@@ -400,14 +400,14 @@ impl Rib {
             // down event handling.
             if link.is_up() {
                 if !fib_link.flags.is_up() {
-                    println!("link: {} Up => Down", link.name);
+                    // println!("link: {} Up => Down", link.name);
                     link.flags = fib_link.flags;
                     let _ = self.tx.send(Message::LinkDown {
                         ifindex: link.index,
                     });
                 }
             } else if fib_link.flags.is_up() {
-                println!("link: {} Down => Up", link.name);
+                // println!("link: {} Down => Up", link.name);
                 link.flags = fib_link.flags;
                 let _ = self.tx.send(Message::LinkUp {
                     ifindex: link.index,
