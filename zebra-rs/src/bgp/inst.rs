@@ -246,6 +246,8 @@ impl Bgp {
                             }
                             Err(e) => {
                                 eprintln!("IPv4 accept error: {}", e);
+                                // Backoff on accept errors to prevent tight loop on FD exhaustion
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             }
                         }
                     }
@@ -276,6 +278,8 @@ impl Bgp {
                             }
                             Err(e) => {
                                 eprintln!("IPv6 accept error: {}", e);
+                                // Backoff on accept errors to prevent tight loop on FD exhaustion
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             }
                         }
                     }

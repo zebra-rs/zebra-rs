@@ -1,6 +1,7 @@
 use std::cmp::min;
 
 use bgp_packet::{AfiSafi, OpenPacket};
+use rand::Rng;
 
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
@@ -103,8 +104,14 @@ macro_rules! start_repeater {
     }};
 }
 
-fn start_idle_hold_timer(peer: &Peer) -> Timer {
-    start_timer!(peer, peer.config.timer.idle_hold_time(), Event::Start)
+fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
+    let time = if peer.first_start {
+        peer.first_start = false;
+        rand::rng().random_range(5..=60)
+    } else {
+        peer.config.timer.idle_hold_time()
+    };
+    start_timer!(peer, time, Event::Start)
 }
 
 pub fn start_connect_retry_timer(peer: &Peer) -> Timer {
@@ -184,6 +191,7 @@ pub fn update_timers(peer: &mut Peer) {
 
             peer.task.writer = None;
             peer.task.reader = None;
+            peer.packet_tx = None;
         }
         Connect => {
             peer.timer.idle_hold_timer = None;

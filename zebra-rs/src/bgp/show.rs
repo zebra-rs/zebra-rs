@@ -986,6 +986,8 @@ struct Neighbor<'a> {
     keepalive_timer_rem: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hold_timer_rem: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_hold_timer_rem: Option<u64>,
     #[serde(skip_serializing)]
     cap_send: BgpCap,
     #[serde(skip_serializing)]
@@ -1092,6 +1094,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
     // Get remaining time for keepalive and hold timers
     let keepalive_timer_rem = peer.timer.keepalive.as_ref().map(|t| t.rem_sec());
     let hold_timer_rem = peer.timer.hold_timer.as_ref().map(|t| t.rem_sec());
+    let idle_hold_timer_rem = peer.timer.idle_hold_timer.as_ref().map(|t| t.rem_sec());
 
     let mut n = Neighbor {
         address: peer.address,
@@ -1107,6 +1110,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         timer_recv: peer.param_rx.clone(),
         keepalive_timer_rem,
         hold_timer_rem,
+        idle_hold_timer_rem,
         cap_send: peer.cap_send.clone(),
         cap_recv: peer.cap_recv.clone(),
         cap_map: peer.cap_map.clone(),
@@ -1177,6 +1181,13 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
     }
     if let Some(hold_rem) = neighbor.hold_timer_rem {
         writeln!(out, "  Next hold timer expires in {} seconds", hold_rem)?;
+    }
+    if let Some(idle_hold_rem) = neighbor.idle_hold_timer_rem {
+        writeln!(
+            out,
+            "  Next idle hold timer expires in {} seconds",
+            idle_hold_rem
+        )?;
     }
     writeln!(out)?;
 
