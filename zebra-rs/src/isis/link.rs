@@ -329,10 +329,10 @@ impl DisStatistics {
         if self.flap_count >= Self::FLAP_THRESHOLD {
             self.dampening_until =
                 Some(now + std::time::Duration::from_secs(Self::DAMPENING_PERIOD_SECS));
-            isis_warn!(
-                "DIS flapping detected, applying dampening for {} seconds",
-                Self::DAMPENING_PERIOD_SECS
-            );
+            // isis_warn!(
+            //     "DIS flapping detected, applying dampening for {} seconds",
+            //     Self::DAMPENING_PERIOD_SECS
+            // );
         }
     }
 

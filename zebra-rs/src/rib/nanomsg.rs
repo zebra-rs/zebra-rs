@@ -664,11 +664,11 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    // let msg = MsgSend {
-                    //     method: String::from("segment-routing:update"),
-                    //     data: self.segment_routing_update(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
 
                     // thread::sleep(Duration::from_secs(10));
                     // println!("sent");
