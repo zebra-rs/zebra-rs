@@ -231,6 +231,19 @@ module config {
         }
         container ipv6 {
           ext:help "IPv6 configuration";
+
+          list neighbor {
+            key "address";
+            leaf "address" {
+              type inet:ipv6-address;
+              description "ARP neighbor address";
+            }
+            leaf mac {
+              type yang:mac-address;
+              description "MAC Address";
+            }
+          }
+
           list route {
             key "prefix";
             leaf prefix {
