@@ -266,6 +266,7 @@ pub struct Peer {
     pub eor: BTreeMap<AfiSafi, bool>,
     pub reflector_client: bool,
     pub instant: Option<Instant>,
+    pub first_start: bool,
 }
 
 impl Peer {
@@ -311,6 +312,7 @@ impl Peer {
             eor: BTreeMap::default(),
             reflector_client: false,
             instant: None,
+            first_start: true,
         };
         peer.config
             .mp
@@ -646,6 +648,7 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
 pub fn fsm_conn_fail(peer: &mut Peer) -> State {
     peer.task.writer = None;
     peer.task.reader = None;
+    peer.packet_tx = None;
     peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
     State::Active
 }
@@ -767,6 +770,9 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
 }
 
 pub fn peer_send_open(peer: &mut Peer) {
+    let Some(packet_tx) = peer.packet_tx.as_ref() else {
+        return;
+    };
     let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
     let router_id = if let Some(identifier) = peer.local_identifier {
         identifier
@@ -804,7 +810,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     cap_register_send(&bgp_cap, &mut peer.cap_map);
     peer.cap_send = bgp_cap.clone();
 
-    // Remmeber sent hold time.
+    // Remember sent hold time.
     let hold_time = peer.config.timer.hold_time() as u16;
     peer.param_tx.hold_time = hold_time;
     peer.param_tx.keepalive = hold_time / 3;
@@ -812,21 +818,47 @@ pub fn peer_send_open(peer: &mut Peer) {
     let open = OpenPacket::new(header, peer.local_as as u16, hold_time, &router_id, bgp_cap);
     let bytes: BytesMut = open.into();
     peer.counter[BgpType::Open as usize].sent += 1;
-    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
+    let _ = packet_tx.send(bytes);
 }
 
 pub fn peer_send_notification(peer: &mut Peer, code: NotifyCode, sub_code: u8, data: Vec<u8>) {
+    let Some(packet_tx) = peer.packet_tx.as_ref() else {
+        return;
+    };
     let notification = NotificationPacket::new(code, sub_code, data);
     let bytes: BytesMut = notification.into();
     peer.counter[BgpType::Notification as usize].sent += 1;
-    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
+    let _ = packet_tx.send(bytes);
 }
 
 pub fn peer_send_keepalive(peer: &mut Peer) {
+    let Some(packet_tx) = peer.packet_tx.as_ref() else {
+        return;
+    };
     let header = BgpHeader::new(BgpType::Keepalive, BGP_HEADER_LEN);
     let bytes: BytesMut = header.into();
     peer.counter[BgpType::Keepalive as usize].sent += 1;
-    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
+    let _ = packet_tx.send(bytes);
+}
+
+/// Reject a connection by sending a NOTIFICATION and closing the socket.
+/// Spawns an async task with a timeout to prevent FD exhaustion.
+fn reject_connection(stream: TcpStream, code: NotifyCode, sub_code: u8) {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    tokio::spawn(async move {
+        let notification = NotificationPacket::new(code, sub_code, Vec::new());
+        let bytes: BytesMut = notification.into();
+        let mut stream = stream;
+        // Use a short timeout to prevent FD exhaustion from slow/unresponsive peers
+        let _ = timeout(Duration::from_secs(5), async {
+            let _ = stream.write_all(&bytes).await;
+            let _ = stream.shutdown().await;
+        })
+        .await;
+        // Stream is dropped here, closing the socket regardless of timeout
+    });
 }
 
 /// Handle incoming connection for a peer based on current BGP state
@@ -838,12 +870,12 @@ fn handle_peer_connection(
     if let Some(peer) = bgp.peers.get_mut(&peer_addr) {
         match peer.state {
             State::Idle => {
-                // bgp_info!("Idle state, rejecting remote connection from {}", peer_addr);
+                // No session established yet - just drop (sends TCP RST/FIN)
+                drop(stream);
                 None
             }
             State::Connect => {
                 // Cancel connect task.
-                //bgp_info!("Connect state, cancel connection then accept {}", peer_addr);
                 peer.task.connect = None;
                 peer.state = fsm_connected(peer, stream);
                 None
@@ -854,18 +886,17 @@ fn handle_peer_connection(
             }
             State::OpenSent => {
                 // In case of OpenSent. We need to keep the session until we
-                // receives Open.
+                // receive Open for collision detection (RFC 4271).
                 Some(stream)
             }
             State::OpenConfirm => {
-                // In case of OpenConfirm keep current session.
+                // Already in OpenConfirm with another connection - send NOTIFICATION.
+                reject_connection(stream, NotifyCode::Cease, 7); // ConnectionCollisionResolution
                 None
             }
             State::Established => {
-                // bgp_info!(
-                //     "Established state, rejecting remote connection from {}",
-                //     peer_addr
-                // );
+                // Session already established - send NOTIFICATION.
+                reject_connection(stream, NotifyCode::Cease, 5); // ConnectionRejected
                 None
             }
         }
@@ -887,8 +918,9 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
     };
 
     // Next, lookup peer-group for dynamic peer.
-    if let Some(_stream) = remaining_stream {
-        // TODO: Handle dynamic peer lookup
+    if let Some(stream) = remaining_stream {
+        // No configured peer found - just drop (sends TCP RST/FIN)
+        drop(stream);
     }
 }
 
