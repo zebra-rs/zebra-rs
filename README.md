@@ -1,0 +1,35 @@
+# bgp-parser
+
+Here is work in progress code for upcoming new zebra's bgpd parser based upon
+[rusticata](https://github.com/rusticata) project.
+
+## BGP attributes
+
+Supported BGP attributes.
+
+| Value | Name             | Reference                                              |
+|-------|------------------|--------------------------------------------------------|
+| 1     | ORIGIN           | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
+| 2     | AS_PATH          | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
+| 3     | NEXT_HOP         | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
+| 4     | MULTI_EXIT_DISC  | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
+| 5     | LOCAL_PREF       | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
+| 6     | ATOMIC_AGGREGATE | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
+| 7     | AGGREGATOR       | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
+| 8     | COMMUNITIES      | [RFC1997](https://www.rfc-editor.org/rfc/rfc1997.html) |
+
+## BGP capability
+
+Supported BGP capability.
+
+| Value | Name                                     | Reference                                              |
+|-------|------------------------------------------|--------------------------------------------------------|
+| 1     | Multiprotocol Extensions for BGP-4       | [RFC2858](https://www.rfc-editor.org/rfc/rfc2858.html) |
+| 2     | Route Refresh Capability for BGP-4       | [RFC2918](https://www.rfc-editor.org/rfc/rfc2918.html) |
+| 64    | Graceful Restart Capability              | [RFC4724](https://www.rfc-editor.org/rfc/rfc4724.html) |
+| 65    | Support for 4-octet AS number capability | [RFC6793](https://www.rfc-editor.org/rfc/rfc6793.html) |
+| 128   | Prestandard Route Refresh (deprecated)   | [RFC8810](https://www.rfc-editor.org/rfc/rfc8810.html) |
+
+## to run
+
+I'll add small config file to run the parser.
