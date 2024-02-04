@@ -1,11 +1,24 @@
-pub enum AFI {
-    IP = 1,
-    IP6 = 2,
-    L2VPN = 25,
+use nom_derive::*;
+use rusticata_macros::newtype_enum;
+
+#[derive(Debug, Eq, PartialEq, NomBE)]
+pub struct Afi(pub u16);
+
+newtype_enum! {
+    impl display Afi {
+        IP = 1,
+        IP6 = 2,
+        L2VPN = 25,
+    }
 }
 
-pub enum SAFI {
-    Unicat = 1,
-    Multicast = 2,
-    MplsLabe = 4,
+#[derive(Debug, Eq, PartialEq, NomBE)]
+pub struct Safi(pub u8);
+
+newtype_enum! {
+    impl display Safi {
+        Unicat = 1,
+        Multicast = 2,
+        MplsLabe = 4,
+    }
 }

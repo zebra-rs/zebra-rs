@@ -7,6 +7,7 @@ use nom::multi::{count, many0};
 use nom::number::streaming::{be_u16, be_u8};
 use nom::IResult;
 use nom_derive::*;
+use std::mem::size_of;
 use std::net::Ipv4Addr;
 
 fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
@@ -62,6 +63,20 @@ fn parse_bgp_attr_community(input: &[u8], length: u16) -> IResult<&[u8], Attribu
     Ok((input, Attribute::Community(community)))
 }
 
+fn parse_bgp_attr_mp_reach(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
+    if input.len() < size_of::<MpNlriHeader>() {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+    }
+    let (attr, input) = input.split_at(length as usize);
+    let (_, header) = MpNlriHeader::parse(attr)?;
+    if header.afi == Afi::IP {}
+
+    let com = CommunityAttr {
+        ..Default::default()
+    };
+    Ok((input, Attribute::Community(com)))
+}
+
 fn parse_bgp_attribute(input: &[u8]) -> IResult<&[u8], Attribute> {
     if input.is_empty() {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
@@ -85,6 +100,7 @@ fn parse_bgp_attribute(input: &[u8]) -> IResult<&[u8], Attribute> {
         }
         AttributeType::Aggregator => map(AggregatorAttr::parse, Attribute::Aggregator)(input),
         AttributeType::Community => parse_bgp_attr_community(input, attr_len),
+        AttributeType::MpReachNlri => parse_bgp_attr_mp_reach(input, attr_len),
         _ => Err(nom::Err::Error(make_error(input, ErrorKind::Tag))),
     }
 }

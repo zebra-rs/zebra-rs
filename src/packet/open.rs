@@ -1,4 +1,4 @@
-use crate::BgpHeader;
+use crate::{Afi, BgpHeader, Safi};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 
@@ -53,9 +53,9 @@ pub struct CapabilityMultiProtocol {
     header: CapabilityHeader,
     typ: u8,
     length: u8,
-    afi: u16,
+    afi: Afi,
     res: u8,
-    safi: u8,
+    safi: Safi,
 }
 
 #[derive(Debug, PartialEq, NomBE)]

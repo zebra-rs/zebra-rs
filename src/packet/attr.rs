@@ -1,4 +1,4 @@
-use crate::{AsPathAttr, CommunityAttr};
+use crate::{Afi, AsPathAttr, CommunityAttr, Safi};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 
@@ -20,6 +20,8 @@ newtype_enum! {
         AtomicAggregate = 6,
         Aggregator = 7,
         Community = 8,
+        MpReachNlri = 14,
+        MpUnreachNlri = 15,
     }
 }
 
@@ -33,6 +35,8 @@ pub enum Attribute {
     AtomicAggregate(AtomicAggregateAttr),
     Aggregator(AggregatorAttr),
     Community(CommunityAttr),
+    MpReachNlri(MpNlriAttr),
+    MpUnreachNlri(MpNlriAttr),
 }
 
 #[derive(Debug, NomBE)]
@@ -75,3 +79,13 @@ pub struct AggregatorAttr {
     pub asn: u16,
     pub ip: u32,
 }
+
+#[derive(Debug, NomBE)]
+pub struct MpNlriHeader {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub nhop_len: u8,
+}
+
+#[derive(Debug)]
+pub struct MpNlriAttr {}

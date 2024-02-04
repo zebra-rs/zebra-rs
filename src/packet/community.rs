@@ -5,7 +5,7 @@ pub enum CommunityType {
 }
 
 #[derive(Debug, NomBE)]
-pub struct CommunityAttr(Vec<u32>);
+pub struct CommunityAttr(pub Vec<u32>);
 
 impl CommunityAttr {
     pub fn new() -> Self {

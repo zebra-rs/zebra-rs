@@ -17,6 +17,8 @@ Supported BGP attributes.
 | 6     | ATOMIC_AGGREGATE | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
 | 7     | AGGREGATOR       | [RFC4271](https://www.rfc-editor.org/rfc/rfc4271.html) |
 | 8     | COMMUNITIES      | [RFC1997](https://www.rfc-editor.org/rfc/rfc1997.html) |
+| 14    | MP_REACH_NLRI    | [RFC4760](https://www.rfc-editor.org/rfc/rfc4760.html) |
+| 15    | MP_UNREACH_NLRI  | [RFC4760](https://www.rfc-editor.org/rfc/rfc4760.html) |
 
 ## BGP capability
 
