@@ -1,6 +1,8 @@
 use crate::{Afi, AsPathAttr, CommunityAttr, Safi};
+use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
+use std::net::Ipv6Addr;
 
 pub const BGP_ATTR_FLAG_OPTIONAL: u8 = 0x80;
 pub const BGP_ATTR_FLAG_TRNANSITIVE: u8 = 0x40;
@@ -81,11 +83,20 @@ pub struct AggregatorAttr {
 }
 
 #[derive(Debug, NomBE)]
-pub struct MpNlriHeader {
+pub struct MpNlriReachHeader {
     pub afi: Afi,
     pub safi: Safi,
     pub nhop_len: u8,
 }
 
+#[derive(Debug, NomBE)]
+pub struct MpNlriUnreachHeader {
+    pub afi: Afi,
+    pub safi: Safi,
+}
+
 #[derive(Debug)]
-pub struct MpNlriAttr {}
+pub struct MpNlriAttr {
+    pub next_hop: Option<Ipv6Addr>,
+    pub prefix: Vec<Ipv6Net>,
+}

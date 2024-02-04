@@ -1,14 +1,14 @@
 use crate::*;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
 use nom::combinator::{map, peek};
 use nom::error::{make_error, ErrorKind};
 use nom::multi::{count, many0};
-use nom::number::streaming::{be_u16, be_u8};
+use nom::number::streaming::{be_u128, be_u16, be_u8};
 use nom::IResult;
 use nom_derive::*;
 use std::mem::size_of;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
     let (_, header) = peek(CapabilityPeekHeader::parse)(input)?;
@@ -64,17 +64,43 @@ fn parse_bgp_attr_community(input: &[u8], length: u16) -> IResult<&[u8], Attribu
 }
 
 fn parse_bgp_attr_mp_reach(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
-    if input.len() < size_of::<MpNlriHeader>() {
+    if input.len() < size_of::<MpNlriReachHeader>() {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
     }
     let (attr, input) = input.split_at(length as usize);
-    let (_, header) = MpNlriHeader::parse(attr)?;
-    if header.afi == Afi::IP {}
-
-    let com = CommunityAttr {
-        ..Default::default()
+    let (attr, header) = MpNlriReachHeader::parse(attr)?;
+    if header.afi != Afi::IP6 || header.safi != Safi::Unicat {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
+    }
+    if header.nhop_len != 16 {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
+    }
+    let (attr, nhop) = be_u128(attr)?;
+    let nhop: Ipv6Addr = Ipv6Addr::from(nhop);
+    let (attr, _snpa) = be_u8(attr)?;
+    let (_, updates) = many0(parse_bgp_nlri_ipv6_prefix)(attr)?;
+    let mp_nlri = MpNlriAttr {
+        next_hop: Some(nhop),
+        prefix: updates,
     };
-    Ok((input, Attribute::Community(com)))
+    Ok((input, Attribute::MpReachNlri(mp_nlri)))
+}
+
+fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
+    if input.len() < size_of::<MpNlriUnreachHeader>() {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+    }
+    let (attr, input) = input.split_at(length as usize);
+    let (attr, header) = MpNlriUnreachHeader::parse(attr)?;
+    if header.afi != Afi::IP6 || header.safi != Safi::Unicat {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
+    }
+    let (_, withdrawal) = many0(parse_bgp_nlri_ipv6_prefix)(attr)?;
+    let mp_nlri = MpNlriAttr {
+        next_hop: None,
+        prefix: withdrawal,
+    };
+    Ok((input, Attribute::MpReachNlri(mp_nlri)))
 }
 
 fn parse_bgp_attribute(input: &[u8]) -> IResult<&[u8], Attribute> {
@@ -101,6 +127,7 @@ fn parse_bgp_attribute(input: &[u8]) -> IResult<&[u8], Attribute> {
         AttributeType::Aggregator => map(AggregatorAttr::parse, Attribute::Aggregator)(input),
         AttributeType::Community => parse_bgp_attr_community(input, attr_len),
         AttributeType::MpReachNlri => parse_bgp_attr_mp_reach(input, attr_len),
+        AttributeType::MpUnreachNlri => parse_bgp_attr_mp_unreach(input, attr_len),
         _ => Err(nom::Err::Error(make_error(input, ErrorKind::Tag))),
     }
 }
@@ -127,8 +154,23 @@ fn parse_bgp_nlri_ipv4_prefix(input: &[u8]) -> IResult<&[u8], Ipv4Net> {
     let mut paddr = [0u8; 4];
     paddr[..psize].copy_from_slice(&input[..psize]);
     let (input, _) = take(psize)(input)?;
-    let prefix =
-        Ipv4Net::new(Ipv4Addr::new(paddr[0], paddr[1], paddr[2], paddr[3]), plen).expect("err");
+    let prefix = Ipv4Net::new(Ipv4Addr::from(paddr), plen).expect("Ipv4Net crete error");
+    Ok((input, prefix))
+}
+
+fn parse_bgp_nlri_ipv6_prefix(input: &[u8]) -> IResult<&[u8], Ipv6Net> {
+    if input.is_empty() {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+    }
+    let (input, plen) = be_u8(input)?;
+    let psize = plen2size(plen);
+    if input.len() < psize {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+    }
+    let mut paddr = [0u8; 16];
+    paddr[..psize].copy_from_slice(&input[..psize]);
+    let (input, _) = take(psize)(input)?;
+    let prefix = Ipv6Net::new(Ipv6Addr::from(paddr), plen).expect("Ipv6Net create error");
     Ok((input, prefix))
 }
 
