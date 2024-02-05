@@ -108,15 +108,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let bgp = Bgp::new_instance().clone();
 
-    let handler = tokio::spawn(async move {
+    tokio::spawn(async move {
         loop {
             let conf = rx.recv().await;
             if let Some(conf) = conf {
                 bgp_config_set(bgp.clone(), conf).await;
             }
         }
-    });
-    handler.await?;
+    })
+    .await?;
 
     Ok(())
 }
