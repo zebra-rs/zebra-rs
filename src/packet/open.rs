@@ -1,6 +1,7 @@
 use crate::{Afi, BgpHeader, Safi};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
+use std::net::Ipv4Addr;
 
 #[derive(Debug, PartialEq, NomBE)]
 pub struct OpenPacket {
@@ -77,4 +78,18 @@ pub struct CapabilityAs4 {
 pub struct CapabilityGracefulRestart {
     header: CapabilityHeader,
     restart_timers: u32,
+}
+
+impl OpenPacket {
+    pub fn new(header: BgpHeader, asn: u16, bgp_id: &Ipv4Addr) -> OpenPacket {
+        OpenPacket {
+            header,
+            version: 4,
+            asn,
+            hold_time: 180,
+            bgp_id: bgp_id.octets(),
+            opt_parm_len: 0,
+            caps: Vec::new(),
+        }
+    }
 }

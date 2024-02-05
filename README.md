@@ -32,6 +32,13 @@ Supported BGP capability.
 | 65    | Support for 4-octet AS number capability | [RFC6793](https://www.rfc-editor.org/rfc/rfc6793.html) |
 | 128   | Prestandard Route Refresh (deprecated)   | [RFC8810](https://www.rfc-editor.org/rfc/rfc8810.html) |
 
-## to run
+## To run
 
-I'll add small config file to run the parser.
+Simplified version of gNMI path can be used to configure BGP. You can change the
+begninning of `main()`` function.
+
+``` shell
+"/bgp/global/as/1"
+"/bgp/global/router-id/10.211.65.2"
+"/bgp/neighbors/address/10.211.55.65/peer-as/100"
+```

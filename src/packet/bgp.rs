@@ -2,6 +2,7 @@ use crate::{NotificationPacket, OpenPacket, UpdatePacket};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 
+pub const BGP_PACKET_MAX_LEN: usize = 4096;
 pub const BGP_PACKET_HEADER_LEN: u16 = 19;
 
 #[derive(Debug, Eq, PartialEq, NomBE)]
