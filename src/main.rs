@@ -1,6 +1,4 @@
-#![feature(async_closure)]
-
-use bgp_parser::*;
+use bgpd::*;
 use std::error::Error;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;

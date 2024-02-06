@@ -35,10 +35,6 @@ pub struct Peer {
     pub state: State,
 }
 
-async fn handler() {
-    println!("hello");
-}
-
 impl Peer {
     pub fn new(bgp: BgpInstance, peer_as: u32, address: Ipv4Addr) -> Self {
         let peer = Self {
@@ -49,13 +45,12 @@ impl Peer {
         };
 
         tokio::spawn(async move {
-            let bgp = bgp.read().await;
-
             let mut stream = TcpStream::connect(address.to_string() + ":179")
                 .await
                 .unwrap();
 
             let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
+            let bgp = bgp.read().await;
             let open = OpenPacket::new(header, bgp.asn as u16, &bgp.router_id);
 
             let bytes: BytesMut = open.into();
@@ -66,7 +61,9 @@ impl Peer {
             stream.write_all(&bytes[..]).await.unwrap();
 
             // Keepalive timer.
-            let _timer = Timer::new(Duration::new(3, 0), TimerType::Infinite, handler);
+            let _timer = Timer::new(Duration::new(3, 0), TimerType::Infinite, || async {
+                println!("xxx");
+            });
 
             loop {
                 let mut rx = [0u8; BGP_PACKET_MAX_LEN];
@@ -78,5 +75,9 @@ impl Peer {
             }
         });
         peer
+    }
+
+    pub fn keepalive_send() {
+        //
     }
 }

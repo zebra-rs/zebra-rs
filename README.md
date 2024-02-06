@@ -1,7 +1,6 @@
-# bgp-parser
+# bgpd
 
-Here is work in progress code for upcoming new zebra's bgpd parser based upon
-[rusticata](https://github.com/rusticata) project.
+Here is work in progress code for upcoming new zebra's bgpd.
 
 ## BGP attributes
 
@@ -32,7 +31,7 @@ Supported BGP capability.
 | 65    | Support for 4-octet AS number capability | [RFC6793](https://www.rfc-editor.org/rfc/rfc6793.html) |
 | 128   | Prestandard Route Refresh (deprecated)   | [RFC8810](https://www.rfc-editor.org/rfc/rfc8810.html) |
 
-## To run
+## Configuration
 
 Simplified version of gNMI path can be used to configure BGP. You can change the
 begninning of `main()`` function.
@@ -42,3 +41,5 @@ begninning of `main()`` function.
 "/bgp/global/router-id/10.211.65.2"
 "/bgp/neighbors/address/10.211.55.65/peer-as/100"
 ```
+
+We will migrate to forthcoming rust based openconfigd in near future.
