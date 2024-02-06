@@ -1,9 +1,12 @@
+#![feature(async_closure)]
+
 use bgp_parser::*;
 use bytes::BytesMut;
 use nom::AsBytes;
 use std::error::Error;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
@@ -49,10 +52,10 @@ async fn bgp_peer_add(bgp: BgpInstance, address: String, _asn_str: String) {
     tokio::spawn(async move {
         let bgp = bgp.read().await;
 
+        let mut stream = TcpStream::connect(address + ":179").await.unwrap();
+
         let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
         let open = OpenPacket::new(header, bgp.asn as u16, &bgp.router_id);
-
-        let mut stream = TcpStream::connect(address + ":179").await.unwrap();
 
         let bytes: BytesMut = open.into();
         stream.write_all(&bytes[..]).await.unwrap();
@@ -60,6 +63,11 @@ async fn bgp_peer_add(bgp: BgpInstance, address: String, _asn_str: String) {
         let keepalive = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
         let bytes: BytesMut = keepalive.into();
         stream.write_all(&bytes[..]).await.unwrap();
+
+        // Keepalive timer.
+        let _timer = Timer::new(Duration::new(3, 0), TimerType::Infinite, async || {
+            println!("timer");
+        });
 
         loop {
             let mut rx = [0u8; BGP_PACKET_MAX_LEN];
