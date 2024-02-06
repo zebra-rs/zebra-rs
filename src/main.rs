@@ -4,39 +4,12 @@ use bgp_parser::*;
 use bytes::BytesMut;
 use nom::AsBytes;
 use std::error::Error;
-use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 const CHANNEL_SIZE: usize = 1024;
-
-pub struct Bgp {
-    pub asn: u32,
-    pub router_id: Ipv4Addr,
-}
-
-impl Bgp {
-    fn new() -> Bgp {
-        Self {
-            asn: 0,
-            router_id: Ipv4Addr::UNSPECIFIED,
-        }
-    }
-
-    fn new_instance() -> BgpInstance {
-        Arc::new(RwLock::new(Self::new()))
-    }
-}
-
-type BgpInstance = Arc<RwLock<Bgp>>;
-
-pub struct Peer {
-    pub peer_as: u32,
-    pub address: Ipv4Addr,
-}
 
 async fn bgp_global_set_asn(bgp: BgpInstance, asn_str: String) {
     let mut bgp = bgp.write().await;
