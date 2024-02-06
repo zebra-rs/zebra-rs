@@ -1,12 +1,8 @@
 #![feature(async_closure)]
 
 use bgp_parser::*;
-use bytes::BytesMut;
-use nom::AsBytes;
 use std::error::Error;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 
 const CHANNEL_SIZE: usize = 1024;
@@ -21,36 +17,16 @@ async fn bgp_global_set_router_id(bgp: BgpInstance, router_id_str: String) {
     bgp.router_id = router_id_str.parse().unwrap();
 }
 
-async fn bgp_peer_add(bgp: BgpInstance, address: String, _asn_str: String) {
-    tokio::spawn(async move {
-        let bgp = bgp.read().await;
+async fn bgp_peer_push(bgp: BgpInstance, peer: Peer) {
+    let mut bgp = bgp.write().await;
+    bgp.peers.push(peer);
+}
 
-        let mut stream = TcpStream::connect(address + ":179").await.unwrap();
-
-        let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
-        let open = OpenPacket::new(header, bgp.asn as u16, &bgp.router_id);
-
-        let bytes: BytesMut = open.into();
-        stream.write_all(&bytes[..]).await.unwrap();
-
-        let keepalive = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
-        let bytes: BytesMut = keepalive.into();
-        stream.write_all(&bytes[..]).await.unwrap();
-
-        // Keepalive timer.
-        let _timer = Timer::new(Duration::new(3, 0), TimerType::Infinite, async || {
-            println!("timer");
-        });
-
-        loop {
-            let mut rx = [0u8; BGP_PACKET_MAX_LEN];
-            let rx_len = stream.read(&mut rx).await.unwrap();
-            if rx_len >= BGP_PACKET_HEADER_LEN as usize {
-                let (_, p) = parse_bgp_packet(rx.as_bytes()).expect("error");
-                println!("{:?}", p);
-            }
-        }
-    });
+async fn bgp_peer_add(bgp: BgpInstance, address: String, asn_str: String) {
+    let addr: Ipv4Addr = address.parse().unwrap();
+    let asn: u32 = asn_str.parse().unwrap();
+    let peer = Peer::new(bgp.clone(), asn, addr);
+    bgp_peer_push(bgp.clone(), peer).await;
 }
 
 async fn bgp_config_set(bgp: BgpInstance, conf: &str) {
