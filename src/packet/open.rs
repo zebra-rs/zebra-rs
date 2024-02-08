@@ -81,13 +81,13 @@ pub struct CapabilityGracefulRestart {
 }
 
 impl OpenPacket {
-    pub fn new(header: BgpHeader, asn: u16, bgp_id: &Ipv4Addr) -> OpenPacket {
+    pub fn new(header: BgpHeader, asn: u16, router_id: &Ipv4Addr) -> OpenPacket {
         OpenPacket {
             header,
             version: 4,
             asn,
             hold_time: 180,
-            bgp_id: bgp_id.octets(),
+            bgp_id: router_id.octets(),
             opt_parm_len: 0,
             caps: Vec::new(),
         }

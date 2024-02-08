@@ -29,16 +29,18 @@ pub enum Event {
 }
 
 pub struct Peer {
-    pub bgp: BgpInstance,
+    pub local_as: u32,
+    pub router_id: Ipv4Addr,
     pub peer_as: u32,
     pub address: Ipv4Addr,
     pub state: State,
 }
 
 impl Peer {
-    pub fn new(bgp: BgpInstance, peer_as: u32, address: Ipv4Addr) -> Self {
+    pub fn new(local_as: u32, router_id: Ipv4Addr, peer_as: u32, address: Ipv4Addr) -> Self {
         let peer = Self {
-            bgp: bgp.clone(),
+            router_id,
+            local_as,
             peer_as,
             address,
             state: State::Idle,
@@ -50,8 +52,7 @@ impl Peer {
                 .unwrap();
 
             let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
-            let bgp = bgp.read().await;
-            let open = OpenPacket::new(header, bgp.asn as u16, &bgp.router_id);
+            let open = OpenPacket::new(header, local_as as u16, &router_id);
 
             let bytes: BytesMut = open.into();
             stream.write_all(&bytes[..]).await.unwrap();
