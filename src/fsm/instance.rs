@@ -1,4 +1,4 @@
-use crate::Peer;
+use crate::{peer_keepalive_start, Peer};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -10,7 +10,7 @@ pub struct Bgp {
     pub rx: UnboundedReceiver<String>,
 }
 
-pub fn bgp_global_set_asn(bgp: &mut Bgp, asn_str: String) {
+fn bgp_global_set_asn(bgp: &mut Bgp, asn_str: String) {
     bgp.asn = asn_str.parse().unwrap();
 }
 
@@ -22,6 +22,7 @@ fn bgp_peer_add(bgp: &mut Bgp, address: String, asn_str: String) {
     let addr: Ipv4Addr = address.parse().unwrap();
     let asn: u32 = asn_str.parse().unwrap();
     let peer = Peer::new(bgp.asn, bgp.router_id, asn, addr);
+    peer_keepalive_start(&peer);
     bgp.peers.push(peer);
 }
 
