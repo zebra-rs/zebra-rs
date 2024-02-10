@@ -35,6 +35,7 @@ pub struct PeerTask {
     pub connect: Option<Task<()>>,
     pub reader: Option<Task<()>>,
     pub writer: Option<Task<()>>,
+    pub keepalive: Option<Timer>,
 }
 
 impl PeerTask {
@@ -44,6 +45,7 @@ impl PeerTask {
             connect: None,
             reader: None,
             writer: None,
+            keepalive: None,
         }
     }
 }
@@ -63,8 +65,8 @@ pub struct Peer {
     pub address: Ipv4Addr,
     pub state: State,
     pub task: PeerTask,
-    pub tx: UnboundedSender<Message>,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
+    pub tx: UnboundedSender<Message>,
 }
 
 impl Peer {
@@ -84,8 +86,8 @@ impl Peer {
             address,
             state: State::Idle,
             task: PeerTask::new(),
-            tx,
             packet_tx: None,
+            tx,
         };
         peer.task.start = Some(peer_start_timer(&peer));
         peer
@@ -93,24 +95,30 @@ impl Peer {
 }
 
 pub fn fsm(peer: &mut Peer, event: Event) {
-    match event {
-        Event::Start => {
-            peer.task.start = None;
-            peer.task.connect = Some(peer_start_connection(peer));
-        }
-        Event::Connected(stream) => {
-            peer.task.connect = None;
-            let (tx, rx) = mpsc::unbounded_channel::<BytesMut>();
-            peer.packet_tx = Some(tx);
-            let (read_half, write_half) = stream.into_split();
-            peer.task.reader = Some(peer_start_reader(peer, read_half));
-            peer.task.writer = Some(peer_start_writer(write_half, rx));
-            peer_send_open(peer);
-            peer_send_keepalive(peer);
-        }
-        Event::Stop => {}
-        _ => {}
-    }
+    peer.state = match event {
+        Event::Start => fsm_start(peer),
+        Event::Connected(stream) => fsm_connected(peer, stream),
+        Event::Stop => State::Idle,
+        _ => State::Idle,
+    };
+}
+
+pub fn fsm_start(peer: &mut Peer) -> State {
+    peer.task.start = None;
+    peer.task.connect = Some(peer_start_connection(peer));
+    State::Connect
+}
+
+pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
+    peer.task.connect = None;
+    let (tx, rx) = mpsc::unbounded_channel::<BytesMut>();
+    peer.packet_tx = Some(tx);
+    let (read_half, write_half) = stream.into_split();
+    peer.task.reader = Some(peer_start_reader(peer, read_half));
+    peer.task.writer = Some(peer_start_writer(write_half, rx));
+    peer_send_open(peer);
+    peer_send_keepalive(peer);
+    State::OpenSent
 }
 
 pub fn peer_start_reader(_peer: &Peer, mut read_half: OwnedReadHalf) -> Task<()> {
