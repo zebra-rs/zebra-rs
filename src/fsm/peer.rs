@@ -21,6 +21,7 @@ pub enum State {
 pub enum Event {
     Start,                        // 1
     Stop,                         // 2
+    ConnRetryTimerExpires,        // 9
     HoldTimerExpires,             // 10
     KeepaliveTimerExpires,        // 11
     Connected(TcpStream),         // 17
@@ -35,6 +36,7 @@ pub enum Event {
 pub struct PeerTask {
     pub start: Option<Timer>,
     pub connect: Option<Task<()>>,
+    pub connect_retry: Option<Timer>,
     pub reader: Option<Task<()>>,
     pub writer: Option<Task<()>>,
     pub keepalive: Option<Timer>,
@@ -45,6 +47,7 @@ impl PeerTask {
         Self {
             start: None,
             connect: None,
+            connect_retry: None,
             reader: None,
             writer: None,
             keepalive: None,
@@ -101,10 +104,15 @@ pub fn fsm(peer: &mut Peer, event: Event) {
     peer.state = match event {
         Event::Start => fsm_start(peer),
         Event::Stop => fsm_stop(peer),
+        Event::ConnRetryTimerExpires => fsm_conn_retry_expires(peer),
+        Event::HoldTimerExpires => fsm_holdtimer_expires(peer),
         Event::KeepaliveTimerExpires => fsm_keepalive_expires(peer),
         Event::Connected(stream) => fsm_connected(peer, stream),
         Event::ConnFail => fsm_conn_fail(peer),
-        _ => State::Idle,
+        Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
+        Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
+        Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
+        Event::UpdateMsg(packet) => fsm_bgp_update(peer, packet),
     };
     println!("State: -> {:?}", peer.state);
 }
@@ -113,6 +121,26 @@ pub fn fsm_start(peer: &mut Peer) -> State {
     peer.task.start = None;
     peer.task.connect = Some(peer_start_connection(peer));
     State::Connect
+}
+
+pub fn fsm_stop(_peer: &mut Peer) -> State {
+    State::Idle
+}
+
+pub fn fsm_bgp_open(_peer: &mut Peer, _packet: OpenPacket) -> State {
+    State::Idle
+}
+
+pub fn fsm_bgp_notification(_peer: &mut Peer, _packet: NotificationPacket) -> State {
+    State::Idle
+}
+
+pub fn fsm_bgp_keepalive(_peer: &mut Peer) -> State {
+    State::Idle
+}
+
+pub fn fsm_bgp_update(_peer: &mut Peer, _packet: UpdatePacket) -> State {
+    State::Idle
 }
 
 pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
@@ -127,18 +155,24 @@ pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
     State::OpenSent
 }
 
-pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
-    peer_send_keepalive(peer);
-    State::Established
+pub fn fsm_conn_retry_expires(_peer: &mut Peer) -> State {
+    // peer_send_notification(peer);
+    State::Idle
+}
+
+pub fn fsm_holdtimer_expires(_peer: &mut Peer) -> State {
+    // peer_send_notification(peer);
+    State::Idle
+}
+
+pub fn fsm_keepalive_expires(_peer: &mut Peer) -> State {
+    // peer_send_notification(peer);
+    State::Idle
 }
 
 pub fn fsm_conn_fail(peer: &mut Peer) -> State {
     peer.task.writer = None;
     peer.task.reader = None;
-    State::Idle
-}
-
-pub fn fsm_stop(_peer: &mut Peer) -> State {
     State::Idle
 }
 
