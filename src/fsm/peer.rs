@@ -145,11 +145,11 @@ pub fn fsm_bgp_update(_peer: &mut Peer, _packet: UpdatePacket) -> State {
 
 pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
     peer.task.connect = None;
-    let (tx, rx) = mpsc::unbounded_channel::<BytesMut>();
-    peer.packet_tx = Some(tx);
+    let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+    peer.packet_tx = Some(packet_tx);
     let (read_half, write_half) = stream.into_split();
     peer.task.reader = Some(peer_start_reader(peer, read_half));
-    peer.task.writer = Some(peer_start_writer(write_half, rx));
+    peer.task.writer = Some(peer_start_writer(write_half, packet_rx));
     peer_send_open(peer);
     peer_send_keepalive(peer);
     State::OpenSent
