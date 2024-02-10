@@ -19,14 +19,16 @@ pub enum State {
 
 #[derive(Debug)]
 pub enum Event {
-    Start,                // 1
-    Stop,                 // 2
-    Connected(TcpStream), // 17
-    ConnFail,             // 18
-    BGPOpen,              // 19
-    NotifMsg,             // 25
-    KeepAliveMsg,         // 26
-    UpdateMsg,            // 27
+    Start,                        // 1
+    Stop,                         // 2
+    HoldTimerExpires,             // 10
+    KeepaliveTimerExpires,        // 11
+    Connected(TcpStream),         // 17
+    ConnFail,                     // 18
+    BGPOpen(OpenPacket),          // 19
+    NotifMsg(NotificationPacket), // 25
+    KeepAliveMsg,                 // 26
+    UpdateMsg(UpdatePacket),      // 27
 }
 
 #[derive(Debug)]
@@ -95,12 +97,16 @@ impl Peer {
 }
 
 pub fn fsm(peer: &mut Peer, event: Event) {
+    println!("State: {:?} -> ", peer.state);
     peer.state = match event {
         Event::Start => fsm_start(peer),
+        Event::Stop => fsm_stop(peer),
+        Event::KeepaliveTimerExpires => fsm_keepalive_expires(peer),
         Event::Connected(stream) => fsm_connected(peer, stream),
-        Event::Stop => State::Idle,
+        Event::ConnFail => fsm_conn_fail(peer),
         _ => State::Idle,
     };
+    println!("State: -> {:?}", peer.state);
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
@@ -121,16 +127,65 @@ pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
     State::OpenSent
 }
 
-pub fn peer_start_reader(_peer: &Peer, mut read_half: OwnedReadHalf) -> Task<()> {
-    Task::spawn(async move {
-        loop {
-            let mut rx = [0u8; BGP_PACKET_MAX_LEN];
-            let rx_len = read_half.read(&mut rx).await.unwrap();
-            if rx_len >= BGP_PACKET_HEADER_LEN as usize {
-                let (_, p) = parse_bgp_packet(rx.as_bytes()).expect("error");
-                println!("{:?}", p);
+pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
+    peer_send_keepalive(peer);
+    State::Established
+}
+
+pub fn fsm_conn_fail(peer: &mut Peer) -> State {
+    peer.task.writer = None;
+    peer.task.reader = None;
+    State::Idle
+}
+
+pub fn fsm_stop(_peer: &mut Peer) -> State {
+    State::Idle
+}
+
+pub fn peer_packet_parse(rx: &[u8], rx_len: usize, ident: Ipv4Addr, tx: UnboundedSender<Message>) {
+    if rx_len >= BGP_PACKET_HEADER_LEN as usize {
+        let (_, p) = parse_bgp_packet(rx).expect("error");
+        match p {
+            BgpPacket::Open(p) => {
+                let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+            }
+            BgpPacket::Keepalive(_) => {
+                let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
+            }
+            BgpPacket::Notification(p) => {
+                let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
+            }
+            BgpPacket::Update(p) => {
+                let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
             }
         }
+    }
+}
+
+pub async fn peer_read(
+    ident: Ipv4Addr,
+    tx: UnboundedSender<Message>,
+    mut read_half: OwnedReadHalf,
+) {
+    loop {
+        let mut rx = [0u8; BGP_PACKET_MAX_LEN];
+        match read_half.read(&mut rx).await {
+            Ok(rx_len) => {
+                peer_packet_parse(rx.as_bytes(), rx_len, ident, tx.clone());
+            }
+            Err(err) => {
+                println!("{:?}", err);
+                let _ = tx.send(Message::Event(ident, Event::ConnFail));
+            }
+        }
+    }
+}
+
+pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
+    let tx = peer.tx.clone();
+    let ident = peer.ident;
+    Task::spawn(async move {
+        peer_read(ident, tx, read_half).await;
     })
 }
 
@@ -182,13 +237,13 @@ pub fn peer_send_keepalive(peer: &Peer) {
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
-// pub fn peer_keepalive_start(peer: &Peer) {
-//     let tx = peer.tx.clone();
-//     let ident = peer.ident;
-//     Timer::new(Timer::second(3), TimerType::Infinite, move || {
-//         let tx = tx.clone();
-//         async move {
-//             //
-//         }
-//     });
-// }
+pub fn peer_start_keepalive(peer: &Peer) -> Timer {
+    let tx = peer.tx.clone();
+    let ident = peer.ident;
+    Timer::new(Timer::second(3), TimerType::Infinite, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::KeepaliveTimerExpires));
+        }
+    })
+}
