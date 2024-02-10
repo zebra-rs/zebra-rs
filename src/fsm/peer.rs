@@ -37,6 +37,7 @@ pub struct Peer {
     pub state: State,
     pub tx: UnboundedSender<Message>,
     pub start: Option<Timer>,
+    pub stream: Option<TcpStream>,
 }
 
 impl Peer {
@@ -55,6 +56,7 @@ impl Peer {
             state: State::Idle,
             tx,
             start: None,
+            stream: None,
         };
         peer.start = Some(peer_start_timer(&peer));
         peer
@@ -93,9 +95,14 @@ impl Peer {
 }
 
 pub fn fsm(peer: &mut Peer, event: Event) {
+    println!("fsm is called");
     match event {
         Event::Start => {
             peer.start = None;
+            peer_start_connection(peer);
+        }
+        Event::Connected => {
+            //
         }
         Event::Stop => {}
         _ => {}
@@ -104,15 +111,26 @@ pub fn fsm(peer: &mut Peer, event: Event) {
 
 pub fn peer_start_timer(peer: &Peer) -> Timer {
     let tx = peer.tx.clone();
+    let address = peer.address;
     Timer::new(Timer::second(1), TimerType::Once, move || {
         let tx = tx.clone();
         async move {
-            let _ = tx.send(Message::Config(String::from("peer start message")));
+            let _ = tx.send(Message::Event(address, Event::Start));
         }
     })
 }
 
-//pub fn peer_connection_start(peer: &mut Peer) {}
+pub fn peer_start_connection(peer: &mut Peer) {
+    let tx = peer.tx.clone();
+    let address = peer.address;
+    tokio::spawn(async move {
+        let tx = tx.clone();
+        let stream = TcpStream::connect(address.to_string() + ":179")
+            .await
+            .unwrap();
+        let _ = tx.send(Message::Stream(stream));
+    });
+}
 
 pub async fn peer_keepalive_send(stream: &mut TcpStream) {
     let keepalive = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);

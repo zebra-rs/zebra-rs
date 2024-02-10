@@ -1,12 +1,14 @@
 use crate::{fsm, Event, Peer};
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub enum Message {
     Config(String),
     Event(Ipv4Addr, Event),
+    Stream(TcpStream),
 }
 
 pub struct Bgp {
@@ -87,11 +89,16 @@ impl Bgp {
             let msg = self.fetch().await;
             match msg {
                 Message::Config(x) => {
+                    println!("Message::Config");
                     bgp_config_set(self, x);
                 }
                 Message::Event(peer, event) => {
+                    println!("Message::Event");
                     let peer = self.peers.get_mut(&peer).unwrap();
                     fsm(peer, event);
+                }
+                Message::Stream(_stream) => {
+                    println!("Message::Stream");
                 }
             }
         }
