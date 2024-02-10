@@ -34,28 +34,45 @@ pub enum Event {
 
 #[derive(Debug)]
 pub struct PeerTask {
-    pub start: Option<Timer>,
     pub connect: Option<Task<()>>,
-    pub connect_retry: Option<Timer>,
     pub reader: Option<Task<()>>,
     pub writer: Option<Task<()>>,
-    pub keepalive: Option<Timer>,
 }
 
 impl PeerTask {
     pub fn new() -> Self {
         Self {
-            start: None,
             connect: None,
-            connect_retry: None,
             reader: None,
             writer: None,
-            keepalive: None,
         }
     }
 }
 
 impl Default for PeerTask {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct PeerTimer {
+    pub start: Option<Timer>,
+    pub connect: Option<Timer>,
+    pub keepalive: Option<Timer>,
+}
+
+impl PeerTimer {
+    pub fn new() -> Self {
+        Self {
+            start: None,
+            connect: None,
+            keepalive: None,
+        }
+    }
+}
+
+impl Default for PeerTimer {
     fn default() -> Self {
         Self::new()
     }
@@ -70,6 +87,7 @@ pub struct Peer {
     pub address: Ipv4Addr,
     pub state: State,
     pub task: PeerTask,
+    pub timer: PeerTimer,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
     pub tx: UnboundedSender<Message>,
 }
@@ -91,10 +109,11 @@ impl Peer {
             address,
             state: State::Idle,
             task: PeerTask::new(),
+            timer: PeerTimer::new(),
             packet_tx: None,
             tx,
         };
-        peer.task.start = Some(peer_start_timer(&peer));
+        peer.timer.start = Some(peer_start_timer(&peer));
         peer
     }
 }
@@ -118,7 +137,7 @@ pub fn fsm(peer: &mut Peer, event: Event) {
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
-    peer.task.start = None;
+    peer.timer.start = None;
     peer.task.connect = Some(peer_start_connection(peer));
     State::Connect
 }
