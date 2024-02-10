@@ -3,8 +3,9 @@ use bytes::BytesMut;
 use nom::AsBytes;
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum State {
@@ -29,6 +30,31 @@ pub enum Event {
 }
 
 #[derive(Debug)]
+pub struct PeerTask {
+    pub start: Option<Timer>,
+    pub connect: Option<Task<()>>,
+    pub reader: Option<Task<()>>,
+    pub writer: Option<Task<()>>,
+}
+
+impl PeerTask {
+    pub fn new() -> Self {
+        Self {
+            start: None,
+            connect: None,
+            reader: None,
+            writer: None,
+        }
+    }
+}
+
+impl Default for PeerTask {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
 pub struct Peer {
     pub ident: Ipv4Addr,
     pub local_as: u32,
@@ -36,10 +62,9 @@ pub struct Peer {
     pub peer_as: u32,
     pub address: Ipv4Addr,
     pub state: State,
+    pub task: PeerTask,
     pub tx: UnboundedSender<Message>,
-    pub start: Option<Timer>,
-    pub connect: Option<Task<()>>,
-    pub stream: Option<TcpStream>,
+    pub packet_tx: Option<UnboundedSender<BytesMut>>,
 }
 
 impl Peer {
@@ -58,60 +83,58 @@ impl Peer {
             peer_as,
             address,
             state: State::Idle,
+            task: PeerTask::new(),
             tx,
-            start: None,
-            stream: None,
-            connect: None,
+            packet_tx: None,
         };
-        peer.start = Some(peer_start_timer(&peer));
+        peer.task.start = Some(peer_start_timer(&peer));
         peer
-    }
-
-    pub fn work(&self) {
-        let address = self.address;
-        let local_as = self.local_as;
-        let router_id = self.router_id;
-
-        tokio::spawn(async move {
-            let mut stream = TcpStream::connect(address.to_string() + ":179")
-                .await
-                .unwrap();
-
-            let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
-            let open = OpenPacket::new(header, local_as as u16, &router_id);
-
-            let bytes: BytesMut = open.into();
-            stream.write_all(&bytes[..]).await.unwrap();
-
-            let keepalive = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
-            let bytes: BytesMut = keepalive.into();
-            stream.write_all(&bytes[..]).await.unwrap();
-
-            loop {
-                let mut rx = [0u8; BGP_PACKET_MAX_LEN];
-                let rx_len = stream.read(&mut rx).await.unwrap();
-                if rx_len >= BGP_PACKET_HEADER_LEN as usize {
-                    let (_, p) = parse_bgp_packet(rx.as_bytes()).expect("error");
-                    println!("{:?}", p);
-                }
-            }
-        });
     }
 }
 
 pub fn fsm(peer: &mut Peer, event: Event) {
     match event {
         Event::Start => {
-            peer.start = None;
-            peer.connect = Some(peer_start_connection(peer));
+            peer.task.start = None;
+            peer.task.connect = Some(peer_start_connection(peer));
         }
         Event::Connected(stream) => {
-            peer.connect = None;
-            // Send open, keepalive
+            peer.task.connect = None;
+            let (tx, rx) = mpsc::unbounded_channel::<BytesMut>();
+            peer.packet_tx = Some(tx);
+            let (read_half, write_half) = stream.into_split();
+            peer.task.reader = Some(peer_start_reader(peer, read_half));
+            peer.task.writer = Some(peer_start_writer(write_half, rx));
+            peer_send_open(peer);
+            peer_send_keepalive(peer);
         }
         Event::Stop => {}
         _ => {}
     }
+}
+
+pub fn peer_start_reader(_peer: &Peer, mut read_half: OwnedReadHalf) -> Task<()> {
+    Task::spawn(async move {
+        loop {
+            let mut rx = [0u8; BGP_PACKET_MAX_LEN];
+            let rx_len = read_half.read(&mut rx).await.unwrap();
+            if rx_len >= BGP_PACKET_HEADER_LEN as usize {
+                let (_, p) = parse_bgp_packet(rx.as_bytes()).expect("error");
+                println!("{:?}", p);
+            }
+        }
+    })
+}
+
+pub fn peer_start_writer(
+    mut write_half: OwnedWriteHalf,
+    mut rx: UnboundedReceiver<BytesMut>,
+) -> Task<()> {
+    Task::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            let _ = write_half.write_all(&msg).await;
+        }
+    })
 }
 
 pub fn peer_start_timer(peer: &Peer) -> Timer {
@@ -138,19 +161,26 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     })
 }
 
-pub fn peer_keepalive_start(peer: &Peer) {
-    let tx = peer.tx.clone();
-    let ident = peer.ident;
-    Timer::new(Timer::second(3), TimerType::Infinite, move || {
-        let tx = tx.clone();
-        async move {
-            //
-        }
-    });
+pub fn peer_send_open(peer: &Peer) {
+    let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
+    let open = OpenPacket::new(header, peer.local_as as u16, &peer.router_id);
+    let bytes: BytesMut = open.into();
+    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
-pub async fn peer_keepalive_send(stream: &mut TcpStream) {
-    let keepalive = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
-    let bytes: BytesMut = keepalive.into();
-    stream.write_all(&bytes[..]).await.unwrap();
+pub fn peer_send_keepalive(peer: &Peer) {
+    let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN);
+    let bytes: BytesMut = header.into();
+    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
+
+// pub fn peer_keepalive_start(peer: &Peer) {
+//     let tx = peer.tx.clone();
+//     let ident = peer.ident;
+//     Timer::new(Timer::second(3), TimerType::Infinite, move || {
+//         let tx = tx.clone();
+//         async move {
+//             //
+//         }
+//     });
+// }
