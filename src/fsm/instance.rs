@@ -1,14 +1,12 @@
 use crate::{fsm, Event, Peer};
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub enum Message {
     Config(String),
     Event(Ipv4Addr, Event),
-    Stream(TcpStream),
 }
 
 pub struct Bgp {
@@ -28,14 +26,14 @@ fn bgp_global_set_router_id(bgp: &mut Bgp, router_id_str: String) {
 }
 
 fn bgp_peer_add(bgp: &mut Bgp, address: String, asn_str: String) {
+    let ident: Ipv4Addr = address.parse().unwrap();
     let addr: Ipv4Addr = address.parse().unwrap();
     let asn: u32 = asn_str.parse().unwrap();
-    let peer = Peer::new(bgp.asn, bgp.router_id, asn, addr, bgp.tx.clone());
-    bgp.peers.insert(addr, peer);
+    let peer = Peer::new(ident, bgp.asn, bgp.router_id, asn, addr, bgp.tx.clone());
+    bgp.peers.insert(ident, peer);
 }
 
 fn bgp_config_set(bgp: &mut Bgp, conf: String) {
-    println!("{conf}");
     let paths: Vec<&str> = conf.split('/').collect();
     if paths.len() < 5 {
         return;
@@ -88,17 +86,14 @@ impl Bgp {
         loop {
             let msg = self.fetch().await;
             match msg {
-                Message::Config(x) => {
-                    println!("Message::Config");
-                    bgp_config_set(self, x);
+                Message::Config(conf) => {
+                    println!("Message::Config: {conf}");
+                    bgp_config_set(self, conf);
                 }
                 Message::Event(peer, event) => {
-                    println!("Message::Event");
+                    println!("Message::Event: {:?}", event);
                     let peer = self.peers.get_mut(&peer).unwrap();
                     fsm(peer, event);
-                }
-                Message::Stream(_stream) => {
-                    println!("Message::Stream");
                 }
             }
         }
