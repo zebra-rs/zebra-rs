@@ -29,7 +29,7 @@ impl Timer {
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(duration);
-
+            _ = interval.tick().await;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {

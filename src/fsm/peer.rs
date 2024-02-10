@@ -4,7 +4,7 @@ use nom::AsBytes;
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum State {
@@ -35,35 +35,28 @@ pub struct Peer {
     pub peer_as: u32,
     pub address: Ipv4Addr,
     pub state: State,
-    pub tx: UnboundedSender<String>,
-    pub rx: UnboundedReceiver<String>,
-    pub keepalive: Option<Timer>,
+    pub tx: UnboundedSender<Message>,
+    pub start: Option<Timer>,
 }
 
 impl Peer {
-    pub async fn event_loop(&mut self) {
-        loop {
-            match self.rx.recv().await {
-                Some(s) => {
-                    println!("{}", s);
-                }
-                None => {}
-            };
-        }
-    }
-
-    pub fn new(local_as: u32, router_id: Ipv4Addr, peer_as: u32, address: Ipv4Addr) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
-        let peer = Self {
+    pub fn new(
+        local_as: u32,
+        router_id: Ipv4Addr,
+        peer_as: u32,
+        address: Ipv4Addr,
+        tx: UnboundedSender<Message>,
+    ) -> Self {
+        let mut peer = Self {
             router_id,
             local_as,
             peer_as,
             address,
             state: State::Idle,
             tx,
-            rx,
-            keepalive: None,
+            start: None,
         };
+        peer.start = Some(peer_start_timer(&peer));
         peer
     }
 
@@ -99,6 +92,28 @@ impl Peer {
     }
 }
 
+pub fn fsm(peer: &mut Peer, event: Event) {
+    match event {
+        Event::Start => {
+            peer.start = None;
+        }
+        Event::Stop => {}
+        _ => {}
+    }
+}
+
+pub fn peer_start_timer(peer: &Peer) -> Timer {
+    let tx = peer.tx.clone();
+    Timer::new(Timer::second(1), TimerType::Once, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Config(String::from("peer start message")));
+        }
+    })
+}
+
+//pub fn peer_connection_start(peer: &mut Peer) {}
+
 pub async fn peer_keepalive_send(stream: &mut TcpStream) {
     let keepalive = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
     let bytes: BytesMut = keepalive.into();
@@ -106,20 +121,11 @@ pub async fn peer_keepalive_send(stream: &mut TcpStream) {
 }
 
 pub fn peer_keepalive_start(peer: &Peer) {
-    let tx = peer.tx.clone();
+    let _tx = peer.tx.clone();
     Timer::new(Timer::second(3), TimerType::Infinite, move || {
-        let tx = tx.clone();
+        //let tx = tx.clone();
         async move {
-            let _ = tx.send(String::from("message"));
+            // let _ = tx.send(String::from("message"));
         }
     });
-}
-
-pub fn peer_start(peer: &Peer) {
-    let tx = peer.tx.clone();
-    let _ = tx.send(String::from("start"));
-}
-
-pub async fn peer_x(peer: &mut Peer) {
-    peer.event_loop().await;
 }
