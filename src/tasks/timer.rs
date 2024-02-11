@@ -9,7 +9,6 @@ pub struct Timer {
 
 #[derive(Debug)]
 pub enum TimerMessage {
-    Cancel,
     Refresh,
 }
 
@@ -40,9 +39,6 @@ impl Timer {
                     }
                     message = rx.recv() => {
                         match message {
-                            Some(TimerMessage::Cancel) => {
-                                break;
-                            }
                             Some(TimerMessage::Refresh)=> {
                                 interval = tokio::time::interval(duration);
                                 _ = interval.tick().await;

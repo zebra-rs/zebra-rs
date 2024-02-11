@@ -25,6 +25,10 @@ fn bgp_global_set_router_id(bgp: &mut Bgp, router_id_str: String) {
     bgp.router_id = router_id_str.parse().unwrap();
 }
 
+//fn bgp_global_start(_bgp: &mut Bgp) {
+// let stream =
+//}
+
 fn bgp_peer_add(bgp: &mut Bgp, address: String, asn_str: String) {
     let ident: Ipv4Addr = address.parse().unwrap();
     let addr: Ipv4Addr = address.parse().unwrap();

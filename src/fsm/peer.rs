@@ -144,16 +144,22 @@ pub fn fsm_start(peer: &mut Peer) -> State {
     State::Connect
 }
 
-pub fn fsm_stop(_peer: &mut Peer) -> State {
+pub fn fsm_stop(peer: &mut Peer) -> State {
+    peer_stop(peer);
     State::Idle
 }
 
-pub fn fsm_bgp_open(peer: &mut Peer, _packet: OpenPacket) -> State {
+pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
+    if packet.asn as u32 != peer.peer_as {
+        return State::Idle;
+    }
+    peer.timer.keepalive = Some(peer_start_keepalive(peer));
     peer.timer.holdtimer = Some(peer_start_holdtimer(peer));
     State::Established
 }
 
-pub fn fsm_bgp_notification(_peer: &mut Peer, _packet: NotificationPacket) -> State {
+pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> State {
+    peer_stop(peer);
     State::Idle
 }
 
@@ -200,6 +206,16 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
     State::Idle
 }
 
+pub fn peer_stop(peer: &mut Peer) {
+    peer.task.connect = None;
+    peer.task.writer = None;
+    peer.task.reader = None;
+    peer.timer.start = None;
+    peer.timer.connect = None;
+    peer.timer.keepalive = None;
+    peer.timer.holdtimer = None;
+}
+
 pub fn peer_packet_parse(rx: &[u8], rx_len: usize, ident: Ipv4Addr, tx: UnboundedSender<Message>) {
     if rx_len >= BGP_PACKET_HEADER_LEN as usize {
         let (_, p) = parse_bgp_packet(rx).expect("error");
@@ -240,8 +256,8 @@ pub async fn peer_read(
 }
 
 pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
-    let tx = peer.tx.clone();
     let ident = peer.ident;
+    let tx = peer.tx.clone();
     Task::spawn(async move {
         peer_read(ident, tx, read_half).await;
     })
@@ -259,8 +275,8 @@ pub fn peer_start_writer(
 }
 
 pub fn peer_start_timer(peer: &Peer) -> Timer {
-    let tx = peer.tx.clone();
     let ident = peer.ident;
+    let tx = peer.tx.clone();
     Timer::new(Timer::second(1), TimerType::Once, move || {
         let tx = tx.clone();
         async move {
@@ -270,8 +286,8 @@ pub fn peer_start_timer(peer: &Peer) -> Timer {
 }
 
 pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
-    let tx = peer.tx.clone();
     let ident = peer.ident;
+    let tx = peer.tx.clone();
     let address = peer.address;
     Task::spawn(async move {
         let tx = tx.clone();
@@ -289,16 +305,10 @@ pub fn peer_send_open(peer: &Peer) {
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
-pub fn peer_send_keepalive(peer: &Peer) {
-    let header = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
-    let bytes: BytesMut = header.into();
-    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
-}
-
 pub fn peer_start_keepalive(peer: &Peer) -> Timer {
-    let tx = peer.tx.clone();
     let ident = peer.ident;
-    Timer::new(Timer::second(3), TimerType::Infinite, move || {
+    let tx = peer.tx.clone();
+    Timer::new(Timer::second(30), TimerType::Infinite, move || {
         let tx = tx.clone();
         async move {
             let _ = tx.send(Message::Event(ident, Event::KeepaliveTimerExpires));
@@ -306,9 +316,15 @@ pub fn peer_start_keepalive(peer: &Peer) -> Timer {
     })
 }
 
+pub fn peer_send_keepalive(peer: &Peer) {
+    let header = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
+    let bytes: BytesMut = header.into();
+    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
+}
+
 pub fn peer_start_holdtimer(peer: &Peer) -> Timer {
-    let tx = peer.tx.clone();
     let ident = peer.ident;
+    let tx = peer.tx.clone();
     Timer::new(Timer::second(180), TimerType::Infinite, move || {
         let tx = tx.clone();
         async move {
