@@ -10,7 +10,7 @@ pub struct Timer {
 #[derive(Debug)]
 pub enum TimerMessage {
     Cancel,
-    Reset,
+    Refresh,
 }
 
 #[derive(PartialEq)]
@@ -43,8 +43,9 @@ impl Timer {
                             Some(TimerMessage::Cancel) => {
                                 break;
                             }
-                            Some(TimerMessage::Reset)=> {
+                            Some(TimerMessage::Refresh)=> {
                                 interval = tokio::time::interval(duration);
+                                _ = interval.tick().await;
                             }
                             None => break,
                         }
@@ -57,5 +58,9 @@ impl Timer {
 
     pub fn second(sec: u64) -> Duration {
         Duration::new(sec, 0)
+    }
+
+    pub fn refresh(&self) {
+        let _ = self.tx.send(TimerMessage::Refresh);
     }
 }

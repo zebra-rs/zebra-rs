@@ -59,6 +59,7 @@ impl Default for PeerTask {
 pub struct PeerTimer {
     pub start: Option<Timer>,
     pub connect: Option<Timer>,
+    pub holdtimer: Option<Timer>,
     pub keepalive: Option<Timer>,
 }
 
@@ -67,6 +68,7 @@ impl PeerTimer {
         Self {
             start: None,
             connect: None,
+            holdtimer: None,
             keepalive: None,
         }
     }
@@ -146,20 +148,23 @@ pub fn fsm_stop(_peer: &mut Peer) -> State {
     State::Idle
 }
 
-pub fn fsm_bgp_open(_peer: &mut Peer, _packet: OpenPacket) -> State {
-    State::Idle
+pub fn fsm_bgp_open(peer: &mut Peer, _packet: OpenPacket) -> State {
+    peer.timer.holdtimer = Some(peer_start_holdtimer(peer));
+    State::Established
 }
 
 pub fn fsm_bgp_notification(_peer: &mut Peer, _packet: NotificationPacket) -> State {
     State::Idle
 }
 
-pub fn fsm_bgp_keepalive(_peer: &mut Peer) -> State {
-    State::Idle
+pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
+    peer_refresh_holdtimer(peer);
+    State::Established
 }
 
-pub fn fsm_bgp_update(_peer: &mut Peer, _packet: UpdatePacket) -> State {
-    State::Idle
+pub fn fsm_bgp_update(peer: &mut Peer, _packet: UpdatePacket) -> State {
+    peer_refresh_holdtimer(peer);
+    State::Established
 }
 
 pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
@@ -184,9 +189,9 @@ pub fn fsm_holdtimer_expires(_peer: &mut Peer) -> State {
     State::Idle
 }
 
-pub fn fsm_keepalive_expires(_peer: &mut Peer) -> State {
-    // peer_send_notification(peer);
-    State::Idle
+pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
+    peer_send_keepalive(peer);
+    State::Established
 }
 
 pub fn fsm_conn_fail(peer: &mut Peer) -> State {
@@ -299,4 +304,21 @@ pub fn peer_start_keepalive(peer: &Peer) -> Timer {
             let _ = tx.send(Message::Event(ident, Event::KeepaliveTimerExpires));
         }
     })
+}
+
+pub fn peer_start_holdtimer(peer: &Peer) -> Timer {
+    let tx = peer.tx.clone();
+    let ident = peer.ident;
+    Timer::new(Timer::second(180), TimerType::Infinite, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::HoldTimerExpires));
+        }
+    })
+}
+
+pub fn peer_refresh_holdtimer(peer: &Peer) {
+    if let Some(holdtimer) = peer.timer.holdtimer.as_ref() {
+        holdtimer.refresh();
+    }
 }
