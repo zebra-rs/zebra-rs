@@ -285,7 +285,7 @@ pub fn peer_send_open(peer: &Peer) {
 }
 
 pub fn peer_send_keepalive(peer: &Peer) {
-    let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN);
+    let header = BgpHeader::new(BgpPacketType::Keepalive, BGP_PACKET_HEADER_LEN);
     let bytes: BytesMut = header.into();
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
