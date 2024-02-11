@@ -219,9 +219,9 @@ pub fn peek_bgp_header(input: &[u8]) -> IResult<&[u8], BgpHeader> {
     Ok((input, header))
 }
 
-pub fn peek_bgp_length(input: &[u8]) -> u16 {
+pub fn peek_bgp_length(input: &[u8]) -> usize {
     if let Some(len) = input.get(16..18) {
-        u16::from_be_bytes(len.try_into().unwrap())
+        u16::from_be_bytes(len.try_into().unwrap()) as usize
     } else {
         0
     }

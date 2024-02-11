@@ -257,28 +257,26 @@ pub async fn peer_read(
     tx: UnboundedSender<Message>,
     mut read_half: OwnedReadHalf,
 ) {
+    let mut buf = BytesMut::with_capacity(BGP_PACKET_MAX_LEN * 2);
     loop {
-        let mut buf = BytesMut::with_capacity(BGP_PACKET_MAX_LEN * 2);
-        loop {
-            match read_half.read_buf(&mut buf).await {
-                Ok(read_len) => {
-                    if read_len == 0 {
-                        let _ = tx.send(Message::Event(ident, Event::ConnFail));
-                        return;
-                    }
-                    while buf.len() >= BGP_PACKET_HEADER_LEN as usize
-                        && buf.len() >= peek_bgp_length(buf.as_bytes()) as usize
-                    {
-                        let length = peek_bgp_length(buf.as_bytes());
-                        peer_packet_parse(buf.as_bytes(), ident, tx.clone());
-                        buf = buf.split_off(length as usize);
-                        buf.reserve(BGP_PACKET_MAX_LEN);
-                    }
-                }
-                Err(err) => {
-                    println!("{:?}", err);
+        match read_half.read_buf(&mut buf).await {
+            Ok(read_len) => {
+                if read_len == 0 {
                     let _ = tx.send(Message::Event(ident, Event::ConnFail));
+                    return;
                 }
+                while buf.len() >= BGP_PACKET_HEADER_LEN as usize
+                    && buf.len() >= peek_bgp_length(buf.as_bytes())
+                {
+                    let length = peek_bgp_length(buf.as_bytes());
+                    peer_packet_parse(buf.as_bytes(), ident, tx.clone());
+                    buf = buf.split_off(length);
+                    buf.reserve(BGP_PACKET_MAX_LEN);
+                }
+            }
+            Err(err) => {
+                println!("{:?}", err);
+                let _ = tx.send(Message::Event(ident, Event::ConnFail));
             }
         }
     }
