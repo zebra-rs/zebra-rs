@@ -7,7 +7,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
     Idle,
     Connect,
@@ -118,10 +118,14 @@ impl Peer {
         peer.timer.start = Some(peer_start_timer(&peer));
         peer
     }
+
+    pub fn is_passive(_peer: &Peer) -> bool {
+        false
+    }
 }
 
 pub fn fsm(peer: &mut Peer, event: Event) {
-    println!("State: {:?} -> ", peer.state);
+    let prev_state = peer.state.clone();
     peer.state = match event {
         Event::Start => fsm_start(peer),
         Event::Stop => fsm_stop(peer),
@@ -135,7 +139,10 @@ pub fn fsm(peer: &mut Peer, event: Event) {
         Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
         Event::UpdateMsg(packet) => fsm_bgp_update(peer, packet),
     };
-    println!("State: -> {:?}", peer.state);
+    println!("State: {:?} -> {:?}", prev_state, peer.state);
+    if prev_state != State::Idle && peer.state == State::Idle {
+        peer_stop(peer);
+    }
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
@@ -144,13 +151,25 @@ pub fn fsm_start(peer: &mut Peer) -> State {
     State::Connect
 }
 
-pub fn fsm_stop(peer: &mut Peer) -> State {
-    peer_stop(peer);
+pub fn fsm_stop(_peer: &mut Peer) -> State {
+    // Send notification if we have writer.
     State::Idle
 }
 
 pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
+    if peer.state != State::OpenSent {
+        println!("peer state mismatch {:?}", peer.state);
+        // Send notification.
+        return State::Idle;
+    }
     if packet.asn as u32 != peer.peer_as {
+        // Send notification.
+        println!("ASN mismatch");
+        return State::Idle;
+    }
+    if packet.bgp_id != peer.address.octets() {
+        // Send notification.
+        println!("router-id mismatch {:?}", peer.address);
         return State::Idle;
     }
     peer.timer.keepalive = Some(peer_start_keepalive(peer));
@@ -158,8 +177,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     State::Established
 }
 
-pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> State {
-    peer_stop(peer);
+pub fn fsm_bgp_notification(_peer: &mut Peer, _packet: NotificationPacket) -> State {
     State::Idle
 }
 
@@ -185,9 +203,9 @@ pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
     State::OpenSent
 }
 
-pub fn fsm_conn_retry_expires(_peer: &mut Peer) -> State {
-    // peer_send_notification(peer);
-    State::Idle
+pub fn fsm_conn_retry_expires(peer: &mut Peer) -> State {
+    peer.task.connect = Some(peer_start_connection(peer));
+    State::Connect
 }
 
 pub fn fsm_holdtimer_expires(_peer: &mut Peer) -> State {
