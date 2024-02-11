@@ -213,3 +213,16 @@ pub fn parse_bgp_packet(input: &[u8]) -> IResult<&[u8], BgpPacket> {
         _ => Err(nom::Err::Error(make_error(input, ErrorKind::Eof))),
     }
 }
+
+pub fn peek_bgp_header(input: &[u8]) -> IResult<&[u8], BgpHeader> {
+    let (_, header) = peek(BgpHeader::parse)(input)?;
+    Ok((input, header))
+}
+
+pub fn peek_bgp_length(input: &[u8]) -> u16 {
+    if let Some(len) = input.get(16..18) {
+        u16::from_be_bytes(len.try_into().unwrap())
+    } else {
+        0
+    }
+}
