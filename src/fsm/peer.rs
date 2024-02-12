@@ -318,10 +318,16 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let address = peer.address;
     Task::spawn(async move {
         let tx = tx.clone();
-        let stream = TcpStream::connect(address.to_string() + ":179")
-            .await
-            .unwrap();
-        let _ = tx.send(Message::Event(ident, Event::Connected(stream)));
+        let result = TcpStream::connect(address.to_string() + ":179").await;
+        match result {
+            Ok(stream) => {
+                let _ = tx.send(Message::Event(ident, Event::Connected(stream)));
+            }
+            Err(err) => {
+                println!("{:?}", err);
+                let _ = tx.send(Message::Event(ident, Event::ConnFail));
+            }
+        };
     })
 }
 
