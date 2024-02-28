@@ -24,6 +24,7 @@ pub enum Event {
     ConnRetryTimerExpires,        // 9
     HoldTimerExpires,             // 10
     KeepaliveTimerExpires,        // 11
+    IdleHoldTimerExpires,         // 13
     Connected(TcpStream),         // 17
     ConnFail,                     // 18
     BGPOpen(OpenPacket),          // 19
@@ -57,19 +58,23 @@ impl Default for PeerTask {
 
 #[derive(Debug)]
 pub struct PeerTimer {
-    pub start: Option<Timer>,
-    pub connect: Option<Timer>,
-    pub holdtimer: Option<Timer>,
+    pub idle_hold_timer: Option<Timer>,
+    pub connect_retry: Option<Timer>,
+    pub hold_timer: Option<Timer>,
     pub keepalive: Option<Timer>,
+    pub min_as_origin: Option<Timer>,
+    pub min_route_adv: Option<Timer>,
 }
 
 impl PeerTimer {
     pub fn new() -> Self {
         Self {
-            start: None,
-            connect: None,
-            holdtimer: None,
+            idle_hold_timer: None,
+            connect_retry: None,
+            hold_timer: None,
             keepalive: None,
+            min_as_origin: None,
+            min_route_adv: None,
         }
     }
 }
@@ -115,11 +120,15 @@ impl Peer {
             packet_tx: None,
             tx,
         };
-        peer.timer.start = Some(peer_start_timer(&peer));
+        fsm_init(&mut peer);
         peer
     }
 
-    pub fn is_passive(_peer: &Peer) -> bool {
+    pub fn event(&self, ident: Ipv4Addr, event: Event) {
+        let _ = self.tx.clone().send(Message::Event(ident, event));
+    }
+
+    pub fn is_passive(&self) -> bool {
         false
     }
 }
@@ -132,6 +141,7 @@ pub fn fsm(peer: &mut Peer, event: Event) {
         Event::ConnRetryTimerExpires => fsm_conn_retry_expires(peer),
         Event::HoldTimerExpires => fsm_holdtimer_expires(peer),
         Event::KeepaliveTimerExpires => fsm_keepalive_expires(peer),
+        Event::IdleHoldTimerExpires => fsm_idle_hold_timer_expires(peer),
         Event::Connected(stream) => fsm_connected(peer, stream),
         Event::ConnFail => fsm_conn_fail(peer),
         Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
@@ -141,18 +151,30 @@ pub fn fsm(peer: &mut Peer, event: Event) {
     };
     println!("State: {:?} -> {:?}", prev_state, peer.state);
     if prev_state != State::Idle && peer.state == State::Idle {
-        peer_stop(peer);
+        fsm_stop(peer);
     }
 }
 
+pub fn fsm_init(peer: &mut Peer) -> State {
+    if !peer.is_passive() {
+        peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(&peer));
+    }
+    State::Idle
+}
+
 pub fn fsm_start(peer: &mut Peer) -> State {
-    peer.timer.start = None;
     peer.task.connect = Some(peer_start_connection(peer));
     State::Connect
 }
 
-pub fn fsm_stop(_peer: &mut Peer) -> State {
-    // Send notification if we have writer.
+pub fn fsm_stop(peer: &mut Peer) -> State {
+    peer.task.writer = None;
+    peer.task.reader = None;
+    peer.timer.idle_hold_timer = None;
+    peer.timer.connect_retry = None;
+    peer.timer.keepalive = None;
+    peer.timer.hold_timer = None;
+    fsm_init(peer);
     State::Idle
 }
 
@@ -173,7 +195,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         return State::Idle;
     }
     peer.timer.keepalive = Some(peer_start_keepalive(peer));
-    peer.timer.holdtimer = Some(peer_start_holdtimer(peer));
+    peer.timer.hold_timer = Some(peer_start_holdtimer(peer));
     State::Established
 }
 
@@ -213,6 +235,12 @@ pub fn fsm_holdtimer_expires(_peer: &mut Peer) -> State {
     State::Idle
 }
 
+pub fn fsm_idle_hold_timer_expires(peer: &mut Peer) -> State {
+    peer.timer.idle_hold_timer = None;
+    peer.task.connect = Some(peer_start_connection(peer));
+    State::Connect
+}
+
 pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
     peer_send_keepalive(peer);
     State::Established
@@ -221,17 +249,30 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
 pub fn fsm_conn_fail(peer: &mut Peer) -> State {
     peer.task.writer = None;
     peer.task.reader = None;
-    State::Idle
+    // peer.timer.connect = Some()
+    State::Active
 }
 
-pub fn peer_stop(peer: &mut Peer) {
-    peer.task.connect = None;
-    peer.task.writer = None;
-    peer.task.reader = None;
-    peer.timer.start = None;
-    peer.timer.connect = None;
-    peer.timer.keepalive = None;
-    peer.timer.holdtimer = None;
+pub fn peer_start_idle_hold_timer(peer: &Peer) -> Timer {
+    let ident = peer.ident;
+    let tx = peer.tx.clone();
+    Timer::new(Timer::second(5), TimerType::Once, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::Start));
+        }
+    })
+}
+
+pub fn peer_start_connect_timer(peer: &Peer) -> Timer {
+    let ident = peer.ident;
+    let tx = peer.tx.clone();
+    Timer::new(Timer::second(5), TimerType::Once, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::Start));
+        }
+    })
 }
 
 pub fn peer_packet_parse(rx: &[u8], ident: Ipv4Addr, tx: UnboundedSender<Message>) {
@@ -301,17 +342,6 @@ pub fn peer_start_writer(
     })
 }
 
-pub fn peer_start_timer(peer: &Peer) -> Timer {
-    let ident = peer.ident;
-    let tx = peer.tx.clone();
-    Timer::new(Timer::second(1), TimerType::Once, move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::Event(ident, Event::Start));
-        }
-    })
-}
-
 pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
@@ -367,7 +397,7 @@ pub fn peer_start_holdtimer(peer: &Peer) -> Timer {
 }
 
 pub fn peer_refresh_holdtimer(peer: &Peer) {
-    if let Some(holdtimer) = peer.timer.holdtimer.as_ref() {
+    if let Some(holdtimer) = peer.timer.hold_timer.as_ref() {
         holdtimer.refresh();
     }
 }
