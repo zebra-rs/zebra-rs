@@ -78,7 +78,7 @@ pub struct AtomicAggregateAttr {}
 
 #[derive(Debug, NomBE)]
 pub struct AggregatorAttr {
-    pub asn: u16,
+    pub asn: u32,
     pub ip: u32,
 }
 

@@ -4,7 +4,7 @@ use nom::bytes::streaming::take;
 use nom::combinator::{map, peek};
 use nom::error::{make_error, ErrorKind};
 use nom::multi::{count, many0};
-use nom::number::streaming::{be_u128, be_u16, be_u8};
+use nom::number::streaming::{be_u128, be_u16, be_u32, be_u8};
 use nom::IResult;
 use nom_derive::*;
 use std::mem::size_of;
@@ -42,7 +42,7 @@ fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], AsSegment> {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
     }
     let (input, header) = AsSegmentHeader::parse(input)?;
-    let (input, asns) = count(be_u16, header.length as usize)(input)?;
+    let (input, asns) = count(be_u32, header.length as usize)(input)?;
     let segment = AsSegment {
         typ: header.typ,
         asn: asns.into_iter().map(|val| val as u32).collect(),
