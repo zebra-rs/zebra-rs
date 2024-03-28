@@ -127,7 +127,7 @@ fn bgp4mp_as4_parse(input: &[u8]) -> IResult<&[u8], (BgpPacket, IpAddr, IpAddr)>
             return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
         }
     };
-    let (input, packet) = parse_bgp_packet(input)?;
+    let (input, packet) = parse_bgp_packet(input, true)?;
     if input.len() != 0 {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
     }

@@ -276,7 +276,7 @@ pub fn peer_start_connect_timer(peer: &Peer) -> Timer {
 }
 
 pub fn peer_packet_parse(rx: &[u8], ident: Ipv4Addr, tx: UnboundedSender<Message>) {
-    let (_, p) = parse_bgp_packet(rx).expect("error");
+    let (_, p) = parse_bgp_packet(rx, false).expect("error");
     match p {
         BgpPacket::Open(p) => {
             let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));

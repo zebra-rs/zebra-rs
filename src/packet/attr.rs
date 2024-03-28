@@ -1,4 +1,4 @@
-use crate::{Afi, AsPathAttr, CommunityAttr, Safi};
+use crate::{Afi, As4PathAttr, AsPathAttr, CommunityAttr, Safi};
 use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
@@ -31,11 +31,13 @@ newtype_enum! {
 pub enum Attribute {
     Origin(OriginAttr),
     AsPath(AsPathAttr),
+    As4Path(As4PathAttr),
     NextHop(NextHopAttr),
     Med(MedAttr),
     LocalPref(LocalPrefAttr),
     AtomicAggregate(AtomicAggregateAttr),
     Aggregator(AggregatorAttr),
+    Aggregator4(Aggregator4Attr),
     Community(CommunityAttr),
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
@@ -78,6 +80,12 @@ pub struct AtomicAggregateAttr {}
 
 #[derive(Debug, NomBE)]
 pub struct AggregatorAttr {
+    pub asn: u16,
+    pub ip: u32,
+}
+
+#[derive(Debug, NomBE)]
+pub struct Aggregator4Attr {
     pub asn: u32,
     pub ip: u32,
 }

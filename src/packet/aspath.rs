@@ -14,12 +14,23 @@ pub struct AsSegmentHeader {
 #[derive(Debug)]
 pub struct AsSegment {
     pub typ: u8,
-    pub asn: Vec<u32>,
+    pub asn: Vec<u16>,
 }
 
 #[derive(Debug)]
 pub struct AsPathAttr {
     pub segments: Vec<AsSegment>,
+}
+
+#[derive(Debug)]
+pub struct As4Segment {
+    pub typ: u8,
+    pub asn: Vec<u32>,
+}
+
+#[derive(Debug)]
+pub struct As4PathAttr {
+    pub segments: Vec<As4Segment>,
 }
 
 // let output: Vec<u8> = input.iter().flat_map(|val| val.to_be_bytes()).collect();

@@ -42,10 +42,10 @@ fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], AsSegment> {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
     }
     let (input, header) = AsSegmentHeader::parse(input)?;
-    let (input, asns) = count(be_u32, header.length as usize)(input)?;
+    let (input, asns) = count(be_u16, header.length as usize)(input)?;
     let segment = AsSegment {
         typ: header.typ,
-        asn: asns.into_iter().map(|val| val as u32).collect(),
+        asn: asns.into_iter().map(|val| val as u16).collect(),
     };
     Ok((input, segment))
 }
@@ -55,6 +55,26 @@ fn parse_bgp_attr_as_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute
     let (_, segments) = many0(parse_bgp_attr_as_segment)(attr)?;
     let as_path = AsPathAttr { segments };
     Ok((input, Attribute::AsPath(as_path)))
+}
+
+fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
+    if input.is_empty() {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+    }
+    let (input, header) = AsSegmentHeader::parse(input)?;
+    let (input, asns) = count(be_u32, header.length as usize)(input)?;
+    let segment = As4Segment {
+        typ: header.typ,
+        asn: asns.into_iter().map(|val| val as u32).collect(),
+    };
+    Ok((input, segment))
+}
+
+fn parse_bgp_attr_as4_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
+    let (attr, input) = input.split_at(length as usize);
+    let (_, segments) = many0(parse_bgp_attr_as4_segment)(attr)?;
+    let as_path = As4PathAttr { segments };
+    Ok((input, Attribute::As4Path(as_path)))
 }
 
 fn parse_bgp_attr_community(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
@@ -103,7 +123,7 @@ fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attrib
     Ok((input, Attribute::MpReachNlri(mp_nlri)))
 }
 
-fn parse_bgp_attribute(input: &[u8]) -> IResult<&[u8], Attribute> {
+fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
     if input.is_empty() {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
     }
@@ -117,14 +137,26 @@ fn parse_bgp_attribute(input: &[u8]) -> IResult<&[u8], Attribute> {
     };
     match AttributeType(header.type_code) {
         AttributeType::Origin => map(OriginAttr::parse, Attribute::Origin)(input),
-        AttributeType::AsPath => parse_bgp_attr_as_path(input, attr_len),
+        AttributeType::AsPath => {
+            if as4 {
+                parse_bgp_attr_as4_path(input, attr_len)
+            } else {
+                parse_bgp_attr_as_path(input, attr_len)
+            }
+        }
         AttributeType::NextHop => map(NextHopAttr::parse, Attribute::NextHop)(input),
         AttributeType::Med => map(MedAttr::parse, Attribute::Med)(input),
         AttributeType::LocalPref => map(LocalPrefAttr::parse, Attribute::LocalPref)(input),
         AttributeType::AtomicAggregate => {
             map(AtomicAggregateAttr::parse, Attribute::AtomicAggregate)(input)
         }
-        AttributeType::Aggregator => map(AggregatorAttr::parse, Attribute::Aggregator)(input),
+        AttributeType::Aggregator => {
+            if as4 {
+                map(Aggregator4Attr::parse, Attribute::Aggregator4)(input)
+            } else {
+                map(AggregatorAttr::parse, Attribute::Aggregator)(input)
+            }
+        }
         AttributeType::Community => parse_bgp_attr_community(input, attr_len),
         AttributeType::MpReachNlri => parse_bgp_attr_mp_reach(input, attr_len),
         AttributeType::MpUnreachNlri => parse_bgp_attr_mp_unreach(input, attr_len),
@@ -132,9 +164,17 @@ fn parse_bgp_attribute(input: &[u8]) -> IResult<&[u8], Attribute> {
     }
 }
 
-fn parse_bgp_update_attribute(input: &[u8], length: u16) -> IResult<&[u8], Vec<Attribute>> {
+pub fn parse_bgp_attribute_as(as4: bool) -> impl Fn(&[u8]) -> IResult<&[u8], attr::Attribute> {
+    move |i: &[u8]| parse_bgp_attribute(i, as4)
+}
+
+fn parse_bgp_update_attribute(
+    input: &[u8],
+    length: u16,
+    as4: bool,
+) -> IResult<&[u8], Vec<Attribute>> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, attrs) = many0(parse_bgp_attribute)(attr)?;
+    let (_, attrs) = many0(parse_bgp_attribute_as(as4))(attr)?;
     Ok((input, attrs))
 }
 
@@ -180,13 +220,13 @@ fn parse_bgp_nlri_ipv4(input: &[u8], length: u16) -> IResult<&[u8], Vec<Ipv4Net>
     Ok((input, prefix))
 }
 
-fn parse_bgp_update_packet(input: &[u8]) -> IResult<&[u8], UpdatePacket> {
+fn parse_bgp_update_packet(input: &[u8], as4: bool) -> IResult<&[u8], UpdatePacket> {
     let (input, mut packet) = UpdatePacket::parse(input)?;
     let (input, withdraw_len) = be_u16(input)?;
     let (input, mut withdrawal) = parse_bgp_nlri_ipv4(input, withdraw_len)?;
     packet.ipv4_withdraw.append(&mut withdrawal);
     let (input, attr_len) = be_u16(input)?;
-    let (input, mut attrs) = parse_bgp_update_attribute(input, attr_len)?;
+    let (input, mut attrs) = parse_bgp_update_attribute(input, attr_len, as4)?;
     packet.attrs.append(&mut attrs);
     let nlri_len = packet.header.length - BGP_PACKET_HEADER_LEN - 2 - withdraw_len - 2 - attr_len;
     let (input, mut updates) = parse_bgp_nlri_ipv4(input, nlri_len)?;
@@ -201,19 +241,6 @@ fn parse_bgp_notification_packet(input: &[u8]) -> IResult<&[u8], NotificationPac
     Ok((input, packet))
 }
 
-pub fn parse_bgp_packet(input: &[u8]) -> IResult<&[u8], BgpPacket> {
-    let (_, header) = peek(BgpHeader::parse)(input)?;
-    match header.typ {
-        BgpPacketType::Open => map(parse_bgp_open_packet, BgpPacket::Open)(input),
-        BgpPacketType::Update => map(parse_bgp_update_packet, BgpPacket::Update)(input),
-        BgpPacketType::Notification => {
-            map(parse_bgp_notification_packet, BgpPacket::Notification)(input)
-        }
-        BgpPacketType::Keepalive => map(BgpHeader::parse, BgpPacket::Keepalive)(input),
-        _ => Err(nom::Err::Error(make_error(input, ErrorKind::Eof))),
-    }
-}
-
 pub fn peek_bgp_header(input: &[u8]) -> IResult<&[u8], BgpHeader> {
     let (_, header) = peek(BgpHeader::parse)(input)?;
     Ok((input, header))
@@ -224,5 +251,21 @@ pub fn peek_bgp_length(input: &[u8]) -> usize {
         u16::from_be_bytes(len.try_into().unwrap()) as usize
     } else {
         0
+    }
+}
+
+pub fn parse_bgp_packet(input: &[u8], as4: bool) -> IResult<&[u8], BgpPacket> {
+    let (_, header) = peek(BgpHeader::parse)(input)?;
+    match header.typ {
+        BgpPacketType::Open => map(parse_bgp_open_packet, BgpPacket::Open)(input),
+        BgpPacketType::Update => {
+            let (input, p) = parse_bgp_update_packet(input, as4)?;
+            Ok((input, BgpPacket::Update(p)))
+        }
+        BgpPacketType::Notification => {
+            map(parse_bgp_notification_packet, BgpPacket::Notification)(input)
+        }
+        BgpPacketType::Keepalive => map(BgpHeader::parse, BgpPacket::Keepalive)(input),
+        _ => Err(nom::Err::Error(make_error(input, ErrorKind::Eof))),
     }
 }
