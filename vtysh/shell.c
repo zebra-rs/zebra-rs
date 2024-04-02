@@ -57,6 +57,7 @@
 #include "mailcheck.h"
 #include "builtins.h"
 #include "builtins/common.h"
+#include "vtysh.h"
 
 #if defined (JOB_CONTROL)
 #include "jobs.h"
@@ -1241,8 +1242,9 @@ run_startup_files ()
 	  maybe_execute_file (SYS_BASHRC, 1);
 #  endif
 #endif
-	  maybe_execute_file (bashrc_file, 1);
-	}
+	  maybe_execute_file(bashrc_file, 1);
+	  cli_execute_startup_string();
+        }
       /* sh */
       else if (act_like_sh && privileged_mode == 0 && sourced_env++ == 0)
 	execute_env_file (get_string_value ("ENV"));

@@ -80,6 +80,8 @@
 #  include "pcomplete.h"
 #endif
 
+#include "vtysh.h"
+
 /* These should agree with the defines for emacs_mode and vi_mode in
    rldefs.h, even though that's not a public readline header file. */
 #ifndef EMACS_EDITING_MODE
@@ -1443,6 +1445,10 @@ find_cmd_start (start)
   register int s, os, ns;
 
   os = 0;
+
+  if (cli_mode())
+    return os;
+
   /* Flags == SD_NOJMP only because we want to skip over command substitutions
      in assignment statements.  Have to test whether this affects `standalone'
      command substitutions as individual words. */
@@ -1491,7 +1497,10 @@ find_cmd_end (end)
 {
   register int e;
 
-  e = skip_to_delim (rl_line_buffer, end, COMMAND_SEPARATORS, SD_NOJMP|SD_COMPLETE);
+  if (!cli_mode())
+    e = skip_to_delim (rl_line_buffer, end, COMMAND_SEPARATORS, SD_NOJMP|SD_COMPLETE);
+  else
+    e = strlen(rl_line_buffer);
   return e;
 }
 
@@ -1624,7 +1633,8 @@ attempt_shell_completion (text, start, end)
     }
   else if (member (rl_line_buffer[ti], command_separator_chars))
     {
-      in_command_position++;
+      if (!cli_mode())
+        in_command_position++;
 
       if (check_redir (ti) == 1)
 	in_command_position = -1;	/* sentinel that we're not the first word on the line */
@@ -1654,6 +1664,7 @@ attempt_shell_completion (text, start, end)
      succeed.  Don't bother if readline found a single quote and we are
      completing on the substring.  */
   if (*text == '`' && rl_completion_quote_character != '\'' &&
+        !cli_mode() &&
 	(in_command_position > 0 || (unclosed_pair (rl_line_buffer, start, "`") &&
 				     unclosed_pair (rl_line_buffer, end, "`"))))
     matches = rl_completion_matches (text, command_subst_completion_function);
@@ -1663,7 +1674,7 @@ attempt_shell_completion (text, start, end)
   have_progcomps = prog_completion_enabled && (progcomp_size () > 0);
   iw_compspec = progcomp_search (INITIALWORD);
   if (matches == 0 &&
-      (in_command_position == 0 || text[0] == '\0' || (in_command_position > 0 && iw_compspec)) &&
+      (cli_mode() || in_command_position == 0 || text[0] == '\0' || (in_command_position > 0 && iw_compspec)) &&
       current_prompt_string == ps1_prompt)
     {
       int s, e, s1, e1, os, foundcs;
@@ -1720,6 +1731,12 @@ attempt_shell_completion (text, start, end)
         prog_complete_matches = programmable_completions (EMPTYCMD, text, s, e, &foundcs);
       else if (start == end && text[0] == '\0' && s1 > start && whitespace (rl_line_buffer[start]))
         foundcs = 0;		/* whitespace before command name */
+      else if (cli_mode () && (e > s || strcmp (n, text) == 0) && was_assignment == 0 && have_progcomps)
+        {
+          prog_complete_matches = programmable_completions (n, text, s, e, &foundcs);
+          /* command completion if programmable completion fails */
+          in_command_position = s == start && STREQ (n, text);	/* XXX */
+        }
       else if (e > s && was_assignment == 0 && e1 == end && rl_line_buffer[e] == 0 && whitespace (rl_line_buffer[e-1]) == 0)
 	{
 	  /* not assignment statement, but still want to perform command
@@ -1801,6 +1818,11 @@ bash_default_completion (text, start, end, qc, compflags)
   char **matches, *t;
 
   matches = (char **)NULL;
+
+  if (cli_mode()) {
+    rl_ignore_some_completions_function = bash_ignore_everything;
+    return matches;
+  }
 
   /* New posix-style command substitution or variable name? */
   if (*text == '$')

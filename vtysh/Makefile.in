@@ -109,10 +109,10 @@ EXEEXT = @EXEEXT@
 OBJEXT = @OBJEXT@
 
 # The name of this program and some version information.
-VERSPROG = bashversion$(EXEEXT)
-VERSOBJ = bashversion.$(OBJEXT)
+VERSPROG = vtyshversion$(EXEEXT)
+VERSOBJ = vtyshversion.$(OBJEXT)
 
-Program = bash$(EXEEXT)
+Program = vtysh$(EXEEXT)
 Version = @BASHVERS@
 PatchLevel = `$(BUILD_DIR)/$(VERSPROG) -p`
 RELSTATUS = @RELSTATUS@
@@ -450,7 +450,8 @@ CSOURCES = shell.c eval.c parse.y general.c make_cmd.c print_cmd.c y.tab.c \
 	   input.c bashhist.c array.c arrayfunc.c assoc.c sig.c pathexp.c \
 	   unwind_prot.c siglist.c bashline.c bracecomp.c error.c \
 	   list.c stringlib.c locale.c findcmd.c redir.c \
-	   pcomplete.c pcomplib.c syntax.c xmalloc.c
+	   pcomplete.c pcomplib.c syntax.c xmalloc.c \
+	   vtysh.c
 
 HSOURCES = shell.h flags.h trap.h hashcmd.h hashlib.h jobs.h builtins.h \
 	   general.h variables.h config.h $(ALLOC_HEADERS) alias.h \
@@ -459,6 +460,7 @@ HSOURCES = shell.h flags.h trap.h hashcmd.h hashlib.h jobs.h builtins.h \
 	   subst.h externs.h siglist.h bashhist.h bashline.h bashtypes.h \
 	   array.h arrayfunc.h sig.h mailcheck.h bashintl.h bashjmp.h \
 	   execute_cmd.h parser.h pathexp.h pathnames.h pcomplete.h assoc.h \
+	   vtysh.h \
 	   $(BASHINCFILES)
 
 SOURCES	 = $(CSOURCES) $(HSOURCES) $(BUILTIN_DEFS)
@@ -494,7 +496,8 @@ OBJECTS	 = shell.o eval.o y.tab.o general.o make_cmd.o print_cmd.o $(GLOBO) \
 	   trap.o input.o unwind_prot.o pathexp.o sig.o test.o version.o \
 	   alias.o $(ARRAY_O) arrayfunc.o assoc.o braces.o bracecomp.o bashhist.o \
 	   bashline.o $(SIGLIST_O) list.o stringlib.o locale.o findcmd.o redir.o \
-	   pcomplete.o pcomplib.o syntax.o xmalloc.o $(SIGNAMES_O)
+	   pcomplete.o pcomplib.o syntax.o xmalloc.o $(SIGNAMES_O) \
+	   vtysh.o
 
 # Where the source code of the shell builtins resides.
 BUILTIN_SRCDIR=$(srcdir)/builtins
@@ -547,8 +550,8 @@ BUILTINS_LDFLAGS = -L$(DEFDIR)
 BUILTINS_DEP = $(BUILTINS_LIBRARY)
 
 # Documentation for the shell.
-DOCSRC = $(srcdir)/doc
-DOCDIR = $(dot)/doc
+# DOCSRC = $(srcdir)/doc
+# DOCDIR = $(dot)/doc
 
 # Translations and other i18n support files
 PO_SRC = $(srcdir)/po/
@@ -568,7 +571,7 @@ CREATED_SUPPORT = signames.h recho$(EXEEXT) zecho$(EXEEXT) printenv$(EXEEXT) \
 		  buildversion.o mksignames.o signames.o buildsignames.o
 CREATED_CONFIGURE = config.h config.cache config.status config.log \
 		    stamp-h po/POTFILES config.status.lineno
-CREATED_MAKEFILES = Makefile builtins/Makefile doc/Makefile \
+CREATED_MAKEFILES = Makefile builtins/Makefile \
 		    lib/readline/Makefile lib/glob/Makefile \
 		    lib/sh/Makefile lib/tilde/Makefile lib/malloc/Makefile \
 		    lib/termcap/Makefile examples/loadables/Makefile \
@@ -587,7 +590,7 @@ LOADABLES_DIR = ${top_builddir}/examples/loadables
 # Keep GNU Make from exporting the entire environment for small machines.
 .NOEXPORT:
 
-.made: $(Program) bashbug $(SDIR)/man2html$(EXEEXT)
+.made: $(Program)
 	@echo "$(Program) last made for a $(Machine) running $(OS)" >.made
 
 $(Program): $(OBJECTS) $(BUILTINS_DEP) $(LIBDEP) .build
@@ -604,11 +607,6 @@ $(Program): $(OBJECTS) $(BUILTINS_DEP) $(LIBDEP) .build
 	@echo "	  *                                                         *"
 	@echo "	  ***********************************************************"
 	@echo
-
-bashbug: $(SDIR)/bashbug.sh $(VERSPROG)
-	@sed -e "s%!PATCHLEVEL!%$(PatchLevel)%" \
-	     $(SDIR)/bashbug.sh > $@
-	@chmod a+rx bashbug
 
 strip:	$(Program) .made
 	$(STRIP) $(Program)
@@ -643,7 +641,7 @@ version.h:  $(SOURCES) config.h Makefile patchlevel.h
 	$(SHELL) $(SUPPORT_SRC)mkversion.sh -b -S ${topdir} -s $(RELSTATUS) -d $(Version) -o newversion.h \
 		&& mv newversion.h version.h
 
-bashversion$(EXEEXT): buildversion.o $(SUPPORT_SRC)bashversion.c
+vtyshversion$(EXEEXT): buildversion.o $(SUPPORT_SRC)bashversion.c
 	$(CC_FOR_BUILD) $(CCFLAGS_FOR_BUILD) ${LDFLAGS_FOR_BUILD} -o $@ $(SUPPORT_SRC)bashversion.c buildversion.o ${LIBS_FOR_BUILD}
 
 buildversion.o: $(srcdir)/version.c
@@ -831,22 +829,9 @@ tags:	$(SOURCES) $(BUILTIN_C_SRC) $(LIBRARY_SOURCE)
 
 installdirs:
 	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(bindir)
-	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(man1dir)
-	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(infodir)
-	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(docdir)
-	-( cd $(PO_DIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
 
 install:	.made installdirs
 	$(INSTALL_PROGRAM) $(INSTALLMODE) $(Program) $(DESTDIR)$(bindir)/$(Program)
-	$(INSTALL_SCRIPT) $(INSTALLMODE2) bashbug $(DESTDIR)$(bindir)/bashbug
-	$(INSTALL_DATA) $(OTHER_DOCS) $(DESTDIR)$(docdir)
-	-( cd $(DOCDIR) ; $(MAKE) $(MFLAGS) \
-		man1dir=$(man1dir) man1ext=$(man1ext) \
-		man3dir=$(man3dir) man3ext=$(man3ext) \
-		infodir=$(infodir) htmldir=$(htmldir) DESTDIR=$(DESTDIR) $@ )
-	-( cd $(DEFDIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
-	-( cd $(PO_DIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
-	-( cd $(LOADABLES_DIR) && $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
 
 install-strip:
 	$(MAKE) $(MFLAGS) INSTALL_PROGRAM='$(INSTALL_PROGRAM) -s' \
@@ -886,14 +871,7 @@ uninstall-headers:
 	-( $(RM) $(DESTDIR)$(pkgconfigdir)/bash.pc )
 
 uninstall:	.made
-	$(RM) $(DESTDIR)$(bindir)/$(Program) $(DESTDIR)$(bindir)/bashbug
-	-( cd $(DESTDIR)$(docdir) && ${RM} ${OTHER_INSTALLED_DOCS} )
-	-( cd $(DOCDIR) ; $(MAKE) $(MFLAGS) \
-		man1dir=$(man1dir) man1ext=$(man1ext) \
-		man3dir=$(man3dir) man3ext=$(man3ext) \
-		infodir=$(infodir) htmldir=$(htmldir) DESTDIR=$(DESTDIR) $@ )
-	-( cd $(PO_DIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
-	-( cd $(LOADABLES_DIR) && $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
+	$(RM) $(DESTDIR)$(bindir)/$(Program)
 
 .PHONY: basic-clean clean realclean maintainer-clean distclean mostlyclean maybe-clean
 
@@ -901,11 +879,10 @@ LIB_SUBDIRS = ${RL_LIBDIR}  ${HIST_LIBDIR} ${TERM_LIBDIR} ${GLOB_LIBDIR} \
 		${INTL_LIBDIR} ${TILDE_LIBDIR} ${ALLOC_LIBDIR} ${SH_LIBDIR}
 
 basic-clean:
-	$(RM) $(OBJECTS) $(Program) bashbug
+	$(RM) $(OBJECTS) $(Program)
 	$(RM) .build .made version.h 
 
 clean:	basic-clean
-	( cd $(DOCDIR) && $(MAKE) $(MFLAGS) $@ )
 	( cd builtins && $(MAKE) $(MFLAGS) $@ )
 	-( cd $(SDIR) && $(MAKE) $(MFLAGS) $@ )
 	-for libdir in ${LIB_SUBDIRS}; do \
@@ -1334,6 +1311,7 @@ bashhist.o: make_cmd.h subst.h sig.h pathnames.h externs.h parser.h
 bashhist.o: flags.h input.h parser.h pathexp.h $(DEFSRC)/common.h bashline.h
 bashhist.o: ${BASHINCDIR}/ocache.h ${BASHINCDIR}/chartypes.h bashhist.h assoc.h
 bashhist.o: $(GLOB_LIBSRC)/strmatch.h ${GLOB_LIBSRC}/glob.h
+bashhist.o: vtysh.h
 bashline.o: config.h bashtypes.h ${BASHINCDIR}/posixstat.h bashansi.h ${BASHINCDIR}/ansi_stdlib.h
 bashline.o: shell.h syntax.h config.h bashjmp.h ${BASHINCDIR}/posixjmp.h command.h ${BASHINCDIR}/stdc.h error.h
 bashline.o: general.h xmalloc.h bashtypes.h variables.h arrayfunc.h conftypes.h array.h hashlib.h
@@ -1440,6 +1418,8 @@ xmalloc.o: bashintl.h ${LIBINTL_H} $(BASHINCDIR)/gettext.h
 $(MALLOC_SOURCE): bashintl.h ${LIBINTL_H} $(BASHINCDIR)/gettext.h
 
 signames.o: config.h bashansi.h ${BASHINCDIR}/ansi_stdlib.h
+
+vtysh.o: vtysh.h
 
 # XXX - dependencies checked through here
 
