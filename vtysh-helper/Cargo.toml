@@ -1,6 +1,6 @@
 [package]
-name = "vtysh-grpc"
-version = "0.5.0"
+name = "vtysh-helper"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]

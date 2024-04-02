@@ -34,7 +34,7 @@ if [[ $interactive ]]; then
 fi
 
 # CLI command tool name.
-cli_command=vtysh-grpc
+cli_command=vtysh-helper
 
 declare -x CLI_MODE="exec"
 declare -x CLI_MODE_STR="Exec"
