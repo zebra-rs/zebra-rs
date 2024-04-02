@@ -1,5 +1,5 @@
 [package]
-name = "zebra-rs"
+name = "zebra"
 version = "0.5.0"
 edition = "2021"
 
