@@ -1,0 +1,82 @@
+module configure {
+  yang-version "1";
+
+  namespace "https://zebra.dev/";
+  prefix "configure";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  import dhcp {
+    prefix dhcp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  container delete {
+    ext:help "Delete configuration";
+    uses "config:config";
+  }
+
+  leaf exit {
+    ext:help "Change to configure mode";
+    type empty;
+  }
+
+  leaf help {
+    ext:help "Show help";
+    type empty;
+  }
+
+  container set {
+    ext:help "Set configuration";
+    uses "config:config";
+  }
+
+  leaf show {
+    ext:help "Show candidate system configuration";
+    type empty;
+  }
+
+  leaf running {
+    ext:help "Show running system configuration";
+    type empty;
+  }
+
+  leaf candidate {
+    ext:help "Show candidate system configuration";
+    type empty;
+  }
+
+  leaf json {
+    ext:help "Show running configuration in JSON format";
+    type empty;
+  }
+
+  leaf commit {
+    ext:help "Commit candidate config to running config";
+    type empty;
+  }
+
+  leaf discard {
+    ext:help "Discard candidate config";
+    type empty;
+  }
+
+  leaf load {
+    ext:help "Load config from file";
+    type empty;
+  }
+
+  leaf list {
+    ext:help "List config from file";
+    type empty;
+  }
+}

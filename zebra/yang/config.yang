@@ -1,0 +1,96 @@
+module config {
+  yang-version "1";
+
+  namespace "https://zebra.dev/";
+  prefix "config";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  import dhcp {
+    prefix dhcp;
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  grouping config {
+    container system {
+      ext:help "System configuration";
+      description
+        "System group configuration.";
+
+      leaf hostname {
+        type string;
+        description
+          "The name of the host. This name can be a single domain label or the
+           fully qualified domain name of the host.";
+      }
+      leaf empty {
+        type empty;
+      }
+      leaf-list track-interface {
+        type string;
+        description
+          "Interfaces to track.";
+      }
+      container presence {
+        presence "Presence container";
+      }
+      container dhcp {
+        uses "dhcp:dhcp";
+      }
+      container etcd {
+        list endpoints {
+          key "url";
+          leaf url {
+            type string;
+          }
+        }
+        leaf path {
+          type string;
+        }
+      }
+    }
+
+    container routing {
+      ext:help "Routing configuration";
+      uses "ietf-bgp:bgp";
+      container static {
+        list route {
+          key "prefix";
+          leaf prefix {
+            type inet:ipv4-prefix;
+          }
+          list nexthop {
+            key "address";
+            leaf "address" {
+              type inet:ipv4-address;
+              description "Nexthop of the route";
+            }
+          }
+          list interface {
+            key "ifname";
+            leaf "ifname" {
+              type string;
+            }
+          }
+          leaf distance {
+            type uint8;
+            description "Distance of the route.";
+          }
+          leaf metric {
+            type uint32;
+            description "Metric of the route.";
+          }
+        }
+      }
+    }
+  }
+}

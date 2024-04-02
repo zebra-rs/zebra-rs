@@ -1,0 +1,56 @@
+module exec {
+  yang-version "1";
+
+  namespace "https://zebra.dev/";
+  prefix "exec";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  leaf help {
+    ext:help "Show help";
+    type empty;
+  }
+
+  leaf configure {
+    ext:help "Manipulate software configuration information";
+    type empty;
+  }
+
+  container show {
+    ext:help "Show command";
+    leaf version {
+      ext:help "Show version";
+      type empty;
+    }
+    leaf hostname {
+      type string;
+      description
+        "The name of the host.  This name can be a single domain
+        label or the fully qualified domain name of the host.";
+    }
+    container ip {
+      ext:help "Show IP commands";
+      leaf route {
+        ext:help "IP route prefix";
+        type inet:ipv4-prefix;
+      }
+    }
+    container ipv6 {
+      ext:help "Show IPv6 commands";
+      leaf route {
+        ext:help "IPv6 address";
+        type inet:ipv6-address;
+      }
+      leaf prefix {
+        ext:help "IPv6 prefix";
+        type inet:ipv6-prefix;
+      }
+    }
+  }
+}
