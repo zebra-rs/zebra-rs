@@ -121,7 +121,7 @@ impl ConfigManager {
         } else {
             let path = elem_str(&state.elems);
             if let Some(f) = mode.fmap.get(&path) {
-                f(&self)
+                f(self)
             } else {
                 (code, "".to_string())
             }

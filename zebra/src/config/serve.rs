@@ -4,6 +4,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
 use tonic::Response;
 
+use super::parse::YangMatch;
 use super::vtysh::exec_server::{Exec, ExecServer};
 use super::vtysh::show_server::{Show, ShowServer};
 use super::vtysh::{ExecCode, ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest};
@@ -90,7 +91,13 @@ fn comp_commands(resp: &CompletionResponse) -> String {
         _ => String::from("NoMatch\n"),
     };
     for comp in resp.comps.iter() {
-        line.push_str(&format!("{}\t  \t{}\n", comp.name, comp.help));
+        if comp.ymatch == YangMatch::Key {
+            line.push_str(&format!("{}\t+>\t{}\n", comp.name, comp.help));
+        } else if comp.ymatch == YangMatch::Dir {
+            line.push_str(&format!("{}\t->\t{}\n", comp.name, comp.help));
+        } else {
+            line.push_str(&format!("{}\t  \t{}\n", comp.name, comp.help));
+        }
     }
     line
 }

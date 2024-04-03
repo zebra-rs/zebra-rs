@@ -4,7 +4,7 @@ use super::ip::*;
 use super::util::*;
 use super::{Completion, Config, Elem, ExecCode};
 use libyang::{
-    path_split, range_match, Entry, EnumNode, MinMax, RangeExtract, RangeNode, TypeKind, TypeNode,
+    path_split, range_match, Entry, MinMax, RangeExtract, RangeNode, TypeKind, TypeNode,
 };
 use regex::Regex;
 use std::rc::Rc;
@@ -51,10 +51,6 @@ fn entry_preset(name: String) -> PresetType {
     }
 }
 
-fn comp_name_string(e: &Rc<Entry>) -> String {
-    e.name.to_owned()
-}
-
 fn comp_integer_string(e: &Rc<Entry>, n: &TypeNode) -> String {
     if let Some(range) = &n.range {
         range.to_string()
@@ -69,10 +65,7 @@ fn comp_range(e: &Rc<Entry>, n: &TypeNode) -> Completion {
     } else {
         format!("<{}>", e.name.to_owned())
     };
-    Completion {
-        name,
-        help: "".to_owned(),
-    }
+    Completion::new_by_name(&name)
 }
 
 fn comp_leaf_string(e: &Rc<Entry>) -> String {
@@ -119,30 +112,18 @@ fn comps_add_config(comps: &mut Vec<Completion>, ymatch: YangMatch, config: &Opt
     if let Some(config) = config {
         if config.has_dir() {
             for config in config.configs.borrow().iter() {
-                comps.push(Completion {
-                    name: config.name.to_owned(),
-                    help: "".to_owned(),
-                });
+                comps.push(Completion::new_by_name(&config.name));
             }
             if ymatch == YangMatch::Key {
                 for key in config.keys.borrow().iter() {
-                    comps.push(Completion {
-                        name: key.name.to_owned(),
-                        help: "".to_owned(),
-                    });
+                    comps.push(Completion::new_by_name(&key.name));
                 }
             }
         } else if config.list.borrow().is_empty() {
-            comps.push(Completion {
-                name: config.value.borrow().clone(),
-                help: "".to_owned(),
-            });
+            comps.push(Completion::new_by_name(&config.value.borrow()));
         } else {
             for value in config.list.borrow().iter() {
-                comps.push(Completion {
-                    name: value.to_owned(),
-                    help: "".to_owned(),
-                });
+                comps.push(Completion::new_by_name(&value));
             }
         }
     }
@@ -155,10 +136,13 @@ fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entr
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             for entry in entry.dir.borrow().iter() {
-                comps.push(Completion {
-                    name: comp_name_string(entry),
-                    help: comp_help_string(entry),
-                });
+                let mut comp = Completion::new(&entry.name, &comp_help_string(entry));
+                if entry.has_key() {
+                    comp.ymatch = YangMatch::Key;
+                } else if entry.is_directory_entry() {
+                    comp.ymatch = YangMatch::Dir;
+                }
+                comps.push(comp);
             }
         }
         YangMatch::LeafMatched => {
@@ -167,21 +151,21 @@ fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entr
         _ => {
             if let Some(node) = &entry.type_node {
                 if node.kind == TypeKind::Yboolean {
-                    comps.push(comp_name("true"));
-                    comps.push(comp_name("false"));
+                    comps.push(Completion::new_by_name("true"));
+                    comps.push(Completion::new_by_name("false"));
                     return;
                 }
                 if node.kind == TypeKind::Yenumeration {
                     for e in node.enum_stmt.iter() {
-                        comps.push(comp_enum(e));
+                        comps.push(Completion::new_by_name(&e.name));
                     }
                     return;
                 }
             }
-            comps.push(Completion {
-                name: comp_leaf_string(entry),
-                help: comp_help_string(entry),
-            });
+            comps.push(Completion::new(
+                &comp_leaf_string(entry),
+                &comp_help_string(entry),
+            ));
         }
     }
     comps.sort_by(|a, b| a.name.cmp(&b.name));
@@ -321,32 +305,60 @@ impl Match {
     }
 
     pub fn match_ipv4_address(&mut self, entry: &Rc<Entry>, s: &String) {
-        self.process(entry, match_ipv4_address(s), comp_name("A.B.C.D"));
+        self.process(
+            entry,
+            match_ipv4_address(s),
+            Completion::new_by_name("A.B.C.D"),
+        );
     }
 
     pub fn match_ipv4_prefix(&mut self, entry: &Rc<Entry>, s: &String) {
-        self.process(entry, match_ipv4_prefix(s), comp_name("A.B.C.D/M"));
+        self.process(
+            entry,
+            match_ipv4_prefix(s),
+            Completion::new_by_name("A.B.C.D/M"),
+        );
     }
 
     pub fn match_ipv6_address(&mut self, entry: &Rc<Entry>, s: &str) {
-        self.process(entry, match_ipv6_address(s), comp_name("X:X::X:X"));
+        self.process(
+            entry,
+            match_ipv6_address(s),
+            Completion::new_by_name("X:X::X:X"),
+        );
     }
 
     pub fn match_ipv6_prefix(&mut self, entry: &Rc<Entry>, s: &str) {
-        self.process(entry, match_ipv6_prefix(s), comp_name("X:X::X:X/M"));
+        self.process(
+            entry,
+            match_ipv6_prefix(s),
+            Completion::new_by_name("X:X::X:X/M"),
+        );
     }
 
     pub fn match_string(&mut self, entry: &Rc<Entry>, s: &String, node: &TypeNode) {
-        self.process(entry, match_string(s, node), comp_leaf(entry));
+        self.process(
+            entry,
+            match_string(s, node),
+            Completion::new(&comp_leaf_string(entry), &comp_help_string(entry)),
+        );
     }
 
     pub fn match_entry_name(&mut self, entry: &Rc<Entry>, s: &str) {
-        self.process(entry, match_keyword_str(s, &entry.name), comp_entry(entry));
+        self.process(
+            entry,
+            match_keyword_str(s, &entry.name),
+            Completion::new(&entry.name.to_owned(), &comp_help_string(entry)),
+        );
     }
 
     pub fn match_enum(&mut self, entry: &Rc<Entry>, node: &TypeNode, s: &String) {
         for n in node.enum_stmt.iter() {
-            self.process(entry, match_keyword(s, &n.name), comp_enum(n));
+            self.process(
+                entry,
+                match_keyword(s, &n.name),
+                Completion::new_by_name(&n.name),
+            );
         }
     }
 
@@ -365,41 +377,13 @@ impl Match {
         self.process(
             entry,
             match_keyword(s, &"true".to_owned()),
-            comp_name("true"),
+            Completion::new_by_name("true"),
         );
         self.process(
             entry,
             match_keyword(s, &"false".to_owned()),
-            comp_name("false"),
+            Completion::new_by_name("false"),
         );
-    }
-}
-
-fn comp_entry(entry: &Rc<Entry>) -> Completion {
-    Completion {
-        name: entry.name.to_owned(),
-        help: comp_help_string(entry),
-    }
-}
-
-fn comp_leaf(entry: &Rc<Entry>) -> Completion {
-    Completion {
-        name: comp_leaf_string(entry),
-        help: comp_help_string(entry),
-    }
-}
-
-fn comp_name(name: &str) -> Completion {
-    Completion {
-        name: name.to_owned(),
-        help: "".to_owned(),
-    }
-}
-
-fn comp_enum(node: &EnumNode) -> Completion {
-    Completion {
-        name: node.name.to_owned(),
-        help: String::from(""),
     }
 }
 

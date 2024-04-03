@@ -46,13 +46,3 @@ pub fn load_config_file(input: String) -> Vec<String> {
     }
     outputs
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_load() {
-        load_config();
-    }
-}

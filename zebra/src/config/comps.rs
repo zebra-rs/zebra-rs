@@ -1,8 +1,10 @@
+use super::parse::YangMatch;
+
 #[derive(Debug, Default)]
 pub struct Completion {
     pub name: String,
     pub help: String,
-    // pub ytype: YangType,
+    pub ymatch: YangMatch,
 }
 
 impl Completion {
@@ -10,6 +12,7 @@ impl Completion {
         Self {
             name: name.to_string(),
             help: help.to_string(),
+            ymatch: YangMatch::Leaf,
         }
     }
 
@@ -17,6 +20,7 @@ impl Completion {
         Self {
             name: name.to_string(),
             help: "".to_string(),
+            ymatch: YangMatch::Leaf,
         }
     }
 }
