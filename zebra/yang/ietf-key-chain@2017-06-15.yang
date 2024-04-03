@@ -323,7 +323,6 @@ module ietf-key-chain {
         container key-string {
           description
             "The key string.";
-          nacm:default-deny-all;
           choice key-string-style {
             description
               "Key string styles";

@@ -75,6 +75,11 @@ module configure {
     type empty;
   }
 
+  leaf save {
+    ext:help "Save config from file";
+    type empty;
+  }
+
   leaf list {
     ext:help "List config from file";
     type empty;

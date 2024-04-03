@@ -513,7 +513,6 @@ module ietf-tcp {
       }
 
       action reset {
-        nacm:default-deny-all;
         description
           "Reset statistics action command.";
         input {
