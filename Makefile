@@ -1,3 +1,8 @@
+.PHONY: zebra
+
+zebra:
+	cargo build --release
+
 all:
 	cargo build --release
 	cd vtysh;./configure;make
@@ -11,3 +16,4 @@ install:
 	cp vtysh/vtysh ${HOME}/.zebra/bin
 	cp zebra/yang/* ${HOME}/.zebra/yang
 	touch ${HOME}/.zebra/etc/zebra.conf
+	@echo '[Please add $${HOME}/.zebra/bin to your PATH]'
