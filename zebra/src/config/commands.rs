@@ -115,7 +115,7 @@ fn json(config: &ConfigManager) -> (ExecCode, String) {
 }
 
 fn commit(config: &ConfigManager) -> (ExecCode, String) {
-    config.store.commit();
+    config.commit_config();
     (ExecCode::Show, String::from(""))
 }
 

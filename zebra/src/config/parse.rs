@@ -123,7 +123,7 @@ fn comps_add_config(comps: &mut Vec<Completion>, ymatch: YangMatch, config: &Opt
             comps.push(Completion::new_by_name(&config.value.borrow()));
         } else {
             for value in config.list.borrow().iter() {
-                comps.push(Completion::new_by_name(&value));
+                comps.push(Completion::new_by_name(value));
             }
         }
     }

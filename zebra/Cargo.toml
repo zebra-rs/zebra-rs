@@ -1,9 +1,15 @@
 [package]
 name = "zebra"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.81"
+bytes = "1"
+ipnet = "2.9.0"
+nom = "7"
+nom-derive = "0.10"
+rusticata-macros = "4"
 prost = "0.11"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

@@ -11,7 +11,7 @@ use libyang::{to_entry, Entry, YangStore};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, UnboundedSender};
 
 pub struct ConfigStore {
     pub running: RefCell<Rc<Config>>,
@@ -39,6 +39,8 @@ impl ConfigStore {
     pub fn save_config(&self) {
         let home = dirs::home_dir();
         if let Some(mut home) = home {
+            home.push(".zebra");
+            home.push("etc");
             home.push("zebra.conf");
             let mut output = String::new();
             self.running.borrow().format(&mut output);
@@ -52,6 +54,7 @@ pub struct ConfigManager {
     pub store: ConfigStore,
     pub modes: HashMap<String, Mode>,
     pub rx: Receiver<Message>,
+    pub cm_txes: Vec<UnboundedSender<String>>,
 }
 
 impl ConfigManager {
@@ -61,6 +64,7 @@ impl ConfigManager {
             modes: HashMap::new(),
             store: ConfigStore::new(),
             rx,
+            cm_txes: Vec::new(),
         };
         cm.init();
         cm
@@ -77,6 +81,16 @@ impl ConfigManager {
         let entry = self.load_mode(&mut yang, "configure");
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
+
+        self.load_config();
+    }
+
+    pub fn subscribe(&mut self, cm_tx: UnboundedSender<String>) {
+        self.cm_txes.push(cm_tx);
+    }
+
+    pub fn commit_config(&self) {
+        self.store.commit();
     }
 
     fn load_mode(&self, yang: &mut YangStore, mode: &str) -> Rc<Entry> {
@@ -88,6 +102,8 @@ impl ConfigManager {
     pub fn load_config(&self) {
         let home = dirs::home_dir();
         if let Some(mut home) = home {
+            home.push(".zebra");
+            home.push("etc");
             home.push("zebra.conf");
             let output = std::fs::read_to_string(home);
             if let Ok(output) = output {
@@ -98,7 +114,7 @@ impl ConfigManager {
                     }
                 }
             }
-            self.store.commit();
+            self.commit_config();
         }
     }
 

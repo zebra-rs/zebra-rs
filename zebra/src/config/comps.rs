@@ -30,7 +30,7 @@ pub fn comps_add_cr(comps: &mut Vec<Completion>) {
 }
 
 fn comps_exists(comps: &[Completion], name: &String) -> bool {
-    comps.iter().map(|x| x.name == *name).any(|t| t)
+    comps.iter().any(|x| x.name == *name)
 }
 
 pub fn comps_append(from: &mut Vec<Completion>, to: &mut Vec<Completion>) {

@@ -63,6 +63,7 @@ module config {
       ext:help "Routing configuration";
       uses "ietf-bgp:bgp";
       container static {
+        ext:help "Static route configuration";
         list route {
           key "prefix";
           leaf prefix {

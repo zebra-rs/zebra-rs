@@ -27,15 +27,6 @@ pub struct CompletionResponse {
     pub comps: Vec<Completion>,
 }
 
-#[derive(Debug, Default)]
-pub enum YangType {
-    #[default]
-    Dir,
-    // Key,
-    // Leaf,
-    // LeafList,
-}
-
 impl ExecuteRequest {
     pub fn new(mode: &str, input: &str, resp: Sender<ExecuteResponse>) -> Self {
         Self {
@@ -72,8 +63,20 @@ impl CompletionResponse {
     }
 }
 
+// #[derive(Debug)]
+// pub struct SubscribeRequest {
+//     pub resp: Sender<String>,
+// }
+
+// #[derive(Debug, Default)]
+// pub struct SubscribeResponse {
+//     pub code: ExecCode,
+//     pub comps: Vec<Completion>,
+// }
+
 #[derive(Debug)]
 pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
+    //Subscribe(),
 }
