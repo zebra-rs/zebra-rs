@@ -6,8 +6,10 @@ use super::elem::elem_str;
 use super::files::load_config_file;
 use super::parse::parse;
 use super::parse::State;
+use super::util::trim_first_line;
 use super::{Completion, Config, ExecCode};
 use libyang::{to_entry, Entry, YangStore};
+use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -81,8 +83,6 @@ impl ConfigManager {
         let entry = self.load_mode(&mut yang, "configure");
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
-
-        self.load_config();
     }
 
     pub fn subscribe(&mut self, cm_tx: UnboundedSender<String>) {
@@ -90,6 +90,24 @@ impl ConfigManager {
     }
 
     pub fn commit_config(&self) {
+        let mut running = String::new();
+        let mut candidate = String::new();
+        self.store.running.borrow().list(&mut running);
+        self.store.candidate.borrow().list(&mut candidate);
+
+        let text_diff = TextDiff::from_lines(&running, &candidate);
+        let mut binding = text_diff.unified_diff();
+        let mut diff = binding.context_radius(65535).to_string();
+        let diff = trim_first_line(&mut diff);
+
+        for line in diff.lines() {
+            if !line.is_empty() {
+                let line = remove_first_char(line);
+                for tx in self.cm_txes.iter() {
+                    tx.send(line.clone()).unwrap();
+                }
+            }
+        }
         self.store.commit();
     }
 
@@ -183,4 +201,8 @@ impl ConfigManager {
             }
         }
     }
+}
+
+fn remove_first_char(s: &str) -> String {
+    s.chars().skip(1).collect()
 }

@@ -23,9 +23,13 @@ pub fn tokenizer(input: String) -> Vec<Token> {
             'a'..='z' | '0'..='9' => {
                 let s: String = iter::once(ch)
                     .chain(from_fn(|| {
-                        chars
-                            .by_ref()
-                            .next_if(|c| c.is_alphabetic() || c.is_ascii_digit() || c == &'.')
+                        chars.by_ref().next_if(|c| {
+                            c.is_alphabetic()
+                                || c.is_ascii_digit()
+                                || c == &'.'
+                                || c == &'-'
+                                || c == &'/'
+                        })
                     }))
                     .collect();
                 tokens.push(Token::String(s));

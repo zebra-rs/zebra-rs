@@ -5,7 +5,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub enum Message {
-    Config(String),
     Event(Ipv4Addr, Event),
 }
 
@@ -35,66 +34,46 @@ fn bgp_peer_add(bgp: &mut Bgp, address: String, asn_str: String) {
 }
 
 fn bgp_config_set(bgp: &mut Bgp, conf: String) {
-    let paths: Vec<&str> = conf.split('/').collect();
-    if paths.len() < 5 {
+    let paths: Vec<&str> = conf.split(' ').collect();
+    if paths.len() < 3 {
         return;
     }
-    match paths[3] {
-        "global" => match paths[4] {
+    println!("CM: {:?}", paths);
+    match paths[2] {
+        "global" => match paths[3] {
             "as" => {
-                bgp_global_set_asn(bgp, paths[5].to_string());
+                bgp_global_set_asn(bgp, paths[4].to_string());
             }
             "identifier" => {
-                bgp_global_set_router_id(bgp, paths[5].to_string());
+                bgp_global_set_router_id(bgp, paths[4].to_string());
             }
             _ => {}
         },
         "neighbors" => {
-            if paths.len() < 7 {
+            if paths.len() < 6 {
                 return;
             }
-            bgp_peer_add(bgp, paths[5].to_string(), paths[7].to_string());
+            bgp_peer_add(bgp, paths[4].to_string(), paths[6].to_string());
         }
         _ => {}
     }
 }
 
-fn bgp_config_set_init(bgp: &mut Bgp) {
-    bgp.set("/routing/bgp/global/as/1");
-    bgp.set("/routing/bgp/global/identifier/10.211.65.2");
-    bgp.set("/routing/bgp/neighbors/neighbor/10.211.55.65/peer-as/100");
-}
-
 impl Bgp {
     pub fn new(cm_rx: UnboundedReceiver<String>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut bgp = Self {
+        Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             peers: BTreeMap::new(),
             tx,
             rx,
             cm_rx,
-        };
-        bgp_config_set_init(&mut bgp);
-        bgp.subscribe();
-        bgp
-    }
-
-    fn subscribe(&self) {
-        //let sub = SubscribeRequest {};
-    }
-
-    pub fn set(&self, s: &str) {
-        let _ = self.tx.send(Message::Config(String::from(s)));
+        }
     }
 
     pub fn process_message(&mut self, msg: Message) {
         match msg {
-            Message::Config(conf) => {
-                println!("Message::Config: {conf}");
-                bgp_config_set(self, conf);
-            }
             Message::Event(peer, event) => {
                 println!("Message::Event: {:?}", event);
                 let peer = self.peers.get_mut(&peer).unwrap();
@@ -104,6 +83,6 @@ impl Bgp {
     }
 
     pub fn process_cm_message(&mut self, msg: String) {
-        println!("CM: {}", msg);
+        bgp_config_set(self, msg);
     }
 }

@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configuration manager.
     let mut cm = ConfigManager::new(path, cli_rx);
     cm.subscribe(cm_tx.clone());
+    cm.load_config();
 
     // BGP task.
     let mut bgp = Bgp::new(cm_rx);
