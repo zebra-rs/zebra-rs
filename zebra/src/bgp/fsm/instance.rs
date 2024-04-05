@@ -35,7 +35,7 @@ fn bgp_peer_add(bgp: &mut Bgp, address: String, asn_str: String) {
 
 fn bgp_config_set(bgp: &mut Bgp, conf: String) {
     let paths: Vec<&str> = conf.split(' ').collect();
-    if paths.len() < 3 {
+    if paths.len() < 4 {
         return;
     }
     println!("CM: {:?}", paths);
