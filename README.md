@@ -50,13 +50,13 @@ And `vtysh` is command line shell for it.
 $ vtysh
 ```
 
-You can play with industry standard CLI with it.
+You can play industry standard CLI with it.
 
 ``` shell
 $ ~ vtysh
 zebra>configure
 zebra#show
-zebra#set
+zebra#set?
 -> routing		Routing configuration
 -> system		System configuration
 
@@ -68,7 +68,7 @@ zebra#set routing bgp
 
 zebra#set routing bgp global as 100
 zebra#set routing bgp global identifier 10.0.0.100
-zebra#set routing bgp neighbors neighbor 10.0.0.1 pe
+zebra#set routing bgp neighbors neighbor 10.0.0.1 pe?
 peer-as     peer-group  peer-type
 zebra#set routing bgp neighbors neighbor 10.0.0.1 peer-as 200
 zebra#show
