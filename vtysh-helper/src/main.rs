@@ -86,6 +86,8 @@ fn exec_request(exec_type: i32, mode: &String, commands: &Vec<String>) -> ExecRe
     }
 }
 
+use tokio::io::{self, AsyncWriteExt};
+
 async fn show(cli: Cli, port: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
     let port = port.unwrap_or(cli.port);
     let mut client = ShowClient::connect(format!("{}:{}", cli.base, port)).await?;
@@ -96,11 +98,12 @@ async fn show(cli: Cli, port: Option<u32>) -> Result<(), Box<dyn std::error::Err
         line: command_string(&commands),
     });
 
+    let mut stdout = io::stdout();
     let mut stream = client.show(request).await?.into_inner();
     println!("Show");
     while let Some(reply) = stream.next().await {
         let reply = reply.unwrap();
-        print!("{}", reply.str);
+        stdout.write_all(reply.str.as_bytes()).await.unwrap();
     }
 
     Ok(())

@@ -132,31 +132,19 @@ impl Show for ShowService {
         &self,
         _request: tonic::Request<ShowRequest>,
     ) -> std::result::Result<Response<Self::ShowStream>, tonic::Status> {
-        // let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
-        // let req = DisplayRequest {
-        //     resp: bus_tx.clone(),
-        // };
-        // self.disp_tx.send(req).unwrap();
+        let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
+        let req = DisplayRequest {
+            resp: bus_tx.clone(),
+        };
+        self.disp_tx.send(req).unwrap();
 
-        //let repeat = std::iter::repeat(format!("local"));
-        let repeat = std::iter::repeat(ShowReply {
-            str: "local".to_string(),
-        });
-        let mut stream = Box::pin(tokio_stream::iter(repeat).throttle(Duration::from_millis(200)));
-
-        let (tx, rx) = mpsc::channel(128);
-
+        let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
-            //while let Some(line) = bus_rx.recv().await {
-            while let Some(item) = stream.next().await {
-                println!("show received {:?}", item);
-                // let item = ShowReply { str: line };
-                match tx
-                    .send(std::result::Result::<_, tonic::Status>::Ok(item))
-                    .await
-                {
+            while let Some(item) = bus_rx.recv().await {
+                println!("send start");
+                match tx.send(Ok(ShowReply { str: item })).await {
                     Ok(_) => {
-                        println!("send success");
+                        println!("send done");
                     }
                     Err(_) => {
                         break;
@@ -165,11 +153,7 @@ impl Show for ShowService {
             }
             println!("client disconnected");
         });
-        let output_stream = ReceiverStream::new(rx);
-        println!("output_stream processed");
-        Ok(Response::new(output_stream))
-
-        //Ok(Response::new(ReceiverStream::new(rx)))
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 

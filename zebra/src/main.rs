@@ -60,14 +60,13 @@ async fn event_loop(bgp: &mut Bgp) {
                 bgp.process_cm_message(msg);
             }
             Some(msg) = bgp.disp_rx.recv() => {
-                let repeat = std::iter::repeat(format!("bgp rib information\n"));
+                let repeat = std::iter::repeat(format!("xyz\n"));
                 let mut stream = Box::pin(tokio_stream::iter(repeat).throttle(Duration::from_millis(1000)));
 
-                while let Some(_mes) = stream.next().await {
-                    let result = msg.resp.send("Disp request from bgp".to_string()).await;
+                while let Some(mes) = stream.next().await {
+                    let result = msg.resp.send(mes).await;
                     match result {
                         Ok(_) => {
-                            println!("Disp request sucess");
                         }
                         Err(err) => {
                             println!("Send error {:?}", err);
