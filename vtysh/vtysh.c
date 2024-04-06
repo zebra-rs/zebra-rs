@@ -42,7 +42,8 @@ cli_mode ()
 void
 cli_execute_startup_string()
 {
-	char *str = malloc(cli_len);
+	char *str = malloc(cli_len + 1);
 	memcpy(str, cli, cli_len);
+	str[cli_len] = '\0';
 	evalstring (str, NULL, 0);
 }
