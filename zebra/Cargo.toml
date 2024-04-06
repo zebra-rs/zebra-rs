@@ -18,6 +18,7 @@ libyang = { git = "https://github.com/zebra-rs/libyang" }
 regex = "1.10"
 similar = "2"
 dirs = "5"
+async-trait = "0.1.79"
 
 [build-dependencies]
 tonic-build = "0.9"

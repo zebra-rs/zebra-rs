@@ -1,4 +1,5 @@
 use super::{fsm, Event, Peer};
+use crate::config::DisplayRequest;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -15,6 +16,7 @@ pub struct Bgp {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub cm_rx: UnboundedReceiver<String>,
+    pub disp_rx: UnboundedReceiver<DisplayRequest>,
 }
 
 fn bgp_global_set_asn(bgp: &mut Bgp, asn_str: String) {
@@ -60,7 +62,10 @@ fn bgp_config_set(bgp: &mut Bgp, conf: String) {
 }
 
 impl Bgp {
-    pub fn new(cm_rx: UnboundedReceiver<String>) -> Self {
+    pub fn new(
+        cm_rx: UnboundedReceiver<String>,
+        disp_rx: UnboundedReceiver<DisplayRequest>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             asn: 0,
@@ -69,6 +74,7 @@ impl Bgp {
             tx,
             rx,
             cm_rx,
+            disp_rx,
         }
     }
 

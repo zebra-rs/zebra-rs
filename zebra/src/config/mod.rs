@@ -19,6 +19,8 @@ mod elem;
 pub use elem::Elem;
 
 mod api;
+pub use api::DisplayRequest;
+
 mod commands;
 mod files;
 mod ip;

@@ -1,15 +1,19 @@
-use tokio::sync::mpsc::Sender;
+use std::time::Duration;
+
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tonic::transport::Server;
 use tonic::Response;
 
+use super::api::{
+    CompletionRequest, CompletionResponse, DisplayRequest, ExecuteRequest, ExecuteResponse, Message,
+};
 use super::parse::YangMatch;
 use super::vtysh::exec_server::{Exec, ExecServer};
 use super::vtysh::show_server::{Show, ShowServer};
 use super::vtysh::{ExecCode, ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest};
-
-use super::api::{CompletionRequest, CompletionResponse, ExecuteRequest, ExecuteResponse, Message};
 
 #[derive(Debug)]
 struct ExecService {
@@ -116,7 +120,9 @@ fn exec_commands(resp: &ExecuteResponse) -> (ExecCode, String) {
 }
 
 #[derive(Debug)]
-struct ShowService {}
+struct ShowService {
+    disp_tx: UnboundedSender<DisplayRequest>,
+}
 
 #[tonic::async_trait]
 impl Show for ShowService {
@@ -126,26 +132,52 @@ impl Show for ShowService {
         &self,
         _request: tonic::Request<ShowRequest>,
     ) -> std::result::Result<Response<Self::ShowStream>, tonic::Status> {
-        let (tx, rx) = mpsc::channel(4);
+        // let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
+        // let req = DisplayRequest {
+        //     resp: bus_tx.clone(),
+        // };
+        // self.disp_tx.send(req).unwrap();
+
+        //let repeat = std::iter::repeat(format!("local"));
+        let repeat = std::iter::repeat(ShowReply {
+            str: "local".to_string(),
+        });
+        let mut stream = Box::pin(tokio_stream::iter(repeat).throttle(Duration::from_millis(200)));
+
+        let (tx, rx) = mpsc::channel(128);
 
         tokio::spawn(async move {
-            for _ in 0..4 {
-                let _ = tx
-                    .send(Ok(ShowReply {
-                        str: String::from(""),
-                    }))
-                    .await;
+            //while let Some(line) = bus_rx.recv().await {
+            while let Some(item) = stream.next().await {
+                println!("show received {:?}", item);
+                // let item = ShowReply { str: line };
+                match tx
+                    .send(std::result::Result::<_, tonic::Status>::Ok(item))
+                    .await
+                {
+                    Ok(_) => {
+                        println!("send success");
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
             }
+            println!("client disconnected");
         });
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let output_stream = ReceiverStream::new(rx);
+        println!("output_stream processed");
+        Ok(Response::new(output_stream))
+
+        //Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 
-pub async fn serve(config_tx: Sender<Message>) {
+pub async fn serve(config_tx: Sender<Message>, disp_tx: UnboundedSender<DisplayRequest>) {
     let exec_service = ExecService { tx: config_tx };
     let exec_server = ExecServer::new(exec_service);
 
-    let show_service = ShowService {};
+    let show_service = ShowService { disp_tx };
     let show_server = ShowServer::new(show_service);
 
     let addr = "0.0.0.0:2650".parse().unwrap();

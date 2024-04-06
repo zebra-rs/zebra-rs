@@ -1,16 +1,17 @@
 mod config;
-use config::ConfigManager;
+use std::time::Duration;
+
+use config::{ConfigManager, DisplayRequest};
 mod bgp;
 use bgp::Bgp;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cli gRPC channel.
     let (cli_tx, cli_rx) = mpsc::channel(255);
-
-    // cli gRPC Server.
-    config::serve(cli_tx.clone()).await;
 
     // Set ${HOME}/.zebra/yang for YANG path.
     let home = dirs::home_dir();
@@ -25,14 +26,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configuration manager channel.
     let (cm_tx, cm_rx) = mpsc::unbounded_channel();
-
-    // Configuration manager.
     let mut cm = ConfigManager::new(path, cli_rx);
     cm.subscribe(cm_tx.clone());
     cm.load_config();
 
     // BGP task.
-    let mut bgp = Bgp::new(cm_rx);
+    let (disp_tx, disp_rx) = mpsc::unbounded_channel();
+    spawn_protocol_module(cm_rx, disp_rx);
+
+    // cli gRPC Server.
+    config::serve(cli_tx.clone(), disp_tx.clone()).await;
 
     // Banner.
     println!("zebra: started");
@@ -43,12 +46,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(msg) = cm.rx.recv() => {
                 cm.process_message(msg);
             }
+        }
+    }
+}
+
+async fn event_loop(bgp: &mut Bgp) {
+    loop {
+        tokio::select! {
             Some(msg) = bgp.rx.recv() => {
                 bgp.process_message(msg)
             }
             Some(msg) = bgp.cm_rx.recv() => {
                 bgp.process_cm_message(msg);
             }
+            Some(msg) = bgp.disp_rx.recv() => {
+                let repeat = std::iter::repeat(format!("bgp rib information\n"));
+                let mut stream = Box::pin(tokio_stream::iter(repeat).throttle(Duration::from_millis(1000)));
+
+                while let Some(_mes) = stream.next().await {
+                    let result = msg.resp.send("Disp request from bgp".to_string()).await;
+                    match result {
+                        Ok(_) => {
+                            println!("Disp request sucess");
+                        }
+                        Err(err) => {
+                            println!("Send error {:?}", err);
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+async fn run(cm_rx: UnboundedReceiver<String>, disp_rx: UnboundedReceiver<DisplayRequest>) {
+    let mut bgp = Bgp::new(cm_rx, disp_rx);
+
+    event_loop(&mut bgp).await;
+}
+
+fn spawn_protocol_module(
+    cm_rx: UnboundedReceiver<String>,
+    disp_rx: UnboundedReceiver<DisplayRequest>,
+) {
+    tokio::spawn(async move {
+        run(cm_rx, disp_rx).await;
+    });
 }
