@@ -1,4 +1,5 @@
 use super::{Completion, ExecCode};
+use tokio::sync::mpsc;
 use tokio::sync::oneshot::Sender;
 
 #[derive(Debug)]
@@ -79,4 +80,10 @@ pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
     //Subscribe(),
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct DisplayRequest {
+    pub resp: mpsc::Sender<String>,
 }

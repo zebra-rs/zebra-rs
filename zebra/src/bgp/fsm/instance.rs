@@ -1,11 +1,14 @@
 use super::{fsm, Event, Peer};
+use crate::config::DisplayRequest;
+use ipnet::Ipv4Net;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub enum Message {
     Event(Ipv4Addr, Event),
+    Show(Sender<String>),
 }
 
 pub struct Bgp {
@@ -15,6 +18,8 @@ pub struct Bgp {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub cm_rx: UnboundedReceiver<String>,
+    pub show_rx: UnboundedReceiver<DisplayRequest>,
+    pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
 }
 
 fn bgp_global_set_asn(bgp: &mut Bgp, asn_str: String) {
@@ -60,7 +65,10 @@ fn bgp_config_set(bgp: &mut Bgp, conf: String) {
 }
 
 impl Bgp {
-    pub fn new(cm_rx: UnboundedReceiver<String>) -> Self {
+    pub fn new(
+        cm_rx: UnboundedReceiver<String>,
+        show_rx: UnboundedReceiver<DisplayRequest>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             asn: 0,
@@ -69,6 +77,8 @@ impl Bgp {
             tx,
             rx,
             cm_rx,
+            show_rx,
+            ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
         }
     }
 
@@ -78,6 +88,9 @@ impl Bgp {
                 println!("Message::Event: {:?}", event);
                 let peer = self.peers.get_mut(&peer).unwrap();
                 fsm(peer, event);
+            }
+            Message::Show(tx) => {
+                self.tx.send(Message::Show(tx)).unwrap();
             }
         }
     }
