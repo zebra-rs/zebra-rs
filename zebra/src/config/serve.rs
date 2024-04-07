@@ -1,9 +1,6 @@
-use std::time::Duration;
-
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt;
 use tonic::transport::Server;
 use tonic::Response;
 
@@ -141,17 +138,13 @@ impl Show for ShowService {
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
             while let Some(item) = bus_rx.recv().await {
-                println!("send start");
                 match tx.send(Ok(ShowReply { str: item })).await {
-                    Ok(_) => {
-                        println!("send done");
-                    }
+                    Ok(_) => {}
                     Err(_) => {
                         break;
                     }
                 }
             }
-            println!("client disconnected");
         });
         Ok(Response::new(ReceiverStream::new(rx)))
     }

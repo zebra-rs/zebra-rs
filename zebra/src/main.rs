@@ -1,12 +1,12 @@
 mod config;
-use std::time::Duration;
 
 use config::{ConfigManager, DisplayRequest};
 mod bgp;
 use bgp::Bgp;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio_stream::StreamExt;
+
+use crate::bgp::Message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,26 +54,13 @@ async fn event_loop(bgp: &mut Bgp) {
     loop {
         tokio::select! {
             Some(msg) = bgp.rx.recv() => {
-                bgp.process_message(msg)
+                bgp.process_message(msg);
             }
             Some(msg) = bgp.cm_rx.recv() => {
                 bgp.process_cm_message(msg);
             }
-            Some(msg) = bgp.disp_rx.recv() => {
-                let repeat = std::iter::repeat(format!("xyz\n"));
-                let mut stream = Box::pin(tokio_stream::iter(repeat).throttle(Duration::from_millis(1000)));
-
-                while let Some(mes) = stream.next().await {
-                    let result = msg.resp.send(mes).await;
-                    match result {
-                        Ok(_) => {
-                        }
-                        Err(err) => {
-                            println!("Send error {:?}", err);
-                            break;
-                        }
-                    }
-                }
+            Some(msg) = bgp.show_rx.recv() => {
+                bgp.tx.send(Message::Show(msg.resp)).unwrap();
             }
         }
     }
