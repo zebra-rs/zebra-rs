@@ -6,4 +6,3 @@ pub mod packet;
 pub mod tasks;
 
 pub mod handler;
-pub use handler::*;

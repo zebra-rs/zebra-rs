@@ -17,9 +17,10 @@ pub struct Bgp {
     pub peers: BTreeMap<Ipv4Addr, Peer>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
+    pub cm: ConfigChannel,
+    pub show_tx: UnboundedSender<DisplayRequest>,
     pub show_rx: UnboundedReceiver<DisplayRequest>,
     pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
-    pub cm: ConfigChannel,
 }
 
 fn bgp_global_set_asn(bgp: &mut Bgp, asn_str: String) {
@@ -65,18 +66,16 @@ fn bgp_config_set(bgp: &mut Bgp, conf: String) {
 }
 
 impl Bgp {
-    pub fn new(
-        // cm_rx: UnboundedReceiver<String>,
-        show_rx: UnboundedReceiver<DisplayRequest>,
-    ) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (show_tx, show_rx) = mpsc::unbounded_channel();
         Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             peers: BTreeMap::new(),
             tx,
             rx,
-            // cm_rx,
+            show_tx,
             show_rx,
             ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
             cm: ConfigChannel::new(),

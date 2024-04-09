@@ -1,4 +1,4 @@
-use super::os::message::{OsChannel, OsMessage};
+use super::os::message::OsChannel;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -30,7 +30,7 @@ impl Rib {
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
-                Some(msg) = self.os.rx.recv() => {
+                Some(_msg) = self.os.rx.recv() => {
                     //
                 }
             }
