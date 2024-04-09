@@ -248,12 +248,22 @@ fn match_string(s: &String, node: &TypeNode) -> (MatchType, usize) {
 }
 
 fn match_range<T: MinMax<T> + PartialOrd + Copy + std::str::FromStr>(
-    s: &str,
+    input: &str,
     node: &TypeNode,
 ) -> (MatchType, usize)
 where
     RangeNode: RangeExtract<T>,
 {
+    // We need to find space as separator.
+    let mut input_mut = input.to_string();
+    let pos = input_mut.find(' ');
+    let s = if let Some(pos) = pos {
+        let _ = input_mut.split_off(pos);
+        &input_mut
+    } else {
+        input
+    };
+
     let v = s.parse::<T>();
     if let Ok(v) = v {
         if let Some(range) = &node.range {
@@ -264,8 +274,10 @@ where
                     }
                 }
             }
+            return (MatchType::None, 0usize);
+        } else {
+            (MatchType::Exact, s.len())
         }
-        (MatchType::Incomplete, s.len())
     } else {
         (MatchType::None, 0usize)
     }
