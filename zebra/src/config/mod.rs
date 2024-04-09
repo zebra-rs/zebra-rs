@@ -4,6 +4,7 @@ mod vtysh {
 pub use vtysh::ExecCode;
 
 mod manager;
+pub use manager::event_loop;
 pub use manager::ConfigManager;
 
 mod serve;

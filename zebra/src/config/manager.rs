@@ -206,3 +206,14 @@ impl ConfigManager {
 fn remove_first_char(s: &str) -> String {
     s.chars().skip(1).collect()
 }
+
+pub async fn event_loop(mut config: ConfigManager) {
+    config.load_config();
+    loop {
+        tokio::select! {
+            Some(msg) = config.rx.recv() => {
+                config.process_message(msg);
+            }
+        }
+    }
+}

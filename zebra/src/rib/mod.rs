@@ -1,4 +1,4 @@
-pub mod manager;
-pub use manager::Rib;
+pub mod handler;
+pub use handler::{serve, Rib};
 
 pub mod os;
