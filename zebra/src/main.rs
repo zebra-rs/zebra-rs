@@ -62,7 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (rib_tx, rib_rx) = mpsc::unbounded_channel();
 
     let rib = Rib::new(rib_rx);
-    // rib.interface_fetch().await;
+
+    #[cfg(target_os = "linux")]
     rib::os::netlink::spawn_netlink(rib_tx.clone())
         .await
         .unwrap();
