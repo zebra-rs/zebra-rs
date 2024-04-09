@@ -21,7 +21,7 @@ dirs = "5"
 async-trait = "0.1"
 prefix-trie = "0.3"
 
-[target.'cfg(linux)'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.14"
 netlink-sys = "0.8.6"
 netlink-packet-route = "0.19.0"

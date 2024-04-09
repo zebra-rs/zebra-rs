@@ -1,4 +1,4 @@
-use super::{OsLink, OsMessage};
+use super::message::{OsLink, OsMessage};
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload};

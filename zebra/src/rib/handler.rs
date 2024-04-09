@@ -1,4 +1,6 @@
 use super::os::message::OsChannel;
+#[cfg(target_os = "linux")]
+use super::os::netlink::spawn_netlink;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -28,6 +30,9 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
+        #[cfg(target_os = "linux")]
+        spawn_netlink(self.os.tx.clone()).await.unwrap();
+
         loop {
             tokio::select! {
                 Some(_msg) = self.os.rx.recv() => {
@@ -42,10 +47,4 @@ pub fn serve(mut rib: Rib) {
     tokio::spawn(async move {
         rib.event_loop().await;
     });
-    //
-
-    #[cfg(target_os = "linux")]
-    super::os::netlink::spawn_netlink(rib_tx.clone())
-        .await
-        .unwrap();
 }
