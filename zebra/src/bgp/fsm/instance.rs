@@ -1,5 +1,5 @@
 use super::{fsm, Event, Peer};
-use crate::config::DisplayRequest;
+use crate::config::{ConfigChannel, DisplayRequest};
 use ipnet::Ipv4Net;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -11,25 +11,12 @@ pub enum Message {
     Show(Sender<String>),
 }
 
-struct ConfigChannel {
-    tx: UnboundedSender<String>,
-    rx: UnboundedReceiver<String>,
-}
-
-impl ConfigChannel {
-    pub fn new() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        Self { tx, rx }
-    }
-}
-
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
     pub peers: BTreeMap<Ipv4Addr, Peer>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    pub cm_rx: UnboundedReceiver<String>,
     pub show_rx: UnboundedReceiver<DisplayRequest>,
     pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
     pub cm: ConfigChannel,
@@ -79,7 +66,7 @@ fn bgp_config_set(bgp: &mut Bgp, conf: String) {
 
 impl Bgp {
     pub fn new(
-        cm_rx: UnboundedReceiver<String>,
+        // cm_rx: UnboundedReceiver<String>,
         show_rx: UnboundedReceiver<DisplayRequest>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -89,7 +76,7 @@ impl Bgp {
             peers: BTreeMap::new(),
             tx,
             rx,
-            cm_rx,
+            // cm_rx,
             show_rx,
             ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
             cm: ConfigChannel::new(),
@@ -112,35 +99,26 @@ impl Bgp {
     pub fn process_cm_message(&mut self, msg: String) {
         bgp_config_set(self, msg);
     }
-}
 
-async fn event_loop(bgp: &mut Bgp) {
-    loop {
-        tokio::select! {
-            Some(msg) = bgp.rx.recv() => {
-                bgp.process_message(msg);
-            }
-            Some(msg) = bgp.cm_rx.recv() => {
-                bgp.process_cm_message(msg);
-            }
-            Some(msg) = bgp.show_rx.recv() => {
-                bgp.tx.send(Message::Show(msg.resp)).unwrap();
+    pub async fn event_loop(&mut self) {
+        loop {
+            tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_message(msg);
+                }
+                Some(msg) = self.cm.rx.recv() => {
+                    self.process_cm_message(msg);
+                }
+                Some(msg) = self.show_rx.recv() => {
+                    self.tx.send(Message::Show(msg.resp)).unwrap();
+                }
             }
         }
     }
 }
 
-async fn run(cm_rx: UnboundedReceiver<String>, disp_rx: UnboundedReceiver<DisplayRequest>) {
-    let mut bgp = Bgp::new(cm_rx, disp_rx);
-
-    event_loop(&mut bgp).await;
-}
-
-pub fn spawn_protocol_module(
-    cm_rx: UnboundedReceiver<String>,
-    disp_rx: UnboundedReceiver<DisplayRequest>,
-) {
+pub fn serve(mut bgp: Bgp) {
     tokio::spawn(async move {
-        run(cm_rx, disp_rx).await;
+        bgp.event_loop().await;
     });
 }

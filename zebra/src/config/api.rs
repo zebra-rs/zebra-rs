@@ -1,6 +1,18 @@
 use super::{Completion, ExecCode};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::Sender;
+
+pub struct ConfigChannel {
+    pub tx: UnboundedSender<String>,
+    pub rx: UnboundedReceiver<String>,
+}
+
+impl ConfigChannel {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self { tx, rx }
+    }
+}
 
 #[derive(Debug)]
 pub struct ExecuteRequest {

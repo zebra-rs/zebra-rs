@@ -19,7 +19,7 @@ mod elem;
 pub use elem::Elem;
 
 mod api;
-pub use api::DisplayRequest;
+pub use api::{ConfigChannel, DisplayRequest};
 
 mod commands;
 mod files;
