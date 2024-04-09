@@ -1,12 +1,33 @@
-mod config;
+// SPDX-License-Identifier: GPL-3.0-or-later or Apache-2.0
 
+mod config;
 use config::{ConfigManager, DisplayRequest};
 mod bgp;
-use bgp::Bgp;
+use bgp::{Bgp, Message};
+mod rib;
+use rib::Rib;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::bgp::Message;
+// struct Tx {
+//     pub cm: UnboundedReceiver<String>,
+//     //    pub rib:
+//     //    pub show:
+// }
+
+// fn test() {
+//     let bgp = Bgp::new();
+//     let rib = Rib::new();
+
+//     let cm = ConfigManager::new();
+//     cm.add(bgp.cm_tx.clone());
+//     cm.add(rib.cm_tx.clone());
+
+//     tokio::spawn(cli.run().await);
+//     tokio::spawn(bgp.run().await);
+//     tokio::spawn(rib.run().await);
+//     tokio::spawn(cm.run().await);
+// }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +57,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // cli gRPC Server.
     config::serve(cli_tx.clone(), disp_tx.clone()).await;
+
+    // RIB task.
+    let (rib_tx, rib_rx) = mpsc::unbounded_channel();
+
+    let rib = Rib::new(rib_rx);
+    // rib.interface_fetch().await;
+    rib::manager::spawn_netlink(rib_tx.clone()).await.unwrap();
 
     // Banner.
     println!("zebra: started");
