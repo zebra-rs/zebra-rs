@@ -45,6 +45,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "./yang/...".to_string()
     };
 
+    // let bgp = Bgp::new();
+
     // Configuration manager channel.
     let (cm_tx, cm_rx) = mpsc::unbounded_channel();
     let mut cm = ConfigManager::new(path, cli_rx);
@@ -53,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // BGP task.
     let (disp_tx, disp_rx) = mpsc::unbounded_channel();
-    spawn_protocol_module(cm_rx, disp_rx);
+    crate::bgp::fsm::spawn_protocol_module(cm_rx, disp_rx);
 
     // cli gRPC Server.
     config::serve(cli_tx.clone(), disp_tx.clone()).await;
@@ -79,35 +81,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-}
-
-async fn event_loop(bgp: &mut Bgp) {
-    loop {
-        tokio::select! {
-            Some(msg) = bgp.rx.recv() => {
-                bgp.process_message(msg);
-            }
-            Some(msg) = bgp.cm_rx.recv() => {
-                bgp.process_cm_message(msg);
-            }
-            Some(msg) = bgp.show_rx.recv() => {
-                bgp.tx.send(Message::Show(msg.resp)).unwrap();
-            }
-        }
-    }
-}
-
-async fn run(cm_rx: UnboundedReceiver<String>, disp_rx: UnboundedReceiver<DisplayRequest>) {
-    let mut bgp = Bgp::new(cm_rx, disp_rx);
-
-    event_loop(&mut bgp).await;
-}
-
-fn spawn_protocol_module(
-    cm_rx: UnboundedReceiver<String>,
-    disp_rx: UnboundedReceiver<DisplayRequest>,
-) {
-    tokio::spawn(async move {
-        run(cm_rx, disp_rx).await;
-    });
 }
