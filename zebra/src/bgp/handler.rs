@@ -1,5 +1,5 @@
 use super::{fsm, Event, Peer};
-use crate::config::DisplayRequest;
+use crate::config::{ConfigChannel, DisplayRequest};
 use ipnet::Ipv4Net;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -17,7 +17,8 @@ pub struct Bgp {
     pub peers: BTreeMap<Ipv4Addr, Peer>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    pub cm_rx: UnboundedReceiver<String>,
+    pub cm: ConfigChannel,
+    pub show_tx: UnboundedSender<DisplayRequest>,
     pub show_rx: UnboundedReceiver<DisplayRequest>,
     pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
 }
@@ -65,20 +66,19 @@ fn bgp_config_set(bgp: &mut Bgp, conf: String) {
 }
 
 impl Bgp {
-    pub fn new(
-        cm_rx: UnboundedReceiver<String>,
-        show_rx: UnboundedReceiver<DisplayRequest>,
-    ) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (show_tx, show_rx) = mpsc::unbounded_channel();
         Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             peers: BTreeMap::new(),
             tx,
             rx,
-            cm_rx,
+            show_tx,
             show_rx,
             ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
+            cm: ConfigChannel::new(),
         }
     }
 
@@ -98,4 +98,26 @@ impl Bgp {
     pub fn process_cm_message(&mut self, msg: String) {
         bgp_config_set(self, msg);
     }
+
+    pub async fn event_loop(&mut self) {
+        loop {
+            tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_message(msg);
+                }
+                Some(msg) = self.cm.rx.recv() => {
+                    self.process_cm_message(msg);
+                }
+                Some(msg) = self.show_rx.recv() => {
+                    self.tx.send(Message::Show(msg.resp)).unwrap();
+                }
+            }
+        }
+    }
+}
+
+pub fn serve(mut bgp: Bgp) {
+    tokio::spawn(async move {
+        bgp.event_loop().await;
+    });
 }

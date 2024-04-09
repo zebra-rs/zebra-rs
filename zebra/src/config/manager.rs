@@ -13,7 +13,7 @@ use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use tokio::sync::mpsc::{Receiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 
 pub struct ConfigStore {
     pub running: RefCell<Rc<Config>>,
@@ -55,16 +55,19 @@ pub struct ConfigManager {
     pub yang_path: String,
     pub store: ConfigStore,
     pub modes: HashMap<String, Mode>,
+    pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
     pub cm_txes: Vec<UnboundedSender<String>>,
 }
 
 impl ConfigManager {
-    pub fn new(yang_path: String, rx: Receiver<Message>) -> Self {
+    pub fn new(yang_path: String) -> Self {
+        let (tx, rx) = mpsc::channel(255);
         let mut cm = Self {
             yang_path,
             modes: HashMap::new(),
             store: ConfigStore::new(),
+            tx,
             rx,
             cm_txes: Vec::new(),
         };
@@ -205,4 +208,15 @@ impl ConfigManager {
 
 fn remove_first_char(s: &str) -> String {
     s.chars().skip(1).collect()
+}
+
+pub async fn event_loop(mut config: ConfigManager) {
+    config.load_config();
+    loop {
+        tokio::select! {
+            Some(msg) = config.rx.recv() => {
+                config.process_message(msg);
+            }
+        }
+    }
 }

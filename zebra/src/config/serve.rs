@@ -150,7 +150,7 @@ impl Show for ShowService {
     }
 }
 
-pub async fn serve(config_tx: Sender<Message>, disp_tx: UnboundedSender<DisplayRequest>) {
+pub fn serve(config_tx: Sender<Message>, disp_tx: UnboundedSender<DisplayRequest>) {
     let exec_service = ExecService { tx: config_tx };
     let exec_server = ExecServer::new(exec_service);
 

@@ -1,82 +1,42 @@
-mod config;
+// SPDX-License-Identifier: GPL-3.0-or-later or Apache-2.0
 
-use config::{ConfigManager, DisplayRequest};
+mod config;
+use config::ConfigManager;
 mod bgp;
 use bgp::Bgp;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::UnboundedReceiver;
+mod rib;
+use rib::Rib;
 
-use crate::bgp::Message;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // cli gRPC channel.
-    let (cli_tx, cli_rx) = mpsc::channel(255);
-
-    // Set ${HOME}/.zebra/yang for YANG path.
+fn yang_path() -> String {
     let home = dirs::home_dir();
-    let path = if let Some(mut home) = home {
+    if let Some(mut home) = home {
         home.push(".zebra");
         home.push("yang");
         home.push("...");
         home.into_os_string().into_string().unwrap()
     } else {
         "./yang/...".to_string()
-    };
+    }
+}
 
-    // Configuration manager channel.
-    let (cm_tx, cm_rx) = mpsc::unbounded_channel();
-    let mut cm = ConfigManager::new(path, cli_rx);
-    cm.subscribe(cm_tx.clone());
-    cm.load_config();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rib = Rib::new();
 
-    // BGP task.
-    let (disp_tx, disp_rx) = mpsc::unbounded_channel();
-    spawn_protocol_module(cm_rx, disp_rx);
+    let bgp = Bgp::new();
 
-    // cli gRPC Server.
-    config::serve(cli_tx.clone(), disp_tx.clone()).await;
+    let mut config = ConfigManager::new(yang_path());
+    config.subscribe(bgp.cm.tx.clone());
 
-    // Banner.
+    config::serve(config.tx.clone(), bgp.show_tx.clone());
+
+    bgp::serve(bgp);
+
+    rib::serve(rib);
+
     println!("zebra: started");
 
-    // Top event loop.
-    loop {
-        tokio::select! {
-            Some(msg) = cm.rx.recv() => {
-                cm.process_message(msg);
-            }
-        }
-    }
-}
+    config::event_loop(config).await;
 
-async fn event_loop(bgp: &mut Bgp) {
-    loop {
-        tokio::select! {
-            Some(msg) = bgp.rx.recv() => {
-                bgp.process_message(msg);
-            }
-            Some(msg) = bgp.cm_rx.recv() => {
-                bgp.process_cm_message(msg);
-            }
-            Some(msg) = bgp.show_rx.recv() => {
-                bgp.tx.send(Message::Show(msg.resp)).unwrap();
-            }
-        }
-    }
-}
-
-async fn run(cm_rx: UnboundedReceiver<String>, disp_rx: UnboundedReceiver<DisplayRequest>) {
-    let mut bgp = Bgp::new(cm_rx, disp_rx);
-
-    event_loop(&mut bgp).await;
-}
-
-fn spawn_protocol_module(
-    cm_rx: UnboundedReceiver<String>,
-    disp_rx: UnboundedReceiver<DisplayRequest>,
-) {
-    tokio::spawn(async move {
-        run(cm_rx, disp_rx).await;
-    });
+    Ok(())
 }

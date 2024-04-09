@@ -4,6 +4,7 @@ mod vtysh {
 pub use vtysh::ExecCode;
 
 mod manager;
+pub use manager::event_loop;
 pub use manager::ConfigManager;
 
 mod serve;
@@ -19,7 +20,7 @@ mod elem;
 pub use elem::Elem;
 
 mod api;
-pub use api::DisplayRequest;
+pub use api::{ConfigChannel, DisplayRequest};
 
 mod commands;
 mod files;
