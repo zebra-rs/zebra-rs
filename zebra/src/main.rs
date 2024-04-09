@@ -63,7 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rib = Rib::new(rib_rx);
     // rib.interface_fetch().await;
-    rib::manager::spawn_netlink(rib_tx.clone()).await.unwrap();
+    rib::os::netlink::spawn_netlink(rib_tx.clone())
+        .await
+        .unwrap();
 
     // Banner.
     println!("zebra: started");
