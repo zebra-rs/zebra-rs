@@ -120,7 +120,9 @@ fn comps_add_config(comps: &mut Vec<Completion>, ymatch: YangMatch, config: &Opt
                 }
             }
         } else if config.list.borrow().is_empty() {
-            comps.push(Completion::new_by_name(&config.value.borrow()));
+            if !config.value.borrow().is_empty() {
+                comps.push(Completion::new_by_name(&config.value.borrow()));
+            }
         } else {
             for value in config.list.borrow().iter() {
                 comps.push(Completion::new_by_name(value));
@@ -560,6 +562,11 @@ pub fn parse(
         }
     }
 
+    // "delete" overwrite entry completion with config completion.
+    if s.delete {
+        mx.comps = cx.comps.clone();
+    }
+
     // Eraly return for no match and ambiguous match.
     if mx.count == 0 {
         return (ExecCode::Nomatch, mx.comps, s);
@@ -571,10 +578,6 @@ pub fn parse(
     // "set" merge config completion to entry completion.
     if s.set {
         comps_append(&mut cx.comps, &mut mx.comps);
-    }
-    // "delete" overwrite entry completion with config completion.
-    if s.delete {
-        mx.comps = cx.comps;
     }
 
     // Transition to next yang match state.
