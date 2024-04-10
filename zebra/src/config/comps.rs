@@ -16,33 +16,20 @@ impl Completion {
         Self {
             name: name.to_string(),
             help: help.to_string(),
-            ymatch: YangMatch::Leaf,
+            ..Default::default()
         }
     }
 
     pub fn new_name(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            help: "".to_string(),
-            ymatch: YangMatch::Leaf,
+            ..Default::default()
         }
     }
-}
-
-pub fn comps_add_cr(comps: &mut Vec<Completion>) {
-    comps.push(Completion::new_name("<cr>"));
 }
 
 fn comps_exists(comps: &[Completion], name: &String) -> bool {
     comps.iter().any(|x| x.name == *name)
-}
-
-pub fn comps_append(from: &mut Vec<Completion>, to: &mut Vec<Completion>) {
-    while let Some(comp) = from.pop() {
-        if !comps_exists(to, &comp.name) {
-            to.push(comp);
-        }
-    }
 }
 
 fn comp_integer_string(e: &Rc<Entry>, n: &TypeNode) -> String {
@@ -53,7 +40,7 @@ fn comp_integer_string(e: &Rc<Entry>, n: &TypeNode) -> String {
     }
 }
 
-pub fn comp_range(e: &Rc<Entry>, n: &TypeNode) -> Completion {
+pub fn comps_range(e: &Rc<Entry>, n: &TypeNode) -> Completion {
     let name = if let Some(range) = &n.range {
         range.to_string()
     } else {
@@ -62,7 +49,19 @@ pub fn comp_range(e: &Rc<Entry>, n: &TypeNode) -> Completion {
     Completion::new_name(&name)
 }
 
-pub fn comp_leaf_string(e: &Rc<Entry>) -> String {
+pub fn comps_add_cr(comps: &mut Vec<Completion>) {
+    comps.push(Completion::new_name("<cr>"));
+}
+
+pub fn comps_append(from: &mut Vec<Completion>, to: &mut Vec<Completion>) {
+    while let Some(comp) = from.pop() {
+        if !comps_exists(to, &comp.name) {
+            to.push(comp);
+        }
+    }
+}
+
+pub fn comps_leaf_string(e: &Rc<Entry>) -> String {
     if let Some(typedef) = &e.typedef {
         match entry_preset(typedef.to_string()) {
             PresetType::None => {}
@@ -91,7 +90,7 @@ pub fn comp_leaf_string(e: &Rc<Entry>) -> String {
     }
 }
 
-pub fn comp_help_string(e: &Entry) -> String {
+pub fn comps_help_string(e: &Entry) -> String {
     match e.extension.get("ext:help") {
         Some(help) => String::from(help),
         None => String::from(""),
@@ -136,7 +135,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             for entry in entry.dir.borrow().iter() {
-                let mut comp = Completion::new(&entry.name, &comp_help_string(entry));
+                let mut comp = Completion::new(&entry.name, &comps_help_string(entry));
                 if entry.has_key() {
                     comp.ymatch = YangMatch::Key;
                 } else if entry.is_directory_entry() {
@@ -163,8 +162,8 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
                 }
             }
             comps.push(Completion::new(
-                &comp_leaf_string(entry),
-                &comp_help_string(entry),
+                &comps_leaf_string(entry),
+                &comps_help_string(entry),
             ));
         }
     }

@@ -1,6 +1,6 @@
 use super::comps::{
-    comp_help_string, comp_leaf_string, comp_range, comps_add_all, comps_add_config, comps_add_cr,
-    comps_append,
+    comps_add_all, comps_add_config, comps_add_cr, comps_append, comps_help_string,
+    comps_leaf_string, comps_range,
 };
 use super::configs::config_match;
 use super::ip::*;
@@ -14,11 +14,11 @@ use std::rc::Rc;
 
 #[derive(Debug, PartialEq, Default, Copy, Clone)]
 pub enum YangMatch {
-    #[default]
     Dir,
     DirMatched,
     Key,
     KeyMatched,
+    #[default]
     Leaf,
     LeafMatched,
     LeafList,
@@ -231,7 +231,7 @@ impl Match {
         self.process(
             entry,
             match_string(s, node),
-            Completion::new(&comp_leaf_string(entry), &comp_help_string(entry)),
+            Completion::new(&comps_leaf_string(entry), &comps_help_string(entry)),
         );
     }
 
@@ -239,7 +239,7 @@ impl Match {
         self.process(
             entry,
             match_keyword_str(s, &entry.name),
-            Completion::new(&entry.name.to_owned(), &comp_help_string(entry)),
+            Completion::new(&entry.name.to_owned(), &comps_help_string(entry)),
         );
     }
 
@@ -261,7 +261,7 @@ impl Match {
     ) where
         RangeNode: RangeExtract<T>,
     {
-        self.process(entry, match_range::<T>(s, node), comp_range(entry, node));
+        self.process(entry, match_range::<T>(s, node), comps_range(entry, node));
     }
 
     pub fn match_bool(&mut self, entry: &Rc<Entry>, s: &String) {
