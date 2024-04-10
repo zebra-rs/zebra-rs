@@ -59,6 +59,7 @@ pub struct State {
     index: usize,
     pub set: bool,
     pub delete: bool,
+    pub show: bool,
     pub elems: Vec<Elem>,
 }
 
@@ -68,6 +69,7 @@ impl State {
             ymatch: YangMatch::Dir,
             set: false,
             delete: false,
+            show: false,
             elems: Vec::new(),
             index: 0usize,
         }
@@ -506,6 +508,9 @@ pub fn parse(
     }
     if elem.name == "delete" {
         s.delete = true;
+    }
+    if elem.name == "show" {
+        s.show = true;
     }
     s.elems.push(elem);
 
