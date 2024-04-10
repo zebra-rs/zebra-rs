@@ -353,6 +353,10 @@ fn config_delete(config: Rc<Config>, name: &String) {
     if let Some(remove_index) = configs.iter().position(|x| *x.name == *name) {
         configs.remove(remove_index);
     }
+    let mut keys = config.keys.borrow_mut();
+    if let Some(remove_index) = keys.iter().position(|x| *x.name == *name) {
+        keys.remove(remove_index);
+    }
 }
 
 pub fn delete(mut elems: Vec<Elem>, mut config: Rc<Config>) {
@@ -363,10 +367,22 @@ pub fn delete(mut elems: Vec<Elem>, mut config: Rc<Config>) {
 
     for elem in elems.iter() {
         match elem.ymatch {
-            YangMatch::Dir | YangMatch::Leaf => {
+            YangMatch::Dir | YangMatch::Leaf | YangMatch::Key => {
                 if let Some(next) = config.lookup(&elem.name) {
                     config = next;
                 } else {
+                    break;
+                }
+            }
+            YangMatch::KeyMatched => {
+                if let Some(next) = config.lookup_key(&elem.name) {
+                    config = next;
+                } else {
+                    break;
+                }
+            }
+            YangMatch::LeafMatched => {
+                if config.value.borrow().as_ref() != elem.name {
                     break;
                 }
             }

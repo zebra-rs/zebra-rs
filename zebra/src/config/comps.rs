@@ -1,6 +1,6 @@
 use super::parse::YangMatch;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Completion {
     pub name: String,
     pub help: String,
