@@ -20,7 +20,7 @@ impl Completion {
         }
     }
 
-    pub fn new_by_name(name: &str) -> Self {
+    pub fn new_name(name: &str) -> Self {
         Self {
             name: name.to_string(),
             help: "".to_string(),
@@ -30,7 +30,7 @@ impl Completion {
 }
 
 pub fn comps_add_cr(comps: &mut Vec<Completion>) {
-    comps.push(Completion::new_by_name("<cr>"));
+    comps.push(Completion::new_name("<cr>"));
 }
 
 fn comps_exists(comps: &[Completion], name: &String) -> bool {
@@ -59,7 +59,7 @@ pub fn comp_range(e: &Rc<Entry>, n: &TypeNode) -> Completion {
     } else {
         format!("<{}>", e.name.to_owned())
     };
-    Completion::new_by_name(&name)
+    Completion::new_name(&name)
 }
 
 pub fn comp_leaf_string(e: &Rc<Entry>) -> String {
@@ -110,20 +110,20 @@ pub fn comps_add_config(
     if let Some(config) = config {
         if config.has_dir() {
             for config in config.configs.borrow().iter() {
-                comps.push(Completion::new_by_name(&config.name));
+                comps.push(Completion::new_name(&config.name));
             }
             if ymatch == YangMatch::Key {
                 for key in config.keys.borrow().iter() {
-                    comps.push(Completion::new_by_name(&key.name));
+                    comps.push(Completion::new_name(&key.name));
                 }
             }
         } else if config.list.borrow().is_empty() {
             if !config.value.borrow().is_empty() {
-                comps.push(Completion::new_by_name(&config.value.borrow()));
+                comps.push(Completion::new_name(&config.value.borrow()));
             }
         } else {
             for value in config.list.borrow().iter() {
-                comps.push(Completion::new_by_name(value));
+                comps.push(Completion::new_name(value));
             }
         }
     }
@@ -151,13 +151,13 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
         _ => {
             if let Some(node) = &entry.type_node {
                 if node.kind == TypeKind::Yboolean {
-                    comps.push(Completion::new_by_name("true"));
-                    comps.push(Completion::new_by_name("false"));
+                    comps.push(Completion::new_name("true"));
+                    comps.push(Completion::new_name("false"));
                     return;
                 }
                 if node.kind == TypeKind::Yenumeration {
                     for e in node.enum_stmt.iter() {
-                        comps.push(Completion::new_by_name(&e.name));
+                        comps.push(Completion::new_name(&e.name));
                     }
                     return;
                 }

@@ -199,7 +199,7 @@ impl Match {
         self.process(
             entry,
             match_ipv4_address(s),
-            Completion::new_by_name("A.B.C.D"),
+            Completion::new_name("A.B.C.D"),
         );
     }
 
@@ -207,7 +207,7 @@ impl Match {
         self.process(
             entry,
             match_ipv4_prefix(s),
-            Completion::new_by_name("A.B.C.D/M"),
+            Completion::new_name("A.B.C.D/M"),
         );
     }
 
@@ -215,7 +215,7 @@ impl Match {
         self.process(
             entry,
             match_ipv6_address(s),
-            Completion::new_by_name("X:X::X:X"),
+            Completion::new_name("X:X::X:X"),
         );
     }
 
@@ -223,7 +223,7 @@ impl Match {
         self.process(
             entry,
             match_ipv6_prefix(s),
-            Completion::new_by_name("X:X::X:X/M"),
+            Completion::new_name("X:X::X:X/M"),
         );
     }
 
@@ -248,7 +248,7 @@ impl Match {
             self.process(
                 entry,
                 match_keyword(s, &n.name),
-                Completion::new_by_name(&n.name),
+                Completion::new_name(&n.name),
             );
         }
     }
@@ -268,12 +268,12 @@ impl Match {
         self.process(
             entry,
             match_keyword(s, &"true".to_owned()),
-            Completion::new_by_name("true"),
+            Completion::new_name("true"),
         );
         self.process(
             entry,
             match_keyword(s, &"false".to_owned()),
-            Completion::new_by_name("false"),
+            Completion::new_name("false"),
         );
     }
 }
