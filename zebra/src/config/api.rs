@@ -2,6 +2,7 @@ use super::{Completion, ExecCode};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::Sender;
 
+#[derive(Debug)]
 pub struct ConfigChannel {
     pub tx: UnboundedSender<String>,
     pub rx: UnboundedReceiver<String>,
@@ -76,25 +77,25 @@ impl CompletionResponse {
     }
 }
 
-// #[derive(Debug)]
-// pub struct SubscribeRequest {
-//     pub resp: Sender<String>,
-// }
-
-// #[derive(Debug, Default)]
-// pub struct SubscribeResponse {
-//     pub code: ExecCode,
-//     pub comps: Vec<Completion>,
-// }
-
 #[derive(Debug)]
 pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
-    //Subscribe(),
 }
 
-#[allow(dead_code)]
+#[derive(Debug)]
+pub struct ShowChannel {
+    pub tx: UnboundedSender<DisplayRequest>,
+    pub rx: UnboundedReceiver<DisplayRequest>,
+}
+
+impl ShowChannel {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self { tx, rx }
+    }
+}
+
 #[derive(Debug)]
 pub struct DisplayRequest {
     pub resp: mpsc::Sender<String>,

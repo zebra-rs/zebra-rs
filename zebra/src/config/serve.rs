@@ -37,7 +37,7 @@ impl ExecService {
             code: code as i32,
             candidates: Vec::new(),
             lines,
-            port: 0,
+            port: 2650,
         };
         Ok(Response::new(reply))
     }
@@ -118,7 +118,7 @@ fn exec_commands(resp: &ExecuteResponse) -> (ExecCode, String) {
 
 #[derive(Debug)]
 struct ShowService {
-    disp_tx: UnboundedSender<DisplayRequest>,
+    txes: Vec<UnboundedSender<DisplayRequest>>,
 }
 
 #[tonic::async_trait]
@@ -133,7 +133,11 @@ impl Show for ShowService {
         let req = DisplayRequest {
             resp: bus_tx.clone(),
         };
-        self.disp_tx.send(req).unwrap();
+        if self.txes.len() > 0 {
+            let tx = self.txes[0].clone();
+            tx.send(req).unwrap();
+        }
+        // self.disp_tx.send(req).unwrap();
 
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
@@ -150,11 +154,32 @@ impl Show for ShowService {
     }
 }
 
-pub fn serve(config_tx: Sender<Message>, disp_tx: UnboundedSender<DisplayRequest>) {
-    let exec_service = ExecService { tx: config_tx };
+pub struct Cli {
+    pub tx: mpsc::Sender<Message>,
+    pub txes: Vec<UnboundedSender<DisplayRequest>>,
+}
+
+impl Cli {
+    pub fn new(config_tx: Sender<Message>) -> Self {
+        Self {
+            tx: config_tx,
+            txes: Vec::new(),
+        }
+    }
+
+    pub fn subscribe(&mut self, disp_tx: UnboundedSender<DisplayRequest>) {
+        self.txes.push(disp_tx);
+    }
+}
+
+pub fn serve(mut cli: Cli) {
+    let exec_service = ExecService { tx: cli.tx.clone() };
     let exec_server = ExecServer::new(exec_service);
 
-    let show_service = ShowService { disp_tx };
+    let mut show_service = ShowService { txes: Vec::new() };
+    for tx in cli.txes.iter() {
+        show_service.txes.push(tx.clone());
+    }
     let show_server = ShowServer::new(show_service);
 
     let addr = "0.0.0.0:2650".parse().unwrap();

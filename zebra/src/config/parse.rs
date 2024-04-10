@@ -1,4 +1,7 @@
-use super::comps::{comps_add_cr, comps_append};
+use super::comps::{
+    comps_add_all, comps_add_config, comps_add_cr, comps_append, comps_help_string,
+    comps_leaf_string, comps_range,
+};
 use super::configs::config_match;
 use super::ip::*;
 use super::util::*;
@@ -11,11 +14,11 @@ use std::rc::Rc;
 
 #[derive(Debug, PartialEq, Default, Copy, Clone)]
 pub enum YangMatch {
-    #[default]
     Dir,
     DirMatched,
     Key,
     KeyMatched,
+    #[default]
     Leaf,
     LeafMatched,
     LeafList,
@@ -32,7 +35,7 @@ pub enum MatchType {
 }
 
 #[derive(PartialEq, Debug)]
-enum PresetType {
+pub enum PresetType {
     None,
     IPv4Address,
     IPv4Prefix,
@@ -40,7 +43,7 @@ enum PresetType {
     IPv6Prefix,
 }
 
-fn entry_preset(name: String) -> PresetType {
+pub fn entry_preset(name: String) -> PresetType {
     let (_, name) = path_split(name.clone());
     match name.as_str() {
         "ipv4-address" => PresetType::IPv4Address,
@@ -51,137 +54,12 @@ fn entry_preset(name: String) -> PresetType {
     }
 }
 
-fn comp_integer_string(e: &Rc<Entry>, n: &TypeNode) -> String {
-    if let Some(range) = &n.range {
-        range.to_string()
-    } else {
-        format!("<{}>", e.name.to_owned())
-    }
-}
-
-fn comp_range(e: &Rc<Entry>, n: &TypeNode) -> Completion {
-    let name = if let Some(range) = &n.range {
-        range.to_string()
-    } else {
-        format!("<{}>", e.name.to_owned())
-    };
-    Completion::new_by_name(&name)
-}
-
-fn comp_leaf_string(e: &Rc<Entry>) -> String {
-    if let Some(typedef) = &e.typedef {
-        match entry_preset(typedef.to_string()) {
-            PresetType::None => {}
-            PresetType::IPv4Address => return String::from("A.B.C.D"),
-            PresetType::IPv4Prefix => return String::from("A.B.C.D/M"),
-            PresetType::IPv6Address => return String::from("X:X::X:X"),
-            PresetType::IPv6Prefix => return String::from("X:X::X:X/M"),
-        };
-    }
-    if let Some(node) = e.type_node.as_ref() {
-        match node.kind {
-            TypeKind::Yint8
-            | TypeKind::Yint16
-            | TypeKind::Yint32
-            | TypeKind::Yint64
-            | TypeKind::Yuint8
-            | TypeKind::Yuint16
-            | TypeKind::Yuint32
-            | TypeKind::Yuint64 => comp_integer_string(e, node),
-            _ => {
-                format!("<{}>", e.name.to_owned())
-            }
-        }
-    } else {
-        format!("<{}>", e.name.to_owned())
-    }
-}
-
-fn comp_help_string(e: &Entry) -> String {
-    match e.extension.get("ext:help") {
-        Some(help) => String::from(help),
-        None => String::from(""),
-    }
-}
-
-fn comps_add_config(comps: &mut Vec<Completion>, ymatch: YangMatch, config: &Option<Rc<Config>>) {
-    if ymatch == YangMatch::LeafMatched {
-        comps_add_cr(comps);
-        return;
-    }
-    if let Some(config) = config {
-        if config.has_dir() {
-            for config in config.configs.borrow().iter() {
-                comps.push(Completion::new_by_name(&config.name));
-            }
-            if ymatch == YangMatch::Key {
-                for key in config.keys.borrow().iter() {
-                    comps.push(Completion::new_by_name(&key.name));
-                }
-            }
-        } else if config.list.borrow().is_empty() {
-            if !config.value.borrow().is_empty() {
-                comps.push(Completion::new_by_name(&config.value.borrow()));
-            }
-        } else {
-            for value in config.list.borrow().iter() {
-                comps.push(Completion::new_by_name(value));
-            }
-        }
-    }
-    if ymatch == YangMatch::DirMatched {
-        comps_add_cr(comps)
-    }
-}
-
-fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entry>) {
-    match ymatch {
-        YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
-            for entry in entry.dir.borrow().iter() {
-                let mut comp = Completion::new(&entry.name, &comp_help_string(entry));
-                if entry.has_key() {
-                    comp.ymatch = YangMatch::Key;
-                } else if entry.is_directory_entry() {
-                    comp.ymatch = YangMatch::Dir;
-                }
-                comps.push(comp);
-            }
-        }
-        YangMatch::LeafMatched => {
-            //
-        }
-        _ => {
-            if let Some(node) = &entry.type_node {
-                if node.kind == TypeKind::Yboolean {
-                    comps.push(Completion::new_by_name("true"));
-                    comps.push(Completion::new_by_name("false"));
-                    return;
-                }
-                if node.kind == TypeKind::Yenumeration {
-                    for e in node.enum_stmt.iter() {
-                        comps.push(Completion::new_by_name(&e.name));
-                    }
-                    return;
-                }
-            }
-            comps.push(Completion::new(
-                &comp_leaf_string(entry),
-                &comp_help_string(entry),
-            ));
-        }
-    }
-    comps.sort_by(|a, b| a.name.cmp(&b.name));
-
-    if ymatch_complete(ymatch) {
-        comps_add_cr(comps);
-    }
-}
-
 pub struct State {
     ymatch: YangMatch,
     index: usize,
     pub set: bool,
     pub delete: bool,
+    pub show: bool,
     pub elems: Vec<Elem>,
 }
 
@@ -191,6 +69,7 @@ impl State {
             ymatch: YangMatch::Dir,
             set: false,
             delete: false,
+            show: false,
             elems: Vec::new(),
             index: 0usize,
         }
@@ -322,7 +201,7 @@ impl Match {
         self.process(
             entry,
             match_ipv4_address(s),
-            Completion::new_by_name("A.B.C.D"),
+            Completion::new_name("A.B.C.D"),
         );
     }
 
@@ -330,7 +209,7 @@ impl Match {
         self.process(
             entry,
             match_ipv4_prefix(s),
-            Completion::new_by_name("A.B.C.D/M"),
+            Completion::new_name("A.B.C.D/M"),
         );
     }
 
@@ -338,7 +217,7 @@ impl Match {
         self.process(
             entry,
             match_ipv6_address(s),
-            Completion::new_by_name("X:X::X:X"),
+            Completion::new_name("X:X::X:X"),
         );
     }
 
@@ -346,7 +225,7 @@ impl Match {
         self.process(
             entry,
             match_ipv6_prefix(s),
-            Completion::new_by_name("X:X::X:X/M"),
+            Completion::new_name("X:X::X:X/M"),
         );
     }
 
@@ -354,7 +233,7 @@ impl Match {
         self.process(
             entry,
             match_string(s, node),
-            Completion::new(&comp_leaf_string(entry), &comp_help_string(entry)),
+            Completion::new(&comps_leaf_string(entry), &comps_help_string(entry)),
         );
     }
 
@@ -362,7 +241,7 @@ impl Match {
         self.process(
             entry,
             match_keyword_str(s, &entry.name),
-            Completion::new(&entry.name.to_owned(), &comp_help_string(entry)),
+            Completion::new(&entry.name.to_owned(), &comps_help_string(entry)),
         );
     }
 
@@ -371,7 +250,7 @@ impl Match {
             self.process(
                 entry,
                 match_keyword(s, &n.name),
-                Completion::new_by_name(&n.name),
+                Completion::new_name(&n.name),
             );
         }
     }
@@ -384,19 +263,19 @@ impl Match {
     ) where
         RangeNode: RangeExtract<T>,
     {
-        self.process(entry, match_range::<T>(s, node), comp_range(entry, node));
+        self.process(entry, match_range::<T>(s, node), comps_range(entry, node));
     }
 
     pub fn match_bool(&mut self, entry: &Rc<Entry>, s: &String) {
         self.process(
             entry,
             match_keyword(s, &"true".to_owned()),
-            Completion::new_by_name("true"),
+            Completion::new_name("true"),
         );
         self.process(
             entry,
             match_keyword(s, &"false".to_owned()),
-            Completion::new_by_name("false"),
+            Completion::new_name("false"),
         );
     }
 }
@@ -508,7 +387,7 @@ fn ymatch_next(entry: &Rc<Entry>, ymatch: YangMatch) -> YangMatch {
     }
 }
 
-fn ymatch_complete(ymatch: YangMatch) -> bool {
+pub fn ymatch_complete(ymatch: YangMatch) -> bool {
     ymatch == YangMatch::DirMatched
         || ymatch == YangMatch::KeyMatched
         || ymatch == YangMatch::LeafMatched
@@ -629,6 +508,9 @@ pub fn parse(
     }
     if elem.name == "delete" {
         s.delete = true;
+    }
+    if elem.name == "show" {
+        s.show = true;
     }
     s.elems.push(elem);
 

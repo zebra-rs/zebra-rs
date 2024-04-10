@@ -3,7 +3,7 @@ use nix::ifaddrs::getifaddrs;
 use nix::net::if_::if_nametoindex;
 use tokio::sync::mpsc::UnboundedSender;
 
-fn address_dump(tx: UnboundedSender<OsMessage>) {
+fn os_dump(tx: UnboundedSender<OsMessage>) {
     let addrs = getifaddrs().unwrap();
     for ifaddr in addrs {
         match ifaddr.address {
@@ -22,8 +22,8 @@ fn address_dump(tx: UnboundedSender<OsMessage>) {
     }
 }
 
-pub async fn spawn_routing_socket(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
-    address_dump(tx);
+pub async fn spawn_os_dump(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+    os_dump(tx);
 
     Ok(())
 }

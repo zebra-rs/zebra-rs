@@ -9,6 +9,7 @@ pub use manager::ConfigManager;
 
 mod serve;
 pub use serve::serve;
+pub use serve::Cli;
 
 mod configs;
 pub use configs::Config;
@@ -20,7 +21,7 @@ mod elem;
 pub use elem::Elem;
 
 mod api;
-pub use api::{ConfigChannel, DisplayRequest};
+pub use api::{ConfigChannel, DisplayRequest, ShowChannel};
 
 mod commands;
 mod files;

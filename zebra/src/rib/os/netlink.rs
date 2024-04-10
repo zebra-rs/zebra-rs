@@ -143,7 +143,7 @@ async fn route_dump(
     }
 }
 
-pub async fn spawn_netlink(rib_tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+pub async fn spawn_os_dump(rib_tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
     let (mut connection, handle, mut messages) = new_connection()?;
 
     let mgroup_flags = RTMGRP_LINK
