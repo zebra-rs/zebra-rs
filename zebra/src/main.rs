@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later or Apache-2.0
 
 mod config;
+use config::Cli;
 use config::ConfigManager;
 mod bgp;
 use bgp::Bgp;
@@ -26,9 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bgp = Bgp::new();
 
     let mut config = ConfigManager::new(yang_path());
+    config.subscribe(rib.cm.tx.clone());
     config.subscribe(bgp.cm.tx.clone());
 
-    config::serve(config.tx.clone(), bgp.show_tx.clone());
+    let mut cli = Cli::new(config.tx.clone());
+    cli.subscribe(rib.show.tx.clone());
+
+    config::serve(cli);
 
     bgp::serve(bgp);
 

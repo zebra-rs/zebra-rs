@@ -103,6 +103,8 @@ impl ConfigManager {
         let mut diff = binding.context_radius(65535).to_string();
         let diff = trim_first_line(&mut diff);
 
+        let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
+
         for line in diff.lines() {
             if !line.is_empty() {
                 let line = remove_first_char(line);
@@ -155,6 +157,8 @@ impl ConfigManager {
             //elem_dump(&state.elems);
             delete(state.elems, self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""))
+        } else if state.show && state.elems.len() > 1 {
+            (ExecCode::RedirectShow, input.clone())
         } else {
             let path = elem_str(&state.elems);
             if let Some(f) = mode.fmap.get(&path) {
@@ -204,10 +208,6 @@ impl ConfigManager {
             }
         }
     }
-}
-
-fn remove_first_char(s: &str) -> String {
-    s.chars().skip(1).collect()
 }
 
 pub async fn event_loop(mut config: ConfigManager) {

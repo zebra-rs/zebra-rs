@@ -1,8 +1,6 @@
-#[cfg(target_os = "macos")]
-use super::os::macos::spawn_routing_socket;
 use super::os::message::{OsChannel, OsLink, OsMessage};
-#[cfg(target_os = "linux")]
-use super::os::netlink::spawn_netlink;
+use super::os::spawn_os_dump;
+use crate::config::{ConfigChannel, ShowChannel};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -33,6 +31,8 @@ impl Link {
 pub struct Rib {
     pub tx: UnboundedSender<String>,
     pub rx: UnboundedReceiver<String>,
+    pub cm: ConfigChannel,
+    pub show: ShowChannel,
     pub os: OsChannel,
     pub links: BTreeMap<u32, Link>,
     //pub rib: prefix_trie::PrefixMap<Ipv4Net, u32>,
@@ -46,6 +46,8 @@ impl Rib {
             links: BTreeMap::new(),
             tx,
             rx,
+            cm: ConfigChannel::new(),
+            show: ShowChannel::new(),
         }
     }
 
@@ -60,36 +62,46 @@ impl Rib {
         self.links.remove(&oslink.index);
     }
 
-    pub async fn event_loop(&mut self) {
-        #[cfg(target_os = "linux")]
-        spawn_netlink(self.os.tx.clone()).await.unwrap();
+    fn process_os_message(&mut self, msg: OsMessage) {
+        match msg {
+            OsMessage::NewLink(link) => {
+                self.link_add(link);
+            }
+            OsMessage::DelLink(link) => {
+                self.link_delete(link);
+            }
+            OsMessage::NewRoute(_route) => {
+                //
+            }
+            OsMessage::DelRoute(_route) => {
+                //
+            }
+            OsMessage::NewAddress(_addr) => {
+                //
+            }
+            OsMessage::DelAddress(_addr) => {}
+        }
+    }
 
-        #[cfg(target_os = "macos")]
-        spawn_routing_socket(self.os.tx.clone()).await.unwrap();
+    fn process_cm_message(&self, msg: String) {
+        println!("CM: {}", msg);
+    }
+
+    pub async fn event_loop(&mut self) {
+        spawn_os_dump(self.os.tx.clone()).await.unwrap();
 
         loop {
             tokio::select! {
                 Some(msg) = self.os.rx.recv() => {
-                    match msg  {
-                        OsMessage::NewLink(link) => {
-                            self.link_add(link);
-                        }
-                        OsMessage::DelLink(link) => {
-                            self.link_delete(link);
-                        }
-                        OsMessage::NewRoute(_route) => {
-                            //
-                        }
-                        OsMessage::DelRoute(_route) => {
-                            //
-                        }
-                        OsMessage::NewAddress(_addr) => {
-                            //
-                        }
-                        OsMessage::DelAddress(_addr) => {
-
-                        }
-                    }
+                    self.process_os_message(msg);
+                }
+                Some(msg) = self.cm.rx.recv() => {
+                    self.process_cm_message(msg);
+                }
+                Some(msg) = self.show.rx.recv() => {
+                    // self.process_show_message(msg);
+            msg.resp.send("line1\n".to_string()).await.unwrap();
+            msg.resp.send("line2\n".to_string()).await.unwrap();
                 }
             }
         }
