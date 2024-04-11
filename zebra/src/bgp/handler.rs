@@ -1,5 +1,5 @@
 use super::{fsm, Event, Peer};
-use crate::config::{ConfigChannel, DisplayRequest};
+use crate::config::{ConfigChannel, ConfigRequest, DisplayRequest};
 use ipnet::Ipv4Net;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -95,8 +95,8 @@ impl Bgp {
         }
     }
 
-    pub fn process_cm_message(&mut self, msg: String) {
-        bgp_config_set(self, msg);
+    pub fn process_cm_message(&mut self, msg: ConfigRequest) {
+        bgp_config_set(self, msg.input);
     }
 
     pub async fn event_loop(&mut self) {

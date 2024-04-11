@@ -1,31 +1,10 @@
 use super::os::message::{OsChannel, OsLink, OsMessage};
 use super::os::spawn_os_dump;
-use crate::config::{ConfigChannel, ShowChannel};
+use super::Link;
+use crate::config::{ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
 use std::collections::BTreeMap;
+//use std::fmt::Write;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-
-#[derive(Default, Debug)]
-pub struct Link {
-    index: u32,
-    name: String,
-    mtu: u32,
-}
-
-#[derive(Default, Debug)]
-pub struct LinkAddr {
-    index: u32,
-    secondary: bool,
-}
-
-impl Link {
-    pub fn from(link: OsLink) -> Self {
-        Self {
-            index: link.index,
-            name: link.name.to_owned(),
-            mtu: link.mtu,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct Rib {
@@ -42,23 +21,21 @@ impl Rib {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Rib {
-            os: OsChannel::new(),
-            links: BTreeMap::new(),
             tx,
             rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
+            os: OsChannel::new(),
+            links: BTreeMap::new(),
         }
     }
 
     pub fn link_add(&mut self, oslink: OsLink) {
         let link = Link::from(oslink);
-        println!("AddX: {:?}", link);
         self.links.insert(link.index, link);
     }
 
     pub fn link_delete(&mut self, oslink: OsLink) {
-        println!("Del: {:?}", oslink);
         self.links.remove(&oslink.index);
     }
 
@@ -70,21 +47,39 @@ impl Rib {
             OsMessage::DelLink(link) => {
                 self.link_delete(link);
             }
+            OsMessage::NewAddress(_addr) => {
+                //
+            }
+            OsMessage::DelAddress(_addr) => {
+                //
+            }
             OsMessage::NewRoute(_route) => {
                 //
             }
             OsMessage::DelRoute(_route) => {
                 //
             }
-            OsMessage::NewAddress(_addr) => {
-                //
-            }
-            OsMessage::DelAddress(_addr) => {}
         }
     }
 
-    fn process_cm_message(&self, msg: String) {
-        println!("CM: {}", msg);
+    fn process_cm_message(&self, _msg: ConfigRequest) {
+        // println!("CM: {}", msg);
+    }
+
+    async fn process_show_message(&self, msg: DisplayRequest) {
+        println!("S: {}", msg.line);
+        self.link_show(msg.resp.clone()).await;
+        // let mut buffer = String::new();
+        // for (_, link) in self.links.iter() {
+        //     write!(&mut buffer, "Interface: {}\n", link.name).unwrap();
+        //     write!(
+        //         &mut buffer,
+        //         "  index {} metric {} mtu {}\n",
+        //         link.index, link.metric, link.mtu
+        //     )
+        //     .unwrap();
+        // }
+        // msg.resp.send(buffer).await.unwrap();
     }
 
     pub async fn event_loop(&mut self) {
@@ -99,9 +94,7 @@ impl Rib {
                     self.process_cm_message(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
-                    // self.process_show_message(msg);
-            msg.resp.send("line1\n".to_string()).await.unwrap();
-            msg.resp.send("line2\n".to_string()).await.unwrap();
+                    self.process_show_message(msg).await;
                 }
             }
         }

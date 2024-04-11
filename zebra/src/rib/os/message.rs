@@ -14,7 +14,7 @@ impl OsChannel {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct OsLink {
     pub index: u32,
     pub name: String,
