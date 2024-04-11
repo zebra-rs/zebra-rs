@@ -1,11 +1,26 @@
-use super::{Completion, ExecCode};
+use super::{Completion, Elem, ExecCode};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::Sender;
 
 #[derive(Debug)]
 pub struct ConfigChannel {
-    pub tx: UnboundedSender<String>,
-    pub rx: UnboundedReceiver<String>,
+    pub tx: UnboundedSender<ConfigRequest>,
+    pub rx: UnboundedReceiver<ConfigRequest>,
+}
+
+#[derive(Debug)]
+pub struct ConfigRequest {
+    pub input: String,
+    pub elems: Vec<Elem>,
+}
+
+impl ConfigRequest {
+    pub fn new(input: String) -> Self {
+        Self {
+            input,
+            elems: Vec::new(),
+        }
+    }
 }
 
 impl ConfigChannel {
@@ -98,5 +113,6 @@ impl ShowChannel {
 
 #[derive(Debug)]
 pub struct DisplayRequest {
+    pub line: String,
     pub resp: mpsc::Sender<String>,
 }
