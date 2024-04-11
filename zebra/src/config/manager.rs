@@ -7,7 +7,7 @@ use super::files::load_config_file;
 use super::parse::parse;
 use super::parse::State;
 use super::util::trim_first_line;
-use super::{Completion, Config, ExecCode};
+use super::{Completion, Config, ConfigRequest, ExecCode};
 use libyang::{to_entry, Entry, YangStore};
 use similar::TextDiff;
 use std::cell::RefCell;
@@ -57,7 +57,7 @@ pub struct ConfigManager {
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
-    pub cm_txes: Vec<UnboundedSender<String>>,
+    pub cm_txes: Vec<UnboundedSender<ConfigRequest>>,
 }
 
 impl ConfigManager {
@@ -88,7 +88,7 @@ impl ConfigManager {
         self.modes.insert("configure".to_string(), configure_mode);
     }
 
-    pub fn subscribe(&mut self, cm_tx: UnboundedSender<String>) {
+    pub fn subscribe(&mut self, cm_tx: UnboundedSender<ConfigRequest>) {
         self.cm_txes.push(cm_tx);
     }
 
@@ -109,7 +109,7 @@ impl ConfigManager {
             if !line.is_empty() {
                 let line = remove_first_char(line);
                 for tx in self.cm_txes.iter() {
-                    tx.send(line.clone()).unwrap();
+                    tx.send(ConfigRequest::new(line.clone())).unwrap();
                 }
             }
         }

@@ -127,10 +127,12 @@ impl Show for ShowService {
 
     async fn show(
         &self,
-        _request: tonic::Request<ShowRequest>,
+        request: tonic::Request<ShowRequest>,
     ) -> std::result::Result<Response<Self::ShowStream>, tonic::Status> {
+        let request = request.get_ref();
         let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
         let req = DisplayRequest {
+            line: request.line.clone(),
             resp: bus_tx.clone(),
         };
         if self.txes.len() > 0 {
@@ -172,7 +174,7 @@ impl Cli {
     }
 }
 
-pub fn serve(mut cli: Cli) {
+pub fn serve(cli: Cli) {
     let exec_service = ExecService { tx: cli.tx.clone() };
     let exec_server = ExecServer::new(exec_service);
 

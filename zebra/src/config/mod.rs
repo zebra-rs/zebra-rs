@@ -21,7 +21,7 @@ mod elem;
 pub use elem::Elem;
 
 mod api;
-pub use api::{ConfigChannel, DisplayRequest, ShowChannel};
+pub use api::{ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
 
 mod commands;
 mod files;
