@@ -1,5 +1,6 @@
+use super::parse::PresetType;
 use super::parse::{entry_preset, ymatch_complete};
-use super::parse::{PresetType, YangMatch};
+use super::vtysh::YangMatch;
 use super::Config;
 use libyang::{Entry, TypeKind, TypeNode};
 use std::rc::Rc;
