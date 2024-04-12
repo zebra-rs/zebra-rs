@@ -43,7 +43,7 @@ fn bgp_config_set(bgp: &mut Bgp, conf: String) {
     if paths.len() < 4 {
         return;
     }
-    println!("CM: {:?}", paths);
+    // println!("CM: {:?}", paths);
     match paths[2] {
         "global" => match paths[3] {
             "as" => {
@@ -93,7 +93,7 @@ impl Bgp {
     }
 
     pub fn process_cm_message(&mut self, msg: ConfigRequest) {
-        println!("P: {:?}", msg.paths);
+        // println!("P: {:?}", msg.paths);
         bgp_config_set(self, msg.input);
     }
 
