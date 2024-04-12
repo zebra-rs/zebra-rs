@@ -17,8 +17,7 @@ pub use configs::Config;
 mod comps;
 pub use comps::Completion;
 
-mod elem;
-//pub use elem::Elem;
+mod paths;
 
 mod api;
 pub use api::{ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};

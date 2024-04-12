@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cli = Cli::new(config.tx.clone());
     cli.subscribe(rib.show.tx.clone());
+    cli.subscribe(bgp.show.tx.clone());
 
     config::serve(cli);
 
