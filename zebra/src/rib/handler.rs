@@ -1,10 +1,9 @@
-use super::link::link_show;
-use super::os::message::{OsChannel, OsLink, OsMessage};
+use super::link::{link_show, LinkAddr};
+use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage};
 use super::os::spawn_os_dump;
 use super::Link;
 use crate::config::{yang_path, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
 use std::collections::{BTreeMap, HashMap};
-//use std::fmt::Write;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 type Callback = fn(&Rib, Vec<String>) -> String;
@@ -21,7 +20,7 @@ pub struct Rib {
     pub callbacks: HashMap<String, Callback>,
 }
 
-pub fn rib_show(rib: &Rib, args: Vec<String>) -> String {
+pub fn rib_show(_rib: &Rib, _args: Vec<String>) -> String {
     "this is show ip route output".to_string()
 }
 
@@ -59,6 +58,23 @@ impl Rib {
         self.links.remove(&oslink.index);
     }
 
+    pub fn addr_add(&mut self, os_addr: OsAddr) {
+        let addr = LinkAddr::from(os_addr);
+        if let Some(link) = self.links.get_mut(&addr.link_index) {
+            if addr.is_v4() {
+                link.addr4.push(addr);
+            } else {
+                link.addr6.push(addr);
+            }
+        }
+    }
+
+    pub fn addr_del(&mut self, addr: OsAddr) {
+        if let Some(_link) = self.links.get_mut(&addr.link_index) {
+            //link.addr.push(addr);
+        }
+    }
+
     fn process_os_message(&mut self, msg: OsMessage) {
         match msg {
             OsMessage::NewLink(link) => {
@@ -67,11 +83,11 @@ impl Rib {
             OsMessage::DelLink(link) => {
                 self.link_delete(link);
             }
-            OsMessage::NewAddress(_addr) => {
-                //
+            OsMessage::NewAddress(addr) => {
+                self.addr_add(addr);
             }
-            OsMessage::DelAddress(_addr) => {
-                //
+            OsMessage::DelAddress(addr) => {
+                self.addr_del(addr);
             }
             OsMessage::NewRoute(_route) => {
                 //

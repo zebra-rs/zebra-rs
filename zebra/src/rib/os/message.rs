@@ -1,4 +1,5 @@
-use super::LinkFlags;
+use super::{LinkFlags, LinkType};
+use ipnet::IpNet;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
@@ -19,6 +20,7 @@ pub struct OsLink {
     pub index: u32,
     pub name: String,
     pub flags: LinkFlags,
+    pub link_type: LinkType,
     pub mtu: u32,
 }
 
@@ -31,12 +33,14 @@ impl OsLink {
 }
 
 #[derive(Default, Debug)]
-pub struct OsAddress {
+pub struct OsAddr {
+    pub addr: IpNet,
     pub link_index: u32,
+    pub secondary: bool,
 }
 
-impl OsAddress {
-    pub fn new() -> OsAddress {
+impl OsAddr {
+    pub fn new() -> OsAddr {
         Self {
             ..Default::default()
         }
@@ -59,8 +63,8 @@ impl OsRoute {
 pub enum OsMessage {
     NewLink(OsLink),
     DelLink(OsLink),
-    NewAddress(OsAddress),
-    DelAddress(OsAddress),
+    NewAddress(OsAddr),
+    DelAddress(OsAddr),
     NewRoute(OsRoute),
     DelRoute(OsRoute),
 }
