@@ -10,4 +10,4 @@ pub use macos::spawn_os_dump;
 
 pub mod message;
 
-pub use super::LinkFlags;
+pub use super::{LinkFlags, LinkType};

@@ -5,7 +5,7 @@ use super::configs::{carbon_copy, config_set, delete};
 use super::files::load_config_file;
 use super::parse::parse;
 use super::parse::State;
-use super::paths::{paths_dump, paths_str};
+use super::paths::paths_str;
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
 use super::{Completion, Config, ConfigRequest, ExecCode};
@@ -184,15 +184,15 @@ impl ConfigManager {
             state,
         );
         if state.set {
-            paths_dump(&state.paths);
+            // paths_dump(&state.paths);
             config_set(state.paths.clone(), self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.delete {
-            paths_dump(&state.paths);
+            // paths_dump(&state.paths);
             delete(state.paths.clone(), self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.show && state.paths.len() > 1 {
-            paths_dump(&state.paths);
+            // paths_dump(&state.paths);
             (ExecCode::RedirectShow, input.clone(), state.paths)
         } else {
             let path = paths_str(&state.paths);

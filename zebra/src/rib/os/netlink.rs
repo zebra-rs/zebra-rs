@@ -1,9 +1,10 @@
-use super::message::{OsAddress, OsLink, OsMessage, OsRoute};
-use futures::stream::StreamExt;
-use futures::stream::TryStreamExt;
+use super::message::{OsAddr, OsLink, OsMessage, OsRoute};
+use crate::rib::link;
+use futures::stream::{StreamExt, TryStreamExt};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
-use netlink_packet_route::link::{LinkAttribute, LinkMessage};
+use netlink_packet_route::link::{LinkAttribute, LinkFlag, LinkLayerType, LinkMessage};
 use netlink_packet_route::route::{RouteAttribute, RouteMessage};
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::{AsyncSocket, SocketAddr};
@@ -13,14 +14,44 @@ use rtnetlink::{
     },
     new_connection, IpVersion,
 };
+use std::net::IpAddr;
 use tokio::sync::mpsc::UnboundedSender;
+
+fn flags_u32(f: &LinkFlag) -> u32 {
+    match f {
+        LinkFlag::Up => link::IFF_UP,
+        LinkFlag::Broadcast => link::IFF_BROADCAST,
+        LinkFlag::Loopback => link::IFF_LOOPBACK,
+        LinkFlag::Pointopoint => link::IFF_POINTOPOINT,
+        LinkFlag::Running => link::IFF_RUNNING,
+        LinkFlag::Promisc => link::IFF_PROMISC,
+        LinkFlag::Multicast => link::IFF_MULTICAST,
+        LinkFlag::LowerUp => link::IFF_LOWER_UP,
+        _ => 0u32,
+    }
+}
+
+fn flags_from(v: &Vec<LinkFlag>) -> link::LinkFlags {
+    let mut d: u32 = 0;
+    for flag in v.iter() {
+        d += flags_u32(flag);
+    }
+    link::LinkFlags(d)
+}
+
+fn link_type_msg(link_type: LinkLayerType) -> link::LinkType {
+    match link_type {
+        LinkLayerType::Ether => link::LinkType::Ethernet,
+        LinkLayerType::Loopback => link::LinkType::Loopback,
+        _ => link::LinkType::Ethernet,
+    }
+}
 
 fn link_from_msg(msg: LinkMessage) -> OsLink {
     let mut link = OsLink::new();
     link.index = msg.header.index;
-    for flag in msg.header.flags.iter() {
-        println!("F: {:?}", flag);
-    }
+    link.link_type = link_type_msg(msg.header.link_layer_type);
+    link.flags = flags_from(&msg.header.flags);
     for attr in msg.attributes.into_iter() {
         match attr {
             LinkAttribute::IfName(name) => {
@@ -36,19 +67,29 @@ fn link_from_msg(msg: LinkMessage) -> OsLink {
     link
 }
 
-fn addr_from_msg(msg: AddressMessage) -> OsAddress {
-    let addr = OsAddress::new();
+fn addr_from_msg(msg: AddressMessage) -> OsAddr {
+    let mut os_addr = OsAddr::new();
+    os_addr.link_index = msg.header.index;
     for attr in msg.attributes.into_iter() {
         match attr {
-            AddressAttribute::Address(_) => {
-                //
-            }
+            AddressAttribute::Address(addr) => match addr {
+                IpAddr::V4(v4) => {
+                    if let Ok(v4) = Ipv4Net::new(v4, msg.header.prefix_len) {
+                        os_addr.addr = IpNet::V4(v4);
+                    }
+                }
+                IpAddr::V6(v6) => {
+                    if let Ok(v6) = Ipv6Net::new(v6, msg.header.prefix_len) {
+                        os_addr.addr = IpNet::V6(v6);
+                    }
+                }
+            },
             _ => {
                 //
             }
         }
     }
-    addr
+    os_addr
 }
 
 fn route_from_msg(msg: RouteMessage) -> OsRoute {
