@@ -17,13 +17,14 @@ impl Completion {
         Self {
             name: name.to_string(),
             help: help.to_string(),
-            ..Default::default()
+            ymatch: YangMatch::Leaf,
         }
     }
 
     pub fn new_name(name: &str) -> Self {
         Self {
             name: name.to_string(),
+            ymatch: YangMatch::Leaf,
             ..Default::default()
         }
     }
