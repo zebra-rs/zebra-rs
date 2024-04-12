@@ -2,7 +2,7 @@ use super::api::{CompletionResponse, ExecuteResponse, Message};
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, config_set, delete};
-use super::elem::elem_str;
+use super::elem::{paths_dump, paths_str};
 use super::files::load_config_file;
 use super::parse::parse;
 use super::parse::State;
@@ -150,17 +150,18 @@ impl ConfigManager {
             state,
         );
         if state.set {
-            //elem_dump(&state.elems);
-            config_set(state.elems, self.store.candidate.borrow().clone());
+            paths_dump(&state.paths);
+            config_set(state.paths, self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""))
         } else if state.delete {
-            //elem_dump(&state.elems);
-            delete(state.elems, self.store.candidate.borrow().clone());
+            paths_dump(&state.paths);
+            delete(state.paths, self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""))
-        } else if state.show && state.elems.len() > 1 {
+        } else if state.show && state.paths.len() > 1 {
+            paths_dump(&state.paths);
             (ExecCode::RedirectShow, input.clone())
         } else {
-            let path = elem_str(&state.elems);
+            let path = paths_str(&state.paths);
             if let Some(f) = mode.fmap.get(&path) {
                 f(self)
             } else {
@@ -211,7 +212,7 @@ impl ConfigManager {
 }
 
 pub async fn event_loop(mut config: ConfigManager) {
-    config.load_config();
+    // config.load_config();
     loop {
         tokio::select! {
             Some(msg) = config.rx.recv() => {

@@ -276,21 +276,29 @@ pub fn peer_start_connect_timer(peer: &Peer) -> Timer {
     })
 }
 
-pub fn peer_packet_parse(rx: &[u8], ident: Ipv4Addr, tx: UnboundedSender<Message>) {
-    let (_, p) = parse_bgp_packet(rx, false).expect("error");
-    match p {
-        BgpPacket::Open(p) => {
-            let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+pub fn peer_packet_parse(
+    rx: &[u8],
+    ident: Ipv4Addr,
+    tx: UnboundedSender<Message>,
+) -> Result<(), &'static str> {
+    if let Ok((_, p)) = parse_bgp_packet(rx, false) {
+        match p {
+            BgpPacket::Open(p) => {
+                let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+            }
+            BgpPacket::Keepalive(_) => {
+                let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
+            }
+            BgpPacket::Notification(p) => {
+                let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
+            }
+            BgpPacket::Update(p) => {
+                let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
+            }
         }
-        BgpPacket::Keepalive(_) => {
-            let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
-        }
-        BgpPacket::Notification(p) => {
-            let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
-        }
-        BgpPacket::Update(p) => {
-            let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
-        }
+        Ok(())
+    } else {
+        Err("parse error")
     }
 }
 
@@ -311,9 +319,18 @@ pub async fn peer_read(
                     && buf.len() >= peek_bgp_length(buf.as_bytes())
                 {
                     let length = peek_bgp_length(buf.as_bytes());
-                    peer_packet_parse(buf.as_bytes(), ident, tx.clone());
-                    buf = buf.split_off(length);
-                    buf.reserve(BGP_PACKET_MAX_LEN);
+                    match peer_packet_parse(buf.as_bytes(), ident, tx.clone()) {
+                        Ok(_) => {
+                            println!("U: split");
+                            buf = buf.split_off(length);
+                            buf.reserve(BGP_PACKET_MAX_LEN);
+                        }
+                        Err(err) => {
+                            println!("E: {}", err);
+                            let _ = tx.send(Message::Event(ident, Event::ConnFail));
+                            return;
+                        }
+                    }
                 }
             }
             Err(err) => {

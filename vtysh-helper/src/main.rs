@@ -3,7 +3,7 @@ use std::env;
 use tokio_stream::StreamExt;
 use vtysh::exec_client::ExecClient;
 use vtysh::show_client::ShowClient;
-use vtysh::{ExecCode, ExecReply, ExecRequest, ExecType, ShowRequest};
+use vtysh::{CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, ShowRequest};
 
 pub mod vtysh {
     tonic::include_proto!("vtysh");
@@ -88,7 +88,11 @@ fn exec_request(exec_type: i32, mode: &String, commands: &Vec<String>) -> ExecRe
 
 use tokio::io::{self, AsyncWriteExt};
 
-async fn show(cli: Cli, port: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
+async fn show(
+    cli: Cli,
+    port: Option<u32>,
+    paths: Vec<CommandPath>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let port = port.unwrap_or(cli.port);
     let mut client = ShowClient::connect(format!("{}:{}", cli.base, port)).await?;
 
@@ -96,6 +100,7 @@ async fn show(cli: Cli, port: Option<u32>) -> Result<(), Box<dyn std::error::Err
     let request = tonic::Request::new(ShowRequest {
         json: cli.json,
         line: command_string(&commands),
+        paths,
     });
 
     let mut stdout = io::stdout();
@@ -156,7 +161,7 @@ async fn exec(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             redirect(cli, reply.port).await?;
         }
         _ if reply.code == ExecCode::RedirectShow as i32 => {
-            show(cli, Some(reply.port)).await?;
+            show(cli, Some(reply.port), reply.paths).await?;
         }
         _ => output(reply),
     }
@@ -173,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => {}
     }
     if cli.show {
-        show(cli, None).await?;
+        show(cli, None, Vec::new()).await?;
     } else if cli.completion || cli.trailing || cli.first {
         completion(cli).await?;
     } else {

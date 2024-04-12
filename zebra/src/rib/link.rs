@@ -9,6 +9,8 @@ pub struct Link {
     pub name: String,
     pub mtu: u32,
     pub metric: u32,
+    pub link_type: LinkType,
+    pub label: bool,
 }
 
 #[derive(Default, Debug)]
@@ -24,8 +26,17 @@ impl Link {
             name: link.name.to_owned(),
             mtu: link.mtu,
             metric: 1,
+            ..Default::default()
         }
     }
+}
+
+#[derive(Default, Debug)]
+pub enum LinkType {
+    #[default]
+    Unknown,
+    Loopback,
+    Ethernet,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -62,16 +73,17 @@ pub struct LinkFlags {
 
 impl Rib {
     pub async fn link_show(&self, resp: mpsc::Sender<String>) {
-        let mut buffer = String::new();
+        let mut buf = String::new();
         for (_, link) in self.links.iter() {
-            write!(&mut buffer, "Interface: {}\n", link.name).unwrap();
+            write!(&mut buf, "Interface: {}\n", link.name).unwrap();
+            write!(&mut buf, "  {}\n", link.index).unwrap();
             write!(
-                &mut buffer,
+                &mut buf,
                 "  index {} metric {} mtu {}\n",
                 link.index, link.metric, link.mtu
             )
             .unwrap();
         }
-        resp.send(buffer).await.unwrap();
+        resp.send(buf).await.unwrap();
     }
 }

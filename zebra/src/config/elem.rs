@@ -1,25 +1,17 @@
-use super::parse::YangMatch;
+use super::vtysh::CommandPath;
 
-#[derive(Debug, Default)]
-pub struct Elem {
-    pub ymatch: YangMatch,
-    pub name: String,
-    pub key: String,
-    pub presence: bool,
-}
-
-pub fn elem_str(elems: &[Elem]) -> String {
+pub fn paths_str(paths: &[CommandPath]) -> String {
     let mut s = String::from("");
-    for elem in elems.iter() {
+    for path in paths.iter() {
         s.push('/');
-        s.push_str(&elem.name.to_string());
+        s.push_str(&path.name.to_string());
     }
     s
 }
 
 #[allow(dead_code)]
-pub fn elem_dump(elems: &[Elem]) {
-    for elem in elems.iter() {
-        println!("{:?}", elem);
+pub fn paths_dump(paths: &[CommandPath]) {
+    for path in paths.iter() {
+        println!("{:?}", path);
     }
 }

@@ -1,6 +1,7 @@
 use super::parse::match_keyword;
-use super::parse::{Match, MatchType, YangMatch};
-use super::{Completion, Elem};
+use super::parse::{Match, MatchType};
+use super::vtysh::{CommandPath, YangMatch};
+use super::Completion;
 use std::{cell::RefCell, rc::Rc};
 
 #[derive(Default, Debug)]
@@ -275,15 +276,15 @@ pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> 
 }
 
 // Config set.
-fn config_set_dir(config: &Rc<Config>, elem: &Elem) -> Rc<Config> {
-    let find = config.lookup(&elem.name);
+fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
+    let find = config.lookup(&cpath.name);
     match find {
         Some(find) => find,
         None => {
             let n = Rc::new(Config {
-                name: elem.name.clone(),
+                name: cpath.name.clone(),
                 parent: Some(config.clone()),
-                presence: elem.presence,
+                presence: (ymatch_enum(cpath.ymatch) == YangMatch::DirMatched),
                 ..Default::default()
             });
             config.configs.borrow_mut().push(n.clone());
@@ -296,15 +297,15 @@ fn config_set_dir(config: &Rc<Config>, elem: &Elem) -> Rc<Config> {
     }
 }
 
-fn config_set_key(config: &Rc<Config>, elem: &Elem) -> Rc<Config> {
-    let find = config.lookup_key(&elem.name);
+fn config_set_key(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
+    let find = config.lookup_key(&cpath.name);
     match find {
         Some(find) => find,
         None => {
             let n = Rc::new(Config {
-                name: elem.name.clone(),
+                name: cpath.name.clone(),
                 parent: Some(config.clone()),
-                prefix: elem.key.clone(),
+                prefix: cpath.key.clone(),
                 ..Default::default()
             });
             config.keys.borrow_mut().push(n.clone());
@@ -314,35 +315,48 @@ fn config_set_key(config: &Rc<Config>, elem: &Elem) -> Rc<Config> {
     }
 }
 
-fn config_set_value(config: &Rc<Config>, elem: &Elem) {
-    config.value.replace(elem.name.to_owned());
+fn config_set_value(config: &Rc<Config>, cpath: &CommandPath) {
+    config.value.replace(cpath.name.to_owned());
 }
 
-fn config_set_list_value(config: &mut Rc<Config>, elem: &Elem) {
-    config.list.borrow_mut().push(elem.name.clone());
+fn config_set_list_value(config: &mut Rc<Config>, cpath: &CommandPath) {
+    config.list.borrow_mut().push(cpath.name.clone());
 }
 
-pub fn config_set(mut elems: Vec<Elem>, mut config: Rc<Config>) {
-    if elems[0].name == "set" {
-        elems.remove(0);
+pub fn ymatch_enum(ymatch: i32) -> YangMatch {
+    match ymatch {
+        0 => YangMatch::Dir,
+        1 => YangMatch::DirMatched,
+        2 => YangMatch::Key,
+        3 => YangMatch::KeyMatched,
+        4 => YangMatch::Leaf,
+        5 => YangMatch::LeafMatched,
+        6 => YangMatch::LeafList,
+        7 | _ => YangMatch::LeafListMatched,
     }
-    for elem in elems.iter() {
-        match elem.ymatch {
+}
+
+pub fn config_set(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
+    if paths[0].name == "set" {
+        paths.remove(0);
+    }
+    for path in paths.iter() {
+        match ymatch_enum(path.ymatch) {
             YangMatch::Dir
             | YangMatch::DirMatched
             | YangMatch::Key
             | YangMatch::Leaf
             | YangMatch::LeafList => {
-                config = config_set_dir(&config, elem);
+                config = config_set_dir(&config, path);
             }
             YangMatch::KeyMatched => {
-                config = config_set_key(&config, elem);
+                config = config_set_key(&config, path);
             }
             YangMatch::LeafMatched => {
-                config_set_value(&config, elem);
+                config_set_value(&config, path);
             }
             YangMatch::LeafListMatched => {
-                config_set_list_value(&mut config, elem);
+                config_set_list_value(&mut config, path);
             }
         }
     }
@@ -359,30 +373,30 @@ fn config_delete(config: Rc<Config>, name: &String) {
     }
 }
 
-pub fn delete(mut elems: Vec<Elem>, mut config: Rc<Config>) {
-    if elems.is_empty() || elems[0].name != "delete" {
+pub fn delete(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
+    if paths.is_empty() || paths[0].name != "delete" {
         return;
     }
-    elems.remove(0);
+    paths.remove(0);
 
-    for elem in elems.iter() {
-        match elem.ymatch {
+    for path in paths.iter() {
+        match ymatch_enum(path.ymatch) {
             YangMatch::Dir | YangMatch::Leaf | YangMatch::Key => {
-                if let Some(next) = config.lookup(&elem.name) {
+                if let Some(next) = config.lookup(&path.name) {
                     config = next;
                 } else {
                     break;
                 }
             }
             YangMatch::KeyMatched => {
-                if let Some(next) = config.lookup_key(&elem.name) {
+                if let Some(next) = config.lookup_key(&path.name) {
                     config = next;
                 } else {
                     break;
                 }
             }
             YangMatch::LeafMatched => {
-                if config.value.borrow().as_ref() != elem.name {
+                if config.value.borrow().as_ref() != path.name {
                     break;
                 }
             }

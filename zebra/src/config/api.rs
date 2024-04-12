@@ -1,4 +1,5 @@
-use super::{Completion, Elem, ExecCode};
+use super::vtysh::CommandPath;
+use super::{Completion, ExecCode};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::Sender;
 
@@ -11,14 +12,14 @@ pub struct ConfigChannel {
 #[derive(Debug)]
 pub struct ConfigRequest {
     pub input: String,
-    pub elems: Vec<Elem>,
+    pub paths: Vec<CommandPath>,
 }
 
 impl ConfigRequest {
     pub fn new(input: String) -> Self {
         Self {
             input,
-            elems: Vec::new(),
+            paths: Vec::new(),
         }
     }
 }
