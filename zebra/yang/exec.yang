@@ -28,11 +28,11 @@ module exec {
       ext:help "Show version";
       type empty;
     }
-    list interface {
+    list interfaces {
       ext:help "Show interface commands";
       key "interface-name";
       leaf interface-name {
-        type empty;
+        type string;
       }
       leaf detail {
         type string;
