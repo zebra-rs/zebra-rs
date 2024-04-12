@@ -599,7 +599,7 @@ $(Program): $(OBJECTS) $(BUILTINS_DEP) $(LIBDEP) .build
 	ls -l $(Program)
 	-$(SIZE) $(Program)
 
-.build:	$(SOURCES) config.h Makefile $(DEFDIR)/builtext.h version.h $(VERSPROG)
+.build:	$(SOURCES) config.h Makefile $(DEFDIR)/builtext.h version.h $(VERSPROG) cli.c
 	@echo
 	@echo "	  ***********************************************************"
 	@echo "	  *                                                         *"
@@ -640,6 +640,11 @@ profiling-tests:	${PROGRAM}
 version.h:  $(SOURCES) config.h Makefile patchlevel.h
 	$(SHELL) $(SUPPORT_SRC)mkversion.sh -b -S ${topdir} -s $(RELSTATUS) -d $(Version) -o newversion.h \
 		&& mv newversion.h version.h
+
+cli.c:
+	xxd -i cli.sh >cli.c
+
+vtysh.o: cli.c
 
 vtyshversion$(EXEEXT): buildversion.o $(SUPPORT_SRC)bashversion.c
 	$(CC_FOR_BUILD) $(CCFLAGS_FOR_BUILD) ${LDFLAGS_FOR_BUILD} -o $@ $(SUPPORT_SRC)bashversion.c buildversion.o ${LIBS_FOR_BUILD}

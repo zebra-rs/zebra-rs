@@ -26,8 +26,9 @@
 
 #include "builtins.h"
 #include "builtins/common.h"
+#include "bashhist.h"
 
-/* xxd -i cli >cli.c */
+/* xxd -i cli.sh >cli.c */
 #include "cli.c"
 
 int
@@ -42,8 +43,15 @@ cli_mode ()
 void
 cli_execute_startup_string()
 {
-	char *str = malloc(cli_len + 1);
-	memcpy(str, cli, cli_len);
-	str[cli_len] = '\0';
-	evalstring (str, NULL, 0);
+  char *str = malloc(cli_sh_len + 1);
+  memcpy(str, cli_sh, cli_sh_len);
+  str[cli_sh_len] = '\0';
+
+  enable_history_list = 0;
+  bash_history_disable();
+
+  evalstring(str, NULL, 0);
+
+  bash_history_enable();
+  enable_history_list = 1;
 }
