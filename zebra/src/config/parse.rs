@@ -5,25 +5,13 @@ use super::comps::{
 use super::configs::config_match;
 use super::ip::*;
 use super::util::*;
-use super::{Completion, Config, Elem, ExecCode};
+use super::vtysh::{CommandPath, YangMatch};
+use super::{Completion, Config, ExecCode};
 use libyang::{
     path_split, range_match, Entry, MinMax, RangeExtract, RangeNode, TypeKind, TypeNode,
 };
 use regex::Regex;
 use std::rc::Rc;
-
-#[derive(Debug, PartialEq, Default, Copy, Clone)]
-pub enum YangMatch {
-    Dir,
-    DirMatched,
-    Key,
-    KeyMatched,
-    #[default]
-    Leaf,
-    LeafMatched,
-    LeafList,
-    LeafListMatched,
-}
 
 #[derive(Default, Debug, PartialEq, PartialOrd)]
 pub enum MatchType {
@@ -60,7 +48,7 @@ pub struct State {
     pub set: bool,
     pub delete: bool,
     pub show: bool,
-    pub elems: Vec<Elem>,
+    pub paths: Vec<CommandPath>,
 }
 
 impl State {
@@ -70,7 +58,7 @@ impl State {
             set: false,
             delete: false,
             show: false,
-            elems: Vec::new(),
+            paths: Vec::new(),
             index: 0usize,
         }
     }
@@ -486,34 +474,6 @@ pub fn parse(
     }
     // println!("A: {:?} {:?}", s.ymatch, next.name);
 
-    // Elem for set/delete/exec func.
-    let elem = if ymatch_complete(s.ymatch) {
-        let sub = &input[0..mx.pos];
-        Elem {
-            name: sub.to_string(),
-            ymatch: s.ymatch,
-            key: mx.matched_entry.name.to_owned(),
-            presence: next.presence,
-        }
-    } else {
-        Elem {
-            name: mx.matched_entry.name.to_owned(),
-            ymatch: s.ymatch,
-            key: "".to_string(),
-            presence: next.presence,
-        }
-    };
-    if elem.name == "set" {
-        s.set = true;
-    }
-    if elem.name == "delete" {
-        s.delete = true;
-    }
-    if elem.name == "show" {
-        s.show = true;
-    }
-    s.elems.push(elem);
-
     // Delay YANG match transition to avoid elem type.
     if s.ymatch == YangMatch::Leaf && mx.matched_entry.is_empty_leaf() {
         s.ymatch = YangMatch::LeafMatched;
@@ -521,6 +481,32 @@ pub fn parse(
     if s.ymatch == YangMatch::Dir && mx.matched_entry.presence {
         s.ymatch = YangMatch::DirMatched;
     }
+
+    // Elem for set/delete/exec func.
+    let path = if ymatch_complete(s.ymatch) {
+        let sub = &input[0..mx.pos];
+        CommandPath {
+            name: sub.to_string(),
+            ymatch: s.ymatch.into(),
+            key: mx.matched_entry.name.to_owned(),
+        }
+    } else {
+        CommandPath {
+            name: mx.matched_entry.name.to_owned(),
+            ymatch: s.ymatch.into(),
+            key: "".to_string(),
+        }
+    };
+    if path.name == "set" {
+        s.set = true;
+    }
+    if path.name == "delete" {
+        s.delete = true;
+    }
+    if path.name == "show" {
+        s.show = true;
+    }
+    s.paths.push(path);
 
     if ymatch_complete(s.ymatch) && mx.matched_type == MatchType::Exact {
         comps_add_cr(&mut mx.comps);

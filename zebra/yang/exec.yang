@@ -28,6 +28,16 @@ module exec {
       ext:help "Show version";
       type empty;
     }
+    list interface {
+      ext:help "Show interface commands";
+      key "interface-name";
+      leaf interface-name {
+        type empty;
+      }
+      leaf detail {
+        type string;
+      }
+    }
     leaf hostname {
       type string;
       description

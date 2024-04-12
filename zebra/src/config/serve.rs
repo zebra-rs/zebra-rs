@@ -7,10 +7,9 @@ use tonic::Response;
 use super::api::{
     CompletionRequest, CompletionResponse, DisplayRequest, ExecuteRequest, ExecuteResponse, Message,
 };
-use super::parse::YangMatch;
 use super::vtysh::exec_server::{Exec, ExecServer};
 use super::vtysh::show_server::{Show, ShowServer};
-use super::vtysh::{ExecCode, ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest};
+use super::vtysh::{ExecCode, ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch};
 
 #[derive(Debug)]
 struct ExecService {
@@ -38,6 +37,7 @@ impl ExecService {
             candidates: Vec::new(),
             lines,
             port: 2650,
+            paths: Vec::new(),
         };
         Ok(Response::new(reply))
     }

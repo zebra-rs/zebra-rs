@@ -239,7 +239,7 @@ fn parse_bgp_update_packet(input: &[u8], as4: bool) -> IResult<&[u8], UpdatePack
 
 fn parse_bgp_notification_packet(input: &[u8]) -> IResult<&[u8], NotificationPacket> {
     let (input, packet) = NotificationPacket::parse(input)?;
-    let len = packet.header.length - BGP_PACKET_HEADER_LEN;
+    let len = packet.header.length - BGP_PACKET_HEADER_LEN - 2;
     let (input, _data) = take(len as usize)(input)?;
     Ok((input, packet))
 }
