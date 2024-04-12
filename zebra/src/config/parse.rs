@@ -1,6 +1,6 @@
 use super::comps::{
-    comps_add_all, comps_add_config, comps_add_cr, comps_append, comps_help_string,
-    comps_leaf_string, comps_range,
+    comps_add_all, comps_add_config, comps_add_cr, comps_append, comps_from_entry,
+    comps_help_string, comps_leaf_string, comps_range,
 };
 use super::configs::config_match;
 use super::ip::*;
@@ -229,7 +229,7 @@ impl Match {
         self.process(
             entry,
             match_keyword_str(s, &entry.name),
-            Completion::new(&entry.name.to_owned(), &comps_help_string(entry)),
+            comps_from_entry(&entry),
         );
     }
 
@@ -439,6 +439,7 @@ pub fn parse(
         return (ExecCode::Nomatch, mx.comps, s);
     }
     if mx.count > 1 {
+        mx.comps.sort_by(|a, b| a.name.cmp(&b.name));
         return (ExecCode::Ambiguous, mx.comps, s);
     }
 

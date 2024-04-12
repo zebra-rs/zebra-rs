@@ -30,6 +30,21 @@ impl Completion {
     }
 }
 
+pub fn comps_from_entry(entry: &Rc<Entry>) -> Completion {
+    let ymatch = if entry.has_key() {
+        YangMatch::Key
+    } else if entry.is_directory_entry() {
+        YangMatch::Dir
+    } else {
+        YangMatch::Leaf
+    };
+    Completion {
+        name: entry.name.clone(),
+        help: comps_help_string(entry).clone(),
+        ymatch,
+    }
+}
+
 fn comps_exists(comps: &[Completion], name: &String) -> bool {
     comps.iter().any(|x| x.name == *name)
 }
@@ -137,13 +152,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             for entry in entry.dir.borrow().iter() {
-                let mut comp = Completion::new(&entry.name, &comps_help_string(entry));
-                if entry.has_key() {
-                    comp.ymatch = YangMatch::Key;
-                } else if entry.is_directory_entry() {
-                    comp.ymatch = YangMatch::Dir;
-                }
-                comps.push(comp);
+                comps.push(comps_from_entry(entry));
             }
         }
         YangMatch::LeafMatched => {
