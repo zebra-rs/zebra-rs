@@ -1,5 +1,5 @@
 use super::os::message::{OsAddr, OsLink};
-use super::os::os_traffic_show;
+use super::os::os_traffic_dump;
 use super::Rib;
 use ipnet::IpNet;
 use std::fmt::{self, Write};
@@ -162,8 +162,6 @@ fn link_info_show(link: &Link, buf: &mut String) {
     for addr in link.addr6.iter() {
         write!(buf, "  inet6 {}\n", addr.addr).unwrap();
     }
-    // OS specific traffic counter.
-    os_traffic_show(&link, buf);
 }
 
 pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
@@ -173,5 +171,7 @@ pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
             link_info_show(link, &mut buf);
         }
     }
+    // OS specific traffic counter.
+    os_traffic_dump();
     buf
 }

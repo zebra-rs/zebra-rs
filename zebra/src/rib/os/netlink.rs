@@ -227,6 +227,7 @@ pub async fn os_dump_spawn(rib_tx: UnboundedSender<OsMessage>) -> std::io::Resul
 //     output errors 0, aborted 0, carrier 0, fifo 0, heartbeat 0, window 0
 //     collisions 0
 
+#[derive(Default)]
 struct LinkStats {
     rx_packets: u32,
     rx_bytes: u64,
@@ -253,6 +254,14 @@ struct LinkStats {
     collisions: u32,
 }
 
+impl LinkStats {
+    pub fn new() -> Self {
+        Self {
+            ..Default::default()
+        }
+    }
+}
+
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
@@ -265,10 +274,69 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-pub fn os_traffic_show(link: &link::Link, buf: &mut String) {
+use scan_fmt::scan_fmt;
+
+pub fn os_traffic_parse(version: i32, line: &String) {
+    let mut stats = LinkStats::new();
+    if version == 3 {
+        (
+            stats.rx_bytes,
+            stats.rx_packets,
+            stats.rx_errors,
+            stats.rx_dropped,
+            stats.rx_fifo_errors,
+            stats.rx_frame_errors,
+            stats.rx_compressed,
+            stats.rx_multicast,
+            stats.tx_bytes,
+            stats.tx_packets,
+            stats.tx_errors,
+            stats.tx_dropped,
+            stats.tx_fifo_errors,
+            stats.collisions,
+            stats.tx_carrier_errors,
+            stats.tx_compressed,
+        ) = scan_fmt!(
+            line,
+            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            u32,
+            u64,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u64,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+        )
+        .unwrap();
+    }
+}
+
+pub fn os_traffic_dump() {
     if let Ok(lines) = read_lines("/proc/net/dev") {
-        for line in lines.flatten() {
-            println!("{}", line.len());
+        let mut lines = lines.flatten();
+        if let Some(_) = lines.next() {
+            // Simply ignore first line.
+        }
+        let mut version = 1;
+        if let Some(second) = lines.next() {
+            if second.contains("compressed") {
+                version = 3
+            } else if second.contains("bytes") {
+                version = 2;
+            }
+        }
+        for line in lines {
+            println!("{}", line);
+            os_traffic_parse(version, &line);
         }
     }
 }
