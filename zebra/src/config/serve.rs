@@ -9,7 +9,9 @@ use super::api::{
 };
 use super::vtysh::exec_server::{Exec, ExecServer};
 use super::vtysh::show_server::{Show, ShowServer};
-use super::vtysh::{ExecCode, ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch};
+use super::vtysh::{
+    CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch,
+};
 
 #[derive(Debug)]
 struct ExecService {
@@ -41,6 +43,22 @@ impl ExecService {
         };
         Ok(Response::new(reply))
     }
+
+    fn reply_exec(
+        &self,
+        code: ExecCode,
+        lines: String,
+        paths: Vec<CommandPath>,
+    ) -> Result<Response<ExecReply>, tonic::Status> {
+        let reply = ExecReply {
+            code: code as i32,
+            candidates: Vec::new(),
+            lines,
+            port: 2650,
+            paths,
+        };
+        Ok(Response::new(reply))
+    }
 }
 
 #[tonic::async_trait]
@@ -53,8 +71,8 @@ impl Exec for ExecService {
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
                 let resp = self.execute_request(&request.mode, &request.line).await;
-                let (code, output) = exec_commands(&resp);
-                self.reply(code, output)
+                let (code, output, paths) = exec_commands(&resp);
+                self.reply_exec(code, output, paths)
             }
             x if x == ExecType::CompleteFirstCommands as i32 => {
                 let resp = self.completion_request(&request.mode, &request.line).await;
@@ -103,17 +121,29 @@ fn comp_commands(resp: &CompletionResponse) -> String {
     line
 }
 
-fn exec_commands(resp: &ExecuteResponse) -> (ExecCode, String) {
+fn exec_commands(resp: &ExecuteResponse) -> (ExecCode, String, Vec<CommandPath>) {
     if resp.code == ExecCode::Nomatch {
-        return (ExecCode::Nomatch, String::from("NoMatch\n"));
+        return (
+            ExecCode::Nomatch,
+            String::from("NoMatch\n"),
+            resp.paths.clone(),
+        );
     }
     if resp.code == ExecCode::Ambiguous {
-        return (ExecCode::Ambiguous, String::from("Ambiguous\n"));
+        return (
+            ExecCode::Ambiguous,
+            String::from("Ambiguous\n"),
+            resp.paths.clone(),
+        );
     }
     if resp.code == ExecCode::Incomplete {
-        return (ExecCode::Incomplete, String::from("Incomplete\n"));
+        return (
+            ExecCode::Incomplete,
+            String::from("Incomplete\n"),
+            resp.paths.clone(),
+        );
     }
-    (resp.code, resp.output.to_owned())
+    (resp.code, resp.output.to_owned(), resp.paths.clone())
 }
 
 #[derive(Debug)]
@@ -134,6 +164,7 @@ impl Show for ShowService {
         let req = DisplayRequest {
             line: request.line.clone(),
             resp: bus_tx.clone(),
+            paths: request.paths.clone(),
         };
         if self.txes.len() > 0 {
             let tx = self.txes[0].clone();
