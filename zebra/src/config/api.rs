@@ -13,13 +13,15 @@ pub struct ConfigChannel {
 pub struct ConfigRequest {
     pub input: String,
     pub paths: Vec<CommandPath>,
+    pub set: bool,
 }
 
 impl ConfigRequest {
-    pub fn new(input: String) -> Self {
+    pub fn new(input: String, paths: Vec<CommandPath>) -> Self {
         Self {
             input,
-            paths: Vec::new(),
+            paths,
+            set: true,
         }
     }
 }
@@ -42,6 +44,7 @@ pub struct ExecuteRequest {
 pub struct ExecuteResponse {
     pub code: ExecCode,
     pub output: String,
+    pub paths: Vec<CommandPath>,
 }
 
 #[derive(Debug)]
@@ -116,4 +119,5 @@ impl ShowChannel {
 pub struct DisplayRequest {
     pub line: String,
     pub resp: mpsc::Sender<String>,
+    pub paths: Vec<CommandPath>,
 }

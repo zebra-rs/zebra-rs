@@ -1,5 +1,5 @@
 use super::{fsm, Event, Peer};
-use crate::config::{ConfigChannel, ConfigRequest, DisplayRequest};
+use crate::config::{ConfigChannel, ConfigRequest, ShowChannel};
 use ipnet::Ipv4Net;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -18,8 +18,7 @@ pub struct Bgp {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
-    pub show_tx: UnboundedSender<DisplayRequest>,
-    pub show_rx: UnboundedReceiver<DisplayRequest>,
+    pub show: ShowChannel,
     pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
 }
 
@@ -68,17 +67,15 @@ fn bgp_config_set(bgp: &mut Bgp, conf: String) {
 impl Bgp {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let (show_tx, show_rx) = mpsc::unbounded_channel();
         Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             peers: BTreeMap::new(),
             tx,
             rx,
-            show_tx,
-            show_rx,
             ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
             cm: ConfigChannel::new(),
+            show: ShowChannel::new(),
         }
     }
 
@@ -96,6 +93,7 @@ impl Bgp {
     }
 
     pub fn process_cm_message(&mut self, msg: ConfigRequest) {
+        println!("P: {:?}", msg.paths);
         bgp_config_set(self, msg.input);
     }
 
@@ -108,7 +106,7 @@ impl Bgp {
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_message(msg);
                 }
-                Some(msg) = self.show_rx.recv() => {
+                Some(msg) = self.show.rx.recv() => {
                     self.tx.send(Message::Show(msg.resp)).unwrap();
                 }
             }

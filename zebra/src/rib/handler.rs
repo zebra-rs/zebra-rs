@@ -67,19 +67,11 @@ impl Rib {
     }
 
     async fn process_show_message(&self, msg: DisplayRequest) {
+        for path in msg.paths.iter() {
+            println!("P: {:?}", path);
+        }
         println!("S: {}", msg.line);
         self.link_show(msg.resp.clone()).await;
-        // let mut buffer = String::new();
-        // for (_, link) in self.links.iter() {
-        //     write!(&mut buffer, "Interface: {}\n", link.name).unwrap();
-        //     write!(
-        //         &mut buffer,
-        //         "  index {} metric {} mtu {}\n",
-        //         link.index, link.metric, link.mtu
-        //     )
-        //     .unwrap();
-        // }
-        // msg.resp.send(buffer).await.unwrap();
     }
 
     pub async fn event_loop(&mut self) {

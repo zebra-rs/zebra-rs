@@ -2,11 +2,12 @@ use super::api::{CompletionResponse, ExecuteResponse, Message};
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, config_set, delete};
-use super::elem::{paths_dump, paths_str};
 use super::files::load_config_file;
 use super::parse::parse;
 use super::parse::State;
+use super::paths::{paths_dump, paths_str};
 use super::util::trim_first_line;
+use super::vtysh::CommandPath;
 use super::{Completion, Config, ConfigRequest, ExecCode};
 use libyang::{to_entry, Entry, YangStore};
 use similar::TextDiff;
@@ -92,6 +93,33 @@ impl ConfigManager {
         self.cm_txes.push(cm_tx);
     }
 
+    fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
+        let mode = self.modes.get("configure");
+        if mode.is_none() {
+            return None;
+        }
+        let mode = mode.unwrap();
+        let state = State::new();
+
+        let mut entry: Option<Rc<Entry>> = None;
+        for e in mode.entry.dir.borrow().iter() {
+            if e.name == "set" {
+                entry = Some(e.clone());
+            }
+        }
+        if entry.is_none() {
+            return None;
+        }
+        let entry = entry.unwrap();
+
+        let (code, _comps, state) = parse(&input, entry, None, state);
+        if code == ExecCode::Success {
+            Some(state.paths)
+        } else {
+            None
+        }
+    }
+
     pub fn commit_config(&self) {
         let mut running = String::new();
         let mut candidate = String::new();
@@ -108,8 +136,14 @@ impl ConfigManager {
         for line in diff.lines() {
             if !line.is_empty() {
                 let line = remove_first_char(line);
+                let paths = self.paths(line.clone());
+                if paths.is_none() {
+                    continue;
+                }
+                let paths = paths.unwrap();
                 for tx in self.cm_txes.iter() {
-                    tx.send(ConfigRequest::new(line.clone())).unwrap();
+                    tx.send(ConfigRequest::new(line.clone(), paths.clone()))
+                        .unwrap();
                 }
             }
         }
@@ -141,7 +175,7 @@ impl ConfigManager {
         }
     }
 
-    pub fn execute(&self, mode: &Mode, input: &String) -> (ExecCode, String) {
+    pub fn execute(&self, mode: &Mode, input: &String) -> (ExecCode, String, Vec<CommandPath>) {
         let state = State::new();
         let (code, _comps, state) = parse(
             input,
@@ -151,21 +185,22 @@ impl ConfigManager {
         );
         if state.set {
             paths_dump(&state.paths);
-            config_set(state.paths, self.store.candidate.borrow().clone());
-            (ExecCode::Show, String::from(""))
+            config_set(state.paths.clone(), self.store.candidate.borrow().clone());
+            (ExecCode::Show, String::from(""), state.paths)
         } else if state.delete {
             paths_dump(&state.paths);
-            delete(state.paths, self.store.candidate.borrow().clone());
-            (ExecCode::Show, String::from(""))
+            delete(state.paths.clone(), self.store.candidate.borrow().clone());
+            (ExecCode::Show, String::from(""), state.paths)
         } else if state.show && state.paths.len() > 1 {
             paths_dump(&state.paths);
-            (ExecCode::RedirectShow, input.clone())
+            (ExecCode::RedirectShow, input.clone(), state.paths)
         } else {
             let path = paths_str(&state.paths);
             if let Some(f) = mode.fmap.get(&path) {
-                f(self)
+                let (code, input) = f(self);
+                (code, input, state.paths)
             } else {
-                (code, "".to_string())
+                (code, "".to_string(), state.paths)
             }
         }
     }
@@ -187,7 +222,7 @@ impl ConfigManager {
                 let mut resp = ExecuteResponse::new();
                 match self.modes.get(&req.mode) {
                     Some(mode) => {
-                        (resp.code, resp.output) = self.execute(mode, &req.input);
+                        (resp.code, resp.output, resp.paths) = self.execute(mode, &req.input);
                     }
                     None => {
                         resp.code = ExecCode::Nomatch;
