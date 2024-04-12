@@ -1,10 +1,13 @@
+use super::link::link_show;
 use super::os::message::{OsChannel, OsLink, OsMessage};
 use super::os::spawn_os_dump;
 use super::Link;
-use crate::config::{ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
-use std::collections::BTreeMap;
+use crate::config::{yang_path, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
+use std::collections::{BTreeMap, HashMap};
 //use std::fmt::Write;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+type Callback = fn(&Rib, Vec<String>) -> String;
 
 #[derive(Debug)]
 pub struct Rib {
@@ -15,19 +18,36 @@ pub struct Rib {
     pub os: OsChannel,
     pub links: BTreeMap<u32, Link>,
     //pub rib: prefix_trie::PrefixMap<Ipv4Net, u32>,
+    pub callbacks: HashMap<String, Callback>,
+}
+
+pub fn rib_show(rib: &Rib, args: Vec<String>) -> String {
+    "this is show ip route output".to_string()
 }
 
 impl Rib {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        Rib {
+        let mut rib = Rib {
             tx,
             rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             os: OsChannel::new(),
             links: BTreeMap::new(),
-        }
+            callbacks: HashMap::new(),
+        };
+        rib.callback_build();
+        rib
+    }
+
+    pub fn callback_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks.insert(path.to_string(), cb);
+    }
+
+    pub fn callback_build(&mut self) {
+        self.callback_add("/show/interfaces", link_show);
+        self.callback_add("/show/ip/route", rib_show);
     }
 
     pub fn link_add(&mut self, oslink: OsLink) {
@@ -67,11 +87,11 @@ impl Rib {
     }
 
     async fn process_show_message(&self, msg: DisplayRequest) {
-        for path in msg.paths.iter() {
-            println!("P: {:?}", path);
+        let (path, _args) = yang_path(&msg.paths);
+        if let Some(f) = self.callbacks.get(&path) {
+            let output = f(self, Vec::new());
+            msg.resp.send(output).await.unwrap();
         }
-        println!("S: {}", msg.line);
-        self.link_show(msg.resp.clone()).await;
     }
 
     pub async fn event_loop(&mut self) {
