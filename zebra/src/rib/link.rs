@@ -71,19 +71,17 @@ pub struct LinkFlags {
 //     output errors 0, aborted 0, carrier 0, fifo 0, heartbeat 0, window 0
 //     collisions 0
 
-impl Rib {
-    pub async fn link_show(&self, resp: mpsc::Sender<String>) {
-        let mut buf = String::new();
-        for (_, link) in self.links.iter() {
-            write!(&mut buf, "Interface: {}\n", link.name).unwrap();
-            write!(&mut buf, "  {}\n", link.index).unwrap();
-            write!(
-                &mut buf,
-                "  index {} metric {} mtu {}\n",
-                link.index, link.metric, link.mtu
-            )
-            .unwrap();
-        }
-        resp.send(buf).await.unwrap();
+pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
+    let mut buf = String::new();
+    for (_, link) in rib.links.iter() {
+        write!(&mut buf, "Interface: {}\n", link.name).unwrap();
+        write!(&mut buf, "  {}\n", link.index).unwrap();
+        write!(
+            &mut buf,
+            "  index {} metric {} mtu {}\n",
+            link.index, link.metric, link.mtu
+        )
+        .unwrap();
     }
+    buf
 }

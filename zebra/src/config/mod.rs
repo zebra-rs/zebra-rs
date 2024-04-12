@@ -18,6 +18,7 @@ mod comps;
 pub use comps::Completion;
 
 mod paths;
+pub use paths::yang_path;
 
 mod api;
 pub use api::{ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
