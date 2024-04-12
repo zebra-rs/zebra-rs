@@ -449,7 +449,7 @@ pub fn parse(
 
     // Transition to next yang match state.
     let mut next = entry.clone();
-    println!("B: {:?} {:?}", s.ymatch, entry.name);
+    // println!("B: {:?} {:?}", s.ymatch, entry.name);
     match s.ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             next = mx.matched_entry.clone();
@@ -472,7 +472,7 @@ pub fn parse(
         }
         YangMatch::LeafMatched | YangMatch::LeafListMatched => {}
     }
-    println!("A: {:?} {:?}", s.ymatch, next.name);
+    // println!("A: {:?} {:?}", s.ymatch, next.name);
 
     // Delay YANG match transition to avoid elem type.
     if s.ymatch == YangMatch::Leaf && mx.matched_entry.is_empty_leaf() {
