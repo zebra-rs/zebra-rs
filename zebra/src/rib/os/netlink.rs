@@ -184,7 +184,7 @@ async fn route_dump(
     }
 }
 
-pub async fn spawn_os_dump(rib_tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+pub async fn os_dump_spawn(rib_tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
     let (mut connection, handle, mut messages) = new_connection()?;
 
     let mgroup_flags = RTMGRP_LINK
@@ -211,4 +211,64 @@ pub async fn spawn_os_dump(rib_tx: UnboundedSender<OsMessage>) -> std::io::Resul
     route_dump(handle.clone(), rib_tx.clone(), IpVersion::V6).await;
 
     Ok(())
+}
+
+// Interface eth0
+//   Hardware is Ethernet, address is 02:bd:18:c5:e1:14
+//   index 2 metric 1 mtu 1500
+//   <UP,BROADCAST,MULTICAST>
+//   VRF Binding: Not bound
+//   Label switching is disabled
+//   inet 172.31.17.11/20
+//   inet6 fe80::bd:18ff:fec5:e114/64
+//     input packets 952254372, bytes 702873607754, dropped 6554, multicast packets 0
+//     input errors 0, length 0, overrun 0, CRC 0, frame 0, fifo 0, missed 0
+//     output packets 1482872126, bytes 125318461158, dropped 0
+//     output errors 0, aborted 0, carrier 0, fifo 0, heartbeat 0, window 0
+//     collisions 0
+
+struct LinkStats {
+    rx_packets: u32,
+    rx_bytes: u64,
+    rx_errors: u32,
+    rx_dropped: u32,
+    rx_multicast: u32,
+    rx_compressed: u32,
+    rx_length_errors: u32,
+    rx_over_errors: u32,
+    rx_crc_errors: u32,
+    rx_frame_errors: u32,
+    rx_fifo_errors: u32,
+    rx_missed_errors: u32,
+    tx_packets: u32,
+    tx_bytes: u64,
+    tx_errors: u32,
+    tx_dropped: u32,
+    tx_compressed: u32,
+    tx_aborted_errors: u32,
+    tx_carrier_errors: u32,
+    tx_fifo_errors: u32,
+    tx_heartbeat_errors: u32,
+    tx_window_errors: u32,
+    collisions: u32,
+}
+
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::Path;
+
+fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(filename)?;
+    Ok(io::BufReader::new(file).lines())
+}
+
+pub fn os_traffic_show(link: &link::Link, buf: &mut String) {
+    if let Ok(lines) = read_lines("/proc/net/dev") {
+        for line in lines.flatten() {
+            println!("{}", line.len());
+        }
+    }
 }

@@ -1,6 +1,6 @@
 use super::link::{link_show, LinkAddr};
 use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage};
-use super::os::spawn_os_dump;
+use super::os::os_dump_spawn;
 use super::Link;
 use crate::config::{yang_path, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
 use std::collections::{BTreeMap, HashMap};
@@ -22,6 +22,36 @@ pub struct Rib {
 
 pub fn rib_show(_rib: &Rib, _args: Vec<String>) -> String {
     "this is show ip route output".to_string()
+}
+
+pub fn link_addr_update(link: &mut Link, addr: LinkAddr) {
+    if addr.is_v4() {
+        for a in link.addr4.iter() {
+            if a.addr == addr.addr {
+                return;
+            }
+        }
+        link.addr4.push(addr);
+    } else {
+        for a in link.addr6.iter() {
+            if a.addr == addr.addr {
+                return;
+            }
+        }
+        link.addr6.push(addr);
+    }
+}
+
+pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
+    if addr.is_v4() {
+        if let Some(remove_index) = link.addr4.iter().position(|x| x.addr == addr.addr) {
+            link.addr4.remove(remove_index);
+        }
+    } else {
+        if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
+            link.addr6.remove(remove_index);
+        }
+    }
 }
 
 impl Rib {
@@ -58,20 +88,17 @@ impl Rib {
         self.links.remove(&oslink.index);
     }
 
-    pub fn addr_add(&mut self, os_addr: OsAddr) {
-        let addr = LinkAddr::from(os_addr);
+    pub fn addr_add(&mut self, osaddr: OsAddr) {
+        let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.link_index) {
-            if addr.is_v4() {
-                link.addr4.push(addr);
-            } else {
-                link.addr6.push(addr);
-            }
+            link_addr_update(link, addr);
         }
     }
 
-    pub fn addr_del(&mut self, addr: OsAddr) {
-        if let Some(_link) = self.links.get_mut(&addr.link_index) {
-            //link.addr.push(addr);
+    pub fn addr_del(&mut self, osaddr: OsAddr) {
+        let addr = LinkAddr::from(osaddr);
+        if let Some(link) = self.links.get_mut(&addr.link_index) {
+            link_addr_del(link, addr);
         }
     }
 
@@ -111,7 +138,7 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
-        spawn_os_dump(self.os.tx.clone()).await.unwrap();
+        os_dump_spawn(self.os.tx.clone()).await.unwrap();
 
         loop {
             tokio::select! {
