@@ -47,10 +47,8 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
         if let Some(remove_index) = link.addr4.iter().position(|x| x.addr == addr.addr) {
             link.addr4.remove(remove_index);
         }
-    } else {
-        if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
-            link.addr6.remove(remove_index);
-        }
+    } else if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
+        link.addr6.remove(remove_index);
     }
 }
 

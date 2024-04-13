@@ -95,9 +95,7 @@ impl ConfigManager {
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
         let mode = self.modes.get("configure");
-        if mode.is_none() {
-            return None;
-        }
+        mode?;
         let mode = mode.unwrap();
         let state = State::new();
 
@@ -107,9 +105,7 @@ impl ConfigManager {
                 entry = Some(e.clone());
             }
         }
-        if entry.is_none() {
-            return None;
-        }
+        entry.as_ref()?;
         let entry = entry.unwrap();
 
         let (code, _comps, state) = parse(&input, entry, None, state);
