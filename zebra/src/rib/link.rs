@@ -134,7 +134,7 @@ impl fmt::Display for LinkFlags {
     }
 }
 
-fn link_info_show(link: &Link, buf: &mut String) {
+fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
     write!(buf, "Interface: {}\n", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
     if link.link_type == LinkType::Ethernet {
@@ -162,16 +162,17 @@ fn link_info_show(link: &Link, buf: &mut String) {
     for addr in link.addr6.iter() {
         write!(buf, "  inet6 {}\n", addr.addr).unwrap();
     }
+    cb(&link.name, buf);
 }
 
 pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
+    let cb = os_traffic_dump();
+
     let mut buf = String::new();
     if args.is_empty() {
         for (_, link) in rib.links.iter() {
-            link_info_show(link, &mut buf);
+            link_info_show(link, &mut buf, &cb);
         }
     }
-    // OS specific traffic counter.
-    os_traffic_dump();
     buf
 }
