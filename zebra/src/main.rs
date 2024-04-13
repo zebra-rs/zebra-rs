@@ -27,8 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bgp = Bgp::new();
 
     let mut config = ConfigManager::new(yang_path());
-    config.subscribe(rib.cm.tx.clone());
-    config.subscribe(bgp.cm.tx.clone());
+    config.subscribe("rib", rib.cm.tx.clone());
+    config.subscribe("bgp", bgp.cm.tx.clone());
 
     let mut cli = Cli::new(config.tx.clone());
     cli.subscribe(rib.show.tx.clone());

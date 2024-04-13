@@ -36,17 +36,17 @@ impl Link {
     //     (self.flags.0 & IFF_LOOPBACK) == IFF_LOOPBACK
     // }
 
-    // pub fn is_up(&self) -> bool {
-    //     (self.flags.0 & IFF_UP) == IFF_UP
-    // }
+    pub fn is_up(&self) -> bool {
+        (self.flags.0 & IFF_UP) == IFF_UP
+    }
 
-    // pub fn is_running(&self) -> bool {
-    //     (self.flags.0 & IFF_RUNNING) == IFF_RUNNING
-    // }
+    pub fn is_running(&self) -> bool {
+        (self.flags.0 & IFF_RUNNING) == IFF_RUNNING
+    }
 
-    // pub fn is_up_and_running(&self) -> bool {
-    //     self.is_up() && self.is_running()
-    // }
+    pub fn is_up_and_running(&self) -> bool {
+        self.is_up() && self.is_running()
+    }
 }
 
 #[derive(Default, Debug)]
@@ -148,6 +148,16 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
         link.index, link.metric, link.mtu
     )
     .unwrap();
+    write!(
+        buf,
+        "  Link is {}",
+        if link.is_up_and_running() {
+            "Up\n"
+        } else {
+            "Down\n"
+        }
+    )
+    .unwrap();
     write!(buf, "  {}\n", link.flags).unwrap();
     write!(buf, "  VRF Binding: Not bound\n").unwrap();
     write!(
@@ -167,11 +177,20 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
 
 pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
     let cb = os_traffic_dump();
-
     let mut buf = String::new();
-    if args.is_empty() {
-        for (_, link) in rib.links.iter() {
-            link_info_show(link, &mut buf, &cb);
+
+    if args.len() > 0 {
+        let link_name = &args[0];
+        if let Some(link) = rib.link_by_name(&link_name) {
+            link_info_show(link, &mut buf, &cb)
+        } else {
+            write!(buf, "% No interface found").unwrap();
+        }
+    } else {
+        if args.is_empty() {
+            for (_, link) in rib.links.iter() {
+                link_info_show(link, &mut buf, &cb);
+            }
         }
     }
     buf
