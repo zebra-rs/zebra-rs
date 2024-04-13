@@ -279,9 +279,9 @@ use scan_fmt::scan_fmt;
 pub fn os_traffic_parse(version: i32, line: &String) {
     let mut stats = LinkStats::new();
     if version == 3 {
-        let test = "84764 372 0 0 0 0 0 0 84764 372 0 0 0 0 0 0";
-        println!("verison: 3");
+        let mut link_name = String::new();
         (
+            link_name,
             stats.rx_bytes,
             stats.rx_packets,
             stats.rx_errors,
@@ -299,8 +299,9 @@ pub fn os_traffic_parse(version: i32, line: &String) {
             stats.tx_carrier_errors,
             stats.tx_compressed,
         ) = scan_fmt!(
-            test,
-            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            line,
+            "{}: {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            String,
             u64,
             u32,
             u32,
