@@ -10,7 +10,7 @@ pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::os_dump_spawn;
 #[cfg(target_os = "macos")]
-pub use macos::os_traffic_show;
+pub use macos::os_traffic_dump;
 
 pub mod message;
 
