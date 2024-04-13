@@ -227,8 +227,9 @@ pub async fn os_dump_spawn(rib_tx: UnboundedSender<OsMessage>) -> std::io::Resul
 //     output errors 0, aborted 0, carrier 0, fifo 0, heartbeat 0, window 0
 //     collisions 0
 
-#[derive(Default)]
-struct LinkStats {
+#[derive(Default, Debug)]
+pub(crate) struct LinkStats {
+    link_name: String,
     rx_packets: u32,
     rx_bytes: u64,
     rx_errors: u32,
@@ -275,13 +276,13 @@ where
 }
 
 use scan_fmt::scan_fmt;
+use std::error::Error;
 
-pub fn os_traffic_parse(version: i32, line: &String) {
+pub fn os_traffic_parse(version: i32, line: &String) -> Result<LinkStats, Box<dyn Error>> {
     let mut stats = LinkStats::new();
     if version == 3 {
-        let mut link_name = String::new();
         (
-            link_name,
+            stats.link_name,
             stats.rx_bytes,
             stats.rx_packets,
             stats.rx_errors,
@@ -318,9 +319,9 @@ pub fn os_traffic_parse(version: i32, line: &String) {
             u32,
             u32,
             u32
-        )
-        .unwrap();
+        )?;
     }
+    Ok(stats)
 }
 
 pub fn os_traffic_dump() {
@@ -339,7 +340,9 @@ pub fn os_traffic_dump() {
         }
         for line in lines {
             println!("{}", line);
-            os_traffic_parse(version, &line);
+            if let Ok(stats) = os_traffic_parse(version, &line) {
+                println!("{:?}", stats);
+            }
         }
     }
 }
