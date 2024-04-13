@@ -137,16 +137,6 @@ impl fmt::Display for LinkFlags {
 fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
     write!(buf, "Interface: {}\n", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
-    write!(
-        buf,
-        " Link is {}",
-        if link.is_up_and_running() {
-            "Up"
-        } else {
-            "Down"
-        }
-    )
-    .unwrap();
     if link.link_type == LinkType::Ethernet {
         write!(buf, "\n").unwrap();
     } else {
@@ -156,6 +146,16 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
         buf,
         "  index {} metric {} mtu {}\n",
         link.index, link.metric, link.mtu
+    )
+    .unwrap();
+    write!(
+        buf,
+        "  Link is {}",
+        if link.is_up_and_running() {
+            "Up\n"
+        } else {
+            "Down\n"
+        }
     )
     .unwrap();
     write!(buf, "  {}\n", link.flags).unwrap();
