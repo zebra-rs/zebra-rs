@@ -10,19 +10,22 @@ pub struct ConfigChannel {
 }
 
 #[derive(Debug)]
+pub enum ConfigOp {
+    Set,
+    Delete,
+    Completion,
+}
+
+#[derive(Debug)]
 pub struct ConfigRequest {
     pub input: String,
     pub paths: Vec<CommandPath>,
-    pub set: bool,
+    pub op: ConfigOp,
 }
 
 impl ConfigRequest {
-    pub fn new(input: String, paths: Vec<CommandPath>) -> Self {
-        Self {
-            input,
-            paths,
-            set: true,
-        }
+    pub fn new(input: String, paths: Vec<CommandPath>, op: ConfigOp) -> Self {
+        Self { input, paths, op }
     }
 }
 

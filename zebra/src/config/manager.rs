@@ -1,4 +1,4 @@
-use super::api::{CompletionResponse, ExecuteResponse, Message};
+use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, config_set, delete};
@@ -138,8 +138,12 @@ impl ConfigManager {
                 }
                 let paths = paths.unwrap();
                 for tx in self.cm_txes.iter() {
-                    tx.send(ConfigRequest::new(line.clone(), paths.clone()))
-                        .unwrap();
+                    tx.send(ConfigRequest::new(
+                        line.clone(),
+                        paths.clone(),
+                        ConfigOp::Set,
+                    ))
+                    .unwrap();
                 }
             }
         }

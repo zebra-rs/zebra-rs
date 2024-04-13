@@ -68,6 +68,14 @@ impl Rib {
         rib
     }
 
+    pub fn link_by_name(&self, link_name: &str) -> Option<&Link> {
+        if let Some((_, value)) = self.links.iter().find(|(_, v)| &v.name == link_name) {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
     }
@@ -128,9 +136,9 @@ impl Rib {
     }
 
     async fn process_show_message(&self, msg: DisplayRequest) {
-        let (path, _args) = yang_path(&msg.paths);
+        let (path, args) = yang_path(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
-            let output = f(self, Vec::new());
+            let output = f(self, args);
             msg.resp.send(output).await.unwrap();
         }
     }
