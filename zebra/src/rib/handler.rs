@@ -2,7 +2,9 @@ use super::link::{link_show, LinkAddr};
 use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage};
 use super::os::os_dump_spawn;
 use super::Link;
-use crate::config::{yang_path, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
+use crate::config::{
+    yang_path, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
+};
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -76,6 +78,10 @@ impl Rib {
         }
     }
 
+    pub fn link_comps(&self) -> Vec<String> {
+        self.links.values().map(|link| link.name.clone()).collect()
+    }
+
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
     }
@@ -131,8 +137,10 @@ impl Rib {
         }
     }
 
-    fn process_cm_message(&self, _msg: ConfigRequest) {
-        // println!("CM: {}", msg);
+    fn process_cm_message(&self, msg: ConfigRequest) {
+        if msg.op == ConfigOp::Completion {
+            msg.resp.unwrap().send(self.link_comps()).unwrap();
+        }
     }
 
     async fn process_show_message(&self, msg: DisplayRequest) {

@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
+use tokio::sync::oneshot;
 
 pub struct ConfigStore {
     pub running: RefCell<Rc<Config>>,
@@ -58,7 +59,8 @@ pub struct ConfigManager {
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
-    pub cm_txes: Vec<UnboundedSender<ConfigRequest>>,
+    pub cm_clients: HashMap<String, UnboundedSender<ConfigRequest>>,
+    // pub cm_txes: Vec<UnboundedSender<ConfigRequest>>,
 }
 
 impl ConfigManager {
@@ -70,7 +72,7 @@ impl ConfigManager {
             store: ConfigStore::new(),
             tx,
             rx,
-            cm_txes: Vec::new(),
+            cm_clients: HashMap::new(),
         };
         cm.init();
         cm
@@ -89,8 +91,8 @@ impl ConfigManager {
         self.modes.insert("configure".to_string(), configure_mode);
     }
 
-    pub fn subscribe(&mut self, cm_tx: UnboundedSender<ConfigRequest>) {
-        self.cm_txes.push(cm_tx);
+    pub fn subscribe(&mut self, name: &str, cm_tx: UnboundedSender<ConfigRequest>) {
+        self.cm_clients.insert(name.to_owned(), cm_tx);
     }
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
@@ -137,7 +139,7 @@ impl ConfigManager {
                     continue;
                 }
                 let paths = paths.unwrap();
-                for tx in self.cm_txes.iter() {
+                for (_, tx) in self.cm_clients.iter() {
                     tx.send(ConfigRequest::new(
                         line.clone(),
                         paths.clone(),
@@ -205,18 +207,26 @@ impl ConfigManager {
         }
     }
 
-    pub fn completion(&self, mode: &Mode, input: &String) -> (ExecCode, Vec<Completion>) {
+    pub async fn completion(&self, mode: &Mode, input: &String) -> (ExecCode, Vec<Completion>) {
         let state = State::new();
-        let (code, comps, _state) = parse(
+        let (code, mut comps, state) = parse(
             input,
             mode.entry.clone(),
             Some(self.store.candidate.borrow().clone()),
             state,
         );
+        if state.dcomp {
+            if let Some(tx) = self.cm_clients.get("rib") {
+                let links = dcomp(tx.clone()).await;
+                for link in links.iter() {
+                    comps.push(Completion::new_name(link));
+                }
+            }
+        }
         (code, comps)
     }
 
-    pub fn process_message(&mut self, m: Message) {
+    pub async fn process_message(&mut self, m: Message) {
         match m {
             Message::Execute(req) => {
                 let mut resp = ExecuteResponse::new();
@@ -234,7 +244,7 @@ impl ConfigManager {
                 let mut resp = CompletionResponse::new();
                 match self.modes.get(&req.mode) {
                     Some(mode) => {
-                        (resp.code, resp.comps) = self.completion(mode, &req.input);
+                        (resp.code, resp.comps) = self.completion(mode, &req.input).await;
                     }
                     None => {
                         resp.code = ExecCode::Nomatch;
@@ -251,8 +261,20 @@ pub async fn event_loop(mut config: ConfigManager) {
     loop {
         tokio::select! {
             Some(msg) = config.rx.recv() => {
-                config.process_message(msg);
+                config.process_message(msg).await;
             }
         }
     }
+}
+
+async fn dcomp(tx: UnboundedSender<ConfigRequest>) -> Vec<String> {
+    let (comp_tx, comp_rx) = oneshot::channel();
+    let req = ConfigRequest {
+        input: "".to_string(),
+        paths: Vec::new(),
+        op: ConfigOp::Completion,
+        resp: Some(comp_tx),
+    };
+    tx.send(req).unwrap();
+    comp_rx.await.unwrap()
 }

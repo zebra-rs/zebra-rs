@@ -9,7 +9,7 @@ pub struct ConfigChannel {
     pub rx: UnboundedReceiver<ConfigRequest>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ConfigOp {
     Set,
     Delete,
@@ -21,11 +21,17 @@ pub struct ConfigRequest {
     pub input: String,
     pub paths: Vec<CommandPath>,
     pub op: ConfigOp,
+    pub resp: Option<Sender<Vec<String>>>,
 }
 
 impl ConfigRequest {
     pub fn new(input: String, paths: Vec<CommandPath>, op: ConfigOp) -> Self {
-        Self { input, paths, op }
+        Self {
+            input,
+            paths,
+            op,
+            resp: None,
+        }
     }
 }
 

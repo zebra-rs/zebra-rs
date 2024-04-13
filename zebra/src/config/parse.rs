@@ -49,6 +49,7 @@ pub struct State {
     pub delete: bool,
     pub show: bool,
     pub paths: Vec<CommandPath>,
+    pub dcomp: bool,
 }
 
 impl State {
@@ -60,6 +61,7 @@ impl State {
             show: false,
             paths: Vec::new(),
             index: 0usize,
+            dcomp: false,
         }
     }
 }
@@ -389,6 +391,7 @@ pub fn parse(
     mut s: State,
 ) -> (ExecCode, Vec<Completion>, State) {
     // Config match for "set" and "delete".
+    s.dcomp = false;
     let mut cx = Match::new();
     if s.set || s.delete {
         if let Some(ref config) = config {
@@ -473,7 +476,6 @@ pub fn parse(
         }
         YangMatch::LeafMatched | YangMatch::LeafListMatched => {}
     }
-    // println!("A: {:?} {:?}", s.ymatch, next.name);
 
     // Delay YANG match transition to avoid elem type.
     if s.ymatch == YangMatch::Leaf && mx.matched_entry.is_empty_leaf() {
@@ -482,6 +484,7 @@ pub fn parse(
     if s.ymatch == YangMatch::Dir && mx.matched_entry.presence {
         s.ymatch = YangMatch::DirMatched;
     }
+    // println!("A: {:?} {:?}", s.ymatch, next.name);
 
     // Elem for set/delete/exec func.
     let path = if ymatch_complete(s.ymatch) {
@@ -526,7 +529,7 @@ pub fn parse(
         if s.delete {
             comps_add_config(&mut mx.comps, s.ymatch, &config);
         } else {
-            comps_add_all(&mut mx.comps, s.ymatch, &next);
+            comps_add_all(&mut mx.comps, s.ymatch, &next, &mut s);
 
             if s.set {
                 let mut comps = Vec::new();
