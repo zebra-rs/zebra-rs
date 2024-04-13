@@ -1,4 +1,5 @@
 use super::os::message::{OsAddr, OsLink};
+use super::os::os_traffic_dump;
 use super::Rib;
 use ipnet::IpNet;
 use std::fmt::{self, Write};
@@ -133,21 +134,7 @@ impl fmt::Display for LinkFlags {
     }
 }
 
-// Interface eth0
-//   Hardware is Ethernet, address is 02:bd:18:c5:e1:14
-//   index 2 metric 1 mtu 1500
-//   <UP,BROADCAST,MULTICAST>
-//   VRF Binding: Not bound
-//   Label switching is disabled
-//   inet 172.31.17.11/20
-//   inet6 fe80::bd:18ff:fec5:e114/64
-//     input packets 952254372, bytes 702873607754, dropped 6554, multicast packets 0
-//     input errors 0, length 0, overrun 0, CRC 0, frame 0, fifo 0, missed 0
-//     output packets 1482872126, bytes 125318461158, dropped 0
-//     output errors 0, aborted 0, carrier 0, fifo 0, heartbeat 0, window 0
-//     collisions 0
-
-fn link_info_show(link: &Link, buf: &mut String) {
+fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
     write!(buf, "Interface: {}\n", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
     if link.link_type == LinkType::Ethernet {
@@ -175,13 +162,16 @@ fn link_info_show(link: &Link, buf: &mut String) {
     for addr in link.addr6.iter() {
         write!(buf, "  inet6 {}\n", addr.addr).unwrap();
     }
+    cb(&link.name, buf);
 }
 
 pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
+    let cb = os_traffic_dump();
+
     let mut buf = String::new();
     if args.is_empty() {
         for (_, link) in rib.links.iter() {
-            link_info_show(link, &mut buf);
+            link_info_show(link, &mut buf, &cb);
         }
     }
     buf

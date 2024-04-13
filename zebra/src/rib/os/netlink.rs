@@ -184,7 +184,7 @@ async fn route_dump(
     }
 }
 
-pub async fn spawn_os_dump(rib_tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+pub async fn os_dump_spawn(rib_tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
     let (mut connection, handle, mut messages) = new_connection()?;
 
     let mgroup_flags = RTMGRP_LINK
@@ -211,4 +211,227 @@ pub async fn spawn_os_dump(rib_tx: UnboundedSender<OsMessage>) -> std::io::Resul
     route_dump(handle.clone(), rib_tx.clone(), IpVersion::V6).await;
 
     Ok(())
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct LinkStats {
+    link_name: String,
+    rx_packets: u32,
+    rx_bytes: u64,
+    rx_errors: u32,
+    rx_dropped: u32,
+    rx_multicast: u32,
+    rx_compressed: u32,
+    rx_frame_errors: u32,
+    rx_fifo_errors: u32,
+    tx_packets: u32,
+    tx_bytes: u64,
+    tx_errors: u32,
+    tx_dropped: u32,
+    tx_compressed: u32,
+    tx_carrier_errors: u32,
+    tx_fifo_errors: u32,
+    collisions: u32,
+}
+
+impl LinkStats {
+    pub fn new() -> Self {
+        Self {
+            ..Default::default()
+        }
+    }
+}
+
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::Path;
+
+fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(filename)?;
+    Ok(io::BufReader::new(file).lines())
+}
+
+use scan_fmt::scan_fmt;
+use std::error::Error;
+
+pub fn os_traffic_parse(version: i32, line: &String) -> Result<LinkStats, Box<dyn Error>> {
+    let mut stats = LinkStats::new();
+    if version == 3 {
+        (
+            stats.link_name,
+            stats.rx_bytes,
+            stats.rx_packets,
+            stats.rx_errors,
+            stats.rx_dropped,
+            stats.rx_fifo_errors,
+            stats.rx_frame_errors,
+            stats.rx_compressed,
+            stats.rx_multicast,
+            stats.tx_bytes,
+            stats.tx_packets,
+            stats.tx_errors,
+            stats.tx_dropped,
+            stats.tx_fifo_errors,
+            stats.collisions,
+            stats.tx_carrier_errors,
+            stats.tx_compressed,
+        ) = scan_fmt!(
+            line,
+            "{}: {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            String,
+            u64,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u64,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32
+        )?;
+    } else if version == 2 {
+        (
+            stats.link_name,
+            stats.rx_bytes,
+            stats.rx_packets,
+            stats.rx_errors,
+            stats.rx_dropped,
+            stats.rx_fifo_errors,
+            stats.rx_frame_errors,
+            stats.tx_bytes,
+            stats.tx_packets,
+            stats.tx_errors,
+            stats.tx_dropped,
+            stats.tx_fifo_errors,
+            stats.collisions,
+            stats.tx_carrier_errors,
+        ) = scan_fmt!(
+            line,
+            "{}: {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            String,
+            u64,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u64,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32
+        )?;
+    } else if version == 1 {
+        (
+            stats.link_name,
+            stats.rx_packets,
+            stats.rx_errors,
+            stats.rx_dropped,
+            stats.rx_fifo_errors,
+            stats.rx_frame_errors,
+            stats.tx_packets,
+            stats.tx_errors,
+            stats.tx_dropped,
+            stats.tx_fifo_errors,
+            stats.collisions,
+            stats.tx_carrier_errors,
+        ) = scan_fmt!(
+            line,
+            "{}: {} {} {} {} {} {} {} {} {} {} {}",
+            String,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32,
+            u32
+        )?;
+    }
+    Ok(stats)
+}
+
+use std::collections::HashMap;
+use std::fmt::Write;
+
+// Interface eth0
+//   Hardware is Ethernet, address is 02:bd:18:c5:e1:14
+//   index 2 metric 1 mtu 1500
+//   <UP,BROADCAST,MULTICAST>
+//   VRF Binding: Not bound
+//   Label switching is disabled
+//   inet 172.31.17.11/20
+//   inet6 fe80::bd:18ff:fec5:e114/64
+//     input packets 952254372, bytes 702873607754, dropped 6554, multicast packets 0
+//     input errors 0, length 0, overrun 0, CRC 0, frame 0, fifo 0, missed 0
+//     output packets 1482872126, bytes 125318461158, dropped 0
+//     output errors 0, aborted 0, carrier 0, fifo 0, heartbeat 0, window 0
+//     collisions 0
+
+pub fn os_traffic_dump() -> impl Fn(&String, &mut String) {
+    let mut stat_map = HashMap::new();
+    if let Ok(lines) = read_lines("/proc/net/dev") {
+        let mut lines = lines.flatten();
+        if let Some(_) = lines.next() {
+            // Simply ignore first line.
+        }
+        let mut version = 1;
+        if let Some(second) = lines.next() {
+            if second.contains("compressed") {
+                version = 3
+            } else if second.contains("bytes") {
+                version = 2;
+            }
+        }
+        for line in lines {
+            if let Ok(stats) = os_traffic_parse(version, &line) {
+                stat_map.insert(stats.link_name.clone(), stats);
+            }
+        }
+    }
+    move |link_name: &String, buf: &mut String| {
+        if let Some(stat) = stat_map.get(link_name) {
+            write!(
+                buf,
+                "    input packets {}, bytes {}, dropped {}, multicast packets {}\n",
+                stat.rx_packets, stat.rx_bytes, stat.rx_dropped, stat.rx_multicast
+            )
+            .unwrap();
+            write!(
+                buf,
+                "    input errors {}, frame {}, fifo {}, compressed {}\n",
+                stat.rx_errors, stat.rx_frame_errors, stat.rx_fifo_errors, stat.rx_compressed
+            )
+            .unwrap();
+            write!(
+                buf,
+                "    output packets {}, bytes {}, dropped {}\n",
+                stat.tx_packets, stat.tx_bytes, stat.tx_dropped
+            )
+            .unwrap();
+            write!(
+                buf,
+                "    output errors {}, carrier {}, fifo {}, compressed {}\n",
+                stat.tx_errors, stat.tx_carrier_errors, stat.tx_fifo_errors, stat.tx_compressed
+            )
+            .unwrap();
+            write!(buf, "    collisions {}\n", stat.collisions).unwrap();
+        }
+    }
 }
