@@ -32,7 +32,7 @@ fn os_dump(tx: UnboundedSender<OsMessage>) {
     }
 }
 
-pub async fn spawn_os_dump(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+pub async fn os_dump_spawn(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
     os_dump(tx);
 
     Ok(())
