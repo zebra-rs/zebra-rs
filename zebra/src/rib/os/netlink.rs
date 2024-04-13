@@ -300,7 +300,7 @@ pub fn os_traffic_parse(version: i32, line: &String) {
             stats.tx_compressed,
         ) = scan_fmt!(
             test,
-            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
             u64,
             u32,
             u32,
