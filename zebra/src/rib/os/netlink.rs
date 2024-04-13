@@ -14,6 +14,8 @@ use rtnetlink::{
     },
     new_connection, IpVersion,
 };
+use std::collections::HashMap;
+use std::fmt::Write;
 use std::net::IpAddr;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -366,23 +368,6 @@ pub fn os_traffic_parse(version: i32, line: &String) -> Result<LinkStats, Box<dy
     }
     Ok(stats)
 }
-
-use std::collections::HashMap;
-use std::fmt::Write;
-
-// Interface eth0
-//   Hardware is Ethernet, address is 02:bd:18:c5:e1:14
-//   index 2 metric 1 mtu 1500
-//   <UP,BROADCAST,MULTICAST>
-//   VRF Binding: Not bound
-//   Label switching is disabled
-//   inet 172.31.17.11/20
-//   inet6 fe80::bd:18ff:fec5:e114/64
-//     input packets 952254372, bytes 702873607754, dropped 6554, multicast packets 0
-//     input errors 0, length 0, overrun 0, CRC 0, frame 0, fifo 0, missed 0
-//     output packets 1482872126, bytes 125318461158, dropped 0
-//     output errors 0, aborted 0, carrier 0, fifo 0, heartbeat 0, window 0
-//     collisions 0
 
 pub fn os_traffic_dump() -> impl Fn(&String, &mut String) {
     let mut stat_map = HashMap::new();
