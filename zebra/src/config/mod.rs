@@ -21,7 +21,7 @@ mod paths;
 pub use paths::yang_path;
 
 mod api;
-pub use api::{ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
+pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 
 mod commands;
 mod files;

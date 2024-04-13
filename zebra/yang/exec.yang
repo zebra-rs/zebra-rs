@@ -30,8 +30,8 @@ module exec {
     }
     list interfaces {
       ext:help "Show interface commands";
-      key "interface-name";
-      leaf interface-name {
+      key "interface";
+      leaf interface {
         type string;
       }
       leaf detail {

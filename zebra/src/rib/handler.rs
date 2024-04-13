@@ -2,7 +2,9 @@ use super::link::{link_show, LinkAddr};
 use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage};
 use super::os::os_dump_spawn;
 use super::Link;
-use crate::config::{yang_path, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel};
+use crate::config::{
+    yang_path, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
+};
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -47,10 +49,8 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
         if let Some(remove_index) = link.addr4.iter().position(|x| x.addr == addr.addr) {
             link.addr4.remove(remove_index);
         }
-    } else {
-        if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
-            link.addr6.remove(remove_index);
-        }
+    } else if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
+        link.addr6.remove(remove_index);
     }
 }
 
@@ -68,6 +68,18 @@ impl Rib {
         };
         rib.callback_build();
         rib
+    }
+
+    pub fn link_by_name(&self, link_name: &str) -> Option<&Link> {
+        if let Some((_, value)) = self.links.iter().find(|(_, v)| &v.name == link_name) {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    pub fn link_comps(&self) -> Vec<String> {
+        self.links.values().map(|link| link.name.clone()).collect()
     }
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -125,14 +137,16 @@ impl Rib {
         }
     }
 
-    fn process_cm_message(&self, _msg: ConfigRequest) {
-        // println!("CM: {}", msg);
+    fn process_cm_message(&self, msg: ConfigRequest) {
+        if msg.op == ConfigOp::Completion {
+            msg.resp.unwrap().send(self.link_comps()).unwrap();
+        }
     }
 
     async fn process_show_message(&self, msg: DisplayRequest) {
-        let (path, _args) = yang_path(&msg.paths);
+        let (path, args) = yang_path(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
-            let output = f(self, Vec::new());
+            let output = f(self, args);
             msg.resp.send(output).await.unwrap();
         }
     }

@@ -1,5 +1,5 @@
-use super::parse::PresetType;
 use super::parse::{entry_preset, ymatch_complete};
+use super::parse::{PresetType, State};
 use super::vtysh::YangMatch;
 use super::Config;
 use libyang::{Entry, TypeKind, TypeNode};
@@ -148,11 +148,36 @@ pub fn comps_add_config(
     }
 }
 
-pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entry>) {
+pub fn comps_as_key(entry: &Rc<Entry>) -> Completion {
+    Completion {
+        name: comps_leaf_string(entry),
+        help: comps_help_string(entry),
+        ymatch: YangMatch::Key,
+    }
+}
+
+pub fn comps_add_all(
+    comps: &mut Vec<Completion>,
+    ymatch: YangMatch,
+    entry: &Rc<Entry>,
+    s: &mut State,
+) {
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             for entry in entry.dir.borrow().iter() {
                 comps.push(comps_from_entry(entry));
+            }
+        }
+        YangMatch::Key => {
+            for key in entry.key.iter() {
+                for entry in entry.dir.borrow().iter() {
+                    if &entry.name == key {
+                        comps.push(comps_as_key(entry));
+                        if entry.name == "interface" {
+                            s.dcomp = true;
+                        }
+                    }
+                }
             }
         }
         YangMatch::LeafMatched => {
@@ -172,10 +197,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
                     return;
                 }
             }
-            comps.push(Completion::new(
-                &comps_leaf_string(entry),
-                &comps_help_string(entry),
-            ));
+            comps.push(comps_as_key(entry));
         }
     }
     comps.sort_by(|a, b| a.name.cmp(&b.name));
