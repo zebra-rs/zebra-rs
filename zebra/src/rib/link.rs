@@ -167,7 +167,12 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     )
     .unwrap();
     for addr in link.addr4.iter() {
-        write!(buf, "  inet {}\n", addr.addr).unwrap();
+        write!(buf, "  inet {}", addr.addr).unwrap();
+        if addr.secondary {
+            write!(buf, " secondary\n").unwrap();
+        } else {
+            write!(buf, "\n").unwrap();
+        }
     }
     for addr in link.addr6.iter() {
         write!(buf, "  inet6 {}\n", addr.addr).unwrap();
@@ -186,11 +191,9 @@ pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
         } else {
             write!(buf, "% interface {} not found", link_name).unwrap();
         }
-    } else {
-        if args.is_empty() {
-            for (_, link) in rib.links.iter() {
-                link_info_show(link, &mut buf, &cb);
-            }
+    } else if args.is_empty() {
+        for (_, link) in rib.links.iter() {
+            link_info_show(link, &mut buf, &cb);
         }
     }
     buf

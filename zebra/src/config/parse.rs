@@ -223,7 +223,6 @@ impl Match {
     }
 
     pub fn match_string(&mut self, entry: &Rc<Entry>, input: &String, node: &TypeNode) {
-        println!("match_string {}", node.name);
         self.process(
             entry,
             match_string(input, node),
@@ -265,7 +264,6 @@ impl Match {
     }
 
     pub fn match_keyword(&mut self, entry: &Rc<Entry>, input: &String, keyword: &String) {
-        println!("match_keyword {}", keyword);
         self.process(
             entry,
             match_keyword(input, keyword),
@@ -433,7 +431,6 @@ pub fn parse(
         }
     }
 
-    println!("I: {:?}", s.ymatch);
     // Entry match.
     let mut mx = Match::new();
     match s.ymatch {
@@ -452,10 +449,6 @@ pub fn parse(
         YangMatch::LeafMatched => {
             // Nothing to do.
         }
-    }
-
-    if s.ymatch == YangMatch::Key {
-        println!("mx.count {}", mx.count);
     }
 
     // "delete" overwrite entry completion with config completion.
@@ -479,7 +472,7 @@ pub fn parse(
 
     // Transition to next yang match state.
     let mut next = entry.clone();
-    println!("B: {:?} {:?}", s.ymatch, entry.name);
+    // println!("B: {:?} {:?}", s.ymatch, entry.name);
     match s.ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             next = mx.matched_entry.clone();
@@ -510,7 +503,7 @@ pub fn parse(
     if s.ymatch == YangMatch::Dir && mx.matched_entry.presence {
         s.ymatch = YangMatch::DirMatched;
     }
-    println!("A: {:?} {:?}", s.ymatch, next.name);
+    // println!("A: {:?} {:?}", s.ymatch, next.name);
 
     // Elem for set/delete/exec func.
     let path = if ymatch_complete(s.ymatch) {

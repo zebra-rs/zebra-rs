@@ -162,15 +162,13 @@ impl Show for ShowService {
         let request = request.get_ref();
         let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
         let req = DisplayRequest {
-            line: request.line.clone(),
-            resp: bus_tx.clone(),
             paths: request.paths.clone(),
+            resp: bus_tx.clone(),
         };
         if self.txes.len() > 0 {
             let tx = self.txes[0].clone();
             tx.send(req).unwrap();
         }
-        // self.disp_tx.send(req).unwrap();
 
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {

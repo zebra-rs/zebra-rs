@@ -3,17 +3,16 @@ use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage};
 use super::os::os_dump_spawn;
 use super::Link;
 use crate::config::{
-    yang_path, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
+    path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 type Callback = fn(&Rib, Vec<String>) -> String;
 
 #[derive(Debug)]
 pub struct Rib {
-    pub tx: UnboundedSender<String>,
-    pub rx: UnboundedReceiver<String>,
+    // pub tx: UnboundedSender<String>,
+    // pub rx: UnboundedReceiver<String>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub os: OsChannel,
@@ -56,10 +55,10 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
 
 impl Rib {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        //let (tx, rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
-            tx,
-            rx,
+            //tx,
+            //rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             os: OsChannel::new(),
@@ -90,7 +89,6 @@ impl Rib {
         self.callback_add("/show/interfaces", link_show);
         self.callback_add("/show/ip/route", rib_show);
     }
-
     pub fn link_add(&mut self, oslink: OsLink) {
         if !self.links.contains_key(&oslink.index) {
             let link = Link::from(oslink);
@@ -146,7 +144,7 @@ impl Rib {
     }
 
     async fn process_show_message(&self, msg: DisplayRequest) {
-        let (path, args) = yang_path(&msg.paths);
+        let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
             let output = f(self, args);
             msg.resp.send(output).await.unwrap();

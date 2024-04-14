@@ -132,6 +132,12 @@ impl ConfigManager {
 
         for line in diff.lines() {
             if !line.is_empty() {
+                let first_char = line.chars().next().unwrap();
+                let op = if first_char == '+' {
+                    ConfigOp::Set
+                } else {
+                    ConfigOp::Delete
+                };
                 let line = remove_first_char(line);
                 let paths = self.paths(line.clone());
                 if paths.is_none() {
@@ -139,12 +145,8 @@ impl ConfigManager {
                 }
                 let paths = paths.unwrap();
                 for (_, tx) in self.cm_clients.iter() {
-                    tx.send(ConfigRequest::new(
-                        line.clone(),
-                        paths.clone(),
-                        ConfigOp::Set,
-                    ))
-                    .unwrap();
+                    tx.send(ConfigRequest::new(paths.clone(), op.clone()))
+                        .unwrap();
                 }
             }
         }
@@ -210,7 +212,7 @@ impl ConfigManager {
         if let Some(tx) = self.cm_clients.get("rib") {
             let (comp_tx, comp_rx) = oneshot::channel();
             let req = ConfigRequest {
-                input: "".to_string(),
+                // input: "".to_string(),
                 paths: Vec::new(),
                 op: ConfigOp::Completion,
                 resp: Some(comp_tx),
