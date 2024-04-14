@@ -156,12 +156,7 @@ pub fn comps_as_key(entry: &Rc<Entry>) -> Completion {
     }
 }
 
-pub fn comps_add_all(
-    comps: &mut Vec<Completion>,
-    ymatch: YangMatch,
-    entry: &Rc<Entry>,
-    s: &mut State,
-) {
+pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entry>, s: &State) {
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             for entry in entry.dir.borrow().iter() {
@@ -174,7 +169,9 @@ pub fn comps_add_all(
                     if &entry.name == key {
                         comps.push(comps_as_key(entry));
                         if entry.name == "interface" {
-                            s.dcomp = true;
+                            for link in s.links.iter() {
+                                comps.push(Completion::new_name(&link));
+                            }
                         }
                     }
                 }
