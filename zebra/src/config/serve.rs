@@ -165,7 +165,7 @@ impl Show for ShowService {
             paths: request.paths.clone(),
             resp: bus_tx.clone(),
         };
-        if self.txes.len() > 0 {
+        if !self.txes.is_empty() {
             let tx = self.txes[0].clone();
             tx.send(req).unwrap();
         }

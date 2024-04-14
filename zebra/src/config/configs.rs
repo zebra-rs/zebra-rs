@@ -332,7 +332,7 @@ pub fn ymatch_enum(ymatch: i32) -> YangMatch {
         4 => YangMatch::Leaf,
         5 => YangMatch::LeafMatched,
         6 => YangMatch::LeafList,
-        7 | _ => YangMatch::LeafListMatched,
+        _ => YangMatch::LeafListMatched,
     }
 }
 

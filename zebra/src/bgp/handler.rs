@@ -25,14 +25,14 @@ pub struct Bgp {
 }
 
 fn bgp_global_asn(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 0 {
+    if op == ConfigOp::Set && !args.is_empty() {
         let asn_str = &args[0];
         bgp.asn = asn_str.parse().unwrap();
     }
 }
 
 fn bgp_global_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 0 {
+    if op == ConfigOp::Set && !args.is_empty() {
         let router_id_str = &args[0];
         bgp.router_id = router_id_str.parse().unwrap();
     }
@@ -44,14 +44,7 @@ fn bgp_neighbor_peer_as(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
         let peer_as = &args[1];
         let addr: Ipv4Addr = peer_addr.parse().unwrap();
         let asn: u32 = peer_as.parse().unwrap();
-        let peer = Peer::new(
-            addr.clone(),
-            bgp.asn,
-            bgp.router_id,
-            asn,
-            addr.clone(),
-            bgp.tx.clone(),
-        );
+        let peer = Peer::new(addr, bgp.asn, bgp.router_id, asn, addr, bgp.tx.clone());
         bgp.peers.insert(addr, peer);
     }
 }
