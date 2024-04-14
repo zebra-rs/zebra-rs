@@ -92,8 +92,10 @@ impl Rib {
     }
 
     pub fn link_add(&mut self, oslink: OsLink) {
-        let link = Link::from(oslink);
-        self.links.insert(link.index, link);
+        if !self.links.contains_key(&oslink.index) {
+            let link = Link::from(oslink);
+            self.links.insert(link.index, link);
+        }
     }
 
     pub fn link_delete(&mut self, oslink: OsLink) {
@@ -122,10 +124,10 @@ impl Rib {
             OsMessage::DelLink(link) => {
                 self.link_delete(link);
             }
-            OsMessage::NewAddress(addr) => {
+            OsMessage::NewAddr(addr) => {
                 self.addr_add(addr);
             }
-            OsMessage::DelAddress(addr) => {
+            OsMessage::DelAddr(addr) => {
                 self.addr_del(addr);
             }
             OsMessage::NewRoute(_route) => {

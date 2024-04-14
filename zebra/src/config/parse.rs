@@ -69,29 +69,32 @@ impl State {
 pub fn match_keyword(src: &String, dst: &String) -> (MatchType, usize) {
     let pos = longest_match(src, dst);
 
-    if !is_delimiter(src, pos) {
-        return (MatchType::None, pos);
-    }
-    if is_delimiter(dst, pos) {
-        (MatchType::Exact, pos)
-    } else {
-        (MatchType::Partial, pos)
+    match is_delimiter(src, pos) {
+        false => (MatchType::None, pos),
+        true => {
+            if is_delimiter(dst, pos) {
+                (MatchType::Exact, pos)
+            } else {
+                (MatchType::Partial, pos)
+            }
+        }
     }
 }
 
 fn match_keyword_str(src: &str, dst: &str) -> (MatchType, usize) {
     let pos = longest_match_str(src, dst);
 
-    if !is_delimiter_str(src, pos) {
-        return (MatchType::None, pos);
-    }
-    if is_delimiter_str(dst, pos) {
-        (MatchType::Exact, pos)
-    } else {
-        (MatchType::Partial, pos)
+    match is_delimiter_str(src, pos) {
+        false => (MatchType::None, pos),
+        true => {
+            if is_delimiter_str(dst, pos) {
+                (MatchType::Exact, pos)
+            } else {
+                (MatchType::Partial, pos)
+            }
+        }
     }
 }
-
 fn match_word(str: &String) -> (MatchType, usize) {
     let mut pos = 0usize;
     while pos < str.len() && !is_whitespace(str, pos) {

@@ -184,7 +184,7 @@ pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
         if let Some(link) = rib.link_by_name(&link_name) {
             link_info_show(link, &mut buf, &cb)
         } else {
-            write!(buf, "% No interface found").unwrap();
+            write!(buf, "% interface {} not found", link_name).unwrap();
         }
     } else {
         if args.is_empty() {
