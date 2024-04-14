@@ -65,7 +65,7 @@ pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
     );
 
     for (prefix, entry) in rib.rib.iter() {
-        write!(buf, "K  {:?}     {:?}\n", prefix, entry.gateway).unwrap();
+        writeln!(buf, "K  {:?}     {:?}", prefix, entry.gateway).unwrap();
     }
 
     buf
