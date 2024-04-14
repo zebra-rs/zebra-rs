@@ -16,7 +16,7 @@ use rtnetlink::{
 };
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::UnboundedSender;
 
 fn flags_u32(f: &LinkFlag) -> u32 {
@@ -95,7 +95,11 @@ fn addr_from_msg(msg: AddressMessage) -> OsAddr {
 }
 
 fn route_from_msg(msg: RouteMessage) -> OsRoute {
-    let route = OsRoute::new();
+    let route = OsRoute {
+        route: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
+        gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    };
+
     for attr in msg.attributes.into_iter() {
         match attr {
             RouteAttribute::Destination(_) => {
