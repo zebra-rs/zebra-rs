@@ -37,10 +37,6 @@ fn os_link_flags(flags: InterfaceFlags) -> link::LinkFlags {
     link::LinkFlags(link_flags)
 }
 
-fn as_i8_slice(bytes: &[u8]) -> &[i8] {
-    unsafe { std::mem::transmute(bytes) }
-}
-
 fn os_mtu(link_name: &String) -> u32 {
     let mut mtu = 0u32;
 
@@ -52,7 +48,9 @@ fn os_mtu(link_name: &String) -> u32 {
 
     let name_str = CString::new(link_name.as_bytes()).unwrap();
     let name_bytes = name_str.as_bytes();
-    ifreq.ifr_name[..name_bytes.len()].copy_from_slice(as_i8_slice(name_bytes));
+    unsafe {
+        ifreq.ifr_name[..name_bytes.len()].copy_from_slice(std::mem::transmute(name_bytes));
+    }
 
     unsafe {
         let s = socket(AF_INET, SOCK_DGRAM, 0);
