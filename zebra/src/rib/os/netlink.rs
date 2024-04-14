@@ -127,12 +127,12 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<OsM
             }
             RouteNetlinkMessage::NewAddress(msg) => {
                 let addr = addr_from_msg(msg);
-                let msg = OsMessage::NewAddress(addr);
+                let msg = OsMessage::NewAddr(addr);
                 tx.send(msg).unwrap();
             }
             RouteNetlinkMessage::DelAddress(msg) => {
                 let addr = addr_from_msg(msg);
-                let msg = OsMessage::DelAddress(addr);
+                let msg = OsMessage::DelAddr(addr);
                 tx.send(msg).unwrap();
             }
             RouteNetlinkMessage::NewRoute(msg) => {
@@ -168,7 +168,7 @@ async fn address_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>)
     let mut addresses = handle.address().get().execute();
     while let Some(msg) = addresses.try_next().await.unwrap() {
         let addr = addr_from_msg(msg);
-        let msg = OsMessage::NewAddress(addr);
+        let msg = OsMessage::NewAddr(addr);
         tx.send(msg).unwrap();
     }
 }
