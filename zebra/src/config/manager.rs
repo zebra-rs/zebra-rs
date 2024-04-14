@@ -60,7 +60,6 @@ pub struct ConfigManager {
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
     pub cm_clients: HashMap<String, UnboundedSender<ConfigRequest>>,
-    // pub cm_txes: Vec<UnboundedSender<ConfigRequest>>,
 }
 
 impl ConfigManager {
@@ -217,7 +216,7 @@ impl ConfigManager {
         );
         if state.dcomp {
             if let Some(tx) = self.cm_clients.get("rib") {
-                let links = dcomp(tx.clone()).await;
+                let links = comps_dynamic(tx.clone()).await;
                 for link in links.iter() {
                     comps.push(Completion::new_name(link));
                 }
@@ -257,7 +256,7 @@ impl ConfigManager {
 }
 
 pub async fn event_loop(mut config: ConfigManager) {
-    // config.load_config();
+    config.load_config();
     loop {
         tokio::select! {
             Some(msg) = config.rx.recv() => {
@@ -267,7 +266,7 @@ pub async fn event_loop(mut config: ConfigManager) {
     }
 }
 
-async fn dcomp(tx: UnboundedSender<ConfigRequest>) -> Vec<String> {
+async fn comps_dynamic(tx: UnboundedSender<ConfigRequest>) -> Vec<String> {
     let (comp_tx, comp_rx) = oneshot::channel();
     let req = ConfigRequest {
         input: "".to_string(),

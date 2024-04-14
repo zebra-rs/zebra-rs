@@ -63,8 +63,8 @@ impl OsRoute {
 pub enum OsMessage {
     NewLink(OsLink),
     DelLink(OsLink),
-    NewAddress(OsAddr),
-    DelAddress(OsAddr),
+    NewAddr(OsAddr),
+    DelAddr(OsAddr),
     NewRoute(OsRoute),
     DelRoute(OsRoute),
 }
