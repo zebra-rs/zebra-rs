@@ -50,7 +50,16 @@ impl OsAddr {
 
 #[derive(Default, Debug)]
 pub struct OsRoute {
-    // pub index: u32,
+    pub index: u32,
+}
+
+impl OsRoute {
+    #[allow(dead_code)]
+    pub fn new() -> OsRoute {
+        Self {
+            ..Default::default()
+        }
+    }
 }
 
 pub enum OsMessage {
