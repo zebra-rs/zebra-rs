@@ -1,4 +1,4 @@
-use super::message::{OsAddr, OsLink, OsMessage};
+use super::message::{OsAddr, OsLink, OsMessage, OsRoute};
 use crate::rib::link;
 use ioctl_rs::SIOCGIFMTU;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -8,7 +8,7 @@ use nix::net::if_::if_nametoindex;
 use nix::net::if_::InterfaceFlags;
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::UnboundedSender;
 
 fn os_link_flags(flags: InterfaceFlags) -> link::LinkFlags {
@@ -129,8 +129,31 @@ fn os_dump(tx: UnboundedSender<OsMessage>) {
     }
 }
 
+async fn os_route_dump(tx: UnboundedSender<OsMessage>) {
+    let handle = net_route::Handle::new();
+    if let Ok(handle) = handle {
+        let routes = handle.list().await;
+        if let Ok(routes) = routes {
+            for route in routes {
+                if let IpAddr::V4(v4) = route.destination {
+                    if let Some(gateway) = route.gateway {
+                        let v4net = Ipv4Net::new(v4, route.prefix).unwrap();
+                        let osroute = OsRoute {
+                            route: IpNet::V4(v4net),
+                            gateway,
+                        };
+                        let msg = OsMessage::NewRoute(osroute);
+                        tx.send(msg).unwrap();
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn os_dump_spawn(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
-    os_dump(tx);
+    os_dump(tx.clone());
+    os_route_dump(tx.clone()).await;
 
     Ok(())
 }
