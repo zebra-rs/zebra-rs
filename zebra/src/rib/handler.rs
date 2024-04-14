@@ -70,11 +70,9 @@ impl Rib {
     }
 
     pub fn link_by_name(&self, link_name: &str) -> Option<&Link> {
-        if let Some((_, value)) = self.links.iter().find(|(_, v)| &v.name == link_name) {
-            Some(value)
-        } else {
-            None
-        }
+        self.links
+            .iter()
+            .find_map(|(_, v)| if v.name == link_name { Some(v) } else { None })
     }
 
     pub fn link_comps(&self) -> Vec<String> {

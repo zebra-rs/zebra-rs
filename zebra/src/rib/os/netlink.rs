@@ -33,7 +33,7 @@ fn flags_u32(f: &LinkFlag) -> u32 {
     }
 }
 
-fn flags_from(v: &Vec<LinkFlag>) -> link::LinkFlags {
+fn flags_from(v: &[LinkFlag]) -> link::LinkFlags {
     let mut d: u32 = 0;
     for flag in v.iter() {
         d += flags_u32(flag);
@@ -259,7 +259,7 @@ where
 use scan_fmt::scan_fmt;
 use std::error::Error;
 
-pub fn os_traffic_parse(version: i32, line: &String) -> Result<LinkStats, Box<dyn Error>> {
+pub fn os_traffic_parse(version: i32, line: &str) -> Result<LinkStats, Box<dyn Error>> {
     let mut stats = LinkStats::new();
     if version == 3 {
         (
@@ -372,8 +372,8 @@ pub fn os_traffic_parse(version: i32, line: &String) -> Result<LinkStats, Box<dy
 pub fn os_traffic_dump() -> impl Fn(&String, &mut String) {
     let mut stat_map = HashMap::new();
     if let Ok(lines) = read_lines("/proc/net/dev") {
-        let mut lines = lines.flatten();
-        if let Some(_) = lines.next() {
+        let mut lines = lines.map_while(Result::ok);
+        if lines.next().is_some() {
             // Simply ignore first line.
         }
         let mut version = 1;
@@ -392,31 +392,31 @@ pub fn os_traffic_dump() -> impl Fn(&String, &mut String) {
     }
     move |link_name: &String, buf: &mut String| {
         if let Some(stat) = stat_map.get(link_name) {
-            write!(
+            writeln!(
                 buf,
-                "    input packets {}, bytes {}, dropped {}, multicast packets {}\n",
+                "    input packets {}, bytes {}, dropped {}, multicast packets {}",
                 stat.rx_packets, stat.rx_bytes, stat.rx_dropped, stat.rx_multicast
             )
             .unwrap();
-            write!(
+            writeln!(
                 buf,
-                "    input errors {}, frame {}, fifo {}, compressed {}\n",
+                "    input errors {}, frame {}, fifo {}, compressed {}",
                 stat.rx_errors, stat.rx_frame_errors, stat.rx_fifo_errors, stat.rx_compressed
             )
             .unwrap();
-            write!(
+            writeln!(
                 buf,
-                "    output packets {}, bytes {}, dropped {}\n",
+                "    output packets {}, bytes {}, dropped {}",
                 stat.tx_packets, stat.tx_bytes, stat.tx_dropped
             )
             .unwrap();
-            write!(
+            writeln!(
                 buf,
-                "    output errors {}, carrier {}, fifo {}, compressed {}\n",
+                "    output errors {}, carrier {}, fifo {}, compressed {}",
                 stat.tx_errors, stat.tx_carrier_errors, stat.tx_fifo_errors, stat.tx_compressed
             )
             .unwrap();
-            write!(buf, "    collisions {}\n", stat.collisions).unwrap();
+            writeln!(buf, "    collisions {}", stat.collisions).unwrap();
         }
     }
 }

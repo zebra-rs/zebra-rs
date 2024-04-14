@@ -148,7 +148,7 @@ where
                     }
                 }
             }
-            return (MatchType::None, 0usize);
+            (MatchType::None, 0usize)
         } else {
             (MatchType::Exact, s.len())
         }
@@ -234,7 +234,7 @@ impl Match {
         self.process(
             entry,
             match_keyword_str(input, &entry.name),
-            comps_from_entry(&entry),
+            comps_from_entry(entry),
         );
     }
 

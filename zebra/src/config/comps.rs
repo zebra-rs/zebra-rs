@@ -177,7 +177,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
                         comps.push(comps_as_key(entry));
                         if entry.name == "interface" {
                             for link in s.links.iter() {
-                                comps.push(Completion::new_name(&link));
+                                comps.push(Completion::new_name(link));
                             }
                         }
                     }

@@ -135,16 +135,16 @@ impl fmt::Display for LinkFlags {
 }
 
 fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
-    write!(buf, "Interface: {}\n", link.name).unwrap();
+    writeln!(buf, "Interface: {}", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
     if link.link_type == LinkType::Ethernet {
-        write!(buf, "\n").unwrap();
+        writeln!(buf, "<macaddress>").unwrap();
     } else {
-        write!(buf, "\n").unwrap();
+        writeln!(buf).unwrap();
     }
-    write!(
+    writeln!(
         buf,
-        "  index {} metric {} mtu {}\n",
+        "  index {} metric {} mtu {}",
         link.index, link.metric, link.mtu
     )
     .unwrap();
@@ -158,24 +158,24 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
         }
     )
     .unwrap();
-    write!(buf, "  {}\n", link.flags).unwrap();
-    write!(buf, "  VRF Binding: Not bound\n").unwrap();
-    write!(
+    writeln!(buf, "  {}", link.flags).unwrap();
+    writeln!(buf, "  VRF Binding: Not bound").unwrap();
+    writeln!(
         buf,
-        "  Label switching is {}\n",
+        "  Label switching is {}",
         if link.label { "enabled" } else { "disabled" }
     )
     .unwrap();
     for addr in link.addr4.iter() {
         write!(buf, "  inet {}", addr.addr).unwrap();
         if addr.secondary {
-            write!(buf, " secondary\n").unwrap();
+            writeln!(buf, " secondary").unwrap();
         } else {
-            write!(buf, "\n").unwrap();
+            writeln!(buf).unwrap();
         }
     }
     for addr in link.addr6.iter() {
-        write!(buf, "  inet6 {}\n", addr.addr).unwrap();
+        writeln!(buf, "  inet6 {}", addr.addr).unwrap();
     }
     cb(&link.name, buf);
 }
@@ -184,16 +184,16 @@ pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
     let cb = os_traffic_dump();
     let mut buf = String::new();
 
-    if args.len() > 0 {
+    if args.is_empty() {
+        for (_, link) in rib.links.iter() {
+            link_info_show(link, &mut buf, &cb);
+        }
+    } else {
         let link_name = &args[0];
-        if let Some(link) = rib.link_by_name(&link_name) {
+        if let Some(link) = rib.link_by_name(link_name) {
             link_info_show(link, &mut buf, &cb)
         } else {
             write!(buf, "% interface {} not found", link_name).unwrap();
-        }
-    } else if args.is_empty() {
-        for (_, link) in rib.links.iter() {
-            link_info_show(link, &mut buf, &cb);
         }
     }
     buf
