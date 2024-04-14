@@ -1,7 +1,6 @@
 use super::{fsm, Event, Peer};
-use crate::config::{ConfigChannel, ConfigRequest, ShowChannel};
-use ipnet::Ipv4Net;
-use std::collections::BTreeMap;
+use crate::config::{path_from_command, ConfigChannel, ConfigOp, ConfigRequest, ShowChannel};
+use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
@@ -11,6 +10,8 @@ pub enum Message {
     Show(Sender<String>),
 }
 
+type Callback = fn(&mut Bgp, Vec<String>, ConfigOp);
+
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
@@ -19,64 +20,71 @@ pub struct Bgp {
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
-    pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
+    // pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
+    pub callbacks: HashMap<String, Callback>,
 }
 
-fn bgp_global_set_asn(bgp: &mut Bgp, asn_str: String) {
-    bgp.asn = asn_str.parse().unwrap();
-}
-
-fn bgp_global_set_router_id(bgp: &mut Bgp, router_id_str: String) {
-    bgp.router_id = router_id_str.parse().unwrap();
-}
-
-fn bgp_peer_add(bgp: &mut Bgp, address: String, asn_str: String) {
-    let ident: Ipv4Addr = address.parse().unwrap();
-    let addr: Ipv4Addr = address.parse().unwrap();
-    let asn: u32 = asn_str.parse().unwrap();
-    let peer = Peer::new(ident, bgp.asn, bgp.router_id, asn, addr, bgp.tx.clone());
-    bgp.peers.insert(ident, peer);
-}
-
-fn bgp_config_set(bgp: &mut Bgp, conf: String) {
-    let paths: Vec<&str> = conf.split(' ').collect();
-    if paths.len() < 4 {
-        return;
+fn bgp_global_asn(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && args.len() > 0 {
+        let asn_str = &args[0];
+        bgp.asn = asn_str.parse().unwrap();
     }
-    // println!("CM: {:?}", paths);
-    match paths[2] {
-        "global" => match paths[3] {
-            "as" => {
-                bgp_global_set_asn(bgp, paths[4].to_string());
-            }
-            "identifier" => {
-                bgp_global_set_router_id(bgp, paths[4].to_string());
-            }
-            _ => {}
-        },
-        "neighbors" => {
-            if paths.len() < 6 {
-                return;
-            }
-            bgp_peer_add(bgp, paths[4].to_string(), paths[6].to_string());
-        }
-        _ => {}
+}
+
+fn bgp_global_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && args.len() > 0 {
+        let router_id_str = &args[0];
+        bgp.router_id = router_id_str.parse().unwrap();
+    }
+}
+
+fn bgp_neighbor_peer_as(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && args.len() > 1 {
+        let peer_addr = &args[0];
+        let peer_as = &args[1];
+        let addr: Ipv4Addr = peer_addr.parse().unwrap();
+        let asn: u32 = peer_as.parse().unwrap();
+        let peer = Peer::new(
+            addr.clone(),
+            bgp.asn,
+            bgp.router_id,
+            asn,
+            addr.clone(),
+            bgp.tx.clone(),
+        );
+        bgp.peers.insert(addr, peer);
     }
 }
 
 impl Bgp {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        Self {
+        let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             peers: BTreeMap::new(),
             tx,
             rx,
-            ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
+            // ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
-        }
+            callbacks: HashMap::new(),
+        };
+        bgp.callback_build();
+        bgp
+    }
+
+    pub fn callback_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks.insert(path.to_string(), cb);
+    }
+
+    pub fn callback_build(&mut self) {
+        self.callback_add("/routing/bgp/global/as", bgp_global_asn);
+        self.callback_add("/routing/bgp/global/identifier", bgp_global_identifier);
+        self.callback_add(
+            "/routing/bgp/neighbors/neighbor/peer-as",
+            bgp_neighbor_peer_as,
+        );
     }
 
     pub fn process_message(&mut self, msg: Message) {
@@ -93,8 +101,10 @@ impl Bgp {
     }
 
     pub fn process_cm_message(&mut self, msg: ConfigRequest) {
-        // println!("P: {:?}", msg.paths);
-        bgp_config_set(self, msg.input);
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.callbacks.get(&path) {
+            f(self, args, msg.op);
+        }
     }
 
     pub async fn event_loop(&mut self) {

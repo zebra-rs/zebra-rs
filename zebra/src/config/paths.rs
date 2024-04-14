@@ -17,7 +17,7 @@ pub fn paths_dump(paths: &[CommandPath]) {
     }
 }
 
-pub fn yang_path(paths: &[CommandPath]) -> (String, Vec<String>) {
+pub fn path_from_command(paths: &[CommandPath]) -> (String, Vec<String>) {
     let mut output = String::new();
     let mut args = Vec::new();
 
