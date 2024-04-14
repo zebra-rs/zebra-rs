@@ -206,22 +206,34 @@ impl ConfigManager {
         }
     }
 
+    pub async fn comps_dynamic(&self) -> Vec<String> {
+        if let Some(tx) = self.cm_clients.get("rib") {
+            let (comp_tx, comp_rx) = oneshot::channel();
+            let req = ConfigRequest {
+                input: "".to_string(),
+                paths: Vec::new(),
+                op: ConfigOp::Completion,
+                resp: Some(comp_tx),
+            };
+            tx.send(req).unwrap();
+            comp_rx.await.unwrap()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub async fn completion(&self, mode: &Mode, input: &String) -> (ExecCode, Vec<Completion>) {
-        let state = State::new();
-        let (code, mut comps, state) = parse(
+        let mut state = State::new();
+        // Temporary workaround for interface completion.
+        if has_interfaces(input) {
+            state.links = self.comps_dynamic().await;
+        }
+        let (code, comps, _state) = parse(
             input,
             mode.entry.clone(),
             Some(self.store.candidate.borrow().clone()),
             state,
         );
-        if state.dcomp {
-            if let Some(tx) = self.cm_clients.get("rib") {
-                let links = comps_dynamic(tx.clone()).await;
-                for link in links.iter() {
-                    comps.push(Completion::new_name(link));
-                }
-            }
-        }
         (code, comps)
     }
 
@@ -266,14 +278,6 @@ pub async fn event_loop(mut config: ConfigManager) {
     }
 }
 
-async fn comps_dynamic(tx: UnboundedSender<ConfigRequest>) -> Vec<String> {
-    let (comp_tx, comp_rx) = oneshot::channel();
-    let req = ConfigRequest {
-        input: "".to_string(),
-        paths: Vec::new(),
-        op: ConfigOp::Completion,
-        resp: Some(comp_tx),
-    };
-    tx.send(req).unwrap();
-    comp_rx.await.unwrap()
+fn has_interfaces(input: &String) -> bool {
+    input.split_whitespace().any(|s| s == "interfaces")
 }
