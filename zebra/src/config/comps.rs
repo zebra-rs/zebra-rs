@@ -1,4 +1,4 @@
-use super::parse::{entry_preset, ymatch_complete};
+use super::parse::{entry_is_key, entry_preset, ymatch_complete};
 use super::parse::{PresetType, State};
 use super::vtysh::YangMatch;
 use super::Config;
@@ -158,9 +158,16 @@ pub fn comps_as_key(entry: &Rc<Entry>) -> Completion {
 
 pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entry>, s: &State) {
     match ymatch {
-        YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
+        YangMatch::Dir | YangMatch::DirMatched => {
             for entry in entry.dir.borrow().iter() {
                 comps.push(comps_from_entry(entry));
+            }
+        }
+        YangMatch::KeyMatched => {
+            for e in entry.dir.borrow().iter() {
+                if !entry_is_key(&e.name, &entry.key) {
+                    comps.push(comps_from_entry(e));
+                }
             }
         }
         YangMatch::Key => {
