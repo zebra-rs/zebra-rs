@@ -160,7 +160,6 @@ impl Rib {
     }
 
     pub fn route_add(&mut self, osroute: OsRoute) {
-        println!("R: {:?}", osroute);
         if let IpNet::V4(v4) = osroute.route {
             let mut rib = RibEntry::new();
             rib.gateway = osroute.gateway;
