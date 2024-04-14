@@ -1,13 +1,45 @@
+use ipnet::{IpNet, Ipv4Net};
+
 use super::link::{link_show, LinkAddr};
-use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage};
+use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage, OsRoute};
 use super::os::os_dump_spawn;
 use super::Link;
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
+use std::net::{IpAddr, Ipv4Addr};
 
 type Callback = fn(&Rib, Vec<String>) -> String;
+
+#[derive(Debug)]
+pub struct Nexthop {
+    nexthop: Ipv4Addr,
+}
+
+#[derive(Debug)]
+pub struct RibEntry {
+    selected: bool,
+    preference: u32,
+    tag: u32,
+    color: Vec<String>,
+    nexthops: Vec<Nexthop>,
+    gateway: IpAddr,
+}
+
+impl RibEntry {
+    pub fn new() -> Self {
+        Self {
+            selected: false,
+            preference: 0,
+            tag: 0,
+            color: Vec::new(),
+            nexthops: Vec::new(),
+            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Rib {
@@ -17,12 +49,26 @@ pub struct Rib {
     pub show: ShowChannel,
     pub os: OsChannel,
     pub links: BTreeMap<u32, Link>,
-    //pub rib: prefix_trie::PrefixMap<Ipv4Net, u32>,
+    pub rib: prefix_trie::PrefixMap<Ipv4Net, RibEntry>,
     pub callbacks: HashMap<String, Callback>,
 }
 
-pub fn rib_show(_rib: &Rib, _args: Vec<String>) -> String {
-    "this is show ip route output".to_string()
+pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
+    let mut buf = String::new();
+
+    buf.push_str(
+        r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
+       O - OSPF, IA - OSPF inter area
+       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2
+       E1 - OSPF external type 1, E2 - OSPF external type 2
+       i - IS-IS, L1 - IS-IS level-1, L2 - IS-IS level-2, ia - IS-IS inter area\n"#,
+    );
+
+    for (prefix, entry) in rib.rib.iter() {
+        write!(buf, "K  {:?}     {:?}\n", prefix, entry.gateway).unwrap();
+    }
+
+    buf
 }
 
 pub fn link_addr_update(link: &mut Link, addr: LinkAddr) {
@@ -63,6 +109,7 @@ impl Rib {
             show: ShowChannel::new(),
             os: OsChannel::new(),
             links: BTreeMap::new(),
+            rib: prefix_trie::PrefixMap::new(),
             callbacks: HashMap::new(),
         };
         rib.callback_build();
@@ -112,6 +159,19 @@ impl Rib {
         }
     }
 
+    pub fn route_add(&mut self, osroute: OsRoute) {
+        println!("R: {:?}", osroute);
+        if let IpNet::V4(v4) = osroute.route {
+            let mut rib = RibEntry::new();
+            rib.gateway = osroute.gateway;
+            self.rib.insert(v4, rib);
+        }
+    }
+
+    pub fn route_del(&mut self, _osroute: OsRoute) {
+        //
+    }
+
     fn process_os_message(&mut self, msg: OsMessage) {
         match msg {
             OsMessage::NewLink(link) => {
@@ -126,11 +186,11 @@ impl Rib {
             OsMessage::DelAddr(addr) => {
                 self.addr_del(addr);
             }
-            OsMessage::NewRoute(_route) => {
-                //
+            OsMessage::NewRoute(route) => {
+                self.route_add(route);
             }
-            OsMessage::DelRoute(_route) => {
-                //
+            OsMessage::DelRoute(route) => {
+                self.route_del(route);
             }
         }
     }

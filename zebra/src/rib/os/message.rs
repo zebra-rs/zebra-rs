@@ -1,5 +1,6 @@
 use super::{LinkFlags, LinkType};
 use ipnet::IpNet;
+use std::net::IpAddr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
@@ -48,18 +49,10 @@ impl OsAddr {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct OsRoute {
-    pub index: u32,
-}
-
-impl OsRoute {
-    #[allow(dead_code)]
-    pub fn new() -> OsRoute {
-        Self {
-            ..Default::default()
-        }
-    }
+    pub route: IpNet,
+    pub gateway: IpAddr,
 }
 
 pub enum OsMessage {
