@@ -262,7 +262,7 @@ _cli_exec ()
     "Ambiguous")
       echo "% Ambiguous command: $*" ;;
     "Incomplete")
-      echo "% Incomplete command: $*" ;;
+      echo "% Incomplete command." ;;
     "SuccessExec")
       if [[ "${line}" == "exit" ]];then
         exit
