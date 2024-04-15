@@ -1,15 +1,16 @@
-use ipnet::{IpNet, Ipv4Net};
-
+use super::api::RibRx;
 use super::link::{link_show, LinkAddr};
 use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage, OsRoute};
 use super::os::os_dump_spawn;
-use super::Link;
+use super::{Link, RibTxChannel};
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
+use ipnet::{IpNet, Ipv4Net};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
+use tokio::sync::mpsc::Sender;
 
 type Callback = fn(&Rib, Vec<String>) -> String;
 
@@ -43,11 +44,11 @@ impl RibEntry {
 
 #[derive(Debug)]
 pub struct Rib {
-    // pub tx: UnboundedSender<String>,
-    // pub rx: UnboundedReceiver<String>,
+    pub api: RibTxChannel,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub os: OsChannel,
+    pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub rib: prefix_trie::PrefixMap<Ipv4Net, RibEntry>,
     pub callbacks: HashMap<String, Callback>,
@@ -103,17 +104,21 @@ impl Rib {
     pub fn new() -> Self {
         //let (tx, rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
-            //tx,
-            //rx,
+            api: RibTxChannel::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             os: OsChannel::new(),
+            redists: Vec::new(),
             links: BTreeMap::new(),
             rib: prefix_trie::PrefixMap::new(),
             callbacks: HashMap::new(),
         };
         rib.callback_build();
         rib
+    }
+
+    pub fn subscribe(&mut self, tx: Sender<RibRx>) {
+        self.redists.push(tx);
     }
 
     pub fn link_by_name(&self, link_name: &str) -> Option<&Link> {
@@ -134,6 +139,7 @@ impl Rib {
         self.callback_add("/show/interfaces", link_show);
         self.callback_add("/show/ip/route", rib_show);
     }
+
     pub fn link_add(&mut self, oslink: OsLink) {
         if !self.links.contains_key(&oslink.index) {
             let link = Link::from(oslink);

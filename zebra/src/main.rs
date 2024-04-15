@@ -22,9 +22,10 @@ fn yang_path() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rib = Rib::new();
+    let mut rib = Rib::new();
 
-    let bgp = Bgp::new();
+    let bgp = Bgp::new(rib.api.tx.clone());
+    rib.subscribe(bgp.redist.tx.clone());
 
     let mut config = ConfigManager::new(yang_path());
     config.subscribe("rib", rib.cm.tx.clone());

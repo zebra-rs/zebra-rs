@@ -1,5 +1,6 @@
 use super::{fsm, Event, Peer};
 use crate::config::{path_from_command, ConfigChannel, ConfigOp, ConfigRequest, ShowChannel};
+use crate::rib::api::{RibRxChannel, RibTx};
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
@@ -20,6 +21,8 @@ pub struct Bgp {
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
+    pub rib: Sender<RibTx>,
+    pub redist: RibRxChannel,
     // pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
     pub callbacks: HashMap<String, Callback>,
 }
@@ -50,7 +53,7 @@ fn bgp_neighbor_peer_as(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
 }
 
 impl Bgp {
-    pub fn new() -> Self {
+    pub fn new(rib: Sender<RibTx>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut bgp = Self {
             asn: 0,
@@ -59,8 +62,10 @@ impl Bgp {
             tx,
             rx,
             // ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
+            rib,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
+            redist: RibRxChannel::new(),
             callbacks: HashMap::new(),
         };
         bgp.callback_build();
