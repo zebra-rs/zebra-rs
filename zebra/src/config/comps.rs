@@ -156,6 +156,23 @@ pub fn comps_as_key(entry: &Rc<Entry>) -> Completion {
     }
 }
 
+fn comps_as_leaf(comps: &mut Vec<Completion>, entry: &Rc<Entry>) {
+    if let Some(node) = &entry.type_node {
+        if node.kind == TypeKind::Yboolean {
+            comps.push(Completion::new_name("true"));
+            comps.push(Completion::new_name("false"));
+            return;
+        }
+        if node.kind == TypeKind::Yenumeration {
+            for e in node.enum_stmt.iter() {
+                comps.push(Completion::new_name(&e.name));
+            }
+            return;
+        }
+    }
+    comps.push(comps_as_key(entry));
+}
+
 pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entry>, s: &State) {
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched => {
@@ -174,7 +191,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
             for key in entry.key.iter() {
                 for entry in entry.dir.borrow().iter() {
                     if &entry.name == key {
-                        comps.push(comps_as_key(entry));
+                        comps_as_leaf(comps, entry);
                         if entry.name == "interface" {
                             for link in s.links.iter() {
                                 comps.push(Completion::new_name(link));
@@ -187,22 +204,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
         YangMatch::LeafMatched => {
             //
         }
-        _ => {
-            if let Some(node) = &entry.type_node {
-                if node.kind == TypeKind::Yboolean {
-                    comps.push(Completion::new_name("true"));
-                    comps.push(Completion::new_name("false"));
-                    return;
-                }
-                if node.kind == TypeKind::Yenumeration {
-                    for e in node.enum_stmt.iter() {
-                        comps.push(Completion::new_name(&e.name));
-                    }
-                    return;
-                }
-            }
-            comps.push(comps_as_key(entry));
-        }
+        _ => comps_as_leaf(comps, entry),
     }
     comps.sort_by(|a, b| a.name.cmp(&b.name));
 

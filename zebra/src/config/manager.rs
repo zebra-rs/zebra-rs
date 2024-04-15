@@ -155,6 +155,7 @@ impl ConfigManager {
 
     fn load_mode(&self, yang: &mut YangStore, mode: &str) -> Rc<Entry> {
         yang.read_with_resolve(mode).unwrap();
+        yang.identity_resolve();
         let module = yang.find_module(mode).unwrap();
         to_entry(yang, module)
     }
