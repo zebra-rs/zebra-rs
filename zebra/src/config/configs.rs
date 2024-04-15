@@ -238,7 +238,7 @@ impl Config {
     }
 
     pub fn list(&self, output: &mut String) {
-        if !self.has_dir() || self.presence {
+        if !self.has_dir() || self.presence || !self.prefix.is_empty() {
             let commands = self.list_command();
             if !commands.is_empty() {
                 output.push_str(&commands.join(" "));
