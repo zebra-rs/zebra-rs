@@ -189,6 +189,9 @@ impl ConfigManager {
         );
         if state.set {
             // paths_dump(&state.paths);
+            if code != ExecCode::Success {
+                return (code, String::from(""), state.paths);
+            }
             config_set(state.paths.clone(), self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.delete {
