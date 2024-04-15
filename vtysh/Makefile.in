@@ -641,7 +641,7 @@ version.h:  $(SOURCES) config.h Makefile patchlevel.h
 	$(SHELL) $(SUPPORT_SRC)mkversion.sh -b -S ${topdir} -s $(RELSTATUS) -d $(Version) -o newversion.h \
 		&& mv newversion.h version.h
 
-cli.c:
+cli.c: cli.sh
 	xxd -i cli.sh >cli.c
 
 vtysh.o: cli.c
