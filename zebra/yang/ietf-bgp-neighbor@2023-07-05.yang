@@ -75,16 +75,16 @@ submodule ietf-bgp-neighbor {
         "AFI, SAFI configuration available for the neighbor or
          group";
       uses mp-afi-safi-config;
-      leaf active {
-        type boolean;
-        config false;
-        description
-          "This value indicates whether a particular AFI-SAFI has
-           been successfully negotiated with the peer. An AFI-SAFI
-           may be enabled in the current running configuration, but
-           a session restart may be required in order to negotiate
-           the new capability.";
-      }
+      // leaf active {
+      //   type boolean;
+      //   config false;
+      //   description
+      //     "This value indicates whether a particular AFI-SAFI has
+      //      been successfully negotiated with the peer. An AFI-SAFI
+      //      may be enabled in the current running configuration, but
+      //      a session restart may be required in order to negotiate
+      //      the new capability.";
+      // }
       container prefixes {
         config false;
         description
@@ -166,7 +166,7 @@ submodule ietf-bgp-neighbor {
              2.";
         }
       }
-      uses mp-all-afi-safi-list-contents;
+      // uses mp-all-afi-safi-list-contents;
       uses bgp-neighbor-use-multiple-paths;
     }
   }
