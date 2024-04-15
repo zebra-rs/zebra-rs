@@ -93,11 +93,13 @@ pub struct Peer {
     pub router_id: Ipv4Addr,
     pub peer_as: u32,
     pub address: Ipv4Addr,
+    pub active: bool,
     pub state: State,
     pub task: PeerTask,
     pub timer: PeerTimer,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
     pub tx: UnboundedSender<Message>,
+    pub local_identifier: Option<Ipv4Addr>,
 }
 
 impl Peer {
@@ -109,20 +111,20 @@ impl Peer {
         address: Ipv4Addr,
         tx: UnboundedSender<Message>,
     ) -> Self {
-        let mut peer = Self {
+        Self {
             ident,
             router_id,
             local_as,
             peer_as,
             address,
+            active: false,
             state: State::Idle,
             task: PeerTask::new(),
             timer: PeerTimer::new(),
             packet_tx: None,
             tx,
-        };
-        fsm_init(&mut peer);
-        peer
+            local_identifier: None,
+        }
     }
 
     pub fn event(&self, ident: Ipv4Addr, event: Event) {
@@ -131,6 +133,13 @@ impl Peer {
 
     pub fn is_passive(&self) -> bool {
         false
+    }
+
+    pub fn update(&mut self) {
+        if self.peer_as != 0 && !self.address.is_unspecified() && !self.active {
+            fsm_init(self);
+            self.active = true;
+        }
     }
 }
 
@@ -381,7 +390,12 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
 
 pub fn peer_send_open(peer: &Peer) {
     let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
-    let open = OpenPacket::new(header, peer.local_as as u16, &peer.router_id);
+    let router_id = if let Some(identifier) = peer.local_identifier {
+        identifier.clone()
+    } else {
+        peer.router_id.clone()
+    };
+    let open = OpenPacket::new(header, peer.local_as as u16, &router_id);
     let bytes: BytesMut = open.into();
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
