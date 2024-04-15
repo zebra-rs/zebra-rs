@@ -383,6 +383,13 @@ module ietf-bgp {
             "List of BGP neighbors configured on the local system,
              uniquely identified by remote IPv[46] address.";
 
+          leaf local-identifier {
+            type inet:ipv4-address;
+            description
+              "When present, this peer has been created
+              dynamically.";
+          }
+
           leaf remote-address {
             type inet:ip-address;
             description
