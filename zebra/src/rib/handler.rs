@@ -12,7 +12,8 @@ use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::Sender;
 
-type Callback = fn(&Rib, Vec<String>) -> String;
+type Callback = fn(&mut Rib, Vec<String>, ConfigOp);
+type ShowCallback = fn(&Rib, Vec<String>) -> String;
 
 #[derive(Debug)]
 pub struct Nexthop {
@@ -47,6 +48,7 @@ pub struct Rib {
     pub api: RibTxChannel,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
+    pub show_cb: HashMap<String, ShowCallback>,
     pub os: OsChannel,
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
@@ -100,6 +102,20 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
     }
 }
 
+fn static_route(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && !args.is_empty() {
+        // let asn_str = &args[0];
+        // bgp.asn = asn_str.parse().unwrap();
+    }
+}
+
+fn static_route_nexthop(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && !args.is_empty() {
+        // let asn_str = &args[0];
+        // bgp.asn = asn_str.parse().unwrap();
+    }
+}
+
 impl Rib {
     pub fn new() -> Self {
         //let (tx, rx) = mpsc::unbounded_channel();
@@ -107,6 +123,7 @@ impl Rib {
             api: RibTxChannel::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
+            show_cb: HashMap::new(),
             os: OsChannel::new(),
             redists: Vec::new(),
             links: BTreeMap::new(),
@@ -114,6 +131,7 @@ impl Rib {
             callbacks: HashMap::new(),
         };
         rib.callback_build();
+        rib.show_build();
         rib
     }
 
@@ -136,8 +154,17 @@ impl Rib {
     }
 
     pub fn callback_build(&mut self) {
-        self.callback_add("/show/interfaces", link_show);
-        self.callback_add("/show/ip/route", rib_show);
+        self.callback_add("/routing/static/route", static_route);
+        self.callback_add("/routing/static/route/nexthop", static_route_nexthop);
+    }
+
+    pub fn show_add(&mut self, path: &str, cb: ShowCallback) {
+        self.show_cb.insert(path.to_string(), cb);
+    }
+
+    pub fn show_build(&mut self) {
+        self.show_add("/show/interfaces", link_show);
+        self.show_add("/show/ip/route", rib_show);
     }
 
     pub fn link_add(&mut self, oslink: OsLink) {
@@ -200,15 +227,23 @@ impl Rib {
         }
     }
 
-    fn process_cm_message(&self, msg: ConfigRequest) {
-        if msg.op == ConfigOp::Completion {
-            msg.resp.unwrap().send(self.link_comps()).unwrap();
+    fn process_cm_message(&mut self, msg: ConfigRequest) {
+        match msg.op {
+            ConfigOp::Completion => {
+                msg.resp.unwrap().send(self.link_comps()).unwrap();
+            }
+            ConfigOp::Set | ConfigOp::Delete => {
+                let (path, args) = path_from_command(&msg.paths);
+                if let Some(f) = self.callbacks.get(&path) {
+                    f(self, args, msg.op);
+                }
+            }
         }
     }
 
     async fn process_show_message(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        if let Some(f) = self.callbacks.get(&path) {
+        if let Some(f) = self.show_cb.get(&path) {
             let output = f(self, args);
             msg.resp.send(output).await.unwrap();
         }
