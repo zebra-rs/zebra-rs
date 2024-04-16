@@ -159,3 +159,7 @@ pub async fn os_dump_spawn(tx: UnboundedSender<OsMessage>) -> std::io::Result<()
 pub fn os_traffic_dump() -> impl Fn(&String, &mut String) {
     move |_link_name: &String, _buf: &mut String| {}
 }
+
+pub fn route_add() {}
+
+pub fn route_del() {}

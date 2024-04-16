@@ -15,6 +15,10 @@ pub mod macos;
 pub use macos::os_dump_spawn;
 #[cfg(target_os = "macos")]
 pub use macos::os_traffic_dump;
+#[cfg(target_os = "macos")]
+pub use macos::route_add;
+#[cfg(target_os = "macos")]
+pub use macos::route_del;
 
 pub mod message;
 
