@@ -130,7 +130,7 @@ fn load(config: &ConfigManager) -> (ExecCode, String) {
 }
 
 fn save(config: &ConfigManager) -> (ExecCode, String) {
-    config.store.save_config();
+    config.save_config();
     (ExecCode::Show, String::from(""))
 }
 

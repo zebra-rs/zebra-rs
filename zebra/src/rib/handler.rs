@@ -92,7 +92,7 @@ pub struct Rib {
     pub links: BTreeMap<u32, Link>,
     pub rib: prefix_trie::PrefixMap<Ipv4Net, RibEntry>,
     pub callbacks: HashMap<String, Callback>,
-    pub handle: Option<rtnetlink::Handle>,
+    //pub handle: Option<rtnetlink::Handle>,
 }
 
 pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
@@ -165,9 +165,9 @@ async fn static_route_nexthop(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
         entry.gateway = IpAddr::V4(gateway);
         rib.rib.insert(dest, entry);
 
-        if let Some(handle) = rib.handle.as_ref() {
-            route_add(handle.clone(), dest, gateway).await;
-        }
+        // if let Some(handle) = rib.handle.as_ref() {
+        //     route_add(handle.clone(), dest, gateway).await;
+        // }
     }
 }
 
@@ -184,7 +184,7 @@ impl Rib {
             links: BTreeMap::new(),
             rib: prefix_trie::PrefixMap::new(),
             callbacks: HashMap::new(),
-            handle: None,
+            // handle: None,
         };
         rib.callback_build();
         rib.show_build();
@@ -319,7 +319,7 @@ impl Rib {
 
     pub async fn event_loop(&mut self) {
         let handle = os_dump_spawn(self.os.tx.clone()).await.unwrap();
-        self.handle = Some(handle);
+        // self.handle = Some(handle);
 
         loop {
             tokio::select! {

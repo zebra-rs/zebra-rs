@@ -13,6 +13,7 @@ use libyang::{to_entry, Entry, YangStore};
 use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::oneshot;
@@ -39,22 +40,11 @@ impl ConfigStore {
         let candidate = carbon_copy(&self.running.borrow(), None);
         self.candidate.replace(candidate);
     }
-
-    pub fn save_config(&self) {
-        let home = dirs::home_dir();
-        if let Some(mut home) = home {
-            home.push(".zebra");
-            home.push("etc");
-            home.push("zebra.conf");
-            let mut output = String::new();
-            self.running.borrow().format(&mut output);
-            std::fs::write(home, output).expect("Unable to write file");
-        }
-    }
 }
 
 pub struct ConfigManager {
     pub yang_path: String,
+    pub config_path: PathBuf,
     pub store: ConfigStore,
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
@@ -63,10 +53,18 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new(yang_path: String) -> Self {
+    pub fn new(mut system_path: PathBuf) -> Self {
+        println!("P: {}", system_path.to_string_lossy());
+        system_path.push("yang");
+        let yang_path = system_path.to_string_lossy().to_string();
+        system_path.pop();
+        system_path.push("etc");
+        system_path.push("zebra.conf");
+
         let (tx, rx) = mpsc::channel(255);
         let mut cm = Self {
             yang_path,
+            config_path: system_path,
             modes: HashMap::new(),
             store: ConfigStore::new(),
             tx,
@@ -161,22 +159,22 @@ impl ConfigManager {
     }
 
     pub fn load_config(&self) {
-        let home = dirs::home_dir();
-        if let Some(mut home) = home {
-            home.push(".zebra");
-            home.push("etc");
-            home.push("zebra.conf");
-            let output = std::fs::read_to_string(home);
-            if let Ok(output) = output {
-                let cmds = load_config_file(output);
-                if let Some(mode) = self.modes.get("configure") {
-                    for cmd in cmds.iter() {
-                        let _ = self.execute(mode, cmd);
-                    }
+        let output = std::fs::read_to_string(&self.config_path);
+        if let Ok(output) = output {
+            let cmds = load_config_file(output);
+            if let Some(mode) = self.modes.get("configure") {
+                for cmd in cmds.iter() {
+                    let _ = self.execute(mode, cmd);
                 }
             }
-            self.commit_config();
         }
+        self.commit_config();
+    }
+
+    pub fn save_config(&self) {
+        let mut output = String::new();
+        self.store.running.borrow().format(&mut output);
+        std::fs::write(&self.config_path, output).expect("Unable to write file");
     }
 
     pub fn execute(&self, mode: &Mode, input: &String) -> (ExecCode, String, Vec<CommandPath>) {
