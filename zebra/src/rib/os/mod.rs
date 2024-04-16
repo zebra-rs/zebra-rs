@@ -4,6 +4,10 @@ pub mod netlink;
 pub use netlink::os_dump_spawn;
 #[cfg(target_os = "linux")]
 pub use netlink::os_traffic_dump;
+#[cfg(target_os = "linux")]
+pub use netlink::route_add;
+#[cfg(target_os = "linux")]
+pub use netlink::route_del;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

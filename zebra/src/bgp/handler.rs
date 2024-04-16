@@ -33,7 +33,6 @@ fn bgp_global_asn(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
         bgp.asn = asn_str.parse().unwrap();
     }
 }
-
 fn bgp_global_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
     if op == ConfigOp::Set && !args.is_empty() {
         let router_id_str = &args[0];

@@ -76,12 +76,6 @@ module config {
               description "Nexthop of the route";
             }
           }
-          list interface {
-            key "ifname";
-            leaf "ifname" {
-              type string;
-            }
-          }
           leaf distance {
             type uint8;
             description "Distance of the route.";

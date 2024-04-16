@@ -5,8 +5,10 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
 use netlink_packet_route::link::{LinkAttribute, LinkFlag, LinkLayerType, LinkMessage};
-use netlink_packet_route::route::{RouteAttribute, RouteMessage};
-use netlink_packet_route::RouteNetlinkMessage;
+use netlink_packet_route::route::{
+    RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
+};
+use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
 use rtnetlink::{
     constants::{
@@ -190,7 +192,88 @@ async fn route_dump(
     }
 }
 
-pub async fn os_dump_spawn(rib_tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+pub async fn route_add(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
+    let result = handle
+        .route()
+        .add()
+        .v4()
+        .destination_prefix(dest.addr(), dest.prefix_len())
+        .gateway(gateway)
+        // .table_id(0u32)
+        .execute()
+        .await;
+    match result {
+        Ok(()) => {
+            println!("Ok");
+        }
+        Err(err) => {
+            println!("Err: {}", err);
+        }
+    }
+}
+
+#[derive(Default)]
+struct RouteDelMessage {
+    message: RouteMessage,
+}
+
+impl RouteDelMessage {
+    pub fn new() -> Self {
+        let mut msg = Self {
+            message: RouteMessage::default(),
+        };
+        msg.message.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.message.header.protocol = RouteProtocol::Static;
+        msg.message.header.scope = RouteScope::Universe;
+        msg.message.header.kind = RouteType::Unicast;
+
+        msg.message.header.address_family = AddressFamily::Inet;
+        msg
+    }
+
+    pub fn destination(mut self, dest: Ipv4Addr, prefixlen: u8) -> Self {
+        self.message
+            .attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet(dest)));
+        self.message.header.destination_prefix_length = prefixlen;
+        self
+    }
+
+    pub fn gateway(mut self, gateway: Ipv4Addr) -> Self {
+        self.message
+            .attributes
+            .push(RouteAttribute::Gateway(RouteAddress::Inet(gateway)));
+        self
+    }
+
+    pub fn build(self) -> RouteMessage {
+        self.message
+    }
+}
+
+pub async fn route_del(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
+    let message = RouteDelMessage::new();
+
+    // destination.
+    let mes = message
+        .destination(dest.addr(), dest.prefix_len())
+        .gateway(gateway)
+        .build();
+
+    let result = handle.route().del(mes).execute().await;
+    match result {
+        Ok(()) => {
+            println!("Ok");
+        }
+        Err(err) => {
+            println!("Err: {}", err);
+        }
+    }
+}
+
+pub async fn os_dump_spawn(
+    rib_tx: UnboundedSender<OsMessage>,
+) -> std::io::Result<rtnetlink::Handle> {
     let (mut connection, handle, mut messages) = new_connection()?;
 
     let mgroup_flags = RTMGRP_LINK
@@ -216,7 +299,7 @@ pub async fn os_dump_spawn(rib_tx: UnboundedSender<OsMessage>) -> std::io::Resul
     route_dump(handle.clone(), rib_tx.clone(), IpVersion::V4).await;
     route_dump(handle.clone(), rib_tx.clone(), IpVersion::V6).await;
 
-    Ok(())
+    Ok(handle.clone())
 }
 
 #[derive(Default, Debug)]
