@@ -3,20 +3,26 @@
 mod config;
 use config::Cli;
 use config::ConfigManager;
+use std::path::PathBuf;
 mod bgp;
 use bgp::Bgp;
 mod rib;
 use rib::Rib;
 
-fn yang_path() -> String {
-    let home = dirs::home_dir();
-    if let Some(mut home) = home {
-        home.push(".zebra");
-        home.push("yang");
-        home.push("...");
-        home.into_os_string().into_string().unwrap()
+fn system_path() -> PathBuf {
+    let mut home = dirs::home_dir().unwrap();
+    home.push(".zebra");
+    if home.is_dir() {
+        return home;
     } else {
-        "./yang/...".to_string()
+        let mut path = PathBuf::new();
+        path.push("etc");
+        path.push("zebra");
+        if path.is_dir() {
+            path
+        } else {
+            std::env::current_dir().unwrap()
+        }
     }
 }
 
@@ -27,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bgp = Bgp::new(rib.api.tx.clone());
     rib.subscribe(bgp.redist.tx.clone());
 
-    let mut config = ConfigManager::new(yang_path());
+    let mut config = ConfigManager::new(system_path());
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
 
