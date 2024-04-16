@@ -1,7 +1,7 @@
 use super::api::RibRx;
 use super::link::{link_show, LinkAddr};
 use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage, OsRoute};
-use super::os::os_dump_spawn;
+use super::os::{os_dump_spawn, route_add};
 use super::{Link, RibTxChannel};
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
@@ -20,10 +20,46 @@ pub struct Nexthop {
     nexthop: Ipv4Addr,
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
+enum RibType {
+    UNKNOWN,
+    KERNEL,
+    CONNECTED,
+    STATIC,
+    RIP,
+    OSPF,
+    ISIS,
+    BGP,
+}
+
+impl RibType {
+    pub fn char(&self) -> char {
+        match self {
+            Self::KERNEL => 'K',
+            Self::STATIC => 'S',
+            _ => '?',
+        }
+    }
+}
+
+#[allow(dead_code, non_camel_case_types)]
+#[derive(Debug)]
+enum RibSubType {
+    UNKNOWN,
+    OSPF_IA,
+    OSPF_NSSA_1,
+    OSPF_NSSA_2,
+    OSPF_EXTERNAL_1,
+    OSPF_EXTERNAL_2,
+}
+
 #[derive(Debug)]
 pub struct RibEntry {
+    rtype: RibType,
+    rsubtype: RibSubType,
     selected: bool,
-    preference: u32,
+    distance: u32,
     tag: u32,
     color: Vec<String>,
     nexthops: Vec<Nexthop>,
@@ -33,8 +69,10 @@ pub struct RibEntry {
 impl RibEntry {
     pub fn new() -> Self {
         Self {
+            rtype: RibType::UNKNOWN,
+            rsubtype: RibSubType::UNKNOWN,
             selected: false,
-            preference: 0,
+            distance: 0,
             tag: 0,
             color: Vec::new(),
             nexthops: Vec::new(),
@@ -54,6 +92,7 @@ pub struct Rib {
     pub links: BTreeMap<u32, Link>,
     pub rib: prefix_trie::PrefixMap<Ipv4Net, RibEntry>,
     pub callbacks: HashMap<String, Callback>,
+    pub handle: Option<rtnetlink::Handle>,
 }
 
 pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
@@ -68,7 +107,14 @@ pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
     );
 
     for (prefix, entry) in rib.rib.iter() {
-        writeln!(buf, "K  {:?}     {:?}", prefix, entry.gateway).unwrap();
+        writeln!(
+            buf,
+            "{}  {:?}     {:?}",
+            entry.rtype.char(),
+            prefix,
+            entry.gateway
+        )
+        .unwrap();
     }
 
     buf
@@ -102,17 +148,26 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
     }
 }
 
-fn static_route(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
+async fn static_route(_rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
     if op == ConfigOp::Set && !args.is_empty() {
         // let asn_str = &args[0];
         // bgp.asn = asn_str.parse().unwrap();
     }
 }
 
-fn static_route_nexthop(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        // let asn_str = &args[0];
-        // bgp.asn = asn_str.parse().unwrap();
+async fn static_route_nexthop(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && args.len() > 1 {
+        let dest: Ipv4Net = args[0].parse().unwrap();
+        let gateway: Ipv4Addr = args[1].parse().unwrap();
+        //
+        let mut entry = RibEntry::new();
+        entry.rtype = RibType::STATIC;
+        entry.gateway = IpAddr::V4(gateway);
+        rib.rib.insert(dest, entry);
+
+        if let Some(handle) = rib.handle.as_ref() {
+            route_add(handle.clone(), dest, gateway).await;
+        }
     }
 }
 
@@ -129,6 +184,7 @@ impl Rib {
             links: BTreeMap::new(),
             rib: prefix_trie::PrefixMap::new(),
             callbacks: HashMap::new(),
+            handle: None,
         };
         rib.callback_build();
         rib.show_build();
@@ -154,8 +210,8 @@ impl Rib {
     }
 
     pub fn callback_build(&mut self) {
-        self.callback_add("/routing/static/route", static_route);
-        self.callback_add("/routing/static/route/nexthop", static_route_nexthop);
+        // self.callback_add("/routing/static/route", static_route);
+        // self.callback_add("/routing/static/route/nexthop", static_route_nexthop);
     }
 
     pub fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -195,13 +251,19 @@ impl Rib {
     pub fn route_add(&mut self, osroute: OsRoute) {
         if let IpNet::V4(v4) = osroute.route {
             let mut rib = RibEntry::new();
+            rib.rtype = RibType::KERNEL;
+            rib.selected = true;
             rib.gateway = osroute.gateway;
             self.rib.insert(v4, rib);
         }
     }
 
-    pub fn route_del(&mut self, _osroute: OsRoute) {
-        //
+    pub fn route_del(&mut self, osroute: OsRoute) {
+        if let IpNet::V4(v4) = osroute.route {
+            if let Some(_ribs) = self.rib.get(&v4) {
+                //
+            }
+        }
     }
 
     fn process_os_message(&mut self, msg: OsMessage) {
@@ -227,16 +289,22 @@ impl Rib {
         }
     }
 
-    fn process_cm_message(&mut self, msg: ConfigRequest) {
+    async fn process_cm_message(&mut self, msg: ConfigRequest) {
         match msg.op {
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                if let Some(f) = self.callbacks.get(&path) {
-                    f(self, args, msg.op);
+                if path == "/routing/static/route" {
+                    static_route(self, args.clone(), msg.op.clone()).await;
                 }
+                if path == "/routing/static/route/nexthop" {
+                    static_route_nexthop(self, args.clone(), msg.op.clone()).await;
+                }
+                // if let Some(f) = self.callbacks.get(&path) {
+                //     f(self, args, msg.op);
+                // }
             }
         }
     }
@@ -250,7 +318,8 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
-        os_dump_spawn(self.os.tx.clone()).await.unwrap();
+        let handle = os_dump_spawn(self.os.tx.clone()).await.unwrap();
+        self.handle = Some(handle);
 
         loop {
             tokio::select! {
@@ -258,7 +327,7 @@ impl Rib {
                     self.process_os_message(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
-                    self.process_cm_message(msg);
+                    self.process_cm_message(msg).await;
                 }
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_message(msg).await;
