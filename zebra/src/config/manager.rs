@@ -54,11 +54,9 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new(mut system_path: PathBuf) -> Self {
-        println!("P: {}", system_path.to_string_lossy());
         system_path.push("yang");
         let yang_path = system_path.to_string_lossy().to_string();
         system_path.pop();
-        system_path.push("etc");
         system_path.push("zebra.conf");
 
         let (tx, rx) = mpsc::channel(255);
