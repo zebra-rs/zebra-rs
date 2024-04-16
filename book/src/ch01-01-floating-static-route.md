@@ -17,13 +17,30 @@ backup ISP. The primary route to the internet is through the primary ISP, while
 the floating static route is configured to use the backup ISP.
 
 ``` console
-interface
- ip address 192.168.1.1 255.255.255.0
-interface Ethernet0/1
- ip address 10.0.0.1 255.255.255.0
-
-ip route 0.0.0.0 0.0.0.0 192.168.1.254 100
-ip route 0.0.0.0 0.0.0.0 10.0.0.254 200
+interfaces {
+    interface eth0 {
+	    ip {
+		    address 192.168.1.1/24;
+		}
+	}
+    interface eth1 {
+	    ip {
+		    address 10.0.0.1/24;
+		}
+	}
+}
+routing {
+    static {
+        route 0.0.0.0/0 {
+            distance 100;
+            nexthop 192.168.1.254;
+        }
+        route 0.0.0.0/0 {
+            distance 200;
+            nexthop 10.0.0.254;
+        }
+    }
+}
 ```
 
 The primary route to the internet is configured with a destination of 0.0.0.0/0
