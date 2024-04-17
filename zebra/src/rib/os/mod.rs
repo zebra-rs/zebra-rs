@@ -8,6 +8,8 @@ pub use netlink::os_traffic_dump;
 pub use netlink::route_add;
 #[cfg(target_os = "linux")]
 pub use netlink::route_del;
+#[cfg(target_os = "linux")]
+pub use netlink::OsHandle;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -16,9 +18,7 @@ pub use macos::os_dump_spawn;
 #[cfg(target_os = "macos")]
 pub use macos::os_traffic_dump;
 #[cfg(target_os = "macos")]
-pub use macos::route_add;
-#[cfg(target_os = "macos")]
-pub use macos::route_del;
+pub use macos::FibHandle;
 
 pub mod message;
 

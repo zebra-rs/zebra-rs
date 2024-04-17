@@ -4,12 +4,12 @@ use std::net::IpAddr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
-pub struct OsChannel {
+pub struct FibChannel {
     pub tx: UnboundedSender<OsMessage>,
     pub rx: UnboundedReceiver<OsMessage>,
 }
 
-impl OsChannel {
+impl FibChannel {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self { tx, rx }
@@ -55,6 +55,7 @@ pub struct OsRoute {
     pub gateway: IpAddr,
 }
 
+#[allow(dead_code)]
 pub enum OsMessage {
     NewLink(OsLink),
     DelLink(OsLink),
