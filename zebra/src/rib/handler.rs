@@ -7,6 +7,7 @@ use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
 use ipnet::{IpNet, Ipv4Net};
+use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
@@ -24,7 +25,7 @@ pub struct Rib {
     pub fib_handle: FibHandle,
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
-    pub rib: prefix_trie::PrefixMap<Ipv4Net, RibEntry>,
+    pub rib: PrefixMap<Ipv4Net, RibEntry>,
     pub callbacks: HashMap<String, Callback>,
 }
 
