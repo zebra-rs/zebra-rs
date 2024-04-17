@@ -9,7 +9,7 @@ pub use netlink::route_add;
 #[cfg(target_os = "linux")]
 pub use netlink::route_del;
 #[cfg(target_os = "linux")]
-pub use netlink::OsHandle;
+pub use netlink::FibHandle;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

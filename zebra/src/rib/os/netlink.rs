@@ -21,6 +21,38 @@ use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::UnboundedSender;
 
+pub struct FibHandle {
+    handle: rtnetlink::Handle,
+}
+
+impl FibHandle {
+    pub fn new(rib_tx: UnboundedSender<OsMessage>) -> anyhow::Result<Self> {
+        let (mut connection, handle, mut messages) = new_connection()?;
+
+        let mgroup_flags = RTMGRP_LINK
+            | RTMGRP_IPV4_ROUTE
+            | RTMGRP_IPV6_ROUTE
+            | RTMGRP_IPV4_IFADDR
+            | RTMGRP_IPV6_IFADDR;
+
+        let addr = SocketAddr::new(0, mgroup_flags);
+        connection.socket_mut().socket_mut().bind(&addr)?;
+
+        tokio::spawn(connection);
+
+        let tx = rib_tx.clone();
+        tokio::spawn(async move {
+            while let Some((message, _)) = messages.next().await {
+                process_msg(message, tx.clone());
+            }
+        });
+
+        Ok(Self { handle })
+    }
+
+    pub async fn route_ipv4_add(&self, _dest: Ipv4Net, _gateway: Ipv4Addr) {}
+}
+
 fn flags_u32(f: &LinkFlag) -> u32 {
     match f {
         LinkFlag::Up => link::IFF_UP,
@@ -273,7 +305,7 @@ pub async fn route_del(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Ad
 
 pub async fn os_dump_spawn(
     rib_tx: UnboundedSender<OsMessage>,
-) -> std::io::Result<rtnetlink::Handle> {
+) -> anyhow::Result<rtnetlink::Handle> {
     let (mut connection, handle, mut messages) = new_connection()?;
 
     let mgroup_flags = RTMGRP_LINK

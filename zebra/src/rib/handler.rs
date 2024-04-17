@@ -21,28 +21,30 @@ pub struct Rib {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub fib: FibChannel,
+    pub fib_handle: FibHandle,
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub rib: prefix_trie::PrefixMap<Ipv4Net, RibEntry>,
     pub callbacks: HashMap<String, Callback>,
-    pub handle: FibHandle,
 }
 
 impl Rib {
     pub fn new() -> anyhow::Result<Self> {
-        let handle = FibHandle::new()?;
+        let fib = FibChannel::new();
+        let fib_handle = FibHandle::new(fib.tx.clone())?;
         let mut rib = Rib {
             api: RibTxChannel::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            fib: FibChannel::new(),
+            fib,
+            fib_handle,
             redists: Vec::new(),
             links: BTreeMap::new(),
             rib: prefix_trie::PrefixMap::new(),
             callbacks: HashMap::new(),
-            handle,
         };
+
         rib.callback_build();
         rib.show_build();
         Ok(rib)
@@ -333,7 +335,7 @@ async fn static_route_nexthop(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
         entry.gateway = IpAddr::V4(gateway);
         rib.rib.insert(dest, entry);
 
-        rib.handle.route_ipv4_add(dest, gateway).await;
+        rib.fib_handle.route_ipv4_add(dest, gateway).await;
         // if let Some(handle) = rib.handle.as_ref() {
         //     route_add(handle.clone(), dest, gateway).await;
         // }
