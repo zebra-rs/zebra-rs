@@ -391,9 +391,9 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
 pub fn peer_send_open(peer: &Peer) {
     let header = BgpHeader::new(BgpPacketType::Open, BGP_PACKET_HEADER_LEN + 10);
     let router_id = if let Some(identifier) = peer.local_identifier {
-        identifier.clone()
+        identifier
     } else {
-        peer.router_id.clone()
+        peer.router_id
     };
     let open = OpenPacket::new(header, peer.local_as as u16, &router_id);
     let bytes: BytesMut = open.into();

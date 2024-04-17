@@ -13,7 +13,7 @@ fn system_path() -> PathBuf {
     let mut home = dirs::home_dir().unwrap();
     home.push(".zebra");
     if home.is_dir() {
-        return home;
+        home
     } else {
         let mut path = PathBuf::new();
         path.push("etc");
@@ -27,8 +27,8 @@ fn system_path() -> PathBuf {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rib = Rib::new();
+async fn main() -> anyhow::Result<()> {
+    let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());
     rib.subscribe(bgp.redist.tx.clone());
