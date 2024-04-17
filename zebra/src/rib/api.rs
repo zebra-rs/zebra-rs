@@ -14,6 +14,7 @@ impl RibTxChannel {
 }
 
 // Message from protocol module to rib.
+#[allow(dead_code)]
 pub enum RibTx {
     RouteAdd(),
     RouteDel(),
@@ -34,6 +35,7 @@ impl RibRxChannel {
 }
 
 // Message from rib to protocol module.
+#[allow(dead_code)]
 pub enum RibRx {
     RedistAdd(),
     RedistDel(),

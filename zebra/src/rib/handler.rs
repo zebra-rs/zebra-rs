@@ -1,7 +1,7 @@
 use super::api::RibRx;
 use super::link::{link_show, LinkAddr};
-use super::os::message::{OsAddr, OsChannel, OsLink, OsMessage, OsRoute};
-use super::os::{os_dump_spawn, route_add};
+use super::os::message::{FibChannel, OsAddr, OsLink, OsMessage, OsRoute};
+use super::os::{os_dump_spawn, FibHandle};
 use super::{Link, RibTxChannel};
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
@@ -15,180 +15,37 @@ use tokio::sync::mpsc::Sender;
 type Callback = fn(&mut Rib, Vec<String>, ConfigOp);
 type ShowCallback = fn(&Rib, Vec<String>) -> String;
 
-#[derive(Debug)]
-pub struct Nexthop {
-    nexthop: Ipv4Addr,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-enum RibType {
-    UNKNOWN,
-    KERNEL,
-    CONNECTED,
-    STATIC,
-    RIP,
-    OSPF,
-    ISIS,
-    BGP,
-}
-
-impl RibType {
-    pub fn char(&self) -> char {
-        match self {
-            Self::KERNEL => 'K',
-            Self::STATIC => 'S',
-            _ => '?',
-        }
-    }
-}
-
-#[allow(dead_code, non_camel_case_types)]
-#[derive(Debug)]
-enum RibSubType {
-    UNKNOWN,
-    OSPF_IA,
-    OSPF_NSSA_1,
-    OSPF_NSSA_2,
-    OSPF_EXTERNAL_1,
-    OSPF_EXTERNAL_2,
-}
-
-#[derive(Debug)]
-pub struct RibEntry {
-    rtype: RibType,
-    rsubtype: RibSubType,
-    selected: bool,
-    distance: u32,
-    tag: u32,
-    color: Vec<String>,
-    nexthops: Vec<Nexthop>,
-    gateway: IpAddr,
-}
-
-impl RibEntry {
-    pub fn new() -> Self {
-        Self {
-            rtype: RibType::UNKNOWN,
-            rsubtype: RibSubType::UNKNOWN,
-            selected: false,
-            distance: 0,
-            tag: 0,
-            color: Vec::new(),
-            nexthops: Vec::new(),
-            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct Rib {
     pub api: RibTxChannel,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    pub os: OsChannel,
+    pub fib: FibChannel,
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub rib: prefix_trie::PrefixMap<Ipv4Net, RibEntry>,
     pub callbacks: HashMap<String, Callback>,
-    //pub handle: Option<rtnetlink::Handle>,
-}
-
-pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
-    let mut buf = String::new();
-
-    buf.push_str(
-        r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
-       O - OSPF, IA - OSPF inter area
-       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2
-       E1 - OSPF external type 1, E2 - OSPF external type 2
-       i - IS-IS, L1 - IS-IS level-1, L2 - IS-IS level-2, ia - IS-IS inter area\n"#,
-    );
-
-    for (prefix, entry) in rib.rib.iter() {
-        writeln!(
-            buf,
-            "{}  {:?}     {:?}",
-            entry.rtype.char(),
-            prefix,
-            entry.gateway
-        )
-        .unwrap();
-    }
-
-    buf
-}
-
-pub fn link_addr_update(link: &mut Link, addr: LinkAddr) {
-    if addr.is_v4() {
-        for a in link.addr4.iter() {
-            if a.addr == addr.addr {
-                return;
-            }
-        }
-        link.addr4.push(addr);
-    } else {
-        for a in link.addr6.iter() {
-            if a.addr == addr.addr {
-                return;
-            }
-        }
-        link.addr6.push(addr);
-    }
-}
-
-pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
-    if addr.is_v4() {
-        if let Some(remove_index) = link.addr4.iter().position(|x| x.addr == addr.addr) {
-            link.addr4.remove(remove_index);
-        }
-    } else if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
-        link.addr6.remove(remove_index);
-    }
-}
-
-async fn static_route(_rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        // let asn_str = &args[0];
-        // bgp.asn = asn_str.parse().unwrap();
-    }
-}
-
-async fn static_route_nexthop(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let dest: Ipv4Net = args[0].parse().unwrap();
-        let gateway: Ipv4Addr = args[1].parse().unwrap();
-        //
-        let mut entry = RibEntry::new();
-        entry.rtype = RibType::STATIC;
-        entry.gateway = IpAddr::V4(gateway);
-        rib.rib.insert(dest, entry);
-
-        // if let Some(handle) = rib.handle.as_ref() {
-        //     route_add(handle.clone(), dest, gateway).await;
-        // }
-    }
+    pub handle: FibHandle,
 }
 
 impl Rib {
-    pub fn new() -> Self {
-        //let (tx, rx) = mpsc::unbounded_channel();
+    pub fn new() -> anyhow::Result<Self> {
+        let handle = FibHandle::new()?;
         let mut rib = Rib {
             api: RibTxChannel::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            os: OsChannel::new(),
+            fib: FibChannel::new(),
             redists: Vec::new(),
             links: BTreeMap::new(),
             rib: prefix_trie::PrefixMap::new(),
             callbacks: HashMap::new(),
-            // handle: None,
+            handle,
         };
         rib.callback_build();
         rib.show_build();
-        rib
+        Ok(rib)
     }
 
     pub fn subscribe(&mut self, tx: Sender<RibRx>) {
@@ -205,6 +62,7 @@ impl Rib {
         self.links.values().map(|link| link.name.clone()).collect()
     }
 
+    #[allow(dead_code)]
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
     }
@@ -318,12 +176,12 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
-        let handle = os_dump_spawn(self.os.tx.clone()).await.unwrap();
+        os_dump_spawn(self.fib.tx.clone()).await.unwrap();
         // self.handle = Some(handle);
 
         loop {
             tokio::select! {
-                Some(msg) = self.os.rx.recv() => {
+                Some(msg) = self.fib.rx.recv() => {
                     self.process_os_message(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
@@ -334,6 +192,151 @@ impl Rib {
                 }
             }
         }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct Nexthop {
+    nexthop: Ipv4Addr,
+}
+
+#[derive(Debug)]
+#[allow(dead_code, non_camel_case_types, clippy::upper_case_acronyms)]
+enum RibType {
+    UNKNOWN,
+    KERNEL,
+    CONNECTED,
+    STATIC,
+    RIP,
+    OSPF,
+    ISIS,
+    BGP,
+}
+
+impl RibType {
+    pub fn char(&self) -> char {
+        match self {
+            Self::KERNEL => 'K',
+            Self::STATIC => 'S',
+            _ => '?',
+        }
+    }
+}
+
+#[allow(dead_code, non_camel_case_types)]
+#[derive(Debug)]
+enum RibSubType {
+    UNKNOWN,
+    OSPF_IA,
+    OSPF_NSSA_1,
+    OSPF_NSSA_2,
+    OSPF_EXTERNAL_1,
+    OSPF_EXTERNAL_2,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct RibEntry {
+    rtype: RibType,
+    rsubtype: RibSubType,
+    selected: bool,
+    distance: u32,
+    tag: u32,
+    color: Vec<String>,
+    nexthops: Vec<Nexthop>,
+    gateway: IpAddr,
+}
+
+impl RibEntry {
+    pub fn new() -> Self {
+        Self {
+            rtype: RibType::UNKNOWN,
+            rsubtype: RibSubType::UNKNOWN,
+            selected: false,
+            distance: 0,
+            tag: 0,
+            color: Vec::new(),
+            nexthops: Vec::new(),
+            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        }
+    }
+}
+
+pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
+    let mut buf = String::new();
+
+    buf.push_str(
+        r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
+       O - OSPF, IA - OSPF inter area
+       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2
+       E1 - OSPF external type 1, E2 - OSPF external type 2
+       i - IS-IS, L1 - IS-IS level-1, L2 - IS-IS level-2, ia - IS-IS inter area\n"#,
+    );
+
+    for (prefix, entry) in rib.rib.iter() {
+        writeln!(
+            buf,
+            "{}  {:?}     {:?}",
+            entry.rtype.char(),
+            prefix,
+            entry.gateway
+        )
+        .unwrap();
+    }
+
+    buf
+}
+
+pub fn link_addr_update(link: &mut Link, addr: LinkAddr) {
+    if addr.is_v4() {
+        for a in link.addr4.iter() {
+            if a.addr == addr.addr {
+                return;
+            }
+        }
+        link.addr4.push(addr);
+    } else {
+        for a in link.addr6.iter() {
+            if a.addr == addr.addr {
+                return;
+            }
+        }
+        link.addr6.push(addr);
+    }
+}
+
+pub fn link_addr_del(link: &mut Link, addr: LinkAddr) {
+    if addr.is_v4() {
+        if let Some(remove_index) = link.addr4.iter().position(|x| x.addr == addr.addr) {
+            link.addr4.remove(remove_index);
+        }
+    } else if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
+        link.addr6.remove(remove_index);
+    }
+}
+
+async fn static_route(_rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && !args.is_empty() {
+        // let asn_str = &args[0];
+        // bgp.asn = asn_str.parse().unwrap();
+    }
+}
+
+async fn static_route_nexthop(rib: &mut Rib, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && args.len() > 1 {
+        let dest: Ipv4Net = args[0].parse().unwrap();
+        let gateway: Ipv4Addr = args[1].parse().unwrap();
+        //
+        let mut entry = RibEntry::new();
+        entry.rtype = RibType::STATIC;
+        entry.gateway = IpAddr::V4(gateway);
+        rib.rib.insert(dest, entry);
+
+        rib.handle.route_ipv4_add(dest, gateway).await;
+        // if let Some(handle) = rib.handle.as_ref() {
+        //     route_add(handle.clone(), dest, gateway).await;
+        // }
     }
 }
 

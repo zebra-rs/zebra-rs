@@ -20,6 +20,7 @@ similar = "2"
 dirs = "5"
 async-trait = "0.1"
 prefix-trie = "0.3"
+thiserror = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.14"

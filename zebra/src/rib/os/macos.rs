@@ -2,6 +2,7 @@ use super::message::{OsAddr, OsLink, OsMessage, OsRoute};
 use crate::rib::link;
 use ioctl_rs::SIOCGIFMTU;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use net_route::Route;
 use nix::ifaddrs::getifaddrs;
 use nix::libc::{ioctl, socket, AF_INET, IFNAMSIZ, SOCK_DGRAM};
 use nix::net::if_::if_nametoindex;
@@ -10,6 +11,30 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::UnboundedSender;
+
+pub struct FibHandle {
+    handle: net_route::Handle,
+}
+
+impl FibHandle {
+    pub fn new() -> anyhow::Result<Self> {
+        let handle = net_route::Handle::new()?;
+        Ok(Self { handle })
+    }
+
+    pub async fn route_ipv4_add(&self, dest: Ipv4Net, gateway: Ipv4Addr) {
+        let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
+            .with_gateway(IpAddr::V4(gateway));
+        self.handle.add(&route).await.unwrap();
+    }
+
+    #[allow(dead_code)]
+    pub async fn route_ipv4_del(&self, dest: Ipv4Net, gateway: Ipv4Addr) {
+        let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
+            .with_gateway(IpAddr::V4(gateway));
+        self.handle.delete(&route).await.unwrap();
+    }
+}
 
 fn os_link_flags(flags: InterfaceFlags) -> link::LinkFlags {
     let mut link_flags: u32 = 0u32;
@@ -159,7 +184,3 @@ pub async fn os_dump_spawn(tx: UnboundedSender<OsMessage>) -> std::io::Result<()
 pub fn os_traffic_dump() -> impl Fn(&String, &mut String) {
     move |_link_name: &String, _buf: &mut String| {}
 }
-
-pub fn route_add() {}
-
-pub fn route_del() {}
