@@ -1,5 +1,6 @@
 use super::message::{OsAddr, OsLink, OsMessage, OsRoute};
 use crate::rib::link;
+use anyhow::Result;
 use ioctl_rs::SIOCGIFMTU;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use net_route::Route;
@@ -13,13 +14,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct FibHandle {
-    handle: net_route::Handle,
+    h: net_route::Handle,
 }
 
 impl FibHandle {
-    pub fn new() -> anyhow::Result<Self> {
-        let handle = net_route::Handle::new()?;
-        Ok(Self { handle })
+    pub fn new() -> Result<Self> {
+        let h = net_route::Handle::new()?;
+        Ok(Self { h })
     }
 
     pub async fn route_ipv4_add(&self, dest: Ipv4Net, gateway: Ipv4Addr) {
@@ -174,7 +175,7 @@ async fn os_route_dump(tx: UnboundedSender<OsMessage>) {
     }
 }
 
-pub async fn os_dump_spawn(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+pub async fn fib_dump(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
     os_dump(tx.clone());
     os_route_dump(tx.clone()).await;
 
