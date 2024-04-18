@@ -75,7 +75,8 @@ fn os_mtu(link_name: &String) -> u32 {
     let name_str = CString::new(link_name.as_bytes()).unwrap();
     let name_bytes = name_str.as_bytes();
     unsafe {
-        ifreq.ifr_name[..name_bytes.len()].copy_from_slice(std::mem::transmute(name_bytes));
+        ifreq.ifr_name[..name_bytes.len()]
+            .copy_from_slice(std::mem::transmute::<&[u8], &[i8]>(name_bytes));
     }
 
     unsafe {
@@ -96,9 +97,9 @@ fn os_dump(tx: UnboundedSender<FibMessage>) {
     for ifa in addrs {
         let index = if_nametoindex(ifa.interface_name.as_str());
         if let Ok(index) = index {
-            if links.get(&index).is_none() {
+            if !links.contains_key(&index) {
                 let mut link = FibLink::new();
-                link.name = ifa.interface_name.clone();
+                link.name.clone_from(&ifa.interface_name);
                 link.index = index;
                 link.flags = os_link_flags(ifa.flags);
                 if (link.flags.0 & link::IFF_LOOPBACK) == link::IFF_LOOPBACK {
