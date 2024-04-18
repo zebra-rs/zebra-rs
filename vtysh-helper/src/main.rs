@@ -1,5 +1,7 @@
+use anyhow::Result;
 use clap::Parser;
 use std::env;
+use tokio::io::{self, AsyncWriteExt};
 use tokio_stream::StreamExt;
 use vtysh::exec_client::ExecClient;
 use vtysh::show_client::ShowClient;
@@ -58,7 +60,7 @@ fn output(reply: ExecReply) {
     println!("{:}", reply.lines);
 }
 
-fn command_string(commands: &Vec<String>) -> String {
+fn command_string(commands: &[String]) -> String {
     if !commands.is_empty() {
         commands.join(" ")
     } else {
@@ -66,7 +68,7 @@ fn command_string(commands: &Vec<String>) -> String {
     }
 }
 
-fn commands_trim_run(commands: &Vec<String>) -> Vec<String> {
+fn commands_trim_run(commands: &[String]) -> Vec<String> {
     let mut commands = commands.to_owned();
     if !commands.is_empty() && commands[0] == "run" {
         commands.remove(0);
@@ -86,13 +88,7 @@ fn exec_request(exec_type: i32, mode: &String, commands: &Vec<String>) -> ExecRe
     }
 }
 
-use tokio::io::{self, AsyncWriteExt};
-
-async fn show(
-    cli: Cli,
-    port: Option<u32>,
-    paths: Vec<CommandPath>,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()> {
     let port = port.unwrap_or(cli.port);
     let mut client = ShowClient::connect(format!("{}:{}", cli.base, port)).await?;
 
@@ -114,7 +110,7 @@ async fn show(
     Ok(())
 }
 
-async fn completion(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn completion(cli: Cli) -> Result<()> {
     let mut client = ExecClient::connect(format!("{}:{}", cli.base, cli.port)).await?;
 
     let exec_type: i32 = if cli.completion {
@@ -134,7 +130,7 @@ async fn completion(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn redirect(cli: Cli, port: u32) -> Result<(), Box<dyn std::error::Error>> {
+async fn redirect(cli: Cli, port: u32) -> Result<()> {
     let mut client = ExecClient::connect(format!("{}:{}", cli.base, port)).await?;
 
     let commands = commands_trim_run(&cli.commands);
@@ -146,7 +142,7 @@ async fn redirect(cli: Cli, port: u32) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-async fn exec(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn exec(cli: Cli) -> Result<()> {
     let mut client = ExecClient::connect(format!("{}:{}", cli.base, cli.port)).await?;
 
     let request = tonic::Request::new(exec_request(
@@ -168,21 +164,25 @@ async fn exec(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cli = Cli::parse();
-    match env::var("VTYSH_SERVER_URL") {
-        Ok(val) => {
-            cli.base = val;
-        }
-        Err(_) => {}
-    }
+async fn run(cli: Cli) -> Result<()> {
     if cli.show {
         show(cli, None, Vec::new()).await?;
     } else if cli.completion || cli.trailing || cli.first {
         completion(cli).await?;
     } else {
         exec(cli).await?;
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut cli = Cli::parse();
+    if let Ok(val) = env::var("VTYSH_SERVER_URL") {
+        cli.base = val;
+    }
+    if let Err(_err) = run(cli).await {
+        println!("dummy\ncommands\n\n");
     }
     Ok(())
 }

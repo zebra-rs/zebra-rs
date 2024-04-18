@@ -27,8 +27,6 @@ fn system_path() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());
