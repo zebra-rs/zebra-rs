@@ -1,4 +1,4 @@
-use super::message::{OsAddr, OsLink, OsMessage, OsRoute};
+use super::message::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::link;
 use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
@@ -27,7 +27,7 @@ pub struct FibHandle {
 }
 
 impl FibHandle {
-    pub fn new(rib_tx: UnboundedSender<OsMessage>) -> anyhow::Result<Self> {
+    pub fn new(rib_tx: UnboundedSender<FibMessage>) -> anyhow::Result<Self> {
         let (mut connection, handle, mut messages) = new_connection()?;
 
         let mgroup_flags = RTMGRP_LINK
@@ -84,8 +84,8 @@ fn link_type_msg(link_type: LinkLayerType) -> link::LinkType {
     }
 }
 
-fn link_from_msg(msg: LinkMessage) -> OsLink {
-    let mut link = OsLink::new();
+fn link_from_msg(msg: LinkMessage) -> FibLink {
+    let mut link = FibLink::new();
     link.index = msg.header.index;
     link.link_type = link_type_msg(msg.header.link_layer_type);
     link.flags = flags_from(&msg.header.flags);
@@ -104,8 +104,8 @@ fn link_from_msg(msg: LinkMessage) -> OsLink {
     link
 }
 
-fn addr_from_msg(msg: AddressMessage) -> OsAddr {
-    let mut os_addr = OsAddr::new();
+fn addr_from_msg(msg: AddressMessage) -> FibAddr {
+    let mut os_addr = FibAddr::new();
     os_addr.link_index = msg.header.index;
     for attr in msg.attributes.into_iter() {
         match attr {
@@ -129,8 +129,8 @@ fn addr_from_msg(msg: AddressMessage) -> OsAddr {
     os_addr
 }
 
-fn route_from_msg(msg: RouteMessage) -> OsRoute {
-    let mut route = OsRoute {
+fn route_from_msg(msg: RouteMessage) -> FibRoute {
+    let mut route = FibRoute {
         route: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
         gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     };
@@ -158,39 +158,39 @@ fn route_from_msg(msg: RouteMessage) -> OsRoute {
     route
 }
 
-fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<OsMessage>) {
+fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
     match msg.payload {
         NetlinkPayload::InnerMessage(msg) => match msg {
             RouteNetlinkMessage::NewLink(msg) => {
                 let link = link_from_msg(msg);
-                let msg = OsMessage::NewLink(link);
+                let msg = FibMessage::NewLink(link);
                 tx.send(msg).unwrap();
             }
             RouteNetlinkMessage::DelLink(msg) => {
                 let link = link_from_msg(msg);
-                let msg = OsMessage::DelLink(link);
+                let msg = FibMessage::DelLink(link);
                 tx.send(msg).unwrap();
             }
             RouteNetlinkMessage::NewAddress(msg) => {
                 let addr = addr_from_msg(msg);
-                let msg = OsMessage::NewAddr(addr);
+                let msg = FibMessage::NewAddr(addr);
                 tx.send(msg).unwrap();
             }
             RouteNetlinkMessage::DelAddress(msg) => {
                 let addr = addr_from_msg(msg);
-                let msg = OsMessage::DelAddr(addr);
+                let msg = FibMessage::DelAddr(addr);
                 tx.send(msg).unwrap();
             }
             RouteNetlinkMessage::NewRoute(msg) => {
                 let route = route_from_msg(msg);
                 if !route.gateway.is_unspecified() {
-                    let msg = OsMessage::NewRoute(route);
+                    let msg = FibMessage::NewRoute(route);
                     tx.send(msg).unwrap();
                 }
             }
             RouteNetlinkMessage::DelRoute(msg) => {
                 let route = route_from_msg(msg);
-                let msg = OsMessage::DelRoute(route);
+                let msg = FibMessage::DelRoute(route);
                 tx.send(msg).unwrap();
             }
             _ => {}
@@ -199,21 +199,21 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<OsM
     }
 }
 
-async fn link_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>) -> Result<()> {
+async fn link_dump(handle: rtnetlink::Handle, tx: UnboundedSender<FibMessage>) -> Result<()> {
     let mut links = handle.link().get().execute();
     while let Some(msg) = links.try_next().await? {
         let link = link_from_msg(msg);
-        let msg = OsMessage::NewLink(link);
+        let msg = FibMessage::NewLink(link);
         tx.send(msg).unwrap();
     }
     Ok(())
 }
 
-async fn address_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>) -> Result<()> {
+async fn address_dump(handle: rtnetlink::Handle, tx: UnboundedSender<FibMessage>) -> Result<()> {
     let mut addresses = handle.address().get().execute();
     while let Some(msg) = addresses.try_next().await? {
         let addr = addr_from_msg(msg);
-        let msg = OsMessage::NewAddr(addr);
+        let msg = FibMessage::NewAddr(addr);
         tx.send(msg).unwrap();
     }
     Ok(())
@@ -221,13 +221,13 @@ async fn address_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>)
 
 async fn route_dump(
     handle: rtnetlink::Handle,
-    tx: UnboundedSender<OsMessage>,
+    tx: UnboundedSender<FibMessage>,
     ip_version: IpVersion,
 ) -> Result<()> {
     let mut routes = handle.route().get(ip_version).execute();
     while let Some(msg) = routes.try_next().await? {
         let route = route_from_msg(msg);
-        let msg = OsMessage::NewRoute(route);
+        let msg = FibMessage::NewRoute(route);
         tx.send(msg).unwrap();
     }
     Ok(())
@@ -312,7 +312,7 @@ pub async fn route_del(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Ad
     }
 }
 
-pub async fn fib_dump(handle: &FibHandle, tx: UnboundedSender<OsMessage>) -> Result<()> {
+pub async fn fib_dump(handle: &FibHandle, tx: UnboundedSender<FibMessage>) -> Result<()> {
     link_dump(handle.handle.clone(), tx.clone()).await?;
     address_dump(handle.handle.clone(), tx.clone()).await?;
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V4).await?;

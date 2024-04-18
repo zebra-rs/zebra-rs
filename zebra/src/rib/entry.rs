@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use super::nexthop::Nexthop;
+use super::{nexthop::Nexthop, Rib};
 
 #[derive(Debug, PartialEq)]
 #[allow(dead_code, non_camel_case_types, clippy::upper_case_acronyms)]
@@ -67,9 +67,13 @@ impl RibEntry {
         }
     }
 
-    pub fn gateway(&self) -> String {
+    pub fn gateway(&self, rib: &Rib) -> String {
         if self.rtype == RibType::CONNECTED {
-            format!("directly connected {}", &self.link_index)
+            if let Some(name) = rib.link_name(self.link_index) {
+                format!("directly connected {}", name)
+            } else {
+                format!("directly connected unknown")
+            }
         } else {
             format!("via {:?}", &self.gateway)
         }

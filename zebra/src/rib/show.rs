@@ -52,7 +52,7 @@ pub(crate) fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
                 e.selected(),
                 prefix,
                 e.distance(),
-                e.gateway(),
+                e.gateway(rib),
             )
             .unwrap();
         }
