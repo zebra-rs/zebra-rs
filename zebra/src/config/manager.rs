@@ -53,7 +53,7 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new(mut system_path: PathBuf) -> Self {
+    pub fn new(mut system_path: PathBuf) -> anyhow::Result<Self> {
         system_path.push("yang");
         let yang_path = system_path.to_string_lossy().to_string();
         system_path.pop();
@@ -69,21 +69,23 @@ impl ConfigManager {
             rx,
             cm_clients: HashMap::new(),
         };
-        cm.init();
-        cm
+        cm.init()?;
+        Ok(cm)
     }
 
-    fn init(&mut self) {
+    fn init(&mut self) -> anyhow::Result<()> {
         let mut yang = YangStore::new();
         yang.add_path(&self.yang_path);
 
-        let entry = self.load_mode(&mut yang, "exec");
+        let entry = self.load_mode(&mut yang, "exec")?;
         let exec_mode = exec_mode_create(entry);
         self.modes.insert("exec".to_string(), exec_mode);
 
-        let entry = self.load_mode(&mut yang, "configure");
+        let entry = self.load_mode(&mut yang, "configure")?;
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
+
+        Ok(())
     }
 
     pub fn subscribe(&mut self, name: &str, cm_tx: UnboundedSender<ConfigRequest>) {
@@ -149,11 +151,11 @@ impl ConfigManager {
         self.store.commit();
     }
 
-    fn load_mode(&self, yang: &mut YangStore, mode: &str) -> Rc<Entry> {
-        yang.read_with_resolve(mode).unwrap();
+    fn load_mode(&self, yang: &mut YangStore, mode: &str) -> anyhow::Result<Rc<Entry>> {
+        yang.read_with_resolve(mode)?;
         yang.identity_resolve();
         let module = yang.find_module(mode).unwrap();
-        to_entry(yang, module)
+        Ok(to_entry(yang, module))
     }
 
     pub fn load_config(&self) {

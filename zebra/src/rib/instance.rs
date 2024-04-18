@@ -10,7 +10,7 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::Sender;
-use tracing::warn;
+// use tracing::warn;
 
 pub type ShowCallback = fn(&Rib, Vec<String>) -> String;
 

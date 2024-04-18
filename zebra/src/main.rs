@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let bgp = Bgp::new(rib.api.tx.clone());
     rib.subscribe(bgp.redist.tx.clone());
 
-    let mut config = ConfigManager::new(system_path());
+    let mut config = ConfigManager::new(system_path())?;
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
 
