@@ -21,5 +21,6 @@ pub use macos::os_traffic_dump;
 pub use macos::FibHandle;
 
 pub mod message;
+pub use message::{FibChannel, FibMessage};
 
 pub use super::{LinkFlags, LinkType};

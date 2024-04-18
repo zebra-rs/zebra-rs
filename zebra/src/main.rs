@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later or Apache-2.0
 
 mod config;
-use config::Cli;
-use config::ConfigManager;
+use config::{Cli, ConfigManager};
 use std::path::PathBuf;
 mod bgp;
 use bgp::Bgp;
@@ -28,6 +27,8 @@ fn system_path() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
     let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());
@@ -38,8 +39,8 @@ async fn main() -> anyhow::Result<()> {
     config.subscribe("bgp", bgp.cm.tx.clone());
 
     let mut cli = Cli::new(config.tx.clone());
-    cli.subscribe(rib.show.tx.clone());
-    cli.subscribe(bgp.show.tx.clone());
+    cli.subscribe("rib", rib.show.tx.clone());
+    cli.subscribe("bgp", bgp.show.tx.clone());
 
     config::serve(cli);
 

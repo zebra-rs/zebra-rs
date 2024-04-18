@@ -198,7 +198,7 @@ impl Cli {
         }
     }
 
-    pub fn subscribe(&mut self, disp_tx: UnboundedSender<DisplayRequest>) {
+    pub fn subscribe(&mut self, _name: &str, disp_tx: UnboundedSender<DisplayRequest>) {
         self.txes.push(disp_tx);
     }
 }

@@ -1,3 +1,4 @@
+use super::entry::{RibEntry, RibType};
 use super::fib::message::{FibAddr, FibLink};
 use super::fib::os_traffic_dump;
 use super::Rib;
@@ -197,4 +198,89 @@ pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
         }
     }
     buf
+}
+
+pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> Option<()> {
+    if addr.is_v4() {
+        for a in link.addr4.iter() {
+            if a.addr == addr.addr {
+                return None;
+            }
+        }
+        link.addr4.push(addr);
+    } else {
+        for a in link.addr6.iter() {
+            if a.addr == addr.addr {
+                return None;
+            }
+        }
+        link.addr6.push(addr);
+    }
+    Some(())
+}
+
+pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
+    if addr.is_v4() {
+        if let Some(remove_index) = link.addr4.iter().position(|x| x.addr == addr.addr) {
+            link.addr4.remove(remove_index);
+            return Some(());
+        }
+    } else if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
+        link.addr6.remove(remove_index);
+        return Some(());
+    }
+    None
+}
+
+impl Rib {
+    pub fn link_add(&mut self, oslink: FibLink) {
+        if !self.links.contains_key(&oslink.index) {
+            let link = Link::from(oslink);
+            self.links.insert(link.index, link);
+        }
+    }
+
+    pub fn link_delete(&mut self, oslink: FibLink) {
+        self.links.remove(&oslink.index);
+    }
+
+    pub fn link_name(&self, link_index: u32) -> Option<&String> {
+        match self.links.get(&link_index) {
+            Some(link) => Some(&link.name),
+            _ => None,
+        }
+    }
+
+    pub fn link_by_name(&self, link_name: &str) -> Option<&Link> {
+        self.links
+            .iter()
+            .find_map(|(_, v)| if v.name == link_name { Some(v) } else { None })
+    }
+
+    pub fn link_comps(&self) -> Vec<String> {
+        self.links.values().map(|link| link.name.clone()).collect()
+    }
+
+    pub fn addr_add(&mut self, osaddr: FibAddr) {
+        let addr = LinkAddr::from(osaddr);
+        if let Some(link) = self.links.get_mut(&addr.link_index) {
+            if link_addr_update(link, addr.clone()).is_some() {
+                let mut e = RibEntry::new(RibType::Connected);
+                e.link_index = link.index;
+                e.distance = 0;
+                e.selected = true;
+                e.fib = true;
+                if let IpNet::V4(net) = addr.addr {
+                    self.ipv4_add(net, e);
+                }
+            }
+        }
+    }
+
+    pub fn addr_del(&mut self, osaddr: FibAddr) {
+        let addr = LinkAddr::from(osaddr);
+        if let Some(link) = self.links.get_mut(&addr.link_index) {
+            link_addr_del(link, addr);
+        }
+    }
 }
