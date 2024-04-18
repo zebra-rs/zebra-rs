@@ -5,6 +5,8 @@ impl RibType {
         match self {
             Self::KERNEL => 'K',
             Self::STATIC => 'S',
+            Self::CONNECTED => 'C',
+            Self::BGP => 'B',
             _ => '?',
         }
     }

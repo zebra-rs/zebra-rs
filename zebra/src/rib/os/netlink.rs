@@ -315,9 +315,7 @@ pub async fn route_del(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Ad
 pub async fn fib_dump(handle: &FibHandle, tx: UnboundedSender<OsMessage>) -> Result<()> {
     link_dump(handle.handle.clone(), tx.clone()).await?;
     address_dump(handle.handle.clone(), tx.clone()).await?;
-    println!("IPv4 Dump start");
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V4).await?;
-    println!("IPv4 Dump end");
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V6).await?;
     Ok(())
 }
