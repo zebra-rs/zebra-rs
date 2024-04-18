@@ -49,7 +49,7 @@ impl Link {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct LinkAddr {
     pub addr: IpNet,
     pub link_index: u32,
