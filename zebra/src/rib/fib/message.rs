@@ -5,8 +5,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub struct FibChannel {
-    pub tx: UnboundedSender<OsMessage>,
-    pub rx: UnboundedReceiver<OsMessage>,
+    pub tx: UnboundedSender<FibMessage>,
+    pub rx: UnboundedReceiver<FibMessage>,
 }
 
 impl FibChannel {
@@ -17,7 +17,7 @@ impl FibChannel {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct OsLink {
+pub struct FibLink {
     pub index: u32,
     pub name: String,
     pub flags: LinkFlags,
@@ -25,8 +25,8 @@ pub struct OsLink {
     pub mtu: u32,
 }
 
-impl OsLink {
-    pub fn new() -> OsLink {
+impl FibLink {
+    pub fn new() -> FibLink {
         Self {
             ..Default::default()
         }
@@ -34,15 +34,15 @@ impl OsLink {
 }
 
 #[derive(Default, Debug)]
-pub struct OsAddr {
+pub struct FibAddr {
     pub addr: IpNet,
     pub link_index: u32,
     pub secondary: bool,
 }
 
-impl OsAddr {
+impl FibAddr {
     #[allow(dead_code)]
-    pub fn new() -> OsAddr {
+    pub fn new() -> FibAddr {
         Self {
             ..Default::default()
         }
@@ -50,17 +50,17 @@ impl OsAddr {
 }
 
 #[derive(Debug)]
-pub struct OsRoute {
+pub struct FibRoute {
     pub route: IpNet,
     pub gateway: IpAddr,
 }
 
 #[allow(dead_code)]
-pub enum OsMessage {
-    NewLink(OsLink),
-    DelLink(OsLink),
-    NewAddr(OsAddr),
-    DelAddr(OsAddr),
-    NewRoute(OsRoute),
-    DelRoute(OsRoute),
+pub enum FibMessage {
+    NewLink(FibLink),
+    DelLink(FibLink),
+    NewAddr(FibAddr),
+    DelAddr(FibAddr),
+    NewRoute(FibRoute),
+    DelRoute(FibRoute),
 }
