@@ -93,8 +93,8 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
-        if let Err(err) = fib_dump(&self.fib_handle, self.fib.tx.clone()).await {
-            warn!("FIB dump error {}", err);
+        if let Err(_err) = fib_dump(&self.fib_handle, self.fib.tx.clone()).await {
+            // warn!("FIB dump error {}", err);
         }
         loop {
             tokio::select! {
