@@ -1,5 +1,6 @@
 use super::message::{OsAddr, OsLink, OsMessage, OsRoute};
 use crate::rib::link;
+use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
@@ -129,19 +130,26 @@ fn addr_from_msg(msg: AddressMessage) -> OsAddr {
 }
 
 fn route_from_msg(msg: RouteMessage) -> OsRoute {
-    let route = OsRoute {
+    let mut route = OsRoute {
         route: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
         gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     };
 
     for attr in msg.attributes.into_iter() {
         match attr {
-            RouteAttribute::Destination(_) => {
-                //
-            }
-            RouteAttribute::Gateway(_) => {
-                //
-            }
+            RouteAttribute::Destination(m) => match m {
+                RouteAddress::Inet(n) => {
+                    route.route =
+                        IpNet::V4(Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap());
+                }
+                _ => {}
+            },
+            RouteAttribute::Gateway(g) => match g {
+                RouteAddress::Inet(n) => {
+                    route.gateway = IpAddr::V4(n);
+                }
+                _ => {}
+            },
             _ => {
                 //
             }
@@ -175,53 +183,54 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<OsM
             }
             RouteNetlinkMessage::NewRoute(msg) => {
                 let route = route_from_msg(msg);
-                let msg = OsMessage::NewRoute(route);
-                tx.send(msg).unwrap();
+                if !route.gateway.is_unspecified() {
+                    let msg = OsMessage::NewRoute(route);
+                    tx.send(msg).unwrap();
+                }
             }
             RouteNetlinkMessage::DelRoute(msg) => {
                 let route = route_from_msg(msg);
                 let msg = OsMessage::DelRoute(route);
                 tx.send(msg).unwrap();
             }
-            _ => {
-                // Not expecting.
-            }
+            _ => {}
         },
-        _ => {
-            // We only interested in updates.
-        }
+        _ => {}
     }
 }
 
-async fn link_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>) {
+async fn link_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>) -> Result<()> {
     let mut links = handle.link().get().execute();
-    while let Some(msg) = links.try_next().await.unwrap() {
+    while let Some(msg) = links.try_next().await? {
         let link = link_from_msg(msg);
         let msg = OsMessage::NewLink(link);
         tx.send(msg).unwrap();
     }
+    Ok(())
 }
 
-async fn address_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>) {
+async fn address_dump(handle: rtnetlink::Handle, tx: UnboundedSender<OsMessage>) -> Result<()> {
     let mut addresses = handle.address().get().execute();
-    while let Some(msg) = addresses.try_next().await.unwrap() {
+    while let Some(msg) = addresses.try_next().await? {
         let addr = addr_from_msg(msg);
         let msg = OsMessage::NewAddr(addr);
         tx.send(msg).unwrap();
     }
+    Ok(())
 }
 
 async fn route_dump(
     handle: rtnetlink::Handle,
     tx: UnboundedSender<OsMessage>,
     ip_version: IpVersion,
-) {
+) -> Result<()> {
     let mut routes = handle.route().get(ip_version).execute();
-    while let Some(msg) = routes.try_next().await.unwrap() {
+    while let Some(msg) = routes.try_next().await? {
         let route = route_from_msg(msg);
         let msg = OsMessage::NewRoute(route);
         tx.send(msg).unwrap();
     }
+    Ok(())
 }
 
 pub async fn route_add(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
@@ -303,35 +312,14 @@ pub async fn route_del(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Ad
     }
 }
 
-pub async fn os_dump_spawn(
-    rib_tx: UnboundedSender<OsMessage>,
-) -> anyhow::Result<rtnetlink::Handle> {
-    let (mut connection, handle, mut messages) = new_connection()?;
-
-    let mgroup_flags = RTMGRP_LINK
-        | RTMGRP_IPV4_ROUTE
-        | RTMGRP_IPV6_ROUTE
-        | RTMGRP_IPV4_IFADDR
-        | RTMGRP_IPV6_IFADDR;
-
-    let addr = SocketAddr::new(0, mgroup_flags);
-    connection.socket_mut().socket_mut().bind(&addr)?;
-
-    tokio::spawn(connection);
-
-    let tx = rib_tx.clone();
-    tokio::spawn(async move {
-        while let Some((message, _)) = messages.next().await {
-            process_msg(message, tx.clone());
-        }
-    });
-
-    link_dump(handle.clone(), rib_tx.clone()).await;
-    address_dump(handle.clone(), rib_tx.clone()).await;
-    route_dump(handle.clone(), rib_tx.clone(), IpVersion::V4).await;
-    route_dump(handle.clone(), rib_tx.clone(), IpVersion::V6).await;
-
-    Ok(handle.clone())
+pub async fn fib_dump(handle: &FibHandle, tx: UnboundedSender<OsMessage>) -> Result<()> {
+    link_dump(handle.handle.clone(), tx.clone()).await?;
+    address_dump(handle.handle.clone(), tx.clone()).await?;
+    println!("IPv4 Dump start");
+    route_dump(handle.handle.clone(), tx.clone(), IpVersion::V4).await?;
+    println!("IPv4 Dump end");
+    route_dump(handle.handle.clone(), tx.clone(), IpVersion::V6).await?;
+    Ok(())
 }
 
 #[derive(Default, Debug)]
