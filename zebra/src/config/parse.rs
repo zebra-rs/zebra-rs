@@ -453,7 +453,7 @@ pub fn parse(
 
     // "delete" overwrite entry completion with config completion.
     if s.delete {
-        mx.comps = cx.comps.clone();
+        mx.comps.clone_from(&cx.comps);
     }
 
     // Eraly return for no match and ambiguous match.
