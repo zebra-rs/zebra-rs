@@ -210,6 +210,13 @@ impl Rib {
             }
         }
     }
+
+    pub fn link_name(&self, link_index: u32) -> Option<&String> {
+        match self.links.get(&link_index) {
+            Some(link) => Some(&link.name),
+            _ => None,
+        }
+    }
 }
 
 pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> Option<()> {
