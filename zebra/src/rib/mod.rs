@@ -9,7 +9,11 @@ pub use link::{Link, LinkFlags, LinkType};
 
 pub mod entry;
 
+pub mod route;
+
 pub mod nexthop;
+
+pub mod config;
 
 pub mod show;
 
