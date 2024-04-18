@@ -1,14 +1,12 @@
+use super::{nexthop::Nexthop, Rib};
 use std::net::{IpAddr, Ipv4Addr};
 
-use super::{nexthop::Nexthop, Rib};
-
 #[derive(Debug, PartialEq)]
-#[allow(dead_code, non_camel_case_types, clippy::upper_case_acronyms)]
+#[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
 pub enum RibType {
-    UNKNOWN,
-    KERNEL,
-    CONNECTED,
-    STATIC,
+    Kernel,
+    Connected,
+    Static,
     RIP,
     OSPF,
     ISIS,
@@ -16,17 +14,19 @@ pub enum RibType {
 }
 
 #[derive(Debug, PartialEq)]
-#[allow(dead_code, non_camel_case_types)]
+#[allow(non_camel_case_types, dead_code)]
 pub enum RibSubType {
-    Unknown,
+    NotApplicable,
     OSPF_IA,
     OSPF_NSSA_1,
     OSPF_NSSA_2,
-    OSPF_EXTERNAL_1,
-    OSPF_EXTERNAL_2,
+    OSPF_External_1,
+    OSPF_External_2,
+    ISIS_Level_1,
+    ISIS_Level_2,
+    ISIS_Intra_Area,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RibEntry {
     pub rtype: RibType,
@@ -43,10 +43,10 @@ pub struct RibEntry {
 }
 
 impl RibEntry {
-    pub fn new() -> Self {
+    pub fn new(rtype: RibType) -> Self {
         Self {
-            rtype: RibType::UNKNOWN,
-            rsubtype: RibSubType::Unknown,
+            rtype,
+            rsubtype: RibSubType::NotApplicable,
             selected: false,
             fib: false,
             distance: 0,
@@ -60,7 +60,7 @@ impl RibEntry {
     }
 
     pub fn distance(&self) -> String {
-        if self.rtype != RibType::CONNECTED {
+        if self.rtype != RibType::Connected {
             format!(" [{}/{}]", &self.distance, &self.metric)
         } else {
             String::new()
@@ -68,11 +68,11 @@ impl RibEntry {
     }
 
     pub fn gateway(&self, rib: &Rib) -> String {
-        if self.rtype == RibType::CONNECTED {
+        if self.rtype == RibType::Connected {
             if let Some(name) = rib.link_name(self.link_index) {
                 format!("directly connected {}", name)
             } else {
-                format!("directly connected unknown")
+                "directly connected unknown".to_string()
             }
         } else {
             format!("via {:?}", &self.gateway)
