@@ -1,7 +1,9 @@
 use super::api::RibRx;
+use super::entry::{RibEntry, RibType};
+use super::fib::message::{FibAddr, FibChannel, FibLink, FibMessage, FibRoute};
+use super::fib::{fib_dump, FibHandle};
 use super::link::{link_show, LinkAddr};
-use super::os::message::{FibChannel, OsAddr, OsLink, OsMessage, OsRoute};
-use super::os::{fib_dump, FibHandle};
+use super::show::rib_show;
 use super::{Link, RibTxChannel};
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
@@ -9,7 +11,6 @@ use crate::config::{
 use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::Sender;
 
@@ -84,18 +85,18 @@ impl Rib {
         self.show_add("/show/ip/route", rib_show);
     }
 
-    pub fn link_add(&mut self, oslink: OsLink) {
+    pub fn link_add(&mut self, oslink: FibLink) {
         if !self.links.contains_key(&oslink.index) {
             let link = Link::from(oslink);
             self.links.insert(link.index, link);
         }
     }
 
-    pub fn link_delete(&mut self, oslink: OsLink) {
+    pub fn link_delete(&mut self, oslink: FibLink) {
         self.links.remove(&oslink.index);
     }
 
-    pub fn addr_add(&mut self, osaddr: OsAddr) {
+    pub fn addr_add(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.link_index) {
             if link_addr_update(link, addr.clone()).is_some() {
@@ -105,20 +106,20 @@ impl Rib {
                 e.distance = 0;
                 e.selected = true;
                 if let IpNet::V4(net) = addr.addr {
-                    self.ipv4_add(net.clone(), e);
+                    self.ipv4_add(net, e);
                 }
             }
         }
     }
 
-    pub fn addr_del(&mut self, osaddr: OsAddr) {
+    pub fn addr_del(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.link_index) {
             link_addr_del(link, addr);
         }
     }
 
-    pub fn route_add(&mut self, osroute: OsRoute) {
+    pub fn route_add(&mut self, osroute: FibRoute) {
         if let IpNet::V4(v4) = osroute.route {
             let mut e = RibEntry::new();
             e.rtype = RibType::KERNEL;
@@ -131,32 +132,32 @@ impl Rib {
         }
     }
 
-    pub fn route_del(&mut self, osroute: OsRoute) {
+    pub fn route_del(&mut self, osroute: FibRoute) {
         if let IpNet::V4(v4) = osroute.route {
-            if let Some(ribs) = self.rib.get(&v4) {
+            if let Some(_ribs) = self.rib.get(&v4) {
                 //
             }
         }
     }
 
-    fn process_os_message(&mut self, msg: OsMessage) {
+    fn process_os_message(&mut self, msg: FibMessage) {
         match msg {
-            OsMessage::NewLink(link) => {
+            FibMessage::NewLink(link) => {
                 self.link_add(link);
             }
-            OsMessage::DelLink(link) => {
+            FibMessage::DelLink(link) => {
                 self.link_delete(link);
             }
-            OsMessage::NewAddr(addr) => {
+            FibMessage::NewAddr(addr) => {
                 self.addr_add(addr);
             }
-            OsMessage::DelAddr(addr) => {
+            FibMessage::DelAddr(addr) => {
                 self.addr_del(addr);
             }
-            OsMessage::NewRoute(route) => {
+            FibMessage::NewRoute(route) => {
                 self.route_add(route);
             }
-            OsMessage::DelRoute(route) => {
+            FibMessage::DelRoute(route) => {
                 self.route_del(route);
             }
         }
@@ -191,7 +192,9 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
-        fib_dump(&self.fib_handle, self.fib.tx.clone()).await;
+        if let Err(_err) = fib_dump(&self.fib_handle, self.fib.tx.clone()).await {
+            // Logging FIB dump error.
+        }
 
         loop {
             tokio::select! {
@@ -239,136 +242,6 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
         return Some(());
     }
     None
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct Nexthop {
-    nexthop: Ipv4Addr,
-}
-
-#[derive(Debug, PartialEq)]
-#[allow(dead_code, non_camel_case_types, clippy::upper_case_acronyms)]
-pub enum RibType {
-    UNKNOWN,
-    KERNEL,
-    CONNECTED,
-    STATIC,
-    RIP,
-    OSPF,
-    ISIS,
-    BGP,
-}
-
-#[derive(Debug, PartialEq)]
-#[allow(dead_code, non_camel_case_types)]
-pub enum RibSubType {
-    UNKNOWN,
-    OSPF_IA,
-    OSPF_NSSA_1,
-    OSPF_NSSA_2,
-    OSPF_EXTERNAL_1,
-    OSPF_EXTERNAL_2,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct RibEntry {
-    rtype: RibType,
-    rsubtype: RibSubType,
-    selected: bool,
-    distance: u32,
-    metric: u32,
-    tag: u32,
-    color: Vec<String>,
-    nexthops: Vec<Nexthop>,
-    gateway: IpAddr,
-    link_index: u32,
-}
-
-impl RibEntry {
-    pub fn new() -> Self {
-        Self {
-            rtype: RibType::UNKNOWN,
-            rsubtype: RibSubType::UNKNOWN,
-            selected: false,
-            distance: 0,
-            metric: 0,
-            tag: 0,
-            color: Vec::new(),
-            nexthops: Vec::new(),
-            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            link_index: 0,
-        }
-    }
-
-    pub fn distance(&self) -> String {
-        if self.rtype != RibType::CONNECTED {
-            format!(" [{}/{}]", &self.distance, &self.metric)
-        } else {
-            String::new()
-        }
-    }
-
-    pub fn gateway(&self) -> String {
-        if self.rtype == RibType::CONNECTED {
-            format!("directly connected {}", &self.link_index)
-        } else {
-            format!("via {:?}", &self.gateway)
-        }
-    }
-
-    pub fn selected(&self) -> String {
-        format!("*>")
-    }
-}
-
-pub fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
-    let mut buf = String::new();
-
-    buf.push_str(
-        r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
-       O - OSPF, IA - OSPF inter area
-       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2
-       E1 - OSPF external type 1, E2 - OSPF external type 2
-       i - IS-IS, L1 - IS-IS level-1, L2 - IS-IS level-2, ia - IS-IS inter area
-        > - selected route, * - FIB route, S - Stale route
-
-"#,
-    );
-
-    // > - selected route, * - FIB route, S - Stale route
-    // K    *> 0.0.0.0/0 [0/0] via 172.27.64.1, wan-1
-    // K    *  0.0.0.0/0 [0/100] via 172.27.64.1, wan-1 src 172.27.71.230
-    // C    *> 127.0.0.0/8 is directly connected lo
-    // K    *> 169.254.0.0/16 [0/1000] is directly connected mgmt
-    // C    *> 172.17.0.0/16 is directly connected docker0
-    // C    *> 192.168.255.0/28 is directly connected mgmt
-    // K    *> 198.18.0.1/32 [0/46] is directly connected sproute0
-    // K    *> 198.18.0.14/32 [0/46] is directly connected sproute0
-    // C    *> 198.18.1.225/32 is directly connected sproute0
-    // B    *> 192.168.111.0/24 [200/0] via 198.18.1.236 pathid 4
-    // B    *> 192.168.111.0/24 [200/0] via 198.18.1.236 hoplimit 255 pathid 2
-    // C    *> 192.168.121.0/24 is directly connected lan-1.211
-    // C    *> 198.18.0.0/15 is directly connected sproute4
-
-    for (prefix, entry) in rib.rib.iter() {
-        for e in entry.iter() {
-            writeln!(
-                buf,
-                "{:1} {:2} {:2} {:18?}{} {}",
-                e.rtype.string(),
-                e.rsubtype.string(),
-                e.selected(),
-                prefix,
-                e.distance(),
-                e.gateway(),
-            )
-            .unwrap();
-        }
-    }
-
-    buf
 }
 
 async fn static_route(_rib: &mut Rib, args: Vec<String>, op: ConfigOp) {

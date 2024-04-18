@@ -1,5 +1,5 @@
-use super::os::message::{OsAddr, OsLink};
-use super::os::os_traffic_dump;
+use super::fib::message::{FibAddr, FibLink};
+use super::fib::os_traffic_dump;
 use super::Rib;
 use ipnet::IpNet;
 use std::fmt::{self, Write};
@@ -18,7 +18,7 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn from(link: OsLink) -> Self {
+    pub fn from(link: FibLink) -> Self {
         Self {
             index: link.index,
             name: link.name.to_owned(),
@@ -57,7 +57,7 @@ pub struct LinkAddr {
 }
 
 impl LinkAddr {
-    pub fn from(osaddr: OsAddr) -> Self {
+    pub fn from(osaddr: FibAddr) -> Self {
         Self {
             addr: osaddr.addr,
             link_index: osaddr.link_index,

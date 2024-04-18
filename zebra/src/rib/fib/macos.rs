@@ -1,4 +1,4 @@
-use super::message::{OsAddr, OsLink, OsMessage, OsRoute};
+use super::message::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::link;
 use anyhow::Result;
 use ioctl_rs::SIOCGIFMTU;
@@ -18,7 +18,7 @@ pub struct FibHandle {
 }
 
 impl FibHandle {
-    pub fn new() -> Result<Self> {
+    pub fn new(_rib_tx: UnboundedSender<FibMessage>) -> Result<Self> {
         let h = net_route::Handle::new()?;
         Ok(Self { h })
     }
@@ -26,14 +26,14 @@ impl FibHandle {
     pub async fn route_ipv4_add(&self, dest: Ipv4Net, gateway: Ipv4Addr) {
         let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
             .with_gateway(IpAddr::V4(gateway));
-        self.handle.add(&route).await.unwrap();
+        self.h.add(&route).await.unwrap();
     }
 
     #[allow(dead_code)]
     pub async fn route_ipv4_del(&self, dest: Ipv4Net, gateway: Ipv4Addr) {
         let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
             .with_gateway(IpAddr::V4(gateway));
-        self.handle.delete(&route).await.unwrap();
+        self.h.delete(&route).await.unwrap();
     }
 }
 
@@ -88,16 +88,16 @@ fn os_mtu(link_name: &String) -> u32 {
     mtu
 }
 
-fn os_dump(tx: UnboundedSender<OsMessage>) {
-    // Local cache for OsLink.
-    let mut links: BTreeMap<u32, OsLink> = BTreeMap::new();
+fn os_dump(tx: UnboundedSender<FibMessage>) {
+    // Local cache for FibLink.
+    let mut links: BTreeMap<u32, FibLink> = BTreeMap::new();
 
     let addrs = getifaddrs().unwrap();
     for ifa in addrs {
         let index = if_nametoindex(ifa.interface_name.as_str());
         if let Ok(index) = index {
             if links.get(&index).is_none() {
-                let mut link = OsLink::new();
+                let mut link = FibLink::new();
                 link.name = ifa.interface_name.clone();
                 link.index = index;
                 link.flags = os_link_flags(ifa.flags);
@@ -106,7 +106,7 @@ fn os_dump(tx: UnboundedSender<OsMessage>) {
                 }
                 link.mtu = os_mtu(&link.name);
 
-                let msg = OsMessage::NewLink(link.clone());
+                let msg = FibMessage::NewLink(link.clone());
                 tx.send(msg).unwrap();
                 links.insert(index, link);
             }
@@ -117,12 +117,12 @@ fn os_dump(tx: UnboundedSender<OsMessage>) {
                         if let Some(mask) = mask.as_sockaddr_in() {
                             let prefixlen = mask.as_ref().sin_addr.s_addr.count_ones();
                             let ipv4net = Ipv4Net::new(addr, prefixlen as u8).unwrap();
-                            let osaddr = OsAddr {
+                            let osaddr = FibAddr {
                                 addr: IpNet::V4(ipv4net),
                                 link_index: index,
                                 secondary: false,
                             };
-                            let msg = OsMessage::NewAddr(osaddr);
+                            let msg = FibMessage::NewAddr(osaddr);
                             tx.send(msg).unwrap();
                         }
                     }
@@ -135,12 +135,12 @@ fn os_dump(tx: UnboundedSender<OsMessage>) {
                             let prefixlen: u32 =
                                 mask.octets().iter().map(|byte| byte.count_ones()).sum();
                             let ipv6net = Ipv6Net::new(addr, prefixlen as u8).unwrap();
-                            let osaddr = OsAddr {
+                            let osaddr = FibAddr {
                                 addr: IpNet::V6(ipv6net),
                                 link_index: index,
                                 secondary: false,
                             };
-                            let msg = OsMessage::NewAddr(osaddr);
+                            let msg = FibMessage::NewAddr(osaddr);
                             tx.send(msg).unwrap();
                         }
                     }
@@ -153,7 +153,7 @@ fn os_dump(tx: UnboundedSender<OsMessage>) {
     }
 }
 
-async fn os_route_dump(tx: UnboundedSender<OsMessage>) {
+async fn os_route_dump(tx: UnboundedSender<FibMessage>) {
     let handle = net_route::Handle::new();
     if let Ok(handle) = handle {
         let routes = handle.list().await;
@@ -162,11 +162,11 @@ async fn os_route_dump(tx: UnboundedSender<OsMessage>) {
                 if let IpAddr::V4(v4) = route.destination {
                     if let Some(gateway) = route.gateway {
                         let v4net = Ipv4Net::new(v4, route.prefix).unwrap();
-                        let osroute = OsRoute {
+                        let osroute = FibRoute {
                             route: IpNet::V4(v4net),
                             gateway,
                         };
-                        let msg = OsMessage::NewRoute(osroute);
+                        let msg = FibMessage::NewRoute(osroute);
                         tx.send(msg).unwrap();
                     }
                 }
@@ -175,7 +175,7 @@ async fn os_route_dump(tx: UnboundedSender<OsMessage>) {
     }
 }
 
-pub async fn fib_dump(tx: UnboundedSender<OsMessage>) -> std::io::Result<()> {
+pub async fn fib_dump(_handle: &FibHandle, tx: UnboundedSender<FibMessage>) -> std::io::Result<()> {
     os_dump(tx.clone());
     os_route_dump(tx.clone()).await;
 
