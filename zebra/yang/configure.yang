@@ -20,6 +20,11 @@ module configure {
     prefix config;
   }
 
+  container set {
+    ext:help "Set configuration";
+    uses "config:config";
+  }
+
   container delete {
     ext:help "Delete configuration";
     uses "config:config";
@@ -33,11 +38,6 @@ module configure {
   leaf help {
     ext:help "Show help";
     type empty;
-  }
-
-  container set {
-    ext:help "Set configuration";
-    uses "config:config";
   }
 
   leaf show {

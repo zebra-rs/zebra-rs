@@ -3,8 +3,9 @@
 
 use super::parse::MatchType;
 use super::util::is_whitespace;
+use std::net::Ipv6Addr;
 
-pub fn match_ipv4_address(src: &String) -> (MatchType, usize) {
+pub fn match_ipv4_addr(src: &str) -> (MatchType, usize) {
     let mut dots = 0;
     let mut nums_not_seen = true;
     let mut nums = 0;
@@ -56,10 +57,10 @@ pub fn match_ipv4_address(src: &String) -> (MatchType, usize) {
     (MatchType::Exact, pos)
 }
 
-pub fn match_ipv4_prefix(src: &String) -> (MatchType, usize) {
+pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
     let p = src.find('/');
     if p.is_none() {
-        let (m, pos) = match_ipv4_address(src);
+        let (m, pos) = match_ipv4_addr(src);
         if m == MatchType::None {
             return (m, pos);
         } else {
@@ -68,10 +69,10 @@ pub fn match_ipv4_prefix(src: &String) -> (MatchType, usize) {
     }
 
     let pos = p.unwrap();
-    let mut first = src.clone();
+    let mut first = src.to_string();
     let _ = first.split_off(pos);
 
-    let (m, pos) = match_ipv4_address(&first);
+    let (m, pos) = match_ipv4_addr(&first);
     if m != MatchType::Exact {
         return (m, pos);
     }
@@ -104,9 +105,7 @@ pub fn match_ipv4_prefix(src: &String) -> (MatchType, usize) {
     (MatchType::Exact, pos)
 }
 
-use std::net::Ipv6Addr;
-
-pub fn match_ipv6_address(src: &str) -> (MatchType, usize) {
+pub fn match_ipv6_addr(src: &str) -> (MatchType, usize) {
     let addr = src.parse::<Ipv6Addr>();
     match addr {
         Ok(_) => (MatchType::Exact, src.len()),
@@ -114,10 +113,10 @@ pub fn match_ipv6_address(src: &str) -> (MatchType, usize) {
     }
 }
 
-pub fn match_ipv6_prefix(src: &str) -> (MatchType, usize) {
+pub fn match_ipv6_net(src: &str) -> (MatchType, usize) {
     let p = src.find('/');
     if p.is_none() {
-        let (m, pos) = match_ipv6_address(src);
+        let (m, pos) = match_ipv6_addr(src);
         if m == MatchType::Exact {
             return (MatchType::Partial, pos);
         } else {
