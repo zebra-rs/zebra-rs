@@ -1,5 +1,5 @@
 use super::comps::{
-    centry, cname, comps_add_all, comps_add_config, comps_add_cr, comps_append, crange,
+    centry, cleaf, cname, comps_add_all, comps_add_config, comps_add_cr, comps_append, crange,
 };
 use super::configs::config_match;
 use super::ip::*;
@@ -132,12 +132,6 @@ pub struct Match {
 }
 
 impl Match {
-    pub fn new() -> Self {
-        Self {
-            ..Default::default()
-        }
-    }
-
     pub fn process(&mut self, entry: &Rc<Entry>, (m, p): (MatchType, usize), comp: Completion) {
         if m == MatchType::None {
             return;
@@ -151,6 +145,10 @@ impl Match {
             self.count += 1;
         }
         self.comps.push(comp);
+    }
+
+    pub fn match_entry(&mut self, entry: &Rc<Entry>, input: &str) {
+        self.process(entry, match_keyword(input, &entry.name), centry(entry));
     }
 
     pub fn match_keyword(&mut self, entry: &Rc<Entry>, input: &str, keyword: &str) {
@@ -247,7 +245,11 @@ fn match_builder() -> MatchMap {
         })
         .kind(YangType::String)
         .exec(|m, entry, input, node| {
-            m.process(entry, match_string(input, node), centry(entry));
+            m.process(entry, match_string(input, node), cleaf(entry));
+        })
+        .kind(YangType::Union)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_string(input, node), cleaf(entry));
         })
         .build()
 }
@@ -281,7 +283,7 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
 
 fn entry_match_dir(entry: &Rc<Entry>, str: &str, m: &mut Match) {
     for entry in entry.dir.borrow().iter() {
-        m.match_keyword(entry, str, &entry.name);
+        m.match_entry(entry, str);
     }
 }
 
@@ -317,7 +319,7 @@ pub fn entry_is_key(name: &String, keys: &[String]) -> bool {
 fn entry_match_key_matched(entry: &Rc<Entry>, str: &str, m: &mut Match) {
     for e in entry.dir.borrow().iter() {
         if !entry_is_key(&e.name, &entry.key) {
-            m.match_keyword(e, str, &e.name);
+            m.match_entry(e, str);
         }
     }
 }
@@ -358,7 +360,7 @@ pub fn parse(
     mut s: State,
 ) -> (ExecCode, Vec<Completion>, State) {
     // Config match for "set" and "delete".
-    let mut cx = Match::new();
+    let mut cx = Match::default();
     if s.set || s.delete {
         if let Some(ref config) = config {
             config_match(config, input, &mut cx);
@@ -379,7 +381,7 @@ pub fn parse(
     }
 
     // Entry match.
-    let mut mx = Match::new();
+    let mut mx = Match::default();
     match s.ymatch {
         YangMatch::Dir | YangMatch::DirMatched => {
             entry_match_dir(&entry, input, &mut mx);
