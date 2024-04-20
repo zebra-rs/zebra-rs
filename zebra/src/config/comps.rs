@@ -91,10 +91,10 @@ pub fn centry(entry: &Rc<Entry>) -> Completion {
 }
 
 pub fn cleaf(entry: &Rc<Entry>) -> Completion {
-    let name = if let Some(ytype) = ytype_from_typedef(&entry.typedef) {
-        ytype_str(&ytype).to_string()
-    } else if let Some(node) = &entry.type_node {
-        if let Some(range) = &node.range {
+    let name = if let Some(node) = &entry.type_node {
+        if let Some(ytype) = ytype_from_typedef(&node.typedef) {
+            ytype_str(&ytype).to_string()
+        } else if let Some(range) = &node.range {
             range.to_string()
         } else {
             format!("<{}:{}>", entry.name, ytype_str(&node.kind))

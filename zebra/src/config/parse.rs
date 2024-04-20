@@ -268,7 +268,15 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
     let matcher = match_builder();
 
     if let Some(node) = &entry.type_node {
-        let kind = ytype_from_typedef(&entry.typedef).unwrap_or(node.kind);
+        if node.kind == YangType::Union {
+            for n in node.union.iter() {
+                let kind = ytype_from_typedef(&n.typedef).unwrap_or(n.kind);
+                if let Some(f) = matcher.get(&kind) {
+                    f(m, entry, input, node);
+                }
+            }
+        }
+        let kind = ytype_from_typedef(&node.typedef).unwrap_or(node.kind);
         if let Some(f) = matcher.get(&kind) {
             f(m, entry, input, node);
         }
