@@ -1,46 +1,15 @@
 use super::comps::{
-    comps_add_all, comps_add_config, comps_add_cr, comps_append, comps_from_entry,
-    comps_help_string, comps_leaf_string, comps_range,
+    centry, cname, comps_add_all, comps_add_config, comps_add_cr, comps_append, crange,
 };
 use super::configs::config_match;
 use super::ip::*;
 use super::util::*;
 use super::vtysh::{CommandPath, YangMatch};
 use super::{Completion, Config, ExecCode};
-use libyang::{
-    path_split, range_match, Entry, MinMax, RangeExtract, RangeNode, TypeKind, TypeNode,
-};
+use libyang::{range_match, Entry, MinMax, RangeExtract, RangeNode, TypeNode, YangType};
 use regex::Regex;
+use std::collections::HashMap;
 use std::rc::Rc;
-
-#[derive(Default, Debug, PartialEq, PartialOrd)]
-pub enum MatchType {
-    #[default]
-    None,
-    Incomplete,
-    Partial,
-    Exact,
-}
-
-#[derive(PartialEq, Debug)]
-pub enum PresetType {
-    None,
-    IPv4Address,
-    IPv4Prefix,
-    IPv6Address,
-    IPv6Prefix,
-}
-
-pub fn entry_preset(name: String) -> PresetType {
-    let (_, name) = path_split(name.clone());
-    match name.as_str() {
-        "ipv4-address" => PresetType::IPv4Address,
-        "ipv4-prefix" => PresetType::IPv4Prefix,
-        "ipv6-address" => PresetType::IPv6Address,
-        "ipv6-prefix" => PresetType::IPv6Prefix,
-        _ => PresetType::None,
-    }
-}
 
 pub struct State {
     ymatch: YangMatch,
@@ -66,7 +35,16 @@ impl State {
     }
 }
 
-pub fn match_keyword(src: &String, dst: &String) -> (MatchType, usize) {
+#[derive(Default, Debug, PartialEq, PartialOrd)]
+pub enum MatchType {
+    #[default]
+    None,
+    Incomplete,
+    Partial,
+    Exact,
+}
+
+pub fn match_keyword(src: &str, dst: &str) -> (MatchType, usize) {
     let pos = longest_match(src, dst);
 
     match is_delimiter(src, pos) {
@@ -81,21 +59,7 @@ pub fn match_keyword(src: &String, dst: &String) -> (MatchType, usize) {
     }
 }
 
-fn match_keyword_str(src: &str, dst: &str) -> (MatchType, usize) {
-    let pos = longest_match_str(src, dst);
-
-    match is_delimiter_str(src, pos) {
-        false => (MatchType::None, pos),
-        true => {
-            if is_delimiter_str(dst, pos) {
-                (MatchType::Exact, pos)
-            } else {
-                (MatchType::Partial, pos)
-            }
-        }
-    }
-}
-fn match_word(str: &String) -> (MatchType, usize) {
+fn match_word(str: &str) -> (MatchType, usize) {
     let mut pos = 0usize;
     while pos < str.len() && !is_whitespace(str, pos) {
         pos += 1;
@@ -113,7 +77,7 @@ fn match_regexp(s: &str, regstr: &str) -> (MatchType, usize) {
     }
 }
 
-fn match_string(s: &String, node: &TypeNode) -> (MatchType, usize) {
+fn match_string(s: &str, node: &TypeNode) -> (MatchType, usize) {
     if let Some(pattern) = node.pattern.as_ref() {
         match_regexp(s, pattern)
     } else {
@@ -170,7 +134,6 @@ pub struct Match {
 impl Match {
     pub fn new() -> Self {
         Self {
-            matched_entry: Rc::new(Entry::new()),
             ..Default::default()
         }
     }
@@ -190,141 +153,125 @@ impl Match {
         self.comps.push(comp);
     }
 
-    pub fn match_ipv4_address(&mut self, entry: &Rc<Entry>, input: &String) {
-        self.process(
-            entry,
-            match_ipv4_address(input),
-            Completion::new_name("A.B.C.D"),
-        );
-    }
-
-    pub fn match_ipv4_prefix(&mut self, entry: &Rc<Entry>, input: &String) {
-        self.process(
-            entry,
-            match_ipv4_prefix(input),
-            Completion::new_name("A.B.C.D/M"),
-        );
-    }
-
-    pub fn match_ipv6_address(&mut self, entry: &Rc<Entry>, input: &str) {
-        self.process(
-            entry,
-            match_ipv6_address(input),
-            Completion::new_name("X:X::X:X"),
-        );
-    }
-
-    pub fn match_ipv6_prefix(&mut self, entry: &Rc<Entry>, input: &str) {
-        self.process(
-            entry,
-            match_ipv6_prefix(input),
-            Completion::new_name("X:X::X:X/M"),
-        );
-    }
-
-    pub fn match_string(&mut self, entry: &Rc<Entry>, input: &String, node: &TypeNode) {
-        self.process(
-            entry,
-            match_string(input, node),
-            Completion::new(&comps_leaf_string(entry), &comps_help_string(entry)),
-        );
-    }
-
-    pub fn match_entry_name(&mut self, entry: &Rc<Entry>, input: &str) {
-        self.process(
-            entry,
-            match_keyword_str(input, &entry.name),
-            comps_from_entry(entry),
-        );
-    }
-
-    pub fn match_enum(&mut self, entry: &Rc<Entry>, node: &TypeNode, input: &String) {
-        for n in node.enum_stmt.iter() {
-            self.process(
-                entry,
-                match_keyword(input, &n.name),
-                Completion::new_name(&n.name),
-            );
-        }
-    }
-
-    pub fn match_range<T: MinMax<T> + PartialOrd + Copy + std::str::FromStr>(
-        &mut self,
-        entry: &Rc<Entry>,
-        node: &TypeNode,
-        input: &str,
-    ) where
-        RangeNode: RangeExtract<T>,
-    {
-        self.process(
-            entry,
-            match_range::<T>(input, node),
-            comps_range(entry, node),
-        );
-    }
-
-    pub fn match_keyword(&mut self, entry: &Rc<Entry>, input: &String, keyword: &String) {
-        self.process(
-            entry,
-            match_keyword(input, keyword),
-            Completion::new_name(keyword),
-        );
-    }
-
-    pub fn match_bool(&mut self, entry: &Rc<Entry>, input: &String) {
-        self.process(
-            entry,
-            match_keyword(input, &"true".to_owned()),
-            Completion::new_name("true"),
-        );
-        self.process(
-            entry,
-            match_keyword(input, &"false".to_owned()),
-            Completion::new_name("false"),
-        );
+    pub fn match_keyword(&mut self, entry: &Rc<Entry>, input: &str, keyword: &str) {
+        self.process(entry, match_keyword(input, keyword), cname(keyword));
     }
 }
 
-fn entry_match_type(entry: &Rc<Entry>, input: &String, m: &mut Match, s: &State) {
-    if let Some(typedef) = &entry.typedef {
-        match entry_preset(typedef.to_string()) {
-            PresetType::None => {}
-            PresetType::IPv4Address => {
-                m.match_ipv4_address(entry, input);
-                return;
-            }
-            PresetType::IPv4Prefix => {
-                m.match_ipv4_prefix(entry, input);
-                return;
-            }
-            PresetType::IPv6Address => {
-                m.match_ipv6_address(entry, input);
-                return;
-            }
-            PresetType::IPv6Prefix => {
-                m.match_ipv6_prefix(entry, input);
-                return;
-            }
-        }
+type MatchFunc = fn(&mut Match, &Rc<Entry>, &str, &TypeNode);
+type MatchMap = HashMap<YangType, MatchFunc>;
+
+#[derive(Default)]
+struct MatchBuilder {
+    map: MatchMap,
+    kind: YangType,
+}
+
+impl MatchBuilder {
+    pub fn kind(mut self, kind: YangType) -> Self {
+        self.kind = kind;
+        self
     }
+
+    pub fn exec(mut self, func: MatchFunc) -> Self {
+        self.map.insert(self.kind, func);
+        self
+    }
+
+    pub fn build(self) -> MatchMap {
+        self.map
+    }
+}
+
+fn match_builder() -> MatchMap {
+    let builder = MatchBuilder::default();
+    builder
+        .kind(YangType::Boolean)
+        .exec(|m, entry, input, _node| {
+            m.process(entry, match_keyword(input, "true"), cname("true"));
+            m.process(entry, match_keyword(input, "false"), cname("false"));
+        })
+        .kind(YangType::Int8)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<i8>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Int16)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<i16>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Int32)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<i32>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Int64)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<i64>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Uint8)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<u8>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Uint16)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<u16>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Uint32)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<u32>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Uint64)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_range::<u64>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Ipv4Addr)
+        .exec(|m, entry, input, _node| {
+            m.process(entry, match_ipv4_addr(input), cname("A.B.C.D"));
+        })
+        .kind(YangType::Ipv4Prefix)
+        .exec(|m, entry, input, _node| {
+            m.process(entry, match_ipv4_net(input), cname("A.B.C.D/M"));
+        })
+        .kind(YangType::Ipv6Addr)
+        .exec(|m, entry, input, _node| {
+            m.process(entry, match_ipv6_addr(input), cname("X:X::X:X"));
+        })
+        .kind(YangType::Ipv6Prefix)
+        .exec(|m, entry, input, _node| {
+            m.process(entry, match_ipv6_net(input), cname("X:X::X:X/M"));
+        })
+        .kind(YangType::Enumeration)
+        .exec(|m, entry, input, node| {
+            for n in node.enum_stmt.iter() {
+                m.process(entry, match_keyword(input, &n.name), cname(&n.name));
+            }
+        })
+        .kind(YangType::String)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_string(input, node), centry(entry));
+        })
+        .build()
+}
+
+pub fn ytype_from_typedef(typedef: &Option<String>) -> Option<YangType> {
+    typedef.as_ref().and_then(|v| match v.as_str() {
+        "inet:ipv4-address" => Some(YangType::Ipv4Addr),
+        "inet:ipv4-prefix" => Some(YangType::Ipv4Prefix),
+        "inet:ipv6-address" => Some(YangType::Ipv6Addr),
+        "inet:ipv6-prefix" => Some(YangType::Ipv6Prefix),
+        _ => None,
+    })
+}
+
+fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
+    let matcher = match_builder();
+
     if let Some(node) = &entry.type_node {
-        match node.kind {
-            TypeKind::Yempty => m.match_entry_name(entry, input),
-            TypeKind::Ystring => m.match_string(entry, input, node),
-            TypeKind::Yboolean => m.match_bool(entry, input),
-            TypeKind::Yint8 => m.match_range::<i8>(entry, node, input),
-            TypeKind::Yint16 => m.match_range::<i16>(entry, node, input),
-            TypeKind::Yint32 => m.match_range::<i32>(entry, node, input),
-            TypeKind::Yint64 => m.match_range::<i64>(entry, node, input),
-            TypeKind::Yuint8 => m.match_range::<u8>(entry, node, input),
-            TypeKind::Yuint16 => m.match_range::<u16>(entry, node, input),
-            TypeKind::Yuint32 => m.match_range::<u32>(entry, node, input),
-            TypeKind::Yuint64 => m.match_range::<u64>(entry, node, input),
-            TypeKind::Yenumeration => m.match_enum(entry, node, input),
-            TypeKind::Yunion => m.match_string(entry, input, node),
-            _ => m.match_string(entry, input, node),
+        let kind = ytype_from_typedef(&entry.typedef).unwrap_or(node.kind);
+        if let Some(f) = matcher.get(&kind) {
+            f(m, entry, input, node);
         }
     }
+
     if entry.name == "interface" {
         for link in s.links.iter() {
             m.match_keyword(entry, input, link);
@@ -334,11 +281,11 @@ fn entry_match_type(entry: &Rc<Entry>, input: &String, m: &mut Match, s: &State)
 
 fn entry_match_dir(entry: &Rc<Entry>, str: &str, m: &mut Match) {
     for entry in entry.dir.borrow().iter() {
-        m.match_entry_name(entry, str);
+        m.match_keyword(entry, str, &entry.name);
     }
 }
 
-fn key(entry: &Rc<Entry>, index: usize) -> Option<Rc<Entry>> {
+fn entry_key(entry: &Rc<Entry>, index: usize) -> Option<Rc<Entry>> {
     if entry.key.len() <= index {
         return None;
     }
@@ -351,8 +298,8 @@ fn key(entry: &Rc<Entry>, index: usize) -> Option<Rc<Entry>> {
     None
 }
 
-fn entry_match_key(entry: &Rc<Entry>, input: &String, m: &mut Match, state: &State) {
-    let key = key(entry, state.index);
+fn entry_match_key(entry: &Rc<Entry>, input: &str, m: &mut Match, state: &State) {
+    let key = entry_key(entry, state.index);
     if let Some(e) = key {
         entry_match_type(&e, input, m, state);
     }
@@ -370,7 +317,7 @@ pub fn entry_is_key(name: &String, keys: &[String]) -> bool {
 fn entry_match_key_matched(entry: &Rc<Entry>, str: &str, m: &mut Match) {
     for e in entry.dir.borrow().iter() {
         if !entry_is_key(&e.name, &entry.key) {
-            m.match_entry_name(e, str);
+            m.match_keyword(e, str, &e.name);
         }
     }
 }
@@ -405,7 +352,7 @@ pub fn ymatch_complete(ymatch: YangMatch) -> bool {
 }
 
 pub fn parse(
-    input: &String,
+    input: &str,
     entry: Rc<Entry>,
     mut config: Option<Rc<Config>>,
     mut s: State,
@@ -558,7 +505,7 @@ pub fn parse(
         }
     }
 
-    let remain = input.clone().split_off(mx.pos);
+    let remain = input.to_string().split_off(mx.pos);
 
     if remain.is_empty() {
         if !ymatch_complete(s.ymatch) {

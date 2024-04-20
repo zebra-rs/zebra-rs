@@ -413,7 +413,7 @@ pub fn delete(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
     }
 }
 
-fn config_match_keyword(config: &Rc<Config>, name: &String, input: &String, mx: &mut Match) {
+fn config_match_keyword(config: &Rc<Config>, name: &str, input: &str, mx: &mut Match) {
     let (m, p) = match_keyword(input, name);
     if m == MatchType::None {
         return;
@@ -429,7 +429,7 @@ fn config_match_keyword(config: &Rc<Config>, name: &String, input: &String, mx: 
     mx.comps.push(Completion::new(name, ""));
 }
 
-fn config_match_dir(config: &Rc<Config>, input: &String, mx: &mut Match) {
+fn config_match_dir(config: &Rc<Config>, input: &str, mx: &mut Match) {
     for config in config.configs.borrow().iter() {
         config_match_keyword(config, &config.name, input, mx);
     }
@@ -438,7 +438,7 @@ fn config_match_dir(config: &Rc<Config>, input: &String, mx: &mut Match) {
     }
 }
 
-fn config_match_value(config: &Rc<Config>, input: &String, mx: &mut Match) {
+fn config_match_value(config: &Rc<Config>, input: &str, mx: &mut Match) {
     if config.list.borrow().is_empty() {
         config_match_keyword(config, &config.value.borrow(), input, mx);
     } else {
@@ -448,7 +448,7 @@ fn config_match_value(config: &Rc<Config>, input: &String, mx: &mut Match) {
     }
 }
 
-pub fn config_match(config: &Rc<Config>, input: &String, mx: &mut Match) {
+pub fn config_match(config: &Rc<Config>, input: &str, mx: &mut Match) {
     if config.has_dir() {
         config_match_dir(config, input, mx);
     } else {
