@@ -231,7 +231,7 @@ fn parse_bgp_update_packet(input: &[u8], as4: bool) -> IResult<&[u8], UpdatePack
     let (input, attr_len) = be_u16(input)?;
     let (input, mut attrs) = parse_bgp_update_attribute(input, attr_len, as4)?;
     packet.attrs.append(&mut attrs);
-    let nlri_len = packet.header.length - BGP_PACKET_HEADER_LEN - 2 - withdraw_len - 2 - attr_len;
+    let nlri_len = packet.header.length - BGP_HEADER_LEN - 2 - withdraw_len - 2 - attr_len;
     let (input, mut updates) = parse_bgp_nlri_ipv4(input, nlri_len)?;
     packet.ipv4_update.append(&mut updates);
     Ok((input, packet))
@@ -239,7 +239,7 @@ fn parse_bgp_update_packet(input: &[u8], as4: bool) -> IResult<&[u8], UpdatePack
 
 fn parse_bgp_notification_packet(input: &[u8]) -> IResult<&[u8], NotificationPacket> {
     let (input, packet) = NotificationPacket::parse(input)?;
-    let len = packet.header.length - BGP_PACKET_HEADER_LEN - 2;
+    let len = packet.header.length - BGP_HEADER_LEN - 2;
     let (input, _data) = take(len as usize)(input)?;
     Ok((input, packet))
 }
@@ -262,15 +262,13 @@ pub fn parse_bgp_packet(input: &[u8], as4: bool) -> IResult<&[u8], BgpPacket> {
     let (_, header) = peek(BgpHeader::parse)(input)?;
     println!("H: {:?}", header);
     match header.typ {
-        BgpPacketType::Open => map(parse_bgp_open_packet, BgpPacket::Open)(input),
-        BgpPacketType::Update => {
+        BgpType::Open => map(parse_bgp_open_packet, BgpPacket::Open)(input),
+        BgpType::Update => {
             let (input, p) = parse_bgp_update_packet(input, as4)?;
             Ok((input, BgpPacket::Update(p)))
         }
-        BgpPacketType::Notification => {
-            map(parse_bgp_notification_packet, BgpPacket::Notification)(input)
-        }
-        BgpPacketType::Keepalive => map(BgpHeader::parse, BgpPacket::Keepalive)(input),
+        BgpType::Notification => map(parse_bgp_notification_packet, BgpPacket::Notification)(input),
+        BgpType::Keepalive => map(BgpHeader::parse, BgpPacket::Keepalive)(input),
         _ => Err(nom::Err::Error(make_error(input, ErrorKind::Eof))),
     }
 }

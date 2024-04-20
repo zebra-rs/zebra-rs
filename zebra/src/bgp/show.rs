@@ -3,7 +3,14 @@ use super::peer::Peer;
 use std::fmt::Write;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
-    writeln!(buf, "{:16} {:11}", peer.address, peer.peer_as).unwrap();
+    let tx: u64 = peer.counter.tx.iter().sum();
+    let rx: u64 = peer.counter.rx.iter().sum();
+    writeln!(
+        buf,
+        "{:16} {:11} {:8} {:8}",
+        peer.address, peer.peer_as, rx, tx,
+    )
+    .unwrap();
 }
 
 fn show_bgp_instance(bgp: &Bgp) -> String {
@@ -31,7 +38,7 @@ fn show_bgp_instance(bgp: &Bgp) -> String {
     } else {
         writeln!(
             buf,
-            "Neighbor                  AS  MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd"
+            "Neighbor                  AS  MsgRcvd  MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd"
         )
         .unwrap();
         for (_, peer) in bgp.peers.iter() {

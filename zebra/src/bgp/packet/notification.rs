@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::{BgpHeader, BgpPacketType, BGP_PACKET_HEADER_LEN};
+use super::{BgpHeader, BgpType, BGP_HEADER_LEN};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 
@@ -92,7 +92,7 @@ newtype_enum! {
 impl NotificationPacket {
     pub fn new(code: u8, sub_code: u8) -> Self {
         Self {
-            header: BgpHeader::new(BgpPacketType::Notification, BGP_PACKET_HEADER_LEN),
+            header: BgpHeader::new(BgpType::Notification, BGP_HEADER_LEN),
             code,
             sub_code,
             data: Vec::new(),
