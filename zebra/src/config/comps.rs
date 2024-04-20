@@ -47,20 +47,6 @@ pub fn crange(e: &Rc<Entry>, n: &TypeNode) -> Completion {
     Completion::new_name(&name)
 }
 
-// fn ytype_integer(ytype: &YangType) -> bool {
-//     match ytype {
-//         YangType::Int8
-//         | YangType::Int16
-//         | YangType::Int32
-//         | YangType::Int64
-//         | YangType::Uint8
-//         | YangType::Uint16
-//         | YangType::Uint32
-//         | YangType::Uint64 => true,
-//         _ => false,
-//     }
-// }
-
 fn ytype_str(ytype: &YangType) -> &'static str {
     match ytype {
         YangType::Binary => "bianry",
@@ -90,6 +76,21 @@ fn ytype_str(ytype: &YangType) -> &'static str {
 }
 
 pub fn centry(entry: &Rc<Entry>) -> Completion {
+    let ymatch = if entry.has_key() {
+        YangMatch::Key
+    } else if entry.is_directory_entry() {
+        YangMatch::Dir
+    } else {
+        YangMatch::Leaf
+    };
+    Completion {
+        name: entry.name.clone(),
+        help: comps_help_string(entry).clone(),
+        ymatch,
+    }
+}
+
+pub fn cleaf(entry: &Rc<Entry>) -> Completion {
     let name = if let Some(ytype) = ytype_from_typedef(&entry.typedef) {
         ytype_str(&ytype).to_string()
     } else if let Some(node) = &entry.type_node {
@@ -106,21 +107,6 @@ pub fn centry(entry: &Rc<Entry>) -> Completion {
         name: name.to_string(),
         help: help.to_string(),
         ymatch: YangMatch::Leaf,
-    }
-}
-
-pub fn comps_from_entry(entry: &Rc<Entry>) -> Completion {
-    let ymatch = if entry.has_key() {
-        YangMatch::Key
-    } else if entry.is_directory_entry() {
-        YangMatch::Dir
-    } else {
-        YangMatch::Leaf
-    };
-    Completion {
-        name: entry.name.clone(),
-        help: comps_help_string(entry).clone(),
-        ymatch,
     }
 }
 
@@ -182,7 +168,7 @@ pub fn comps_add_config(
 }
 
 pub fn comps_as_key(entry: &Rc<Entry>) -> Completion {
-    let mut comp = centry(entry);
+    let mut comp = cleaf(entry);
     comp.ymatch = YangMatch::Key;
     comp
 }
@@ -208,13 +194,13 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched => {
             for entry in entry.dir.borrow().iter() {
-                comps.push(comps_from_entry(entry));
+                comps.push(centry(entry));
             }
         }
         YangMatch::KeyMatched => {
             for e in entry.dir.borrow().iter() {
                 if !entry_is_key(&e.name, &entry.key) {
-                    comps.push(comps_from_entry(e));
+                    comps.push(centry(e));
                 }
             }
         }
