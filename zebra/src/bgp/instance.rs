@@ -1,4 +1,4 @@
-use super::{fsm, Event, Peer};
+use super::peer::{fsm, Event, Peer};
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };

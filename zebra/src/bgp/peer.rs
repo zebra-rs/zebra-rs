@@ -1,5 +1,7 @@
 #![allow(dead_code)]
-use super::*;
+use super::instance::Message;
+use super::packet::*;
+use super::tasks::*;
 use bytes::BytesMut;
 use nom::AsBytes;
 use std::net::Ipv4Addr;
@@ -65,6 +67,11 @@ pub struct PeerTimer {
     pub keepalive: Option<Timer>,
     pub min_as_origin: Option<Timer>,
     pub min_route_adv: Option<Timer>,
+}
+
+pub struct PeerCounter {
+    pub msg_tx: [u64; 5],
+    pub msg_rx: [u64; 5],
 }
 
 impl PeerTimer {
