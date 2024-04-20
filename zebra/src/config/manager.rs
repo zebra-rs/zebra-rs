@@ -177,7 +177,7 @@ impl ConfigManager {
         std::fs::write(&self.config_path, output).expect("Unable to write file");
     }
 
-    pub fn execute(&self, mode: &Mode, input: &String) -> (ExecCode, String, Vec<CommandPath>) {
+    pub fn execute(&self, mode: &Mode, input: &str) -> (ExecCode, String, Vec<CommandPath>) {
         let state = State::new();
         let (code, _comps, state) = parse(
             input,
@@ -198,7 +198,7 @@ impl ConfigManager {
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.show && state.paths.len() > 1 {
             // paths_dump(&state.paths);
-            (ExecCode::RedirectShow, input.clone(), state.paths)
+            (ExecCode::RedirectShow, input.to_string(), state.paths)
         } else {
             let path = paths_str(&state.paths);
             if let Some(f) = mode.fmap.get(&path) {
@@ -226,7 +226,7 @@ impl ConfigManager {
         }
     }
 
-    pub async fn completion(&self, mode: &Mode, input: &String) -> (ExecCode, Vec<Completion>) {
+    pub async fn completion(&self, mode: &Mode, input: &str) -> (ExecCode, Vec<Completion>) {
         let mut state = State::new();
         // Temporary workaround for interface completion.
         if has_interfaces(input) {

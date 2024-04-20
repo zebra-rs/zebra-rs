@@ -1,8 +1,8 @@
-use super::parse::{entry_is_key, entry_preset, ymatch_complete};
-use super::parse::{PresetType, State};
+use super::parse::State;
+use super::parse::{entry_is_key, ymatch_complete, ytype_from_typedef};
 use super::vtysh::YangMatch;
 use super::Config;
-use libyang::{Entry, TypeKind, TypeNode};
+use libyang::{Entry, TypeNode, YangType};
 use std::rc::Rc;
 
 #[derive(Debug, Default, Clone)]
@@ -30,6 +30,85 @@ impl Completion {
     }
 }
 
+pub fn cname(name: &str) -> Completion {
+    Completion {
+        name: name.to_string(),
+        ymatch: YangMatch::Leaf,
+        ..Default::default()
+    }
+}
+
+pub fn crange(e: &Rc<Entry>, n: &TypeNode) -> Completion {
+    let name = if let Some(range) = &n.range {
+        range.to_string()
+    } else {
+        format!("<{}:{}>", e.name.to_owned(), ytype_str(&n.kind))
+    };
+    Completion::new_name(&name)
+}
+
+// fn ytype_integer(ytype: &YangType) -> bool {
+//     match ytype {
+//         YangType::Int8
+//         | YangType::Int16
+//         | YangType::Int32
+//         | YangType::Int64
+//         | YangType::Uint8
+//         | YangType::Uint16
+//         | YangType::Uint32
+//         | YangType::Uint64 => true,
+//         _ => false,
+//     }
+// }
+
+fn ytype_str(ytype: &YangType) -> &'static str {
+    match ytype {
+        YangType::Binary => "bianry",
+        YangType::Bits => "bits",
+        YangType::Boolean => "boolean",
+        YangType::Decimal64 => "dicimal64",
+        YangType::Empty => "empty",
+        YangType::Enumeration => "enumeration",
+        YangType::Int8 => "int8",
+        YangType::Int16 => "int16",
+        YangType::Int32 => "int32",
+        YangType::Int64 => "int64",
+        YangType::String => "string",
+        YangType::Uint8 => "uint8",
+        YangType::Uint16 => "uint16",
+        YangType::Uint32 => "uint32",
+        YangType::Uint64 => "uint64",
+        YangType::Union => "union",
+        YangType::Leafref => "leafref",
+        YangType::Identityref => "identityref",
+        YangType::Path => "path",
+        YangType::Ipv4Addr => "A.B.C.D",
+        YangType::Ipv4Prefix => "A.B.C.D/M",
+        YangType::Ipv6Addr => "X:X::X:X",
+        YangType::Ipv6Prefix => "X:X::X:X/M",
+    }
+}
+
+pub fn centry(entry: &Rc<Entry>) -> Completion {
+    let name = if let Some(ytype) = ytype_from_typedef(&entry.typedef) {
+        ytype_str(&ytype).to_string()
+    } else if let Some(node) = &entry.type_node {
+        if let Some(range) = &node.range {
+            range.to_string()
+        } else {
+            format!("<{}:{}>", entry.name, ytype_str(&node.kind))
+        }
+    } else {
+        format!("<{}>", entry.name)
+    };
+    let help = entry.extension.get("ext:help").map_or_else(|| "", |v| v);
+    Completion {
+        name: name.to_string(),
+        help: help.to_string(),
+        ymatch: YangMatch::Leaf,
+    }
+}
+
 pub fn comps_from_entry(entry: &Rc<Entry>) -> Completion {
     let ymatch = if entry.has_key() {
         YangMatch::Key
@@ -49,23 +128,6 @@ fn comps_exists(comps: &[Completion], name: &String) -> bool {
     comps.iter().any(|x| x.name == *name)
 }
 
-fn comp_integer_string(e: &Rc<Entry>, n: &TypeNode) -> String {
-    if let Some(range) = &n.range {
-        range.to_string()
-    } else {
-        format!("<{}>", e.name.to_owned())
-    }
-}
-
-pub fn comps_range(e: &Rc<Entry>, n: &TypeNode) -> Completion {
-    let name = if let Some(range) = &n.range {
-        range.to_string()
-    } else {
-        format!("<{}>", e.name.to_owned())
-    };
-    Completion::new_name(&name)
-}
-
 pub fn comps_add_cr(comps: &mut Vec<Completion>) {
     comps.push(Completion::new_name("<cr>"));
 }
@@ -75,35 +137,6 @@ pub fn comps_append(from: &mut Vec<Completion>, to: &mut Vec<Completion>) {
         if !comps_exists(to, &comp.name) {
             to.push(comp);
         }
-    }
-}
-
-pub fn comps_leaf_string(e: &Rc<Entry>) -> String {
-    if let Some(typedef) = &e.typedef {
-        match entry_preset(typedef.to_string()) {
-            PresetType::None => {}
-            PresetType::IPv4Address => return String::from("A.B.C.D"),
-            PresetType::IPv4Prefix => return String::from("A.B.C.D/M"),
-            PresetType::IPv6Address => return String::from("X:X::X:X"),
-            PresetType::IPv6Prefix => return String::from("X:X::X:X/M"),
-        };
-    }
-    if let Some(node) = e.type_node.as_ref() {
-        match node.kind {
-            TypeKind::Yint8
-            | TypeKind::Yint16
-            | TypeKind::Yint32
-            | TypeKind::Yint64
-            | TypeKind::Yuint8
-            | TypeKind::Yuint16
-            | TypeKind::Yuint32
-            | TypeKind::Yuint64 => comp_integer_string(e, node),
-            _ => {
-                format!("<{}>", e.name.to_owned())
-            }
-        }
-    } else {
-        format!("<{}>", e.name.to_owned())
     }
 }
 
@@ -149,21 +182,19 @@ pub fn comps_add_config(
 }
 
 pub fn comps_as_key(entry: &Rc<Entry>) -> Completion {
-    Completion {
-        name: comps_leaf_string(entry),
-        help: comps_help_string(entry),
-        ymatch: YangMatch::Key,
-    }
+    let mut comp = centry(entry);
+    comp.ymatch = YangMatch::Key;
+    comp
 }
 
 fn comps_as_leaf(comps: &mut Vec<Completion>, entry: &Rc<Entry>) {
     if let Some(node) = &entry.type_node {
-        if node.kind == TypeKind::Yboolean {
+        if node.kind == YangType::Boolean {
             comps.push(Completion::new_name("true"));
             comps.push(Completion::new_name("false"));
             return;
         }
-        if node.kind == TypeKind::Yenumeration {
+        if node.kind == YangType::Enumeration {
             for e in node.enum_stmt.iter() {
                 comps.push(Completion::new_name(&e.name));
             }

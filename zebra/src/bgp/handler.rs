@@ -23,7 +23,6 @@ pub struct Bgp {
     pub show: ShowChannel,
     pub rib: Sender<RibTx>,
     pub redist: RibRxChannel,
-    // pub ptree: prefix_trie::PrefixMap<Ipv4Net, u32>,
     pub callbacks: HashMap<String, Callback>,
 }
 
