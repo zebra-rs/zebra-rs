@@ -1,5 +1,7 @@
 use super::{fsm, Event, Peer};
-use crate::config::{path_from_command, ConfigChannel, ConfigOp, ConfigRequest, ShowChannel};
+use crate::config::{
+    path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
+};
 use crate::rib::api::{RibRxChannel, RibTx};
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
@@ -11,7 +13,8 @@ pub enum Message {
     Show(Sender<String>),
 }
 
-type Callback = fn(&mut Bgp, Vec<String>, ConfigOp);
+pub type Callback = fn(&mut Bgp, Vec<String>, ConfigOp);
+pub type ShowCallback = fn(&Bgp, Vec<String>) -> String;
 
 pub struct Bgp {
     pub asn: u32,
@@ -21,6 +24,7 @@ pub struct Bgp {
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
+    pub show_cb: HashMap<String, ShowCallback>,
     pub rib: Sender<RibTx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
@@ -87,10 +91,12 @@ impl Bgp {
             rib,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
+            show_cb: HashMap::new(),
             redist: RibRxChannel::new(),
             callbacks: HashMap::new(),
         };
         bgp.callback_build();
+        bgp.show_build();
         bgp
     }
 
@@ -112,7 +118,7 @@ impl Bgp {
         );
     }
 
-    pub fn process_message(&mut self, msg: Message) {
+    pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Event(peer, event) => {
                 println!("Message::Event: {:?}", event);
@@ -125,10 +131,18 @@ impl Bgp {
         }
     }
 
-    pub fn process_cm_message(&mut self, msg: ConfigRequest) {
+    pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        }
+    }
+
+    async fn process_show_msg(&self, msg: DisplayRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.show_cb.get(&path) {
+            let output = f(self, args);
+            msg.resp.send(output).await.unwrap();
         }
     }
 
@@ -136,13 +150,13 @@ impl Bgp {
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
-                    self.process_message(msg);
+                    self.process_msg(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
-                    self.process_cm_message(msg);
+                    self.process_cm_msg(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
-                    self.tx.send(Message::Show(msg.resp)).unwrap();
+            self.process_show_msg(msg).await;
                 }
             }
         }
