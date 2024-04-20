@@ -220,6 +220,14 @@ impl Config {
         out.push('}');
     }
 
+    pub fn yaml(&self, out: &mut String) {
+        let mut json = String::new();
+        self.json(&mut json);
+        let json_value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let yaml_str = serde_yaml::to_string(&json_value).unwrap();
+        out.push_str(&yaml_str);
+    }
+
     pub fn list_command(&self) -> Vec<String> {
         let mut commands = Vec::new();
         if let Some(parent) = self.parent.as_ref() {

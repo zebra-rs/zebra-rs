@@ -284,4 +284,5 @@ pub async fn event_loop(mut config: ConfigManager) {
 
 fn has_interfaces(input: &str) -> bool {
     input.split_whitespace().any(|s| s == "interfaces")
+        | input.split_whitespace().any(|s| s == "neighbors")
 }
