@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::instance::Message;
+use super::handler::Message;
 use super::packet::*;
 use super::task::*;
 use super::Bgp;

@@ -1,4 +1,4 @@
-use super::instance::{Bgp, ShowCallback};
+use super::handler::{Bgp, ShowCallback};
 use super::peer::Peer;
 use std::fmt::Write;
 

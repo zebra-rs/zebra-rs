@@ -1,5 +1,5 @@
-pub mod instance;
-pub use instance::{serve, Bgp};
+pub mod handler;
+pub use handler::{serve, Bgp};
 
 pub mod mrt;
 pub mod packet;
