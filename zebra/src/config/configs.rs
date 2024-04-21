@@ -389,7 +389,7 @@ pub fn delete(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
 
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
-            YangMatch::Dir | YangMatch::Leaf | YangMatch::Key => {
+            YangMatch::Dir | YangMatch::DirMatched | YangMatch::Leaf | YangMatch::Key => {
                 if let Some(next) = config.lookup(&path.name) {
                     config = next;
                 } else {
@@ -408,7 +408,7 @@ pub fn delete(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
                     break;
                 }
             }
-            _ => {}
+            YangMatch::LeafList | YangMatch::LeafListMatched => {}
         }
     }
 
