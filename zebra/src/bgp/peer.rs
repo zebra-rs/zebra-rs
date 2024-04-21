@@ -2,6 +2,7 @@
 use super::instance::Message;
 use super::packet::*;
 use super::tasks::*;
+use super::Bgp;
 use bytes::BytesMut;
 use nom::AsBytes;
 use std::net::Ipv4Addr;
@@ -22,6 +23,7 @@ pub enum State {
 
 #[derive(Debug)]
 pub enum Event {
+    ConfigUpdate,                 // 0
     Start,                        // 1
     Stop,                         // 2
     ConnRetryTimerExpires,        // 9
@@ -36,30 +38,14 @@ pub enum Event {
     UpdateMsg(UpdatePacket),      // 27
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PeerTask {
     pub connect: Option<Task<()>>,
     pub reader: Option<Task<()>>,
     pub writer: Option<Task<()>>,
 }
 
-impl PeerTask {
-    pub fn new() -> Self {
-        Self {
-            connect: None,
-            reader: None,
-            writer: None,
-        }
-    }
-}
-
-impl Default for PeerTask {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PeerTimer {
     pub idle_hold_timer: Option<Timer>,
     pub connect_retry: Option<Timer>,
@@ -73,25 +59,6 @@ pub struct PeerTimer {
 pub struct PeerCounter {
     pub tx: [u64; 5],
     pub rx: [u64; 5],
-}
-
-impl PeerTimer {
-    pub fn new() -> Self {
-        Self {
-            idle_hold_timer: None,
-            connect_retry: None,
-            hold_timer: None,
-            keepalive: None,
-            min_as_origin: None,
-            min_route_adv: None,
-        }
-    }
-}
-
-impl Default for PeerTimer {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[derive(Debug)]
@@ -128,8 +95,8 @@ impl Peer {
             address,
             active: false,
             state: State::Idle,
-            task: PeerTask::new(),
-            timer: PeerTimer::new(),
+            task: PeerTask::default(),
+            timer: PeerTimer::default(),
             counter: PeerCounter::default(),
             packet_tx: None,
             tx,
@@ -153,9 +120,25 @@ impl Peer {
     }
 }
 
-pub fn fsm(peer: &mut Peer, event: Event) {
+struct ConfigRef<'a> {
+    router_id: &'a Ipv4Addr,
+}
+
+fn update_rib(id: &Ipv4Addr) {
+    println!("XX Recv update packet from id {}", id);
+}
+
+pub fn fsm(bgp: &mut Bgp, id: Ipv4Addr, event: Event) {
+    let bgp_ref = ConfigRef {
+        router_id: &bgp.router_id,
+    };
+    if let Event::UpdateMsg(ref packet) = event {
+        update_rib(&id);
+    }
+    let peer = bgp.peers.get_mut(&id).unwrap();
     let prev_state = peer.state.clone();
     peer.state = match event {
+        Event::ConfigUpdate => fsm_config_update(&bgp_ref, peer),
         Event::Start => fsm_start(peer),
         Event::Stop => fsm_stop(peer),
         Event::ConnRetryTimerExpires => fsm_conn_retry_expires(peer),
@@ -173,6 +156,11 @@ pub fn fsm(peer: &mut Peer, event: Event) {
     if prev_state != State::Idle && peer.state == State::Idle {
         fsm_stop(peer);
     }
+}
+
+fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
+    println!("{}", bgp.router_id);
+    peer.state.clone()
 }
 
 pub fn fsm_init(peer: &mut Peer) -> State {

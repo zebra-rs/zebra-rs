@@ -122,8 +122,7 @@ impl Bgp {
         match msg {
             Message::Event(peer, event) => {
                 println!("Message::Event: {:?}", event);
-                let peer = self.peers.get_mut(&peer).unwrap();
-                fsm(peer, event);
+                fsm(self, peer, event);
             }
             Message::Show(tx) => {
                 self.tx.send(Message::Show(tx)).unwrap();
