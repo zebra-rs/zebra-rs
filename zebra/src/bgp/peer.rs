@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use super::instance::Message;
 use super::packet::*;
-use super::tasks::*;
+use super::task::*;
 use super::Bgp;
 use bytes::BytesMut;
 use nom::AsBytes;
