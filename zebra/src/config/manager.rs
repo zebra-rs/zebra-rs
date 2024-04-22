@@ -1,11 +1,11 @@
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
-use super::configs::{carbon_copy, config_set, delete};
+use super::configs::{carbon_copy, delete, set};
 use super::files::load_config_file;
 use super::parse::parse;
 use super::parse::State;
-use super::paths::paths_str;
+use super::paths::{path_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
 use super::{Completion, Config, ConfigRequest, ExecCode};
@@ -78,10 +78,12 @@ impl ConfigManager {
         yang.add_path(&self.yang_path);
 
         let entry = self.load_mode(&mut yang, "exec")?;
+        let exec = entry.clone();
         let exec_mode = exec_mode_create(entry);
         self.modes.insert("exec".to_string(), exec_mode);
 
         let entry = self.load_mode(&mut yang, "configure")?;
+        entry.dir.borrow_mut().push(run_from_exec(exec));
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
 
@@ -93,9 +95,7 @@ impl ConfigManager {
     }
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
-        let mode = self.modes.get("configure");
-        mode?;
-        let mode = mode.unwrap();
+        let mode = self.modes.get("configure")?;
         let state = State::new();
 
         let mut entry: Option<Rc<Entry>> = None;
@@ -104,8 +104,7 @@ impl ConfigManager {
                 entry = Some(e.clone());
             }
         }
-        entry.as_ref()?;
-        let entry = entry.unwrap();
+        let entry = entry?;
 
         let (code, _comps, state) = parse(&input, entry, None, state);
         if code == ExecCode::Success {
@@ -186,19 +185,19 @@ impl ConfigManager {
             state,
         );
         if state.set {
-            // paths_dump(&state.paths);
             if code != ExecCode::Success {
                 return (code, String::from(""), state.paths);
             }
-            config_set(state.paths.clone(), self.store.candidate.borrow().clone());
+            let paths = path_trim("set", state.paths.clone());
+            set(paths, self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.delete {
-            // paths_dump(&state.paths);
-            delete(state.paths.clone(), self.store.candidate.borrow().clone());
+            let paths = path_trim("delete", state.paths.clone());
+            delete(paths, self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.show && state.paths.len() > 1 {
-            // paths_dump(&state.paths);
-            (ExecCode::RedirectShow, input.to_string(), state.paths)
+            let paths = path_trim("run", state.paths.clone());
+            (ExecCode::RedirectShow, input.to_string(), paths)
         } else {
             let path = paths_str(&state.paths);
             if let Some(f) = mode.fmap.get(&path) {
@@ -269,6 +268,15 @@ impl ConfigManager {
             }
         }
     }
+}
+
+fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
+    let mut run = Entry::new_dir("run".to_string());
+    run.extension = HashMap::from([("ext:help".to_string(), "Run exec mode commands".to_string())]);
+    for dir in exec.dir.borrow().iter() {
+        run.dir.borrow_mut().push(dir.clone());
+    }
+    Rc::new(run)
 }
 
 pub async fn event_loop(mut config: ConfigManager) {

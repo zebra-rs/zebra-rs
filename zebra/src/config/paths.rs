@@ -17,6 +17,13 @@ pub fn paths_dump(paths: &[CommandPath]) {
     }
 }
 
+pub fn path_trim(name: &str, mut paths: Vec<CommandPath>) -> Vec<CommandPath> {
+    if paths.len() > 0 && paths[0].name == name {
+        paths.remove(0);
+    }
+    paths
+}
+
 pub fn path_from_command(paths: &[CommandPath]) -> (String, Vec<String>) {
     let mut output = String::new();
     let mut args = Vec::new();

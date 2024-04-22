@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 use super::handler::Message;
 use super::packet::*;
+use super::route::Route;
 use super::task::*;
 use super::Bgp;
 use bytes::BytesMut;
+use ipnet::Ipv4Net;
 use nom::AsBytes;
+use prefix_trie::PrefixMap;
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -122,19 +125,18 @@ impl Peer {
 
 struct ConfigRef<'a> {
     router_id: &'a Ipv4Addr,
+    ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
 }
 
-fn update_rib(id: &Ipv4Addr) {
+fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
     println!("XX Recv update packet from id {}", id);
 }
 
 pub fn fsm(bgp: &mut Bgp, id: Ipv4Addr, event: Event) {
-    let bgp_ref = ConfigRef {
+    let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
+        ptree: &mut bgp.ptree,
     };
-    if let Event::UpdateMsg(ref packet) = event {
-        update_rib(&id);
-    }
     let peer = bgp.peers.get_mut(&id).unwrap();
     let prev_state = peer.state.clone();
     peer.state = match event {
@@ -150,7 +152,7 @@ pub fn fsm(bgp: &mut Bgp, id: Ipv4Addr, event: Event) {
         Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
         Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
         Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
-        Event::UpdateMsg(packet) => fsm_bgp_update(peer, packet),
+        Event::UpdateMsg(packet) => fsm_bgp_update(peer, packet, &mut bgp_ref),
     };
     println!("State: {:?} -> {:?}", prev_state, peer.state);
     if prev_state != State::Idle && peer.state == State::Idle {
@@ -219,9 +221,15 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     State::Established
 }
 
-pub fn fsm_bgp_update(peer: &mut Peer, _packet: UpdatePacket) -> State {
+fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter.rx[usize::from(BgpType::Update)] += 1;
     peer_refresh_holdtimer(peer);
+
+    // route_from_peer(peer.router_id.clone());
+
+    let net: Ipv4Net = "10.0.0.0/8".parse().unwrap();
+    bgp.ptree.insert(net, Vec::new());
+
     State::Established
 }
 

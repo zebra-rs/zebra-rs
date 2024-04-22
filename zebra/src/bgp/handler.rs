@@ -1,8 +1,11 @@
 use super::peer::{fsm, Event, Peer};
+use super::route::Route;
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
 use crate::rib::api::{RibRxChannel, RibTx};
+use ipnet::Ipv4Net;
+use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
@@ -28,6 +31,7 @@ pub struct Bgp {
     pub rib: Sender<RibTx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
+    pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
 }
 
 fn bgp_global_asn(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
@@ -87,7 +91,7 @@ impl Bgp {
             peers: BTreeMap::new(),
             tx,
             rx,
-            // ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
+            ptree: PrefixMap::<Ipv4Net, Vec<Route>>::new(),
             rib,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),

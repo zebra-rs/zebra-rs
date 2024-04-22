@@ -44,6 +44,8 @@ pub enum Attribute {
     MpUnreachNlri(MpNlriAttr),
 }
 
+pub type Attrs = Vec<Attribute>;
+
 #[derive(Debug, NomBE)]
 pub struct AttributeHeader {
     pub flags: u8,

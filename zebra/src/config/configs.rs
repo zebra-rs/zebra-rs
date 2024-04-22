@@ -344,10 +344,7 @@ pub fn ymatch_enum(ymatch: i32) -> YangMatch {
     }
 }
 
-pub fn config_set(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
-    if paths[0].name == "set" {
-        paths.remove(0);
-    }
+pub fn set(paths: Vec<CommandPath>, mut config: Rc<Config>) {
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
             YangMatch::Dir
@@ -381,12 +378,7 @@ fn config_delete(config: Rc<Config>, name: &String) {
     }
 }
 
-pub fn delete(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
-    if paths.is_empty() || paths[0].name != "delete" {
-        return;
-    }
-    paths.remove(0);
-
+pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
             YangMatch::Dir | YangMatch::DirMatched | YangMatch::Leaf | YangMatch::Key => {
