@@ -4,7 +4,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
 use nom::combinator::{map, peek};
 use nom::error::{make_error, ErrorKind};
-use nom::multi::{count, many0};
+use nom::multi::count;
 use nom::number::streaming::{be_u128, be_u16, be_u32, be_u8};
 use nom::IResult;
 use nom_derive::*;
@@ -32,18 +32,13 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
 }
 
 fn parse_bgp_open_packet(input: &[u8]) -> IResult<&[u8], OpenPacket> {
-    println!("parse_bgp_open_packet: len {}", input.len());
     let (input, mut packet) = OpenPacket::parse(input)?;
-    println!("P: {:?}", packet);
     let (input, mut caps) = many0(parse_bgp_capability_packet)(input)?;
     packet.caps.append(&mut caps);
     Ok((input, packet))
 }
 
 fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], AsSegment> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-    }
     let (input, header) = AsSegmentHeader::parse(input)?;
     let (input, asns) = count(be_u16, header.length as usize)(input)?;
     let segment = AsSegment {
@@ -61,9 +56,6 @@ fn parse_bgp_attr_as_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute
 }
 
 fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-    }
     let (input, header) = AsSegmentHeader::parse(input)?;
     let (input, asns) = count(be_u32, header.length as usize)(input)?;
     let segment = As4Segment {
@@ -127,9 +119,6 @@ fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attrib
 }
 
 fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-    }
     let (input, header) = AttributeHeader::parse(input)?;
     let ext_len: usize = if header.is_extended() { 2 } else { 1 };
     let (input, exts) = take(ext_len)(input)?;
@@ -186,9 +175,6 @@ fn plen2size(plen: u8) -> usize {
 }
 
 pub fn parse_ipv4_prefix(input: &[u8]) -> IResult<&[u8], Ipv4Net> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-    }
     let (input, plen) = be_u8(input)?;
     let psize = plen2size(plen);
     if input.len() < psize {
@@ -202,9 +188,6 @@ pub fn parse_ipv4_prefix(input: &[u8]) -> IResult<&[u8], Ipv4Net> {
 }
 
 fn parse_bgp_nlri_ipv6_prefix(input: &[u8]) -> IResult<&[u8], Ipv6Net> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-    }
     let (input, plen) = be_u8(input)?;
     let psize = plen2size(plen);
     if input.len() < psize {
@@ -258,9 +241,7 @@ pub fn peek_bgp_length(input: &[u8]) -> usize {
 }
 
 pub fn parse_bgp_packet(input: &[u8], as4: bool) -> IResult<&[u8], BgpPacket> {
-    println!("parse_bgp_packet");
     let (_, header) = peek(BgpHeader::parse)(input)?;
-    println!("H: {:?}", header);
     match header.typ {
         BgpType::Open => map(parse_bgp_open_packet, BgpPacket::Open)(input),
         BgpType::Update => {

@@ -239,7 +239,7 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     State::Established
 }
 
-fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
+fn fsm_bgp_update(peer: &mut Peer, _packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter.rx[usize::from(BgpType::Update)] += 1;
     peer_refresh_holdtimer(peer);
 
@@ -356,11 +356,13 @@ pub async fn peer_read(
                     && buf.len() >= peek_bgp_length(buf.as_bytes())
                 {
                     let length = peek_bgp_length(buf.as_bytes());
+
+                    let mut remain = buf.split_off(length);
+                    remain.reserve(BGP_MAX_LEN * 2);
+
                     match peer_packet_parse(buf.as_bytes(), ident, tx.clone()) {
                         Ok(_) => {
-                            println!("U: split");
-                            buf = buf.split_off(length);
-                            buf.reserve(BGP_MAX_LEN);
+                            buf = remain;
                         }
                         Err(err) => {
                             println!("E: {}", err);
@@ -464,12 +466,15 @@ pub fn peer_refresh_holdtimer(peer: &Peer) {
     }
 }
 
-pub fn accept(bgp: &mut Bgp, socket: TcpStream, sockaddr: SocketAddr) {
+pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
     match sockaddr {
         SocketAddr::V4(addr) => {
             println!("IPv4: {:?}", addr);
-            if let Some(peer) = bgp.peers.get(addr.ip()) {
+            if let Some(peer) = bgp.peers.get_mut(addr.ip()) {
                 println!("Found peer: status {:?}", peer.state);
+                if peer.state == State::Active {
+                    peer.state = fsm_connected(peer, stream);
+                }
             }
         }
         SocketAddr::V6(addr) => {

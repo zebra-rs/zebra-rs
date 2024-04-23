@@ -52,8 +52,7 @@ fn show_bgp_instance(bgp: &Bgp) -> String {
 }
 
 fn show_bgp_route(_bgp: &Bgp) -> String {
-    let mut buf = String::new();
-    buf
+    String::new()
 }
 
 fn show_bgp(bgp: &Bgp, args: Args) -> String {

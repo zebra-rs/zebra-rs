@@ -21,7 +21,7 @@ impl From<OpenPacket> for BytesMut {
         buf.put_u16(open.asn);
         buf.put_u16(open.hold_time);
         buf.put(&open.bgp_id[..]);
-        buf.put_u8(open.opt_parm_len);
+        buf.put_u8(open.opt_param_len);
         buf
     }
 }

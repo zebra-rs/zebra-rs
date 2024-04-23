@@ -10,7 +10,7 @@ pub struct OpenPacket {
     pub asn: u16,
     pub hold_time: u16,
     pub bgp_id: [u8; 4],
-    pub opt_parm_len: u8,
+    pub opt_param_len: u8,
     #[nom(Ignore)]
     pub caps: Vec<CapabilityPacket>,
 }
@@ -30,6 +30,7 @@ newtype_enum! {
 
 #[derive(Debug, PartialEq)]
 pub enum CapabilityPacket {
+    Dummy,
     MultiProtocol(CapabilityMultiProtocol),
     RouteRefresh(CapabilityRouteRefresh),
     As4(CapabilityAs4),
@@ -88,7 +89,7 @@ impl OpenPacket {
             asn,
             hold_time: 180,
             bgp_id: router_id.octets(),
-            opt_parm_len: 0,
+            opt_param_len: 0,
             caps: Vec::new(),
         }
     }
