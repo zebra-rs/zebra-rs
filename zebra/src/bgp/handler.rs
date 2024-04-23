@@ -1,5 +1,6 @@
 use super::peer::{fsm, Event, Peer};
 use super::route::Route;
+use crate::bgp::task::Task;
 use crate::config::{
     path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
@@ -8,6 +9,7 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
@@ -32,68 +34,7 @@ pub struct Bgp {
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
     pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
-}
-
-fn bgp_global_asn(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let asn_str = &args[0];
-        bgp.asn = asn_str.parse().unwrap();
-    }
-}
-fn bgp_global_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let router_id_str = &args[0];
-        bgp.router_id = router_id_str.parse().unwrap();
-    }
-}
-
-fn bgp_neighbor_peer(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let peer_addr = &args[0];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
-        bgp.peers.insert(addr, peer);
-    }
-}
-
-fn bgp_neighbor_peer_as(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let peer_as = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let asn: u32 = peer_as.parse().unwrap();
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.peer_as = asn;
-            peer.update();
-        }
-    }
-}
-
-fn bgp_neighbor_local_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let local_identifier = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let identifier: Ipv4Addr = local_identifier.parse().unwrap();
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.local_identifier = Some(identifier);
-            peer.update();
-        }
-    }
-}
-
-fn bgp_neighbor_transport_passive(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let passive = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let passive: bool = passive == "true";
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            println!("setting peer passive {}", passive);
-            peer.config.transport.passive = passive;
-            peer.timer.idle_hold_timer = None;
-        }
-    }
+    pub listen_task: Option<Task<()>>,
 }
 
 impl Bgp {
@@ -112,6 +53,7 @@ impl Bgp {
             show_cb: HashMap::new(),
             redist: RibRxChannel::new(),
             callbacks: HashMap::new(),
+            listen_task: None,
         };
         bgp.callback_build();
         bgp.show_build();
@@ -120,24 +62,6 @@ impl Bgp {
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
-    }
-
-    pub fn callback_build(&mut self) {
-        self.callback_add("/routing/bgp/global/as", bgp_global_asn);
-        self.callback_add("/routing/bgp/global/identifier", bgp_global_identifier);
-        self.callback_add("/routing/bgp/neighbors/neighbor", bgp_neighbor_peer);
-        self.callback_add(
-            "/routing/bgp/neighbors/neighbor/peer-as",
-            bgp_neighbor_peer_as,
-        );
-        self.callback_add(
-            "/routing/bgp/neighbors/neighbor/local-identifier",
-            bgp_neighbor_local_identifier,
-        );
-        self.callback_add(
-            "/routing/bgp/neighbors/neighbor/transport/passive-mode",
-            bgp_neighbor_transport_passive,
-        );
     }
 
     pub fn process_msg(&mut self, msg: Message) {
@@ -167,7 +91,26 @@ impl Bgp {
         }
     }
 
+    pub async fn listen(&mut self) -> anyhow::Result<()> {
+        let listener = TcpListener::bind("0.0.0.0:179").await?;
+        println!("listener is created");
+
+        println!("start accept");
+        let tx = self.tx.clone();
+        let listen_task = Task::spawn(async move {
+            loop {
+                let (_socket, sockaddr) = listener.accept().await.unwrap();
+                println!("end accept {:?}", sockaddr);
+                // tx.send();
+            }
+        });
+        self.listen_task = Some(listen_task);
+        // process_socket(socket).await;
+        Ok(())
+    }
+
     pub async fn event_loop(&mut self) {
+        self.listen().await.unwrap();
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
