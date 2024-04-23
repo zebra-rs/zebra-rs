@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use super::*;
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
@@ -225,11 +224,6 @@ fn parse_bgp_notification_packet(input: &[u8]) -> IResult<&[u8], NotificationPac
     let len = packet.header.length - BGP_HEADER_LEN - 2;
     let (input, _data) = take(len as usize)(input)?;
     Ok((input, packet))
-}
-
-pub fn peek_bgp_header(input: &[u8]) -> IResult<&[u8], BgpHeader> {
-    let (_, header) = peek(BgpHeader::parse)(input)?;
-    Ok((input, header))
 }
 
 pub fn peek_bgp_length(input: &[u8]) -> usize {
