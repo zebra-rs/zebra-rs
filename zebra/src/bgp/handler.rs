@@ -82,6 +82,20 @@ fn bgp_neighbor_local_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp)
     }
 }
 
+fn bgp_neighbor_transport_passive(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
+    if op == ConfigOp::Set && args.len() > 1 {
+        let peer_addr = &args[0];
+        let passive = &args[1];
+        let addr: Ipv4Addr = peer_addr.parse().unwrap();
+        let passive: bool = passive == "true";
+        if let Some(peer) = bgp.peers.get_mut(&addr) {
+            println!("setting peer passive {}", passive);
+            peer.config.transport.passive = passive;
+            peer.timer.idle_hold_timer = None;
+        }
+    }
+}
+
 impl Bgp {
     pub fn new(rib: Sender<RibTx>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -119,6 +133,10 @@ impl Bgp {
         self.callback_add(
             "/routing/bgp/neighbors/neighbor/local-identifier",
             bgp_neighbor_local_identifier,
+        );
+        self.callback_add(
+            "/routing/bgp/neighbors/neighbor/transport/passive-mode",
+            bgp_neighbor_transport_passive,
         );
     }
 

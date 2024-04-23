@@ -64,6 +64,16 @@ pub struct PeerCounter {
     pub rx: [u64; 5],
 }
 
+#[derive(Debug, Default)]
+pub struct PeerTransportConfig {
+    pub passive: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct PeerConfig {
+    pub transport: PeerTransportConfig,
+}
+
 #[derive(Debug)]
 pub struct Peer {
     pub ident: Ipv4Addr,
@@ -79,6 +89,7 @@ pub struct Peer {
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
     pub tx: UnboundedSender<Message>,
     pub local_identifier: Option<Ipv4Addr>,
+    pub config: PeerConfig,
 }
 
 impl Peer {
@@ -104,6 +115,7 @@ impl Peer {
             packet_tx: None,
             tx,
             local_identifier: None,
+            config: PeerConfig::default(),
         }
     }
 
@@ -112,7 +124,8 @@ impl Peer {
     }
 
     pub fn is_passive(&self) -> bool {
-        false
+        println!("P: {}", self.config.transport.passive);
+        self.config.transport.passive
     }
 
     pub fn update(&mut self) {
@@ -168,6 +181,8 @@ fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
 pub fn fsm_init(peer: &mut Peer) -> State {
     if !peer.is_passive() {
         peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
+    } else {
+        println!("Peer is passive");
     }
     State::Idle
 }
