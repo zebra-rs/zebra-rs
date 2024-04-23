@@ -4,7 +4,7 @@ use super::entry::RibEntry;
 use super::fib::fib_dump;
 use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::{Link, RibTxChannel};
-use crate::config::path_from_command;
+use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::Sender;
 // use tracing::warn;
 
-pub type ShowCallback = fn(&Rib, Vec<String>) -> String;
+pub type ShowCallback = fn(&Rib, Args) -> String;
 
 pub struct Rib {
     pub api: RibTxChannel,

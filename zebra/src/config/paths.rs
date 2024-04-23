@@ -1,5 +1,8 @@
+use std::collections::VecDeque;
+
 use super::configs::ymatch_enum;
 use super::vtysh::{CommandPath, YangMatch};
+use super::Args;
 
 pub fn paths_str(paths: &[CommandPath]) -> String {
     let mut s = String::from("");
@@ -24,9 +27,9 @@ pub fn path_trim(name: &str, mut paths: Vec<CommandPath>) -> Vec<CommandPath> {
     paths
 }
 
-pub fn path_from_command(paths: &[CommandPath]) -> (String, Vec<String>) {
+pub fn path_from_command(paths: &[CommandPath]) -> (String, Args) {
     let mut output = String::new();
-    let mut args = Vec::new();
+    let mut args = VecDeque::new();
 
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
@@ -39,9 +42,9 @@ pub fn path_from_command(paths: &[CommandPath]) -> (String, Vec<String>) {
                 output.push_str(&path.name);
             }
             YangMatch::KeyMatched | YangMatch::LeafMatched | YangMatch::LeafListMatched => {
-                args.push(path.name.clone());
+                args.push_back(path.name.clone());
             }
         }
     }
-    (output, args)
+    (output, Args(args))
 }

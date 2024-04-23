@@ -1,3 +1,5 @@
+use crate::config::Args;
+
 use super::{
     entry::{RibSubType, RibType},
     instance::ShowCallback,
@@ -44,7 +46,7 @@ static SHOW_IPV4_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static,
 
 "#;
 
-pub(crate) fn rib_show(rib: &Rib, _args: Vec<String>) -> String {
+pub(crate) fn rib_show(rib: &Rib, _args: Args) -> String {
     let mut buf = String::new();
 
     buf.push_str(SHOW_IPV4_HEADER);

@@ -1,69 +1,70 @@
+use super::{
+    peer::{fsm_init, Peer},
+    Bgp,
+};
+use crate::config::{Args, ConfigOp};
 use std::net::Ipv4Addr;
 
-use crate::config::ConfigOp;
-
-use super::{peer::Peer, Bgp};
-
-fn bgp_global_asn(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
+fn bgp_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set && !args.is_empty() {
-        let asn_str = &args[0];
-        bgp.asn = asn_str.parse().unwrap();
+        let asn = args.u32()?;
+        bgp.asn = asn;
     }
+    Some(())
 }
-fn bgp_global_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let router_id_str = &args[0];
-        bgp.router_id = router_id_str.parse().unwrap();
+fn bgp_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Set {
+        let router_id = args.v4addr()?;
+        bgp.router_id = router_id;
     }
+    Some(())
 }
 
-fn bgp_neighbor_peer(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let peer_addr = &args[0];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
+fn bgp_neighbor_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Set {
+        let addr: Ipv4Addr = args.v4addr()?;
         let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
         bgp.peers.insert(addr, peer);
     }
+    Some(())
 }
 
-fn bgp_neighbor_peer_as(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let peer_as = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let asn: u32 = peer_as.parse().unwrap();
+fn bgp_neighbor_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Set {
+        let addr: Ipv4Addr = args.v4addr()?;
+        let asn: u32 = args.u32()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.peer_as = asn;
             peer.update();
         }
     }
+    Some(())
 }
 
-fn bgp_neighbor_local_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let local_identifier = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let identifier: Ipv4Addr = local_identifier.parse().unwrap();
+fn bgp_neighbor_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Set {
+        let addr: Ipv4Addr = args.v4addr()?;
+        let identifier: Ipv4Addr = args.v4addr()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.local_identifier = Some(identifier);
             peer.update();
         }
     }
+    Some(())
 }
 
-fn bgp_neighbor_transport_passive(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let passive = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let passive: bool = passive == "true";
+fn bgp_neighbor_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.v4addr()?;
+    let passive = args.boolean()?;
+
+    if op == ConfigOp::Set {
         if let Some(peer) = bgp.peers.get_mut(&addr) {
-            println!("setting peer passive {}", passive);
             peer.config.transport.passive = passive;
             peer.timer.idle_hold_timer = None;
+            peer.state = fsm_init(peer);
         }
     }
+    Some(())
 }
 
 impl Bgp {

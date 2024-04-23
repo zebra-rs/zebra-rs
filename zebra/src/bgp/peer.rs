@@ -9,6 +9,7 @@ use ipnet::Ipv4Net;
 use nom::AsBytes;
 use prefix_trie::PrefixMap;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -179,12 +180,14 @@ fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
 }
 
 pub fn fsm_init(peer: &mut Peer) -> State {
-    if !peer.is_passive() {
-        peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
+    println!("fsm_init");
+    if peer.is_passive() {
+        println!("Peer is passive, transit to Active");
+        State::Active
     } else {
-        println!("Peer is passive");
+        peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
+        State::Idle
     }
-    State::Idle
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
@@ -459,4 +462,20 @@ pub fn peer_refresh_holdtimer(peer: &Peer) {
     if let Some(holdtimer) = peer.timer.hold_timer.as_ref() {
         holdtimer.refresh();
     }
+}
+
+pub fn accept(bgp: &mut Bgp, socket: TcpStream, sockaddr: SocketAddr) {
+    match sockaddr {
+        SocketAddr::V4(addr) => {
+            println!("IPv4: {:?}", addr);
+            if let Some(peer) = bgp.peers.get(addr.ip()) {
+                println!("Found peer: status {:?}", peer.state);
+            }
+        }
+        SocketAddr::V6(addr) => {
+            println!("IPv6: {:?}", addr);
+        }
+    }
+
+    // Next, lookup peer-group for dynamic peer.
 }

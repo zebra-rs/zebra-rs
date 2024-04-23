@@ -1,8 +1,53 @@
+use ipnet::Ipv4Net;
+
 use super::parse::match_keyword;
 use super::parse::{Match, MatchType};
 use super::vtysh::{CommandPath, YangMatch};
 use super::Completion;
+use std::collections::VecDeque;
+use std::net::Ipv4Addr;
 use std::{cell::RefCell, rc::Rc};
+
+#[derive(Clone)]
+pub struct Args(pub VecDeque<String>);
+
+impl Args {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn string(&mut self) -> Option<String> {
+        self.0.pop_front()
+    }
+
+    pub fn u32(&mut self) -> Option<u32> {
+        let item = self.0.pop_front()?;
+        let arg: u32 = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn v4addr(&mut self) -> Option<Ipv4Addr> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv4Addr = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn v4net(&mut self) -> Option<Ipv4Net> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv4Net = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn boolean(&mut self) -> Option<bool> {
+        let item = self.0.pop_front()?;
+        let arg: bool = item.parse().ok()?;
+        Some(arg)
+    }
+}
 
 #[derive(Default, Debug)]
 pub struct Config {

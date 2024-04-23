@@ -1,25 +1,27 @@
 use super::peer::{fsm, Event, Peer};
 use super::route::Route;
+use crate::bgp::peer::accept;
 use crate::bgp::task::Task;
 use crate::config::{
-    path_from_command, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
+    path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
 use crate::rib::api::{RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::net::Ipv4Addr;
-use tokio::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub enum Message {
     Event(Ipv4Addr, Event),
+    Accept(TcpStream, SocketAddr),
     Show(Sender<String>),
 }
 
-pub type Callback = fn(&mut Bgp, Vec<String>, ConfigOp);
-pub type ShowCallback = fn(&Bgp, Vec<String>) -> String;
+pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
+pub type ShowCallback = fn(&Bgp, Args) -> String;
 
 pub struct Bgp {
     pub asn: u32,
@@ -70,6 +72,10 @@ impl Bgp {
                 println!("Message::Event: {:?}", event);
                 fsm(self, peer, event);
             }
+            Message::Accept(socket, sockaddr) => {
+                println!("Accept: {:?}", sockaddr);
+                accept(self, socket, sockaddr);
+            }
             Message::Show(tx) => {
                 self.tx.send(Message::Show(tx)).unwrap();
             }
@@ -93,19 +99,15 @@ impl Bgp {
 
     pub async fn listen(&mut self) -> anyhow::Result<()> {
         let listener = TcpListener::bind("0.0.0.0:179").await?;
-        println!("listener is created");
-
-        println!("start accept");
         let tx = self.tx.clone();
+
         let listen_task = Task::spawn(async move {
             loop {
-                let (_socket, sockaddr) = listener.accept().await.unwrap();
-                println!("end accept {:?}", sockaddr);
-                // tx.send();
+                let (socket, sockaddr) = listener.accept().await.unwrap();
+                tx.send(Message::Accept(socket, sockaddr)).unwrap();
             }
         });
         self.listen_task = Some(listen_task);
-        // process_socket(socket).await;
         Ok(())
     }
 

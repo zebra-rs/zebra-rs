@@ -1,3 +1,5 @@
+use crate::config::Args;
+
 use super::handler::{Bgp, ShowCallback};
 use super::peer::Peer;
 use std::fmt::Write;
@@ -54,7 +56,7 @@ fn show_bgp_route(_bgp: &Bgp) -> String {
     buf
 }
 
-fn show_bgp(bgp: &Bgp, args: Vec<String>) -> String {
+fn show_bgp(bgp: &Bgp, args: Args) -> String {
     if args.is_empty() {
         show_bgp_route(bgp)
     } else {
