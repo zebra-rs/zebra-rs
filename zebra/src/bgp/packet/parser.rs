@@ -117,6 +117,12 @@ fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attrib
     Ok((input, Attribute::MpReachNlri(mp_nlri)))
 }
 
+fn parse_bgp_attr_large_com(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
+    let (attr, input) = input.split_at(length as usize);
+    let (_, lcom) = LargeComAttr::parse(attr)?;
+    Ok((input, Attribute::LargeCom(lcom)))
+}
+
 fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
     let (input, header) = AttributeHeader::parse(input)?;
     let ext_len: usize = if header.is_extended() { 2 } else { 1 };
@@ -151,6 +157,7 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
         AttributeType::Community => parse_bgp_attr_community(input, attr_len),
         AttributeType::MpReachNlri => parse_bgp_attr_mp_reach(input, attr_len),
         AttributeType::MpUnreachNlri => parse_bgp_attr_mp_unreach(input, attr_len),
+        AttributeType::LargeCom => parse_bgp_attr_large_com(input, attr_len),
         _ => Err(nom::Err::Error(make_error(input, ErrorKind::Tag))),
     }
 }

@@ -33,7 +33,7 @@ impl fmt::Display for LargeCom {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, NomBE)]
 pub struct LargeComAttr(pub Vec<LargeCom>);
 
 fn parse_large_com(input: &[u8]) -> IResult<&[u8], LargeCom> {

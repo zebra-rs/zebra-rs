@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::{large::LargeComAttr, Afi, As4PathAttr, AsPathAttr, CommunityAttr, Safi};
+use super::{Afi, As4PathAttr, AsPathAttr, CommunityAttr, ExtendedComAttr, LargeComAttr, Safi};
 use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
@@ -25,6 +25,7 @@ newtype_enum! {
         Community = 8,
         MpReachNlri = 14,
         MpUnreachNlri = 15,
+        ExtendedCom = 16,
         LargeCom = 32,
     }
 }
@@ -43,6 +44,7 @@ pub enum Attribute {
     Community(CommunityAttr),
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
+    ExtendedCom(ExtendedComAttr),
     LargeCom(LargeComAttr),
 }
 
