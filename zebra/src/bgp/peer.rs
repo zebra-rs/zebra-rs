@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use super::handler::Message;
 use super::packet::*;
+use super::route::route_from_peer;
 use super::route::Route;
 use super::task::*;
 use super::Bgp;
@@ -137,9 +138,9 @@ impl Peer {
     }
 }
 
-struct ConfigRef<'a> {
-    router_id: &'a Ipv4Addr,
-    ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
+pub struct ConfigRef<'a> {
+    pub router_id: &'a Ipv4Addr,
+    pub ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
 }
 
 fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
@@ -239,14 +240,11 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     State::Established
 }
 
-fn fsm_bgp_update(peer: &mut Peer, _packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
+fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter.rx[usize::from(BgpType::Update)] += 1;
     peer_refresh_holdtimer(peer);
 
-    // route_from_peer(peer.router_id.clone());
-
-    let net: Ipv4Net = "10.0.0.0/8".parse().unwrap();
-    bgp.ptree.insert(net, Vec::new());
+    route_from_peer(peer, packet, bgp);
 
     State::Established
 }

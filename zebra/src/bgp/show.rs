@@ -33,7 +33,7 @@ fn show_bgp_instance(bgp: &Bgp) -> String {
         identifier, asn
     )
     .unwrap();
-    writeln!(buf, "").unwrap();
+    writeln!(buf).unwrap();
 
     if bgp.peers.is_empty() {
         writeln!(buf, "No neighbor has been configured").unwrap();
@@ -51,8 +51,25 @@ fn show_bgp_instance(bgp: &Bgp) -> String {
     buf
 }
 
-fn show_bgp_route(_bgp: &Bgp) -> String {
-    String::new()
+static SHOW_BGP_HEADER: &str = r#"Status codes:  s suppressed, d damped, h history, u unsorted,
+               * valid, > best, = multipath,
+               i internal, r RIB-failure, S Stale, R Removed
+Nexthop codes: @NNN nexthop's vrf id, < announce-nh-self
+Origin codes:  i - IGP, e - EGP, ? - incomplete
+RPKI validation codes: V valid, I invalid, N Not found
+
+     Network          Next Hop            Metric LocPrf Weight Path
+"#;
+
+fn show_bgp_route(bgp: &Bgp) -> String {
+    let mut buf = String::new();
+
+    buf.push_str(SHOW_BGP_HEADER);
+
+    for (key, _value) in bgp.ptree.iter() {
+        writeln!(buf, "{}", key).unwrap();
+    }
+    buf
 }
 
 fn show_bgp(bgp: &Bgp, args: Args) -> String {

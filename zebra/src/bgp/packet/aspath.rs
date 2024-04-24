@@ -12,24 +12,24 @@ pub struct AsSegmentHeader {
     pub length: u8,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AsSegment {
     pub typ: u8,
     pub asn: Vec<u16>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AsPathAttr {
     pub segments: Vec<AsSegment>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct As4Segment {
     pub typ: u8,
     pub asn: Vec<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct As4PathAttr {
     pub segments: Vec<As4Segment>,
 }

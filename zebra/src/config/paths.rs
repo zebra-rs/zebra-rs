@@ -21,7 +21,7 @@ pub fn paths_dump(paths: &[CommandPath]) {
 }
 
 pub fn path_trim(name: &str, mut paths: Vec<CommandPath>) -> Vec<CommandPath> {
-    if paths.len() > 0 && paths[0].name == name {
+    if !paths.is_empty() && paths[0].name == name {
         paths.remove(0);
     }
     paths

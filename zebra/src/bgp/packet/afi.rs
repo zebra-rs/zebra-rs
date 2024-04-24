@@ -1,7 +1,7 @@
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 
-#[derive(Debug, Eq, PartialEq, NomBE)]
+#[derive(Clone, Debug, Eq, PartialEq, NomBE)]
 pub struct Afi(pub u16);
 
 newtype_enum! {
@@ -12,7 +12,7 @@ newtype_enum! {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, NomBE)]
+#[derive(Clone, Debug, Eq, PartialEq, NomBE)]
 pub struct Safi(pub u8);
 
 newtype_enum! {

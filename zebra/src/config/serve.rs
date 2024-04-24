@@ -153,7 +153,7 @@ struct ShowService {
     show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
 }
 
-fn is_bgp(paths: &Vec<CommandPath>) -> bool {
+fn is_bgp(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "bgp")
 }
 
@@ -175,10 +175,8 @@ impl Show for ShowService {
             if let Some(tx) = self.show_clients.get("bgp") {
                 tx.send(req).unwrap();
             }
-        } else {
-            if let Some(tx) = self.show_clients.get("rib") {
-                tx.send(req).unwrap();
-            }
+        } else if let Some(tx) = self.show_clients.get("rib") {
+            tx.send(req).unwrap();
         }
 
         let (tx, rx) = mpsc::channel(4);

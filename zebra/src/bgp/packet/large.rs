@@ -2,7 +2,7 @@ use nom::IResult;
 use nom_derive::*;
 use std::fmt;
 
-#[derive(Default, Debug, NomBE)]
+#[derive(Clone, Default, Debug, NomBE)]
 pub struct LargeCom {
     pub global: u32,
     pub local1: u32,
@@ -33,7 +33,7 @@ impl fmt::Display for LargeCom {
     }
 }
 
-#[derive(Default, Debug, NomBE)]
+#[derive(Clone, Default, Debug, NomBE)]
 pub struct LargeComAttr(pub Vec<LargeCom>);
 
 fn parse_large_com(input: &[u8]) -> IResult<&[u8], LargeCom> {
@@ -44,9 +44,10 @@ fn parse_large_com(input: &[u8]) -> IResult<&[u8], LargeCom> {
 #[cfg(test)]
 
 mod test {
-    use nom::{multi::many0, AsBytes};
-
     use super::*;
+
+    use crate::bgp::packet::many0;
+    use nom::AsBytes;
 
     #[test]
     fn vaue_to_str() {
@@ -68,7 +69,7 @@ mod test {
         // println!("{}", lcoms);
         // let (input, lcoms) = parse_large_com(input).unwrap();
         // println!("{}", lcoms);
-        let (input, lcoms) = many0_no_input(parse_large_com)(input).unwrap();
+        let (input, lcoms) = many0(parse_large_com)(input).unwrap();
         assert_eq!(lcoms.len(), 2);
         assert_eq!(input.len(), 0);
     }

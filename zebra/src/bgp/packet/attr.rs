@@ -30,7 +30,7 @@ newtype_enum! {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Attribute {
     Origin(OriginAttr),
     AsPath(AsPathAttr),
@@ -62,55 +62,55 @@ impl AttributeHeader {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct OriginAttr {
     pub origin: u8,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct NextHopAttr {
     pub next_hop: [u8; 4],
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct MedAttr {
     pub med: u32,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct LocalPrefAttr {
     pub local_pref: u32,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct AtomicAggregateAttr {}
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct AggregatorAttr {
     pub asn: u16,
     pub ip: u32,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct Aggregator4Attr {
     pub asn: u32,
     pub ip: u32,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct MpNlriReachHeader {
     pub afi: Afi,
     pub safi: Safi,
     pub nhop_len: u8,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct MpNlriUnreachHeader {
     pub afi: Afi,
     pub safi: Safi,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MpNlriAttr {
     pub next_hop: Option<Ipv6Addr>,
     pub prefix: Vec<Ipv6Net>,
