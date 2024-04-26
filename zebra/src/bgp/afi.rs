@@ -17,17 +17,27 @@ pub struct Safi(pub u8);
 
 newtype_enum! {
     impl display Safi {
-        Unicat = 1,
+        Unicast = 1,
         Multicast = 2,
-        MplsLabe = 4,
+        MplsLabel = 4,
     }
 }
 
 // AFI/SAFI config
 #[derive(Debug, Default)]
-pub struct AfiSafis(Vec<AfiSafi>);
+pub struct AfiSafis(pub Vec<AfiSafi>);
 
-#[derive(Debug, Default)]
+impl AfiSafis {
+    pub fn has(&self, afi_safi: &AfiSafi) -> bool {
+        self.0.iter().any(|x| x == afi_safi)
+    }
+
+    pub fn push(&mut self, afi_safi: AfiSafi) {
+        self.0.push(afi_safi);
+    }
+}
+
+#[derive(Debug, Default, PartialEq)]
 pub struct AfiSafi {
     pub afi: Afi,
     pub safi: Safi,

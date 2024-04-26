@@ -1,11 +1,11 @@
-use ipnet::Ipv4Net;
-
 use super::parse::match_keyword;
 use super::parse::{Match, MatchType};
 use super::vtysh::{CommandPath, YangMatch};
 use super::Completion;
+use crate::bgp::{Afi, AfiSafi, Safi};
+use ipnet::{Ipv4Net, Ipv6Net};
 use std::collections::VecDeque;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone)]
@@ -42,10 +42,33 @@ impl Args {
         Some(arg)
     }
 
+    pub fn v6addr(&mut self) -> Option<Ipv6Addr> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv6Addr = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn v6net(&mut self) -> Option<Ipv6Net> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv6Net = item.parse().ok()?;
+        Some(arg)
+    }
+
     pub fn boolean(&mut self) -> Option<bool> {
         let item = self.0.pop_front()?;
         let arg: bool = item.parse().ok()?;
         Some(arg)
+    }
+
+    pub fn afi_safi(&mut self) -> Option<AfiSafi> {
+        let item = self.0.pop_front()?;
+        match item.as_str() {
+            "ipv4-unicast" => Some(AfiSafi::new(Afi::IP, Safi::Unicast)),
+            "ipv4-labeled-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsLabel)),
+            "ipv6-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::Unicast)),
+            "ipv6-labeled-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::MplsLabel)),
+            _ => None,
+        }
     }
 }
 

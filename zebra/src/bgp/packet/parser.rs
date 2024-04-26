@@ -84,7 +84,7 @@ fn parse_bgp_attr_mp_reach(input: &[u8], length: u16) -> IResult<&[u8], Attribut
     }
     let (attr, input) = input.split_at(length as usize);
     let (attr, header) = MpNlriReachHeader::parse(attr)?;
-    if header.afi != Afi::IP6 || header.safi != Safi::Unicat {
+    if header.afi != Afi::IP6 || header.safi != Safi::Unicast {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
     }
     if header.nhop_len != 16 {
@@ -107,7 +107,7 @@ fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attrib
     }
     let (attr, input) = input.split_at(length as usize);
     let (attr, header) = MpNlriUnreachHeader::parse(attr)?;
-    if header.afi != Afi::IP6 || header.safi != Safi::Unicat {
+    if header.afi != Afi::IP6 || header.safi != Safi::Unicast {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
     }
     let (_, withdrawal) = many0(parse_bgp_nlri_ipv6_prefix)(attr)?;

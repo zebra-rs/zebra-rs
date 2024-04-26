@@ -4,8 +4,7 @@ use super::packet::*;
 use super::route::route_from_peer;
 use super::route::Route;
 use super::task::*;
-use super::AfiSafis;
-use super::Bgp;
+use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
@@ -105,7 +104,7 @@ impl Peer {
         address: Ipv4Addr,
         tx: UnboundedSender<Message>,
     ) -> Self {
-        Self {
+        let mut bgp = Self {
             ident,
             router_id,
             local_as,
@@ -120,7 +119,11 @@ impl Peer {
             tx,
             local_identifier: None,
             config: PeerConfig::default(),
-        }
+        };
+        bgp.config
+            .afi_safi
+            .push(AfiSafi::new(Afi::IP, Safi::Unicast));
+        bgp
     }
 
     pub fn event(&self, ident: Ipv4Addr, event: Event) {
@@ -423,7 +426,17 @@ pub fn peer_send_open(peer: &mut Peer) {
     } else {
         peer.router_id
     };
-    let open = OpenPacket::new(header, peer.local_as as u16, &router_id);
+    let mut caps = Vec::new();
+    for afi_safi in peer.config.afi_safi.0.iter() {
+        let cap = CapabilityMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
+        caps.push(CapabilityPacket::MultiProtocol(cap));
+    }
+    let mut open = OpenPacket::new(header, peer.local_as as u16, &router_id, caps);
+    // 4octet.
+
+    // Graceful Restart.
+
+    // Route Refresh.
     let bytes: BytesMut = open.into();
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
     peer.counter.tx[usize::from(BgpType::Open)] += 1;

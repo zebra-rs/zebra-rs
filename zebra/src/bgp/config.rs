@@ -1,6 +1,6 @@
 use super::{
     peer::{fsm_init, Peer},
-    Bgp,
+    AfiSafi, Bgp,
 };
 use crate::config::{Args, ConfigOp};
 use std::net::Ipv4Addr;
@@ -36,6 +36,19 @@ fn bgp_neighbor_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.peer_as = asn;
             peer.update();
+        }
+    }
+    Some(())
+}
+
+fn bgp_neighbor_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Set {
+        let addr: Ipv4Addr = args.v4addr()?;
+        let afi_safi: AfiSafi = args.afi_safi()?;
+        if let Some(peer) = bgp.peers.get_mut(&addr) {
+            if peer.config.afi_safi.has(&afi_safi) {
+                peer.config.afi_safi.push(afi_safi);
+            }
         }
     }
     Some(())
@@ -83,6 +96,10 @@ impl Bgp {
         self.callback_add(
             "/routing/bgp/neighbors/neighbor/transport/passive-mode",
             bgp_neighbor_transport_passive,
+        );
+        self.callback_add(
+            "/routing/bgp/neighbors/neighbor/afi-safis/afi-safi/enabled",
+            bgp_neighbor_afi_safi,
         );
     }
 }
