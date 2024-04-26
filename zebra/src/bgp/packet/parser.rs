@@ -1,4 +1,5 @@
 use super::*;
+use crate::bgp::{Afi, Safi};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
 use nom::combinator::{map, peek};

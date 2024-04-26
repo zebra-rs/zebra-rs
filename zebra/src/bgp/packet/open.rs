@@ -1,4 +1,5 @@
-use super::{Afi, BgpHeader, Safi};
+use super::BgpHeader;
+use crate::bgp::{Afi, Safi};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 use std::net::Ipv4Addr;

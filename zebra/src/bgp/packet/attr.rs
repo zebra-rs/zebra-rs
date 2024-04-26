@@ -1,5 +1,6 @@
 #![allow(dead_code)]
-use super::{Afi, As4PathAttr, AsPathAttr, CommunityAttr, ExtendedComAttr, LargeComAttr, Safi};
+use super::{As4PathAttr, AsPathAttr, CommunityAttr, ExtendedComAttr, LargeComAttr};
+use crate::bgp::{Afi, Safi};
 use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;

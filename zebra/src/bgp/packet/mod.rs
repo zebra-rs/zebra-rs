@@ -1,4 +1,3 @@
-pub mod afi;
 pub mod aspath;
 pub mod attr;
 pub mod bgp;
@@ -14,7 +13,6 @@ pub mod update;
 pub mod many;
 pub use many::many0;
 
-pub use afi::*;
 pub use aspath::*;
 pub use attr::*;
 pub use bgp::*;

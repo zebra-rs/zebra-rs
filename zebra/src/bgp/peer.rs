@@ -4,6 +4,7 @@ use super::packet::*;
 use super::route::route_from_peer;
 use super::route::Route;
 use super::task::*;
+use super::AfiSafis;
 use super::Bgp;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
@@ -74,6 +75,7 @@ pub struct PeerTransportConfig {
 #[derive(Debug, Default)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
+    pub afi_safi: AfiSafis,
 }
 
 #[derive(Debug)]
@@ -126,7 +128,6 @@ impl Peer {
     }
 
     pub fn is_passive(&self) -> bool {
-        println!("P: {}", self.config.transport.passive);
         self.config.transport.passive
     }
 
@@ -181,9 +182,8 @@ fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
 }
 
 pub fn fsm_init(peer: &mut Peer) -> State {
-    println!("fsm_init");
     if peer.is_passive() {
-        println!("Peer is passive, transit to Active");
+        peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
         State::Active
     } else {
         peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
