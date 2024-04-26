@@ -46,7 +46,7 @@ fn bgp_neighbor_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
         let addr: Ipv4Addr = args.v4addr()?;
         let afi_safi: AfiSafi = args.afi_safi()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
-            if peer.config.afi_safi.has(&afi_safi) {
+            if !peer.config.afi_safi.has(&afi_safi) {
                 peer.config.afi_safi.push(afi_safi);
             }
         }

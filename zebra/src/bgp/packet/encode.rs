@@ -21,15 +21,14 @@ impl From<OpenPacket> for BytesMut {
         buf.put_u16(open.asn);
         buf.put_u16(open.hold_time);
         buf.put(&open.bgp_id[..]);
+
         let op_param_pos = buf.len();
         buf.put_u8(open.opt_param_len);
-
-        // Optional parameter
         for cap in open.caps.iter() {
             cap.encode(&mut buf);
         }
+        buf[op_param_pos] = (buf.len() - op_param_pos - 1) as u8;
 
-        // Adjust length.
         const LENGTH_POS: std::ops::Range<usize> = 16..18;
         let length: u16 = buf.len() as u16;
         buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
