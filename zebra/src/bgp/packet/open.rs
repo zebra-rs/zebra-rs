@@ -18,7 +18,7 @@ pub struct OpenPacket {
     pub caps: Vec<CapabilityPacket>,
 }
 
-#[derive(Debug, Eq, PartialEq, NomBE)]
+#[derive(Debug, Eq, PartialEq, NomBE, Clone)]
 pub struct CapabilityType(pub u8);
 
 newtype_enum! {
@@ -31,7 +31,7 @@ newtype_enum! {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum CapabilityPacket {
     MultiProtocol(CapabilityMultiProtocol),
     RouteRefresh(CapabilityRouteRefresh),
@@ -71,7 +71,7 @@ impl CapabilityPacket {
 
 const CAPABILITY_CODE: u8 = 2;
 
-#[derive(Debug, PartialEq, NomBE)]
+#[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityHeader {
     pub code: u8,
     pub length: u8,
@@ -98,7 +98,7 @@ pub struct CapabilityPeekHeader {
     pub length: u8,
 }
 
-#[derive(Debug, PartialEq, NomBE)]
+#[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityMultiProtocol {
     header: CapabilityHeader,
     typ: CapabilityType,
@@ -123,7 +123,7 @@ impl CapabilityMultiProtocol {
 
 //
 
-#[derive(Debug, PartialEq, NomBE)]
+#[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityRouteRefresh {
     header: CapabilityHeader,
     typ: CapabilityType,
@@ -140,7 +140,7 @@ impl CapabilityRouteRefresh {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE)]
+#[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityAs4 {
     header: CapabilityHeader,
     typ: CapabilityType,
@@ -159,7 +159,7 @@ impl CapabilityAs4 {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE)]
+#[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityGracefulRestart {
     header: CapabilityHeader,
     restart_time: u32,

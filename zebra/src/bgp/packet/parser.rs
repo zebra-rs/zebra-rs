@@ -125,7 +125,6 @@ fn parse_bgp_attr_large_com(input: &[u8], length: u16) -> IResult<&[u8], Attribu
 }
 
 fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
-    println!("XX BGP Attrs: input len {} as4 {}", input.len(), as4);
     let (input, header) = AttributeHeader::parse(input)?;
     let ext_len: usize = if header.is_extended() { 2 } else { 1 };
     let (input, exts) = take(ext_len)(input)?;
@@ -215,9 +214,7 @@ fn parse_bgp_nlri_ipv4(input: &[u8], length: u16) -> IResult<&[u8], Vec<Ipv4Net>
 }
 
 fn parse_bgp_update_packet(input: &[u8], as4: bool) -> IResult<&[u8], UpdatePacket> {
-    println!("Update packet 1");
     let (input, mut packet) = UpdatePacket::parse(input)?;
-    println!("Update packet 2");
     let (input, withdraw_len) = be_u16(input)?;
     let (input, mut withdrawal) = parse_bgp_nlri_ipv4(input, withdraw_len)?;
     packet.ipv4_withdraw.append(&mut withdrawal);
@@ -240,7 +237,6 @@ fn parse_bgp_notification_packet(input: &[u8]) -> IResult<&[u8], NotificationPac
 pub fn peek_bgp_length(input: &[u8]) -> usize {
     if let Some(len) = input.get(16..18) {
         let len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
-        println!("peek_bgp_length {}", len);
         len
     } else {
         0

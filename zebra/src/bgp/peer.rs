@@ -70,6 +70,7 @@ pub struct PeerCounter {
 pub struct PeerTransportConfig {
     pub passive: bool,
 }
+
 #[derive(Debug, Default, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
@@ -77,6 +78,7 @@ pub struct PeerConfig {
     pub four_octet: bool,
     pub route_refresh: bool,
     pub graceful_restart: Option<u32>,
+    pub received: Vec<CapabilityPacket>,
 }
 
 #[derive(Debug)]
@@ -325,11 +327,16 @@ pub fn peer_packet_parse(
     rx: &[u8],
     ident: Ipv4Addr,
     tx: UnboundedSender<Message>,
-    as4: bool,
+    config: &mut PeerConfig,
 ) -> Result<(), &'static str> {
+    // Check as4.
+    let as4 = !config.received.is_empty();
+    println!("AS4 {}", as4);
+
     if let Ok((_, p)) = parse_bgp_packet(rx, as4) {
         match p {
             BgpPacket::Open(p) => {
+                config.received = p.caps.clone();
                 let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
             }
             BgpPacket::Keepalive(_) => {
@@ -352,6 +359,7 @@ pub async fn peer_read(
     ident: Ipv4Addr,
     tx: UnboundedSender<Message>,
     mut read_half: OwnedReadHalf,
+    mut config: PeerConfig,
 ) {
     let mut buf = BytesMut::with_capacity(BGP_MAX_LEN * 2);
     loop {
@@ -369,7 +377,7 @@ pub async fn peer_read(
                     let mut remain = buf.split_off(length);
                     remain.reserve(BGP_MAX_LEN * 2);
 
-                    match peer_packet_parse(buf.as_bytes(), ident, tx.clone(), true) {
+                    match peer_packet_parse(buf.as_bytes(), ident, tx.clone(), &mut config) {
                         Ok(_) => {
                             buf = remain;
                         }
@@ -392,9 +400,9 @@ pub async fn peer_read(
 pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    let as4 = peer.as4;
+    let mut config = peer.config.clone();
     Task::spawn(async move {
-        peer_read(ident, tx.clone(), read_half).await;
+        peer_read(ident, tx.clone(), read_half, config).await;
     })
 }
 
