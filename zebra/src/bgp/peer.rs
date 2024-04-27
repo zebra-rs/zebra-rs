@@ -70,11 +70,13 @@ pub struct PeerCounter {
 pub struct PeerTransportConfig {
     pub passive: bool,
 }
-
 #[derive(Debug, Default)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
     pub afi_safi: AfiSafis,
+    pub four_octet: bool,
+    pub route_refresh: bool,
+    pub graceful_restart: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -93,6 +95,7 @@ pub struct Peer {
     pub tx: UnboundedSender<Message>,
     pub local_identifier: Option<Ipv4Addr>,
     pub config: PeerConfig,
+    pub as4: bool,
 }
 
 impl Peer {
@@ -104,7 +107,7 @@ impl Peer {
         address: Ipv4Addr,
         tx: UnboundedSender<Message>,
     ) -> Self {
-        let mut bgp = Self {
+        let mut peer = Self {
             ident,
             router_id,
             local_as,
@@ -119,11 +122,15 @@ impl Peer {
             tx,
             local_identifier: None,
             config: PeerConfig::default(),
+            as4: true,
         };
-        bgp.config
+        peer.config
             .afi_safi
             .push(AfiSafi::new(Afi::IP, Safi::Unicast));
-        bgp
+        peer.config.four_octet = true;
+        peer.config.route_refresh = true;
+        // peer.config.graceful_restart = Some(65535);
+        peer
     }
 
     pub fn event(&self, ident: Ipv4Addr, event: Event) {
@@ -318,8 +325,9 @@ pub fn peer_packet_parse(
     rx: &[u8],
     ident: Ipv4Addr,
     tx: UnboundedSender<Message>,
+    as4: bool,
 ) -> Result<(), &'static str> {
-    if let Ok((_, p)) = parse_bgp_packet(rx, false) {
+    if let Ok((_, p)) = parse_bgp_packet(rx, as4) {
         match p {
             BgpPacket::Open(p) => {
                 let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
@@ -361,7 +369,7 @@ pub async fn peer_read(
                     let mut remain = buf.split_off(length);
                     remain.reserve(BGP_MAX_LEN * 2);
 
-                    match peer_packet_parse(buf.as_bytes(), ident, tx.clone()) {
+                    match peer_packet_parse(buf.as_bytes(), ident, tx.clone(), true) {
                         Ok(_) => {
                             buf = remain;
                         }
@@ -384,6 +392,7 @@ pub async fn peer_read(
 pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
+    let as4 = peer.as4;
     Task::spawn(async move {
         peer_read(ident, tx.clone(), read_half).await;
     })
@@ -431,12 +440,22 @@ pub fn peer_send_open(peer: &mut Peer) {
         let cap = CapabilityMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
         caps.push(CapabilityPacket::MultiProtocol(cap));
     }
-    let mut open = OpenPacket::new(header, peer.local_as as u16, &router_id, caps);
-    // 4octet.
+    if peer.config.four_octet {
+        let cap = CapabilityAs4::new(peer.local_as);
+        caps.push(CapabilityPacket::As4(cap));
+    }
+    if peer.config.route_refresh {
+        let cap = CapabilityRouteRefresh::new(CapabilityType::RouteRefresh);
+        caps.push(CapabilityPacket::RouteRefresh(cap));
+        let cap = CapabilityRouteRefresh::new(CapabilityType::RouteRefreshCisco);
+        caps.push(CapabilityPacket::RouteRefresh(cap));
+    }
+    if let Some(restart_time) = peer.config.graceful_restart {
+        let cap = CapabilityGracefulRestart::new(restart_time);
+        caps.push(CapabilityPacket::GracefulRestart(cap));
+    }
 
-    // Graceful Restart.
-
-    // Route Refresh.
+    let open = OpenPacket::new(header, peer.local_as as u16, &router_id, caps);
     let bytes: BytesMut = open.into();
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
     peer.counter.tx[usize::from(BgpType::Open)] += 1;

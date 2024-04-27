@@ -52,22 +52,24 @@ impl CapabilityPacket {
             }
             Self::RouteRefresh(m) => {
                 m.header.encode(buf);
-                buf.put_u8(m.typ);
+                buf.put_u8(m.typ.0);
                 buf.put_u8(m.length);
             }
             Self::As4(m) => {
                 m.header.encode(buf);
-                buf.put_u8(m.typ);
+                buf.put_u8(m.typ.0);
                 buf.put_u8(m.length);
                 buf.put_u32(m.asn);
             }
             Self::GracefulRestart(m) => {
                 m.header.encode(buf);
-                buf.put_u32(m.restart_timers);
+                buf.put_u32(m.restart_time);
             }
         }
     }
 }
+
+const CAPABILITY_CODE: u8 = 2;
 
 #[derive(Debug, PartialEq, NomBE)]
 pub struct CapabilityHeader {
@@ -76,8 +78,11 @@ pub struct CapabilityHeader {
 }
 
 impl CapabilityHeader {
-    pub fn new(code: u8, length: u8) -> Self {
-        Self { code, length }
+    pub fn new(length: u8) -> Self {
+        Self {
+            code: CAPABILITY_CODE,
+            length,
+        }
     }
 
     pub fn encode(&self, buf: &mut BytesMut) {
@@ -103,12 +108,10 @@ pub struct CapabilityMultiProtocol {
     safi: Safi,
 }
 
-const OpenCapability: u8 = 2;
-
 impl CapabilityMultiProtocol {
     pub fn new(afi: &Afi, safi: &Safi) -> Self {
         Self {
-            header: CapabilityHeader::new(OpenCapability, 6),
+            header: CapabilityHeader::new(6),
             typ: CapabilityType::MultiProtocol,
             length: 4,
             afi: afi.clone(),
@@ -123,22 +126,52 @@ impl CapabilityMultiProtocol {
 #[derive(Debug, PartialEq, NomBE)]
 pub struct CapabilityRouteRefresh {
     header: CapabilityHeader,
-    typ: u8,
+    typ: CapabilityType,
     length: u8,
+}
+
+impl CapabilityRouteRefresh {
+    pub fn new(typ: CapabilityType) -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ,
+            length: 0,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, NomBE)]
 pub struct CapabilityAs4 {
     header: CapabilityHeader,
-    typ: u8,
+    typ: CapabilityType,
     length: u8,
     asn: u32,
+}
+
+impl CapabilityAs4 {
+    pub fn new(asn: u32) -> Self {
+        Self {
+            header: CapabilityHeader::new(6),
+            typ: CapabilityType::As4,
+            length: 4,
+            asn,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, NomBE)]
 pub struct CapabilityGracefulRestart {
     header: CapabilityHeader,
-    restart_timers: u32,
+    restart_time: u32,
+}
+
+impl CapabilityGracefulRestart {
+    pub fn new(restart_time: u32) -> Self {
+        Self {
+            header: CapabilityHeader::new(4),
+            restart_time,
+        }
+    }
 }
 
 impl OpenPacket {
