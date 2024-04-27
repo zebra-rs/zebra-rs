@@ -24,7 +24,7 @@ newtype_enum! {
 }
 
 // AFI/SAFI config
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AfiSafis(pub Vec<AfiSafi>);
 
 impl AfiSafis {
@@ -37,7 +37,7 @@ impl AfiSafis {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct AfiSafi {
     pub afi: Afi,
     pub safi: Safi,

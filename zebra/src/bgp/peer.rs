@@ -66,11 +66,11 @@ pub struct PeerCounter {
     pub rx: [u64; 5],
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PeerTransportConfig {
     pub passive: bool,
 }
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
     pub afi_safi: AfiSafis,
