@@ -78,7 +78,7 @@ routing {
 }
 "#;
         let tokens = tokenizer(config.to_string());
-        assert_eq!(tokens.len(), 23);
+        assert_eq!(tokens.len(), 22);
         assert_eq!(
             tokens.get(10).unwrap(),
             &Token::String("neighbors".to_string())
