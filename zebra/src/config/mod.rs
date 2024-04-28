@@ -12,6 +12,7 @@ pub use serve::serve;
 pub use serve::Cli;
 
 mod configs;
+pub use configs::Args;
 pub use configs::Config;
 
 mod comps;

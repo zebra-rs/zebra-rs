@@ -1,17 +1,27 @@
-use super::{fsm, Event, Peer};
-use crate::config::{path_from_command, ConfigChannel, ConfigOp, ConfigRequest, ShowChannel};
+use super::peer::{fsm, Event, Peer};
+use super::route::Route;
+use crate::bgp::peer::accept;
+use crate::bgp::task::Task;
+use crate::config::{
+    path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
+};
 use crate::rib::api::{RibRxChannel, RibTx};
+use ipnet::Ipv4Net;
+use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub enum Message {
     Event(Ipv4Addr, Event),
+    Accept(TcpStream, SocketAddr),
     Show(Sender<String>),
 }
 
-type Callback = fn(&mut Bgp, Vec<String>, ConfigOp);
+pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
+pub type ShowCallback = fn(&Bgp, Args) -> String;
 
 pub struct Bgp {
     pub asn: u32,
@@ -21,57 +31,12 @@ pub struct Bgp {
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
+    pub show_cb: HashMap<String, ShowCallback>,
     pub rib: Sender<RibTx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
-}
-
-fn bgp_global_asn(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let asn_str = &args[0];
-        bgp.asn = asn_str.parse().unwrap();
-    }
-}
-fn bgp_global_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let router_id_str = &args[0];
-        bgp.router_id = router_id_str.parse().unwrap();
-    }
-}
-
-fn bgp_neighbor_peer(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && !args.is_empty() {
-        let peer_addr = &args[0];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
-        bgp.peers.insert(addr, peer);
-    }
-}
-
-fn bgp_neighbor_peer_as(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let peer_as = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let asn: u32 = peer_as.parse().unwrap();
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.peer_as = asn;
-            peer.update();
-        }
-    }
-}
-
-fn bgp_neighbor_local_identifier(bgp: &mut Bgp, args: Vec<String>, op: ConfigOp) {
-    if op == ConfigOp::Set && args.len() > 1 {
-        let peer_addr = &args[0];
-        let local_identifier = &args[1];
-        let addr: Ipv4Addr = peer_addr.parse().unwrap();
-        let identifier: Ipv4Addr = local_identifier.parse().unwrap();
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.local_identifier = Some(identifier);
-            peer.update();
-        }
-    }
+    pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
+    pub listen_task: Option<Task<()>>,
 }
 
 impl Bgp {
@@ -83,14 +48,17 @@ impl Bgp {
             peers: BTreeMap::new(),
             tx,
             rx,
-            // ptree: prefix_trie::PrefixMap::<Ipv4Net, u32>::new(),
+            ptree: PrefixMap::<Ipv4Net, Vec<Route>>::new(),
             rib,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
+            show_cb: HashMap::new(),
             redist: RibRxChannel::new(),
             callbacks: HashMap::new(),
+            listen_task: None,
         };
         bgp.callback_build();
+        bgp.show_build();
         bgp
     }
 
@@ -98,26 +66,15 @@ impl Bgp {
         self.callbacks.insert(path.to_string(), cb);
     }
 
-    pub fn callback_build(&mut self) {
-        self.callback_add("/routing/bgp/global/as", bgp_global_asn);
-        self.callback_add("/routing/bgp/global/identifier", bgp_global_identifier);
-        self.callback_add("/routing/bgp/neighbors/neighbor", bgp_neighbor_peer);
-        self.callback_add(
-            "/routing/bgp/neighbors/neighbor/peer-as",
-            bgp_neighbor_peer_as,
-        );
-        self.callback_add(
-            "/routing/bgp/neighbors/neighbor/local-identifier",
-            bgp_neighbor_local_identifier,
-        );
-    }
-
-    pub fn process_message(&mut self, msg: Message) {
+    pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Event(peer, event) => {
                 println!("Message::Event: {:?}", event);
-                let peer = self.peers.get_mut(&peer).unwrap();
-                fsm(peer, event);
+                fsm(self, peer, event);
+            }
+            Message::Accept(socket, sockaddr) => {
+                println!("Accept: {:?}", sockaddr);
+                accept(self, socket, sockaddr);
             }
             Message::Show(tx) => {
                 self.tx.send(Message::Show(tx)).unwrap();
@@ -125,24 +82,47 @@ impl Bgp {
         }
     }
 
-    pub fn process_cm_message(&mut self, msg: ConfigRequest) {
+    pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
     }
 
+    async fn process_show_msg(&self, msg: DisplayRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.show_cb.get(&path) {
+            let output = f(self, args);
+            msg.resp.send(output).await.unwrap();
+        }
+    }
+
+    pub async fn listen(&mut self) -> anyhow::Result<()> {
+        let listener = TcpListener::bind("0.0.0.0:179").await?;
+        let tx = self.tx.clone();
+
+        let listen_task = Task::spawn(async move {
+            loop {
+                let (socket, sockaddr) = listener.accept().await.unwrap();
+                tx.send(Message::Accept(socket, sockaddr)).unwrap();
+            }
+        });
+        self.listen_task = Some(listen_task);
+        Ok(())
+    }
+
     pub async fn event_loop(&mut self) {
+        self.listen().await.unwrap();
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
-                    self.process_message(msg);
+                    self.process_msg(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
-                    self.process_cm_message(msg);
+                    self.process_cm_msg(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
-                    self.tx.send(Message::Show(msg.resp)).unwrap();
+            self.process_show_msg(msg).await;
                 }
             }
         }

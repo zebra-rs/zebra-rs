@@ -100,7 +100,7 @@ impl CommunityValue {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Clone, Debug, NomBE)]
 pub struct CommunityAttr(pub Vec<u32>);
 
 impl CommunityAttr {

@@ -44,6 +44,7 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/candidate"), candidate);
     mode.install_func(String::from("/running"), running);
     mode.install_func(String::from("/json"), json);
+    mode.install_func(String::from("/yaml"), yaml);
     mode.install_func(String::from("/commit"), commit);
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/list"), list);
@@ -111,6 +112,12 @@ fn running(config: &ConfigManager) -> (ExecCode, String) {
 fn json(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.candidate.borrow().json(&mut output);
+    (ExecCode::Show, output)
+}
+
+fn yaml(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    config.store.candidate.borrow().yaml(&mut output);
     (ExecCode::Show, output)
 }
 

@@ -1,4 +1,4 @@
-use super::{parse_bgp_packet, parse_ipv4_prefix, BgpPacket};
+use super::super::packet::{parse_bgp_packet, parse_ipv4_prefix, BgpPacket};
 use nom::bytes::streaming::take;
 use nom::error::{make_error, ErrorKind};
 use nom::multi::many0;

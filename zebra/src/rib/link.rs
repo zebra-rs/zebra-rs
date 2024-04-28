@@ -1,3 +1,5 @@
+use crate::config::Args;
+
 use super::entry::{RibEntry, RibType};
 use super::fib::message::{FibAddr, FibLink};
 use super::fib::os_traffic_dump;
@@ -181,7 +183,7 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     cb(&link.name, buf);
 }
 
-pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
+pub fn link_show(rib: &Rib, mut args: Args) -> String {
     let cb = os_traffic_dump();
     let mut buf = String::new();
 
@@ -190,8 +192,8 @@ pub fn link_show(rib: &Rib, args: Vec<String>) -> String {
             link_info_show(link, &mut buf, &cb);
         }
     } else {
-        let link_name = &args[0];
-        if let Some(link) = rib.link_by_name(link_name) {
+        let link_name = args.string().unwrap();
+        if let Some(link) = rib.link_by_name(&link_name) {
             link_info_show(link, &mut buf, &cb)
         } else {
             write!(buf, "% interface {} not found", link_name).unwrap();

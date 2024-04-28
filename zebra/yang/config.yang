@@ -20,6 +20,10 @@ module config {
     prefix bgp;
   }
 
+  import ietf-bgp-policy {
+    prefix policy;
+  }
+
   grouping config {
     container system {
       ext:help "System configuration";
@@ -62,6 +66,7 @@ module config {
     container routing {
       ext:help "Routing configuration";
       uses "ietf-bgp:bgp";
+      uses "policy:defined-sets";
       container static {
         ext:help "Static route configuration";
         list route {

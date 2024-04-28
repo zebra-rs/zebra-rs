@@ -2,7 +2,75 @@ use super::parse::match_keyword;
 use super::parse::{Match, MatchType};
 use super::vtysh::{CommandPath, YangMatch};
 use super::Completion;
+use crate::bgp::{Afi, AfiSafi, Safi};
+use ipnet::{Ipv4Net, Ipv6Net};
+use std::collections::VecDeque;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{cell::RefCell, rc::Rc};
+
+#[derive(Clone)]
+pub struct Args(pub VecDeque<String>);
+
+impl Args {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn string(&mut self) -> Option<String> {
+        self.0.pop_front()
+    }
+
+    pub fn u32(&mut self) -> Option<u32> {
+        let item = self.0.pop_front()?;
+        let arg: u32 = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn v4addr(&mut self) -> Option<Ipv4Addr> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv4Addr = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn v4net(&mut self) -> Option<Ipv4Net> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv4Net = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn v6addr(&mut self) -> Option<Ipv6Addr> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv6Addr = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn v6net(&mut self) -> Option<Ipv6Net> {
+        let item = self.0.pop_front()?;
+        let arg: Ipv6Net = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn boolean(&mut self) -> Option<bool> {
+        let item = self.0.pop_front()?;
+        let arg: bool = item.parse().ok()?;
+        Some(arg)
+    }
+
+    pub fn afi_safi(&mut self) -> Option<AfiSafi> {
+        let item = self.0.pop_front()?;
+        match item.as_str() {
+            "ipv4-unicast" => Some(AfiSafi::new(Afi::IP, Safi::Unicast)),
+            "ipv4-labeled-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsLabel)),
+            "ipv6-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::Unicast)),
+            "ipv6-labeled-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::MplsLabel)),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 pub struct Config {
@@ -220,6 +288,14 @@ impl Config {
         out.push('}');
     }
 
+    pub fn yaml(&self, out: &mut String) {
+        let mut json = String::new();
+        self.json(&mut json);
+        let json_value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let yaml_str = serde_yaml::to_string(&json_value).unwrap();
+        out.push_str(&yaml_str);
+    }
+
     pub fn list_command(&self) -> Vec<String> {
         let mut commands = Vec::new();
         if let Some(parent) = self.parent.as_ref() {
@@ -336,10 +412,7 @@ pub fn ymatch_enum(ymatch: i32) -> YangMatch {
     }
 }
 
-pub fn config_set(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
-    if paths[0].name == "set" {
-        paths.remove(0);
-    }
+pub fn set(paths: Vec<CommandPath>, mut config: Rc<Config>) {
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
             YangMatch::Dir
@@ -373,15 +446,10 @@ fn config_delete(config: Rc<Config>, name: &String) {
     }
 }
 
-pub fn delete(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
-    if paths.is_empty() || paths[0].name != "delete" {
-        return;
-    }
-    paths.remove(0);
-
+pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
-            YangMatch::Dir | YangMatch::Leaf | YangMatch::Key => {
+            YangMatch::Dir | YangMatch::DirMatched | YangMatch::Leaf | YangMatch::Key => {
                 if let Some(next) = config.lookup(&path.name) {
                     config = next;
                 } else {
@@ -400,7 +468,7 @@ pub fn delete(mut paths: Vec<CommandPath>, mut config: Rc<Config>) {
                     break;
                 }
             }
-            _ => {}
+            YangMatch::LeafList | YangMatch::LeafListMatched => {}
         }
     }
 

@@ -60,6 +60,11 @@ module configure {
     type empty;
   }
 
+  leaf yaml {
+    ext:help "Show running configuration in YAML format";
+    type empty;
+  }
+
   leaf commit {
     ext:help "Commit candidate config to running config";
     type empty;

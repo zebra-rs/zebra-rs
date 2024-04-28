@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -148,7 +150,11 @@ fn exec_commands(resp: &ExecuteResponse) -> (ExecCode, String, Vec<CommandPath>)
 
 #[derive(Debug)]
 struct ShowService {
-    txes: Vec<UnboundedSender<DisplayRequest>>,
+    show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
+}
+
+fn is_bgp(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "bgp")
 }
 
 #[tonic::async_trait]
@@ -165,8 +171,11 @@ impl Show for ShowService {
             paths: request.paths.clone(),
             resp: bus_tx.clone(),
         };
-        if !self.txes.is_empty() {
-            let tx = self.txes[0].clone();
+        if is_bgp(&req.paths) {
+            if let Some(tx) = self.show_clients.get("bgp") {
+                tx.send(req).unwrap();
+            }
+        } else if let Some(tx) = self.show_clients.get("rib") {
             tx.send(req).unwrap();
         }
 
@@ -187,19 +196,19 @@ impl Show for ShowService {
 
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
-    pub txes: Vec<UnboundedSender<DisplayRequest>>,
+    pub show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
 }
 
 impl Cli {
     pub fn new(config_tx: Sender<Message>) -> Self {
         Self {
             tx: config_tx,
-            txes: Vec::new(),
+            show_clients: HashMap::new(),
         }
     }
 
-    pub fn subscribe(&mut self, _name: &str, disp_tx: UnboundedSender<DisplayRequest>) {
-        self.txes.push(disp_tx);
+    pub fn subscribe(&mut self, name: &str, tx: UnboundedSender<DisplayRequest>) {
+        self.show_clients.insert(name.to_string(), tx);
     }
 }
 
@@ -207,9 +216,13 @@ pub fn serve(cli: Cli) {
     let exec_service = ExecService { tx: cli.tx.clone() };
     let exec_server = ExecServer::new(exec_service);
 
-    let mut show_service = ShowService { txes: Vec::new() };
-    for tx in cli.txes.iter() {
-        show_service.txes.push(tx.clone());
+    let mut show_service = ShowService {
+        show_clients: HashMap::new(),
+    };
+    for (client, tx) in cli.show_clients.iter() {
+        show_service
+            .show_clients
+            .insert(client.to_string(), tx.clone());
     }
     let show_server = ShowServer::new(show_service);
 

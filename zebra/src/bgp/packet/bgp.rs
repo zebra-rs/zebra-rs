@@ -3,14 +3,14 @@ use super::{NotificationPacket, OpenPacket, UpdatePacket};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 
-pub const BGP_PACKET_MAX_LEN: usize = 4096;
-pub const BGP_PACKET_HEADER_LEN: u16 = 19;
+pub const BGP_MAX_LEN: usize = 4096;
+pub const BGP_HEADER_LEN: u16 = 19;
 
 #[derive(Debug, Eq, PartialEq, NomBE)]
-pub struct BgpPacketType(u8);
+pub struct BgpType(u8);
 
 newtype_enum! {
-    impl display BgpPacketType {
+    impl display BgpType {
         Open = 1,
         Update = 2,
         Notification = 3,
@@ -18,10 +18,18 @@ newtype_enum! {
     }
 }
 
-impl From<BgpPacketType> for u8 {
-    fn from(typ: BgpPacketType) -> u8 {
+impl From<BgpType> for u8 {
+    fn from(typ: BgpType) -> u8 {
         match typ {
-            BgpPacketType(t) => t,
+            BgpType(t) => t,
+        }
+    }
+}
+
+impl From<BgpType> for usize {
+    fn from(typ: BgpType) -> usize {
+        match typ {
+            BgpType(t) => t as usize,
         }
     }
 }
@@ -30,11 +38,11 @@ impl From<BgpPacketType> for u8 {
 pub struct BgpHeader {
     pub marker: [u8; 16],
     pub length: u16,
-    pub typ: BgpPacketType,
+    pub typ: BgpType,
 }
 
 impl BgpHeader {
-    pub fn new(typ: BgpPacketType, length: u16) -> Self {
+    pub fn new(typ: BgpType, length: u16) -> Self {
         Self {
             marker: [0xffu8; 16],
             length,

@@ -192,7 +192,7 @@ module ietf-bgp-policy {
 
   // augment statements
 
-  augment "/rt-pol:routing-policy/rt-pol:defined-sets" {
+  grouping "defined-sets" {
     description
       "Adds BGP defined sets container to routing policy model.";
     container bgp-defined-sets {

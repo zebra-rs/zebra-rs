@@ -44,21 +44,19 @@ module exec {
         "The name of the host.  This name can be a single domain
         label or the fully qualified domain name of the host.";
     }
-    leaf boolean {
-      type boolean;
-      description
-        "Boolean value test";
-    }
-    leaf i8 {
-      type int8;
-      description
-        "int8 value test";
-    }
     container ip {
       ext:help "Show IP commands";
       leaf route {
         ext:help "IP route prefix";
         type inet:ipv4-prefix;
+      }
+      container bgp {
+        ext:help "BGP commands";
+        presence "BGP RIB";
+        leaf summary {
+          ext:help "BGP summary information";
+          type empty;
+        }
       }
     }
     container ipv6 {
