@@ -9,8 +9,7 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
 use prefix_trie::PrefixMap;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -182,10 +181,10 @@ pub fn fsm(bgp: &mut Bgp, id: Ipv4Addr, event: Event) {
         Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
         Event::UpdateMsg(packet) => fsm_bgp_update(peer, packet, &mut bgp_ref),
     };
-    println!("State: {:?} -> {:?}", prev_state, peer.state);
     if prev_state != State::Idle && peer.state == State::Idle {
-        fsm_stop(peer);
+        peer.state = fsm_stop(peer);
     }
+    println!("State: {:?} -> {:?}", prev_state, peer.state);
 }
 
 fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
@@ -195,7 +194,7 @@ fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
 
 pub fn fsm_init(peer: &mut Peer) -> State {
     if peer.is_passive() {
-        peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
+        peer.timer.idle_hold_timer = None;
         State::Active
     } else {
         peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
@@ -215,12 +214,48 @@ pub fn fsm_stop(peer: &mut Peer) -> State {
     peer.timer.connect_retry = None;
     peer.timer.keepalive = None;
     peer.timer.hold_timer = None;
-    fsm_init(peer);
-    State::Idle
+    fsm_init(peer)
+}
+
+pub fn capability_as4(caps: &Vec<CapabilityPacket>) -> Option<u32> {
+    for cap in caps.iter() {
+        if let CapabilityPacket::As4(m) = cap {
+            return Some(m.asn);
+        }
+    }
+    None
+}
+
+pub fn open_asn(packet: &OpenPacket) -> u32 {
+    let asn = capability_as4(&packet.caps);
+    if let Some(asn) = asn {
+        asn
+    } else {
+        packet.asn as u32
+    }
 }
 
 pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
+    println!("fsm_bgp_open");
+
     peer.counter.rx[usize::from(BgpType::Open)] += 1;
+
+    // Peer ASN.
+    let asn = open_asn(&packet);
+    println!("fsm_bgp_open: asn {}", asn);
+
+    // Compare with configured asn.
+    if peer.peer_as != asn {
+        println!("XXX peer as wrong");
+        peer_send_notification(
+            peer,
+            NotificationCode::OpenMessageError,
+            OpenError::BadPeerAS as u8,
+            Vec::new(),
+        );
+        return State::Idle;
+    }
+
     if peer.state != State::OpenSent {
         println!("peer state mismatch {:?}", peer.state);
         // Send notification.
@@ -255,9 +290,7 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter.rx[usize::from(BgpType::Update)] += 1;
     peer_refresh_holdtimer(peer);
-
     route_from_peer(peer, packet, bgp);
-
     State::Established
 }
 
@@ -278,8 +311,8 @@ pub fn fsm_conn_retry_expires(peer: &mut Peer) -> State {
     State::Connect
 }
 
-pub fn fsm_holdtimer_expires(_peer: &mut Peer) -> State {
-    // peer_send_notification(peer);
+pub fn fsm_holdtimer_expires(peer: &mut Peer) -> State {
+    peer_send_notification(peer, NotificationCode::HoldTimerExpired, 0, Vec::new());
     State::Idle
 }
 
@@ -297,7 +330,7 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
 pub fn fsm_conn_fail(peer: &mut Peer) -> State {
     peer.task.writer = None;
     peer.task.reader = None;
-    // peer.timer.connect = Some()
+    peer.timer.connect_retry = Some(peer_start_connect_retry_timer(peer));
     State::Active
 }
 
@@ -312,7 +345,7 @@ pub fn peer_start_idle_hold_timer(peer: &Peer) -> Timer {
     })
 }
 
-pub fn peer_start_connect_timer(peer: &Peer) -> Timer {
+pub fn peer_start_connect_retry_timer(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     Timer::new(Timer::second(5), TimerType::Once, move || {
@@ -400,7 +433,7 @@ pub async fn peer_read(
 pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    let mut config = peer.config.clone();
+    let config = peer.config.clone();
     Task::spawn(async move {
         peer_read(ident, tx.clone(), read_half, config).await;
     })
@@ -469,6 +502,18 @@ pub fn peer_send_open(peer: &mut Peer) {
     peer.counter.tx[usize::from(BgpType::Open)] += 1;
 }
 
+pub fn peer_send_notification(
+    peer: &mut Peer,
+    code: NotificationCode,
+    sub_code: u8,
+    data: Vec<u8>,
+) {
+    let notification = NotificationPacket::new(code, sub_code, data);
+    let bytes: BytesMut = notification.into();
+    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
+    peer.counter.tx[usize::from(BgpType::Notification)] += 1;
+}
+
 pub fn peer_start_keepalive(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
@@ -507,9 +552,7 @@ pub fn peer_refresh_holdtimer(peer: &Peer) {
 pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
     match sockaddr {
         SocketAddr::V4(addr) => {
-            println!("IPv4: {:?}", addr);
             if let Some(peer) = bgp.peers.get_mut(addr.ip()) {
-                println!("Found peer: status {:?}", peer.state);
                 if peer.state == State::Active {
                     peer.state = fsm_connected(peer, stream);
                 }

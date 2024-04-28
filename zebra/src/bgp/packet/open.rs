@@ -6,6 +6,8 @@ use nom_derive::*;
 use rusticata_macros::newtype_enum;
 use std::net::Ipv4Addr;
 
+const CAPABILITY_CODE: u8 = 2;
+
 #[derive(Debug, PartialEq, NomBE)]
 pub struct OpenPacket {
     pub header: BgpHeader,
@@ -68,8 +70,6 @@ impl CapabilityPacket {
         }
     }
 }
-
-const CAPABILITY_CODE: u8 = 2;
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityHeader {
@@ -145,7 +145,7 @@ pub struct CapabilityAs4 {
     header: CapabilityHeader,
     typ: CapabilityType,
     length: u8,
-    asn: u32,
+    pub asn: u32,
 }
 
 impl CapabilityAs4 {
