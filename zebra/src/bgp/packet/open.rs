@@ -35,7 +35,8 @@ newtype_enum! {
     EnhancedRouteRefresh = 70,
     LLGR = 71,
     FQDN = 73,
-    SoftwareVersion = 76,
+        SoftwareVersion = 75,
+        PathLimit = 76,
         RouteRefreshCisco = 128,
     }
 }
@@ -53,6 +54,8 @@ pub enum CapabilityPacket {
     LLGR(CapabilityLLGR),
     FQDN(CapabilityFQDN),
     SoftwareVersion(CapabilitySoftwareVersion),
+    PathLimit(CapabilityPathLimit),
+    Unknown(CapabilityUnknown),
 }
 
 impl CapabilityPacket {
@@ -119,6 +122,20 @@ impl CapabilityPacket {
                 m.header.encode(buf);
                 buf.put_u8(m.typ.0);
                 buf.put_u8(m.length);
+            }
+            Self::PathLimit(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+                buf.put_u16(m.afi.0);
+                buf.put_u8(m.safi.0);
+                buf.put_u16(m.path_limit);
+            }
+            Self::Unknown(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+                buf.put(&m.data[..]);
             }
         }
     }
@@ -310,9 +327,9 @@ pub struct LLGRValue {
 pub struct CapabilityLLGR {
     header: CapabilityHeader,
     typ: CapabilityType,
-    length: u8,
+    pub length: u8,
     #[nom(Ignore)]
-    values: Vec<LLGRValue>,
+    pub values: Vec<LLGRValue>,
 }
 
 impl CapabilityLLGR {
@@ -367,6 +384,38 @@ impl CapabilitySoftwareVersion {
             version,
         }
     }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityPathLimit {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    pub length: u8,
+    pub afi: Afi,
+    pub safi: Safi,
+    pub path_limit: u16,
+}
+
+impl CapabilityPathLimit {
+    pub fn new(afi: Afi, safi: Safi, path_limit: u16) -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::AddPath,
+            length: 5,
+            afi,
+            safi,
+            path_limit,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityUnknown {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    pub length: u8,
+    #[nom(Ignore)]
+    pub data: Vec<u8>,
 }
 
 impl OpenPacket {
