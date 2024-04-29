@@ -37,6 +37,7 @@ pub struct Bgp {
     pub callbacks: HashMap<String, Callback>,
     pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
     pub listen_task: Option<Task<()>>,
+    pub listen_err: Option<anyhow::Error>,
 }
 
 impl Bgp {
@@ -56,6 +57,7 @@ impl Bgp {
             redist: RibRxChannel::new(),
             callbacks: HashMap::new(),
             listen_task: None,
+            listen_err: None,
         };
         bgp.callback_build();
         bgp.show_build();
@@ -112,7 +114,9 @@ impl Bgp {
     }
 
     pub async fn event_loop(&mut self) {
-        self.listen().await.unwrap();
+        if let Err(err) = self.listen().await {
+            self.listen_err = Some(err);
+        }
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
