@@ -27,8 +27,15 @@ newtype_enum! {
     impl display CapabilityType {
         MultiProtocol = 1,
         RouteRefresh = 2,
+    ExtendedMessage = 6,
         GracefulRestart = 64,
         As4 = 65,
+        DynamicCapability = 67,
+    AddPath = 69,
+    EnhancedRouteRefresh = 70,
+    LLGR = 71,
+    FQDN = 73,
+    SoftwareVersion = 76,
         RouteRefreshCisco = 128,
     }
 }
@@ -37,8 +44,15 @@ newtype_enum! {
 pub enum CapabilityPacket {
     MultiProtocol(CapabilityMultiProtocol),
     RouteRefresh(CapabilityRouteRefresh),
+    ExtendedMessage(CapabilityExtendedMessage),
     As4(CapabilityAs4),
+    DynamicCapability(CapabilityDynamicCapability),
+    AddPath(CapabilityAddPath),
     GracefulRestart(CapabilityGracefulRestart),
+    EnhancedRouteRefresh(CapabilityEnhancedRouteRefresh),
+    LLGR(CapabilityLLGR),
+    FQDN(CapabilityFQDN),
+    SoftwareVersion(CapabilitySoftwareVersion),
 }
 
 impl CapabilityPacket {
@@ -57,15 +71,54 @@ impl CapabilityPacket {
                 buf.put_u8(m.typ.0);
                 buf.put_u8(m.length);
             }
+            Self::ExtendedMessage(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+            }
             Self::As4(m) => {
                 m.header.encode(buf);
                 buf.put_u8(m.typ.0);
                 buf.put_u8(m.length);
                 buf.put_u32(m.asn);
             }
+            Self::DynamicCapability(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+            }
+            Self::AddPath(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+            }
             Self::GracefulRestart(m) => {
                 m.header.encode(buf);
                 buf.put_u32(m.restart_time);
+            }
+            Self::EnhancedRouteRefresh(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+            }
+            Self::LLGR(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+            }
+            Self::FQDN(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
+                buf.put_u8(m.hostname.len() as u8);
+                buf.put(&m.hostname[..]);
+                buf.put_u8(m.domain.len() as u8);
+                buf.put(&m.domain[..]);
+            }
+            Self::SoftwareVersion(m) => {
+                m.header.encode(buf);
+                buf.put_u8(m.typ.0);
+                buf.put_u8(m.length);
             }
         }
     }
@@ -121,8 +174,6 @@ impl CapabilityMultiProtocol {
     }
 }
 
-//
-
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityRouteRefresh {
     header: CapabilityHeader,
@@ -160,6 +211,46 @@ impl CapabilityAs4 {
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityDynamicCapability {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    length: u8,
+}
+
+impl CapabilityDynamicCapability {
+    pub fn new() -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::DynamicCapability,
+            length: 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityAddPath {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    length: u8,
+    afi: Afi,
+    safi: Safi,
+    send_receive: u8,
+}
+
+impl CapabilityAddPath {
+    pub fn new(afi: Afi, safi: Safi, send_receive: u8) -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::AddPath,
+            length: 4,
+            afi,
+            safi,
+            send_receive,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityGracefulRestart {
     header: CapabilityHeader,
     restart_time: u32,
@@ -170,6 +261,110 @@ impl CapabilityGracefulRestart {
         Self {
             header: CapabilityHeader::new(4),
             restart_time,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityExtendedMessage {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    length: u8,
+}
+
+impl CapabilityExtendedMessage {
+    pub fn new() -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::ExtendedMessage,
+            length: 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityEnhancedRouteRefresh {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    length: u8,
+}
+
+impl CapabilityEnhancedRouteRefresh {
+    pub fn new() -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::EnhancedRouteRefresh,
+            length: 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct LLGRValue {
+    afi: Afi,
+    safi: Safi,
+    flags_stale_time: u32,
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityLLGR {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    length: u8,
+    #[nom(Ignore)]
+    values: Vec<LLGRValue>,
+}
+
+impl CapabilityLLGR {
+    pub fn new(hostname: &String, domain: &String) -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::EnhancedRouteRefresh,
+            length: 0,
+            values: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityFQDN {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    length: u8,
+    #[nom(Ignore)]
+    pub hostname: Vec<u8>,
+    #[nom(Ignore)]
+    pub domain: Vec<u8>,
+}
+
+impl CapabilityFQDN {
+    pub fn new(hostname: &String, domain: &String) -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::EnhancedRouteRefresh,
+            length: 0,
+            hostname: hostname.clone().into_bytes(),
+            domain: domain.clone().into_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilitySoftwareVersion {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    pub length: u8,
+    #[nom(Ignore)]
+    pub version: Vec<u8>,
+}
+
+impl CapabilitySoftwareVersion {
+    pub fn new(version: Vec<u8>) -> Self {
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::AddPath,
+            length: version.len() as u8,
+            version,
         }
     }
 }

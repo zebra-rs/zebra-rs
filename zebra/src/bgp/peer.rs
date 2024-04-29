@@ -337,7 +337,7 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
 pub fn peer_start_idle_hold_timer(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    Timer::new(Timer::second(5), TimerType::Once, move || {
+    Timer::new(Timer::second(1), TimerType::Once, move || {
         let tx = tx.clone();
         async move {
             let _ = tx.send(Message::Event(ident, Event::Start));

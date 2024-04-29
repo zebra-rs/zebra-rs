@@ -93,6 +93,7 @@ impl Bgp {
 
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
+        println!("P: {}", path);
         if let Some(f) = self.show_cb.get(&path) {
             let output = f(self, args);
             msg.resp.send(output).await.unwrap();

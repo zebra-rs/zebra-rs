@@ -1,7 +1,9 @@
-use crate::config::Args;
+use handlebars::Handlebars;
 
 use super::handler::{Bgp, ShowCallback};
 use super::peer::Peer;
+use crate::config::Args;
+use std::collections::HashMap;
 use std::fmt::Write;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
@@ -80,6 +82,33 @@ fn show_bgp(bgp: &Bgp, args: Args) -> String {
     }
 }
 
+use serde::Serialize;
+
+#[derive(Serialize, Debug)]
+struct Neighbor {
+    name: String,
+}
+
+fn show_bgp_neighbor(bgp: &Bgp, args: Args) -> String {
+    let neighbor = Neighbor {
+        name: "neighbor".to_string(),
+    };
+    let serialized: String = serde_json::to_string(&neighbor).unwrap();
+    println!("S: {}", serialized);
+
+    let var_name = Handlebars::new();
+    let mut handlebars = var_name;
+    let source = "Hello {{ name }}";
+    handlebars
+        .register_template_string("hello", source)
+        .unwrap();
+
+    let mut data = HashMap::new();
+    data.insert("name", "Rust");
+
+    handlebars.render("hello", &data).unwrap()
+}
+
 impl Bgp {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -87,5 +116,7 @@ impl Bgp {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp);
+        self.show_add("/show/ip/bgp/summary", show_bgp);
+        self.show_add("/show/ip/bgp/neighbor", show_bgp_neighbor);
     }
 }
