@@ -23,7 +23,17 @@ newtype_enum! {
         HoldTimerExpired = 4,
         FiniteStateMachineError = 5,
         Cease = 6,
+        RouteRefreshError = 7,  // RFC7313
+        SendHoldTimeError = 8,  // draft-ietf-idr-bgp-sendholdtimer-01
     }
+}
+
+#[repr(u8)]
+#[derive(Debug)]
+pub enum MessageError {
+    ConnectionNotSynced = 1,
+    BadMessageLength = 2,
+    BadMessageType = 3,
 }
 
 #[repr(u8)]
@@ -33,57 +43,57 @@ pub enum OpenError {
     BadPeerAS = 2,
     BadBgpIdentifier = 3,
     UnsupportedOptionalParameter = 4,
+    // [Deprecated] = 5
     UnacceptableHoldTime = 6,
+    UnsupportedCapability = 7, // RFC5492
+    // [Deprecated] = 8 - 10
+    RoleMismatch = 11, // RFC9234
 }
 
-// impl From<OpenMessageError> for NotificationError {
-//     fn from(error: OpenMessageError) -> NotificationError {
-//         NotificationError::OpenMessage(error)
-//     }
-// }
+#[repr(u8)]
+#[derive(Debug)]
+pub enum UpdateError {
+    MalformedAttributeList = 1,
+    UnrecognizedWellknownAttribute = 2,
+    MissingWellknownAttribute = 3,
+    AttributeFlagsError = 4,
+    AttributeLengthError = 5,
+    InvalidORIGINAttribute = 6,
+    // [Deprecated] = 7,
+    InvalidNexthopAttribute = 8,
+    OptionalAttributeError = 9,
+    InvalidNetworkField = 10,
+    MalformedAspath = 11,
+}
 
-// #[derive(Debug, Eq, PartialEq, NomBE)]
-// pub struct NotificationMessageSubCode(pub u8);
+#[repr(u8)]
+#[derive(Debug)]
+pub enum FsmError {
+    UnexpectedMessageInOpenSent = 1,    // RFC6608
+    UnexpectedMessageInOpenConfirm = 2, // RFC6608
+    UnexpectedMessageInEstablished = 3, // RFC6608
+}
 
-// newtype_enum! {
-//     impl display NotificationMessageSubCode {
-//         ConnectionNotSynchronized = 1,
-//         BadMessageLength = 2,
-//         BadMessageType = 3,
-//     }
-// }
+#[repr(u8)]
+#[derive(Debug)]
+pub enum NotificationError {
+    MaximumNumberOfPrefixReached = 1,  // RFC4486
+    AdministrativeShutdown = 2,        // RFC4486|RFC9003
+    PeerDeConfigured = 3,              // RFC4486
+    AdministrativeReset = 4,           // RFC4486|RFC9003
+    ConnectionRejected = 5,            // RFC4486
+    OtherConfigChange = 6,             // RFC4486
+    ConnectionCollisionResolution = 7, // RFC4486
+    OutOfResources = 8,                // RFC4486
+    HardReset = 9,                     // RFC4486
+    BfdDown = 10,                      // RFC4486
+}
 
-// #[derive(Debug, Eq, PartialEq, NomBE)]
-// pub struct NotificationOpenSubCode(pub u8);
-
-// newtype_enum! {
-//     impl display NotificationOpenSubCode {
-//         UnsupportedVersionNumber = 1,
-//         BadPeerAS = 2,
-//         BadBGPIdentifier = 3,
-//         UnsupportedOptionalParameter = 4,
-//         // [Deprecated] = 5,
-//         UnacceptableHoldTime = 6,
-// }}
-
-// #[derive(Debug, Eq, PartialEq, NomBE)]
-// pub struct NotificationUpdateSubCode(pub u8);
-
-// newtype_enum! {
-//     impl display NotificationUpdateSubCode {
-//         MalformedAttributeList = 1,
-//         UnrecognizedWellknownAttribute = 2,
-//         MissingWellknownAttribute = 3,
-//         AttributeFlagsError = 4,
-//         AttributeLengthError = 5,
-//         InvalidORIGINAttribute = 6,
-//         // [Deprecated] = 7,
-//         InvalidNEXT_HOPAttribute = 8,
-//         OptionalAttributeError = 9,
-//         InvalidNetworkField = 10,
-//         MalformedAS_PATH =  11,
-//     }
-// }
+#[repr(u8)]
+#[derive(Debug)]
+pub enum RouteRefreshError {
+    InvalidMessageLength = 1, // RFC7313
+}
 
 impl NotificationPacket {
     pub fn new(code: NotificationCode, sub_code: u8, data: Vec<u8>) -> Self {
