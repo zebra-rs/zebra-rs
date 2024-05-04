@@ -84,11 +84,9 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 fn config_hold_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         let addr: Ipv4Addr = args.v4addr()?;
-        let afi_safi: AfiSafi = args.afi_safi()?;
+        let hold_time: u16 = args.u16()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
-            if !peer.config.afi_safi.has(&afi_safi) {
-                peer.config.afi_safi.push(afi_safi);
-            }
+            peer.config.hold_time = Some(hold_time);
         }
     }
     Some(())

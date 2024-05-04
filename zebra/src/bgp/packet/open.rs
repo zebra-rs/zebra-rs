@@ -334,7 +334,7 @@ pub struct CapabilityLLGR {
 }
 
 impl CapabilityLLGR {
-    pub fn new(hostname: &String, domain: &String) -> Self {
+    pub fn new() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::EnhancedRouteRefresh,

@@ -89,7 +89,7 @@ struct Neighbor {
     name: String,
 }
 
-fn show_bgp_neighbor(bgp: &Bgp, args: Args) -> String {
+fn show_bgp_neighbor(_bgp: &Bgp, _args: Args) -> String {
     let neighbor = Neighbor {
         name: "neighbor".to_string(),
     };
