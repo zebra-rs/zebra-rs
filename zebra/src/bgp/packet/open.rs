@@ -1,4 +1,5 @@
 use super::BgpHeader;
+use crate::bgp::BGP_VERSION;
 use crate::bgp::{Afi, Safi};
 use bytes::BufMut;
 use bytes::BytesMut;
@@ -422,14 +423,15 @@ impl OpenPacket {
     pub fn new(
         header: BgpHeader,
         asn: u16,
+        hold_time: u16,
         router_id: &Ipv4Addr,
         caps: Vec<CapabilityPacket>,
     ) -> OpenPacket {
         OpenPacket {
             header,
-            version: 4,
+            version: BGP_VERSION,
             asn,
-            hold_time: 180,
+            hold_time,
             bgp_id: router_id.octets(),
             opt_param_len: 0,
             caps,

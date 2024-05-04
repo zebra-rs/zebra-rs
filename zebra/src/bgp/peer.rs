@@ -4,7 +4,7 @@ use super::packet::*;
 use super::route::route_from_peer;
 use super::route::Route;
 use super::task::*;
-use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi};
+use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi, BGP_HOLD_TIME};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
@@ -78,6 +78,7 @@ pub struct PeerConfig {
     pub route_refresh: bool,
     pub graceful_restart: Option<u32>,
     pub received: Vec<CapabilityPacket>,
+    pub hold_time: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -147,6 +148,10 @@ impl Peer {
             fsm_init(self);
             self.active = true;
         }
+    }
+
+    pub fn hold_time(&self) -> u16 {
+        self.config.hold_time.unwrap_or(BGP_HOLD_TIME)
     }
 }
 
@@ -254,6 +259,17 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
             Vec::new(),
         );
         return State::Idle;
+    }
+
+    // Holdtimer negotiation.
+    if packet.hold_time == 0 {
+        //
+    } else if packet.hold_time < 3 {
+        // Error.
+    } else {
+        // Smaller.
+
+        // Keepalive. 1/3 of Holdtime.
     }
 
     if peer.state != State::OpenSent {
@@ -496,7 +512,13 @@ pub fn peer_send_open(peer: &mut Peer) {
         caps.push(CapabilityPacket::GracefulRestart(cap));
     }
 
-    let open = OpenPacket::new(header, peer.local_as as u16, &router_id, caps);
+    let open = OpenPacket::new(
+        header,
+        peer.local_as as u16,
+        peer.hold_time(),
+        &router_id,
+        caps,
+    );
     let bytes: BytesMut = open.into();
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
     peer.counter.tx[usize::from(BgpType::Open)] += 1;
