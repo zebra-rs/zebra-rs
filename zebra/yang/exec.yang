@@ -57,6 +57,13 @@ module exec {
           ext:help "BGP summary information";
           type empty;
         }
+        container neighbor {
+          ext:help "BGP neighbor information";
+          presence "all neighbor";
+          leaf address {
+            type string;
+          }
+        }
       }
     }
     container ipv6 {

@@ -15,6 +15,8 @@ newtype_enum! {
         Update = 2,
         Notification = 3,
         Keepalive = 4,
+    RouteRefresh = 5,
+    Capability = 6,
     }
 }
 
