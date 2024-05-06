@@ -78,8 +78,8 @@ pub struct PeerTimer {
 
 #[derive(Debug, Default)]
 pub struct PeerCounter {
-    pub tx: [u64; 5],
-    pub rx: [u64; 5],
+    pub tx: [u64; 7],
+    pub rx: [u64; 7],
 }
 
 #[derive(Debug, Default, Clone)]

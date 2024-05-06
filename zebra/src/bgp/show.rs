@@ -174,34 +174,27 @@ fn fetch(peer: &Peer) -> Neighbor {
 fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
     writeln!(
         out,
-        "BGP neighbor is {}, remote AS {}, local AS {}, {} link",
-        neighbor.address, neighbor.remote_as, neighbor.local_as, neighbor.peer_type,
-    )?;
-    writeln!(
-        out,
-        "  BGP version 4, remote router ID {}, local router ID {}",
-        neighbor.remote_router_id, neighbor.local_router_id,
-    )?;
-    writeln!(
-        out,
-        "  BGP state = {}, up for {}",
-        neighbor.state, neighbor.uptime,
-    )?;
-    writeln!(out, "  Last read 00:00:00, Last write 00:00:00")?;
-    writeln!(
-        out,
-        "  Hold time {} seconds, keepalive {} seconds",
-        neighbor.timer.hold_time, neighbor.timer.keepalive
-    )?;
-    writeln!(
-        out,
-        "  Sent Hold time {} seconds, sent keepalive {} seconds",
-        neighbor.timer_sent.hold_time, neighbor.timer_sent.keepalive
-    )?;
-    writeln!(
-        out,
-        "  Recv Hold time {} seconds, Recieved keepalive {} seconds",
-        neighbor.timer_recv.hold_time, neighbor.timer_recv.keepalive
+        r#"BGP neighbor is {}, remote AS {}, local AS {}, {} link
+  BGP version 4, remote router ID {}, local router ID {}
+  BGP state = {}, up for {}
+  Last read 00:00:00, Last write 00:00:00
+  Hold time {} seconds, keepalive {} seconds
+  Sent Hold time {} seconds, sent keepalive {} seconds
+  Recv Hold time {} seconds, Recieved keepalive {} seconds"#,
+        neighbor.address,
+        neighbor.remote_as,
+        neighbor.local_as,
+        neighbor.peer_type,
+        neighbor.remote_router_id,
+        neighbor.local_router_id,
+        neighbor.state,
+        neighbor.uptime,
+        neighbor.timer.hold_time,
+        neighbor.timer.keepalive,
+        neighbor.timer_sent.hold_time,
+        neighbor.timer_sent.keepalive,
+        neighbor.timer_recv.hold_time,
+        neighbor.timer_recv.keepalive
     )?;
     Ok(())
 }
