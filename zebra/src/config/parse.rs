@@ -453,15 +453,6 @@ pub fn parse(
         YangMatch::LeafMatched | YangMatch::LeafListMatched => {}
     }
 
-    // Delay YANG match transition to avoid elem type.
-    if s.ymatch == YangMatch::Leaf && mx.matched_entry.is_empty_leaf() {
-        s.ymatch = YangMatch::LeafMatched;
-    }
-    if s.ymatch == YangMatch::Dir && mx.matched_entry.presence {
-        s.ymatch = YangMatch::DirMatched;
-    }
-    // println!("A: {:?} {:?}", s.ymatch, next.name);
-
     // Elem for set/delete/exec func.
     let path = if ymatch_complete(s.ymatch) {
         let sub = &input[0..mx.pos];
@@ -477,6 +468,15 @@ pub fn parse(
             key: "".to_string(),
         }
     };
+
+    // Delay YANG match transition to avoid elem type.
+    if s.ymatch == YangMatch::Leaf && mx.matched_entry.is_empty_leaf() {
+        s.ymatch = YangMatch::LeafMatched;
+    }
+    if s.ymatch == YangMatch::Dir && mx.matched_entry.presence {
+        s.ymatch = YangMatch::DirMatched;
+    }
+    // println!("A: {:?} {:?}", s.ymatch, next.name);
 
     if path.name == "set" {
         s.set = true;

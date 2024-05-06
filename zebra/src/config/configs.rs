@@ -60,6 +60,12 @@ impl Args {
         Some(arg)
     }
 
+    pub fn u16(&mut self) -> Option<u16> {
+        let item = self.0.pop_front()?;
+        let arg: u16 = item.parse().ok()?;
+        Some(arg)
+    }
+
     pub fn afi_safi(&mut self) -> Option<AfiSafi> {
         let item = self.0.pop_front()?;
         match item.as_str() {
