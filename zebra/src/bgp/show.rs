@@ -1,8 +1,10 @@
 use super::handler::{Bgp, ShowCallback};
-use super::peer::Peer;
+use super::peer::{Peer, PeerParam};
 use crate::config::Args;
+use serde::Serialize;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
+use std::time::Instant;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
     let tx: u64 = peer.counter.tx.iter().sum();
@@ -80,8 +82,6 @@ fn show_bgp(bgp: &Bgp, args: Args) -> String {
     }
 }
 
-use serde::Serialize;
-
 #[derive(Serialize, Debug)]
 struct Neighbor<'a> {
     address: Ipv4Addr,
@@ -91,6 +91,20 @@ struct Neighbor<'a> {
     local_router_id: Ipv4Addr,
     remote_router_id: Ipv4Addr,
     state: &'a str,
+    uptime: String,
+    timer: PeerParam,
+    timer_sent: PeerParam,
+    timer_recv: PeerParam,
+}
+
+fn uptime(instant: &Option<Instant>) -> String {
+    if let Some(instant) = instant {
+        let now = Instant::now();
+        let duration = now.duration_since(*instant);
+        format!("{:?}", duration)
+    } else {
+        String::from("never")
+    }
 }
 
 fn fetch(peer: &Peer) -> Neighbor {
@@ -102,9 +116,60 @@ fn fetch(peer: &Peer) -> Neighbor {
         local_router_id: peer.router_id.clone(),
         remote_router_id: peer.remote_id.clone(),
         state: peer.state.to_str(),
+        uptime: uptime(&peer.instant),
+        timer: peer.param.clone(),
+        timer_sent: peer.param_tx.clone(),
+        timer_recv: peer.param_rx.clone(),
     };
     n
 }
+
+// /* Display peer uptime.*/
+// char *peer_uptime(time_t uptime2, char *buf, size_t len, bool use_json,
+// 		  json_object *json)
+// {
+// 	time_t uptime1, epoch_tbuf;
+// 	struct tm tm;
+
+// 	/* If there is no connection has been done before print `never'. */
+// 	if (uptime2 == 0) {
+// 		if (use_json) {
+// 			json_object_string_add(json, "peerUptime", "never");
+// 			json_object_int_add(json, "peerUptimeMsec", 0);
+// 		} else
+// 			snprintf(buf, len, "never");
+// 		return buf;
+// 	}
+
+// 	/* Get current time. */
+// 	uptime1 = monotime(NULL);
+// 	uptime1 -= uptime2;
+// 	gmtime_r(&uptime1, &tm);
+
+// 	if (uptime1 < ONE_DAY_SECOND)
+// 		snprintf(buf, len, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min,
+// 			 tm.tm_sec);
+// 	else if (uptime1 < ONE_WEEK_SECOND)
+// 		snprintf(buf, len, "%dd%02dh%02dm", tm.tm_yday, tm.tm_hour,
+// 			 tm.tm_min);
+// 	else if (uptime1 < ONE_YEAR_SECOND)
+// 		snprintf(buf, len, "%02dw%dd%02dh", tm.tm_yday / 7,
+// 			 tm.tm_yday - ((tm.tm_yday / 7) * 7), tm.tm_hour);
+// 	else
+// 		snprintf(buf, len, "%02dy%02dw%dd", tm.tm_year - 70,
+// 			 tm.tm_yday / 7,
+// 			 tm.tm_yday - ((tm.tm_yday / 7) * 7));
+
+// 	if (use_json) {
+// 		epoch_tbuf = time(NULL) - uptime1;
+// 		json_object_string_add(json, "peerUptime", buf);
+// 		json_object_int_add(json, "peerUptimeMsec", uptime1 * 1000);
+// 		json_object_int_add(json, "peerUptimeEstablishedEpoch",
+// 				    epoch_tbuf);
+// 	}
+
+// 	return buf;
+// }
 
 fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
     writeln!(
@@ -117,7 +182,27 @@ fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
         "  BGP version 4, remote router ID {}, local router ID {}",
         neighbor.remote_router_id, neighbor.local_router_id,
     )?;
-    writeln!(out, "  BGP state = {}, up for 00:00:06", neighbor.state)?;
+    writeln!(
+        out,
+        "  BGP state = {}, up for {}",
+        neighbor.state, neighbor.uptime,
+    )?;
+    writeln!(out, "  Last read 00:00:00, Last write 00:00:00")?;
+    writeln!(
+        out,
+        "  Hold time {} seconds, keepalive {} seconds",
+        neighbor.timer.hold_time, neighbor.timer.keepalive
+    )?;
+    writeln!(
+        out,
+        "  Sent Hold time {} seconds, sent keepalive {} seconds",
+        neighbor.timer_sent.hold_time, neighbor.timer_sent.keepalive
+    )?;
+    writeln!(
+        out,
+        "  Recv Hold time {} seconds, Recieved keepalive {} seconds",
+        neighbor.timer_recv.hold_time, neighbor.timer_recv.keepalive
+    )?;
     Ok(())
 }
 

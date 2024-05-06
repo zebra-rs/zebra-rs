@@ -10,7 +10,10 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
 use prefix_trie::PrefixMap;
+use serde::Serialize;
+use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -95,11 +98,6 @@ pub struct PeerConfig {
     pub hold_time: Option<u16>,
 }
 
-#[derive(Debug, Default)]
-pub struct PeerParam {
-    pub hold_time: u16,
-}
-
 #[derive(Debug)]
 pub enum PeerType {
     Internal,
@@ -113,6 +111,12 @@ impl PeerType {
             Self::External => "external",
         }
     }
+}
+
+#[derive(Debug, Default, Serialize, Clone)]
+pub struct PeerParam {
+    pub hold_time: u16,
+    pub keepalive: u16,
 }
 
 #[derive(Debug)]
@@ -132,13 +136,13 @@ pub struct Peer {
     pub timer: PeerTimer,
     pub counter: PeerCounter,
     pub as4: bool,
+    pub param: PeerParam,
     pub param_tx: PeerParam,
     pub param_rx: PeerParam,
-    pub hold_time: u16,
-    pub keepalive: u16,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
     pub tx: UnboundedSender<Message>,
     pub config: PeerConfig,
+    pub instant: Option<Instant>,
 }
 
 impl Peer {
@@ -168,10 +172,10 @@ impl Peer {
             local_identifier: None,
             config: PeerConfig::default(),
             as4: true,
+            param: PeerParam::default(),
             param_tx: PeerParam::default(),
             param_rx: PeerParam::default(),
-            keepalive: 0,
-            hold_time: 0,
+            instant: None,
         };
         peer.config
             .afi_safi
@@ -308,19 +312,6 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         return State::Idle;
     }
 
-    println!("XX HoldTime {}", packet.hold_time);
-
-    // Holdtimer negotiation.
-    if packet.hold_time == 0 {
-        peer.hold_time = 0;
-        peer.keepalive = 0;
-    } else if packet.hold_time < 3 {
-        // Error.
-    } else {
-        peer.hold_time = std::cmp::min(packet.hold_time, peer.hold_time());
-        peer.keepalive = peer.hold_time / 3;
-    }
-
     if peer.state != State::OpenSent {
         println!("peer state mismatch {:?}", peer.state);
         // Send notification.
@@ -336,18 +327,38 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         println!("router-id mismatch {:?}", peer.address);
         return State::Idle;
     }
+    if packet.hold_time > 0 && packet.hold_time < 3 {
+        return State::Idle;
+    }
     peer.remote_id = Ipv4Addr::new(
         packet.bgp_id[0],
         packet.bgp_id[1],
         packet.bgp_id[2],
         packet.bgp_id[3],
     );
-    if peer.keepalive > 0 {
+
+    // Remember received hold time.
+    peer.param_rx.hold_time = packet.hold_time;
+    peer.param_rx.keepalive = packet.hold_time / 3;
+
+    // Hold timer negotiation.
+    if packet.hold_time == 0 {
+        peer.param.hold_time = 0;
+        peer.param.keepalive = 0;
+    } else {
+        peer.param.hold_time = min(packet.hold_time, peer.hold_time());
+        peer.param.keepalive = peer.param.hold_time / 3;
+    }
+    if peer.param.keepalive > 0 {
         peer.timer.keepalive = Some(peer_start_keepalive(peer));
     }
-    if peer.hold_time > 0 {
+    if peer.param.hold_time > 0 {
         peer.timer.hold_timer = Some(peer_start_holdtimer(peer));
     }
+
+    // Set established time.
+    peer.instant = Some(Instant::now());
+
     State::Established
 }
 
@@ -570,6 +581,10 @@ pub fn peer_send_open(peer: &mut Peer) {
         caps.push(CapabilityPacket::GracefulRestart(cap));
     }
 
+    // Remmeber sent hold time.
+    peer.param_tx.hold_time = peer.hold_time();
+    peer.param_tx.keepalive = peer.hold_time() / 3;
+
     let open = OpenPacket::new(
         header,
         peer.local_as as u16,
@@ -598,7 +613,7 @@ pub fn peer_start_keepalive(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     Timer::new(
-        Timer::second(peer.keepalive as u64),
+        Timer::second(peer.param.keepalive as u64),
         TimerType::Infinite,
         move || {
             let tx = tx.clone();
@@ -620,7 +635,7 @@ pub fn peer_start_holdtimer(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     Timer::new(
-        Timer::second(peer.hold_time as u64),
+        Timer::second(peer.param.hold_time as u64),
         TimerType::Infinite,
         move || {
             let tx = tx.clone();
