@@ -1,10 +1,8 @@
-use handlebars::Handlebars;
-
 use super::handler::{Bgp, ShowCallback};
 use super::peer::Peer;
 use crate::config::Args;
-use std::collections::HashMap;
 use std::fmt::Write;
+use std::net::Ipv4Addr;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
     let tx: u64 = peer.counter.tx.iter().sum();
@@ -85,28 +83,60 @@ fn show_bgp(bgp: &Bgp, args: Args) -> String {
 use serde::Serialize;
 
 #[derive(Serialize, Debug)]
-struct Neighbor {
-    name: String,
+struct Neighbor<'a> {
+    address: Ipv4Addr,
+    peer_type: &'a str,
+    local_as: u32,
+    remote_as: u32,
+    local_router_id: Ipv4Addr,
+    remote_router_id: Ipv4Addr,
+    state: &'a str,
 }
 
-fn show_bgp_neighbor(_bgp: &Bgp, _args: Args) -> String {
-    let neighbor = Neighbor {
-        name: "neighbor".to_string(),
+fn fetch(peer: &Peer) -> Neighbor {
+    let n = Neighbor {
+        address: peer.address.clone(),
+        remote_as: peer.peer_as,
+        local_as: peer.local_as,
+        peer_type: peer.peer_type.to_str(),
+        local_router_id: peer.router_id.clone(),
+        remote_router_id: peer.remote_id.clone(),
+        state: peer.state.to_str(),
     };
-    let serialized: String = serde_json::to_string(&neighbor).unwrap();
-    println!("S: {}", serialized);
+    n
+}
 
-    let var_name = Handlebars::new();
-    let mut handlebars = var_name;
-    let source = "Hello {{ name }}";
-    handlebars
-        .register_template_string("hello", source)
-        .unwrap();
+fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
+    writeln!(
+        out,
+        "BGP neighbor is {}, remote AS {}, local AS {}, {} link",
+        neighbor.address, neighbor.remote_as, neighbor.local_as, neighbor.peer_type,
+    )?;
+    writeln!(
+        out,
+        "  BGP version 4, remote router ID {}, local router ID {}",
+        neighbor.remote_router_id, neighbor.local_router_id,
+    )?;
+    writeln!(out, "  BGP state = {}, up for 00:00:06", neighbor.state)?;
+    Ok(())
+}
 
-    let mut data = HashMap::new();
-    data.insert("name", "Rust");
+fn show_bgp_neighbor(bgp: &Bgp, args: Args) -> String {
+    let mut out = String::new();
 
-    handlebars.render("hello", &data).unwrap()
+    if args.is_empty() {
+        let mut neighbors = Vec::<Neighbor>::new();
+        for (_, peer) in bgp.peers.iter() {
+            neighbors.push(fetch(peer));
+        }
+        for neighbor in neighbors.iter() {
+            render(neighbor, &mut out).unwrap();
+        }
+        // out = serde_json::to_string(&neighbors).unwrap();
+    } else {
+        // Specific neighbor.
+    }
+    out
 }
 
 impl Bgp {

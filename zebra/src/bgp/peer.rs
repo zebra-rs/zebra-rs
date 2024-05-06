@@ -26,6 +26,19 @@ pub enum State {
     Established,
 }
 
+impl State {
+    pub fn to_str(&self) -> &str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Connect => "Connect",
+            Self::Active => "Active",
+            Self::OpenSent => "OpenSent",
+            Self::OpenConfirm => "OpenConfirm",
+            Self::Established => "Established",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Event {
     ConfigUpdate,                 // 0
@@ -88,26 +101,44 @@ pub struct PeerParam {
 }
 
 #[derive(Debug)]
+pub enum PeerType {
+    Internal,
+    External,
+}
+
+impl PeerType {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::External => "external",
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Peer {
     pub ident: Ipv4Addr,
-    pub local_as: u32,
-    pub router_id: Ipv4Addr,
-    pub peer_as: u32,
     pub address: Ipv4Addr,
+    pub router_id: Ipv4Addr,
+    pub local_identifier: Option<Ipv4Addr>,
+    pub remote_id: Ipv4Addr,
+    pub local_as: u32,
+    pub peer_as: u32,
     pub active: bool,
+    pub peer_type: PeerType,
+    //
     pub state: State,
     pub task: PeerTask,
     pub timer: PeerTimer,
     pub counter: PeerCounter,
-    pub packet_tx: Option<UnboundedSender<BytesMut>>,
-    pub tx: UnboundedSender<Message>,
-    pub local_identifier: Option<Ipv4Addr>,
-    pub config: PeerConfig,
     pub as4: bool,
-    pub sent: PeerParam,
-    pub received: PeerParam,
+    pub param_tx: PeerParam,
+    pub param_rx: PeerParam,
     pub hold_time: u16,
     pub keepalive: u16,
+    pub packet_tx: Option<UnboundedSender<BytesMut>>,
+    pub tx: UnboundedSender<Message>,
+    pub config: PeerConfig,
 }
 
 impl Peer {
@@ -126,17 +157,19 @@ impl Peer {
             peer_as,
             address,
             active: false,
+            peer_type: PeerType::Internal,
             state: State::Idle,
             task: PeerTask::default(),
             timer: PeerTimer::default(),
             counter: PeerCounter::default(),
             packet_tx: None,
             tx,
+            remote_id: Ipv4Addr::UNSPECIFIED,
             local_identifier: None,
             config: PeerConfig::default(),
             as4: true,
-            sent: PeerParam::default(),
-            received: PeerParam::default(),
+            param_tx: PeerParam::default(),
+            param_rx: PeerParam::default(),
             keepalive: 0,
             hold_time: 0,
         };
@@ -303,6 +336,12 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         println!("router-id mismatch {:?}", peer.address);
         return State::Idle;
     }
+    peer.remote_id = Ipv4Addr::new(
+        packet.bgp_id[0],
+        packet.bgp_id[1],
+        packet.bgp_id[2],
+        packet.bgp_id[3],
+    );
     if peer.keepalive > 0 {
         peer.timer.keepalive = Some(peer_start_keepalive(peer));
     }

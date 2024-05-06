@@ -1,6 +1,6 @@
 use super::{
     handler::Callback,
-    peer::{fsm_init, Peer},
+    peer::{fsm_init, Peer, PeerType},
     AfiSafi, Bgp,
 };
 use crate::config::{Args, ConfigOp};
@@ -36,6 +36,11 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         let asn: u32 = args.u32()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.peer_as = asn;
+            peer.peer_type = if peer.peer_as == bgp.asn {
+                PeerType::Internal
+            } else {
+                PeerType::External
+            };
             peer.update();
         }
     }
