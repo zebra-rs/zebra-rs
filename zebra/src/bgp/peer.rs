@@ -82,6 +82,12 @@ pub struct PeerCounter {
     pub rx: [u64; 7],
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PEERCounter {
+    pub sent: u64,
+    pub rcvd: u64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PeerTransportConfig {
     pub passive: bool,
@@ -130,11 +136,11 @@ pub struct Peer {
     pub peer_as: u32,
     pub active: bool,
     pub peer_type: PeerType,
-    //
     pub state: State,
     pub task: PeerTask,
     pub timer: PeerTimer,
     pub counter: PeerCounter,
+    pub new_counter: [PEERCounter; BGPType::Max as usize],
     pub as4: bool,
     pub param: PeerParam,
     pub param_tx: PeerParam,
@@ -166,6 +172,7 @@ impl Peer {
             task: PeerTask::default(),
             timer: PeerTimer::default(),
             counter: PeerCounter::default(),
+            new_counter: [PEERCounter::default(); BGPType::Max as usize],
             packet_tx: None,
             tx,
             remote_id: Ipv4Addr::UNSPECIFIED,

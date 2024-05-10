@@ -9,14 +9,22 @@ pub const BGP_HEADER_LEN: u16 = 19;
 #[derive(Debug, Eq, PartialEq, NomBE)]
 pub struct BgpType(u8);
 
+#[repr(u8)]
+pub enum BGPType {
+    Open = 1,
+    Update = 2,
+    Max = 3,
+}
+
 newtype_enum! {
     impl display BgpType {
         Open = 1,
         Update = 2,
         Notification = 3,
         Keepalive = 4,
-    RouteRefresh = 5,
-    Capability = 6,
+        RouteRefresh = 5,
+        Capability = 6,
+        Max = 7,
     }
 }
 

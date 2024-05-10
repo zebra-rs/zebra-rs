@@ -180,7 +180,17 @@ fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
   Last read 00:00:00, Last write 00:00:00
   Hold time {} seconds, keepalive {} seconds
   Sent Hold time {} seconds, sent keepalive {} seconds
-  Recv Hold time {} seconds, Recieved keepalive {} seconds"#,
+  Recv Hold time {} seconds, Recieved keepalive {} seconds
+  Message statistics:
+                          Sent      Rcvd
+    Opens:                  {}        {}
+    Notifications:
+    Updates:
+    Keepalives:
+    Route Refresh:
+    Capability:
+    Total:
+"#,
         neighbor.address,
         neighbor.remote_as,
         neighbor.local_as,
@@ -194,7 +204,9 @@ fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
         neighbor.timer_sent.hold_time,
         neighbor.timer_sent.keepalive,
         neighbor.timer_recv.hold_time,
-        neighbor.timer_recv.keepalive
+        neighbor.timer_recv.keepalive,
+        0,
+        0
     )?;
     Ok(())
 }
