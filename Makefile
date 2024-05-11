@@ -18,3 +18,6 @@ endif
 	cp zebra/yang/* ${HOME}/.zebra/yang
 	touch ${HOME}/.zebra/zebra.conf
 	@echo '[Please add $${HOME}/.zebra/bin to your PATH]'
+
+doc:
+	rustdoc

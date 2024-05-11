@@ -6,7 +6,7 @@ impl From<BgpHeader> for BytesMut {
         let mut buf = BytesMut::new();
         buf.put(&header.marker[..]);
         buf.put_u16(header.length);
-        let typ: u8 = header.typ.into();
+        let typ: u8 = header.typ as u8;
         buf.put_u8(typ);
         buf
     }

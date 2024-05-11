@@ -76,10 +76,10 @@ pub struct PeerTimer {
     pub min_route_adv: Option<Timer>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Serialize, Debug, Default, Clone, Copy)]
 pub struct PeerCounter {
-    pub tx: [u64; 7],
-    pub rx: [u64; 7],
+    pub sent: u64,
+    pub rcvd: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -130,11 +130,10 @@ pub struct Peer {
     pub peer_as: u32,
     pub active: bool,
     pub peer_type: PeerType,
-    //
     pub state: State,
     pub task: PeerTask,
     pub timer: PeerTimer,
-    pub counter: PeerCounter,
+    pub counter: [PeerCounter; BgpType::Max as usize],
     pub as4: bool,
     pub param: PeerParam,
     pub param_tx: PeerParam,
@@ -165,7 +164,7 @@ impl Peer {
             state: State::Idle,
             task: PeerTask::default(),
             timer: PeerTimer::default(),
-            counter: PeerCounter::default(),
+            counter: [PeerCounter::default(); BgpType::Max as usize],
             packet_tx: None,
             tx,
             remote_id: Ipv4Addr::UNSPECIFIED,
@@ -203,6 +202,13 @@ impl Peer {
 
     pub fn hold_time(&self) -> u16 {
         self.config.hold_time.unwrap_or(BGP_HOLD_TIME)
+    }
+
+    pub fn count_clear(&mut self) {
+        for count in self.counter.iter_mut() {
+            count.sent = 0;
+            count.rcvd = 0;
+        }
     }
 }
 
@@ -294,7 +300,7 @@ pub fn open_asn(packet: &OpenPacket) -> u32 {
 pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     println!("fsm_bgp_open");
 
-    peer.counter.rx[usize::from(BgpType::Open)] += 1;
+    peer.counter[BgpType::Open as usize].rcvd += 1;
 
     // Peer ASN.
     let asn = open_asn(&packet);
@@ -363,18 +369,18 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
 }
 
 pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> State {
-    peer.counter.rx[usize::from(BgpType::Notification)] += 1;
+    peer.counter[BgpType::Notification as usize].rcvd += 1;
     State::Idle
 }
 
 pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
-    peer.counter.rx[usize::from(BgpType::Keepalive)] += 1;
+    peer.counter[BgpType::Keepalive as usize].rcvd += 1;
     peer_refresh_holdtimer(peer);
     State::Established
 }
 
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
-    peer.counter.rx[usize::from(BgpType::Update)] += 1;
+    peer.counter[BgpType::Update as usize].rcvd += 1;
     peer_refresh_holdtimer(peer);
     route_from_peer(peer, packet, bgp);
     State::Established
@@ -478,7 +484,7 @@ pub async fn peer_read(
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
 ) {
-    let mut buf = BytesMut::with_capacity(BGP_MAX_LEN * 2);
+    let mut buf = BytesMut::with_capacity(BGP_PACKET_LEN * 2);
     loop {
         match read_half.read_buf(&mut buf).await {
             Ok(read_len) => {
@@ -492,7 +498,7 @@ pub async fn peer_read(
                     let length = peek_bgp_length(buf.as_bytes());
 
                     let mut remain = buf.split_off(length);
-                    remain.reserve(BGP_MAX_LEN * 2);
+                    remain.reserve(BGP_PACKET_LEN * 2);
 
                     match peer_packet_parse(buf.as_bytes(), ident, tx.clone(), &mut config) {
                         Ok(_) => {
@@ -593,8 +599,8 @@ pub fn peer_send_open(peer: &mut Peer) {
         caps,
     );
     let bytes: BytesMut = open.into();
+    peer.counter[BgpType::Open as usize].sent += 1;
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
-    peer.counter.tx[usize::from(BgpType::Open)] += 1;
 }
 
 pub fn peer_send_notification(
@@ -605,8 +611,8 @@ pub fn peer_send_notification(
 ) {
     let notification = NotificationPacket::new(code, sub_code, data);
     let bytes: BytesMut = notification.into();
+    peer.counter[BgpType::Notification as usize].sent += 1;
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
-    peer.counter.tx[usize::from(BgpType::Notification)] += 1;
 }
 
 pub fn peer_start_keepalive(peer: &Peer) -> Timer {
@@ -627,8 +633,8 @@ pub fn peer_start_keepalive(peer: &Peer) -> Timer {
 pub fn peer_send_keepalive(peer: &mut Peer) {
     let header = BgpHeader::new(BgpType::Keepalive, BGP_HEADER_LEN);
     let bytes: BytesMut = header.into();
+    peer.counter[BgpType::Keepalive as usize].sent += 1;
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
-    peer.counter.tx[usize::from(BgpType::Keepalive)] += 1;
 }
 
 pub fn peer_start_holdtimer(peer: &Peer) -> Timer {
