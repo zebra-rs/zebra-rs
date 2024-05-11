@@ -1,18 +1,24 @@
 use super::handler::{Bgp, ShowCallback};
-use super::peer::{Peer, PeerParam};
+use super::packet::BgpType;
+use super::peer::{Peer, PeerCounter, PeerParam};
 use crate::config::Args;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
-    let tx: u64 = peer.counter.tx.iter().sum();
-    let rx: u64 = peer.counter.rx.iter().sum();
+    let mut sent: u64 = 0;
+    let mut rcvd: u64 = 0;
+    for counter in peer.counter.iter() {
+        sent += counter.sent;
+        rcvd += counter.rcvd;
+    }
     writeln!(
         buf,
         "{:16} {:11} {:8} {:8}",
-        peer.address, peer.peer_as, rx, tx,
+        peer.address, peer.peer_as, rcvd, sent,
     )
     .unwrap();
 }
@@ -95,6 +101,7 @@ struct Neighbor<'a> {
     timer: PeerParam,
     timer_sent: PeerParam,
     timer_recv: PeerParam,
+    count: HashMap<&'a str, PeerCounter>,
 }
 
 fn uptime(instant: &Option<Instant>) -> String {
@@ -108,7 +115,7 @@ fn uptime(instant: &Option<Instant>) -> String {
 }
 
 fn fetch(peer: &Peer) -> Neighbor {
-    let n = Neighbor {
+    let mut n = Neighbor {
         address: peer.address.clone(),
         remote_as: peer.peer_as,
         local_as: peer.local_as,
@@ -120,7 +127,26 @@ fn fetch(peer: &Peer) -> Neighbor {
         timer: peer.param.clone(),
         timer_sent: peer.param_tx.clone(),
         timer_recv: peer.param_rx.clone(),
+        count: HashMap::default(),
     };
+
+    // Timers.
+    n.count.insert("open", peer.counter[BgpType::Open as usize]);
+    n.count
+        .insert("notification", peer.counter[BgpType::Notification as usize]);
+    n.count
+        .insert("update", peer.counter[BgpType::Update as usize]);
+    n.count
+        .insert("keepalive", peer.counter[BgpType::Keepalive as usize]);
+    n.count
+        .insert("routerefresh", peer.counter[BgpType::RouteRefresh as usize]);
+    n.count
+        .insert("capability", peer.counter[BgpType::Capability as usize]);
+    let total = PeerCounter {
+        sent: n.count.values().map(|count| count.sent).sum(),
+        rcvd: n.count.values().map(|count| count.rcvd).sum(),
+    };
+    n.count.insert("total", total);
     n
 }
 
@@ -180,7 +206,17 @@ fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
   Last read 00:00:00, Last write 00:00:00
   Hold time {} seconds, keepalive {} seconds
   Sent Hold time {} seconds, sent keepalive {} seconds
-  Recv Hold time {} seconds, Recieved keepalive {} seconds"#,
+  Recv Hold time {} seconds, Recieved keepalive {} seconds
+  Message statistics:
+                              Sent          Rcvd
+    Opens:              {:>10}    {:>10}
+    Notifications:      {:>10}    {:>10}
+    Updates:            {:>10}    {:>10}
+    Keepalives:         {:>10}    {:>10}
+    Route Refresh:      {:>10}    {:>10}
+    Capability:         {:>10}    {:>10}
+    Total:              {:>10}    {:>10}
+"#,
         neighbor.address,
         neighbor.remote_as,
         neighbor.local_as,
@@ -194,7 +230,21 @@ fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
         neighbor.timer_sent.hold_time,
         neighbor.timer_sent.keepalive,
         neighbor.timer_recv.hold_time,
-        neighbor.timer_recv.keepalive
+        neighbor.timer_recv.keepalive,
+        neighbor.count.get("open").unwrap().sent,
+        neighbor.count.get("open").unwrap().rcvd,
+        neighbor.count.get("notification").unwrap().sent,
+        neighbor.count.get("notification").unwrap().rcvd,
+        neighbor.count.get("update").unwrap().sent,
+        neighbor.count.get("update").unwrap().rcvd,
+        neighbor.count.get("keepalive").unwrap().sent,
+        neighbor.count.get("keepalive").unwrap().rcvd,
+        neighbor.count.get("routerefresh").unwrap().sent,
+        neighbor.count.get("routerefresh").unwrap().rcvd,
+        neighbor.count.get("capability").unwrap().sent,
+        neighbor.count.get("capability").unwrap().rcvd,
+        neighbor.count.get("total").unwrap().sent,
+        neighbor.count.get("total").unwrap().rcvd,
     )?;
     Ok(())
 }
