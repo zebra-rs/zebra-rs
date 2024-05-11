@@ -1,47 +1,20 @@
 #![allow(dead_code)]
 use super::{NotificationPacket, OpenPacket, UpdatePacket};
 use nom_derive::*;
-use rusticata_macros::newtype_enum;
 
-pub const BGP_MAX_LEN: usize = 4096;
+pub const BGP_PACKET_LEN: usize = 4096;
 pub const BGP_HEADER_LEN: u16 = 19;
 
-#[derive(Debug, Eq, PartialEq, NomBE)]
-pub struct BgpType(u8);
-
 #[repr(u8)]
-pub enum BGPType {
+#[derive(Debug, Eq, PartialEq, NomBE)]
+pub enum BgpType {
     Open = 1,
     Update = 2,
-    Max = 3,
-}
-
-newtype_enum! {
-    impl display BgpType {
-        Open = 1,
-        Update = 2,
-        Notification = 3,
-        Keepalive = 4,
-        RouteRefresh = 5,
-        Capability = 6,
-        Max = 7,
-    }
-}
-
-impl From<BgpType> for u8 {
-    fn from(typ: BgpType) -> u8 {
-        match typ {
-            BgpType(t) => t,
-        }
-    }
-}
-
-impl From<BgpType> for usize {
-    fn from(typ: BgpType) -> usize {
-        match typ {
-            BgpType(t) => t as usize,
-        }
-    }
+    Notification = 3,
+    Keepalive = 4,
+    RouteRefresh = 5,
+    Capability = 6,
+    Max = 7,
 }
 
 #[derive(Debug, PartialEq, NomBE)]
