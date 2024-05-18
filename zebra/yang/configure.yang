@@ -20,6 +20,12 @@ module configure {
     prefix config;
   }
 
+  import iana-bgp-community-types {
+    prefix bct;
+    reference
+      "RFC XXXX: YANG Model for Border Gateway Protocol (BGP-4).";
+  }
+
   container set {
     ext:help "Set configuration";
     uses "config:config";
