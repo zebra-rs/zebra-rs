@@ -19,22 +19,24 @@ struct Arg {
 
 fn system_path(arg: &Arg) -> PathBuf {
     if !arg.yang_path.is_empty() {
-        let mut path = PathBuf::new();
-        path.push(&arg.yang_path);
-        path
+        PathBuf::from(&arg.yang_path)
     } else {
         let mut home = dirs::home_dir().unwrap();
         home.push(".zebra");
+        home.push("yang");
         if home.is_dir() {
             home
         } else {
             let mut path = PathBuf::new();
             path.push("etc");
             path.push("zebra");
+            home.push("yang");
             if path.is_dir() {
                 path
             } else {
-                std::env::current_dir().unwrap()
+                let mut cwd = std::env::current_dir().unwrap();
+                cwd.push("yang");
+                cwd
             }
         }
     }
