@@ -3,7 +3,10 @@ use super::{
     peer::{fsm_init, Peer, PeerType},
     AfiSafi, Bgp,
 };
-use crate::config::{Args, ConfigOp};
+use crate::{
+    config::{Args, ConfigOp},
+    policy::CommunityMember,
+};
 use std::net::Ipv4Addr;
 
 fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -94,6 +97,11 @@ fn config_hold_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             peer.config.hold_time = Some(hold_time);
         }
     }
+    Some(())
+}
+
+fn config_clist(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let x = CommunityMember::Regexp(String::from("x"));
     Some(())
 }
 
