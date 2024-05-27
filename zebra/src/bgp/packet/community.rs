@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
@@ -138,6 +138,11 @@ impl CommunityAttr {
             // Otherwise none.
             _ => None,
         }
+    }
+
+    pub fn sort_uniq(&mut self) {
+        let coms: BTreeSet<u32> = self.0.iter().cloned().collect();
+        self.0 = coms.into_iter().collect();
     }
 }
 
@@ -305,5 +310,18 @@ mod test {
         if !com.contains(&val) {
             panic!("Community must contain 100:10");
         }
+    }
+
+    #[test]
+    fn sort_uniq() {
+        let mut com = CommunityAttr::from_str("100:10 no-export 100:10 100").unwrap();
+        com.sort_uniq();
+        assert_eq!(format!("{}", com), "0:100 100:10 no-export");
+    }
+
+    fn sort_uniq_no_export() {
+        let mut com = CommunityAttr::from_str("no-export no-export no-export").unwrap();
+        com.sort_uniq();
+        assert_eq!(format!("{}", com), "no-export");
     }
 }

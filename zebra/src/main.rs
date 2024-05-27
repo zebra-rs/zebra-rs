@@ -7,6 +7,7 @@ mod bgp;
 use bgp::Bgp;
 mod rib;
 use rib::Rib;
+mod policy;
 
 fn system_path() -> PathBuf {
     let mut home = dirs::home_dir().unwrap();

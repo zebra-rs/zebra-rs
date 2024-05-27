@@ -474,7 +474,22 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
                     break;
                 }
             }
-            YangMatch::LeafList | YangMatch::LeafListMatched => {}
+            YangMatch::LeafList => {
+                if let Some(next) = config.lookup(&path.name) {
+                    config = next;
+                } else {
+                    break;
+                }
+            }
+            YangMatch::LeafListMatched => {
+                let mut lists = config.list.borrow_mut();
+                if let Some(remove_index) = lists.iter().position(|x| *x == path.name) {
+                    lists.remove(remove_index);
+                }
+                if !lists.is_empty() {
+                    return;
+                }
+            }
         }
     }
 

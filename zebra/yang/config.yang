@@ -92,5 +92,42 @@ module config {
         }
       }
     }
-  }
+
+    list community-list {
+      description
+        "Enclosing container for list of defined BGP community
+           sets.";
+      key "name";
+      description
+        "List of defined BGP community sets.";
+      leaf name {
+        type string;
+        description
+          "Name / label of the community set -- this is used to
+               reference the set in match conditions.";
+      }
+      list seq {
+        key "seq";
+        description
+          "List of defined BGP community sets.";
+        leaf seq {
+          type uint32;
+          description
+            "Name / label of the community set -- this is used to
+               reference the set in match conditions.";
+        }
+        leaf action {
+          type enumeration {
+            enum permit;
+            enum deny;
+          }
+        }
+        leaf-list member {
+          type string;
+          description
+            "Members of the community set";
+        }
+      }
+    }
+}
 }
