@@ -391,7 +391,10 @@ fn config_set_key(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 ..Default::default()
             });
             config.keys.borrow_mut().push(n.clone());
-            config.keys.borrow_mut().sort_by(|a, b| a.name.cmp(&b.name));
+            config
+                .keys
+                .borrow_mut()
+                .sort_by(|a, b| alphanumeric_sort::compare_str(&a.name, &b.name));
             n.clone()
         }
     }
