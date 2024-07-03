@@ -26,29 +26,6 @@ impl Community {
         self.0.contains(val)
     }
 
-    fn parse_community(s: &str) -> Option<u32> {
-        let com_strs: Vec<&str> = s.split(':').collect();
-        match com_strs.len() {
-            // ASN:NN format.
-            2 => {
-                if let Ok(hval) = com_strs[0].parse::<u16>() {
-                    if let Ok(lval) = com_strs[1].parse::<u16>() {
-                        return Some(u32::from(hval) << 16 | u32::from(lval));
-                    }
-                }
-                None
-            }
-            // NN format.
-            1 => {
-                if let Ok(val) = com_strs[0].parse::<u32>() {
-                    return Some(val);
-                }
-                None
-            }
-            // Otherwise none.
-            _ => None,
-        }
-    }
 }
 
 impl Default for Community {
@@ -59,7 +36,7 @@ impl Default for Community {
 
 impl fmt::Display for Community {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let format = |v: &u32| {
+        let formatter = |v: &u32| {
             let hval: u32 = (v & 0xFFFF0000) >> 16;
             let lval: u32 = v & 0x0000FFFF;
             hval.to_string() + ":" + &lval.to_string()
@@ -70,13 +47,13 @@ impl fmt::Display for Community {
             Some(first_elem) => {
                 let mut result = match CommunityValue::to_string(*first_elem) {
                     Some(s) => s,
-                    None => format(first_elem),
+                    None => formatter(first_elem),
                 };
                 for elem in iter {
                     result.push(' ');
                     let elem_str = match CommunityValue::to_string(*elem) {
                         Some(s) => s,
-                        None => format(elem),
+                        None => formatter(elem),
                     };
                     result = result + &elem_str;
                 }
@@ -101,11 +78,11 @@ impl FromStr for Community {
 
         for s in com_strs.iter() {
             // Well known community value match.
-            match CommunityValue::to_welknown(s) {
-                Some(c) => coms.push(c.to_value()),
+            match CommunityValue::str_to_wellknown(s) {
+                Some(c) => coms.push(c.get_value()),
                 None => {
                     // ASN:NN or NN format parse.
-                    if let Some(c) = Community::parse_community(s) {
+                    if let Some(c) = CommunityValue::str_to_value(s) {
                         coms.push(c)
                     } else {
                         return Err(());
@@ -181,7 +158,7 @@ impl CommunityValue {
         map.get(&CommunityValue(com)).cloned()
     }
 
-    pub fn to_welknown(str: &str) -> Option<CommunityValue> {
+    pub fn str_to_wellknown(str: &str) -> Option<CommunityValue> {
         let map: HashMap<&str, CommunityValue> = HashMap::from([
             ("graceful-shutdown", CommunityValue::GracefulShutdown),
             ("accept-own", CommunityValue::AcceptOwn),
@@ -208,7 +185,31 @@ impl CommunityValue {
         map.get(str).cloned()
     }
 
-    pub fn to_value(&self) -> u32 {
+    fn str_to_value(s: &str) -> Option<u32> {
+        let com_strs: Vec<&str> = s.split(':').collect();
+        match com_strs.len() {
+            // ASN:NN format.
+            2 => {
+                if let Ok(hval) = com_strs[0].parse::<u16>() {
+                    if let Ok(lval) = com_strs[1].parse::<u16>() {
+                        return Some(u32::from(hval) << 16 | u32::from(lval));
+                    }
+                }
+                None
+            }
+            // NN format.
+            1 => {
+                if let Ok(val) = com_strs[0].parse::<u32>() {
+                    return Some(val);
+                }
+                None
+            }
+            // Otherwise none.
+            _ => None,
+        }
+    }
+
+    pub fn get_value(&self) -> u32 {
         self.0
     }
 }
@@ -228,7 +229,7 @@ mod test {
 
         let mut com = Community::new();
         com.push(1u32);
-        com.push(CommunityValue::Blackhole.to_value());
+        com.push(CommunityValue::Blackhole.get_value());
         com.push(3u32);
         assert_eq!(format!("{}", com), "0:1 blackhole 0:3");
     }
@@ -300,15 +301,15 @@ mod test {
         }
 
         let com = Community::from_str("no-export 100:10 100").unwrap();
-        if !com.contains(&CommunityValue::NoExport.to_value()) {
+        if !com.contains(&CommunityValue::NoExport.get_value()) {
             panic!("Community must contain no-export");
         }
 
-        if com.contains(&CommunityValue::NoAdvertise.to_value()) {
+        if com.contains(&CommunityValue::NoAdvertise.get_value()) {
             panic!("Community must not contain no-advertise");
         }
 
-        let val = Community::parse_community("100:10").unwrap();
+        let val = CommunityValue::str_to_value("100:10").unwrap();
         if !com.contains(&val) {
             panic!("Community must contain 100:10");
         }
