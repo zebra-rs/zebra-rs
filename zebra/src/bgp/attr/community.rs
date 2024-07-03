@@ -4,6 +4,120 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
+/// BGP Community attribute.
+#[derive(Clone, Debug, NomBE)]
+pub struct Community(pub Vec<u32>);
+
+impl Community {
+    pub fn new() -> Self {
+        Community(Vec::<u32>::new())
+    }
+
+    pub fn push(&mut self, value: u32) {
+        self.0.push(value)
+    }
+
+    pub fn sort_uniq(&mut self) {
+        let coms: BTreeSet<u32> = self.0.iter().cloned().collect();
+        self.0 = coms.into_iter().collect();
+    }
+
+    pub fn contains(&self, val: &u32) -> bool {
+        self.0.contains(val)
+    }
+
+    fn parse_community(s: &str) -> Option<u32> {
+        let com_strs: Vec<&str> = s.split(':').collect();
+        match com_strs.len() {
+            // ASN:NN format.
+            2 => {
+                if let Ok(hval) = com_strs[0].parse::<u16>() {
+                    if let Ok(lval) = com_strs[1].parse::<u16>() {
+                        return Some(u32::from(hval) << 16 | u32::from(lval));
+                    }
+                }
+                None
+            }
+            // NN format.
+            1 => {
+                if let Ok(val) = com_strs[0].parse::<u32>() {
+                    return Some(val);
+                }
+                None
+            }
+            // Otherwise none.
+            _ => None,
+        }
+    }
+}
+
+impl Default for Community {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for Community {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let format = |v: &u32| {
+            let hval: u32 = (v & 0xFFFF0000) >> 16;
+            let lval: u32 = v & 0x0000FFFF;
+            hval.to_string() + ":" + &lval.to_string()
+        };
+        let mut iter = self.0.iter();
+        let val = match iter.next() {
+            None => String::new(),
+            Some(first_elem) => {
+                let mut result = match CommunityValue::to_string(*first_elem) {
+                    Some(s) => s,
+                    None => format(first_elem),
+                };
+                for elem in iter {
+                    result.push(' ');
+                    let elem_str = match CommunityValue::to_string(*elem) {
+                        Some(s) => s,
+                        None => format(elem),
+                    };
+                    result = result + &elem_str;
+                }
+                result
+            }
+        };
+        write!(f, "{}", val)
+    }
+}
+
+impl FromStr for Community {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let com_strs: Vec<&str> = s.split(' ').collect();
+        if com_strs.is_empty() {
+            return Err(());
+        }
+
+        // At least one community string exists.
+        let mut coms = Community::new();
+
+        for s in com_strs.iter() {
+            // Well known community value match.
+            match CommunityValue::to_welknown(s) {
+                Some(c) => coms.push(c.to_value()),
+                None => {
+                    // ASN:NN or NN format parse.
+                    if let Some(c) = Community::parse_community(s) {
+                        coms.push(c)
+                    } else {
+                        return Err(());
+                    }
+                }
+            }
+        }
+        Ok(coms)
+    }
+}
+
+/// BGP Community 32 bit value.
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct CommunityValue(pub u32);
 
@@ -99,117 +213,6 @@ impl CommunityValue {
     }
 }
 
-#[derive(Clone, Debug, NomBE)]
-pub struct Community(pub Vec<u32>);
-
-impl Community {
-    pub fn new() -> Self {
-        Community(Vec::<u32>::new())
-    }
-
-    pub fn push(&mut self, value: u32) {
-        self.0.push(value)
-    }
-
-    pub fn contains(&self, val: &u32) -> bool {
-        self.0.contains(val)
-    }
-
-    fn parse_community(s: &str) -> Option<u32> {
-        let com_strs: Vec<&str> = s.split(':').collect();
-        match com_strs.len() {
-            // ASN:NN format.
-            2 => {
-                if let Ok(hval) = com_strs[0].parse::<u16>() {
-                    if let Ok(lval) = com_strs[1].parse::<u16>() {
-                        return Some(u32::from(hval) << 16 | u32::from(lval));
-                    }
-                }
-                None
-            }
-            // NN format.
-            1 => {
-                if let Ok(val) = com_strs[0].parse::<u32>() {
-                    return Some(val);
-                }
-                None
-            }
-            // Otherwise none.
-            _ => None,
-        }
-    }
-
-    pub fn sort_uniq(&mut self) {
-        let coms: BTreeSet<u32> = self.0.iter().cloned().collect();
-        self.0 = coms.into_iter().collect();
-    }
-}
-
-impl Default for Community {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for Community {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let format = |v: &u32| {
-            let hval: u32 = (v & 0xFFFF0000) >> 16;
-            let lval: u32 = v & 0x0000FFFF;
-            hval.to_string() + ":" + &lval.to_string()
-        };
-        let mut iter = self.0.iter();
-        let val = match iter.next() {
-            None => String::new(),
-            Some(first_elem) => {
-                let mut result = match CommunityValue::to_string(*first_elem) {
-                    Some(s) => s,
-                    None => format(first_elem),
-                };
-                for elem in iter {
-                    result.push(' ');
-                    let elem_str = match CommunityValue::to_string(*elem) {
-                        Some(s) => s,
-                        None => format(elem),
-                    };
-                    result = result + &elem_str;
-                }
-                result
-            }
-        };
-        write!(f, "{}", val)
-    }
-}
-
-impl FromStr for Community {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let com_strs: Vec<&str> = s.split(' ').collect();
-        if com_strs.is_empty() {
-            return Err(());
-        }
-
-        // At least one community string exists.
-        let mut coms = Community::new();
-
-        for s in com_strs.iter() {
-            // Well known community value match.
-            match CommunityValue::to_welknown(s) {
-                Some(c) => coms.push(c.to_value()),
-                None => {
-                    // ASN:NN or NN format parse.
-                    if let Some(c) = Community::parse_community(s) {
-                        coms.push(c)
-                    } else {
-                        return Err(());
-                    }
-                }
-            }
-        }
-        Ok(coms)
-    }
-}
 
 #[cfg(test)]
 mod test {
