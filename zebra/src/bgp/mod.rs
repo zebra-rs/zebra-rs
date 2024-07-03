@@ -7,6 +7,7 @@ pub use afi::*;
 pub mod constant;
 pub use constant::*;
 
+pub mod attr;
 pub mod config;
 pub mod packet;
 pub mod peer;

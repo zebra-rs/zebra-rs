@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    bgp::packet::CommunityAttr,
+    bgp::attr::Community,
     config::{Args, ConfigOp},
 };
 
@@ -20,7 +20,7 @@ pub struct CommunityEntry {
 #[derive(Debug)]
 pub enum CommunityMember {
     Regexp(String),
-    Community(CommunityAttr),
+    Community(Community),
 }
 
 #[derive(Debug)]

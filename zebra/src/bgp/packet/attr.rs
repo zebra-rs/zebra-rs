@@ -1,6 +1,7 @@
 #![allow(dead_code)]
-use super::{As4PathAttr, AsPathAttr, CommunityAttr, ExtendedComAttr, LargeComAttr};
+use super::{As4PathAttr, AsPathAttr, ExtendedComAttr, LargeComAttr};
 use crate::bgp::{Afi, Safi};
+use crate::bgp::attr::Community;
 use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
@@ -42,7 +43,7 @@ pub enum Attribute {
     AtomicAggregate(AtomicAggregateAttr),
     Aggregator(AggregatorAttr),
     Aggregator4(Aggregator4Attr),
-    Community(CommunityAttr),
+    Community(Community),
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
     ExtendedCom(ExtendedComAttr),

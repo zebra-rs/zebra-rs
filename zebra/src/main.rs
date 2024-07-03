@@ -47,6 +47,8 @@ fn system_path(arg: &Arg) -> PathBuf {
 async fn main() -> anyhow::Result<()> {
     let arg = Arg::parse();
 
+    policy::PolicyInit();
+
     let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());

@@ -1,7 +1,6 @@
 pub mod aspath;
 pub mod attr;
 pub mod bgp;
-pub mod community;
 pub mod encode;
 pub mod extended;
 pub mod large;
@@ -16,7 +15,6 @@ pub use many::many0;
 pub use aspath::*;
 pub use attr::*;
 pub use bgp::*;
-pub use community::*;
 pub use extended::*;
 pub use large::*;
 pub use notification::*;

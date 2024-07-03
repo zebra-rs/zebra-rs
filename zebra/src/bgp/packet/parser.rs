@@ -1,5 +1,6 @@
 use super::*;
 use crate::bgp::{Afi, Safi};
+use crate::bgp::attr::Community;
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
 use nom::combinator::{map, peek};
@@ -119,7 +120,7 @@ fn parse_bgp_attr_as4_path(input: &[u8], length: u16) -> IResult<&[u8], Attribut
 
 fn parse_bgp_attr_community(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, community) = CommunityAttr::parse(attr)?;
+    let (_, community) = Community::parse(attr)?;
     Ok((input, Attribute::Community(community)))
 }
 

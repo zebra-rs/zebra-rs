@@ -1,5 +1,4 @@
-#![allow(dead_code)]
-use nom_derive::*;
+use nom_derive::NomBE;
 use rusticata_macros::newtype_enum;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -101,11 +100,11 @@ impl CommunityValue {
 }
 
 #[derive(Clone, Debug, NomBE)]
-pub struct CommunityAttr(pub Vec<u32>);
+pub struct Community(pub Vec<u32>);
 
-impl CommunityAttr {
+impl Community {
     pub fn new() -> Self {
-        CommunityAttr(Vec::<u32>::new())
+        Community(Vec::<u32>::new())
     }
 
     pub fn push(&mut self, value: u32) {
@@ -146,13 +145,13 @@ impl CommunityAttr {
     }
 }
 
-impl Default for CommunityAttr {
+impl Default for Community {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl fmt::Display for CommunityAttr {
+impl fmt::Display for Community {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let format = |v: &u32| {
             let hval: u32 = (v & 0xFFFF0000) >> 16;
@@ -182,7 +181,7 @@ impl fmt::Display for CommunityAttr {
     }
 }
 
-impl FromStr for CommunityAttr {
+impl FromStr for Community {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -192,7 +191,7 @@ impl FromStr for CommunityAttr {
         }
 
         // At least one community string exists.
-        let mut coms = CommunityAttr::new();
+        let mut coms = Community::new();
 
         for s in com_strs.iter() {
             // Well known community value match.
@@ -200,7 +199,7 @@ impl FromStr for CommunityAttr {
                 Some(c) => coms.push(c.to_value()),
                 None => {
                     // ASN:NN or NN format parse.
-                    if let Some(c) = CommunityAttr::parse_community(s) {
+                    if let Some(c) = Community::parse_community(s) {
                         coms.push(c)
                     } else {
                         return Err(());
@@ -218,13 +217,13 @@ mod test {
 
     #[test]
     fn push() {
-        let mut com = CommunityAttr::new();
+        let mut com = Community::new();
         com.push(1u32);
         com.push(2u32);
         com.push(3u32);
         assert_eq!(format!("{}", com), "0:1 0:2 0:3");
 
-        let mut com = CommunityAttr::new();
+        let mut com = Community::new();
         com.push(1u32);
         com.push(CommunityValue::Blackhole.to_value());
         com.push(3u32);
@@ -233,71 +232,71 @@ mod test {
 
     #[test]
     fn from_str() {
-        let com = CommunityAttr::from_str("no-export 100:10 100").unwrap();
+        let com = Community::from_str("no-export 100:10 100").unwrap();
         assert_eq!(format!("{}", com), "no-export 100:10 0:100");
 
-        let com = CommunityAttr::from_str("100:10 local-AS 100").unwrap();
+        let com = Community::from_str("100:10 local-AS 100").unwrap();
         assert_eq!(format!("{}", com), "100:10 local-AS 0:100");
 
-        let com = CommunityAttr::from_str("100 llgr-stale 100:10").unwrap();
+        let com = Community::from_str("100 llgr-stale 100:10").unwrap();
         assert_eq!(format!("{}", com), "0:100 llgr-stale 100:10");
 
-        let com = CommunityAttr::from_str("4294967295 graceful-shutdown 100:10").unwrap();
+        let com = Community::from_str("4294967295 graceful-shutdown 100:10").unwrap();
         assert_eq!(format!("{}", com), "65535:65535 graceful-shutdown 100:10");
 
-        let com = CommunityAttr::from_str("4294967296 no-export 100:10");
+        let com = Community::from_str("4294967296 no-export 100:10");
         if com.is_ok() {
             panic!("com must be None");
         }
 
-        let com = CommunityAttr::from_str("not-well-defined 100:10");
+        let com = Community::from_str("not-well-defined 100:10");
         if com.is_ok() {
             panic!("com must be None");
         }
 
-        let com = CommunityAttr::from_str("");
+        let com = Community::from_str("");
         if com.is_ok() {
             panic!("com must be None");
         }
 
-        let com = CommunityAttr::from_str("-1");
+        let com = Community::from_str("-1");
         if com.is_ok() {
             panic!("com must be None");
         }
 
-        let com = CommunityAttr::from_str("100:test");
+        let com = Community::from_str("100:test");
         if com.is_ok() {
             panic!("com must be None");
         }
 
-        let com = CommunityAttr::from_str("65535:65535").unwrap();
+        let com = Community::from_str("65535:65535").unwrap();
         assert_eq!(format!("{}", com), "65535:65535");
 
-        let com = CommunityAttr::from_str("65535:65536");
+        let com = Community::from_str("65535:65536");
         if com.is_ok() {
             panic!("com must be None");
         }
 
-        let com = CommunityAttr::from_str("65536:65535");
+        let com = Community::from_str("65536:65535");
         if com.is_ok() {
             panic!("com must be None");
         }
 
-        let com = CommunityAttr::from_str("65536").unwrap();
+        let com = Community::from_str("65536").unwrap();
         assert_eq!(format!("{}", com), "1:0");
 
-        let com = CommunityAttr::from_str("1").unwrap();
+        let com = Community::from_str("1").unwrap();
         assert_eq!(format!("{}", com), "0:1");
     }
 
     #[test]
     fn contains() {
-        let com = CommunityAttr::from_str("no-export 100:10 100").unwrap();
+        let com = Community::from_str("no-export 100:10 100").unwrap();
         if !com.contains(&100u32) {
             panic!("Community must contain no-export");
         }
 
-        let com = CommunityAttr::from_str("no-export 100:10 100").unwrap();
+        let com = Community::from_str("no-export 100:10 100").unwrap();
         if !com.contains(&CommunityValue::NoExport.to_value()) {
             panic!("Community must contain no-export");
         }
@@ -306,7 +305,7 @@ mod test {
             panic!("Community must not contain no-advertise");
         }
 
-        let val = CommunityAttr::parse_community("100:10").unwrap();
+        let val = Community::parse_community("100:10").unwrap();
         if !com.contains(&val) {
             panic!("Community must contain 100:10");
         }
@@ -314,13 +313,13 @@ mod test {
 
     #[test]
     fn sort_uniq() {
-        let mut com = CommunityAttr::from_str("100:10 no-export 100:10 100").unwrap();
+        let mut com = Community::from_str("100:10 no-export 100:10 100").unwrap();
         com.sort_uniq();
         assert_eq!(format!("{}", com), "0:100 100:10 no-export");
     }
 
     fn sort_uniq_no_export() {
-        let mut com = CommunityAttr::from_str("no-export no-export no-export").unwrap();
+        let mut com = Community::from_str("no-export no-export no-export").unwrap();
         com.sort_uniq();
         assert_eq!(format!("{}", com), "no-export");
     }
