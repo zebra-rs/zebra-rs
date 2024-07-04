@@ -5,7 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// BGP Community attribute.
-#[derive(Clone, Debug, NomBE)]
+#[derive(Clone, Debug, Default, NomBE)]
 pub struct Community(pub Vec<u32>);
 
 impl Community {
@@ -27,39 +27,15 @@ impl Community {
     }
 }
 
-impl Default for Community {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl fmt::Display for Community {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let formatter = |v: &u32| {
-            let hval: u32 = (v & 0xFFFF0000) >> 16;
-            let lval: u32 = v & 0x0000FFFF;
-            hval.to_string() + ":" + &lval.to_string()
-        };
-        let mut iter = self.0.iter();
-        let val = match iter.next() {
-            None => String::new(),
-            Some(first_elem) => {
-                let mut result = match CommunityValue::to_wellknown_str(*first_elem) {
-                    Some(s) => s.to_string(),
-                    None => formatter(first_elem),
-                };
-                for elem in iter {
-                    result.push(' ');
-                    let elem_str = match CommunityValue::to_wellknown_str(*elem) {
-                        Some(s) => s.to_string(),
-                        None => formatter(elem),
-                    };
-                    result = result + &elem_str;
-                }
-                result
-            }
-        };
-        write!(f, "{}", val)
+        let val = self
+            .0
+            .iter()
+            .map(|x| CommunityValue(*x).to_str())
+            .collect::<Vec<String>>()
+            .join(" ");
+        write!(f, "{val}")
     }
 }
 
@@ -72,23 +48,15 @@ impl FromStr for Community {
             return Err(());
         }
 
-        // At least one community string exists.
         let mut coms = Community::new();
 
         for s in com_strs.iter() {
-            // Well known community value match.
-            match CommunityValue::from_wellknown_str(s) {
+            match CommunityValue::from_str(s) {
                 Some(c) => coms.push(c.get()),
-                None => {
-                    // ASN:NN or NN format parse.
-                    if let Some(c) = CommunityValue::from_digit_str(s) {
-                        coms.push(c.get())
-                    } else {
-                        return Err(());
-                    }
-                }
+                None => return Err(()),
             }
         }
+        coms.sort_uniq();
         Ok(coms)
     }
 }
@@ -192,10 +160,6 @@ fn str_wellknown_map() -> &'static HashMap<&'static str, CommunityValue> {
 }
 
 impl CommunityValue {
-    pub fn to_wellknown_str(com: u32) -> Option<&'static str> {
-        wellknown_str_map().get(&CommunityValue(com)).cloned()
-    }
-
     pub fn from_wellknown_str(s: &str) -> Option<Self> {
         str_wellknown_map().get(s).cloned()
     }
@@ -227,6 +191,24 @@ impl CommunityValue {
         Self::from_wellknown_str(s).or(Self::from_digit_str(s))
     }
 
+    pub fn to_wellknown_str(&self) -> Option<&'static str> {
+        wellknown_str_map().get(self).cloned()
+    }
+
+    pub fn to_digit_str(&self) -> String {
+        let hval: u32 = (self.0 & 0xFFFF0000) >> 16;
+        let lval: u32 = self.0 & 0x0000FFFF;
+        hval.to_string() + ":" + &lval.to_string()
+    }
+
+    pub fn to_str(&self) -> String {
+        if let Some(s) = self.to_wellknown_str() {
+            s.to_string()
+        } else {
+            self.to_digit_str()
+        }
+    }
+
     pub fn get(&self) -> u32 {
         self.0
     }
@@ -254,16 +236,16 @@ mod test {
     #[test]
     fn from_str() {
         let com = Community::from_str("no-export 100:10 100").unwrap();
-        assert_eq!(format!("{}", com), "no-export 100:10 0:100");
+        assert_eq!(format!("{}", com), "0:100 100:10 no-export");
 
         let com = Community::from_str("100:10 local-AS 100").unwrap();
-        assert_eq!(format!("{}", com), "100:10 local-AS 0:100");
+        assert_eq!(format!("{}", com), "0:100 100:10 local-AS");
 
         let com = Community::from_str("100 llgr-stale 100:10").unwrap();
-        assert_eq!(format!("{}", com), "0:100 llgr-stale 100:10");
+        assert_eq!(format!("{}", com), "0:100 100:10 llgr-stale");
 
         let com = Community::from_str("4294967295 graceful-shutdown 100:10").unwrap();
-        assert_eq!(format!("{}", com), "65535:65535 graceful-shutdown 100:10");
+        assert_eq!(format!("{}", com), "100:10 graceful-shutdown 65535:65535");
 
         let com = Community::from_str("4294967296 no-export 100:10");
         if com.is_ok() {
