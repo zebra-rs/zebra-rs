@@ -267,6 +267,11 @@ mod test {
             panic!("com must be None");
         }
 
+        let com = Community::from_str("10+");
+        if com.is_ok() {
+            panic!("com must be None");
+        }
+
         let com = Community::from_str("100:test");
         if com.is_ok() {
             panic!("com must be None");
