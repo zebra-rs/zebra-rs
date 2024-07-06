@@ -48,3 +48,15 @@ pub fn config_action(policy: &mut Policy, mut args: Args, op: ConfigOp) -> Optio
 pub fn config_member(policy: &mut Policy, mut args: Args, op: ConfigOp) -> Option<()> {
     None
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn clist_regexp() {
+        // Try to parse community.
+
+        // When it failed, treat it as regexp.
+    }
+}
