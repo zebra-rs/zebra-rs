@@ -25,6 +25,11 @@ impl Community {
     pub fn contains(&self, val: &u32) -> bool {
         self.0.contains(val)
     }
+
+    pub fn append(&mut self, other: &mut Self) {
+        self.0.append(&mut other.0);
+        self.sort_uniq();
+    }
 }
 
 impl fmt::Display for Community {
@@ -343,5 +348,14 @@ mod test {
 
         let val = CommunityValue::from_str("6553620").unwrap();
         assert_eq!(val.0, (100 << 16) + 20);
+    }
+
+    #[test]
+    fn append() {
+        let mut com = Community::from_str("100:10 100:20").unwrap();
+        let mut other = Community::from_str("100:30 100:20").unwrap();
+
+        com.append(&mut other);
+        assert_eq!(format!("{}", com), "100:10 100:20 100:30");
     }
 }

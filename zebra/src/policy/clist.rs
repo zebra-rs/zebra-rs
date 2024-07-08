@@ -28,6 +28,14 @@ pub struct Policy {
     pub clist: HashMap<String, CommunityList>,
 }
 
+impl Policy {
+    pub fn new() -> Self {
+        Self {
+            clist: HashMap::new(),
+        }
+    }
+}
+
 // community-list hoge
 // community-list hoge seq 5
 // community-list hoge seq 5 action permit
@@ -49,14 +57,13 @@ pub fn config_member(policy: &mut Policy, mut args: Args, op: ConfigOp) -> Optio
     None
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
+// #[cfg(test)]
+// mod test {
+//     use super::*;
 
-    #[test]
-    fn clist_regexp() {
-        // Try to parse community.
-
-        // When it failed, treat it as regexp.
-    }
-}
+//     #[test]
+//     fn clist_regexp() {
+//         // When it failed, treat it as regexp.
+//         let com = Community::new();
+//     }
+// }
