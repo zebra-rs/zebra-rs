@@ -1,5 +1,5 @@
 use super::*;
-use crate::bgp::attr::Community;
+use crate::bgp::attr::{Community, LargeCommunity};
 use crate::bgp::{Afi, Safi};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
@@ -167,7 +167,7 @@ fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attrib
 
 fn parse_bgp_attr_large_com(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, lcom) = LargeComAttr::parse(attr)?;
+    let (_, lcom) = LargeCommunity::parse(attr)?;
     Ok((input, Attribute::LargeCom(lcom)))
 }
 

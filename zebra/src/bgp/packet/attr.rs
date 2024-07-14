@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-use super::{As4PathAttr, AsPathAttr, ExtendedComAttr, LargeComAttr};
-use crate::bgp::attr::Community;
+use super::{As4PathAttr, AsPathAttr, ExtendedComAttr};
+use crate::bgp::attr::{Community, LargeCommunity};
 use crate::bgp::{Afi, Safi};
 use ipnet::Ipv6Net;
 use nom_derive::*;
@@ -47,7 +47,7 @@ pub enum Attribute {
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
     ExtendedCom(ExtendedComAttr),
-    LargeCom(LargeComAttr),
+    LargeCom(LargeCommunity),
 }
 
 pub type Attrs = Vec<Attribute>;
