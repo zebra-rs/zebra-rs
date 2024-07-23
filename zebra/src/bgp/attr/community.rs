@@ -340,14 +340,14 @@ mod test {
 
     #[test]
     fn value_from_str() {
-        let val = CommunityValue::from_str("no-export").unwrap();
-        assert_eq!(val.0, CommunityValue::NoExport.0);
+        let com = CommunityValue::from_str("no-export").unwrap();
+        assert_eq!(com.value(), CommunityValue::NoExport.value());
 
-        let val = CommunityValue::from_str("100:10").unwrap();
-        assert_eq!(val.0, (100 << 16) + 10);
+        let com = CommunityValue::from_str("100:10").unwrap();
+        assert_eq!(com.value(), (100 << 16) + 10);
 
-        let val = CommunityValue::from_str("6553620").unwrap();
-        assert_eq!(val.0, (100 << 16) + 20);
+        let com = CommunityValue::from_str("6553620").unwrap();
+        assert_eq!(com.value(), (100 << 16) + 20);
     }
 
     #[test]
