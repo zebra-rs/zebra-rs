@@ -57,7 +57,7 @@ impl FromStr for Community {
 
         for s in com_strs.iter() {
             match CommunityValue::from_str(s) {
-                Some(c) => coms.push(c.get()),
+                Some(c) => coms.push(c.value()),
                 None => return Err(()),
             }
         }
@@ -214,7 +214,7 @@ impl CommunityValue {
         }
     }
 
-    pub fn get(&self) -> u32 {
+    pub fn value(&self) -> u32 {
         self.0
     }
 }
@@ -233,7 +233,7 @@ mod test {
 
         let mut com = Community::new();
         com.push(1u32);
-        com.push(CommunityValue::Blackhole.get());
+        com.push(CommunityValue::Blackhole.value());
         com.push(3u32);
         assert_eq!(format!("{}", com), "0:1 blackhole 0:3");
     }
@@ -310,11 +310,11 @@ mod test {
         }
 
         let com = Community::from_str("no-export 100:10 100").unwrap();
-        if !com.contains(&CommunityValue::NoExport.get()) {
+        if !com.contains(&CommunityValue::NoExport.value()) {
             panic!("Community must contain no-export");
         }
 
-        if com.contains(&CommunityValue::NoAdvertise.get()) {
+        if com.contains(&CommunityValue::NoAdvertise.value()) {
             panic!("Community must not contain no-advertise");
         }
 

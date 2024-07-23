@@ -96,6 +96,8 @@ mod test {
         assert_eq!(format!("{}", com), "100:102:103 65538:655900:14560");
 
         let com = LargeCommunity::from_str("65538:655900 100:102:103");
-        assert_eq!(com, None);
+        if com.is_ok() {
+            panic!("Larg Community parse mut fail");
+        }
     }
 }
