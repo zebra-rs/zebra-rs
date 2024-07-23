@@ -30,6 +30,10 @@ impl Community {
         self.0.append(&mut other.0);
         self.sort_uniq();
     }
+
+    pub fn is_no_export(&self) -> bool {
+        self.contains(&CommunityValue::NoExport.value())
+    }
 }
 
 impl fmt::Display for Community {
