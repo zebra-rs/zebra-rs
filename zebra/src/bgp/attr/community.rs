@@ -3,6 +3,7 @@ use rusticata_macros::newtype_enum;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 /// BGP Community attribute.
 #[derive(Clone, Debug, Default, NomBE)]
@@ -94,83 +95,61 @@ newtype_enum! {
     }
 }
 
-// Available nightly.
-// use std::sync::LazyLock;
+static WELLKNOWN_STR_MAP: LazyLock<HashMap<CommunityValue, &'static str>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    map.insert(CommunityValue::GracefulShutdown, "graceful-shutdown");
+    map.insert(CommunityValue::AcceptOwn, "accept-own");
+    map.insert(
+        CommunityValue::RouteFilterTranslatedV4,
+        "route-filter-translated-v4",
+    );
+    map.insert(CommunityValue::RouteFilterV4, "route-filter-v4");
+    map.insert(
+        CommunityValue::RouteFilterTranslatedV6,
+        "route-filter-translated-v6",
+    );
+    map.insert(CommunityValue::RouteFilterV6, "route-filter-v6");
+    map.insert(CommunityValue::LlgrStale, "llgr-stale");
+    map.insert(CommunityValue::NoLlgr, "no-llgr");
+    map.insert(CommunityValue::AcceptOwnNexthop, "accept-own-nexthop");
+    map.insert(CommunityValue::Blackhole, "blackhole");
+    map.insert(CommunityValue::NoExport, "no-export");
+    map.insert(CommunityValue::NoAdvertise, "no-advertise");
+    map.insert(CommunityValue::NoExportSubconfed, "no-export-sub-confed");
+    map.insert(CommunityValue::LocalAs, "local-AS");
+    map.insert(CommunityValue::NoPeer, "no-peer");
+    map
+});
 
-// static HASHMAP: LazyLock<HashMap<CommunityValue, String>> = LazyLock::new(|| {
-//     let mut map = HashMap::new();
-//     map.insert(
-//         CommunityValue::GracefulShutdown,
-//         String::from("graceful-shutdown"),
-//     );
-//     map
-// });
-
-use std::sync::OnceLock;
-
-static WELLKNOWN_STR_MAP: OnceLock<HashMap<CommunityValue, &'static str>> = OnceLock::new();
-
-fn wellknown_str_map() -> &'static HashMap<CommunityValue, &'static str> {
-    WELLKNOWN_STR_MAP.get_or_init(|| {
-        let mut map = HashMap::new();
-        map.insert(CommunityValue::GracefulShutdown, "graceful-shutdown");
-        map.insert(CommunityValue::AcceptOwn, "accept-own");
-        map.insert(
-            CommunityValue::RouteFilterTranslatedV4,
-            "route-filter-translated-v4",
-        );
-        map.insert(CommunityValue::RouteFilterV4, "route-filter-v4");
-        map.insert(
-            CommunityValue::RouteFilterTranslatedV6,
-            "route-filter-translated-v6",
-        );
-        map.insert(CommunityValue::RouteFilterV6, "route-filter-v6");
-        map.insert(CommunityValue::LlgrStale, "llgr-stale");
-        map.insert(CommunityValue::NoLlgr, "no-llgr");
-        map.insert(CommunityValue::AcceptOwnNexthop, "accept-own-nexthop");
-        map.insert(CommunityValue::Blackhole, "blackhole");
-        map.insert(CommunityValue::NoExport, "no-export");
-        map.insert(CommunityValue::NoAdvertise, "no-advertise");
-        map.insert(CommunityValue::NoExportSubconfed, "no-export-sub-confed");
-        map.insert(CommunityValue::LocalAs, "local-AS");
-        map.insert(CommunityValue::NoPeer, "no-peer");
-        map
-    })
-}
-
-static STR_WELLKNOWN_MAP: OnceLock<HashMap<&'static str, CommunityValue>> = OnceLock::new();
-
-fn str_wellknown_map() -> &'static HashMap<&'static str, CommunityValue> {
-    STR_WELLKNOWN_MAP.get_or_init(|| {
-        let mut map = HashMap::new();
-        map.insert("graceful-shutdown", CommunityValue::GracefulShutdown);
-        map.insert("accept-own", CommunityValue::AcceptOwn);
-        map.insert(
-            "route-filter-translated-v4",
-            CommunityValue::RouteFilterTranslatedV4,
-        );
-        map.insert("route-filter-v4", CommunityValue::RouteFilterV4);
-        map.insert(
-            "route-filter-translated-v6",
-            CommunityValue::RouteFilterTranslatedV6,
-        );
-        map.insert("route-filter-v6", CommunityValue::RouteFilterV6);
-        map.insert("llgr-stale", CommunityValue::LlgrStale);
-        map.insert("no-llgr", CommunityValue::NoLlgr);
-        map.insert("accept-own-nexthop", CommunityValue::AcceptOwnNexthop);
-        map.insert("blackhole", CommunityValue::Blackhole);
-        map.insert("no-export", CommunityValue::NoExport);
-        map.insert("no-advertise", CommunityValue::NoAdvertise);
-        map.insert("no-export-sub-confed", CommunityValue::NoExportSubconfed);
-        map.insert("local-AS", CommunityValue::LocalAs);
-        map.insert("no-peer", CommunityValue::NoPeer);
-        map
-    })
-}
+static STR_WELLKNOWN_MAP: LazyLock<HashMap<&'static str, CommunityValue>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    map.insert("graceful-shutdown", CommunityValue::GracefulShutdown);
+    map.insert("accept-own", CommunityValue::AcceptOwn);
+    map.insert(
+        "route-filter-translated-v4",
+        CommunityValue::RouteFilterTranslatedV4,
+    );
+    map.insert("route-filter-v4", CommunityValue::RouteFilterV4);
+    map.insert(
+        "route-filter-translated-v6",
+        CommunityValue::RouteFilterTranslatedV6,
+    );
+    map.insert("route-filter-v6", CommunityValue::RouteFilterV6);
+    map.insert("llgr-stale", CommunityValue::LlgrStale);
+    map.insert("no-llgr", CommunityValue::NoLlgr);
+    map.insert("accept-own-nexthop", CommunityValue::AcceptOwnNexthop);
+    map.insert("blackhole", CommunityValue::Blackhole);
+    map.insert("no-export", CommunityValue::NoExport);
+    map.insert("no-advertise", CommunityValue::NoAdvertise);
+    map.insert("no-export-sub-confed", CommunityValue::NoExportSubconfed);
+    map.insert("local-AS", CommunityValue::LocalAs);
+    map.insert("no-peer", CommunityValue::NoPeer);
+    map
+});
 
 impl CommunityValue {
     pub fn from_wellknown_str(s: &str) -> Option<Self> {
-        str_wellknown_map().get(s).cloned()
+        STR_WELLKNOWN_MAP.get(s).cloned()
     }
 
     fn from_digit_str(s: &str) -> Option<Self> {
@@ -201,7 +180,7 @@ impl CommunityValue {
     }
 
     pub fn to_wellknown_str(&self) -> Option<&'static str> {
-        wellknown_str_map().get(self).cloned()
+        WELLKNOWN_STR_MAP.get(self).cloned()
     }
 
     pub fn to_digit_str(&self) -> String {
