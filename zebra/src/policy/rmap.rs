@@ -46,9 +46,9 @@ impl RouteMapEntry {
         self.action = action;
     }
 
-    pub fn match_add(&mut self, match_type: EntryMatch, arg: &[&str]) {}
+    pub fn match_add(&mut self, _match_type: EntryMatch, _arg: &[&str]) {}
 
-    pub fn set_add(&mut self, set_type: EntrySet, arg: &str) {}
+    pub fn set_add(&mut self, _set_type: EntrySet, _arg: &str) {}
 }
 
 #[derive(Debug)]

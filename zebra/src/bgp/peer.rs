@@ -379,10 +379,30 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     State::Established
 }
 
+fn peer_send_update_test() {
+    let mut update: UpdatePacket = UpdatePacket::new();
+
+    let origin = OriginAttr { origin: ORIGIN_EGP };
+    update.attrs.push(Attribute::Origin(origin));
+
+    let nexthop = NextHopAttr {
+        next_hop: [10, 255, 0, 65],
+    };
+    update.attrs.push(Attribute::NextHop(nexthop));
+
+    let ipv4net: Ipv4Net = "1.1.1.1/32".parse().unwrap();
+    update.ipv4_update.push(ipv4net);
+
+    let bytes: BytesMut = update.into();
+}
+
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter[BgpType::Update as usize].rcvd += 1;
     peer_refresh_holdtimer(peer);
     route_from_peer(peer, packet, bgp);
+
+    peer_send_update_test();
+
     State::Established
 }
 

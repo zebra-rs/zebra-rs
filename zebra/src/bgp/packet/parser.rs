@@ -1,5 +1,7 @@
 use super::*;
-use crate::bgp::attr::{Community, LargeCommunity};
+use crate::bgp::attr::{
+    As2PathAttr, As2Segment, As4PathAttr, As4Segment, AsSegmentHeader, Community, LargeCommunity,
+};
 use crate::bgp::{Afi, Safi};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
@@ -84,10 +86,10 @@ fn parse_bgp_open_packet(input: &[u8]) -> IResult<&[u8], OpenPacket> {
     Ok((input, packet))
 }
 
-fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], AsSegment> {
+fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
     let (input, header) = AsSegmentHeader::parse(input)?;
     let (input, asns) = count(be_u16, header.length as usize)(input)?;
-    let segment = AsSegment {
+    let segment = As2Segment {
         typ: header.typ,
         asn: asns.into_iter().collect(),
     };
@@ -97,8 +99,8 @@ fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], AsSegment> {
 fn parse_bgp_attr_as_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
     let (_, segments) = many0(parse_bgp_attr_as_segment)(attr)?;
-    let as_path = AsPathAttr { segments };
-    Ok((input, Attribute::AsPath(as_path)))
+    let as_path = As2PathAttr { segments };
+    Ok((input, Attribute::As2Path(as_path)))
 }
 
 fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {

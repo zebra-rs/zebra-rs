@@ -1,3 +1,6 @@
+pub mod aspath;
+pub use aspath::*;
+
 pub mod community;
 pub use community::*;
 

@@ -1,4 +1,4 @@
-use super::{BgpHeader, NotificationPacket, OpenPacket};
+use super::{Attribute, BgpHeader, NotificationPacket, OpenPacket, UpdatePacket};
 use bytes::{BufMut, BytesMut};
 
 impl From<BgpHeader> for BytesMut {
@@ -28,6 +28,46 @@ impl From<OpenPacket> for BytesMut {
             cap.encode(&mut buf);
         }
         buf[op_param_pos] = (buf.len() - op_param_pos - 1) as u8;
+
+        const LENGTH_POS: std::ops::Range<usize> = 16..18;
+        let length: u16 = buf.len() as u16;
+        buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+
+        buf
+    }
+}
+
+impl From<UpdatePacket> for BytesMut {
+    fn from(update: UpdatePacket) -> Self {
+        let mut buf = BytesMut::new();
+        let header: BytesMut = update.header.into();
+        buf.put(&header[..]);
+
+        // Withdraw.
+        if !update.ipv4_withdraw.is_empty() {
+            return buf;
+        } else {
+            buf.put_u16(0u16);
+        }
+
+        // Attributes.
+        let attr_len_pos = buf.len();
+        println!("attr_len_pos {}", attr_len_pos);
+        buf.put_u16(0u16);
+        let _attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
+
+        for attr in update.attrs.iter() {
+            match attr {
+                Attribute::Origin(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::NextHop(attr) => {
+                    attr.encode(&mut buf);
+                }
+                _ => {}
+            }
+            println!("{:?}", attr)
+        }
 
         const LENGTH_POS: std::ops::Range<usize> = 16..18;
         let length: u16 = buf.len() as u16;

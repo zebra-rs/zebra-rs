@@ -1,4 +1,4 @@
-use super::{Attribute, BgpHeader};
+use super::{Attribute, BgpHeader, BgpType, BGP_HEADER_LEN};
 use ipnet::Ipv4Net;
 use nom_derive::*;
 
@@ -11,4 +11,15 @@ pub struct UpdatePacket {
     pub ipv4_update: Vec<Ipv4Net>,
     #[nom(Ignore)]
     pub ipv4_withdraw: Vec<Ipv4Net>,
+}
+
+impl UpdatePacket {
+    pub fn new() -> Self {
+        Self {
+            header: BgpHeader::new(BgpType::Update, BGP_HEADER_LEN),
+            attrs: Vec::new(),
+            ipv4_update: Vec::new(),
+            ipv4_withdraw: Vec::new(),
+        }
+    }
 }

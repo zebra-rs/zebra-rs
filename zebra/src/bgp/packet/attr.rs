@@ -1,7 +1,9 @@
 #![allow(dead_code)]
-use super::{As4PathAttr, AsPathAttr, ExtendedComAttr};
-use crate::bgp::attr::{Community, LargeCommunity};
+use super::ExtendedComAttr;
+use crate::bgp::attr::{As2PathAttr, As4PathAttr, Community, LargeCommunity};
 use crate::bgp::{Afi, Safi};
+use bitflags::bitflags;
+use bytes::{BufMut, BytesMut};
 use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
@@ -35,7 +37,7 @@ newtype_enum! {
 #[derive(Clone, Debug)]
 pub enum Attribute {
     Origin(OriginAttr),
-    AsPath(AsPathAttr),
+    As2Path(As2PathAttr),
     As4Path(As4PathAttr),
     NextHop(NextHopAttr),
     Med(MedAttr),
@@ -64,14 +66,45 @@ impl AttributeHeader {
     }
 }
 
+bitflags! {
+    pub struct AttributeFlags: u8 {
+        const OPTIONAL = 0x80;
+        const TRANSITIVE = 0x40;
+        const PARTIAL = 0x20;
+        const EXTENDED = 0x10;
+    }
+}
+
+pub const ORIGIN_IGP: u8 = 0;
+pub const ORIGIN_EGP: u8 = 1;
+pub const ORIGIN_INCOMPLETE: u8 = 2;
+
 #[derive(Clone, Debug, NomBE)]
 pub struct OriginAttr {
     pub origin: u8,
 }
 
+impl OriginAttr {
+    pub fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(AttributeFlags::TRANSITIVE.bits());
+        buf.put_u8(AttributeType::Origin.0);
+        buf.put_u8(1u8);
+        buf.put_u8(self.origin);
+    }
+}
+
 #[derive(Clone, Debug, NomBE)]
 pub struct NextHopAttr {
     pub next_hop: [u8; 4],
+}
+
+impl NextHopAttr {
+    pub fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(AttributeFlags::TRANSITIVE.bits());
+        buf.put_u8(AttributeType::NextHop.0);
+        buf.put_u8(4u8);
+        buf.put(&self.next_hop[..]);
+    }
 }
 
 #[derive(Clone, Debug, NomBE)]

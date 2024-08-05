@@ -1,4 +1,4 @@
-pub mod aspath;
+//pub mod aspath;
 pub mod attr;
 pub mod bgp;
 pub mod encode;
@@ -12,7 +12,7 @@ pub mod update;
 pub mod many;
 pub use many::many0;
 
-pub use aspath::*;
+//pub use aspath::*;
 pub use attr::*;
 pub use bgp::*;
 pub use extended::*;
