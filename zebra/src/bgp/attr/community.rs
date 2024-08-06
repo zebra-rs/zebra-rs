@@ -39,13 +39,13 @@ impl Community {
 
 impl fmt::Display for Community {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let val = self
+        let v = self
             .0
             .iter()
             .map(|x| CommunityValue(*x).to_str())
             .collect::<Vec<String>>()
             .join(" ");
-        write!(f, "{val}")
+        write!(f, "{v}")
     }
 }
 

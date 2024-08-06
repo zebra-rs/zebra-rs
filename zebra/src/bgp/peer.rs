@@ -393,7 +393,7 @@ fn peer_send_update_test() {
     let ipv4net: Ipv4Net = "1.1.1.1/32".parse().unwrap();
     update.ipv4_update.push(ipv4net);
 
-    let bytes: BytesMut = update.into();
+    let _bytes: BytesMut = update.into();
 }
 
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {

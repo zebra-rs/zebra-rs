@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use super::ExtendedComAttr;
-use crate::bgp::attr::{As2PathAttr, As4PathAttr, Community, LargeCommunity};
+use crate::bgp::attr::{As2Path, As4Path, Community, LargeCommunity};
 use crate::bgp::{Afi, Safi};
 use bitflags::bitflags;
 use bytes::{BufMut, BytesMut};
@@ -37,8 +37,8 @@ newtype_enum! {
 #[derive(Clone, Debug)]
 pub enum Attribute {
     Origin(OriginAttr),
-    As2Path(As2PathAttr),
-    As4Path(As4PathAttr),
+    As2Path(As2Path),
+    As4Path(As4Path),
     NextHop(NextHopAttr),
     Med(MedAttr),
     LocalPref(LocalPrefAttr),

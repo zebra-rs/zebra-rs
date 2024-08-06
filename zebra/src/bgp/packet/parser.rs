@@ -1,6 +1,6 @@
 use super::*;
 use crate::bgp::attr::{
-    As2PathAttr, As2Segment, As4PathAttr, As4Segment, AsSegmentHeader, Community, LargeCommunity,
+    As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader, Community, LargeCommunity,
 };
 use crate::bgp::{Afi, Safi};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -79,14 +79,26 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
 }
 
 fn parse_bgp_open_packet(input: &[u8]) -> IResult<&[u8], OpenPacket> {
-    println!("Parse Open");
     let (input, mut packet) = OpenPacket::parse(input)?;
+    let (input, len) = if packet.opt_param_len == 255 {
+        let (input, ext) = OpenExtended::parse(input)?;
+        if ext.non_ext_op_type != 255 {
+            // TODO Error.
+        }
+        (input, ext.ext_opt_parm_len)
+    } else {
+        (input, packet.opt_param_len as u16)
+    };
+    // Check optional open parameter length.
+    if input.len() != len as usize {
+        // TODO: Error.
+    }
     let (input, mut caps) = many0(parse_bgp_capability_packet)(input)?;
     packet.caps.append(&mut caps);
     Ok((input, packet))
 }
 
-fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
+fn parse_bgp_attr_as2_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
     let (input, header) = AsSegmentHeader::parse(input)?;
     let (input, asns) = count(be_u16, header.length as usize)(input)?;
     let segment = As2Segment {
@@ -96,10 +108,10 @@ fn parse_bgp_attr_as_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
     Ok((input, segment))
 }
 
-fn parse_bgp_attr_as_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
+fn parse_bgp_attr_as2_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, segments) = many0(parse_bgp_attr_as_segment)(attr)?;
-    let as_path = As2PathAttr { segments };
+    let (_, segments) = many0(parse_bgp_attr_as2_segment)(attr)?;
+    let as_path = As2Path { segments };
     Ok((input, Attribute::As2Path(as_path)))
 }
 
@@ -116,7 +128,7 @@ fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
 fn parse_bgp_attr_as4_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
     let (_, segments) = many0(parse_bgp_attr_as4_segment)(attr)?;
-    let as_path = As4PathAttr { segments };
+    let as_path = As4Path { segments };
     Ok((input, Attribute::As4Path(as_path)))
 }
 
@@ -188,7 +200,7 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
             if as4 {
                 parse_bgp_attr_as4_path(input, attr_len)
             } else {
-                parse_bgp_attr_as_path(input, attr_len)
+                parse_bgp_attr_as2_path(input, attr_len)
             }
         }
         AttributeType::NextHop => map(NextHopAttr::parse, Attribute::NextHop)(input),
