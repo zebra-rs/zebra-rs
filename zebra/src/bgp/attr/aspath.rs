@@ -1,11 +1,16 @@
+use crate::bgp::packet::{AttributeFlags, AttributeType};
+
 use super::aspath_token::{tokenizer, Token};
+use bytes::{BufMut, BytesMut};
 use nom_derive::*;
+use std::fmt;
 use std::str::FromStr;
 
 pub const AS_SET: u8 = 1;
 pub const AS_SEQUENCE: u8 = 2;
 pub const AS_CONFED_SEQUENCE: u8 = 3;
 pub const AS_CONFED_SET: u8 = 4;
+
 #[derive(Debug, NomBE)]
 pub struct AsSegmentHeader {
     pub typ: u8,
@@ -29,20 +34,68 @@ pub struct As4Segment {
     pub asn: Vec<u32>,
 }
 
+pub fn asn_to_string(val: u32) -> String {
+    if val > 65535 {
+        let hval: u32 = (val & 0xFFFF0000) >> 16;
+        let lval: u32 = val & 0x0000FFFF;
+        hval.to_string() + "." + &lval.to_string()
+    } else {
+        val.to_string()
+    }
+}
+
+impl fmt::Display for As4Segment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let v = self
+            .asn
+            .iter()
+            .map(|x| asn_to_string(*x))
+            .collect::<Vec<String>>()
+            .join(" ");
+        match self.typ {
+            AS_SET => {
+                write!(f, "{{{v}}}")
+            }
+            AS_CONFED_SEQUENCE => {
+                write!(f, "({v})")
+            }
+            AS_CONFED_SET => {
+                write!(f, "[{v}]")
+            }
+            _ => {
+                write!(f, "{v}")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct As4Path {
     pub segments: Vec<As4Segment>,
 }
 
+impl fmt::Display for As4Path {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let v = self
+            .segments
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<String>>()
+            .join(" ");
+        write!(f, "{v}")
+    }
+}
+
 impl FromStr for As4Path {
     type Err = ();
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut aspath = As4Path {
             segments: Vec::new(),
         };
         let tokens = tokenizer(String::from(s)).unwrap();
         let mut segment_type = AS_SEQUENCE;
-        let mut current_segment = As4Segment {
+        let mut segment = As4Segment {
             typ: segment_type,
             asn: Vec::new(),
         };
@@ -50,21 +103,21 @@ impl FromStr for As4Path {
         for token in tokens.iter() {
             match token {
                 Token::As(asn) => {
-                    current_segment.asn.push(*asn);
+                    segment.asn.push(*asn);
                 }
                 Token::AsSetStart => {
                     if segment_type != AS_SEQUENCE {
                         return Err(());
                     }
                     segment_type = AS_SET;
-                    if !current_segment.asn.is_empty() {
-                        aspath.segments.push(current_segment);
-                        current_segment = As4Segment {
+                    if !segment.asn.is_empty() {
+                        aspath.segments.push(segment);
+                        segment = As4Segment {
                             typ: segment_type,
                             asn: Vec::new(),
                         };
                     } else {
-                        current_segment.typ = segment_type;
+                        segment.typ = segment_type;
                     }
                 }
                 Token::AsSetEnd => {
@@ -72,14 +125,14 @@ impl FromStr for As4Path {
                         return Err(());
                     }
                     segment_type = AS_SEQUENCE;
-                    if !current_segment.asn.is_empty() {
-                        aspath.segments.push(current_segment);
-                        current_segment = As4Segment {
+                    if !segment.asn.is_empty() {
+                        aspath.segments.push(segment);
+                        segment = As4Segment {
                             typ: segment_type,
                             asn: Vec::new(),
                         };
                     } else {
-                        current_segment.typ = segment_type;
+                        segment.typ = segment_type;
                     }
                 }
                 Token::AsConfedSeqStart => {
@@ -87,14 +140,14 @@ impl FromStr for As4Path {
                         return Err(());
                     }
                     segment_type = AS_CONFED_SEQUENCE;
-                    if !current_segment.asn.is_empty() {
-                        aspath.segments.push(current_segment);
-                        current_segment = As4Segment {
+                    if !segment.asn.is_empty() {
+                        aspath.segments.push(segment);
+                        segment = As4Segment {
                             typ: segment_type,
                             asn: Vec::new(),
                         };
                     } else {
-                        current_segment.typ = segment_type;
+                        segment.typ = segment_type;
                     }
                 }
                 Token::AsConfedSeqEnd => {
@@ -102,14 +155,14 @@ impl FromStr for As4Path {
                         return Err(());
                     }
                     segment_type = AS_SEQUENCE;
-                    if !current_segment.asn.is_empty() {
-                        aspath.segments.push(current_segment);
-                        current_segment = As4Segment {
+                    if !segment.asn.is_empty() {
+                        aspath.segments.push(segment);
+                        segment = As4Segment {
                             typ: segment_type,
                             asn: Vec::new(),
                         };
                     } else {
-                        current_segment.typ = segment_type;
+                        segment.typ = segment_type;
                     }
                 }
                 Token::AsConfedSetStart => {
@@ -117,14 +170,14 @@ impl FromStr for As4Path {
                         return Err(());
                     }
                     segment_type = AS_CONFED_SET;
-                    if !current_segment.asn.is_empty() {
-                        aspath.segments.push(current_segment);
-                        current_segment = As4Segment {
+                    if !segment.asn.is_empty() {
+                        aspath.segments.push(segment);
+                        segment = As4Segment {
                             typ: segment_type,
                             asn: Vec::new(),
                         };
                     } else {
-                        current_segment.typ = segment_type;
+                        segment.typ = segment_type;
                     }
                 }
                 Token::AsConfedSetEnd => {
@@ -132,26 +185,33 @@ impl FromStr for As4Path {
                         return Err(());
                     }
                     segment_type = AS_SEQUENCE;
-                    if !current_segment.asn.is_empty() {
-                        aspath.segments.push(current_segment);
-                        current_segment = As4Segment {
+                    if !segment.asn.is_empty() {
+                        aspath.segments.push(segment);
+                        segment = As4Segment {
                             typ: segment_type,
                             asn: Vec::new(),
                         };
                     } else {
-                        current_segment.typ = segment_type;
+                        segment.typ = segment_type;
                     }
                 }
             }
         }
 
-        if !current_segment.asn.is_empty() {
-            aspath.segments.push(current_segment);
+        if !segment.asn.is_empty() {
+            aspath.segments.push(segment);
         }
 
         Ok(aspath)
     }
 }
+
+// impl As4Path {
+//     fn encode(&self, buf: &mut BytesMut) {
+//         buf.put_u8(AttributeFlags::TRANSITIVE.bits());
+//         buf.put_u8(AttributeType::AsPath.0);
+//     }
+// }
 
 #[cfg(test)]
 mod test {
@@ -159,8 +219,17 @@ mod test {
 
     #[test]
     fn parse() {
-        let aspath: As4Path = As4Path::from_str("1 2 3").unwrap();
-        println!("aspath {:?}", aspath);
+        let aspath: As4Path = As4Path::from_str("1 2 3 65536").unwrap();
+        println!("aspath {:}", aspath);
+
+        let aspath: As4Path = As4Path::from_str("1 2 3 {4} 4294967295").unwrap();
+        println!("aspath {:}", aspath);
+
+        let aspath: As4Path = As4Path::from_str("1 2 3 [4 5] 6").unwrap();
+        println!("aspath {:}", aspath);
+
+        let aspath: As4Path = As4Path::from_str("1 2 3 [4 5] 6 (7)").unwrap();
+        println!("aspath {:}", aspath);
     }
 }
 

@@ -286,6 +286,14 @@ mod test {
     }
 
     #[test]
+    fn to_string() {
+        let com = Community::from_str("no-export 100:10 100").unwrap();
+        let string = com.to_string();
+
+        assert_eq!(string, "0:100 100:10 no-export");
+    }
+
+    #[test]
     fn contains() {
         let com = Community::from_str("no-export 100:10 100").unwrap();
         if !com.contains(&100u32) {

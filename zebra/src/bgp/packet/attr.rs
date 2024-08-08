@@ -57,7 +57,7 @@ pub type Attrs = Vec<Attribute>;
 #[derive(Debug, NomBE)]
 pub struct AttributeHeader {
     pub flags: u8,
-    pub type_code: u8,
+    pub type_code: AttributeType,
 }
 
 impl AttributeHeader {
@@ -70,9 +70,19 @@ bitflags! {
     pub struct AttributeFlags: u8 {
         const OPTIONAL = 0x80;
         const TRANSITIVE = 0x40;
-        const PARTIAL = 0x20;
+        const WELL_KNOWN = 0x20;
         const EXTENDED = 0x10;
     }
+}
+
+pub fn attribute_flag_display(flags: AttributeFlags) {
+    if flags.contains(AttributeFlags::OPTIONAL) {
+        print!(" OPTIONAL");
+    }
+    if flags.contains(AttributeFlags::TRANSITIVE) {
+        print!(" TRANSITIVE");
+    }
+    println!("");
 }
 
 pub const ORIGIN_IGP: u8 = 0;

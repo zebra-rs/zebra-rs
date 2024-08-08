@@ -2,6 +2,7 @@ use super::*;
 use crate::bgp::attr::{
     As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader, Community, LargeCommunity,
 };
+use crate::bgp::packet::attr::AttributeFlags;
 use crate::bgp::{Afi, Safi};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
@@ -194,7 +195,10 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
     } else {
         ((exts[0] as u16) << 8) + exts[1] as u16
     };
-    match AttributeType(header.type_code) {
+    println!("AttributeType {}", header.type_code);
+    let flags = AttributeFlags::from_bits(header.flags).unwrap();
+    println!("AttributeHeader {:?}", attribute_flag_display(flags));
+    match header.type_code {
         AttributeType::Origin => map(OriginAttr::parse, Attribute::Origin)(input),
         AttributeType::AsPath => {
             if as4 {
