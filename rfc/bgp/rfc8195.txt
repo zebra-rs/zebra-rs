@@ -1,0 +1,843 @@
+
+
+
+
+
+
+Internet Engineering Task Force (IETF)                       J. Snijders
+Request for Comments: 8195                                    J. Heasley
+Category: Informational                                              NTT
+ISSN: 2070-1721                                               M. Schmidt
+                                                                 i3D.net
+                                                               June 2017
+
+
+                      Use of BGP Large Communities
+
+Abstract
+
+   This document presents examples and inspiration for operator
+   application of BGP Large Communities.  Based on operational
+   experience with BGP Communities, this document suggests logical
+   categories of BGP Large Communities and demonstrates an orderly
+   manner of organizing community values within them to achieve typical
+   goals in routing policy.  Any operator can consider using the
+   concepts presented as the basis for their own BGP Large Communities
+   repertoire.
+
+Status of This Memo
+
+   This document is not an Internet Standards Track specification; it is
+   published for informational purposes.
+
+   This document is a product of the Internet Engineering Task Force
+   (IETF).  It represents the consensus of the IETF community.  It has
+   received public review and has been approved for publication by the
+   Internet Engineering Steering Group (IESG).  Not all documents
+   approved by the IESG are a candidate for any level of Internet
+   Standard; see Section 2 of RFC 7841.
+
+   Information about the current status of this document, any errata,
+   and how to provide feedback on it may be obtained at
+   http://www.rfc-editor.org/info/rfc8195.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 1]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+Copyright Notice
+
+   Copyright (c) 2017 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+   2.  The Design Overview . . . . . . . . . . . . . . . . . . . . .   3
+     2.1.  Informational Communities . . . . . . . . . . . . . . . .   4
+     2.2.  Action Communities  . . . . . . . . . . . . . . . . . . .   5
+   3.  Examples of Informational Communities . . . . . . . . . . . .   5
+     3.1.  Location  . . . . . . . . . . . . . . . . . . . . . . . .   5
+       3.1.1.  An ISO 3166-1 Numeric Function  . . . . . . . . . . .   6
+       3.1.2.  A UN M.49 Region Function . . . . . . . . . . . . . .   6
+     3.2.  Relation Function . . . . . . . . . . . . . . . . . . . .   7
+     3.3.  Combining Informational Communities . . . . . . . . . . .   7
+   4.  Examples of Action Communities  . . . . . . . . . . . . . . .   7
+     4.1.  Selective NO_EXPORT . . . . . . . . . . . . . . . . . . .   7
+       4.1.1.  ASN-Based Selective NO_EXPORT . . . . . . . . . . . .   8
+       4.1.2.  Location-Based Selective NO_EXPORT  . . . . . . . . .   8
+     4.2.  Selective AS_PATH Prepending  . . . . . . . . . . . . . .   9
+       4.2.1.  ASN-Based Selective AS_PATH Prepending  . . . . . . .   9
+       4.2.2.  Location-Based Selective AS_PATH Prepending . . . . .  10
+     4.3.  Manipulation of the LOCAL_PREF Attribute  . . . . . . . .  10
+       4.3.1.  Global Manipulation of LOCAL_PREF . . . . . . . . . .  11
+       4.3.2.  Region-Based Manipulation of LOCAL_PREF . . . . . . .  11
+       4.3.3.  Note of Caution for LOCAL_PREF Functions  . . . . . .  12
+     4.4.  Route Server Prefix Distribution Control  . . . . . . . .  12
+   5.  Security Considerations . . . . . . . . . . . . . . . . . . .  13
+   6.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  14
+   7.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  14
+     7.1.  Normative References  . . . . . . . . . . . . . . . . . .  14
+     7.2.  Informative References  . . . . . . . . . . . . . . . . .  14
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  15
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  15
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 2]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+1.  Introduction
+
+   BGP Large Communities [RFC8092] provide a mechanism to signal opaque
+   information between and within Autonomous Systems (ASes).  In very
+   much the same way that [RFC1998] provides a concrete real-world
+   application for BGP Communities [RFC1997], this document presents
+   examples of how operators might utilize BGP Large Communities to
+   achieve various goals.  This document draws on the experience of
+   operator communities such as the North American Network Operators'
+   Group (NANOG) <https://www.nanog.org/> and the Netherlands Network
+   Operator Group (NLNOG) <https://nlnog.net/>.
+
+2.  The Design Overview
+
+   BGP Large Communities are composed of three 4-octet fields.  The
+   first is the Global Administrator (GA) field, whose value is the
+   Autonomous System Number (ASN) of the AS that has defined the meaning
+   of the remaining two 4-octet fields, known as "Local Data Part 1" and
+   "Local Data Part 2".  This document describes an approach where the
+   "Local Data Part 1" field contains a function identifier and the
+   "Local Data Part 2" contains a parameter value.  Using the canonical
+   notation this format can be summarized as "ASN:Function:Parameter".
+
+                 +----------------------+---------------+
+                 |       RFC 8092       | this document |
+                 +----------------------+---------------+
+                 | Global Administrator |      ASN      |
+                 |  Local Data Part 1   |    Function   |
+                 |  Local Data Part 2   |   Parameter   |
+                 +----------------------+---------------+
+
+                          Table 1: Field Mapping
+
+   The table above shows a mapping table between the fields in BGP Large
+   Communities [RFC8092] and this document.
+
+   In contemporary deployments of both BGP Communities [RFC1997] and BGP
+   Large Communities [RFC8092], the function of a community can be
+   divided into two categories:
+
+   o  Informational Communities
+
+   o  Action Communities
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 3]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+   Throughout the document, a topology of four ASes is used to
+   illustrate the use of communities in the following configuration:
+
+           AS 65551
+               |
+               ^
+               |
+           AS 64497
+             /  \
+            ^    \
+           /      ^
+      AS 64498     \
+          |        |
+          `<->- AS 64499
+
+   AS 64497 obtains transit services from (is a customer of) AS 65551, a
+   4-octet ASN.  AS 64497 provides transit services to both AS 64498 and
+   AS 64499.  AS 64498 and AS 64499 maintain a peering relationship in
+   which they only exchange their customer routes.
+
+   The opaque nature of BGP Large Communities allows for rapid
+   deployment of new features or changes to their routing policy that
+   perform an action.  Operators are encouraged to publicly publish and
+   maintain documentation on the purpose of each BGP Large Community,
+   both Informational and Action, that they support or that are visible
+   in BGP RIBs.
+
+2.1.  Informational Communities
+
+   Informational Communities are labels for attributes such as the
+   origin of the route announcement, the nature of the relation with an
+   External BGP (EBGP) neighbor, or the intended propagation audience.
+   Informational Communities can also assist in providing valuable
+   information for day-to-day network operations such as debugging or
+   capacity planning.
+
+   The Global Administrator field is set to the ASN of the network that
+   tags the routes with the Informational Communities.  For example, AS
+   64497 might add a community with the GA 64497 to a route accepted
+   from an Internal BGP (IBGP) or EBGP neighbor as a means of signaling
+   that it was imported in a certain geographical region.
+
+   In general, the intended audiences of Informational Communities are
+   downstream networks and the GA itself, but any AS could benefit from
+   receiving these communities.
+
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 4]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+2.2.  Action Communities
+
+   Action Communities are added as labels to request that a route be
+   treated in a particular way within an AS.  The operator of the AS
+   defines a routing policy that adjusts path attributes based on the
+   community.  For example, the route's propagation characteristics, the
+   LOCAL_PREF (local preference), the next hop, or the number of AS_PATH
+   prepends to be added when it is received or propagated can be
+   changed.
+
+   The Global Administrator field is set to the ASN that has defined the
+   functionality of that BGP Large Community and is the ASN that is
+   expected to perform the action.  For example, AS 64499 might label a
+   route with a BGP Large Community containing GA 64497 to request that
+   AS 64497 perform a predefined action on that route.
+
+   In general, the intended audience of Action Communities are transit
+   providers taking action on behalf of a customer or the GA itself, but
+   any AS could take action if they choose and any AS could add an
+   Action Community with the GA of a non-adjacent ASN.  However, note
+   that an Action Community could also be Informational.  Its presence
+   is an indicator that the GA may have performed the action and that an
+   AS in the AS_PATH requested it.
+
+   Operators are recommended to publish the relative order in which
+   Action Communities (both BGP Communities and BGP Large Communities)
+   are processed in their routing policy.
+
+3.  Examples of Informational Communities
+
+3.1.  Location
+
+   An AS, AS 64497 in these examples, may inform other networks about
+   the geographical region where AS 64497 imported a route by labeling
+   it with BGP Large Communities following one of the following schemes
+   or a combination of them.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 5]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+3.1.1.  An ISO 3166-1 Numeric Function
+
+   AS 64497 could assign a value of 1 to the Function field to designate
+   the content of the Parameter field as an ISO 3166-1 numeric country
+   identifier <https://www.iso.org/iso-3166-country-codes.html>.
+
+   +---------------------+---------------------------------------------+
+   | BGP Large Community | Description                                 |
+   +---------------------+---------------------------------------------+
+   |     64497:1:528     | Route learned in the Netherlands            |
+   |     64497:1:392     | Route learned in Japan                      |
+   |     64497:1:840     | Route learned in the United States of       |
+   |                     | America                                     |
+   +---------------------+---------------------------------------------+
+
+                    Table 2: Informational: ISO 3166-1
+
+   The table above shows example documentation for Informational
+   Communities deployed by AS 64497 to describe the location where a
+   route was imported using ISO 3166-1 numeric identifiers.
+
+3.1.2.  A UN M.49 Region Function
+
+   AS 64497 could assign a value of 2 to the Function field to designate
+   the content of the Parameter field as the M.49 numeric code published
+   by the United Nations Statistics Division (UNSD)
+   <https://unstats.un.org/unsd/methodology/m49/> for macro-geographical
+   (continental) regions, geographical sub-regions, or selected economic
+   and other groupings.
+
+          +---------------------+-------------------------------+
+          | BGP Large Community | Description                   |
+          +---------------------+-------------------------------+
+          |      64497:2:2      | Route learned in Africa       |
+          |      64497:2:9      | Route learned in Oceania      |
+          |     64497:2:145     | Route learned in Western Asia |
+          |     64497:2:150     | Route learned in Europe       |
+          +---------------------+-------------------------------+
+
+                   Table 3: Informational: UNSD Regions
+
+   The table above shows example documentation for Informational
+   Communities deployed by AS 64497 to describe the location where a
+   route was imported using M.49 numeric codes published by the UNSD.
+
+
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 6]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+3.2.  Relation Function
+
+   An AS, AS 64497 in this example, could assign a value of 3 to the
+   Function field to designate the content of the Parameter field as a
+   number indicating whether the route originated inside its own network
+   or was learned externally, and if learned externally, it might
+   simultaneously characterize the nature of the relation with that
+   specific EBGP neighbor.
+
+      +---------------------+---------------------------------------+
+      | BGP Large Community | Description                           |
+      +---------------------+---------------------------------------+
+      |      64497:3:1      | Route originated internally           |
+      |      64497:3:2      | Route learned from a customer         |
+      |      64497:3:3      | Route learned from a peering partner  |
+      |      64497:3:4      | Route learned from a transit provider |
+      +---------------------+---------------------------------------+
+
+                     Table 4: Informational: Relation
+
+   The table above shows example documentation for Informational
+   Communities deployed by AS 64497 to describe the relation to the ASN
+   from which the route was learned.
+
+3.3.  Combining Informational Communities
+
+   A route may be labeled with multiple Informational Communities.  For
+   example, a route learned in the Netherlands from a customer might be
+   labeled with communities 64497:1:528, 64497:2:150, and 64497:3:2 at
+   the same time.
+
+4.  Examples of Action Communities
+
+4.1.  Selective NO_EXPORT
+
+   As part of an agreement, often a commercial transit agreement,
+   between AS 64497 and AS 64498, AS 64497 might expose BGP traffic-
+   engineering functions to AS 64498.  One such BGP traffic-engineering
+   function could be selective NO_EXPORT, which is the selective
+   filtering of a route learned from one AS, AS 64498, to certain EBGP
+   neighbors of the GA, AS 64497.
+
+
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 7]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+4.1.1.  ASN-Based Selective NO_EXPORT
+
+   AS 64497 could assign a value of 4 to the Function field to designate
+   the content of the Parameter field as a neighboring ASN to which a
+   route should not be propagated.
+
+         +---------------------+---------------------------------+
+         | BGP Large Community | Description                     |
+         +---------------------+---------------------------------+
+         |    64497:4:64498    | Do not export route to AS 64498 |
+         |    64497:4:64499    | Do not export route to AS 64499 |
+         |    64497:4:65551    | Do not export route to AS 65551 |
+         +---------------------+---------------------------------+
+
+                      Table 5: Action: ASN NO_EXPORT
+
+   The table above shows example documentation for Action Communities
+   deployed by AS 64497 to expose a BGP traffic-engineering function
+   that selectively prevents the propagation of routes to the
+   neighboring ASN specified in the Parameter field.
+
+4.1.2.  Location-Based Selective NO_EXPORT
+
+   AS 64497 could assign a value of 5 to the Function field to designate
+   the content of the Parameter field as an ISO 3166-1 numeric country
+   identifier within which a labeled route is not propagated to EBGP
+   neighbors.  However, this might not prevent one of those EBGP
+   neighbors from learning that route in another country and making it
+   available in the country specified by the BGP Large Community.
+
+   +-----------------+-------------------------------------------------+
+   |    BGP Large    | Description                                     |
+   |    Community    |                                                 |
+   +-----------------+-------------------------------------------------+
+   |   64497:5:528   | Do not export to EBGP neighbors in the          |
+   |                 | Netherlands                                     |
+   |   64497:5:392   | Do not export to EBGP neighbors in Japan        |
+   |   64497:5:840   | Do not export to EBGP neighbors in the United   |
+   |                 | States of America                               |
+   +-----------------+-------------------------------------------------+
+
+                   Table 6: Action: NO_EXPORT in Region
+
+   The table above shows example documentation for Action Communities
+   deployed by AS 64497 to expose a BGP traffic-engineering function
+   that selectively prevents the propagation of routes to all EBGP
+   neighbors in the geographical region specified in the Parameter
+   field.
+
+
+
+Snijders, et al.              Informational                     [Page 8]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+4.2.  Selective AS_PATH Prepending
+
+   As part of an agreement between AS 64497 and AS 64498, AS 64497 might
+   expose BGP traffic-engineering functions to AS 64498.  One such BGP
+   traffic-engineering function could be selective prepending of the
+   AS_PATH with AS 64497 to certain EBGP neighbors of AS 64497.
+
+4.2.1.  ASN-Based Selective AS_PATH Prepending
+
+   AS 64497 could assign a value of 6 to the Function field to designate
+   the content of the Parameter field as a neighboring ASN to which
+   prepending of the AS_PATH with AS 64497 is requested on propagation
+   of the route.  Additional AS_PATH prepending functions might also be
+   defined to support multiples of prepending, that is, two, three, or
+   more prepends of AS 64497.
+
+    +---------------------+------------------------------------------+
+    | BGP Large Community | Description                              |
+    +---------------------+------------------------------------------+
+    |    64497:6:64498    | Prepend 64497 once on export to AS 64498 |
+    |    64497:6:64499    | Prepend 64497 once on export to AS 64499 |
+    |    64497:6:65551    | Prepend 64497 once on export to AS 65551 |
+    +---------------------+------------------------------------------+
+
+                      Table 7: Action: Prepend to ASN
+
+   The table above shows example documentation for Action Communities
+   deployed by AS 64497 to expose a BGP traffic-engineering function
+   that selectively prepends the AS_PATH with AS 64497 when propagating
+   the route to the specified EBGP neighbor.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                     [Page 9]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+4.2.2.  Location-Based Selective AS_PATH Prepending
+
+   AS 64497 could assign a value of 7 to the Function field to designate
+   the content of the Parameter field as an ISO 3166-1 numeric country
+   identifier to which the prepending of the AS_PATH with AS 64497 is
+   requested on propagation of the route to all EBGP neighbors in that
+   region.
+
+   +-----------------+-------------------------------------------------+
+   |    BGP Large    | Description                                     |
+   |    Community    |                                                 |
+   +-----------------+-------------------------------------------------+
+   |   64497:7:528   | Prepend once to EBGP neighbors in the           |
+   |                 | Netherlands                                     |
+   |   64497:7:392   | Prepend once to EBGP neighbors in Japan         |
+   |   64497:7:840   | Prepend once to EBGP neighbors in the United    |
+   |                 | States of America                               |
+   +-----------------+-------------------------------------------------+
+
+                    Table 8: Action: Prepend in Region
+
+   The table above shows example documentation for Action Communities
+   deployed by AS 64497 to expose a BGP traffic-engineering function
+   that selectively prepends the AS_PATH with AS 64497 when propagating
+   the route to all EBGP neighbors in the geographical region specified
+   in the Parameter field.
+
+4.3.  Manipulation of the LOCAL_PREF Attribute
+
+   As part of an agreement between AS 64497 and AS 64498, AS 64497 might
+   expose BGP traffic-engineering functions to AS 64498.  One such BGP
+   traffic-engineering function might allow AS 64498 to manipulate the
+   value of the LOCAL_PREF attribute of routes learned from AS 64498
+   within AS 64497, even though the LOCAL_PREF attribute is
+   non-transitive and is not propagated to EBGP neighbors.
+
+   The LOCAL_PREF value of routes are locally significant within each AS
+   and are impossible to list in this document.  Instead, the typical
+   LOCAL_PREF values could be classified as a hierarchy, and a BGP Large
+   Community function could be exposed, allowing an EBGP neighbor to
+   affect the LOCAL_PREF value within the specified GA.  The following
+   example list defines the classes of routes in the order of descending
+   LOCAL_PREF value and assigns a function identifier that could be used
+   in the Function field of a BGP Large Community.
+
+
+
+
+
+
+
+Snijders, et al.              Informational                    [Page 10]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+   +----------+--------------------------------------------------------+
+   | Function | Preference Class                                       |
+   +----------+--------------------------------------------------------+
+   |    8     | Normal customer route                                  |
+   |    9     | Backup customer route                                  |
+   |    10    | Peering route                                          |
+   |    11    | Upstream transit route                                 |
+   |    12    | Fallback route, to be installed if no other path is    |
+   |          | available                                              |
+   +----------+--------------------------------------------------------+
+
+             Table 9: Action: Preference Function Identifiers
+
+4.3.1.  Global Manipulation of LOCAL_PREF
+
+   AS 64497 could place one of the previously defined Preference
+   Function Identifiers in the Function field and set the value 0 in the
+   Parameter field to designate that the LOCAL_PREF associated with that
+   function identifier should be applied for that route throughout the
+   whole AS.
+
+   +---------------------+---------------------------------------------+
+   | BGP Large Community | Description                                 |
+   +---------------------+---------------------------------------------+
+   |      64497:9:0      | Assign LOCAL_PREF for a customer backup     |
+   |                     | route                                       |
+   |      64497:10:0     | Assign LOCAL_PREF for a peering route       |
+   |      64497:12:0     | Assign LOCAL_PREF for a fallback route      |
+   +---------------------+---------------------------------------------+
+
+             Table 10: Action: Global LOCAL_PREF Manipulation
+
+   The table above shows example documentation for Action Communities
+   deployed by AS 64497 to expose a BGP traffic-engineering function
+   that allows a BGP neighbor to globally manipulate the LOCAL_PREF
+   attribute for the route within AS 64497.
+
+4.3.2.  Region-Based Manipulation of LOCAL_PREF
+
+   AS 64497 could place one of the previously defined Preference
+   Function Identifiers in the Function field and use a UN M.49 numeric
+   region identifier in the Parameter field to designate the
+   geographical region within which the non-default LOCAL_PREF
+   associated with that function identifier should be applied to the
+   route.  The value of the LOCAL_PREF attribute should not deviate from
+   the default for that route class in any region not specified by one
+   or more of these Action Communities.
+
+
+
+
+Snijders, et al.              Informational                    [Page 11]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+   +--------------+----------------------------------------------------+
+   |  BGP Large   | Description                                        |
+   |  Community   |                                                    |
+   +--------------+----------------------------------------------------+
+   |  64497:9:3   | Assign the LOCAL_PREF value equivalent to a        |
+   |              | customer backup class route on BGP routers in the  |
+   |              | North America region                               |
+   |  64497:10:5  | Assign the LOCAL_PREF value equivalent to a        |
+   |              | peering class route on BGP routers in the South    |
+   |              | America region                                     |
+   | 64497:12:142 | Assign the LOCAL_PREF value equivalent to a        |
+   |              | fallback class route on BGP routers in the Asia    |
+   |              | region                                             |
+   +--------------+----------------------------------------------------+
+
+            Table 11: Action: Regional LOCAL_PREF Manipulation
+
+   The table above shows example documentation for Action Communities
+   deployed by AS 64497 to expose a BGP traffic-engineering function
+   that allows a BGP neighbor to selectively manipulate the LOCAL_PREF
+   attribute within AS 64497 in the geographical region specified in the
+   Parameter field.
+
+4.3.3.  Note of Caution for LOCAL_PREF Functions
+
+   The LOCAL_PREF attribute strongly influences the BGP Decision
+   Process, which in turn affects the scope of route propagation.
+   Operators should take special care when using Action Communities that
+   decrease the LOCAL_PREF value, and the degree of preference, to a
+   value below that of another route class.  Some of the unintended BGP
+   states that might arise as a result of these traffic-engineering
+   decisions are described as "BGP Wedgies" in [RFC4264].
+
+4.4.  Route Server Prefix Distribution Control
+
+   Route servers [RFC7947] use BGP to broker network reachability
+   information among their clients.  As not all route server clients may
+   wish to interconnect with each other, the route server operator will
+   usually implement a mechanism to allow each client to control the
+   route server's export routing policy, as described in Section 4.6 of
+   [RFC7948].  One widely used mechanism is an adaption of "ASN-Based
+   Selective NO_EXPORT" (Section 4.1.1) that is specific to route
+   servers.
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                    [Page 12]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+   An example BGP Large Communities policy that enables client-
+   controlled prefix distribution for a route server operating as AS
+   64511 is outlined as follows:
+
+   +-------------------+-----------------------------------------------+
+   | BGP Large         | Description                                   |
+   | Community         |                                               |
+   +-------------------+-----------------------------------------------+
+   | 64511:0:peer-as   | Explicitly prevent announcement of route to   |
+   |                   | peer-as                                       |
+   | 64511:1:peer-as   | Explicitly announce route to peer-as          |
+   | 64511:0:0         | Do not announce route to any peers by default |
+   | 64511:1:0         | Announce route to all peers by default        |
+   +-------------------+-----------------------------------------------+
+
+        Table 12: Action: Route Server Prefix Distribution Control
+
+   Multiple BGP Large Community values can be used together to implement
+   fine-grained route distribution control.  For example, route server
+   client AS 64500 might wish to use a route server for interconnecting
+   to all other clients except AS 64509.  In this case, they would label
+   all their outbound routes to the route server with 64511:1:0 (to
+   announce to all clients by default) and 64511:0:64509 (to prevent
+   announcement to AS 64509).
+
+   Alternatively, route server client AS 64501 may have a selective
+   routing policy and may wish to interconnect with only AS 64505 and AS
+   64506.  This could be implemented by announcing routes labeled with
+   64511:0:0 (blocking all distribution by default) and 64511:1:64505,
+   64511:1:64506 to instruct the route server to force announcement to
+   those two ASNs.
+
+5.  Security Considerations
+
+   Operators should note the recommendations in Section 11 of "BGP
+   Operations and Security" [RFC7454] and handle BGP Large Communities
+   with their ASN in the Global Administrator field similarly.
+
+   In particular and in the same respect as BGP Communities [RFC1997],
+   operators should be cognizant that any Large Community can be carried
+   in a BGP UPDATE.  Operators should recognize that BGP neighbors,
+   particularly customers and customers of customers, may utilize
+   communities defined by other BGP neighbors of the operator.  They may
+   wish to send routes with Action Communities and receive routes with
+   Informational Communities to or from these other neighbors, and it is
+   beneficial to all to permit this.
+
+
+
+
+
+Snijders, et al.              Informational                    [Page 13]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+6.  IANA Considerations
+
+   This document does not require any IANA actions.
+
+7.  References
+
+7.1.  Normative References
+
+   [RFC1997]  Chandra, R., Traina, P., and T. Li, "BGP Communities
+              Attribute", RFC 1997, DOI 10.17487/RFC1997, August 1996,
+              <http://www.rfc-editor.org/info/rfc1997>.
+
+   [RFC7454]  Durand, J., Pepelnjak, I., and G. Doering, "BGP Operations
+              and Security", BCP 194, RFC 7454, DOI 10.17487/RFC7454,
+              February 2015, <http://www.rfc-editor.org/info/rfc7454>.
+
+   [RFC8092]  Heitz, J., Ed., Snijders, J., Ed., Patel, K., Bagdonas,
+              I., and N. Hilliard, "BGP Large Communities Attribute",
+              RFC 8092, DOI 10.17487/RFC8092, February 2017,
+              <http://www.rfc-editor.org/info/rfc8092>.
+
+7.2.  Informative References
+
+   [RFC1998]  Chen, E. and T. Bates, "An Application of the BGP
+              Community Attribute in Multi-home Routing", RFC 1998,
+              DOI 10.17487/RFC1998, August 1996,
+              <http://www.rfc-editor.org/info/rfc1998>.
+
+   [RFC4264]  Griffin, T. and G. Huston, "BGP Wedgies", RFC 4264,
+              DOI 10.17487/RFC4264, November 2005,
+              <http://www.rfc-editor.org/info/rfc4264>.
+
+   [RFC7947]  Jasinska, E., Hilliard, N., Raszuk, R., and N. Bakker,
+              "Internet Exchange BGP Route Server", RFC 7947,
+              DOI 10.17487/RFC7947, September 2016,
+              <http://www.rfc-editor.org/info/rfc7947>.
+
+   [RFC7948]  Hilliard, N., Jasinska, E., Raszuk, R., and N. Bakker,
+              "Internet Exchange BGP Route Server Operations", RFC 7948,
+              DOI 10.17487/RFC7948, September 2016,
+              <http://www.rfc-editor.org/info/rfc7948>.
+
+
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                    [Page 14]
+
+RFC 8195              Use of BGP Large Communities             June 2017
+
+
+Acknowledgments
+
+   The authors would like to gratefully acknowledge the insightful
+   comments, contributions, critique, and support from Adam Chappell,
+   Jonathan Stewart, Greg Hankins, Nick Hilliard, Will Hargrave, Randy
+   Bush, Shawn Morris, Jay Borkenhagen, and Stewart Bryant.
+
+Authors' Addresses
+
+   Job Snijders
+   NTT Communications
+   Theodorus Majofskistraat 100
+   Amsterdam  1065 SZ
+   The Netherlands
+
+   Email: job@ntt.net
+
+
+   John Heasley
+   NTT Communications
+   1111 NW 53rd Drive
+   Portland, OR  97210
+   United States of America
+
+   Email: heas@shrubbery.net
+
+
+   Martijn Schmidt
+   i3D.net
+   Rivium 1e Straat 1
+   Capelle aan den IJssel  2909 LE
+   The Netherlands
+
+   Email: martijnschmidt@i3d.net
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Snijders, et al.              Informational                    [Page 15]
+

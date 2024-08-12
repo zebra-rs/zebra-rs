@@ -13,6 +13,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Message {
     Event(Ipv4Addr, Event),
@@ -23,6 +24,7 @@ pub enum Message {
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Bgp, Args) -> String;
 
+#[allow(dead_code)]
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,

@@ -1,15 +1,14 @@
 #![allow(dead_code)]
-use super::{As4PathAttr, AsPathAttr, CommunityAttr, ExtendedComAttr, LargeComAttr};
 use crate::bgp::{Afi, Safi};
 use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 use std::net::Ipv6Addr;
 
-pub const BGP_ATTR_FLAG_OPTIONAL: u8 = 0x80;
-pub const BGP_ATTR_FLAG_TRNANSITIVE: u8 = 0x40;
-pub const BGP_ATTR_FLAG_WELL_KNOWN: u8 = 0x20;
-pub const BGP_ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
+use super::{
+    As2Path, As4Path, AtomicAggregate, Community, ExtCommunity, LargeCommunity, LocalPref, Med,
+    NextHopAttr, Origin,
+};
 
 #[derive(Debug, Eq, PartialEq, NomBE)]
 pub struct AttributeType(pub u8);
@@ -33,61 +32,24 @@ newtype_enum! {
 
 #[derive(Clone, Debug)]
 pub enum Attribute {
-    Origin(OriginAttr),
-    AsPath(AsPathAttr),
-    As4Path(As4PathAttr),
+    Origin(Origin),
+    As2Path(As2Path),
+    As4Path(As4Path),
     NextHop(NextHopAttr),
-    Med(MedAttr),
-    LocalPref(LocalPrefAttr),
-    AtomicAggregate(AtomicAggregateAttr),
-    Aggregator(AggregatorAttr),
+    Med(Med),
+    LocalPref(LocalPref),
+    AtomicAggregate(AtomicAggregate),
+    Aggregator2(Aggregator2Attr),
     Aggregator4(Aggregator4Attr),
-    Community(CommunityAttr),
+    Community(Community),
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
-    ExtendedCom(ExtendedComAttr),
-    LargeCom(LargeComAttr),
-}
-
-pub type Attrs = Vec<Attribute>;
-
-#[derive(Debug, NomBE)]
-pub struct AttributeHeader {
-    pub flags: u8,
-    pub type_code: u8,
-}
-
-impl AttributeHeader {
-    pub fn is_extended(&self) -> bool {
-        (self.flags & BGP_ATTR_FLAG_EXTENDED_LENGTH) != 0
-    }
+    ExtCommunity(ExtCommunity),
+    LargeCom(LargeCommunity),
 }
 
 #[derive(Clone, Debug, NomBE)]
-pub struct OriginAttr {
-    pub origin: u8,
-}
-
-#[derive(Clone, Debug, NomBE)]
-pub struct NextHopAttr {
-    pub next_hop: [u8; 4],
-}
-
-#[derive(Clone, Debug, NomBE)]
-pub struct MedAttr {
-    pub med: u32,
-}
-
-#[derive(Clone, Debug, NomBE)]
-pub struct LocalPrefAttr {
-    pub local_pref: u32,
-}
-
-#[derive(Clone, Debug, NomBE)]
-pub struct AtomicAggregateAttr {}
-
-#[derive(Clone, Debug, NomBE)]
-pub struct AggregatorAttr {
+pub struct Aggregator2Attr {
     pub asn: u16,
     pub ip: u32,
 }

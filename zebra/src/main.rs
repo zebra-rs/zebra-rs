@@ -8,6 +8,7 @@ use bgp::Bgp;
 mod rib;
 use rib::Rib;
 mod policy;
+
 use clap::Parser;
 
 #[derive(Parser)]
@@ -45,6 +46,8 @@ fn system_path(arg: &Arg) -> PathBuf {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arg = Arg::parse();
+
+    policy::PolicyInit();
 
     let mut rib = Rib::new()?;
 
