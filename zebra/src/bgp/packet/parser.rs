@@ -1,8 +1,9 @@
 use super::*;
 use crate::bgp::attr::{
-    As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader, Community, LargeCommunity,
+    Aggregator2Attr, Aggregator4Attr, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
+    AtomicAggregate, Attribute, AttributeFlags, AttributeType, Community, LargeCommunity,
+    LocalPref, Med, MpNlriAttr, MpNlriReachHeader, MpNlriUnreachHeader, NextHopAttr, Origin,
 };
-use crate::bgp::packet::attr::AttributeFlags;
 use crate::bgp::{Afi, Safi};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
@@ -187,19 +188,19 @@ fn parse_bgp_attr_large_com(input: &[u8], length: u16) -> IResult<&[u8], Attribu
 }
 
 fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
-    let (input, header) = AttributeHeader::parse(input)?;
-    let ext_len: usize = if header.is_extended() { 2 } else { 1 };
+    let (input, flags) = be_u8(input)?;
+    let flags = AttributeFlags::from_bits(flags).unwrap();
+    let (input, type_code) = AttributeType::parse(input)?;
+    let ext_len: usize = if flags.is_extended() { 2 } else { 1 };
     let (input, exts) = take(ext_len)(input)?;
     let attr_len = if exts.len() == 1 {
         exts[0] as u16
     } else {
         ((exts[0] as u16) << 8) + exts[1] as u16
     };
-    println!("AttributeType {}", header.type_code);
-    let flags = AttributeFlags::from_bits(header.flags).unwrap();
-    println!("AttributeHeader {:?}", attribute_flag_display(flags));
-    match header.type_code {
-        AttributeType::Origin => map(OriginAttr::parse, Attribute::Origin)(input),
+    println!("{} {}", type_code, flags);
+    let var_name = match type_code {
+        AttributeType::Origin => map(Origin::parse, Attribute::Origin)(input),
         AttributeType::AsPath => {
             if as4 {
                 parse_bgp_attr_as4_path(input, attr_len)
@@ -208,16 +209,16 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
             }
         }
         AttributeType::NextHop => map(NextHopAttr::parse, Attribute::NextHop)(input),
-        AttributeType::Med => map(MedAttr::parse, Attribute::Med)(input),
-        AttributeType::LocalPref => map(LocalPrefAttr::parse, Attribute::LocalPref)(input),
+        AttributeType::Med => map(Med::parse, Attribute::Med)(input),
+        AttributeType::LocalPref => map(LocalPref::parse, Attribute::LocalPref)(input),
         AttributeType::AtomicAggregate => {
-            map(AtomicAggregateAttr::parse, Attribute::AtomicAggregate)(input)
+            map(AtomicAggregate::parse, Attribute::AtomicAggregate)(input)
         }
         AttributeType::Aggregator => {
             if as4 {
                 map(Aggregator4Attr::parse, Attribute::Aggregator4)(input)
             } else {
-                map(AggregatorAttr::parse, Attribute::Aggregator)(input)
+                map(Aggregator2Attr::parse, Attribute::Aggregator2)(input)
             }
         }
         AttributeType::Community => parse_bgp_attr_community(input, attr_len),
@@ -225,10 +226,11 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
         AttributeType::MpUnreachNlri => parse_bgp_attr_mp_unreach(input, attr_len),
         AttributeType::LargeCom => parse_bgp_attr_large_com(input, attr_len),
         _ => Err(nom::Err::Error(make_error(input, ErrorKind::Tag))),
-    }
+    };
+    var_name
 }
 
-pub fn parse_bgp_attribute_as(as4: bool) -> impl Fn(&[u8]) -> IResult<&[u8], attr::Attribute> {
+pub fn parse_bgp_attribute_as(as4: bool) -> impl Fn(&[u8]) -> IResult<&[u8], Attribute> {
     move |i: &[u8]| parse_bgp_attribute(i, as4)
 }
 
@@ -242,13 +244,13 @@ fn parse_bgp_update_attribute(
     Ok((input, attrs))
 }
 
-fn plen2size(plen: u8) -> usize {
+pub fn nlri_psize(plen: u8) -> usize {
     ((plen + 7) / 8) as usize
 }
 
 pub fn parse_ipv4_prefix(input: &[u8]) -> IResult<&[u8], Ipv4Net> {
     let (input, plen) = be_u8(input)?;
-    let psize = plen2size(plen);
+    let psize = nlri_psize(plen);
     if input.len() < psize {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
     }
@@ -261,7 +263,7 @@ pub fn parse_ipv4_prefix(input: &[u8]) -> IResult<&[u8], Ipv4Net> {
 
 fn parse_bgp_nlri_ipv6_prefix(input: &[u8]) -> IResult<&[u8], Ipv6Net> {
     let (input, plen) = be_u8(input)?;
-    let psize = plen2size(plen);
+    let psize = nlri_psize(plen);
     if input.len() < psize {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
     }

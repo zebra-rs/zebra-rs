@@ -1,4 +1,12 @@
 #![allow(dead_code)]
+use super::attr::As4Path;
+use super::attr::Attribute;
+use super::attr::Community;
+use super::attr::LocalPref;
+use super::attr::Med;
+use super::attr::NextHopAttr;
+use super::attr::Origin;
+use super::attr::ORIGIN_IGP;
 use super::handler::Message;
 use super::packet::*;
 use super::route::route_from_peer;
@@ -13,6 +21,7 @@ use prefix_trie::PrefixMap;
 use serde::Serialize;
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -379,21 +388,36 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     State::Established
 }
 
-fn peer_send_update_test() {
+fn peer_send_update_test(peer: &mut Peer) {
     let mut update: UpdatePacket = UpdatePacket::new();
 
-    let origin = OriginAttr { origin: ORIGIN_EGP };
+    let origin = Origin::new(ORIGIN_IGP);
     update.attrs.push(Attribute::Origin(origin));
 
+    let aspath: As4Path = As4Path::from_str("1").unwrap();
+    update.attrs.push(Attribute::As4Path(aspath));
+
     let nexthop = NextHopAttr {
-        next_hop: [10, 255, 0, 65],
+        next_hop: [10, 211, 55, 2],
     };
     update.attrs.push(Attribute::NextHop(nexthop));
+
+    let med: Med = Med::new(123);
+    update.attrs.push(Attribute::Med(med));
+
+    let lpref: LocalPref = LocalPref::new(100u32);
+    update.attrs.push(Attribute::LocalPref(lpref));
+
+    let com = Community::from_str("100:10 100:20").unwrap();
+    update.attrs.push(Attribute::Community(com));
 
     let ipv4net: Ipv4Net = "1.1.1.1/32".parse().unwrap();
     update.ipv4_update.push(ipv4net);
 
-    let _bytes: BytesMut = update.into();
+    let bytes: BytesMut = update.into();
+
+    // Send update.
+    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
@@ -401,7 +425,7 @@ fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) ->
     peer_refresh_holdtimer(peer);
     route_from_peer(peer, packet, bgp);
 
-    peer_send_update_test();
+    peer_send_update_test(peer);
 
     State::Established
 }

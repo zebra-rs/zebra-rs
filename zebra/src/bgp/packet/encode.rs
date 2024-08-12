@@ -1,4 +1,6 @@
-use super::{Attribute, BgpHeader, NotificationPacket, OpenPacket, UpdatePacket};
+use crate::bgp::{attr::Attribute, packet::nlri_psize};
+
+use super::{BgpHeader, NotificationPacket, OpenPacket, UpdatePacket};
 use bytes::{BufMut, BytesMut};
 
 impl From<BgpHeader> for BytesMut {
@@ -54,32 +56,48 @@ impl From<UpdatePacket> for BytesMut {
         buf.put(&header[..]);
 
         // Withdraw.
-        if !update.ipv4_withdraw.is_empty() {
-            return buf;
-        } else {
+        if update.ipv4_withdraw.is_empty() {
             buf.put_u16(0u16);
+        } else {
+            return buf;
         }
 
         // Attributes.
         let attr_len_pos = buf.len();
-        println!("attr_len_pos {}", attr_len_pos);
-        buf.put_u16(0u16);
-        let _attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
+        buf.put_u16(0u16); // Placeholder
+        let attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
 
         for attr in update.attrs.iter() {
             match attr {
                 Attribute::Origin(attr) => {
                     attr.encode(&mut buf);
                 }
+                Attribute::As4Path(attr) => {
+                    attr.encode(&mut buf);
+                }
                 Attribute::NextHop(attr) => {
                     attr.encode(&mut buf);
                 }
-                // Attribute::As4Path(attr) => {
-                //     attr.encode(&mut buf);
-                // }
+                Attribute::Med(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::LocalPref(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::Community(attr) => {
+                    attr.encode(&mut buf);
+                }
                 _ => {}
             }
-            println!("{:?}", attr)
+        }
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        buf[attr_pos].copy_from_slice(&attr_len.to_be_bytes());
+
+        // NLRI.
+        for ip in update.ipv4_update.iter() {
+            buf.put_u8(ip.prefix_len());
+            let plen = nlri_psize(ip.prefix_len());
+            buf.put(&ip.addr().octets()[0..plen]);
         }
 
         const LENGTH_POS: std::ops::Range<usize> = 16..18;

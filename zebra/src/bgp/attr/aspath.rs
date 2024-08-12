@@ -1,10 +1,10 @@
-use crate::bgp::packet::{AttributeFlags, AttributeType};
-
-use super::aspath_token::{tokenizer, Token};
 use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 use std::fmt;
 use std::str::FromStr;
+
+use super::aspath_token::{tokenizer, Token};
+use super::{AttributeFlags, AttributeType};
 
 pub const AS_SET: u8 = 1;
 pub const AS_SEQUENCE: u8 = 2;
@@ -32,6 +32,14 @@ pub struct As2Path {
 pub struct As4Segment {
     pub typ: u8,
     pub asn: Vec<u32>,
+}
+
+impl As4Segment {
+    pub fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.typ);
+        buf.put_u8(self.asn.len() as u8);
+        self.asn.iter().for_each(|x| buf.put_u32(*x));
+    }
 }
 
 pub fn asn_to_string(val: u32) -> String {
@@ -206,12 +214,28 @@ impl FromStr for As4Path {
     }
 }
 
-// impl As4Path {
-//     fn encode(&self, buf: &mut BytesMut) {
-//         buf.put_u8(AttributeFlags::TRANSITIVE.bits());
-//         buf.put_u8(AttributeType::AsPath.0);
-//     }
-// }
+impl As4Path {
+    fn flags() -> AttributeFlags {
+        AttributeFlags::TRANSITIVE
+    }
+
+    pub fn encode(&self, buf: &mut BytesMut) {
+        let mut attr_buf = BytesMut::new();
+        for seg in self.segments.iter() {
+            seg.encode(&mut attr_buf);
+        }
+        if attr_buf.len() > 255 {
+            buf.put_u8(Self::flags().bits() | AttributeFlags::EXTENDED.bits());
+            buf.put_u8(AttributeType::AsPath.0);
+            buf.put_u16(attr_buf.len() as u16)
+        } else {
+            buf.put_u8(Self::flags().bits());
+            buf.put_u8(AttributeType::AsPath.0);
+            buf.put_u8(attr_buf.len() as u8);
+        }
+        buf.put(&attr_buf[..]);
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -232,5 +256,3 @@ mod test {
         println!("aspath {:}", aspath);
     }
 }
-
-// let output: Vec<u8> = input.iter().flat_map(|val| val.to_be_bytes()).collect();
