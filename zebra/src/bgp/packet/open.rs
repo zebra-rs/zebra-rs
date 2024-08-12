@@ -21,6 +21,12 @@ pub struct OpenPacket {
     pub caps: Vec<CapabilityPacket>,
 }
 
+#[derive(Debug, PartialEq, NomBE)]
+pub struct OpenExtended {
+    pub non_ext_op_type: u8,
+    pub ext_opt_parm_len: u16,
+}
+
 #[derive(Debug, Eq, PartialEq, NomBE, Clone)]
 pub struct CapabilityType(pub u8);
 
@@ -28,14 +34,16 @@ newtype_enum! {
     impl display CapabilityType {
         MultiProtocol = 1,
         RouteRefresh = 2,
-    ExtendedMessage = 6,
+        ExtendedNextHop = 5,
+        ExtendedMessage = 6,
+        Role = 9,
         GracefulRestart = 64,
         As4 = 65,
         DynamicCapability = 67,
-    AddPath = 69,
-    EnhancedRouteRefresh = 70,
-    LLGR = 71,
-    FQDN = 73,
+        AddPath = 69,
+        EnhancedRouteRefresh = 70,
+        LLGR = 71,
+        FQDN = 73,
         SoftwareVersion = 75,
         PathLimit = 76,
         RouteRefreshCisco = 128,
@@ -380,7 +388,7 @@ impl CapabilitySoftwareVersion {
     pub fn new(version: Vec<u8>) -> Self {
         Self {
             header: CapabilityHeader::new(2),
-            typ: CapabilityType::AddPath,
+            typ: CapabilityType::SoftwareVersion,
             length: version.len() as u8,
             version,
         }

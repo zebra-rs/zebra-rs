@@ -1,5 +1,6 @@
 use super::{
-    packet::{Attrs, UpdatePacket},
+    attr::Attribute,
+    packet::UpdatePacket,
     peer::{ConfigRef, Peer},
 };
 use std::net::Ipv4Addr;
@@ -14,7 +15,7 @@ use std::net::Ipv4Addr;
 
 pub struct Route {
     pub from: Ipv4Addr,
-    pub attrs: Attrs,
+    pub attrs: Vec<Attribute>,
     pub ibgp: bool,
     pub selected: bool,
 }
