@@ -8,14 +8,14 @@ pub const ORIGIN_IGP: u8 = 0;
 pub const ORIGIN_EGP: u8 = 1;
 pub const ORIGIN_INCOMPLETE: u8 = 2;
 
-const LEN: u8 = 1;
-
 #[derive(Clone, NomBE)]
 pub struct Origin {
     pub origin: u8,
 }
 
 impl Origin {
+    const LEN: u8 = 1;
+
     pub fn new(origin: u8) -> Self {
         Self { origin }
     }
@@ -27,7 +27,7 @@ impl Origin {
     pub fn encode(&self, buf: &mut BytesMut) {
         buf.put_u8(Self::flags().bits());
         buf.put_u8(AttributeType::Origin.0);
-        buf.put_u8(LEN);
+        buf.put_u8(Self::LEN);
         buf.put_u8(self.origin);
     }
 

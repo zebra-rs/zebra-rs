@@ -4,7 +4,7 @@ use std::fmt;
 bitflags! {
     #[derive(Clone)]
     pub struct AttributeFlags: u8 {
-        const lOPTIONAL = 0x80;
+        const OPTIONAL = 0x80;
         const TRANSITIVE = 0x40;
         const PARTIAL = 0x20;
         const EXTENDED = 0x10;
