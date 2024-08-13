@@ -23,6 +23,9 @@ pub use local_pref::*;
 pub mod atomic;
 pub use atomic::*;
 
+pub mod aggregator;
+pub use aggregator::*;
+
 pub mod community;
 pub use community::*;
 

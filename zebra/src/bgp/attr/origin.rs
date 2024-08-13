@@ -1,7 +1,8 @@
-use super::{AttributeFlags, AttributeType};
 use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 use std::fmt;
+
+use super::{AttributeFlags, AttributeType};
 
 pub const ORIGIN_IGP: u8 = 0;
 pub const ORIGIN_EGP: u8 = 1;

@@ -8,7 +8,6 @@ use std::sync::LazyLock;
 
 use super::{AttributeFlags, AttributeType};
 
-/// BGP Community attribute.
 #[derive(Clone, Debug, Default, NomBE)]
 pub struct Community(pub Vec<u32>);
 

@@ -1,12 +1,5 @@
 #![allow(dead_code)]
-use super::attr::As4Path;
-use super::attr::Attribute;
-use super::attr::Community;
-use super::attr::LocalPref;
-use super::attr::Med;
-use super::attr::NextHopAttr;
-use super::attr::Origin;
-use super::attr::ORIGIN_IGP;
+use super::attr::*;
 use super::handler::Message;
 use super::packet::*;
 use super::route::route_from_peer;
@@ -407,6 +400,12 @@ fn peer_send_update_test(peer: &mut Peer) {
 
     let lpref: LocalPref = LocalPref::new(100u32);
     update.attrs.push(Attribute::LocalPref(lpref));
+
+    let atomic = AtomicAggregate::new();
+    update.attrs.push(Attribute::AtomicAggregate(atomic));
+
+    let aggregator = Aggregator4::new(1, Ipv4Addr::new(10, 211, 55, 2));
+    update.attrs.push(Attribute::Aggregator4(aggregator));
 
     let com = Community::from_str("100:10 100:20").unwrap();
     update.attrs.push(Attribute::Community(com));

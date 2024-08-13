@@ -1,8 +1,9 @@
-use super::{AttributeFlags, AttributeType};
 use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
-const LEN: u8 = 1;
+use super::{AttributeFlags, AttributeType};
+
+const LEN: u8 = 0;
 
 #[derive(Clone, Debug, NomBE)]
 pub struct AtomicAggregate {}

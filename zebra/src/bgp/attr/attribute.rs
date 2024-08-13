@@ -6,8 +6,8 @@ use rusticata_macros::newtype_enum;
 use std::net::Ipv6Addr;
 
 use super::{
-    As2Path, As4Path, AtomicAggregate, Community, ExtCommunity, LargeCommunity, LocalPref, Med,
-    NextHopAttr, Origin,
+    Aggregator2, Aggregator4, As2Path, As4Path, AtomicAggregate, Community, ExtCommunity,
+    LargeCommunity, LocalPref, Med, NextHopAttr, Origin,
 };
 
 #[derive(Debug, Eq, PartialEq, NomBE)]
@@ -39,25 +39,13 @@ pub enum Attribute {
     Med(Med),
     LocalPref(LocalPref),
     AtomicAggregate(AtomicAggregate),
-    Aggregator2(Aggregator2Attr),
-    Aggregator4(Aggregator4Attr),
+    Aggregator2(Aggregator2),
+    Aggregator4(Aggregator4),
     Community(Community),
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
     ExtCommunity(ExtCommunity),
     LargeCom(LargeCommunity),
-}
-
-#[derive(Clone, Debug, NomBE)]
-pub struct Aggregator2Attr {
-    pub asn: u16,
-    pub ip: u32,
-}
-
-#[derive(Clone, Debug, NomBE)]
-pub struct Aggregator4Attr {
-    pub asn: u32,
-    pub ip: u32,
 }
 
 #[derive(Clone, Debug, NomBE)]

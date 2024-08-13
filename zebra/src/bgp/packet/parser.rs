@@ -1,6 +1,6 @@
 use super::*;
 use crate::bgp::attr::{
-    Aggregator2Attr, Aggregator4Attr, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
+    Aggregator2, Aggregator4, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
     AtomicAggregate, Attribute, AttributeFlags, AttributeType, Community, LargeCommunity,
     LocalPref, Med, MpNlriAttr, MpNlriReachHeader, MpNlriUnreachHeader, NextHopAttr, Origin,
 };
@@ -216,9 +216,9 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
         }
         AttributeType::Aggregator => {
             if as4 {
-                map(Aggregator4Attr::parse, Attribute::Aggregator4)(input)
+                map(Aggregator4::parse, Attribute::Aggregator4)(input)
             } else {
-                map(Aggregator2Attr::parse, Attribute::Aggregator2)(input)
+                map(Aggregator2::parse, Attribute::Aggregator2)(input)
             }
         }
         AttributeType::Community => parse_bgp_attr_community(input, attr_len),
