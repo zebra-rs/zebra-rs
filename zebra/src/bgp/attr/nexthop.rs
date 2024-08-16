@@ -9,18 +9,16 @@ pub struct NextHopAttr {
 }
 
 impl NextHopAttr {
+    const LEN: u8 = 4;
+
     fn flags() -> AttributeFlags {
         AttributeFlags::TRANSITIVE
-    }
-
-    fn len() -> u8 {
-        4
     }
 
     pub fn encode(&self, buf: &mut BytesMut) {
         buf.put_u8(Self::flags().bits());
         buf.put_u8(AttributeType::NextHop.0);
-        buf.put_u8(Self::len());
+        buf.put_u8(Self::LEN);
         buf.put(&self.next_hop[..]);
     }
 }

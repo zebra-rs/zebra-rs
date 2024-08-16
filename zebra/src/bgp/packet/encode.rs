@@ -93,6 +93,12 @@ impl From<UpdatePacket> for BytesMut {
                 Attribute::Aggregator4(attr) => {
                     attr.encode(&mut buf);
                 }
+                Attribute::OriginatorId(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::ClusterList(attr) => {
+                    attr.encode(&mut buf);
+                }
                 Attribute::Community(attr) => {
                     attr.encode(&mut buf);
                 }
