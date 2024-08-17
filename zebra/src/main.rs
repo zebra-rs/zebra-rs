@@ -43,8 +43,12 @@ fn system_path(arg: &Arg) -> PathBuf {
     }
 }
 
+use rib::srv6;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = srv6::enable();
+
     let arg = Arg::parse();
 
     policy::PolicyInit();

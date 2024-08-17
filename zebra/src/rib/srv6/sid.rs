@@ -1,5 +1,7 @@
 use std::net::Ipv6Addr;
 
+pub enum SidFormat {}
+
 pub struct Sid {
     sid: Ipv6Addr,
 }

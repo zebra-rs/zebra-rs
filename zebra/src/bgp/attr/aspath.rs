@@ -12,6 +12,8 @@ pub const AS_SEQ: u8 = 2;
 pub const AS_CONFED_SEQ: u8 = 3;
 pub const AS_CONFED_SET: u8 = 4;
 
+pub const AS_TRANS: u16 = 23456;
+
 #[derive(Debug, NomBE)]
 pub struct AsSegmentHeader {
     pub typ: u8,
