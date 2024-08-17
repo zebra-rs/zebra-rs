@@ -112,8 +112,8 @@ fn parse_bgp_attr_as2_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
 
 fn parse_bgp_attr_as2_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, segments) = many0(parse_bgp_attr_as2_segment)(attr)?;
-    let as_path = As2Path { segments };
+    let (_, segs) = many0(parse_bgp_attr_as2_segment)(attr)?;
+    let as_path = As2Path { segs };
     Ok((input, Attribute::As2Path(as_path)))
 }
 
@@ -129,8 +129,8 @@ fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
 
 fn parse_bgp_attr_as4_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, segments) = many0(parse_bgp_attr_as4_segment)(attr)?;
-    let as_path = As4Path { segments };
+    let (_, segs) = many0(parse_bgp_attr_as4_segment)(attr)?;
+    let as_path = As4Path { segs: segs.into() };
     Ok((input, Attribute::As4Path(as_path)))
 }
 
