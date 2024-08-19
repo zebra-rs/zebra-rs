@@ -305,7 +305,7 @@ _cli_bind_key ()
   bind '"\C-l": clear-screen'
   bind 'set show-all-if-ambiguous on'
   stty susp ''
-  bind -x '"\C-^": _cli_ctrl_caret'
+  bind -x '"\C-^": _cli_refresh'
   bind '"\C-z":"\C-^\C-m"'
 }
 
