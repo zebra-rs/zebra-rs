@@ -1,13 +1,14 @@
-use super::{AttributeFlags, AttributeType};
 use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
-const LEN: u8 = 1;
+use super::{AttributeFlags, AttributeType};
 
 #[derive(Clone, Debug, NomBE)]
 pub struct AtomicAggregate {}
 
 impl AtomicAggregate {
+    const LEN: u8 = 0;
+
     pub fn new() -> Self {
         Self {}
     }
@@ -19,6 +20,6 @@ impl AtomicAggregate {
     pub fn encode(&self, buf: &mut BytesMut) {
         buf.put_u8(Self::flags().bits());
         buf.put_u8(AttributeType::AtomicAggregate.0);
-        buf.put_u8(LEN);
+        buf.put_u8(Self::LEN);
     }
 }

@@ -1,12 +1,5 @@
 #![allow(dead_code)]
-use super::attr::As4Path;
-use super::attr::Attribute;
-use super::attr::Community;
-use super::attr::LocalPref;
-use super::attr::Med;
-use super::attr::NextHopAttr;
-use super::attr::Origin;
-use super::attr::ORIGIN_IGP;
+use super::attr::*;
 use super::handler::Message;
 use super::packet::*;
 use super::route::route_from_peer;
@@ -17,7 +10,7 @@ use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi, BGP_HOLD_TIME};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
-use prefix_trie::PrefixMap;
+use ptree::PrefixTree;
 use serde::Serialize;
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -223,7 +216,7 @@ impl Peer {
 
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
-    pub ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
+    pub ptree: &'a mut PrefixTree<Ipv4Net, Vec<Route>>,
 }
 
 fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
@@ -407,6 +400,12 @@ fn peer_send_update_test(peer: &mut Peer) {
 
     let lpref: LocalPref = LocalPref::new(100u32);
     update.attrs.push(Attribute::LocalPref(lpref));
+
+    let atomic = AtomicAggregate::new();
+    update.attrs.push(Attribute::AtomicAggregate(atomic));
+
+    let aggregator = Aggregator4::new(1, Ipv4Addr::new(10, 211, 55, 2));
+    update.attrs.push(Attribute::Aggregator4(aggregator));
 
     let com = Community::from_str("100:10 100:20").unwrap();
     update.attrs.push(Attribute::Community(com));

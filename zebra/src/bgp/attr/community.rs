@@ -6,19 +6,24 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use super::{AttributeFlags, AttributeType};
+use super::{encode_tlv, AttributeEncoder, AttributeFlags, AttributeType};
 
-/// BGP Community attribute.
 #[derive(Clone, Debug, Default, NomBE)]
 pub struct Community(pub Vec<u32>);
+
+impl AttributeEncoder for Community {
+    fn attr_type() -> AttributeType {
+        AttributeType::Community
+    }
+
+    fn attr_flag() -> AttributeFlags {
+        AttributeFlags::OPTIONAL | AttributeFlags::TRANSITIVE
+    }
+}
 
 impl Community {
     pub fn new() -> Self {
         Community(Vec::<u32>::new())
-    }
-
-    fn flags() -> AttributeFlags {
-        AttributeFlags::OPTIONAL | AttributeFlags::TRANSITIVE
     }
 
     pub fn push(&mut self, value: u32) {
@@ -45,19 +50,8 @@ impl Community {
 
     pub fn encode(&self, buf: &mut BytesMut) {
         let mut attr_buf = BytesMut::new();
-        for com in self.0.iter() {
-            attr_buf.put_u32(*com);
-        }
-        if attr_buf.len() > 255 {
-            buf.put_u8(Self::flags().bits() | AttributeFlags::EXTENDED.bits());
-            buf.put_u8(AttributeType::Community.0);
-            buf.put_u16(attr_buf.len() as u16)
-        } else {
-            buf.put_u8(Self::flags().bits());
-            buf.put_u8(AttributeType::Community.0);
-            buf.put_u8(attr_buf.len() as u8);
-        }
-        buf.put(&attr_buf[..]);
+        self.0.iter().for_each(|x| attr_buf.put_u32(*x));
+        encode_tlv::<Self>(buf, attr_buf);
     }
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::bgp::attr::{
-    Aggregator2Attr, Aggregator4Attr, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
+    Aggregator2, Aggregator4, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
     AtomicAggregate, Attribute, AttributeFlags, AttributeType, Community, LargeCommunity,
     LocalPref, Med, MpNlriAttr, MpNlriReachHeader, MpNlriUnreachHeader, NextHopAttr, Origin,
 };
@@ -112,8 +112,8 @@ fn parse_bgp_attr_as2_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
 
 fn parse_bgp_attr_as2_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, segments) = many0(parse_bgp_attr_as2_segment)(attr)?;
-    let as_path = As2Path { segments };
+    let (_, segs) = many0(parse_bgp_attr_as2_segment)(attr)?;
+    let as_path = As2Path { segs };
     Ok((input, Attribute::As2Path(as_path)))
 }
 
@@ -129,8 +129,8 @@ fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
 
 fn parse_bgp_attr_as4_path(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
     let (attr, input) = input.split_at(length as usize);
-    let (_, segments) = many0(parse_bgp_attr_as4_segment)(attr)?;
-    let as_path = As4Path { segments };
+    let (_, segs) = many0(parse_bgp_attr_as4_segment)(attr)?;
+    let as_path = As4Path { segs: segs.into() };
     Ok((input, Attribute::As4Path(as_path)))
 }
 
@@ -216,9 +216,9 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
         }
         AttributeType::Aggregator => {
             if as4 {
-                map(Aggregator4Attr::parse, Attribute::Aggregator4)(input)
+                map(Aggregator4::parse, Attribute::Aggregator4)(input)
             } else {
-                map(Aggregator2Attr::parse, Attribute::Aggregator2)(input)
+                map(Aggregator2::parse, Attribute::Aggregator2)(input)
             }
         }
         AttributeType::Community => parse_bgp_attr_community(input, attr_len),

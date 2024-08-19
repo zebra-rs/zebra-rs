@@ -23,8 +23,17 @@ pub use local_pref::*;
 pub mod atomic;
 pub use atomic::*;
 
+pub mod aggregator;
+pub use aggregator::*;
+
 pub mod community;
 pub use community::*;
+
+pub mod originator_id;
+pub use originator_id::*;
+
+pub mod cluster_list;
+pub use cluster_list::*;
 
 pub mod ext_community;
 pub use ext_community::*;
