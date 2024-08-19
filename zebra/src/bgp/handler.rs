@@ -7,7 +7,7 @@ use crate::config::{
 };
 use crate::rib::api::{RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
+use ptree::PrefixTree;
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
@@ -37,7 +37,7 @@ pub struct Bgp {
     pub rib: Sender<RibTx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
-    pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
+    pub ptree: PrefixTree<Ipv4Net, Vec<Route>>,
     pub listen_task: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
 }
@@ -51,7 +51,7 @@ impl Bgp {
             peers: BTreeMap::new(),
             tx,
             rx,
-            ptree: PrefixMap::<Ipv4Net, Vec<Route>>::new(),
+            ptree: PrefixTree::<Ipv4Net, Vec<Route>>::new(),
             rib,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),

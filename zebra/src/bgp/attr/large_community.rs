@@ -1,7 +1,10 @@
+use bytes::{BufMut, BytesMut};
 use nom_derive::NomBE;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
+
+use super::{AttributeFlags, AttributeType};
 
 #[derive(Clone, Debug, Default, NomBE)]
 pub struct LargeCommunity(pub Vec<LargeCommunityValue>);
@@ -11,6 +14,10 @@ impl LargeCommunity {
         Default::default()
     }
 
+    fn flags() -> AttributeFlags {
+        AttributeFlags::OPTIONAL | AttributeFlags::TRANSITIVE
+    }
+
     pub fn push(&mut self, value: LargeCommunityValue) {
         self.0.push(value)
     }
@@ -18,6 +25,23 @@ impl LargeCommunity {
     pub fn sort_uniq(&mut self) {
         let coms: BTreeSet<LargeCommunityValue> = self.0.iter().cloned().collect();
         self.0 = coms.into_iter().collect();
+    }
+
+    pub fn encode(&self, buf: &mut BytesMut) {
+        let mut attr_buf = BytesMut::new();
+        for com in self.0.iter() {
+            com.encode(&mut attr_buf);
+        }
+        if attr_buf.len() > 255 {
+            buf.put_u8(Self::flags().bits() | AttributeFlags::EXTENDED.bits());
+            buf.put_u8(AttributeType::LargeCom.0);
+            buf.put_u16(attr_buf.len() as u16)
+        } else {
+            buf.put_u8(Self::flags().bits());
+            buf.put_u8(AttributeType::LargeCom.0);
+            buf.put_u8(attr_buf.len() as u8);
+        }
+        buf.put(&attr_buf[..]);
     }
 }
 
@@ -83,6 +107,12 @@ impl LargeCommunityValue {
             }
         }
         None
+    }
+
+    pub fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.global);
+        buf.put_u32(self.local1);
+        buf.put_u32(self.local2);
     }
 }
 

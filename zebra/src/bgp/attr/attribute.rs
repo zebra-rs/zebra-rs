@@ -1,13 +1,13 @@
-#![allow(dead_code)]
 use crate::bgp::{Afi, Safi};
+use bytes::{BufMut, BytesMut};
 use ipnet::Ipv6Net;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 use std::net::Ipv6Addr;
 
 use super::{
-    As2Path, As4Path, AtomicAggregate, Community, ExtCommunity, LargeCommunity, LocalPref, Med,
-    NextHopAttr, Origin,
+    Aggregator2, Aggregator4, As2Path, As4Path, AtomicAggregate, AttributeFlags, ClusterList,
+    Community, ExtCommunity, LargeCommunity, LocalPref, Med, NextHopAttr, Origin, OriginatorId,
 };
 
 #[derive(Debug, Eq, PartialEq, NomBE)]
@@ -23,6 +23,8 @@ newtype_enum! {
         AtomicAggregate = 6,
         Aggregator = 7,
         Community = 8,
+        OriginatorId = 9,
+        ClusterList = 10,
         MpReachNlri = 14,
         MpUnreachNlri = 15,
         ExtendedCom = 16,
@@ -39,25 +41,33 @@ pub enum Attribute {
     Med(Med),
     LocalPref(LocalPref),
     AtomicAggregate(AtomicAggregate),
-    Aggregator2(Aggregator2Attr),
-    Aggregator4(Aggregator4Attr),
+    Aggregator2(Aggregator2),
+    Aggregator4(Aggregator4),
     Community(Community),
+    OriginatorId(OriginatorId),
+    ClusterList(ClusterList),
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
     ExtCommunity(ExtCommunity),
     LargeCom(LargeCommunity),
 }
 
-#[derive(Clone, Debug, NomBE)]
-pub struct Aggregator2Attr {
-    pub asn: u16,
-    pub ip: u32,
+pub trait AttributeEncoder {
+    fn attr_type() -> AttributeType;
+    fn attr_flag() -> AttributeFlags;
 }
 
-#[derive(Clone, Debug, NomBE)]
-pub struct Aggregator4Attr {
-    pub asn: u32,
-    pub ip: u32,
+pub fn encode_tlv<T: AttributeEncoder>(buf: &mut BytesMut, attr_buf: BytesMut) {
+    if attr_buf.len() > 255 {
+        buf.put_u8(T::attr_flag().bits() | AttributeFlags::EXTENDED.bits());
+        buf.put_u8(T::attr_type().0);
+        buf.put_u16(attr_buf.len() as u16)
+    } else {
+        buf.put_u8(T::attr_flag().bits());
+        buf.put_u8(T::attr_type().0);
+        buf.put_u8(attr_buf.len() as u8);
+    }
+    buf.put(&attr_buf[..]);
 }
 
 #[derive(Clone, Debug, NomBE)]

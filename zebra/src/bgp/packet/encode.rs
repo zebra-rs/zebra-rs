@@ -84,6 +84,21 @@ impl From<UpdatePacket> for BytesMut {
                 Attribute::LocalPref(attr) => {
                     attr.encode(&mut buf);
                 }
+                Attribute::AtomicAggregate(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::Aggregator2(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::Aggregator4(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::OriginatorId(attr) => {
+                    attr.encode(&mut buf);
+                }
+                Attribute::ClusterList(attr) => {
+                    attr.encode(&mut buf);
+                }
                 Attribute::Community(attr) => {
                     attr.encode(&mut buf);
                 }

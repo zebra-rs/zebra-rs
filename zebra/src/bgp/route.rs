@@ -13,11 +13,22 @@ use std::net::Ipv4Addr;
 //     Static,
 // }
 
+#[derive(Clone)]
+pub enum PeerType {
+    IBGP,
+    EBGP,
+}
+
 pub struct Route {
     pub from: Ipv4Addr,
     pub attrs: Vec<Attribute>,
-    pub ibgp: bool,
+    pub origin: u8,
+    pub typ: PeerType,
     pub selected: bool,
+}
+
+fn attr_check() {
+    //
 }
 
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
@@ -25,7 +36,8 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
         let route = Route {
             from: peer.address,
             attrs: packet.attrs.clone(),
-            ibgp: false,
+            origin: 0u8,
+            typ: PeerType::IBGP,
             selected: false,
         };
         bgp.ptree.entry(*ipv4).or_default().push(route);

@@ -1,0 +1,8 @@
+[package]
+name = "ptree"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+ipnet = "2.9.0"
+num-traits = "0.2.19"
