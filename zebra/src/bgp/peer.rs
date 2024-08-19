@@ -10,7 +10,7 @@ use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi, BGP_HOLD_TIME};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
-use prefix_trie::PrefixMap;
+use ptree::PrefixTree;
 use serde::Serialize;
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -216,7 +216,7 @@ impl Peer {
 
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
-    pub ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
+    pub ptree: &'a mut PrefixTree<Ipv4Net, Vec<Route>>,
 }
 
 fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {

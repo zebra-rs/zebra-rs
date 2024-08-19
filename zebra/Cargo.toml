@@ -19,7 +19,6 @@ regex = "1.10"
 similar = "2"
 dirs = "5"
 async-trait = "0.1"
-prefix-trie = "0.3"
 ptree = { path = "../ptree" }
 thiserror = "1"
 tracing = "0.1"
