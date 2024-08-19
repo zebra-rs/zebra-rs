@@ -29,6 +29,7 @@ pub fn tokenizer(input: String) -> Vec<Token> {
                                 || c == &'.'
                                 || c == &'-'
                                 || c == &'/'
+                                || c == &':'
                         })
                     }))
                     .collect();
