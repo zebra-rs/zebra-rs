@@ -1,6 +1,6 @@
 [package]
 name = "zebra"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 
 [dependencies]
@@ -10,10 +10,10 @@ ipnet = "2.9"
 nom = "7"
 nom-derive = "0.10"
 rusticata-macros = "4"
-prost = "0.11"
+prost = "0.13"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-tonic = "0.9"
+tonic = "0.12"
 libyang = { git = "https://github.com/zebra-rs/libyang" }
 regex = "1.10"
 similar = "2"
@@ -34,15 +34,15 @@ sysctl = "0.5.5"
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.14"
 netlink-sys = "0.8"
-netlink-packet-route = "0.19"
+netlink-packet-route = "0.20"
 netlink-packet-core = "0.7"
 futures = "0.3"
 scan_fmt = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nix = { version = "0.28", features = ["net"] }
+nix = { version = "0.29", features = ["net"] }
 ioctl-rs = "0.2.0"
 net-route = "0.4.2"
 
 [build-dependencies]
-tonic-build = "0.9"
+tonic-build = "0.12"
