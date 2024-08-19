@@ -89,7 +89,7 @@ pub enum EntrySet {
 //     }
 // }
 
-pub fn PolicyInit() {
+pub fn policy_init() {
     let pmap = Policy::new();
     println!("{:?}", pmap);
 
