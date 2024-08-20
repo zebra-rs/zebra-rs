@@ -88,6 +88,10 @@ impl Bgp {
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
+        println!("{}", path);
+        for a in args.0.iter() {
+            println!("{}", a);
+        }
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
@@ -128,7 +132,7 @@ impl Bgp {
                     self.process_cm_msg(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
-            self.process_show_msg(msg).await;
+                    self.process_show_msg(msg).await;
                 }
             }
         }

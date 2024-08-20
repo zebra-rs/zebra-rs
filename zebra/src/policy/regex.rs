@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // Character '_' has special meanings. It represents [,{}() ] and the beginning of
 // the line(^) and the end of the line ($).
 

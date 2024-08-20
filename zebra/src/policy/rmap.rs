@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
@@ -58,6 +59,7 @@ pub enum EntryAction {
     Deny,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum EntryMatch {
     PrefixList,

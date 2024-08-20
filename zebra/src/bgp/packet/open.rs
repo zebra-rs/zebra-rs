@@ -51,6 +51,7 @@ newtype_enum! {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum CapabilityPacket {
     MultiProtocol(CapabilityMultiProtocol),
     RouteRefresh(CapabilityRouteRefresh),
@@ -245,6 +246,12 @@ pub struct CapabilityDynamicCapability {
 
 impl CapabilityDynamicCapability {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityDynamicCapability {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::DynamicCapability,
@@ -300,6 +307,12 @@ pub struct CapabilityExtendedMessage {
 
 impl CapabilityExtendedMessage {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityExtendedMessage {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::ExtendedMessage,
@@ -317,6 +330,12 @@ pub struct CapabilityEnhancedRouteRefresh {
 
 impl CapabilityEnhancedRouteRefresh {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityEnhancedRouteRefresh {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::EnhancedRouteRefresh,
@@ -343,6 +362,12 @@ pub struct CapabilityLLGR {
 
 impl CapabilityLLGR {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityLLGR {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::EnhancedRouteRefresh,
@@ -364,13 +389,13 @@ pub struct CapabilityFQDN {
 }
 
 impl CapabilityFQDN {
-    pub fn new(hostname: &String, domain: &String) -> Self {
+    pub fn new(hostname: &str, domain: &str) -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::EnhancedRouteRefresh,
             length: 0,
-            hostname: hostname.clone().into_bytes(),
-            domain: domain.clone().into_bytes(),
+            hostname: hostname.into(),
+            domain: domain.into(),
         }
     }
 }

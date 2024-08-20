@@ -24,25 +24,33 @@ fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
-        let addr: Ipv4Addr = args.v4addr()?;
-        let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
-        bgp.peers.insert(addr, peer);
+        if let Some(addr) = args.v4addr() {
+            let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
+            bgp.peers.insert(addr, peer);
+        } else if let Some(addr) = args.v6addr() {
+            println!("XXXX IPv6 address peer {}", addr);
+            //let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
+            //bgp.peers.insert(addr, peer);
+        }
     }
     Some(())
 }
 
 fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
-        let addr: Ipv4Addr = args.v4addr()?;
-        let asn: u32 = args.u32()?;
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.peer_as = asn;
-            peer.peer_type = if peer.peer_as == bgp.asn {
-                PeerType::Internal
-            } else {
-                PeerType::External
-            };
-            peer.update();
+        if let Some(addr) = args.v4addr() {
+            let asn: u32 = args.u32()?;
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
+                peer.peer_as = asn;
+                peer.peer_type = if peer.peer_as == bgp.asn {
+                    PeerType::Internal
+                } else {
+                    PeerType::External
+                };
+                peer.update();
+            }
+        } else if let Some(addr) = args.v6addr() {
+            println!("XXXX IPv6 address peer {}", addr);
         }
     }
     Some(())

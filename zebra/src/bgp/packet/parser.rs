@@ -303,8 +303,7 @@ fn parse_bgp_notification_packet(input: &[u8]) -> IResult<&[u8], NotificationPac
 
 pub fn peek_bgp_length(input: &[u8]) -> usize {
     if let Some(len) = input.get(16..18) {
-        let len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
-        len
+        u16::from_be_bytes(len.try_into().unwrap()) as usize
     } else {
         0
     }

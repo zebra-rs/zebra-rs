@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// SRv6 endpoint behavior.
 pub enum Endpoint {
     End,

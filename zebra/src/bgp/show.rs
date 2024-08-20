@@ -116,12 +116,12 @@ fn uptime(instant: &Option<Instant>) -> String {
 
 fn fetch(peer: &Peer) -> Neighbor {
     let mut n = Neighbor {
-        address: peer.address.clone(),
+        address: peer.address,
         remote_as: peer.peer_as,
         local_as: peer.local_as,
         peer_type: peer.peer_type.to_str(),
-        local_router_id: peer.router_id.clone(),
-        remote_router_id: peer.remote_id.clone(),
+        local_router_id: peer.router_id,
+        remote_router_id: peer.remote_id,
         state: peer.state.to_str(),
         uptime: uptime(&peer.instant),
         timer: peer.param.clone(),

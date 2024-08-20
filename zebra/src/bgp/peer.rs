@@ -281,7 +281,7 @@ pub fn fsm_stop(peer: &mut Peer) -> State {
     fsm_init(peer)
 }
 
-pub fn capability_as4(caps: &Vec<CapabilityPacket>) -> Option<u32> {
+pub fn capability_as4(caps: &[CapabilityPacket]) -> Option<u32> {
     for cap in caps.iter() {
         if let CapabilityPacket::As4(m) = cap {
             return Some(m.asn);

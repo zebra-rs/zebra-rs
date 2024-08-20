@@ -1,39 +1,32 @@
 use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
-use super::{AttributeFlags, AttributeType};
+use super::{encode_tlv, AttributeEncoder, AttributeFlags, AttributeType};
 
-#[derive(Clone, NomBE, Debug)]
+#[derive(Clone, NomBE, Debug, Default)]
 pub struct ClusterList {
     pub list: Vec<ClusterId>,
 }
 
-impl ClusterList {
-    const TYPE: AttributeType = AttributeType::ClusterList;
-
-    pub fn new() -> Self {
-        Self { list: Vec::new() }
+impl AttributeEncoder for ClusterList {
+    fn attr_type() -> AttributeType {
+        AttributeType::ClusterList
     }
 
-    fn flags() -> AttributeFlags {
+    fn attr_flag() -> AttributeFlags {
         AttributeFlags::OPTIONAL
+    }
+}
+
+impl ClusterList {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn encode(&self, buf: &mut BytesMut) {
         let mut attr_buf = BytesMut::new();
-        for id in self.list.iter() {
-            id.encode(&mut attr_buf);
-        }
-        if attr_buf.len() > 255 {
-            buf.put_u8(Self::flags().bits() | AttributeFlags::EXTENDED.bits());
-            buf.put_u8(Self::TYPE.0);
-            buf.put_u16(attr_buf.len() as u16)
-        } else {
-            buf.put_u8(Self::flags().bits());
-            buf.put_u8(Self::TYPE.0);
-            buf.put_u8(attr_buf.len() as u8);
-        }
-        buf.put(&attr_buf[..]);
+        self.list.iter().for_each(|x| x.encode(&mut attr_buf));
+        encode_tlv::<Self>(buf, attr_buf);
     }
 }
 

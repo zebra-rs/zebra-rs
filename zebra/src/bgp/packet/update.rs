@@ -17,6 +17,12 @@ pub struct UpdatePacket {
 
 impl UpdatePacket {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for UpdatePacket {
+    fn default() -> Self {
         Self {
             header: BgpHeader::new(BgpType::Update, BGP_HEADER_LEN),
             attrs: Vec::new(),
