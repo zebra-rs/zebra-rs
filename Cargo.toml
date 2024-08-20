@@ -4,3 +4,4 @@ members = [
   "zebra",
   "vtysh-helper",
 ]
+default-members = [ "zebra" ]

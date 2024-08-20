@@ -28,6 +28,7 @@ newtype_enum! {
         MpReachNlri = 14,
         MpUnreachNlri = 15,
         ExtendedCom = 16,
+        ExtendedIpv6Com = 25,
         LargeCom = 32,
     }
 }
@@ -49,6 +50,7 @@ pub enum Attribute {
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
     ExtCommunity(ExtCommunity),
+    // ExtIpv6Community(ExtIpv6Community)
     LargeCom(LargeCommunity),
 }
 

@@ -1,7 +1,7 @@
 module extension {
   yang-version "1";
 
-  namespace "http://coreswitch.io/";
+  namespace "urn:ietf:params:xml:ns:yang:zebra";
   prefix "coreswitch";
 
   extension help {
