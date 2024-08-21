@@ -1,6 +1,6 @@
 [package]
 name = "zebra"
-version = "0.6.1"
+version = "0.6.3"
 edition = "2021"
 
 [dependencies]
@@ -19,7 +19,7 @@ regex = "1.10"
 similar = "2"
 dirs = "5"
 async-trait = "0.1"
-ptree = { path = "../ptree" }
+prefix-trie = { git = "https://github.com/zebra-rs/prefix-trie" }
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
