@@ -1,5 +1,6 @@
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RibTxChannel {
     pub tx: Sender<RibTx>,
@@ -22,6 +23,7 @@ pub enum RibTx {
     NexthopUnresgister(),
 }
 
+#[allow(dead_code)]
 pub struct RibRxChannel {
     pub tx: Sender<RibRx>,
     pub rx: Receiver<RibRx>,

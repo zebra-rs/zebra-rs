@@ -3,7 +3,7 @@ use super::{
     packet::UpdatePacket,
     peer::{ConfigRef, Peer},
 };
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 // pub enum RouteFrom {
 //     Peer,
@@ -14,19 +14,23 @@ use std::net::Ipv4Addr;
 // }
 
 #[derive(Clone)]
+#[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum PeerType {
     IBGP,
     EBGP,
 }
 
+#[allow(dead_code)]
 pub struct Route {
-    pub from: Ipv4Addr,
+    pub from: IpAddr,
     pub attrs: Vec<Attribute>,
     pub origin: u8,
     pub typ: PeerType,
     pub selected: bool,
 }
 
+#[allow(dead_code)]
 fn attr_check() {
     //
 }

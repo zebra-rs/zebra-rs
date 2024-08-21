@@ -68,6 +68,7 @@ pub enum UpdateError {
 
 #[repr(u8)]
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum FsmError {
     UnexpectedMessageInOpenSent = 1,    // RFC6608
     UnexpectedMessageInOpenConfirm = 2, // RFC6608

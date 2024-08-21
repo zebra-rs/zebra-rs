@@ -51,6 +51,7 @@ newtype_enum! {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum CapabilityPacket {
     MultiProtocol(CapabilityMultiProtocol),
     RouteRefresh(CapabilityRouteRefresh),
@@ -136,9 +137,11 @@ impl CapabilityPacket {
                 m.header.encode(buf);
                 buf.put_u8(m.typ.0);
                 buf.put_u8(m.length);
-                buf.put_u16(m.afi.0);
-                buf.put_u8(m.safi.0);
-                buf.put_u16(m.path_limit);
+                for v in m.values.iter() {
+                    buf.put_u16(v.afi.0);
+                    buf.put_u8(v.safi.0);
+                    buf.put_u16(v.path_limit);
+                }
             }
             Self::Unknown(m) => {
                 m.header.encode(buf);
@@ -245,6 +248,12 @@ pub struct CapabilityDynamicCapability {
 
 impl CapabilityDynamicCapability {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityDynamicCapability {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::DynamicCapability,
@@ -254,24 +263,33 @@ impl CapabilityDynamicCapability {
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityAddPath {
-    header: CapabilityHeader,
-    typ: CapabilityType,
-    length: u8,
+pub struct AddPathValue {
     afi: Afi,
     safi: Safi,
     send_receive: u8,
 }
 
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityAddPath {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    pub length: u8,
+    #[nom(Ignore)]
+    pub values: Vec<AddPathValue>,
+}
+
 impl CapabilityAddPath {
     pub fn new(afi: Afi, safi: Safi, send_receive: u8) -> Self {
+        let value = AddPathValue {
+            afi,
+            safi,
+            send_receive,
+        };
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::AddPath,
             length: 4,
-            afi,
-            safi,
-            send_receive,
+            values: vec![value],
         }
     }
 }
@@ -300,6 +318,12 @@ pub struct CapabilityExtendedMessage {
 
 impl CapabilityExtendedMessage {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityExtendedMessage {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::ExtendedMessage,
@@ -317,6 +341,12 @@ pub struct CapabilityEnhancedRouteRefresh {
 
 impl CapabilityEnhancedRouteRefresh {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityEnhancedRouteRefresh {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::EnhancedRouteRefresh,
@@ -343,6 +373,12 @@ pub struct CapabilityLLGR {
 
 impl CapabilityLLGR {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for CapabilityLLGR {
+    fn default() -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::EnhancedRouteRefresh,
@@ -364,13 +400,13 @@ pub struct CapabilityFQDN {
 }
 
 impl CapabilityFQDN {
-    pub fn new(hostname: &String, domain: &String) -> Self {
+    pub fn new(hostname: &str, domain: &str) -> Self {
         Self {
             header: CapabilityHeader::new(2),
             typ: CapabilityType::EnhancedRouteRefresh,
             length: 0,
-            hostname: hostname.clone().into_bytes(),
-            domain: domain.clone().into_bytes(),
+            hostname: hostname.into(),
+            domain: domain.into(),
         }
     }
 }
@@ -396,24 +432,33 @@ impl CapabilitySoftwareVersion {
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityPathLimit {
-    header: CapabilityHeader,
-    typ: CapabilityType,
-    pub length: u8,
+pub struct PathLimitValue {
     pub afi: Afi,
     pub safi: Safi,
     pub path_limit: u16,
 }
 
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityPathLimit {
+    header: CapabilityHeader,
+    typ: CapabilityType,
+    pub length: u8,
+    #[nom(Ignore)]
+    pub values: Vec<PathLimitValue>,
+}
+
 impl CapabilityPathLimit {
     pub fn new(afi: Afi, safi: Safi, path_limit: u16) -> Self {
-        Self {
-            header: CapabilityHeader::new(2),
-            typ: CapabilityType::AddPath,
-            length: 5,
+        let value = PathLimitValue {
             afi,
             safi,
             path_limit,
+        };
+        Self {
+            header: CapabilityHeader::new(2),
+            typ: CapabilityType::PathLimit,
+            length: 5,
+            values: vec![value],
         }
     }
 }

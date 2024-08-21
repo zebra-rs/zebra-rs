@@ -27,6 +27,7 @@ pub enum RibSubType {
     ISIS_Intra_Area,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RibEntry {
     pub rtype: RibType,

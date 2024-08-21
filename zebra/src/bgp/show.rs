@@ -5,7 +5,7 @@ use crate::config::Args;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
@@ -90,7 +90,7 @@ fn show_bgp(bgp: &Bgp, args: Args) -> String {
 
 #[derive(Serialize, Debug)]
 struct Neighbor<'a> {
-    address: Ipv4Addr,
+    address: IpAddr,
     peer_type: &'a str,
     local_as: u32,
     remote_as: u32,
@@ -116,12 +116,12 @@ fn uptime(instant: &Option<Instant>) -> String {
 
 fn fetch(peer: &Peer) -> Neighbor {
     let mut n = Neighbor {
-        address: peer.address.clone(),
+        address: peer.address,
         remote_as: peer.peer_as,
         local_as: peer.local_as,
         peer_type: peer.peer_type.to_str(),
-        local_router_id: peer.router_id.clone(),
-        remote_router_id: peer.remote_id.clone(),
+        local_router_id: peer.router_id,
+        remote_router_id: peer.remote_id,
         state: peer.state.to_str(),
         uptime: uptime(&peer.instant),
         timer: peer.param.clone(),

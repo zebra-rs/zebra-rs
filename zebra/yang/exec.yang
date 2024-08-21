@@ -1,7 +1,7 @@
 module exec {
   yang-version "1";
 
-  namespace "https://zebra.dev/";
+  namespace "urn:ietf:params:xml:ns:yang:zebra";
   prefix "exec";
 
   import ietf-inet-types {
