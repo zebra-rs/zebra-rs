@@ -9,14 +9,14 @@ use crate::rib::api::{RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum Message {
-    Event(Ipv4Addr, Event),
+    Event(IpAddr, Event),
     Accept(TcpStream, SocketAddr),
     Show(Sender<String>),
 }
@@ -28,7 +28,7 @@ pub type ShowCallback = fn(&Bgp, Args) -> String;
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
-    pub peers: BTreeMap<Ipv4Addr, Peer>,
+    pub peers: BTreeMap<IpAddr, Peer>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
@@ -88,10 +88,6 @@ impl Bgp {
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        println!("{}", path);
-        for a in args.0.iter() {
-            println!("{}", a);
-        }
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }

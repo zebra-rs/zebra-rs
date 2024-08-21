@@ -5,7 +5,7 @@ use super::{
 };
 
 use crate::config::{Args, ConfigOp};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set && !args.is_empty() {
@@ -25,12 +25,13 @@ fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         if let Some(addr) = args.v4addr() {
+            let addr = IpAddr::V4(addr);
             let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
             bgp.peers.insert(addr, peer);
         } else if let Some(addr) = args.v6addr() {
-            println!("XXXX IPv6 address peer {}", addr);
-            //let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
-            //bgp.peers.insert(addr, peer);
+            let addr = IpAddr::V6(addr);
+            let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
+            bgp.peers.insert(addr, peer);
         }
     }
     Some(())
@@ -39,6 +40,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         if let Some(addr) = args.v4addr() {
+            let addr = IpAddr::V4(addr);
             let asn: u32 = args.u32()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 peer.peer_as = asn;
@@ -50,7 +52,17 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
                 peer.update();
             }
         } else if let Some(addr) = args.v6addr() {
-            println!("XXXX IPv6 address peer {}", addr);
+            let addr = IpAddr::V6(addr);
+            let asn: u32 = args.u32()?;
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
+                peer.peer_as = asn;
+                peer.peer_type = if peer.peer_as == bgp.asn {
+                    PeerType::Internal
+                } else {
+                    PeerType::External
+                };
+                peer.update();
+            }
         }
     }
     Some(())
@@ -58,11 +70,21 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
-        let addr: Ipv4Addr = args.v4addr()?;
-        let afi_safi: AfiSafi = args.afi_safi()?;
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            if !peer.config.afi_safi.has(&afi_safi) {
-                peer.config.afi_safi.push(afi_safi);
+        if let Some(addr) = args.v4addr() {
+            let addr = IpAddr::V4(addr);
+            let afi_safi: AfiSafi = args.afi_safi()?;
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
+                if !peer.config.afi_safi.has(&afi_safi) {
+                    peer.config.afi_safi.push(afi_safi);
+                }
+            }
+        } else if let Some(addr) = args.v6addr() {
+            let addr = IpAddr::V6(addr);
+            let afi_safi: AfiSafi = args.afi_safi()?;
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
+                if !peer.config.afi_safi.has(&afi_safi) {
+                    peer.config.afi_safi.push(afi_safi);
+                }
             }
         }
     }
@@ -72,6 +94,7 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         let addr: Ipv4Addr = args.v4addr()?;
+        let addr = IpAddr::V4(addr);
         let identifier: Ipv4Addr = args.v4addr()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.local_identifier = Some(identifier);
@@ -83,6 +106,7 @@ fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 
 fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.v4addr()?;
+    let addr = IpAddr::V4(addr);
     let passive = args.boolean()?;
 
     if op == ConfigOp::Set {
@@ -98,6 +122,7 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 fn config_hold_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         let addr: Ipv4Addr = args.v4addr()?;
+        let addr = IpAddr::V4(addr);
         let hold_time: u16 = args.u16()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.config.hold_time = Some(hold_time);

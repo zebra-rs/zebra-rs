@@ -3,7 +3,7 @@ use super::{
     packet::UpdatePacket,
     peer::{ConfigRef, Peer},
 };
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 // pub enum RouteFrom {
 //     Peer,
@@ -23,7 +23,7 @@ pub enum PeerType {
 
 #[allow(dead_code)]
 pub struct Route {
-    pub from: Ipv4Addr,
+    pub from: IpAddr,
     pub attrs: Vec<Attribute>,
     pub origin: u8,
     pub typ: PeerType,
