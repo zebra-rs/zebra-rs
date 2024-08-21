@@ -9,7 +9,7 @@ const CTLNAMES: &[&str] = &[
 pub fn enable() -> anyhow::Result<()> {
     for ctlname in CTLNAMES.iter() {
         let ctl = sysctl::Ctl::new(ctlname)?;
-        let value = ctl.set_value_string("1")?;
+        let _ = ctl.set_value_string("1")?;
     }
     Ok(())
 }

@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     let arg = Arg::parse();
 
-    policy::PolicyInit();
+    policy::policy_init();
 
     let mut rib = Rib::new()?;
 

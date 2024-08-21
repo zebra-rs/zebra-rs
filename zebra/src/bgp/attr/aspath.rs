@@ -12,6 +12,7 @@ pub const AS_SEQ: u8 = 2;
 pub const AS_CONFED_SEQ: u8 = 3;
 pub const AS_CONFED_SET: u8 = 4;
 
+#[allow(dead_code)]
 pub const AS_TRANS: u16 = 23456;
 
 #[derive(Debug, NomBE)]
@@ -80,7 +81,10 @@ impl fmt::Display for As4Segment {
             AS_CONFED_SET => {
                 write!(f, "[{v}]")
             }
-            AS_SEQ | _ => {
+            AS_SEQ => {
+                write!(f, "{v}")
+            }
+            _ => {
                 write!(f, "{v}")
             }
         }
@@ -195,6 +199,12 @@ impl As4Path {
             aspath.segs.push_front(other.segs[0].clone());
         }
         aspath
+    }
+}
+
+impl Default for As4Path {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

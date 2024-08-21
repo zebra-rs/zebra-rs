@@ -23,3 +23,9 @@ impl AtomicAggregate {
         buf.put_u8(Self::LEN);
     }
 }
+
+impl Default for AtomicAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}

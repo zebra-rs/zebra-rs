@@ -4,18 +4,24 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-use super::{AttributeFlags, AttributeType};
+use super::{encode_tlv, AttributeEncoder, AttributeFlags, AttributeType};
 
 #[derive(Clone, Debug, Default, NomBE)]
 pub struct LargeCommunity(pub Vec<LargeCommunityValue>);
 
+impl AttributeEncoder for LargeCommunity {
+    fn attr_type() -> AttributeType {
+        AttributeType::LargeCom
+    }
+
+    fn attr_flag() -> AttributeFlags {
+        AttributeFlags::OPTIONAL | AttributeFlags::TRANSITIVE
+    }
+}
+
 impl LargeCommunity {
     pub fn new() -> Self {
         Default::default()
-    }
-
-    fn flags() -> AttributeFlags {
-        AttributeFlags::OPTIONAL | AttributeFlags::TRANSITIVE
     }
 
     pub fn push(&mut self, value: LargeCommunityValue) {
@@ -29,19 +35,8 @@ impl LargeCommunity {
 
     pub fn encode(&self, buf: &mut BytesMut) {
         let mut attr_buf = BytesMut::new();
-        for com in self.0.iter() {
-            com.encode(&mut attr_buf);
-        }
-        if attr_buf.len() > 255 {
-            buf.put_u8(Self::flags().bits() | AttributeFlags::EXTENDED.bits());
-            buf.put_u8(AttributeType::LargeCom.0);
-            buf.put_u16(attr_buf.len() as u16)
-        } else {
-            buf.put_u8(Self::flags().bits());
-            buf.put_u8(AttributeType::LargeCom.0);
-            buf.put_u8(attr_buf.len() as u8);
-        }
-        buf.put(&attr_buf[..]);
+        self.0.iter().for_each(|x| x.encode(&mut attr_buf));
+        encode_tlv::<Self>(buf, attr_buf);
     }
 }
 

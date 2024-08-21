@@ -10,10 +10,10 @@ use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi, BGP_HOLD_TIME};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
-use ptree::PrefixTree;
+use prefix_trie::PrefixMap;
 use serde::Serialize;
 use std::cmp::min;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -123,8 +123,8 @@ pub struct PeerParam {
 
 #[derive(Debug)]
 pub struct Peer {
-    pub ident: Ipv4Addr,
-    pub address: Ipv4Addr,
+    pub ident: IpAddr,
+    pub address: IpAddr,
     pub router_id: Ipv4Addr,
     pub local_identifier: Option<Ipv4Addr>,
     pub remote_id: Ipv4Addr,
@@ -148,11 +148,11 @@ pub struct Peer {
 
 impl Peer {
     pub fn new(
-        ident: Ipv4Addr,
+        ident: IpAddr,
         local_as: u32,
         router_id: Ipv4Addr,
         peer_as: u32,
-        address: Ipv4Addr,
+        address: IpAddr,
         tx: UnboundedSender<Message>,
     ) -> Self {
         let mut peer = Self {
@@ -187,7 +187,7 @@ impl Peer {
         peer
     }
 
-    pub fn event(&self, ident: Ipv4Addr, event: Event) {
+    pub fn event(&self, ident: IpAddr, event: Event) {
         let _ = self.tx.clone().send(Message::Event(ident, event));
     }
 
@@ -216,14 +216,14 @@ impl Peer {
 
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
-    pub ptree: &'a mut PrefixTree<Ipv4Net, Vec<Route>>,
+    pub ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
 }
 
 fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
     println!("XX Recv update packet from id {}", id);
 }
 
-pub fn fsm(bgp: &mut Bgp, id: Ipv4Addr, event: Event) {
+pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         ptree: &mut bgp.ptree,
@@ -281,7 +281,7 @@ pub fn fsm_stop(peer: &mut Peer) -> State {
     fsm_init(peer)
 }
 
-pub fn capability_as4(caps: &Vec<CapabilityPacket>) -> Option<u32> {
+pub fn capability_as4(caps: &[CapabilityPacket]) -> Option<u32> {
     for cap in caps.iter() {
         if let CapabilityPacket::As4(m) = cap {
             return Some(m.asn);
@@ -310,7 +310,6 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
 
     // Compare with configured asn.
     if peer.peer_as != asn {
-        println!("XXX peer as wrong");
         peer_send_notification(
             peer,
             NotificationCode::OpenMessageError,
@@ -330,11 +329,12 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         println!("ASN mismatch");
         return State::Idle;
     }
-    if packet.bgp_id != peer.address.octets() {
-        // Send notification.
-        println!("router-id mismatch {:?}", peer.address);
-        return State::Idle;
-    }
+    // TODO: correct router-id validation.
+    // if packet.bgp_id != peer.address.octets() {
+    //     // Send notification.
+    //     println!("router-id mismatch {:?}", peer.address);
+    //     return State::Idle;
+    // }
     if packet.hold_time > 0 && packet.hold_time < 3 {
         return State::Idle;
     }
@@ -493,7 +493,7 @@ pub fn peer_start_connect_retry_timer(peer: &Peer) -> Timer {
 
 pub fn peer_packet_parse(
     rx: &[u8],
-    ident: Ipv4Addr,
+    ident: IpAddr,
     tx: UnboundedSender<Message>,
     config: &mut PeerConfig,
 ) -> Result<(), &'static str> {
@@ -522,7 +522,7 @@ pub fn peer_packet_parse(
 }
 
 pub async fn peer_read(
-    ident: Ipv4Addr,
+    ident: IpAddr,
     tx: UnboundedSender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
@@ -589,7 +589,11 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let address = peer.address;
     Task::spawn(async move {
         let tx = tx.clone();
-        let addr = format!("{}:{}", address, BGP_PORT);
+        let addr = match address {
+            IpAddr::V4(addr) => format!("{}:{}", addr, BGP_PORT),
+            IpAddr::V6(addr) => format!("[{}]:{}", addr, BGP_PORT),
+        };
+        // XXX Here is a connection to the peer.
         let result = TcpStream::connect(addr).await;
         match result {
             Ok(stream) => {
@@ -704,7 +708,8 @@ pub fn peer_refresh_holdtimer(peer: &Peer) {
 pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
     match sockaddr {
         SocketAddr::V4(addr) => {
-            if let Some(peer) = bgp.peers.get_mut(addr.ip()) {
+            let addr = IpAddr::V4(*addr.ip());
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
                 if peer.state == State::Active {
                     peer.state = fsm_connected(peer, stream);
                 }

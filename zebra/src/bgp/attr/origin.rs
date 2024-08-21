@@ -47,7 +47,10 @@ impl fmt::Display for Origin {
             ORIGIN_EGP => {
                 write!(f, "e")
             }
-            ORIGIN_INCOMPLETE | _ => {
+            ORIGIN_INCOMPLETE => {
+                write!(f, "?")
+            }
+            _ => {
                 write!(f, "?")
             }
         }
@@ -63,7 +66,10 @@ impl fmt::Debug for Origin {
             ORIGIN_EGP => {
                 write!(f, "EGP")
             }
-            ORIGIN_INCOMPLETE | _ => {
+            ORIGIN_INCOMPLETE => {
+                write!(f, "Incomplete")
+            }
+            _ => {
                 write!(f, "Incomplete")
             }
         }

@@ -7,7 +7,7 @@ use super::{Link, RibTxChannel};
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use ipnet::Ipv4Net;
-use ptree::PrefixTree;
+use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::Sender;
 // use tracing::warn;
@@ -23,7 +23,7 @@ pub struct Rib {
     pub fib_handle: FibHandle,
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
-    pub rib: PrefixTree<Ipv4Net, Vec<RibEntry>>,
+    pub rib: PrefixMap<Ipv4Net, Vec<RibEntry>>,
 }
 
 impl Rib {
@@ -39,7 +39,7 @@ impl Rib {
             fib_handle,
             redists: Vec::new(),
             links: BTreeMap::new(),
-            rib: PrefixTree::new(),
+            rib: PrefixMap::new(),
         };
         rib.show_build();
         Ok(rib)

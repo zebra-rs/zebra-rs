@@ -40,7 +40,13 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             CapabilityDynamicCapability::parse,
             CapabilityPacket::DynamicCapability,
         )(input),
-        CapabilityType::AddPath => map(CapabilityAddPath::parse, CapabilityPacket::AddPath)(input),
+        CapabilityType::AddPath => {
+            let (input, mut cap) = CapabilityAddPath::parse(input)?;
+            let (value, input) = input.split_at(cap.length as usize);
+            let (_, values) = many0(AddPathValue::parse)(value)?;
+            cap.values = values;
+            Ok((input, CapabilityPacket::AddPath(cap)))
+        }
         CapabilityType::EnhancedRouteRefresh => map(
             CapabilityEnhancedRouteRefresh::parse,
             CapabilityPacket::EnhancedRouteRefresh,
@@ -69,10 +75,16 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             Ok((input, CapabilityPacket::SoftwareVersion(cap)))
         }
         CapabilityType::PathLimit => {
-            map(CapabilityPathLimit::parse, CapabilityPacket::PathLimit)(input)
+            let (input, mut cap) = CapabilityPathLimit::parse(input)?;
+            let (value, input) = input.split_at(cap.length as usize);
+            let (_, values) = many0(PathLimitValue::parse)(value)?;
+            cap.values = values;
+            Ok((input, CapabilityPacket::PathLimit(cap)))
         }
         _ => {
+            println!("Unknown?");
             let (input, mut cap) = CapabilityUnknown::parse(input)?;
+            println!("{:?}", cap);
             let (input, data) = take(cap.length)(input)?;
             cap.data = data.to_vec();
             Ok((input, CapabilityPacket::Unknown(cap)))
@@ -81,6 +93,7 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
 }
 
 fn parse_bgp_open_packet(input: &[u8]) -> IResult<&[u8], OpenPacket> {
+    println!("Open Packet parse");
     let (input, mut packet) = OpenPacket::parse(input)?;
     let (input, len) = if packet.opt_param_len == 255 {
         let (input, ext) = OpenExtended::parse(input)?;
@@ -303,8 +316,7 @@ fn parse_bgp_notification_packet(input: &[u8]) -> IResult<&[u8], NotificationPac
 
 pub fn peek_bgp_length(input: &[u8]) -> usize {
     if let Some(len) = input.get(16..18) {
-        let len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
-        len
+        u16::from_be_bytes(len.try_into().unwrap()) as usize
     } else {
         0
     }

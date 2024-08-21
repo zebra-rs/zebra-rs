@@ -7,16 +7,16 @@ use crate::config::{
 };
 use crate::rib::api::{RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
-use ptree::PrefixTree;
+use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum Message {
-    Event(Ipv4Addr, Event),
+    Event(IpAddr, Event),
     Accept(TcpStream, SocketAddr),
     Show(Sender<String>),
 }
@@ -28,7 +28,7 @@ pub type ShowCallback = fn(&Bgp, Args) -> String;
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
-    pub peers: BTreeMap<Ipv4Addr, Peer>,
+    pub peers: BTreeMap<IpAddr, Peer>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
@@ -37,7 +37,7 @@ pub struct Bgp {
     pub rib: Sender<RibTx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
-    pub ptree: PrefixTree<Ipv4Net, Vec<Route>>,
+    pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
     pub listen_task: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
 }
@@ -51,7 +51,7 @@ impl Bgp {
             peers: BTreeMap::new(),
             tx,
             rx,
-            ptree: PrefixTree::<Ipv4Net, Vec<Route>>::new(),
+            ptree: PrefixMap::<Ipv4Net, Vec<Route>>::new(),
             rib,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
@@ -128,7 +128,7 @@ impl Bgp {
                     self.process_cm_msg(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
-            self.process_show_msg(msg).await;
+                    self.process_show_msg(msg).await;
                 }
             }
         }

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use ipnet::Ipv6Net;
 
 pub enum SidFormat {
@@ -9,6 +10,7 @@ pub enum SidFormat {
     FullLength,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 pub enum SidSource {
     Manager,
     OSPF,

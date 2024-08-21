@@ -11,6 +11,22 @@ use std::{cell::RefCell, rc::Rc};
 #[derive(Clone)]
 pub struct Args(pub VecDeque<String>);
 
+macro_rules! arg_parse_type {
+    ($self:expr, $typ:ty) => {
+        let item = $self.0.pop_front()?;
+        match item.parse::<$typ>() {
+            Ok(arg) => {
+                return Some(arg);
+            }
+            Err(_) => {
+                $self.0.push_front(item);
+                return None;
+            }
+        }
+    };
+}
+
+#[allow(dead_code)]
 impl Args {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -24,46 +40,32 @@ impl Args {
         self.0.pop_front()
     }
 
+    pub fn u16(&mut self) -> Option<u16> {
+        arg_parse_type!(self, u16);
+    }
+
     pub fn u32(&mut self) -> Option<u32> {
-        let item = self.0.pop_front()?;
-        let arg: u32 = item.parse().ok()?;
-        Some(arg)
+        arg_parse_type!(self, u32);
     }
 
     pub fn v4addr(&mut self) -> Option<Ipv4Addr> {
-        let item = self.0.pop_front()?;
-        let arg: Ipv4Addr = item.parse().ok()?;
-        Some(arg)
+        arg_parse_type!(self, Ipv4Addr);
     }
 
     pub fn v4net(&mut self) -> Option<Ipv4Net> {
-        let item = self.0.pop_front()?;
-        let arg: Ipv4Net = item.parse().ok()?;
-        Some(arg)
+        arg_parse_type!(self, Ipv4Net);
     }
 
     pub fn v6addr(&mut self) -> Option<Ipv6Addr> {
-        let item = self.0.pop_front()?;
-        let arg: Ipv6Addr = item.parse().ok()?;
-        Some(arg)
+        arg_parse_type!(self, Ipv6Addr);
     }
 
     pub fn v6net(&mut self) -> Option<Ipv6Net> {
-        let item = self.0.pop_front()?;
-        let arg: Ipv6Net = item.parse().ok()?;
-        Some(arg)
+        arg_parse_type!(self, Ipv6Net);
     }
 
     pub fn boolean(&mut self) -> Option<bool> {
-        let item = self.0.pop_front()?;
-        let arg: bool = item.parse().ok()?;
-        Some(arg)
-    }
-
-    pub fn u16(&mut self) -> Option<u16> {
-        let item = self.0.pop_front()?;
-        let arg: u16 = item.parse().ok()?;
-        Some(arg)
+        arg_parse_type!(self, bool);
     }
 
     pub fn afi_safi(&mut self) -> Option<AfiSafi> {

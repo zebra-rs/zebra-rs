@@ -97,7 +97,7 @@ fn os_dump(tx: UnboundedSender<FibMessage>) {
     for ifa in addrs {
         let index = if_nametoindex(ifa.interface_name.as_str());
         if let Ok(index) = index {
-            if !links.contains_key(&index) {
+            if let std::collections::btree_map::Entry::Vacant(e) = links.entry(index) {
                 let mut link = FibLink::new();
                 link.name.clone_from(&ifa.interface_name);
                 link.index = index;
@@ -109,8 +109,22 @@ fn os_dump(tx: UnboundedSender<FibMessage>) {
 
                 let msg = FibMessage::NewLink(link.clone());
                 tx.send(msg).unwrap();
-                links.insert(index, link);
+                e.insert(link);
             }
+            // if !links.contains_key(&index) {
+            //     let mut link = FibLink::new();
+            //     link.name.clone_from(&ifa.interface_name);
+            //     link.index = index;
+            //     link.flags = os_link_flags(ifa.flags);
+            //     if (link.flags.0 & link::IFF_LOOPBACK) == link::IFF_LOOPBACK {
+            //         link.link_type = link::LinkType::Loopback;
+            //     }
+            //     link.mtu = os_mtu(&link.name);
+
+            //     let msg = FibMessage::NewLink(link.clone());
+            //     tx.send(msg).unwrap();
+            //     links.insert(index, link);
+            // }
             if let Some(addr) = ifa.address {
                 if let Some(addr) = addr.as_sockaddr_in() {
                     let addr = Ipv4Addr::from(addr.as_ref().sin_addr.s_addr.to_be());
