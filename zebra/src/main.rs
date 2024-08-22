@@ -43,16 +43,9 @@ fn system_path(arg: &Arg) -> PathBuf {
     }
 }
 
-use rib::srv6;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = srv6::enable();
-
     let arg = Arg::parse();
-
-    policy::policy_init();
-
     let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());

@@ -129,6 +129,7 @@ pub struct Match {
     pub matched_entry: Rc<Entry>,
     pub matched_type: MatchType,
     pub matched_config: Rc<Config>,
+    pub last_match: Option<String>,
 }
 
 impl Match {
@@ -144,6 +145,7 @@ impl Match {
         } else if m == self.matched_type {
             self.count += 1;
         }
+        self.last_match = Some(comp.name.clone());
         self.comps.push(comp);
     }
 
@@ -361,6 +363,17 @@ pub fn ymatch_complete(ymatch: YangMatch) -> bool {
         || ymatch == YangMatch::LeafListMatched
 }
 
+fn matched_enumeration(mx: &Match) -> Option<String> {
+    if let Some(type_node) = &mx.matched_entry.type_node {
+        if type_node.kind == YangType::Enumeration {
+            if let Some(last_match) = &mx.last_match {
+                return Some(last_match.clone());
+            }
+        }
+    }
+    None
+}
+
 pub fn parse(
     input: &str,
     entry: Rc<Entry>,
@@ -455,9 +468,13 @@ pub fn parse(
 
     // Elem for set/delete/exec func.
     let path = if ymatch_complete(s.ymatch) {
-        let sub = &input[0..mx.pos];
+        let sub = if let Some(sub) = matched_enumeration(&mx) {
+            sub
+        } else {
+            input[0..mx.pos].to_string()
+        };
         CommandPath {
-            name: sub.to_string(),
+            name: sub,
             ymatch: s.ymatch.into(),
             key: mx.matched_entry.name.to_owned(),
         }
