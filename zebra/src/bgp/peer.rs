@@ -387,7 +387,7 @@ fn peer_send_update_test(peer: &mut Peer) {
     let origin = Origin::new(ORIGIN_IGP);
     update.attrs.push(Attribute::Origin(origin));
 
-    let aspath: As4Path = As4Path::from_str("1").unwrap();
+    let aspath: As4Path = As4Path::from_str("").unwrap();
     update.attrs.push(Attribute::As4Path(aspath));
 
     let nexthop = NextHopAttr {

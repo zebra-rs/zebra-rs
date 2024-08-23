@@ -31,10 +31,17 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             CapabilityExtendedMessage::parse,
             CapabilityPacket::ExtendedMessage,
         )(input),
-        CapabilityType::GracefulRestart => map(
-            CapabilityGracefulRestart::parse,
-            CapabilityPacket::GracefulRestart,
-        )(input),
+        CapabilityType::GracefulRestart => {
+            let (input, mut cap) = CapabilityGracefulRestart::parse(input)?;
+            let (input, restart_time) = if cap.length == 2 {
+                let (input, restart_time) = be_u16(input)?;
+                (input, restart_time as u32)
+            } else {
+                be_u32(input)?
+            };
+            cap.restart_time = restart_time;
+            Ok((input, CapabilityPacket::GracefulRestart(cap)))
+        }
         CapabilityType::As4 => map(CapabilityAs4::parse, CapabilityPacket::As4)(input),
         CapabilityType::DynamicCapability => map(
             CapabilityDynamicCapability::parse,
@@ -92,6 +99,13 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
     }
 }
 
+fn parse_bgp_open_option_packet(input: &[u8]) -> IResult<&[u8], Vec<CapabilityPacket>> {
+    let (input, header) = CapabilityHeader::parse(input)?;
+    let (opts, input) = input.split_at(header.length as usize);
+    let (_, caps) = many0(parse_bgp_capability_packet)(opts)?;
+    Ok((input, caps))
+}
+
 fn parse_bgp_open_packet(input: &[u8]) -> IResult<&[u8], OpenPacket> {
     println!("Open Packet parse");
     let (input, mut packet) = OpenPacket::parse(input)?;
@@ -108,8 +122,11 @@ fn parse_bgp_open_packet(input: &[u8]) -> IResult<&[u8], OpenPacket> {
     if input.len() != len as usize {
         // TODO: Error.
     }
-    let (input, mut caps) = many0(parse_bgp_capability_packet)(input)?;
-    packet.caps.append(&mut caps);
+    let (opts, input) = input.split_at(len as usize);
+    let (_, caps) = many0(parse_bgp_open_option_packet)(opts)?;
+    for mut cap in caps.into_iter() {
+        packet.caps.append(&mut cap);
+    }
     Ok((input, packet))
 }
 
