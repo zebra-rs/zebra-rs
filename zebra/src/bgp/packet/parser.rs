@@ -17,23 +17,23 @@ use std::mem::size_of;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
-    let (_, header) = peek(CapabilityPeekHeader::parse)(input)?;
-    match CapabilityType(header.typ) {
-        CapabilityType::MultiProtocol => map(
+    let (_, header) = peek(CapabilityHeader::parse)(input)?;
+    match CapabilityCode(header.code) {
+        CapabilityCode::MultiProtocol => map(
             CapabilityMultiProtocol::parse,
             CapabilityPacket::MultiProtocol,
         )(input),
-        CapabilityType::RouteRefresh | CapabilityType::RouteRefreshCisco => map(
+        CapabilityCode::RouteRefresh | CapabilityCode::RouteRefreshCisco => map(
             CapabilityRouteRefresh::parse,
             CapabilityPacket::RouteRefresh,
         )(input),
-        CapabilityType::ExtendedMessage => map(
+        CapabilityCode::ExtendedMessage => map(
             CapabilityExtendedMessage::parse,
             CapabilityPacket::ExtendedMessage,
         )(input),
-        CapabilityType::GracefulRestart => {
+        CapabilityCode::GracefulRestart => {
             let (input, mut cap) = CapabilityGracefulRestart::parse(input)?;
-            let (input, restart_time) = if cap.length == 2 {
+            let (input, restart_time) = if cap.header.length == 2 {
                 let (input, restart_time) = be_u16(input)?;
                 (input, restart_time as u32)
             } else {
@@ -42,30 +42,30 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             cap.restart_time = restart_time;
             Ok((input, CapabilityPacket::GracefulRestart(cap)))
         }
-        CapabilityType::As4 => map(CapabilityAs4::parse, CapabilityPacket::As4)(input),
-        CapabilityType::DynamicCapability => map(
+        CapabilityCode::As4 => map(CapabilityAs4::parse, CapabilityPacket::As4)(input),
+        CapabilityCode::DynamicCapability => map(
             CapabilityDynamicCapability::parse,
             CapabilityPacket::DynamicCapability,
         )(input),
-        CapabilityType::AddPath => {
+        CapabilityCode::AddPath => {
             let (input, mut cap) = CapabilityAddPath::parse(input)?;
-            let (value, input) = input.split_at(cap.length as usize);
+            let (value, input) = input.split_at(cap.header.length as usize);
             let (_, values) = many0(AddPathValue::parse)(value)?;
             cap.values = values;
             Ok((input, CapabilityPacket::AddPath(cap)))
         }
-        CapabilityType::EnhancedRouteRefresh => map(
+        CapabilityCode::EnhancedRouteRefresh => map(
             CapabilityEnhancedRouteRefresh::parse,
             CapabilityPacket::EnhancedRouteRefresh,
         )(input),
-        CapabilityType::LLGR => {
+        CapabilityCode::LLGR => {
             let (input, mut cap) = CapabilityLLGR::parse(input)?;
-            let (value, input) = input.split_at(cap.length as usize);
+            let (value, input) = input.split_at(cap.header.length as usize);
             let (_, values) = many0(LLGRValue::parse)(value)?;
             cap.values = values;
             Ok((input, CapabilityPacket::LLGR(cap)))
         }
-        CapabilityType::FQDN => {
+        CapabilityCode::FQDN => {
             let (input, mut cap) = CapabilityFQDN::parse(input)?;
             let (input, hostname_len) = be_u8(input)?;
             let (input, hostname) = take(hostname_len)(input)?;
@@ -75,15 +75,15 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             cap.domain = domain.to_vec();
             Ok((input, CapabilityPacket::FQDN(cap)))
         }
-        CapabilityType::SoftwareVersion => {
+        CapabilityCode::SoftwareVersion => {
             let (input, mut cap) = CapabilitySoftwareVersion::parse(input)?;
-            let (input, version) = take(cap.length)(input)?;
+            let (input, version) = take(cap.header.length)(input)?;
             cap.version = version.to_vec();
             Ok((input, CapabilityPacket::SoftwareVersion(cap)))
         }
-        CapabilityType::PathLimit => {
+        CapabilityCode::PathLimit => {
             let (input, mut cap) = CapabilityPathLimit::parse(input)?;
-            let (value, input) = input.split_at(cap.length as usize);
+            let (value, input) = input.split_at(cap.header.length as usize);
             let (_, values) = many0(PathLimitValue::parse)(value)?;
             cap.values = values;
             Ok((input, CapabilityPacket::PathLimit(cap)))
@@ -92,7 +92,7 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             println!("Unknown?");
             let (input, mut cap) = CapabilityUnknown::parse(input)?;
             println!("{:?}", cap);
-            let (input, data) = take(cap.length)(input)?;
+            let (input, data) = take(cap.header.length)(input)?;
             cap.data = data.to_vec();
             Ok((input, CapabilityPacket::Unknown(cap)))
         }
