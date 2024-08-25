@@ -73,8 +73,10 @@ impl Args {
         match item.as_str() {
             "ipv4-unicast" => Some(AfiSafi::new(Afi::IP, Safi::Unicast)),
             "ipv4-labeled-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsLabel)),
+            "l3vpn-ipv4-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsVpn)),
             "ipv6-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::Unicast)),
             "ipv6-labeled-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::MplsLabel)),
+            "l3vpn-ipv6-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsVpn)),
             _ => None,
         }
     }

@@ -102,6 +102,9 @@ impl From<UpdatePacket> for BytesMut {
                 Attribute::Community(attr) => {
                     attr.encode(&mut buf);
                 }
+                Attribute::ExtCommunity(attr) => {
+                    attr.encode(&mut buf);
+                }
                 _ => {}
             }
         }

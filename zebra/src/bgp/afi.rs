@@ -20,6 +20,7 @@ newtype_enum! {
         Unicast = 1,
         Multicast = 2,
         MplsLabel = 4,
+        MplsVpn = 128,
     }
 }
 
