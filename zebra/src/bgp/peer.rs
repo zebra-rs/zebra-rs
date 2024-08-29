@@ -387,7 +387,7 @@ fn peer_send_update_test(peer: &mut Peer) {
     let origin = Origin::new(ORIGIN_IGP);
     update.attrs.push(Attribute::Origin(origin));
 
-    let aspath: As4Path = As4Path::from_str("1").unwrap();
+    let aspath: As4Path = As4Path::from_str("").unwrap();
     update.attrs.push(Attribute::As4Path(aspath));
 
     let nexthop = NextHopAttr {
@@ -409,6 +409,9 @@ fn peer_send_update_test(peer: &mut Peer) {
 
     let com = Community::from_str("100:10 100:20").unwrap();
     update.attrs.push(Attribute::Community(com));
+
+    let ecom = ExtCommunity::from_str("rt 123:100 soo 1.1.1.1:12").unwrap();
+    update.attrs.push(Attribute::ExtCommunity(ecom));
 
     let ipv4net: Ipv4Net = "1.1.1.1/32".parse().unwrap();
     update.ipv4_update.push(ipv4net);
@@ -624,9 +627,9 @@ pub fn peer_send_open(peer: &mut Peer) {
         caps.push(CapabilityPacket::As4(cap));
     }
     if peer.config.route_refresh {
-        let cap = CapabilityRouteRefresh::new(CapabilityType::RouteRefresh);
+        let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefresh);
         caps.push(CapabilityPacket::RouteRefresh(cap));
-        let cap = CapabilityRouteRefresh::new(CapabilityType::RouteRefreshCisco);
+        let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefreshCisco);
         caps.push(CapabilityPacket::RouteRefresh(cap));
     }
     if let Some(restart_time) = peer.config.graceful_restart {

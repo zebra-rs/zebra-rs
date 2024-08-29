@@ -4,21 +4,24 @@ use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 #[allow(clippy::upper_case_acronyms)]
-enum RouteDistinguisherType {
+#[repr(u16)]
+#[derive(Default, NomBE, PartialEq, Debug)]
+pub enum RouteDistinguisherType {
+    #[default]
     ASN = 0,
     IP = 1,
 }
 
-#[derive(Default, NomBE)]
-struct RouteDistinguisher {
-    typ: u16,
-    val: [u8; 6],
+#[derive(Default, NomBE, PartialEq, Debug)]
+pub struct RouteDistinguisher {
+    pub typ: RouteDistinguisherType,
+    pub val: [u8; 6],
 }
 
 impl RouteDistinguisher {
     pub fn new(typ: RouteDistinguisherType) -> Self {
         Self {
-            typ: typ as u16,
+            typ,
             ..Default::default()
         }
     }
@@ -58,7 +61,7 @@ impl FromStr for RouteDistinguisher {
 
 impl fmt::Display for RouteDistinguisher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.typ == RouteDistinguisherType::ASN as u16 {
+        if self.typ == RouteDistinguisherType::ASN {
             let asn = u16::from_be_bytes([self.val[0], self.val[1]]);
             let val = u32::from_be_bytes([self.val[2], self.val[3], self.val[4], self.val[5]]);
             write!(f, "{asn}:{val}")

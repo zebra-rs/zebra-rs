@@ -73,8 +73,10 @@ impl Args {
         match item.as_str() {
             "ipv4-unicast" => Some(AfiSafi::new(Afi::IP, Safi::Unicast)),
             "ipv4-labeled-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsLabel)),
+            "l3vpn-ipv4-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsVpn)),
             "ipv6-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::Unicast)),
             "ipv6-labeled-unicast" => Some(AfiSafi::new(Afi::IP6, Safi::MplsLabel)),
+            "l3vpn-ipv6-unicast" => Some(AfiSafi::new(Afi::IP, Safi::MplsVpn)),
             _ => None,
         }
     }
@@ -90,6 +92,7 @@ pub struct Config {
     pub keys: RefCell<Vec<Rc<Config>>>,
     pub presence: bool,
     pub parent: Option<Rc<Config>>,
+    pub mandatory: Vec<String>,
 }
 
 impl Config {
@@ -336,6 +339,43 @@ impl Config {
             config.list(output);
         }
     }
+
+    fn has_mandatory(&self, mandatory: &String) -> bool {
+        for config in self.configs.borrow().iter() {
+            if config.name == *mandatory {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for m in self.mandatory.iter() {
+            for key in self.keys.borrow().iter() {
+                if !key.has_mandatory(m) {
+                    return Err(anyhow::anyhow!(format!(
+                        "\"{} {}\" missing mandatory node \"{}\"",
+                        self.name, key.name, m
+                    )));
+                }
+            }
+            if !self.configs.borrow().is_empty() {
+                if !self.has_mandatory(m) {
+                    return Err(anyhow::anyhow!(format!(
+                        "\"{}\" missing mandatory node \"{}\"",
+                        self.name, m
+                    )));
+                }
+            }
+        }
+        for key in self.keys.borrow().iter() {
+            key.validate()?;
+        }
+        for config in self.configs.borrow().iter() {
+            config.validate()?;
+        }
+        Ok(())
+    }
 }
 
 pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> {
@@ -345,6 +385,7 @@ pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> 
         value: conf.value.clone(),
         list: conf.list.clone(),
         presence: conf.presence,
+        mandatory: conf.mandatory.clone(),
         parent,
         ..Default::default()
     });
@@ -369,6 +410,7 @@ fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 name: cpath.name.clone(),
                 parent: Some(config.clone()),
                 presence: (ymatch_enum(cpath.ymatch) == YangMatch::DirMatched),
+                mandatory: cpath.mandatory.clone(),
                 ..Default::default()
             });
             config.configs.borrow_mut().push(n.clone());
@@ -390,6 +432,7 @@ fn config_set_key(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 name: cpath.name.clone(),
                 parent: Some(config.clone()),
                 prefix: cpath.key.clone(),
+                mandatory: cpath.mandatory.clone(),
                 ..Default::default()
             });
             config.keys.borrow_mut().push(n.clone());
