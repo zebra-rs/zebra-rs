@@ -170,6 +170,7 @@ message CommandPath {
   string name = 1;
   string key = 2;
   YangMatch ymatch = 3;
+  repeated string mandatory = 4;
 }
 
 // Show service.

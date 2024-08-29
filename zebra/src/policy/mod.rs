@@ -2,4 +2,4 @@ pub mod rmap;
 
 pub mod regex;
 
-pub mod clist;
+pub mod com_list;

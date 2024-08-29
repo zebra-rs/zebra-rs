@@ -467,6 +467,12 @@ pub fn parse(
     }
 
     // Elem for set/delete/exec func.
+    let mut mandatory = Vec::<String>::new();
+    for entry in mx.matched_entry.dir.borrow().iter() {
+        if entry.mandatory {
+            mandatory.push(entry.name.clone());
+        }
+    }
     let path = if ymatch_complete(s.ymatch) {
         let sub = if let Some(sub) = matched_enumeration(&mx) {
             sub
@@ -477,12 +483,14 @@ pub fn parse(
             name: sub,
             ymatch: s.ymatch.into(),
             key: mx.matched_entry.name.to_owned(),
+            mandatory,
         }
     } else {
         CommandPath {
             name: mx.matched_entry.name.to_owned(),
             ymatch: s.ymatch.into(),
             key: "".to_string(),
+            mandatory,
         }
     };
 

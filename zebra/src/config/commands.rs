@@ -122,8 +122,11 @@ fn yaml(config: &ConfigManager) -> (ExecCode, String) {
 }
 
 fn commit(config: &ConfigManager) -> (ExecCode, String) {
-    config.commit_config();
-    (ExecCode::Show, String::from(""))
+    let result = config.commit_config();
+    match result {
+        Ok(_) => (ExecCode::Show, String::from("")),
+        Err(err) => (ExecCode::Show, err.to_string()),
+    }
 }
 
 fn discard(config: &ConfigManager) -> (ExecCode, String) {
