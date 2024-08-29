@@ -114,8 +114,12 @@ impl ConfigManager {
     }
 
     pub fn commit_config(&self) -> anyhow::Result<()> {
-        self.store.candidate.borrow().validate()?;
-
+        let mut errors = Vec::<String>::new();
+        self.store.candidate.borrow().validate(&mut errors);
+        if !errors.is_empty() {
+            let errors = errors.join("\n");
+            return Err(anyhow::anyhow!(errors));
+        }
         let mut running = String::new();
         let mut candidate = String::new();
         self.store.running.borrow().list(&mut running);
