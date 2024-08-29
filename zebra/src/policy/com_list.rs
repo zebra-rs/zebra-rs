@@ -1,16 +1,47 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     bgp::attr::Community,
     config::{Args, ConfigOp},
 };
 
+pub struct CommunityListMap(pub BTreeMap<String, CommunityList>);
+
+impl CommunityListMap {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
 #[derive(Debug)]
 pub struct CommunityList {
     name: String,
     entry: Vec<CommunityEntry>,
+}
+
+pub enum Action {
+    Permit,
+    Deny,
+}
+
+impl CommunityList {
+    pub fn action_set(seq: u32, action: Action) {
+        //
+    }
+
+    pub fn action_del(seq: u32) {
+        //
+    }
+
+    pub fn set(seq: u32) {
+        //
+    }
+
+    pub fn del(seq: u32) {
+        //
+    }
 }
 
 #[derive(Debug)]
@@ -41,9 +72,26 @@ impl Policy {
 // community-list hoge
 // community-list hoge seq 5
 // community-list hoge seq 5 action permit
-// community-list hoge seq 5 member b c
+// community-list hoge seq 5 member 100:10 20:1
 
-pub fn config_entry(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
+// community-list hoge {
+//     seq 5 {
+//         action permit;
+//         member 100:10 no-export;
+//         option additive;
+//     }
+//     seq 10 {
+//         action permit;
+//         member 100:10 no-export;
+//         option additive;
+//     }
+// }
+
+pub fn config_add(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
+    None
+}
+
+pub fn config_del(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
     None
 }
 

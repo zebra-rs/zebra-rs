@@ -113,7 +113,9 @@ impl ConfigManager {
         }
     }
 
-    pub fn commit_config(&self) {
+    pub fn commit_config(&self) -> anyhow::Result<()> {
+        self.store.candidate.borrow().validate()?;
+
         let mut running = String::new();
         let mut candidate = String::new();
         self.store.running.borrow().list(&mut running);
@@ -147,6 +149,7 @@ impl ConfigManager {
             }
         }
         self.store.commit();
+        Ok(())
     }
 
     fn load_mode(&self, yang: &mut YangStore, mode: &str) -> anyhow::Result<Rc<Entry>> {
@@ -166,7 +169,7 @@ impl ConfigManager {
                 }
             }
         }
-        self.commit_config();
+        let _ = self.commit_config();
     }
 
     pub fn save_config(&self) {

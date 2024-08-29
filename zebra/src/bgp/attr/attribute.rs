@@ -1,6 +1,6 @@
 use crate::bgp::{Afi, Safi};
 use bytes::{BufMut, BytesMut};
-use ipnet::Ipv6Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 use std::net::Ipv6Addr;
@@ -88,5 +88,6 @@ pub struct MpNlriUnreachHeader {
 #[derive(Clone, Debug)]
 pub struct MpNlriAttr {
     pub next_hop: Option<Ipv6Addr>,
-    pub prefix: Vec<Ipv6Net>,
+    pub ipv6_prefix: Vec<Ipv6Net>,
+    pub vpnv4_prefix: Vec<Ipv4Net>,
 }
