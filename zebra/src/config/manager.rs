@@ -76,6 +76,7 @@ impl ConfigManager {
         Ok(cm)
     }
 
+    #[allow(dead_code)]
     fn json_test(&self) {
         let mode = self.modes.get("configure").unwrap();
         let mut entry: Option<Rc<Entry>> = None;

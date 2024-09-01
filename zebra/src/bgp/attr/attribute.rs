@@ -7,7 +7,8 @@ use std::net::Ipv6Addr;
 
 use super::{
     Aggregator2, Aggregator4, As2Path, As4Path, AtomicAggregate, AttributeFlags, ClusterList,
-    Community, ExtCommunity, LargeCommunity, LocalPref, Med, NextHopAttr, Origin, OriginatorId,
+    Community, ExtCommunity, ExtIpv6Community, LargeCommunity, LocalPref, Med, NextHopAttr, Origin,
+    OriginatorId,
 };
 
 #[derive(Debug, Eq, PartialEq, NomBE)]
@@ -50,7 +51,7 @@ pub enum Attribute {
     MpReachNlri(MpNlriAttr),
     MpUnreachNlri(MpNlriAttr),
     ExtCommunity(ExtCommunity),
-    // ExtIpv6Community(ExtIpv6Community)
+    ExtIpv6Community(ExtIpv6Community),
     LargeCom(LargeCommunity),
 }
 

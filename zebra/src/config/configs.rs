@@ -371,15 +371,13 @@ impl Config {
                     errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
                 }
             }
-            if !self.configs.borrow().is_empty() {
-                if !self.has_mandatory(m) {
-                    let mut parents = VecDeque::<String>::new();
-                    self.parents(&mut parents);
-                    parents.push_back(self.name.clone());
-                    let parents = Vec::from(parents);
-                    let parents = parents.join(" ");
-                    errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
-                }
+            if !self.configs.borrow().is_empty() && !self.has_mandatory(m) {
+                let mut parents = VecDeque::<String>::new();
+                self.parents(&mut parents);
+                parents.push_back(self.name.clone());
+                let parents = Vec::from(parents);
+                let parents = parents.join(" ");
+                errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
             }
         }
         for key in self.keys.borrow().iter() {
