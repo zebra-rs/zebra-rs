@@ -39,6 +39,13 @@ pub mod ext_community;
 pub mod ext_community_token;
 pub use ext_community::*;
 
+pub mod ext_ipv6_community;
+pub mod ext_ipv6_community_token;
+pub use ext_ipv6_community::*;
+
+pub mod ext_community_type;
+pub use ext_community_type::*;
+
 pub mod large_community;
 pub use large_community::*;
 

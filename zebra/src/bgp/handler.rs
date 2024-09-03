@@ -5,6 +5,7 @@ use crate::bgp::task::Task;
 use crate::config::{
     path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
 };
+use crate::policy::com_list::CommunityListMap;
 use crate::rib::api::{RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
@@ -22,6 +23,7 @@ pub enum Message {
 }
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
+pub type PCallback = fn(&mut CommunityListMap, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Bgp, Args) -> String;
 
 #[allow(dead_code)]
@@ -37,9 +39,11 @@ pub struct Bgp {
     pub rib: Sender<RibTx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
+    pub pcallbacks: HashMap<String, PCallback>,
     pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
     pub listen_task: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
+    pub clist: CommunityListMap,
 }
 
 impl Bgp {
@@ -58,8 +62,10 @@ impl Bgp {
             show_cb: HashMap::new(),
             redist: RibRxChannel::new(),
             callbacks: HashMap::new(),
+            pcallbacks: HashMap::new(),
             listen_task: None,
             listen_err: None,
+            clist: CommunityListMap::new(),
         };
         bgp.callback_build();
         bgp.show_build();
@@ -68,6 +74,10 @@ impl Bgp {
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
+    }
+
+    pub fn pcallback_add(&mut self, path: &str, cb: PCallback) {
+        self.pcallbacks.insert(path.to_string(), cb);
     }
 
     pub fn process_msg(&mut self, msg: Message) {
@@ -90,6 +100,10 @@ impl Bgp {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        } else {
+            if let Some(f) = self.pcallbacks.get(&path) {
+                f(&mut self.clist, args, msg.op);
+            }
         }
     }
 

@@ -3,6 +3,7 @@ use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, delete, set};
 use super::files::load_config_file;
+use super::json::json_read;
 use super::parse::parse;
 use super::parse::State;
 use super::paths::{path_trim, paths_str};
@@ -69,7 +70,24 @@ impl ConfigManager {
             cm_clients: HashMap::new(),
         };
         cm.init()?;
+
+        // cm.json_test();
+
         Ok(cm)
+    }
+
+    #[allow(dead_code)]
+    fn json_test(&self) {
+        let mode = self.modes.get("configure").unwrap();
+        let mut entry: Option<Rc<Entry>> = None;
+        for e in mode.entry.dir.borrow().iter() {
+            if e.name == "set" {
+                entry = Some(e.clone());
+            }
+        }
+        let entry = entry.unwrap();
+
+        json_read(entry);
     }
 
     fn init(&mut self) -> anyhow::Result<()> {
@@ -114,8 +132,12 @@ impl ConfigManager {
     }
 
     pub fn commit_config(&self) -> anyhow::Result<()> {
-        self.store.candidate.borrow().validate()?;
-
+        let mut errors = Vec::<String>::new();
+        self.store.candidate.borrow().validate(&mut errors);
+        if !errors.is_empty() {
+            let errors = errors.join("\n");
+            return Err(anyhow::anyhow!(errors));
+        }
         let mut running = String::new();
         let mut candidate = String::new();
         self.store.running.borrow().list(&mut running);
