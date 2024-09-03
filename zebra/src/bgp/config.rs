@@ -5,6 +5,7 @@ use super::{
 };
 
 use crate::config::{Args, ConfigOp};
+use crate::policy::com_list::*;
 use std::net::{IpAddr, Ipv4Addr};
 
 fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -131,11 +132,6 @@ fn config_hold_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-// fn config_clist(_bgp: &mut Bgp, mut _args: Args, _op: ConfigOp) -> Option<()> {
-//     let _x = CommunityMember::Regexp(String::from("x"));
-//     Some(())
-// }
-
 impl Bgp {
     fn callback_peer(&mut self, path: &str, cb: Callback) {
         let neighbor_prefix = String::from("/routing/bgp/neighbors/neighbor");
@@ -151,5 +147,9 @@ impl Bgp {
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/afi-safis/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/timers/hold-time", config_hold_time);
+
+        self.pcallback_add("/community-list", config_com_list);
+        self.pcallback_add("/community-list/seq", config_com_list_seq);
+        self.pcallback_add("/community-list/seq/action", config_com_list_action);
     }
 }

@@ -62,5 +62,8 @@ mod test {
 
         let tokens = tokenizer(String::from("100"));
         assert!(tokens.is_err());
+
+        let tokens = tokenizer(String::from("100"));
+        assert!(tokens.is_err());
     }
 }

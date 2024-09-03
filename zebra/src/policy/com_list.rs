@@ -1,11 +1,17 @@
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::{
     bgp::attr::Community,
     config::{Args, ConfigOp},
 };
+
+#[derive(Debug)]
+pub enum Action {
+    Permit,
+    Deny,
+}
 
 #[derive(Debug)]
 pub struct CommunityListMap(pub BTreeMap<String, CommunityList>);
@@ -17,110 +23,119 @@ impl CommunityListMap {
 }
 
 impl CommunityListMap {
-    pub fn get_list(&self, name: &String) -> Option<&CommunityList> {
+    pub fn ensure(&mut self, name: &str) {
+        if self.lookup(name).is_some() {
+            return;
+        }
+        let clist = CommunityList::new(name);
+        self.0.insert(name.to_string(), clist);
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<&CommunityList> {
         self.0.get(name)
+    }
+
+    pub fn action_test(&mut self, name: &str, seq: u32, action: Action) {
+        self.ensure(name);
+        let clist = self.0.get_mut(name).unwrap();
+        clist.ensure(seq);
+        let entry = clist.get_mut(seq).unwrap();
+        entry.action = Some(action);
     }
 }
 
 #[derive(Debug)]
 pub struct CommunityList {
-    name: String,
-    entry: BTreeMap<u32, CommunityEntry>,
-}
-
-pub enum Action {
-    Permit,
-    Deny,
+    pub name: String,
+    pub entry: BTreeMap<u32, CommunityEntry>,
 }
 
 impl CommunityList {
-    pub fn action_set(seq: u32, action: Action) {
-        //
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            entry: BTreeMap::new(),
+        }
     }
 
-    pub fn action_del(seq: u32) {
-        //
+    pub fn ensure(&mut self, seq: u32) {
+        if self.entry.get(&seq).is_some() {
+            return;
+        }
+        let entry = CommunityEntry::new(seq);
+        self.entry.insert(seq, entry);
     }
 
-    pub fn entry_set(seq: u32) {
-        //
-    }
-
-    pub fn entry_del(seq: u32) {
-        //
+    pub fn get_mut(&mut self, seq: u32) -> Option<&mut CommunityEntry> {
+        self.entry.get_mut(&seq)
     }
 }
 
 #[derive(Debug)]
 pub struct CommunityEntry {
-    seq: u32,
-    member: CommunityMember,
+    pub seq: u32,
+    pub action: Option<Action>,
+    pub member: CommunityMember,
 }
 
-#[derive(Debug)]
-pub enum CommunityMember {
-    Regexp(String),
-    Community(Community),
-}
-
-#[derive(Debug)]
-pub struct Policy {
-    pub clist: HashMap<String, CommunityList>,
-}
-
-impl Policy {
-    pub fn new() -> Self {
+impl CommunityEntry {
+    pub fn new(seq: u32) -> Self {
         Self {
-            clist: HashMap::new(),
+            seq,
+            action: None,
+            member: CommunityMember::None,
         }
     }
 }
 
-// community-list hoge
-// community-list hoge seq 5
-// community-list hoge seq 5 action permit
-// community-list hoge seq 5 member 100:10 20:1
+#[derive(Debug)]
+pub enum CommunityMember {
+    None,
+    Regexp(String),
+    Community(Community),
+}
 
-// community-list hoge {
-//     seq 5 {
-//         action permit;
-//         member 100:10 no-export;
-//         option additive;
-//     }
-//     seq 10 {
-//         action permit;
-//         member 100:10 no-export;
-//         option additive;
-//     }
-// }
+pub fn config_com_list(clist: &mut CommunityListMap, mut args: Args, _op: ConfigOp) -> Option<()> {
+    if let Some(name) = args.string() {
+        clist.ensure(&name);
+    }
+    Some(())
+}
 
-// pub fn config_add(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
-//     None
-// }
+pub fn config_com_list_seq(
+    clist: &mut CommunityListMap,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    if let Some(name) = args.string() {
+        clist.ensure(&name);
+        let clist = clist.0.get_mut(&name).unwrap();
+        if let Some(seq) = args.u32() {
+            clist.ensure(seq);
+        }
+    }
+    Some(())
+}
 
-// pub fn config_del(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
-//     None
-// }
-
-// pub fn config_seq(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
-//     None
-// }
-
-// pub fn config_action(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
-//     None
-// }
-
-// pub fn config_member(_policy: &mut Policy, mut _args: Args, _op: ConfigOp) -> Option<()> {
-//     None
-// }
-
-// #[cfg(test)]
-// mod test {
-//     use super::*;
-
-//     #[test]
-//     fn clist_regexp() {
-//         // When it failed, treat it as regexp.
-//         let com = Community::new();
-//     }
-// }
+pub fn config_com_list_action(
+    clist: &mut CommunityListMap,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    if let Some(name) = args.string() {
+        clist.ensure(&name);
+        let clist = clist.0.get_mut(&name).unwrap();
+        if let Some(seq) = args.u32() {
+            clist.ensure(seq);
+            if let Some(action) = args.string() {
+                let entry = clist.get_mut(seq).unwrap();
+                if action == "permit" {
+                    entry.action = Some(Action::Permit);
+                } else {
+                    entry.action = Some(Action::Deny);
+                }
+            }
+        }
+    }
+    Some(())
+}
