@@ -28,6 +28,10 @@ module exec {
       ext:help "Show version";
       type empty;
     }
+    leaf community-list {
+      ext:help "Show community-list";
+      type empty;
+    }
     list interfaces {
       ext:help "Show interface commands";
       key "interface";

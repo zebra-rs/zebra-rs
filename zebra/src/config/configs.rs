@@ -349,32 +349,43 @@ impl Config {
         false
     }
 
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub fn parents(&self, p: &mut VecDeque<String>) {
+        if let Some(parent) = &self.parent {
+            if !parent.name.is_empty() {
+                p.push_front(parent.name.clone());
+            }
+            parent.parents(p);
+        }
+    }
+
+    pub fn validate(&self, errors: &mut Vec<String>) {
         for m in self.mandatory.iter() {
             for key in self.keys.borrow().iter() {
                 if !key.has_mandatory(m) {
-                    return Err(anyhow::anyhow!(format!(
-                        "\"{} {}\" missing mandatory node \"{}\"",
-                        self.name, key.name, m
-                    )));
+                    let mut parents = VecDeque::<String>::new();
+                    self.parents(&mut parents);
+                    parents.push_back(self.name.clone());
+                    parents.push_back(key.name.clone());
+                    let parents = Vec::from(parents);
+                    let parents = parents.join(" ");
+                    errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
                 }
             }
-            if !self.configs.borrow().is_empty() {
-                if !self.has_mandatory(m) {
-                    return Err(anyhow::anyhow!(format!(
-                        "\"{}\" missing mandatory node \"{}\"",
-                        self.name, m
-                    )));
-                }
+            if !self.configs.borrow().is_empty() && !self.has_mandatory(m) {
+                let mut parents = VecDeque::<String>::new();
+                self.parents(&mut parents);
+                parents.push_back(self.name.clone());
+                let parents = Vec::from(parents);
+                let parents = parents.join(" ");
+                errors.push(format!("'{}' missing mandatory node '{}'", parents, m));
             }
         }
         for key in self.keys.borrow().iter() {
-            key.validate()?;
+            key.validate(errors);
         }
         for config in self.configs.borrow().iter() {
-            config.validate()?;
+            config.validate(errors);
         }
-        Ok(())
     }
 }
 

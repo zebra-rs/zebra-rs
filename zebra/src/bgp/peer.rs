@@ -413,6 +413,10 @@ fn peer_send_update_test(peer: &mut Peer) {
     let ecom = ExtCommunity::from_str("rt 123:100 soo 1.1.1.1:12").unwrap();
     update.attrs.push(Attribute::ExtCommunity(ecom));
 
+    let ecom6_val = ExtIpv6CommunityValue::new();
+    let ecom6 = ExtIpv6Community(vec![ecom6_val]);
+    update.attrs.push(Attribute::ExtIpv6Community(ecom6));
+
     let ipv4net: Ipv4Net = "1.1.1.1/32".parse().unwrap();
     update.ipv4_update.push(ipv4net);
 

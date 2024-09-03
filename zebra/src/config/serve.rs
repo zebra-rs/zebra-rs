@@ -154,7 +154,9 @@ struct ShowService {
 }
 
 fn is_bgp(paths: &[CommandPath]) -> bool {
-    paths.iter().any(|x| x.name == "bgp")
+    paths
+        .iter()
+        .any(|x| x.name == "bgp" || x.name == "community-list")
 }
 
 #[tonic::async_trait]

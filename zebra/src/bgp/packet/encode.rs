@@ -105,6 +105,9 @@ impl From<UpdatePacket> for BytesMut {
                 Attribute::ExtCommunity(attr) => {
                     attr.encode(&mut buf);
                 }
+                Attribute::ExtIpv6Community(attr) => {
+                    attr.encode(&mut buf);
+                }
                 _ => {}
             }
         }

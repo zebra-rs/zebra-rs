@@ -267,6 +267,21 @@ fn show_bgp_neighbor(bgp: &Bgp, args: Args) -> String {
     out
 }
 
+fn show_community_list(bgp: &Bgp, args: Args) -> String {
+    let mut out = String::from("community-list");
+    for (name, clist) in bgp.clist.0.iter() {
+        writeln!(out, "name: {:?}", name).unwrap();
+        for (seq, entry) in clist.entry.iter() {
+            writeln!(out, " seq: {}", seq).unwrap();
+            if let Some(action) = &entry.action {
+                writeln!(out, " action: {:?}", action).unwrap();
+            }
+        }
+    }
+
+    out
+}
+
 impl Bgp {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -276,5 +291,6 @@ impl Bgp {
         self.show_add("/show/ip/bgp", show_bgp);
         self.show_add("/show/ip/bgp/summary", show_bgp);
         self.show_add("/show/ip/bgp/neighbor", show_bgp_neighbor);
+        self.show_add("/show/community-list", show_community_list);
     }
 }
