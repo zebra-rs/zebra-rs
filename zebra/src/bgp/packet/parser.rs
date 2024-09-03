@@ -210,7 +210,7 @@ fn parse_bgp_attr_mp_reach(input: &[u8], length: u16) -> IResult<&[u8], Attribut
         };
         return Ok((input, Attribute::MpReachNlri(mp_nlri)));
     }
-    return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
+    Err(nom::Err::Error(make_error(input, ErrorKind::Tag)))
 }
 
 fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
