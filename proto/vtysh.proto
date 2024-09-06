@@ -187,3 +187,24 @@ message ShowReply {
 service Show {
   rpc Show(ShowRequest) returns (stream ShowReply) {}
 }
+
+// Apply service.
+message ApplyRequest {
+  string line = 1;
+}
+
+enum ApplyCode {
+  APPLIED = 0;
+  FORMAT_ERROR = 1;
+  PARSE_ERROR = 2;
+  MISSING_MANDATORY = 3;
+}
+
+message ApplyReply {
+  ApplyCode code = 1;
+  string description = 2;
+}
+
+service Apply {
+  rpc Apply(stream ApplyRequest) returns (ApplyReply) {}
+}
