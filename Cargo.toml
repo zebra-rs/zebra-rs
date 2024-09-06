@@ -3,5 +3,6 @@ resolver = "2"
 members = [
   "zebra",
   "vtysh-helper",
+  "vtyctl",
 ]
 default-members = [ "zebra" ]

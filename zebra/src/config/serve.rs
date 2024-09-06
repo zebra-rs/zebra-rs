@@ -1,20 +1,20 @@
 use std::collections::HashMap;
-
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::transport::Server;
 use tonic::Response;
 
 use super::api::{
     CompletionRequest, CompletionResponse, DisplayRequest, ExecuteRequest, ExecuteResponse, Message,
 };
+use super::vtysh::apply_server::{Apply, ApplyServer};
 use super::vtysh::exec_server::{Exec, ExecServer};
 use super::vtysh::show_server::{Show, ShowServer};
 use super::vtysh::{
-    CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch,
+    ApplyCode, ApplyReply, ApplyRequest, CommandPath, ExecCode, ExecReply, ExecRequest, ExecType,
+    ShowReply, ShowRequest, YangMatch,
 };
-
 #[derive(Debug)]
 struct ExecService {
     pub tx: mpsc::Sender<Message>,
@@ -68,7 +68,7 @@ impl Exec for ExecService {
     async fn do_exec(
         &self,
         request: tonic::Request<ExecRequest>,
-    ) -> std::result::Result<Response<ExecReply>, tonic::Status> {
+    ) -> Result<Response<ExecReply>, tonic::Status> {
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
@@ -214,6 +214,58 @@ impl Cli {
     }
 }
 
+struct ApplyService {}
+
+#[tonic::async_trait]
+impl Apply for ApplyService {
+    async fn apply(
+        &self,
+        request: tonic::Request<tonic::Streaming<ApplyRequest>>,
+    ) -> Result<tonic::Response<ApplyReply>, tonic::Status> {
+        let mut stream = request.into_inner();
+
+        let mut code = ApplyCode::Applied;
+        let mut description = String::from("All lines processed successfully.");
+
+        // Process the stream of requests
+        while let Some(req) = stream.next().await {
+            match req {
+                Ok(ApplyRequest { line }) => {
+                    println!("Processing line: {}", line);
+
+                    // Logic to handle different cases based on the request line
+                    if line.is_empty() {
+                        code = ApplyCode::MissingMandatory;
+                        description = String::from("Missing mandatory field: line.");
+                        break; // Exit early on error
+                    } else if line.contains("format_error") {
+                        code = ApplyCode::FormatError;
+                        description = String::from("Line format is incorrect.");
+                        break;
+                    } else if line.contains("parse_error") {
+                        code = ApplyCode::ParseError;
+                        description = String::from("Failed to parse the line.");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error receiving request: {}", e);
+                    return Err(tonic::Status::internal("Failed to receive request."));
+                }
+            }
+        }
+
+        // // Create the reply based on the processing outcome
+        let reply = ApplyReply {
+            code: code as i32,
+            description,
+        };
+
+        // // Return the response
+        Ok(Response::new(reply))
+    }
+}
+
 pub fn serve(cli: Cli) {
     let exec_service = ExecService { tx: cli.tx.clone() };
     let exec_server = ExecServer::new(exec_service);
@@ -228,12 +280,16 @@ pub fn serve(cli: Cli) {
     }
     let show_server = ShowServer::new(show_service);
 
+    let apply_service = ApplyService {};
+    let apply_server = ApplyServer::new(apply_service);
+
     let addr = "0.0.0.0:2650".parse().unwrap();
 
     tokio::spawn(async move {
         Server::builder()
             .add_service(exec_server)
             .add_service(show_server)
+            .add_service(apply_server)
             .serve(addr)
             .await
     });

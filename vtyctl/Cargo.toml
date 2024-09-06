@@ -1,0 +1,15 @@
+[package]
+name = "vtyctl"
+version = "0.6.3"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.82"
+clap = { version = "4", features = ["derive"] }
+prost = "0.13"
+tokio = { version="1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+
+[build-dependencies]
+tonic-build = "0.12"
