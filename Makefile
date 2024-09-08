@@ -12,6 +12,7 @@ install:
 	mkdir -p ${HOME}/.zebra/yang
 	cp target/release/zebra ${HOME}/.zebra/bin
 	cp target/release/vtysh-helper ${HOME}/.zebra/bin
+	cp target/release/vtyctl ${HOME}/.zebra/bin
 ifneq ("$(wildcard vtysh/vtysh)","")
 	cp vtysh/vtysh ${HOME}/.zebra/bin
 endif
