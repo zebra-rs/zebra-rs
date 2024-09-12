@@ -8,9 +8,11 @@ use std::net::{IpAddr, Ipv4Addr};
 
 pub async fn config_dispatch(rib: &mut Rib, path: String, args: Args, op: ConfigOp) {
     if path == "/routing/static/route" {
+        println!("static add");
         static_route(rib, args.clone(), op.clone()).await;
     }
     if path == "/routing/static/route/nexthop" {
+        println!("static add nexthop");
         static_route_nexthop(rib, args.clone(), op.clone()).await;
     }
     // if let Some(f) = self.callbacks.get(&path) {
@@ -29,10 +31,15 @@ async fn static_route_nexthop(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Op
     if op == ConfigOp::Set && args.len() > 1 {
         let dest: Ipv4Net = args.v4net()?;
         let gateway: Ipv4Addr = args.v4addr()?;
-        //
+
+        println!("addr {} nexthop {}", dest, gateway);
+
         let mut entry = RibEntry::new(RibType::Static);
         entry.gateway = IpAddr::V4(gateway);
         // XXX rib.rib.insert(dest, entry);
+
+        rib.ipv4_add(dest, entry.clone());
+        rib.ipv4_add(dest, entry);
 
         rib.fib_handle.route_ipv4_add(dest, gateway).await;
         // if let Some(handle) = rib.handle.as_ref() {

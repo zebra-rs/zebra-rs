@@ -68,6 +68,31 @@ module config {
       uses "ietf-bgp:bgp";
       // uses "policy:defined-sets";
       container static {
+        ext:help "Static route configuration";
+        list route {
+          key "prefix";
+          leaf prefix {
+            type inet:ipv4-prefix;
+          }
+          list nexthop {
+            key "address";
+            leaf "address" {
+              type inet:ipv4-address;
+              description "Nexthop of the route";
+            }
+          }
+          leaf distance {
+            type uint8;
+            description "Distance of the route.";
+          }
+          leaf metric {
+            type uint32;
+            description "Metric of the route.";
+          }
+        }
+      }
+
+      container static-ietf {
         container ipv4 {
           description
             "Support for a 'static' pseudo-protocol instance

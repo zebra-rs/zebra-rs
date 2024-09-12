@@ -1,7 +1,7 @@
 use super::{nexthop::Nexthop, Rib};
 use std::net::{IpAddr, Ipv4Addr};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
 pub enum RibType {
     Kernel,
@@ -13,7 +13,7 @@ pub enum RibType {
     BGP,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[allow(non_camel_case_types, dead_code)]
 pub enum RibSubType {
     NotApplicable,
@@ -28,7 +28,7 @@ pub enum RibSubType {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RibEntry {
     pub rtype: RibType,
     pub rsubtype: RibSubType,

@@ -10,7 +10,6 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::Sender;
-// use tracing::warn;
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
 
@@ -79,6 +78,7 @@ impl Rib {
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
+                println!("Path: {}", path);
                 config_dispatch(self, path, args, msg.op).await;
             }
         }
@@ -92,10 +92,19 @@ impl Rib {
         }
     }
 
+    pub fn rib_test(&self) {
+        // static prefix 1.1.1.1/32 nexthop 10.211.55.1.
+        // NexthopBuilder.address().build();
+    }
+
     pub async fn event_loop(&mut self) {
         if let Err(_err) = fib_dump(&self.fib_handle, self.fib.tx.clone()).await {
             // warn!("FIB dump error {}", err);
         }
+
+        // Dump done.
+        self.rib_test();
+
         loop {
             tokio::select! {
                 Some(msg) = self.fib.rx.recv() => {

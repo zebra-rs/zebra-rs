@@ -3,14 +3,10 @@ use super::fib::message::FibRoute;
 use super::instance::Rib;
 use ipnet::{IpNet, Ipv4Net};
 
-// Route.
 impl Rib {
     pub fn ipv4_add(&mut self, dest: Ipv4Net, e: RibEntry) {
-        if let Some(n) = self.rib.get_mut(&dest) {
-            n.push(e);
-        } else {
-            self.rib.insert(dest, vec![e]);
-        }
+        let ribs = self.rib.entry(dest).or_default();
+        ribs.push(e);
     }
 
     pub fn route_add(&mut self, r: FibRoute) {
