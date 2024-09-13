@@ -1,5 +1,4 @@
 use super::{nexthop::Nexthop, Rib};
-use std::net::{IpAddr, Ipv4Addr};
 
 #[derive(Debug, PartialEq, Clone)]
 #[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
@@ -39,7 +38,7 @@ pub struct RibEntry {
     pub tag: u32,
     pub color: Vec<String>,
     pub nexthops: Vec<Nexthop>,
-    pub gateway: IpAddr,
+    // pub gateway: IpAddr,
     pub link_index: u32,
 }
 
@@ -55,7 +54,7 @@ impl RibEntry {
             tag: 0,
             color: Vec::new(),
             nexthops: Vec::new(),
-            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            // gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             link_index: 0,
         }
     }
@@ -76,7 +75,11 @@ impl RibEntry {
                 "directly connected unknown".to_string()
             }
         } else {
-            format!("via {:?}", &self.gateway)
+            if !self.nexthops.is_empty() {
+                format!("via {}", &self.nexthops[0])
+            } else {
+                format!("")
+            }
         }
     }
 

@@ -2,9 +2,12 @@ use super::{
     entry::{RibEntry, RibType},
     instance::Rib,
 };
-use crate::config::{Args, ConfigOp};
+use crate::{
+    config::{Args, ConfigOp},
+    rib::nexthop::Nexthop,
+};
 use ipnet::Ipv4Net;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 
 pub async fn config_dispatch(rib: &mut Rib, path: String, args: Args, op: ConfigOp) {
     if path == "/routing/static/route" {
@@ -35,7 +38,9 @@ async fn static_route_nexthop(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Op
         println!("addr {} nexthop {}", dest, gateway);
 
         let mut entry = RibEntry::new(RibType::Static);
-        entry.gateway = IpAddr::V4(gateway);
+        let nexthop = Nexthop::builder().saddr(gateway).build();
+        entry.nexthops.push(nexthop);
+        // entry.gateway = IpAddr::V4(gateway);
         // XXX rib.rib.insert(dest, entry);
 
         rib.ipv4_add(dest, entry.clone());

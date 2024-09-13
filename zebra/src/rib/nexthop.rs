@@ -1,19 +1,15 @@
+use std::fmt;
 use std::net::Ipv4Addr;
-
-#[derive(Debug, Default, Clone)]
-pub struct NexthopSource {
-    addr: Option<Ipv4Addr>,
-    ifindex: Option<u32>,
-}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Nexthop {
+    valid: bool,
     addr: Ipv4Addr,
     ifindex: u32,
     weight: Option<u32>,
-    source: NexthopSource,
-    valid: bool,
+    saddr: Option<Ipv4Addr>,
+    sifname: Option<String>,
 }
 
 impl Default for Nexthop {
@@ -23,26 +19,61 @@ impl Default for Nexthop {
             addr: Ipv4Addr::UNSPECIFIED,
             ifindex: 0,
             weight: None,
-            source: NexthopSource::default(),
+            saddr: None,
+            sifname: None,
         }
     }
 }
 
+impl Nexthop {
+    pub fn builder() -> NexthopBuilder {
+        NexthopBuilder::default()
+    }
+}
+
+impl fmt::Display for Nexthop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(addr) = self.saddr {
+            write!(f, "{}", addr)
+        } else {
+            if self.addr.is_unspecified() {
+                write!(f, "unspec")
+            } else {
+                write!(f, "{}", self.addr)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct NexthopBuilder {
-    source_addr: Option<Ipv4Addr>,
-    source_ifname: Option<String>,
+    addr: Option<Ipv4Addr>,
+    saddr: Option<Ipv4Addr>,
+    sifname: Option<String>,
     weight: Option<u32>,
 }
 
 impl NexthopBuilder {
-    pub fn builder(&self) -> Nexthop {
-        Nexthop {
-            valid: false,
-            addr: Ipv4Addr::UNSPECIFIED,
-            ifindex: 0,
-            weight: self.weight,
-            source: NexthopSource::default(),
-        }
+    pub fn addr(mut self, addr: Ipv4Addr) -> Self {
+        self.addr = Some(addr);
+        self
+    }
+
+    pub fn saddr(mut self, saddr: Ipv4Addr) -> Self {
+        self.saddr = Some(saddr);
+        self
+    }
+
+    // pub fn sifname(mut self, sifname: String) -> Self {
+    //     self.sifname = Some(sifname);
+    //     self
+    // }
+
+    pub fn build(&self) -> Nexthop {
+        let mut nexthop = Nexthop::default();
+        nexthop.saddr = self.saddr.clone();
+        nexthop.sifname = self.sifname.clone();
+        nexthop
     }
 }
 
