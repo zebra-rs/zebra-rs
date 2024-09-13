@@ -5,22 +5,18 @@ use std::net::Ipv4Addr;
 #[derive(Debug, Clone)]
 pub struct Nexthop {
     valid: bool,
-    addr: Ipv4Addr,
+    addr: Option<Ipv4Addr>,
     ifindex: u32,
     weight: Option<u32>,
-    saddr: Option<Ipv4Addr>,
-    sifname: Option<String>,
 }
 
 impl Default for Nexthop {
     fn default() -> Self {
         Self {
             valid: false,
-            addr: Ipv4Addr::UNSPECIFIED,
+            addr: None,
             ifindex: 0,
             weight: None,
-            saddr: None,
-            sifname: None,
         }
     }
 }
@@ -33,14 +29,10 @@ impl Nexthop {
 
 impl fmt::Display for Nexthop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(addr) = self.saddr {
+        if let Some(addr) = self.addr {
             write!(f, "{}", addr)
         } else {
-            if self.addr.is_unspecified() {
-                write!(f, "unspec")
-            } else {
-                write!(f, "{}", self.addr)
-            }
+            write!(f, "unspec")
         }
     }
 }
@@ -48,9 +40,6 @@ impl fmt::Display for Nexthop {
 #[derive(Debug, Default)]
 pub struct NexthopBuilder {
     addr: Option<Ipv4Addr>,
-    saddr: Option<Ipv4Addr>,
-    sifname: Option<String>,
-    weight: Option<u32>,
 }
 
 impl NexthopBuilder {
@@ -59,20 +48,9 @@ impl NexthopBuilder {
         self
     }
 
-    pub fn saddr(mut self, saddr: Ipv4Addr) -> Self {
-        self.saddr = Some(saddr);
-        self
-    }
-
-    // pub fn sifname(mut self, sifname: String) -> Self {
-    //     self.sifname = Some(sifname);
-    //     self
-    // }
-
     pub fn build(&self) -> Nexthop {
         let mut nexthop = Nexthop::default();
-        nexthop.saddr = self.saddr.clone();
-        nexthop.sifname = self.sifname.clone();
+        nexthop.addr = self.addr.clone();
         nexthop
     }
 }

@@ -38,7 +38,7 @@ async fn static_route_nexthop(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Op
         println!("addr {} nexthop {}", dest, gateway);
 
         let mut entry = RibEntry::new(RibType::Static);
-        let nexthop = Nexthop::builder().saddr(gateway).build();
+        let nexthop = Nexthop::builder().addr(gateway).build();
         entry.nexthops.push(nexthop);
         // entry.gateway = IpAddr::V4(gateway);
         // XXX rib.rib.insert(dest, entry);
