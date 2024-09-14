@@ -9,9 +9,13 @@ use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Show
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
+
+pub enum Message {
+    ResolveNexthop,
+}
 
 pub struct Rib {
     pub api: RibTxChannel,
@@ -23,12 +27,15 @@ pub struct Rib {
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub rib: PrefixMap<Ipv4Net, Vec<RibEntry>>,
+    pub tx: UnboundedSender<Message>,
+    pub rx: UnboundedReceiver<Message>,
 }
 
 impl Rib {
     pub fn new() -> anyhow::Result<Self> {
         let fib = FibChannel::new();
         let fib_handle = FibHandle::new(fib.tx.clone())?;
+        let (tx, rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
             api: RibTxChannel::new(),
             cm: ConfigChannel::new(),
@@ -39,6 +46,8 @@ impl Rib {
             redists: Vec::new(),
             links: BTreeMap::new(),
             rib: PrefixMap::new(),
+            tx,
+            rx,
         };
         rib.show_build();
         Ok(rib)
@@ -46,6 +55,14 @@ impl Rib {
 
     pub fn subscribe(&mut self, tx: Sender<RibRx>) {
         self.redists.push(tx);
+    }
+
+    fn process_msg(&mut self, msg: Message) {
+        match msg {
+            Message::ResolveNexthop => {
+                self.resolve_nexthop();
+            }
+        }
     }
 
     fn process_fib_msg(&mut self, msg: FibMessage) {
@@ -107,6 +124,9 @@ impl Rib {
 
         loop {
             tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_msg(msg);
+                }
                 Some(msg) = self.fib.rx.recv() => {
                     self.process_fib_msg(msg);
                 }
@@ -118,6 +138,10 @@ impl Rib {
                 }
             }
         }
+    }
+
+    fn resolve_nexthop(&mut self) {
+        //
     }
 }
 

@@ -4,8 +4,8 @@ use std::net::Ipv4Addr;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Nexthop {
-    valid: bool,
-    addr: Option<Ipv4Addr>,
+    pub valid: bool,
+    pub addr: Option<Ipv4Addr>,
     ifindex: u32,
     weight: Option<u32>,
 }
@@ -32,7 +32,7 @@ impl fmt::Display for Nexthop {
         if let Some(addr) = self.addr {
             write!(f, "{}", addr)
         } else {
-            write!(f, "unspec")
+            Ok(())
         }
     }
 }

@@ -5,6 +5,7 @@ use super::fib::message::FibRoute;
 use super::instance::Rib;
 use super::nexthop::Nexthop;
 use ipnet::{IpNet, Ipv4Net};
+use prefix_trie::PrefixMap;
 
 fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
     for (i, rib) in ribs.iter().enumerate() {
@@ -15,8 +16,14 @@ fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
     None
 }
 
+pub fn nexthop_resolve(table: &PrefixMap<Ipv4Net, Vec<RibEntry>>, nexthop: &Nexthop) {
+    //
+}
+
 impl Rib {
     pub fn ipv4_add(&mut self, dest: Ipv4Net, e: RibEntry) {
+        //nexthop_resolve(&self.rib, &e.nexthops[0]);
+
         let ribs = self.rib.entry(dest).or_default();
         let find = rib_same_type(&ribs, &e);
         match find {
@@ -25,13 +32,22 @@ impl Rib {
                 println!("XX Prev {:?}", prev);
             }
             None => {
-                println!("XX No same type rib");
+                // println!("XX No same type rib");
             }
         }
+
         // Nexthop resolve.
+        // if e.rtype == RibType::Static {
+        //     for nhop in e.nexthops.iter() {
+        //         if let Some(addr) = nhop.addr {
+        //             let addr = Ipv4Net::new(addr, 32).unwrap();
+        //             self.rib.get_lpm(&addr);
+        //         }
+        //         //nexthop_resolve(&self.rib, nhop);
+        //     }
+        // }
 
         ribs.push(e);
-
         // Path selection.
     }
 
