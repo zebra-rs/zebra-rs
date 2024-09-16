@@ -159,8 +159,8 @@ fn route_from_msg(msg: RouteMessage) -> FibRoute {
 }
 
 fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
-    match msg.payload {
-        NetlinkPayload::InnerMessage(msg) => match msg {
+    if let NetlinkPayload::InnerMessage(msg) = msg.payload {
+        match msg {
             RouteNetlinkMessage::NewLink(msg) => {
                 let link = link_from_msg(msg);
                 let msg = FibMessage::NewLink(link);
@@ -194,8 +194,7 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 tx.send(msg).unwrap();
             }
             _ => {}
-        },
-        _ => {}
+        }
     }
 }
 

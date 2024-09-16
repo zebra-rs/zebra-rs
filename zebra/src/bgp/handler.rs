@@ -100,10 +100,8 @@ impl Bgp {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
-        } else {
-            if let Some(f) = self.pcallbacks.get(&path) {
-                f(&mut self.clist, args, msg.op);
-            }
+        } else if let Some(f) = self.pcallbacks.get(&path) {
+            f(&mut self.clist, args, msg.op);
         }
     }
 

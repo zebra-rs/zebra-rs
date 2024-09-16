@@ -74,12 +74,10 @@ impl RibEntry {
             } else {
                 "directly connected unknown".to_string()
             }
+        } else if !self.nexthops.is_empty() {
+            format!("via {}", &self.nexthops[0])
         } else {
-            if !self.nexthops.is_empty() {
-                format!("via {}", &self.nexthops[0])
-            } else {
-                format!("")
-            }
+            format!("")
         }
     }
 
