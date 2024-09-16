@@ -22,3 +22,11 @@ endif
 
 doc:
 	rustdoc
+
+.PHONY: book read
+
+book:
+	(cd book; mdbook build)
+
+read:
+	(cd book; open book/index.html)
