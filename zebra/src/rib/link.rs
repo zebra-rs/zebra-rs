@@ -1,4 +1,5 @@
 use crate::config::Args;
+use crate::rib::instance::Message;
 
 use super::entry::{RibEntry, RibType};
 use super::fib::message::{FibAddr, FibLink};
@@ -275,6 +276,8 @@ impl Rib {
                 if let IpNet::V4(net) = addr.addr {
                     println!("Connected add");
                     self.ipv4_add(net, e);
+                    // Event for resolve.
+                    let _ = self.tx.clone().send(Message::ResolveNexthop);
                 }
             }
         }

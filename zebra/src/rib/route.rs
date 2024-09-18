@@ -61,6 +61,7 @@ impl Rib {
                 if !addr.is_unspecified() {
                     let nexthop = Nexthop::builder().addr(addr).build();
                     e.nexthops.push(nexthop);
+                    println!("XXX kernel route add");
                     self.ipv4_add(v4, e);
                 }
             }

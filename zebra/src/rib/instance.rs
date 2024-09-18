@@ -141,7 +141,10 @@ impl Rib {
     }
 
     fn resolve_nexthop(&mut self) {
-        //
+        println!("XXXXX resolve nexthop");
+        for (key, _value) in self.rib.iter() {
+            println!("Key: {}", key);
+        }
     }
 }
 
