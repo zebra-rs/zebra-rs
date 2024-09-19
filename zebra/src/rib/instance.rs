@@ -6,9 +6,11 @@ use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::{Link, RibTxChannel};
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
-use ipnet::Ipv4Net;
+use crate::rib::entry::RibType;
+use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
@@ -140,12 +142,70 @@ impl Rib {
         }
     }
 
+    fn lookup(&self, addr: &Ipv4Addr) -> bool {
+        let addr = Ipv4Net::new(*addr, 32).unwrap();
+        let Some((a, b)) = self.rib.get_lpm(&addr) else {
+            return false;
+        };
+        for e in b.iter() {
+            if e.rtype == RibType::Connected {
+                println!("Lookup {} onlink", a);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn nexthop_validate(&mut self, nhop: &Ipv4Addr) {
+        sub(&self.rib);
+    }
+
+    // XXX
     fn resolve_nexthop(&mut self) {
         println!("XXXXX resolve nexthop");
-        for (key, _value) in self.rib.iter() {
-            println!("Key: {}", key);
+    }
+}
+
+pub fn sub(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>) {
+    for (key, value) in rib.iter() {
+        for v in value.iter() {
+            if v.rtype == RibType::Static {
+                println!("RIB: {} {:?}", key, v);
+                for n in v.nexthops.iter() {
+                    if let Some(addr) = n.addr {
+                        println!("Nexthop: {}", addr);
+                        let found = lookup(rib, &addr);
+                        println!("Found: {}", found);
+                        // self.nexthop_validate(&addr);
+                    }
+                }
+            }
         }
     }
+}
+
+trait IpAddrExt<T> {
+    fn to_host_prefix(&self) -> T;
+}
+
+impl IpAddrExt<Ipv4Net> for Ipv4Addr {
+    fn to_host_prefix(&self) -> Ipv4Net {
+        Ipv4Net::new(*self, Self::BITS as u8).unwrap()
+    }
+}
+
+impl IpAddrExt<Ipv6Net> for Ipv6Addr {
+    fn to_host_prefix(&self) -> Ipv6Net {
+        Ipv6Net::new(*self, Self::BITS as u8).unwrap()
+    }
+}
+
+fn lookup(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, addr: &Ipv4Addr) -> bool {
+    let p = addr.to_host_prefix();
+    let Some((_, entry)) = rib.get_lpm(&p) else {
+        return false;
+    };
+    entry.iter().any(|x| x.rtype == RibType::Connected)
 }
 
 pub fn serve(mut rib: Rib) {
