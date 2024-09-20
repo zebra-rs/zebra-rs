@@ -12,6 +12,7 @@ pub mod entry;
 pub mod route;
 
 pub mod nexthop;
+pub mod nexthop_map;
 
 pub mod config;
 

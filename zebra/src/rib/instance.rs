@@ -3,6 +3,7 @@ use super::config::config_dispatch;
 use super::entry::RibEntry;
 use super::fib::fib_dump;
 use super::fib::{FibChannel, FibHandle, FibMessage};
+use super::nexthop_map::NexthopMap;
 use super::{Link, RibTxChannel};
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -31,6 +32,7 @@ pub struct Rib {
     pub rib: PrefixMap<Ipv4Net, Vec<RibEntry>>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
+    pub nexthop: NexthopMap,
 }
 
 impl Rib {
@@ -50,6 +52,7 @@ impl Rib {
             rib: PrefixMap::new(),
             tx,
             rx,
+            nexthop: NexthopMap::new(),
         };
         rib.show_build();
         Ok(rib)
@@ -157,7 +160,7 @@ impl Rib {
     }
 
     fn nexthop_validate(&mut self, nhop: &Ipv4Addr) {
-        sub(&self.rib);
+        validate(&self.rib, &mut self.nexthop);
     }
 
     // XXX
@@ -166,17 +169,34 @@ impl Rib {
     }
 }
 
-pub fn sub(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>) {
-    for (key, value) in rib.iter() {
-        for v in value.iter() {
+pub fn set_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr, valid: bool) {
+    let entry = nexthop.entry(*addr).or_default();
+    *entry = valid;
+}
+
+pub fn get_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr) -> bool {
+    *nexthop.entry(*addr).or_default()
+}
+
+pub fn validate(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopMap) {
+    nmap.need_resolve_all();
+    for (key, ribs) in rib.iter() {
+        for v in ribs.iter() {
             if v.rtype == RibType::Static {
                 println!("RIB: {} {:?}", key, v);
                 for n in v.nexthops.iter() {
-                    if let Some(addr) = n.addr {
-                        println!("Nexthop: {}", addr);
-                        let found = lookup(rib, &addr);
-                        println!("Found: {}", found);
-                        // self.nexthop_validate(&addr);
+                    if let Some(nhop) = n.addr {
+                        // If the nexthop needs resolve.
+                        println!("Nexthop: {}", nhop);
+
+                        // Lookup nexthop.
+                        let entry = nmap.map.entry(nhop).or_default();
+                        println!("Entry: {}", entry.need_resolve);
+
+                        if entry.need_resolve {
+                            let found = lookup(rib, &nhop);
+                            entry.need_resolve = found;
+                        }
                     }
                 }
             }

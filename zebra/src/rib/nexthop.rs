@@ -4,18 +4,20 @@ use std::net::Ipv4Addr;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Nexthop {
+    pub onlink: bool,
     pub valid: bool,
     pub addr: Option<Ipv4Addr>,
-    ifindex: u32,
+    ifindex: Option<u32>,
     weight: Option<u32>,
 }
 
 impl Default for Nexthop {
     fn default() -> Self {
         Self {
+            onlink: false,
             valid: false,
             addr: None,
-            ifindex: 0,
+            ifindex: None,
             weight: None,
         }
     }
