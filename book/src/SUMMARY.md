@@ -1,6 +1,7 @@
 # The Zebra Routing Software
 
 [The Zebra Routing Software](ch-00-00-introduction.md)
+- [Separation of Reachability Information and Forwarding Decision](ch-00-01-reachability-information.md)
 
 ## Static Route
 
