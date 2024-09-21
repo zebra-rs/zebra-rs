@@ -180,10 +180,10 @@ pub fn get_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr) -> b
 
 pub fn validate(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopMap) {
     nmap.need_resolve_all();
-    for (key, ribs) in rib.iter() {
+    for (prefix, ribs) in rib.iter() {
         for v in ribs.iter() {
             if v.rtype == RibType::Static {
-                println!("RIB: {} {:?}", key, v);
+                println!("RIB: {} {:?}", prefix, v);
                 for n in v.nexthops.iter() {
                     if let Some(nhop) = n.addr {
                         // If the nexthop needs resolve.
