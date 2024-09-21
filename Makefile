@@ -28,5 +28,8 @@ doc:
 book:
 	(cd book; mdbook build)
 
+book-po:
+	(cd book; MDBOOK_OUTPUT='{"xgettext": {}}' mdbook build -d po)
+
 read:
 	(cd book; open book/index.html)
