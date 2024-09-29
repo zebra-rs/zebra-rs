@@ -1,11 +1,14 @@
 .PHONY: zebra
 
 zebra:
-	cargo build --release
+	RUSTFLAGS="--cfg tokio_unstable" cargo build --release
 
 all:
-	cargo build --release
+	RUSTFLAGS="--cfg tokio_unstable" cargo build --release
 	cd vtysh;./configure;make
+
+run:
+	RUSTFLAGS="--cfg tokio_unstable" cargo run --bin zebra --release
 
 install:
 	mkdir -p ${HOME}/.zebra/bin

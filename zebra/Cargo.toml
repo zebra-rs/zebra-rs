@@ -11,9 +11,10 @@ nom = "7"
 nom-derive = "0.10"
 rusticata-macros = "4"
 prost = "0.13"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "tracing"] }
 tokio-stream = "0.1"
 tonic = "0.12"
+console-subscriber = "0.1.5"
 libyang = { git = "https://github.com/zebra-rs/libyang" }
 regex = "1.10"
 similar = "2"

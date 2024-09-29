@@ -62,6 +62,7 @@ async fn static_route_nexthop(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Op
         println!("addr {} nexthop {}", dest, gateway);
 
         let mut entry = RibEntry::new(RibType::Static);
+        entry.distance = 1;
         let mut nexthop = Nexthop::builder().addr(gateway).build();
         let found = resolve(rib, &mut nexthop);
         if let Some(ifc) = found {

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod bgp;
 use bgp::Bgp;
 mod rib;
+use rib::fib::netlink_srv6::srv6_encap;
 use rib::Rib;
 mod policy;
 
@@ -45,6 +46,8 @@ fn system_path(arg: &Arg) -> PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // console_subscriber::init();
+    srv6_encap();
     let arg = Arg::parse();
     let mut rib = Rib::new()?;
 

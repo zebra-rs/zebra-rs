@@ -159,48 +159,101 @@ impl Rib {
         false
     }
 
-    fn nexthop_validate(&mut self, nhop: &Ipv4Addr) {
-        validate(&self.rib, &mut self.nexthop);
-    }
+    // fn nexthop_validate(&mut self, nhop: &Ipv4Addr) {
+    //     validate(&self.rib, &mut self.nexthop);
+    // }
 
     // XXX
     fn resolve_nexthop(&mut self) {
-        println!("XXXXX resolve nexthop");
+        validate(&mut self.rib, &mut self.nexthop);
     }
 }
 
-pub fn set_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr, valid: bool) {
-    let entry = nexthop.entry(*addr).or_default();
-    *entry = valid;
+// pub fn set_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr, valid: bool) {
+//     let entry = nexthop.entry(*addr).or_default();
+//     *entry = valid;
+// }
+
+// pub fn get_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr) -> bool {
+//     *nexthop.entry(*addr).or_default()
+// }
+
+pub fn fib_update(prev: Option<&RibEntry>, new: Option<&RibEntry>) {
+    println!("UPDATE Prev {:?} New {:?}", prev, new)
 }
 
-pub fn get_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr) -> bool {
-    *nexthop.entry(*addr).or_default()
+fn rib_same(lhs: Option<&RibEntry>, rhs: Option<&RibEntry>) -> bool {
+    if lhs.is_none() && rhs.is_none() {
+        return true;
+    }
+    if lhs.is_none() && rhs.is_some() {
+        return false;
+    }
+    if lhs.is_some() && rhs.is_none() {
+        return false;
+    }
+    let lhs = lhs.unwrap();
+    let rhs = rhs.unwrap();
+    *lhs == *rhs
 }
 
-pub fn validate(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopMap) {
+pub fn select(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>) {
+    for (_prefix, ribs) in rib.iter_mut() {
+        let mut selected: Option<&mut RibEntry> = None;
+        for rib in ribs.iter_mut() {
+            selected = Some(rib);
+        }
+        if let Some(r) = selected {
+            r.selected = true;
+        }
+    }
+}
+
+pub fn validate(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopMap) {
+    println!("[Validate]");
     nmap.need_resolve_all();
     for (prefix, ribs) in rib.iter() {
         for v in ribs.iter() {
             if v.rtype == RibType::Static {
-                println!("RIB: {} {:?}", prefix, v);
+                println!(" RIB: {} {:?}", prefix, v.rtype);
                 for n in v.nexthops.iter() {
                     if let Some(nhop) = n.addr {
-                        // If the nexthop needs resolve.
-                        println!("Nexthop: {}", nhop);
-
-                        // Lookup nexthop.
                         let entry = nmap.map.entry(nhop).or_default();
-                        println!("Entry: {}", entry.need_resolve);
-
-                        if entry.need_resolve {
-                            let found = lookup(rib, &nhop);
-                            entry.need_resolve = found;
+                        println!("  Nexthop: {} Resolved: {}", nhop, entry.resolved);
+                        if !entry.resolved {
+                            // entry.valid = lookup(rib, &nhop);
+                            entry.valid = true;
+                            entry.resolved = true;
                         }
                     }
                 }
             }
         }
+    }
+
+    for (prefix, ribs) in rib.iter_mut() {
+        let mut fib: Option<&mut RibEntry> = None;
+        for v in ribs.iter_mut() {
+            if v.fib {
+                fib = Some(v);
+            }
+        }
+        let mut selected: Option<&mut RibEntry> = None;
+        for v in ribs.iter_mut() {
+            if let Some(other) = selected.as_ref() {
+                if v.distance < other.distance {
+                    selected = Some(v);
+                }
+            } else {
+                selected = Some(v);
+            }
+        }
+        if let Some(selected) = selected {
+            selected.fib = true;
+        }
+        // if !rib_same(fib, selected) {
+        //     fib_update(fib, selected);
+        // }
     }
 }
 

@@ -27,7 +27,7 @@ pub enum RibSubType {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
     pub rtype: RibType,
     pub rsubtype: RibSubType,
@@ -57,6 +57,10 @@ impl RibEntry {
             // gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             link_index: 0,
         }
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.rtype == RibType::Connected || self.rtype == RibType::Kernel
     }
 
     pub fn distance(&self) -> String {

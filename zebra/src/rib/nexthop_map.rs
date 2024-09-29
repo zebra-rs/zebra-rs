@@ -3,7 +3,8 @@ use std::net::Ipv4Addr;
 
 #[derive(Default)]
 pub struct NexthopResolve {
-    pub need_resolve: bool,
+    pub resolved: bool,
+    pub valid: bool,
     refcnt: usize,
 }
 
@@ -25,6 +26,6 @@ impl NexthopMap {
     pub fn del(&mut self, nhop: &Ipv4Addr) {}
 
     pub fn need_resolve_all(&mut self) {
-        self.map.iter_mut().for_each(|(_, x)| x.need_resolve = true);
+        self.map.iter_mut().for_each(|(_, x)| x.resolved = false);
     }
 }
