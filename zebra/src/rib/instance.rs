@@ -2,6 +2,7 @@ use super::api::RibRx;
 use super::config::config_dispatch;
 use super::entry::RibEntry;
 use super::fib::fib_dump;
+//use super::fib::netlink::route_add;
 use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop_map::NexthopMap;
 use super::{Link, RibTxChannel};
@@ -13,6 +14,8 @@ use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
+
+use super::fib::netlink_srv6::srv6_encap;
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
 
@@ -114,7 +117,13 @@ impl Rib {
         }
     }
 
-    pub fn rib_test(&self) {
+    pub async fn rib_test(&self) {
+        srv6_encap(&self.fib_handle.handle);
+
+        // let dest: Ipv4Net = "1.1.1.1/32".parse().unwrap();
+        // let gateway: Ipv4Addr = "10.211.55.1".parse().unwrap();
+        // route_add(self.fib_handle.handle.clone(), dest, gateway).await;
+
         // static prefix 1.1.1.1/32 nexthop 10.211.55.1.
         // NexthopBuilder.address().build();
     }
@@ -125,7 +134,7 @@ impl Rib {
         }
 
         // Dump done.
-        self.rib_test();
+        self.rib_test().await;
 
         loop {
             tokio::select! {
