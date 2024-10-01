@@ -18,7 +18,7 @@ pub async fn apply(host: &String, filename: &String) -> Result<()> {
         exit(1);
     }
     let path = Path::new(filename);
-    let file = match File::open(&path) {
+    let file = match File::open(path) {
         Ok(file) => file,
         Err(err) => panic!("Can not open {}: {}", filename, err),
     };

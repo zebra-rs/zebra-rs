@@ -5,12 +5,13 @@ use futures::stream::{StreamExt, TryStreamExt};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
-use netlink_packet_route::link::{LinkAttribute, LinkFlag, LinkLayerType, LinkMessage};
+use netlink_packet_route::link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage};
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
+use rtnetlink::RouteMessageBuilder;
 use rtnetlink::{
     constants::{
         RTMGRP_IPV4_IFADDR, RTMGRP_IPV4_ROUTE, RTMGRP_IPV6_IFADDR, RTMGRP_IPV6_ROUTE, RTMGRP_LINK,
@@ -19,11 +20,11 @@ use rtnetlink::{
 };
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct FibHandle {
-    handle: rtnetlink::Handle,
+    pub handle: rtnetlink::Handle,
 }
 
 impl FibHandle {
@@ -54,24 +55,24 @@ impl FibHandle {
     pub async fn route_ipv4_add(&self, _dest: Ipv4Net, _gateway: Ipv4Addr) {}
 }
 
-fn flags_u32(f: &LinkFlag) -> u32 {
-    match f {
-        LinkFlag::Up => link::IFF_UP,
-        LinkFlag::Broadcast => link::IFF_BROADCAST,
-        LinkFlag::Loopback => link::IFF_LOOPBACK,
-        LinkFlag::Pointopoint => link::IFF_POINTOPOINT,
-        LinkFlag::Running => link::IFF_RUNNING,
-        LinkFlag::Promisc => link::IFF_PROMISC,
-        LinkFlag::Multicast => link::IFF_MULTICAST,
-        LinkFlag::LowerUp => link::IFF_LOWER_UP,
+fn flags_u32(f: &LinkFlags) -> u32 {
+    match *f {
+        LinkFlags::Up => link::IFF_UP,
+        LinkFlags::Broadcast => link::IFF_BROADCAST,
+        LinkFlags::Loopback => link::IFF_LOOPBACK,
+        LinkFlags::Pointopoint => link::IFF_POINTOPOINT,
+        LinkFlags::Running => link::IFF_RUNNING,
+        LinkFlags::Promisc => link::IFF_PROMISC,
+        LinkFlags::Multicast => link::IFF_MULTICAST,
+        LinkFlags::LowerUp => link::IFF_LOWER_UP,
         _ => 0u32,
     }
 }
 
-fn flags_from(v: &[LinkFlag]) -> link::LinkFlags {
+fn flags_from(v: &LinkFlags) -> link::LinkFlags {
     let mut d: u32 = 0;
     for flag in v.iter() {
-        d += flags_u32(flag);
+        d += flags_u32(&flag);
     }
     link::LinkFlags(d)
 }
@@ -130,6 +131,7 @@ fn addr_from_msg(msg: AddressMessage) -> FibAddr {
 }
 
 fn route_from_msg(msg: RouteMessage) -> FibRoute {
+    println!("route_from_msg");
     let mut route = FibRoute {
         route: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
         gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -150,6 +152,12 @@ fn route_from_msg(msg: RouteMessage) -> FibRoute {
                 }
                 _ => {}
             },
+            RouteAttribute::EncapType(e) => {
+                println!("XXX EncapType {}", e);
+            }
+            RouteAttribute::Encap(e) => {
+                println!("XXX Encap {:?}", e);
+            }
             _ => {
                 //
             }
@@ -159,8 +167,8 @@ fn route_from_msg(msg: RouteMessage) -> FibRoute {
 }
 
 fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
-    match msg.payload {
-        NetlinkPayload::InnerMessage(msg) => match msg {
+    if let NetlinkPayload::InnerMessage(msg) = msg.payload {
+        match msg {
             RouteNetlinkMessage::NewLink(msg) => {
                 let link = link_from_msg(msg);
                 let msg = FibMessage::NewLink(link);
@@ -194,8 +202,7 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 tx.send(msg).unwrap();
             }
             _ => {}
-        },
-        _ => {}
+        }
     }
 }
 
@@ -224,7 +231,11 @@ async fn route_dump(
     tx: UnboundedSender<FibMessage>,
     ip_version: IpVersion,
 ) -> Result<()> {
-    let mut routes = handle.route().get(ip_version).execute();
+    let route = match ip_version {
+        IpVersion::V4 => RouteMessageBuilder::<Ipv4Addr>::new().build(),
+        IpVersion::V6 => RouteMessageBuilder::<Ipv6Addr>::new().build(),
+    };
+    let mut routes = handle.route().get(route).execute();
     while let Some(msg) = routes.try_next().await? {
         let route = route_from_msg(msg);
         let msg = FibMessage::NewRoute(route);
@@ -234,15 +245,13 @@ async fn route_dump(
 }
 
 pub async fn route_add(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
-    let result = handle
-        .route()
-        .add()
-        .v4()
+    println!("XXX route_add");
+    let route = RouteMessageBuilder::<Ipv4Addr>::new()
         .destination_prefix(dest.addr(), dest.prefix_len())
         .gateway(gateway)
-        // .table_id(0u32)
-        .execute()
-        .await;
+        .build();
+
+    let result = handle.route().add(route).execute().await;
     match result {
         Ok(()) => {
             println!("Ok");
@@ -316,7 +325,9 @@ pub async fn fib_dump(handle: &FibHandle, tx: UnboundedSender<FibMessage>) -> Re
     link_dump(handle.handle.clone(), tx.clone()).await?;
     address_dump(handle.handle.clone(), tx.clone()).await?;
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V4).await?;
+    println!("==== Ipv6 route start ===");
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V6).await?;
+    println!("==== Ipv6 route end ===");
     Ok(())
 }
 

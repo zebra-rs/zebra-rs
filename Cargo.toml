@@ -5,4 +5,3 @@ members = [
   "vtysh-helper",
   "vtyctl",
 ]
-default-members = [ "zebra" ]
