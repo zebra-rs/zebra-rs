@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
-use super::fib::netlink_srv6::srv6_encap;
+//use super::fib::netlink_srv6::{srv6_encap_add, srv6_encap_del};
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
 
@@ -118,7 +118,8 @@ impl Rib {
     }
 
     pub async fn rib_test(&self) {
-        srv6_encap(&self.fib_handle.handle);
+        // srv6_encap_add(&self.fib_handle.handle).await;
+        // srv6_encap_del(&self.fib_handle.handle).await;
 
         // let dest: Ipv4Net = "1.1.1.1/32".parse().unwrap();
         // let gateway: Ipv4Addr = "10.211.55.1".parse().unwrap();
@@ -240,7 +241,7 @@ pub fn validate(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopM
         }
     }
 
-    for (prefix, ribs) in rib.iter_mut() {
+    for (_prefix, ribs) in rib.iter_mut() {
         let mut fib: Option<&mut RibEntry> = None;
         for v in ribs.iter_mut() {
             if v.fib {
