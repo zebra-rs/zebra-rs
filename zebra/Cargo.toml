@@ -33,11 +33,9 @@ bitflags = "2.6.0"
 sysctl = "0.5.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-#rtnetlink = { git = "https://github.com/rust-netlink/rtnetlink" }
-rtnetlink = { path = "../../rtnetlink" }
+rtnetlink = { git = "https://github.com/zebra-rs/rtnetlink" }
 netlink-sys = "0.8"
-netlink-packet-route = { path = "../../netlink-packet-route" }
-#netlink-packet-route = "0.20.1"
+netlink-packet-route = { git = "https://github.com/zebra-rs/netlink-packet-route" }
 netlink-packet-core = "0.7"
 futures = "0.3"
 scan_fmt = "0.2"
