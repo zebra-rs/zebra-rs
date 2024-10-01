@@ -104,9 +104,22 @@ impl CompletionResponse {
 }
 
 #[derive(Debug)]
+pub struct DeployRequest {
+    pub config: String,
+    pub resp: Sender<DeployResponse>,
+}
+
+#[derive(Debug, Default)]
+pub struct DeployResponse {
+    pub code: u32,
+    pub output: String,
+}
+
+#[derive(Debug)]
 pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
+    Deploy(DeployRequest),
 }
 
 #[derive(Debug)]

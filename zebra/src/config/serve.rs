@@ -5,6 +5,8 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::transport::Server;
 use tonic::Response;
 
+use crate::config::api::DeployRequest;
+
 use super::api::{
     CompletionRequest, CompletionResponse, DisplayRequest, ExecuteRequest, ExecuteResponse, Message,
 };
@@ -214,7 +216,9 @@ impl Cli {
     }
 }
 
-struct ApplyService {}
+struct ApplyService {
+    pub tx: mpsc::Sender<Message>,
+}
 
 #[tonic::async_trait]
 impl Apply for ApplyService {
@@ -224,29 +228,12 @@ impl Apply for ApplyService {
     ) -> Result<tonic::Response<ApplyReply>, tonic::Status> {
         let mut stream = request.into_inner();
 
-        let mut code = ApplyCode::Applied;
-        let mut description = String::from("All lines processed successfully.");
-
         // Process the stream of requests
+        let mut config = String::new();
         while let Some(req) = stream.next().await {
             match req {
                 Ok(ApplyRequest { line }) => {
-                    println!("Processing line: {}", line);
-
-                    // Logic to handle different cases based on the request line
-                    if line.is_empty() {
-                        code = ApplyCode::MissingMandatory;
-                        description = String::from("Missing mandatory field: line.");
-                        break; // Exit early on error
-                    } else if line.contains("format_error") {
-                        code = ApplyCode::FormatError;
-                        description = String::from("Line format is incorrect.");
-                        break;
-                    } else if line.contains("parse_error") {
-                        code = ApplyCode::ParseError;
-                        description = String::from("Failed to parse the line.");
-                        break;
-                    }
+                    config.push_str(&line);
                 }
                 Err(e) => {
                     eprintln!("Error receiving request: {}", e);
@@ -255,13 +242,21 @@ impl Apply for ApplyService {
             }
         }
 
-        // // Create the reply based on the processing outcome
+        let (tx, rx) = oneshot::channel();
+        let deploy = DeployRequest { config, resp: tx };
+        self.tx.send(Message::Deploy(deploy)).await.unwrap();
+        let _resp = rx.await.unwrap();
+
+        let code = ApplyCode::Applied;
+        let description = String::from("All lines processed successfully.");
+
+        // Create the reply based on the processing outcome
         let reply = ApplyReply {
             code: code as i32,
             description,
         };
 
-        // // Return the response
+        // Return the response
         Ok(Response::new(reply))
     }
 }
@@ -280,7 +275,7 @@ pub fn serve(cli: Cli) {
     }
     let show_server = ShowServer::new(show_service);
 
-    let apply_service = ApplyService {};
+    let apply_service = ApplyService { tx: cli.tx.clone() };
     let apply_server = ApplyServer::new(apply_service);
 
     let addr = "0.0.0.0:2650".parse().unwrap();

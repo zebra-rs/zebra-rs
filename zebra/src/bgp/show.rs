@@ -267,7 +267,7 @@ fn show_bgp_neighbor(bgp: &Bgp, args: Args) -> String {
     out
 }
 
-fn show_community_list(bgp: &Bgp, args: Args) -> String {
+fn show_community_list(bgp: &Bgp, _args: Args) -> String {
     let mut out = String::from("community-list");
     for (name, clist) in bgp.clist.0.iter() {
         writeln!(out, "name: {:?}", name).unwrap();

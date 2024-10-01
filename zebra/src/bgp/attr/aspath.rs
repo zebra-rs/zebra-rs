@@ -72,21 +72,10 @@ impl fmt::Display for As4Segment {
             .collect::<Vec<String>>()
             .join(" ");
         match self.typ {
-            AS_SET => {
-                write!(f, "{{{v}}}")
-            }
-            AS_CONFED_SEQ => {
-                write!(f, "({v})")
-            }
-            AS_CONFED_SET => {
-                write!(f, "[{v}]")
-            }
-            AS_SEQ => {
-                write!(f, "{v}")
-            }
-            _ => {
-                write!(f, "{v}")
-            }
+            AS_SET => write!(f, "{{{v}}}"),
+            AS_CONFED_SEQ => write!(f, "({v})"),
+            AS_CONFED_SET => write!(f, "[{v}]"),
+            AS_SEQ | _ => write!(f, "{v}"),
         }
     }
 }

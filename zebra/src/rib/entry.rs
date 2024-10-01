@@ -1,7 +1,6 @@
 use super::{nexthop::Nexthop, Rib};
-use std::net::{IpAddr, Ipv4Addr};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
 pub enum RibType {
     Kernel,
@@ -13,7 +12,7 @@ pub enum RibType {
     BGP,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[allow(non_camel_case_types, dead_code)]
 pub enum RibSubType {
     NotApplicable,
@@ -28,7 +27,7 @@ pub enum RibSubType {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
     pub rtype: RibType,
     pub rsubtype: RibSubType,
@@ -39,7 +38,7 @@ pub struct RibEntry {
     pub tag: u32,
     pub color: Vec<String>,
     pub nexthops: Vec<Nexthop>,
-    pub gateway: IpAddr,
+    // pub gateway: IpAddr,
     pub link_index: u32,
 }
 
@@ -55,9 +54,13 @@ impl RibEntry {
             tag: 0,
             color: Vec::new(),
             nexthops: Vec::new(),
-            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            // gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             link_index: 0,
         }
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.rtype == RibType::Connected || self.rtype == RibType::Kernel
     }
 
     pub fn distance(&self) -> String {
@@ -75,8 +78,10 @@ impl RibEntry {
             } else {
                 "directly connected unknown".to_string()
             }
+        } else if !self.nexthops.is_empty() {
+            format!("via {}", &self.nexthops[0])
         } else {
-            format!("via {:?}", &self.gateway)
+            format!("")
         }
     }
 
