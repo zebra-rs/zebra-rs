@@ -1,39 +1,32 @@
 use libyang::Entry;
 use serde_json::Value;
-use std::fs::File;
-use std::io::prelude::*;
 use std::rc::Rc;
 
-pub fn json_read(e: Rc<Entry>) {
-    println!("Read JSON configuration");
-    let mut file = File::open("/Users/kunihiro/z.json").unwrap();
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).unwrap();
-
-    let json: Value = serde_json::from_str(contents.as_str()).unwrap();
-    json_to_list(e, Vec::new(), &json);
-
-    println!("{}", json);
+pub fn json_read(e: Rc<Entry>, str: &str) -> Vec<String> {
+    let json: Value = serde_json::from_str(str).unwrap();
+    let mut lines: Vec<String> = Vec::new();
+    json_to_list(e, Vec::new(), &json, &mut lines);
+    lines
 }
 
-pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value) {
+pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value, lines: &mut Vec<String>) {
     match v {
         Value::Null => {
-            println!("{}", p.join(" "));
+            lines.push(format!("set {}", p.join(" ")));
         }
         Value::Bool(v) => {
-            println!("{} {}", p.join(" "), v);
+            lines.push(format!("set {} {}", p.join(" "), v));
         }
         Value::Number(v) => {
-            println!("{} {}", p.join(" "), v);
+            lines.push(format!("set {} {}", p.join(" "), v));
         }
         Value::String(v) => {
-            println!("{} {}", p.join(" "), v);
+            lines.push(format!("set {} {}", p.join(" "), v));
         }
         Value::Array(vec) => {
             for v in vec.iter() {
                 let p = p.clone();
-                json_to_list(entry.clone(), p, v);
+                json_to_list(entry.clone(), p, v, lines);
             }
         }
         Value::Object(map) => {
@@ -41,9 +34,9 @@ pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value) {
             if !entry.key.is_empty() {
                 if let Some(value) = map.get(&entry.key[0]) {
                     p.push(value_without_quotes(&value));
-                    println!("{}", p.join(" "));
+                    lines.push(format!("set {}", p.join(" ")));
                 } else {
-                    println!("Not found key {}", entry.key[0]);
+                    //println!("Not found key {}", entry.key[0]);
                     return;
                 }
             }
@@ -55,10 +48,10 @@ pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value) {
                     Some(entry) => {
                         let mut p = p.clone();
                         p.push(key.clone());
-                        json_to_list(entry.clone(), p, &value);
+                        json_to_list(entry.clone(), p, &value, lines);
                     }
                     None => {
-                        println!("Not found key {}", key);
+                        //println!("Not found key {}", key);
                         return;
                     }
                 }

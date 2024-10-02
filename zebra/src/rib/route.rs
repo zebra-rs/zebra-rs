@@ -29,7 +29,6 @@ impl Rib {
         match find {
             Some(index) => {
                 let prev = ribs.remove(index);
-                println!("XX Prev {:?}", prev);
             }
             None => {
                 // println!("XX No same type rib");
@@ -61,7 +60,6 @@ impl Rib {
                 if !addr.is_unspecified() {
                     let nexthop = Nexthop::builder().addr(addr).build();
                     e.nexthops.push(nexthop);
-                    println!("XXX kernel route add");
                     self.ipv4_add(v4, e);
                 }
             }

@@ -103,7 +103,6 @@ impl Rib {
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                println!("Path: {}", path);
                 config_dispatch(self, path, args, msg.op).await;
             }
         }
