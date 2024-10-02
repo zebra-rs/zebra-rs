@@ -23,10 +23,17 @@ pub async fn apply(host: &String, filename: &String) -> Result<()> {
     let path = Path::new(filename);
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(err) => panic!("Can not open {}: {}", filename, err),
+        Err(err) => {
+            eprintln!("Can't open file {}: {}", filename, err);
+            exit(2);
+        }
     };
 
-    let mut client = ApplyClient::connect(format!("http://{}:{}", host, 2650)).await?;
+    let client = ApplyClient::connect(format!("http://{}:{}", host, 2650)).await;
+    let Ok(mut client) = client else {
+        eprintln!("Can't connect to {}", host);
+        exit(3);
+    };
 
     let mut vec = Vec::new();
     for line in BufReader::new(file).lines() {
