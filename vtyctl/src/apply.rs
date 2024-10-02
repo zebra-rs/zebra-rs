@@ -11,10 +11,13 @@ pub mod vtysh {
     tonic::include_proto!("vtysh");
 }
 
+fn print_help() {
+    eprintln!("vtyctl apply must specify -f or --filename.");
+}
+
 pub async fn apply(host: &String, filename: &String) -> Result<()> {
-    println!("apply host: {} filename: {}", host, filename);
     if filename.is_empty() {
-        println!("Please specify filename");
+        print_help();
         exit(1);
     }
     let path = Path::new(filename);
@@ -23,12 +26,12 @@ pub async fn apply(host: &String, filename: &String) -> Result<()> {
         Err(err) => panic!("Can not open {}: {}", filename, err),
     };
 
-    let mut client = ApplyClient::connect(format!("{}:{}", "http://127.0.0.1", 2650)).await?;
+    let mut client = ApplyClient::connect(format!("http://{}:{}", host, 2650)).await?;
 
     let mut vec = Vec::new();
     for line in BufReader::new(file).lines() {
         vec.push(ApplyRequest {
-            line: line.unwrap(),
+            line: line.unwrap() + "\n",
         });
     }
 

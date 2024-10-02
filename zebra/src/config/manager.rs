@@ -289,7 +289,8 @@ impl ConfigManager {
                 }
                 let entry = entry.unwrap();
 
-                json_read(entry);
+                // Here we are.
+                // json_read(entry);
 
                 println!("XXX {}", req.config);
 
