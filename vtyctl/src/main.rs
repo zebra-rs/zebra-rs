@@ -25,6 +25,13 @@ enum Commands {
     },
 }
 
+fn print_help() {
+    eprintln!("`vtyctl' controls Zebra Routing Software configuration.");
+    eprintln!("");
+    eprintln!("Basic Commands:");
+    eprintln!("  apply       Apply configuration.");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -33,7 +40,9 @@ async fn main() -> Result<()> {
         Some(Commands::Apply { host, filename }) => {
             apply::apply(host, filename).await?;
         }
-        None => {}
+        None => {
+            print_help();
+        }
     }
 
     Ok(())

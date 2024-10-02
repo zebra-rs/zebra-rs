@@ -43,6 +43,11 @@ impl ConfigStore {
         let candidate = carbon_copy(&self.running.borrow(), None);
         self.candidate.replace(candidate);
     }
+
+    pub fn candidate_clear(&self) {
+        let candidate = Rc::new(Config::new("".to_string(), None));
+        self.candidate.replace(candidate);
+    }
 }
 
 pub struct ConfigManager {
@@ -289,9 +294,20 @@ impl ConfigManager {
                 }
                 let entry = entry.unwrap();
 
-                json_read(entry);
+                // Parse as YAML.
+                let config = if req.config.as_str().starts_with('{') {
+                    req.config
+                } else {
+                    super::yaml::yaml_parse(req.config.as_str())
+                };
 
-                println!("XXX {}", req.config);
+                // Here we are.
+                let cmds = json_read(entry, config.as_str());
+                self.store.candidate_clear();
+                for cmd in cmds.iter() {
+                    let _ = self.execute(mode, cmd);
+                }
+                let _ = self.commit_config();
 
                 let resp = DeployResponse {
                     code: 0,
