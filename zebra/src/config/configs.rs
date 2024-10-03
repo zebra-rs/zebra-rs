@@ -232,7 +232,10 @@ impl Config {
             } else {
                 let value_list = self.list.borrow();
                 if value_list.len() > 0 {
-                    //
+                    let value_list: Vec<String> =
+                        value_list.iter().map(|x| format!("\"{}\"", x)).collect();
+                    let leaf_list = value_list.join(",");
+                    out.push_str(&format!("\"{}\": [{}]", self.name, leaf_list));
                 } else {
                     out.push_str(&format!("\"{}\":", self.name));
                 }
