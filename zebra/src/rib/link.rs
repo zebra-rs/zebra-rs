@@ -274,7 +274,6 @@ impl Rib {
                 e.selected = true;
                 e.fib = true;
                 if let IpNet::V4(net) = addr.addr {
-                    println!("Connected add");
                     self.ipv4_add(net, e);
                     // Event for resolve.
                     let _ = self.tx.clone().send(Message::ResolveNexthop);
