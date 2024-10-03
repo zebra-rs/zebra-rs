@@ -219,7 +219,6 @@ pub fn select(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>) {
 }
 
 pub fn validate(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopMap) {
-    println!("[Validate]");
     nmap.need_resolve_all();
     for (prefix, ribs) in rib.iter() {
         for v in ribs.iter() {
