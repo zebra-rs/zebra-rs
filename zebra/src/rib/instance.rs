@@ -2,12 +2,14 @@ use super::api::RibRx;
 use super::config::config_dispatch;
 use super::entry::RibEntry;
 use super::fib::fib_dump;
-//use super::fib::netlink::route_add;
+// use super::fib::netlink::route_add;
 use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop_map::NexthopMap;
+use super::route::StaticRoute;
 use super::{Link, RibTxChannel};
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
+use crate::rib::config::routing_static_commit;
 use crate::rib::entry::RibType;
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
@@ -23,6 +25,12 @@ pub enum Message {
     ResolveNexthop,
 }
 
+#[derive(Default)]
+pub struct RibEntries {
+    pub ribs: Vec<RibEntry>,
+    pub st: Option<StaticRoute>,
+}
+
 pub struct Rib {
     pub api: RibTxChannel,
     pub cm: ConfigChannel,
@@ -32,10 +40,11 @@ pub struct Rib {
     pub fib_handle: FibHandle,
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
-    pub rib: PrefixMap<Ipv4Net, Vec<RibEntry>>,
+    pub rib: PrefixMap<Ipv4Net, RibEntries>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub nexthop: NexthopMap,
+    pub cache: BTreeMap<Ipv4Net, StaticRoute>,
 }
 
 impl Rib {
@@ -56,6 +65,7 @@ impl Rib {
             tx,
             rx,
             nexthop: NexthopMap::new(),
+            cache: BTreeMap::new(),
         };
         rib.show_build();
         Ok(rib)
@@ -98,6 +108,13 @@ impl Rib {
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
+            ConfigOp::CommitStart => {
+                println!("Commit Start");
+            }
+            ConfigOp::CommitEnd => {
+                println!("Commit End");
+                routing_static_commit(&mut self.rib, &mut self.cache);
+            }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
             }
@@ -159,7 +176,7 @@ impl Rib {
         let Some((a, b)) = self.rib.get_lpm(&addr) else {
             return false;
         };
-        for e in b.iter() {
+        for e in b.ribs.iter() {
             if e.rtype == RibType::Connected {
                 println!("Lookup {} onlink", a);
                 return true;
@@ -218,10 +235,10 @@ pub fn select(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>) {
     }
 }
 
-pub fn validate(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopMap) {
+pub fn validate(rib: &mut PrefixMap<Ipv4Net, RibEntries>, nmap: &mut NexthopMap) {
     nmap.need_resolve_all();
     for (prefix, ribs) in rib.iter() {
-        for v in ribs.iter() {
+        for v in ribs.ribs.iter() {
             if v.rtype == RibType::Static {
                 println!(" RIB: {} {:?}", prefix, v.rtype);
                 for n in v.nexthops.iter() {
@@ -241,13 +258,13 @@ pub fn validate(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>, nmap: &mut NexthopM
 
     for (_prefix, ribs) in rib.iter_mut() {
         let mut fib: Option<&mut RibEntry> = None;
-        for v in ribs.iter_mut() {
+        for v in ribs.ribs.iter_mut() {
             if v.fib {
                 fib = Some(v);
             }
         }
         let mut selected: Option<&mut RibEntry> = None;
-        for v in ribs.iter_mut() {
+        for v in ribs.ribs.iter_mut() {
             if let Some(other) = selected.as_ref() {
                 if v.distance < other.distance {
                     selected = Some(v);

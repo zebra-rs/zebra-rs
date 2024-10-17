@@ -40,6 +40,10 @@ impl Args {
         self.0.pop_front()
     }
 
+    pub fn u8(&mut self) -> Option<u8> {
+        arg_parse_type!(self, u8);
+    }
+
     pub fn u16(&mut self) -> Option<u16> {
         arg_parse_type!(self, u16);
     }

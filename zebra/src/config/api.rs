@@ -11,6 +11,8 @@ pub struct ConfigChannel {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ConfigOp {
+    CommitStart,
+    CommitEnd,
     Set,
     Delete,
     Completion,

@@ -52,7 +52,7 @@ pub(crate) fn rib_show(rib: &Rib, _args: Args) -> String {
     buf.push_str(SHOW_IPV4_HEADER);
 
     for (prefix, entry) in rib.rib.iter() {
-        for e in entry.iter() {
+        for e in entry.ribs.iter() {
             writeln!(
                 buf,
                 "{} {} {} {:?}{} {}",
@@ -64,6 +64,9 @@ pub(crate) fn rib_show(rib: &Rib, _args: Args) -> String {
                 e.gateway(rib),
             )
             .unwrap();
+        }
+        if let Some(ref st) = entry.st {
+            writeln!(buf, "{:?}", st).unwrap();
         }
     }
     buf
