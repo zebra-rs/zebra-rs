@@ -562,7 +562,7 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
     while let Some(parent) = config.parent.as_ref() {
         config_delete(parent.clone(), &config.name);
         config = parent.clone();
-        if config.has_dir() || config.presence {
+        if config.has_dir() || config.has_prefix() || config.presence {
             break;
         }
     }

@@ -66,7 +66,7 @@ pub(crate) fn rib_show(rib: &Rib, _args: Args) -> String {
             .unwrap();
         }
         if let Some(ref st) = entry.st {
-            writeln!(buf, "{:?}", st).unwrap();
+            writeln!(buf, "S   {} {}", prefix, st).unwrap();
         }
     }
     buf

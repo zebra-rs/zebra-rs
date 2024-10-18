@@ -148,10 +148,10 @@ impl ConfigManager {
         for line in diff.lines() {
             if !line.is_empty() {
                 let first_char = line.chars().next().unwrap();
-                let op = if first_char == '+' {
-                    ConfigOp::Set
-                } else {
-                    ConfigOp::Delete
+                let op = match first_char {
+                    '+' => ConfigOp::Set,
+                    '-' => ConfigOp::Delete,
+                    _ => continue,
                 };
                 let line = remove_first_char(line);
                 let paths = self.paths(line.clone());

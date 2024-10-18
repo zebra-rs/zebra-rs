@@ -99,6 +99,7 @@ pub struct StaticRoute {
     pub distance: Option<u8>,
     pub metric: Option<u32>,
     pub nexthops: BTreeMap<Ipv4Addr, StaticNexthop>,
+    pub delete: bool,
 }
 
 impl StaticRoute {
@@ -109,62 +110,22 @@ impl StaticRoute {
     pub fn to_rib(&self) -> Vec<RibEntry> {
         Vec::new()
     }
+}
 
-    pub fn set_metric(&mut self, metric: u32) {
-        self.metric = Some(metric);
-    }
+use std::fmt;
 
-    pub fn del_metric(&mut self) {
-        self.metric = None;
-    }
+impl fmt::Display for StaticRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let distance = self.distance.unwrap_or(1);
+        let metric = self.metric.unwrap_or(0);
 
-    pub fn set_distance(&mut self, distance: u8) {
-        self.distance = Some(distance);
-    }
-
-    pub fn del_distance(&mut self) {
-        self.distance = None;
-    }
-
-    pub fn set_nexthop(&mut self, nexthop: Ipv4Addr) {
-        self.nexthops.entry(nexthop).or_default();
-    }
-
-    pub fn del_nexthop(&mut self, nexthop: Ipv4Addr) {
-        self.nexthops.remove(&nexthop);
-    }
-
-    pub fn set_nexthop_distance(&mut self, nexthop: Ipv4Addr, distance: u8) {
-        let nexthop = self.nexthops.entry(nexthop).or_default();
-        nexthop.distance = Some(distance);
-    }
-
-    pub fn del_nexthop_distance(&mut self, nexthop: Ipv4Addr) {
-        if let Some(nexthop) = self.nexthops.get_mut(&nexthop) {
-            nexthop.distance = None;
+        write!(f, "[{}/{}]", distance, metric).unwrap();
+        for (p, n) in self.nexthops.iter() {
+            let distance = n.distance.unwrap_or(distance);
+            let metric = n.metric.unwrap_or(metric);
+            writeln!(f, "  {} [{}/{}]", p, distance, metric).unwrap();
         }
-    }
-
-    pub fn set_nexthop_metric(&mut self, nexthop: Ipv4Addr, metric: u32) {
-        let nexthop = self.nexthops.entry(nexthop).or_default();
-        nexthop.metric = Some(metric);
-    }
-
-    pub fn del_nexthop_metric(&mut self, nexthop: Ipv4Addr) {
-        if let Some(nexthop) = self.nexthops.get_mut(&nexthop) {
-            nexthop.metric = None;
-        }
-    }
-
-    pub fn set_nexthop_weight(&mut self, nexthop: Ipv4Addr, weight: u32) {
-        let nexthop = self.nexthops.entry(nexthop).or_default();
-        nexthop.weight = Some(weight);
-    }
-
-    pub fn del_nexthop_weight(&mut self, nexthop: Ipv4Addr) {
-        if let Some(nexthop) = self.nexthops.get_mut(&nexthop) {
-            nexthop.weight = None;
-        }
+        write!(f, "")
     }
 }
 
