@@ -253,10 +253,10 @@ pub fn validate(rib: &mut PrefixMap<Ipv4Net, RibEntries>, nmap: &mut NexthopMap)
     }
 
     for (_prefix, ribs) in rib.iter_mut() {
-        let mut fib: Option<&mut RibEntry> = None;
+        let mut _fib: Option<&mut RibEntry> = None;
         for v in ribs.ribs.iter_mut() {
             if v.fib {
-                fib = Some(v);
+                // fib = Some(v);
             }
         }
         let mut selected: Option<&mut RibEntry> = None;
