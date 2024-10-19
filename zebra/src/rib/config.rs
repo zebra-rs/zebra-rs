@@ -8,7 +8,10 @@ use crate::{
 };
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use std::{collections::BTreeMap, net::Ipv4Addr};
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::Ipv4Addr,
+};
 
 use anyhow::{Context, Result};
 
@@ -27,13 +30,13 @@ fn static_route_lookup(
     prefix: &Ipv4Net,
 ) -> Option<StaticRoute> {
     let entry = rib.get(prefix)?;
-    match &entry.st {
-        Some(st) => Some(st.clone()),
-        None => None,
-    }
+    let Some(st) = &entry.st else {
+        return None;
+    };
+    Some(st.clone())
 }
 
-fn static_cache_get<'a>(
+fn cache_get<'a>(
     rib: &'a PrefixMap<Ipv4Net, RibEntries>,
     cache: &'a mut BTreeMap<Ipv4Net, StaticRoute>,
     prefix: &'a Ipv4Net,
@@ -62,116 +65,6 @@ fn static_cache_lookup<'a>(
     }
 }
 
-pub fn static_route_config(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Result<()> {
-    let prefix: Ipv4Net = args.v4net().context("")?;
-    if op == ConfigOp::Set {
-        let _ = static_cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
-    }
-    if op == ConfigOp::Delete {
-        if let Some(st) = rib.cache.get_mut(&prefix) {
-            st.delete = true;
-        } else {
-            let mut st = static_route_lookup(&rib.rib, &prefix).context("")?;
-            st.delete = true;
-            rib.cache.insert(prefix, st);
-        }
-    }
-    Ok(())
-}
-
-pub fn static_route_metric(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Result<()> {
-    let prefix: Ipv4Net = args.v4net().context("missing IPv4 network arguments")?;
-    if op == ConfigOp::Set {
-        let s = static_cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        s.metric = Some(args.u32().context("")?);
-    }
-    if op == ConfigOp::Delete {
-        let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        s.metric = None;
-    }
-    Ok(())
-}
-
-pub fn static_route_distance(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Result<()> {
-    let prefix: Ipv4Net = args.v4net().context("")?;
-    if op == ConfigOp::Set {
-        let s = static_cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        s.distance = Some(args.u8().context("")?);
-    }
-    if op == ConfigOp::Delete {
-        let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        s.distance = None;
-    }
-    Ok(())
-}
-
-pub fn static_route_nexthop_config(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Result<()> {
-    let prefix: Ipv4Net = args.v4net().context("")?;
-    if op == ConfigOp::Set {
-        let s = static_cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        let _ = s.nexthops.entry(args.v4addr().context("")?).or_default();
-    }
-    if op == ConfigOp::Delete {
-        let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        s.nexthops.remove(&args.v4addr().context("")?).context("")?;
-    }
-    Ok(())
-}
-
-pub fn static_route_nexthop_distance(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Result<()> {
-    let prefix: Ipv4Net = args.v4net().context("")?;
-    if op == ConfigOp::Set {
-        let s = static_cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        let n = s.nexthops.entry(args.v4addr().context("")?).or_default();
-        n.distance = Some(args.u8().context("")?);
-    }
-    if op == ConfigOp::Delete {
-        let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        let n = s
-            .nexthops
-            .get_mut(&args.v4addr().context("")?)
-            .context("")?;
-        n.distance = None;
-    }
-    Ok(())
-}
-
-pub fn static_route_nexthop_metric(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Result<()> {
-    let prefix: Ipv4Net = args.v4net().context("")?;
-    if op == ConfigOp::Set {
-        let s = static_cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        let n = s.nexthops.entry(args.v4addr().context("")?).or_default();
-        n.metric = Some(args.u32().context("")?);
-    }
-    if op == ConfigOp::Delete {
-        let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        let n = s
-            .nexthops
-            .get_mut(&args.v4addr().context("")?)
-            .context("")?;
-        n.metric = None;
-    }
-    Ok(())
-}
-
-pub fn static_route_nexthop_weight(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Result<()> {
-    let prefix: Ipv4Net = args.v4net().context("")?;
-    if op == ConfigOp::Set {
-        let s = static_cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        let n = s.nexthops.entry(args.v4addr().context("")?).or_default();
-        n.weight = Some(args.u32().context("")?);
-    }
-    if op == ConfigOp::Delete {
-        let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
-        let n = s
-            .nexthops
-            .get_mut(&args.v4addr().context("")?)
-            .context("")?;
-        n.weight = None;
-    }
-    Ok(())
-}
-
 pub fn routing_static_commit(
     rib: &mut PrefixMap<Ipv4Net, RibEntries>,
     cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
@@ -187,34 +80,138 @@ pub fn routing_static_commit(
     cache.clear();
 }
 
-pub async fn config_dispatch(rib: &mut Rib, path: String, args: Args, op: ConfigOp) {
-    println!("P: {:?} {}", op, path);
-    match path.as_str() {
-        "/routing/static/route" => {
-            let _ = static_route_config(rib, args, op);
-        }
-        "/routing/static/route/metric" => {
-            let _ = static_route_metric(rib, args, op);
-        }
-        "/routing/static/route/distance" => {
-            let _ = static_route_distance(rib, args, op);
-        }
-        "/routing/static/route/nexthop" => {
-            let _ = static_route_nexthop_config(rib, args, op);
-        }
-        "/routing/static/route/nexthop/metric" => {
-            let _ = static_route_nexthop_metric(rib, args, op);
-        }
-        "/routing/static/route/nexthop/distance" => {
-            let _ = static_route_nexthop_distance(rib, args, op);
-        }
-        "/routing/static/route/nexthop/weight" => {
-            let _ = static_route_nexthop_weight(rib, args, op);
-        }
-        _ => {
-            println!("route");
-        }
+type ConfigFunc = fn(rib: &mut Rib, prefix: &Ipv4Net, args: &mut Args) -> Result<()>;
+
+#[derive(Default)]
+struct StaticConfigRunner {
+    path: String,
+    map: HashMap<(String, ConfigOp), ConfigFunc>,
+}
+
+impl StaticConfigRunner {
+    pub fn path(mut self, path: &str) -> Self {
+        self.path = path.to_string();
+        self
     }
+
+    pub fn set(mut self, func: ConfigFunc) -> Self {
+        self.map.insert((self.path.clone(), ConfigOp::Set), func);
+        self
+    }
+
+    pub fn del(mut self, func: ConfigFunc) -> Self {
+        self.map.insert((self.path.clone(), ConfigOp::Delete), func);
+        self
+    }
+
+    pub fn exec(&self, path: &str, op: ConfigOp, rib: &mut Rib, mut args: Args) -> Result<()> {
+        let func = self.map.get(&(path.to_string(), op)).context("")?;
+        let prefix: Ipv4Net = args.v4net().context("")?;
+        func(rib, &prefix, &mut args)
+    }
+}
+
+pub async fn config_dispatch(rib: &mut Rib, path: String, args: Args, op: ConfigOp) {
+    let runner = StaticConfigRunner::default()
+        .path("/routing/static/route")
+        .set(|rib, prefix, _| {
+            let _ = cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            Ok(())
+        })
+        .del(|rib, prefix, _| {
+            if let Some(st) = rib.cache.get_mut(&prefix) {
+                st.delete = true;
+            } else {
+                let mut st = static_route_lookup(&rib.rib, &prefix).context("")?;
+                st.delete = true;
+                rib.cache.insert(*prefix, st);
+            }
+            Ok(())
+        })
+        .path("/routing/static/route/metric")
+        .set(|rib, prefix, args| {
+            let s = cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            s.metric = Some(args.u32().context("")?);
+            Ok(())
+        })
+        .del(|rib, prefix, args| {
+            let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            s.metric = None;
+            Ok(())
+        })
+        .path("/routing/static/route/distance")
+        .set(|rib, prefix, args| {
+            let s = cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            s.distance = Some(args.u8().context("")?);
+            Ok(())
+        })
+        .del(|rib, prefix, _| {
+            let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            s.distance = None;
+            Ok(())
+        })
+        .path("/routing/static/route/nexthop")
+        .set(|rib, prefix, args| {
+            let s = cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            let _ = s.nexthops.entry(args.v4addr().context("")?).or_default();
+            Ok(())
+        })
+        .del(|rib, prefix, args| {
+            let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            s.nexthops.remove(&args.v4addr().context("")?).context("")?;
+            Ok(())
+        })
+        .path("/routing/static/route/nexthop/metric")
+        .set(|rib, prefix, args| {
+            let s = cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            let n = s.nexthops.entry(args.v4addr().context("")?).or_default();
+            n.metric = Some(args.u32().context("")?);
+            Ok(())
+        })
+        .del(|rib, prefix, args| {
+            let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            let n = s
+                .nexthops
+                .get_mut(&args.v4addr().context("")?)
+                .context("")?;
+            n.metric = None;
+            Ok(())
+        })
+        .path("/routing/static/route/nexthop/distance")
+        .set(|rib, prefix, args| {
+            let s = cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            let n = s.nexthops.entry(args.v4addr().context("")?).or_default();
+            n.distance = Some(args.u8().context("")?);
+            Ok(())
+        })
+        .del(|rib, prefix, args| {
+            let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            let n = s
+                .nexthops
+                .get_mut(&args.v4addr().context("")?)
+                .context("")?;
+            n.distance = None;
+            Ok(())
+        })
+        .path("/routing/static/route/nexthop/weight")
+        .set(|rib, prefix, args| {
+            let s = cache_get(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            let n = s.nexthops.entry(args.v4addr().context("")?).or_default();
+            n.weight = Some(args.u32().context("")?);
+            Ok(())
+        })
+        .del(|rib, prefix, args| {
+            let s = static_cache_lookup(&rib.rib, &mut rib.cache, &prefix).context("")?;
+            let n = s
+                .nexthops
+                .get_mut(&args.v4addr().context("")?)
+                .context("")?;
+            n.weight = None;
+            Ok(())
+        });
+
+    println!("P: {:?} {}", op, path);
+    let _ = runner.exec(path.as_str(), op, rib, args);
 }
 
 async fn static_route_nexthop(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Option<()> {
