@@ -1,15 +1,13 @@
 use super::{
     entry::{RibEntry, RibType},
-    instance::{Rib, RibEntries},
+    instance::Rib,
 };
-use crate::rib::StaticRoute;
 use crate::{
     config::{Args, ConfigOp},
     rib::nexthop::Nexthop,
 };
 use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
-use std::{collections::BTreeMap, net::Ipv4Addr};
+use std::net::Ipv4Addr;
 
 async fn static_route_nexthop(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set && args.len() > 1 {
