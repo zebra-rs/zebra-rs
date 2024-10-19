@@ -1,16 +1,15 @@
 use super::api::RibRx;
-use super::config::config_dispatch;
 use super::entry::RibEntry;
 use super::fib::fib_dump;
 // use super::fib::netlink::route_add;
 use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop_map::NexthopMap;
-use super::route::StaticRoute;
 use super::{Link, RibTxChannel};
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
-use crate::rib::config::routing_static_commit;
 use crate::rib::entry::RibType;
+use crate::rib::StaticRoute;
+use crate::rib::{static_config_commit, static_config_exec};
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
@@ -108,19 +107,16 @@ impl Rib {
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
-            ConfigOp::CommitStart => {
-                println!("Commit Start");
+            ConfigOp::CommitStart => {}
+            ConfigOp::Set | ConfigOp::Delete => {
+                let (path, args) = path_from_command(&msg.paths);
+                static_config_exec(self, path, args, msg.op);
             }
             ConfigOp::CommitEnd => {
-                println!("Commit End");
-                routing_static_commit(&mut self.rib, &mut self.cache);
+                static_config_commit(&mut self.rib, &mut self.cache);
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
-            }
-            ConfigOp::Set | ConfigOp::Delete => {
-                let (path, args) = path_from_command(&msg.paths);
-                config_dispatch(self, path, args, msg.op).await;
             }
         }
     }

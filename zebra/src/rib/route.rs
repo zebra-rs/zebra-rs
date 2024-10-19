@@ -4,6 +4,7 @@ use super::instance::Rib;
 use super::nexthop::Nexthop;
 use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
+use std::net::IpAddr;
 
 fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
     for (i, rib) in ribs.iter().enumerate() {
@@ -81,68 +82,5 @@ impl Rib {
                 //
             }
         }
-    }
-}
-
-use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
-
-#[derive(Debug, Default, Clone)]
-pub struct StaticNexthop {
-    pub distance: Option<u8>,
-    pub metric: Option<u32>,
-    pub weight: Option<u32>,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct StaticRoute {
-    pub distance: Option<u8>,
-    pub metric: Option<u32>,
-    pub nexthops: BTreeMap<Ipv4Addr, StaticNexthop>,
-    pub delete: bool,
-}
-
-impl StaticRoute {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn to_rib(&self) -> Vec<RibEntry> {
-        Vec::new()
-    }
-}
-
-use std::fmt;
-
-impl fmt::Display for StaticRoute {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let distance = self.distance.unwrap_or(1);
-        let metric = self.metric.unwrap_or(0);
-
-        write!(f, "[{}/{}]", distance, metric).unwrap();
-        for (p, n) in self.nexthops.iter() {
-            let distance = n.distance.unwrap_or(distance);
-            let metric = n.metric.unwrap_or(metric);
-            writeln!(f, "  {} [{}/{}]", p, distance, metric).unwrap();
-        }
-        write!(f, "")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_static_set() {
-        let mut st = StaticRoute::new();
-        assert_eq!(st.nexthops.len(), 0);
-
-        let nexthop: Ipv4Addr = "1.1.1.1".parse().unwrap();
-        st.set_nexthop(nexthop);
-        assert_eq!(st.nexthops.len(), 1);
-
-        st.set_metric(10);
-        st.set_distance(10);
     }
 }
