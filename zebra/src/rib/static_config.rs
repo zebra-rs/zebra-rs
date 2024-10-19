@@ -99,14 +99,14 @@ fn static_config_runner() -> StaticConfigRunner {
     StaticConfigRunner::default()
         .path("/routing/static/route")
         .set(|rib, cache, prefix, _| {
-            let _ = cache_get(rib, cache, &prefix).context("missing static config")?;
+            let _ = cache_get(rib, cache, &prefix).context("missing config")?;
             Ok(())
         })
         .del(|rib, cache, prefix, _| {
             if let Some(st) = cache.get_mut(&prefix) {
                 st.delete = true;
             } else {
-                let mut st = static_lookup(rib, &prefix).context("")?;
+                let mut st = static_lookup(rib, &prefix).context("missing config")?;
                 st.delete = true;
                 cache.insert(*prefix, st);
             }
@@ -114,81 +114,81 @@ fn static_config_runner() -> StaticConfigRunner {
         })
         .path("/routing/static/route/metric")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context("")?;
+            let s = cache_get(rib, cache, &prefix).context("missing config")?;
             s.metric = Some(args.u32().context("missing metric arg")?);
             Ok(())
         })
         .del(|rib, cache, prefix, _| {
-            let s = cache_lookup(rib, cache, &prefix).context("")?;
+            let s = cache_lookup(rib, cache, &prefix).context("missing config")?;
             s.metric = None;
             Ok(())
         })
         .path("/routing/static/route/distance")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context("")?;
+            let s = cache_get(rib, cache, &prefix).context("missing config")?;
             s.distance = Some(args.u8().context("missing distance arg")?);
             Ok(())
         })
         .del(|rib, cache, prefix, _| {
-            let s = cache_lookup(rib, cache, &prefix).context("")?;
+            let s = cache_lookup(rib, cache, &prefix).context("missing config")?;
             s.distance = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context("")?;
+            let s = cache_get(rib, cache, &prefix).context("missing config")?;
             let naddr = args.v4addr().context("missing nexthop address")?;
             let _ = s.nexthops.entry(naddr).or_default();
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context("")?;
+            let s = cache_lookup(rib, cache, &prefix).context("missing config")?;
             let naddr = args.v4addr().context("missing nexthop address")?;
-            s.nexthops.remove(&naddr).context("")?;
+            s.nexthops.remove(&naddr).context("missing config")?;
             Ok(())
         })
         .path("/routing/static/route/nexthop/metric")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context("")?;
+            let s = cache_get(rib, cache, &prefix).context("missing config")?;
             let naddr = args.v4addr().context("missing nexthop address")?;
             let n = s.nexthops.entry(naddr).or_default();
             n.metric = Some(args.u32().context("missing metric arg")?);
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context("")?;
+            let s = cache_lookup(rib, cache, &prefix).context("missing config")?;
             let naddr = args.v4addr().context("missing nexthop address")?;
-            let n = s.nexthops.get_mut(&naddr).context("")?;
+            let n = s.nexthops.get_mut(&naddr).context("missing config")?;
             n.metric = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop/distance")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context("")?;
+            let s = cache_get(rib, cache, &prefix).context("missing config")?;
             let naddr = args.v4addr().context("missing nexthop address")?;
             let n = s.nexthops.entry(naddr).or_default();
-            n.distance = Some(args.u8().context("")?);
+            n.distance = Some(args.u8().context("missing distance arg")?);
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context("")?;
+            let s = cache_lookup(rib, cache, &prefix).context("missing config")?;
             let naddr = args.v4addr().context("missing nexthop address")?;
-            let n = s.nexthops.get_mut(&naddr).context("")?;
+            let n = s.nexthops.get_mut(&naddr).context("missing config")?;
             n.distance = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop/weight")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context("")?;
-            let naddr = args.v4addr().context("missing nexthop")?;
+            let s = cache_get(rib, cache, &prefix).context("missing config")?;
+            let naddr = args.v4addr().context("missing nexthop address")?;
             let n = s.nexthops.entry(naddr).or_default();
-            n.weight = Some(args.u32().context("")?);
+            n.weight = Some(args.u32().context("missing weight arg")?);
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context("")?;
-            let naddr = args.v4addr().context("missing nexthop")?;
-            let n = s.nexthops.get_mut(&naddr).context("")?;
+            let s = cache_lookup(rib, cache, &prefix).context("missing config")?;
+            let naddr = args.v4addr().context("missing nexthop address")?;
+            let n = s.nexthops.get_mut(&naddr).context("missing config")?;
             n.weight = None;
             Ok(())
         })
