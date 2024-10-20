@@ -56,11 +56,3 @@ impl NexthopBuilder {
         nexthop
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn parse() {}
-}
