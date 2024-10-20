@@ -80,6 +80,18 @@ module config {
               type inet:ipv4-address;
               description "Nexthop of the route";
             }
+            leaf distance {
+              type uint8;
+              description "Distance of the route.";
+            }
+            leaf metric {
+              type uint32;
+              description "Metric of the route.";
+            }
+            leaf weight {
+              type uint32;
+              description "Metric of the route.";
+            }
           }
           leaf distance {
             type uint8;
@@ -117,6 +129,7 @@ module config {
           }
           leaf action {
             type enumeration {
+              enum End;
               enum End.DT4;
             }
           }
@@ -126,6 +139,20 @@ module config {
           }
           leaf table {
             type uint32;
+          }
+          leaf flavors {
+            type enumeration {
+              enum next-csid;
+              enum psp;
+              enum usp;
+              enum usd;
+            }
+          }
+          leaf lblen {
+            type uint8;
+          }
+          leaf nflen {
+            type uint8;
           }
         }
       }

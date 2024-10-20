@@ -26,6 +26,10 @@ pub enum RibSubType {
     ISIS_Intra_Area,
 }
 
+trait RibExt {
+    fn metric(&self) -> u32;
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
@@ -33,13 +37,17 @@ pub struct RibEntry {
     pub rsubtype: RibSubType,
     pub selected: bool,
     pub fib: bool,
-    pub distance: u32,
+    pub distance: u8,
     pub metric: u32,
     pub tag: u32,
-    pub color: Vec<String>,
     pub nexthops: Vec<Nexthop>,
-    // pub gateway: IpAddr,
     pub link_index: u32,
+}
+
+impl RibExt for RibEntry {
+    fn metric(&self) -> u32 {
+        self.metric
+    }
 }
 
 impl RibEntry {
@@ -52,9 +60,7 @@ impl RibEntry {
             distance: 0,
             metric: 0,
             tag: 0,
-            color: Vec::new(),
             nexthops: Vec::new(),
-            // gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             link_index: 0,
         }
     }
@@ -79,7 +85,11 @@ impl RibEntry {
                 "directly connected unknown".to_string()
             }
         } else if !self.nexthops.is_empty() {
-            format!("via {}", &self.nexthops[0])
+            let mut out: String = String::from("via ");
+            for n in self.nexthops.iter() {
+                out += &format!("{} ", n);
+            }
+            out
         } else {
             format!("")
         }

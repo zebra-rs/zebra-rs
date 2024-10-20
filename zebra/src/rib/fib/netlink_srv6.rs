@@ -2,7 +2,7 @@ use std::net::Ipv6Addr;
 use std::str::FromStr;
 
 use netlink_packet_route::route::{
-    Ipv6SrHdr, RouteAttribute, RouteHeader, RouteLwEnCapType, RouteLwTunnelEncap, RouteMessage,
+    Ipv6SrHdr, RouteAttribute, RouteLwEnCapType, RouteLwTunnelEncap, RouteMessage,
     RouteSeg6IpTunnel, Seg6IpTunnelEncap, Seg6IpTunnelMode, VecIpv6SrHdr,
 };
 use rtnetlink::RouteMessageBuilder;
@@ -26,6 +26,7 @@ pub async fn srv6_encap_add(handle: &rtnetlink::Handle) {
         flags: 0,
         tag: 0,
         segments,
+        ..Default::default()
     };
     let seg6encap = Seg6IpTunnelEncap {
         mode: Seg6IpTunnelMode::Encap.into(),
@@ -70,6 +71,7 @@ pub async fn srv6_encap_del(handle: &rtnetlink::Handle) {
         flags: 0,
         tag: 0,
         segments,
+        ..Default::default()
     };
     let seg6encap = Seg6IpTunnelEncap {
         mode: Seg6IpTunnelMode::Encap.into(),

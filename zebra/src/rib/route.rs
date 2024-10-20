@@ -1,11 +1,10 @@
-use std::net::IpAddr;
-
 use super::entry::{RibEntry, RibType};
 use super::fib::message::FibRoute;
 use super::instance::Rib;
 use super::nexthop::Nexthop;
 use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
+use std::net::IpAddr;
 
 fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
     for (i, rib) in ribs.iter().enumerate() {
@@ -25,29 +24,40 @@ impl Rib {
         //nexthop_resolve(&self.rib, &e.nexthops[0]);
 
         let ribs = self.rib.entry(dest).or_default();
-        let find = rib_same_type(&ribs, &e);
+        let find = rib_same_type(&ribs.ribs, &e);
+        let mut prev: Option<RibEntry> = None;
         match find {
             Some(index) => {
-                let prev = ribs.remove(index);
+                prev = Some(ribs.ribs.remove(index));
             }
-            None => {
-                // println!("XX No same type rib");
+            None => {}
+        }
+
+        ribs.ribs.push(e);
+
+        // Path selection.
+        let mut selected: Option<usize> = None;
+        let mut srib: Option<&RibEntry> = None;
+        for (i, rib) in ribs.ribs.iter().enumerate() {
+            if let Some(x) = srib {
+                if rib.distance < x.distance {
+                    srib = Some(rib);
+                    selected = Some(i);
+                }
+            } else {
+                srib = Some(rib);
+                selected = Some(i);
             }
         }
 
-        // Nexthop resolve.
-        // if e.rtype == RibType::Static {
-        //     for nhop in e.nexthops.iter() {
-        //         if let Some(addr) = nhop.addr {
-        //             let addr = Ipv4Net::new(addr, 32).unwrap();
-        //             self.rib.get_lpm(&addr);
-        //         }
-        //         //nexthop_resolve(&self.rib, nhop);
-        //     }
-        // }
-
-        ribs.push(e);
-        // Path selection.
+        if let Some(prev) = prev {
+            println!("Previous route {:?}", prev);
+        }
+        if let Some(selected) = selected {
+            println!("Found selected");
+            ribs.ribs[selected].selected = true;
+            ribs.ribs[selected].fib = true;
+        }
     }
 
     pub fn route_add(&mut self, r: FibRoute) {
