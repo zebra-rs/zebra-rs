@@ -30,6 +30,21 @@ pub struct RibEntries {
     pub st: Option<StaticRoute>,
 }
 
+impl RibEntries {
+    pub fn static_process(&mut self, _prefix: &Ipv4Net) {
+        // Remove static RIB.
+        self.ribs.retain(|x| x.rtype != RibType::Static);
+
+        // Static -> RIB.
+        if let Some(st) = &self.st {
+            let mut sts: Vec<RibEntry> = st.to_ribs();
+            self.ribs.append(&mut sts);
+        }
+
+        // Path selection.
+    }
+}
+
 pub struct Rib {
     pub api: RibTxChannel,
     pub cm: ConfigChannel,

@@ -37,7 +37,7 @@ pub struct RibEntry {
     pub rsubtype: RibSubType,
     pub selected: bool,
     pub fib: bool,
-    pub distance: u32,
+    pub distance: u8,
     pub metric: u32,
     pub tag: u32,
     pub nexthops: Vec<Nexthop>,
@@ -85,7 +85,11 @@ impl RibEntry {
                 "directly connected unknown".to_string()
             }
         } else if !self.nexthops.is_empty() {
-            format!("via {}", &self.nexthops[0])
+            let mut out: String = String::from("via ");
+            for n in self.nexthops.iter() {
+                out += &format!("{} ", n);
+            }
+            out
         } else {
             format!("")
         }
