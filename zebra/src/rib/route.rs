@@ -3,7 +3,6 @@ use super::fib::message::FibRoute;
 use super::instance::Rib;
 use super::nexthop::Nexthop;
 use ipnet::{IpNet, Ipv4Net};
-use prefix_trie::PrefixMap;
 use std::net::IpAddr;
 
 fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
@@ -13,10 +12,6 @@ fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
         }
     }
     None
-}
-
-pub fn nexthop_resolve(table: &PrefixMap<Ipv4Net, Vec<RibEntry>>, nexthop: &Nexthop) {
-    //
 }
 
 impl Rib {

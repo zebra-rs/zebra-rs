@@ -318,8 +318,8 @@ impl ConfigManager {
                 let _ = self.commit_config();
 
                 let resp = DeployResponse {
-                    code: 0,
-                    output: String::from("hogehoge"),
+                    // code: 0,
+                    // output: String::from("hogehoge"),
                 };
                 req.resp.send(resp).unwrap();
             }

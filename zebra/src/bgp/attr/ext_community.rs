@@ -1,13 +1,16 @@
 use bytes::{BufMut, BytesMut};
 use nom_derive::NomBE;
+use std::fmt;
+use std::net::Ipv4Addr;
 use std::str::FromStr;
-use std::{fmt, net::Ipv4Addr};
 
 use super::{
     encode_tlv,
     ext_community_token::{tokenizer, Token},
     AttributeEncoder, AttributeFlags, AttributeType, RouteDistinguisher, RouteDistinguisherType,
 };
+
+use super::ext_community_type::ExtCommunityType;
 
 #[derive(Clone, Debug, Default, NomBE)]
 pub struct ExtCommunity(pub Vec<ExtCommunityValue>);
@@ -44,9 +47,11 @@ fn sub_type_str(sub_type: u8) -> &'static str {
     }
 }
 
+use ExtCommunityType::*;
+
 impl fmt::Display for ExtCommunityValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.high_type == 0 {
+        if self.high_type == TransTwoOctetAS as u8 {
             let asn = u16::from_be_bytes([self.val[0], self.val[1]]);
             let val = u32::from_be_bytes([self.val[2], self.val[3], self.val[4], self.val[5]]);
             write!(f, "{} {asn}:{val}", sub_type_str(self.low_type))
