@@ -19,12 +19,6 @@ impl NexthopMap {
         }
     }
 
-    pub fn set() {}
-
-    pub fn add(&mut self, nhop: &Ipv4Addr) {}
-
-    pub fn del(&mut self, nhop: &Ipv4Addr) {}
-
     pub fn need_resolve_all(&mut self) {
         self.map.iter_mut().for_each(|(_, x)| x.resolved = false);
     }
