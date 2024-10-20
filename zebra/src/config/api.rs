@@ -9,8 +9,10 @@ pub struct ConfigChannel {
     pub rx: UnboundedReceiver<ConfigRequest>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord)]
 pub enum ConfigOp {
+    CommitStart,
+    CommitEnd,
     Set,
     Delete,
     Completion,

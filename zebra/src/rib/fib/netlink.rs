@@ -131,7 +131,6 @@ fn addr_from_msg(msg: AddressMessage) -> FibAddr {
 }
 
 fn route_from_msg(msg: RouteMessage) -> FibRoute {
-    println!("route_from_msg");
     let mut route = FibRoute {
         route: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
         gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),

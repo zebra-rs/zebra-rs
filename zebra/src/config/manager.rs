@@ -141,13 +141,17 @@ impl ConfigManager {
 
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
 
+        for (_, tx) in self.cm_clients.iter() {
+            tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
+                .unwrap();
+        }
         for line in diff.lines() {
             if !line.is_empty() {
                 let first_char = line.chars().next().unwrap();
-                let op = if first_char == '+' {
-                    ConfigOp::Set
-                } else {
-                    ConfigOp::Delete
+                let op = match first_char {
+                    '+' => ConfigOp::Set,
+                    '-' => ConfigOp::Delete,
+                    _ => continue,
                 };
                 let line = remove_first_char(line);
                 let paths = self.paths(line.clone());
@@ -160,6 +164,10 @@ impl ConfigManager {
                         .unwrap();
                 }
             }
+        }
+        for (_, tx) in self.cm_clients.iter() {
+            tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
+                .unwrap();
         }
         self.store.commit();
         Ok(())

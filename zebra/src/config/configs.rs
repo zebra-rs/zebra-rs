@@ -40,6 +40,10 @@ impl Args {
         self.0.pop_front()
     }
 
+    pub fn u8(&mut self) -> Option<u8> {
+        arg_parse_type!(self, u8);
+    }
+
     pub fn u16(&mut self) -> Option<u16> {
         arg_parse_type!(self, u16);
     }
@@ -558,7 +562,7 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
     while let Some(parent) = config.parent.as_ref() {
         config_delete(parent.clone(), &config.name);
         config = parent.clone();
-        if config.has_dir() || config.presence {
+        if config.has_dir() || config.has_prefix() || config.presence {
             break;
         }
     }
