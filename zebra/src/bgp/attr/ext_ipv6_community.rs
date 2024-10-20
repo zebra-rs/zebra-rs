@@ -1,4 +1,3 @@
-use super::{encode_tlv, AttributeEncoder, AttributeFlags, AttributeType, ExtCommunitySubType};
 use bytes::{BufMut, BytesMut};
 use nom_derive::NomBE;
 use std::fmt;
@@ -6,6 +5,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use super::ext_ipv6_community_token::{tokenizer, Token};
+use super::{encode_tlv, AttributeEncoder, AttributeFlags, AttributeType, ExtCommunitySubType};
 
 #[derive(Clone, Debug, Default, NomBE)]
 pub struct ExtIpv6Community(pub Vec<ExtIpv6CommunityValue>);
