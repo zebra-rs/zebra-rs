@@ -16,8 +16,13 @@ pub struct PrefixListIpv4 {
 }
 
 impl PrefixListIpv4 {
-    pub fn apply(&self, prefix: Ipv4Net) -> Action {
-        Action::Permit
+    pub fn apply(&self, prefix: &Ipv4Net) -> Action {
+        for (_, seq) in self.seq.iter() {
+            if seq.apply(prefix) {
+                return seq.action.clone();
+            }
+        }
+        Action::Deny
     }
 }
 
@@ -28,6 +33,37 @@ pub struct PrefixListIpv4Entry {
     pub le: Option<u8>,
     pub eq: Option<u8>,
     pub ge: Option<u8>,
+}
+
+impl PrefixListIpv4Entry {
+    pub fn apply(&self, prefix: &Ipv4Net) -> bool {
+        if self.prefix.contains(prefix) {
+            if let Some(le) = self.le {
+                if prefix.prefix_len() <= le {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+            if let Some(eq) = self.eq {
+                if prefix.prefix_len() == eq {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+            if let Some(ge) = self.ge {
+                if prefix.prefix_len() >= ge {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+            self.prefix.prefix_len() == prefix.prefix_len()
+        } else {
+            false
+        }
+    }
 }
 
 impl Default for PrefixListIpv4Entry {
@@ -78,7 +114,7 @@ mod tests {
         plist.seq.insert(1, seq1);
 
         let net: Ipv4Net = "10.1.1.0/24".parse().unwrap();
-        let action = plist.apply(net);
+        let action = plist.apply(&net);
         assert_eq!(action, Action::Permit);
     }
 }
