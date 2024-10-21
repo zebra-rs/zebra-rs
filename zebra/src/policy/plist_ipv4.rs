@@ -15,6 +15,12 @@ pub struct PrefixListIpv4 {
     pub delete: bool,
 }
 
+impl PrefixListIpv4 {
+    pub fn apply(&self, prefix: Ipv4Net) -> Action {
+        Action::Permit
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PrefixListIpv4Entry {
     pub action: Action,
@@ -36,6 +42,7 @@ impl Default for PrefixListIpv4Entry {
     }
 }
 
+#[allow(dead_code)]
 pub fn plist_ipv4_show(plist: &BTreeMap<String, PrefixListIpv4>) {
     for (n, p) in plist.iter() {
         println!("name: {}", n);
@@ -50,5 +57,28 @@ pub fn plist_ipv4_show(plist: &BTreeMap<String, PrefixListIpv4>) {
                 e.ge.unwrap_or(0)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply() {
+        let net1: Ipv4Net = "10.1.1.0/24".parse().unwrap();
+        let seq1 = PrefixListIpv4Entry {
+            action: Action::Permit,
+            prefix: net1,
+            le: None,
+            eq: None,
+            ge: None,
+        };
+        let mut plist = PrefixListIpv4::default();
+        plist.seq.insert(1, seq1);
+
+        let net: Ipv4Net = "10.1.1.0/24".parse().unwrap();
+        let action = plist.apply(net);
+        assert_eq!(action, Action::Permit);
     }
 }
