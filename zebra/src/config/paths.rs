@@ -13,13 +13,6 @@ pub fn paths_str(paths: &[CommandPath]) -> String {
     s
 }
 
-#[allow(dead_code)]
-pub fn paths_dump(paths: &[CommandPath]) {
-    for path in paths.iter() {
-        println!("{:?}", path);
-    }
-}
-
 pub fn path_trim(name: &str, mut paths: Vec<CommandPath>) -> Vec<CommandPath> {
     if !paths.is_empty() && paths[0].name == name {
         paths.remove(0);

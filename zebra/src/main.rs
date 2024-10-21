@@ -9,6 +9,7 @@ mod rib;
 //use rib::fib::netlink_srv6::srv6_encap;
 use rib::Rib;
 mod policy;
+use policy::Policy;
 
 use clap::Parser;
 
@@ -44,25 +45,34 @@ fn system_path(arg: &Arg) -> PathBuf {
     }
 }
 
+fn trace_set() {
+    // console_subscriber::init();
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // console_subscriber::init();
-    //srv6_encap();
+    trace_set();
+
     let arg = Arg::parse();
     let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());
     rib.subscribe(bgp.redist.tx.clone());
 
+    let policy = Policy::new();
+
     let mut config = ConfigManager::new(system_path(&arg))?;
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
+    config.subscribe("policy", policy.cm.tx.clone());
 
     let mut cli = Cli::new(config.tx.clone());
     cli.subscribe("rib", rib.show.tx.clone());
     cli.subscribe("bgp", bgp.show.tx.clone());
 
     config::serve(cli);
+
+    policy::serve(policy);
 
     bgp::serve(bgp);
 
