@@ -1,18 +1,5 @@
-#![allow(dead_code)]
-use std::collections::BTreeMap;
-
-#[derive(Debug)]
-pub struct Policy {
-    pub route_map: BTreeMap<String, RouteMap>,
-}
-
-impl Policy {
-    pub fn new() -> Self {
-        Self {
-            route_map: BTreeMap::new(),
-        }
-    }
-}
+// #![allow(dead_code)]
+// use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct RouteMap {
@@ -92,15 +79,15 @@ pub enum EntrySet {
 // }
 
 pub fn policy_init() {
-    let pmap = Policy::new();
-    println!("{:?}", pmap);
+    // let pmap = Policy::new();
+    // println!("{:?}", pmap);
 
-    let rmap = RouteMap::new();
-    println!("{:?}", rmap);
+    // let rmap = RouteMap::new();
+    // println!("{:?}", rmap);
 
-    let mut rentry = RouteMapEntry::new(5);
-    rentry.action(EntryAction::Permit);
-    rentry.match_add(EntryMatch::CommList, &["clist"]);
+    // let mut rentry = RouteMapEntry::new(5);
+    // rentry.action(EntryAction::Permit);
+    // rentry.match_add(EntryMatch::CommList, &["clist"]);
     // rentry.match_del();
     // rentry.set_add();
     // rentry.set_del();

@@ -55,9 +55,8 @@ fn cache_lookup<'a>(
         Some(cache)
     }
 }
-
 #[derive(Default)]
-struct StaticConfigRunner {
+struct ConfigBuilder {
     path: String,
     map: BTreeMap<(String, ConfigOp), Handler>,
 }
@@ -69,7 +68,7 @@ type Handler = fn(
     args: &mut Args,
 ) -> Result<()>;
 
-impl StaticConfigRunner {
+impl ConfigBuilder {
     pub fn path(mut self, path: &str) -> Self {
         self.path = path.to_string();
         self
@@ -95,14 +94,14 @@ impl StaticConfigRunner {
     }
 }
 
-fn static_config_runner() -> StaticConfigRunner {
+fn static_config_builder() -> ConfigBuilder {
     const CONFIG_ERR: &str = "missing config";
     const NEXTHOP_ERR: &str = "missing nexthop address";
     const METRIC_ERR: &str = "missing metric arg";
     const DISTANCE_ERR: &str = "missing distance arg";
     const WEIGHT_ERR: &str = "missing weight arg";
 
-    StaticConfigRunner::default()
+    ConfigBuilder::default()
         .path("/routing/static/route")
         .set(|rib, cache, prefix, _| {
             let _ = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
@@ -201,22 +200,21 @@ fn static_config_runner() -> StaticConfigRunner {
 }
 
 pub fn static_config_exec(rib: &mut Rib, path: String, args: Args, op: ConfigOp) {
-    let runner = static_config_runner();
-    let _ = runner.exec(path.as_str(), op, rib, args);
+    let builder = static_config_builder();
+    let _ = builder.exec(path.as_str(), op, rib, args);
 }
 
 pub fn static_config_commit(
     rib: &mut PrefixMap<Ipv4Net, RibEntries>,
     cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
 ) {
-    for (p, s) in cache.into_iter() {
-        let entry = rib.entry(*p).or_default();
+    while let Some((p, s)) = cache.pop_first() {
+        let entry = rib.entry(p).or_default();
         if s.delete {
             entry.st = None;
         } else {
-            entry.st = Some(s.clone());
+            entry.st = Some(s);
         }
-        entry.static_process(p);
+        entry.static_process(&p);
     }
-    cache.clear();
 }

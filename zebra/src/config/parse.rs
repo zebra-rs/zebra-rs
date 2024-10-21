@@ -442,7 +442,6 @@ pub fn parse(
 
     // Transition to next yang match state.
     let mut next = entry.clone();
-    // println!("B: {:?} {:?}", s.ymatch, entry.name);
     match s.ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             next = mx.matched_entry.clone();
@@ -501,7 +500,6 @@ pub fn parse(
     if s.ymatch == YangMatch::Dir && mx.matched_entry.presence {
         s.ymatch = YangMatch::DirMatched;
     }
-    // println!("A: {:?} {:?}", s.ymatch, next.name);
 
     if path.name == "set" {
         s.set = true;
