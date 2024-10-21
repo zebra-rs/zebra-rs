@@ -74,7 +74,7 @@ impl fmt::Display for RouteDistinguisher {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]

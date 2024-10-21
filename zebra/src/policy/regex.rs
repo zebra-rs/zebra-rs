@@ -18,7 +18,7 @@ pub fn regcomp(s: &str) -> Result<Regex, regex::Error> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]

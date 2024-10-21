@@ -198,7 +198,7 @@ impl Default for As4Path {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]
