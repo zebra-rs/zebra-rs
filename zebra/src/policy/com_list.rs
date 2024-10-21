@@ -7,11 +7,7 @@ use crate::{
     config::{Args, ConfigOp},
 };
 
-#[derive(Debug)]
-pub enum Action {
-    Permit,
-    Deny,
-}
+use super::Action;
 
 #[derive(Debug)]
 pub struct CommunityListMap(pub BTreeMap<String, CommunityList>);

@@ -36,7 +36,6 @@ pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value, lines: &mut Vec
                     p.push(value_without_quotes(&value));
                     lines.push(format!("set {}", p.join(" ")));
                 } else {
-                    //println!("Not found key {}", entry.key[0]);
                     return;
                 }
             }
@@ -51,7 +50,6 @@ pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value, lines: &mut Vec
                         json_to_list(entry.clone(), p, &value, lines);
                     }
                     None => {
-                        //println!("Not found key {}", key);
                         return;
                     }
                 }

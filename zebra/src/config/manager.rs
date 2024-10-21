@@ -216,9 +216,6 @@ impl ConfigManager {
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.delete {
             let paths = path_trim("delete", state.paths.clone());
-            for p in paths.iter() {
-                println!("{:?}", p);
-            }
             delete(paths, self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.show && state.paths.len() > 1 {
