@@ -35,6 +35,7 @@ pub struct RibEntry {
     pub rsubtype: RibSubType,
     pub selected: bool,
     pub fib: bool,
+    pub valid: bool,
     pub distance: u8,
     pub metric: u32,
     pub nexthops: Vec<Nexthop>,
@@ -48,15 +49,12 @@ impl RibEntry {
             rsubtype: RibSubType::NotApplicable,
             selected: false,
             fib: false,
+            valid: false,
             distance: 0,
             metric: 0,
             nexthops: Vec::new(),
             link_index: 0,
         }
-    }
-
-    pub fn is_system(&self) -> bool {
-        self.rtype == RibType::Connected || self.rtype == RibType::Kernel
     }
 
     pub fn distance(&self) -> String {
@@ -100,16 +98,50 @@ pub struct RibEntries {
 }
 
 impl RibEntries {
-    pub fn static_process(&mut self, _prefix: &Ipv4Net) {
-        // Remove static RIB.
+    pub fn static_process(&mut self, prefix: &Ipv4Net) {
         self.ribs.retain(|x| x.rtype != RibType::Static);
 
-        // Static -> RIB.
         if let Some(st) = &self.st {
             let mut sts: Vec<RibEntry> = st.to_ribs();
             self.ribs.append(&mut sts);
         }
 
-        // Path selection.
+        let index = self
+            .ribs
+            .iter()
+            .filter(|x| x.valid)
+            .enumerate()
+            .fold(
+                None,
+                |acc: Option<(usize, &RibEntry)>, (index, entry)| match acc {
+                    Some((_, aentry))
+                        if entry.distance > aentry.distance
+                            || (entry.distance == aentry.distance
+                                && entry.metric > aentry.metric) =>
+                    {
+                        acc
+                    }
+                    _ => Some((index, entry)),
+                },
+            )
+            .map(|(index, _)| index);
+
+        while let Some(fib) = self.fibs.pop() {
+            fib_delete(prefix, &fib);
+        }
+
+        if let Some(sindex) = index {
+            let entry = self.ribs.get(sindex).unwrap();
+            fib_add(prefix, entry);
+            self.fibs.push(entry.clone());
+        }
     }
+}
+
+fn fib_add(prefix: &Ipv4Net, entry: &RibEntry) {
+    println!("Add: {} [{}/{}]", prefix, entry.distance, entry.metric);
+}
+
+fn fib_delete(prefix: &Ipv4Net, entry: &RibEntry) {
+    println!("Del: {} [{}/{}]", prefix, entry.distance, entry.metric);
 }

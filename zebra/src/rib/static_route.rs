@@ -59,6 +59,7 @@ impl StaticRoute {
                 nhop.addr = Some(*n);
                 entry.nexthops.push(nhop);
             }
+            entry.valid = true;
             entries.push(entry);
         }
         entries
