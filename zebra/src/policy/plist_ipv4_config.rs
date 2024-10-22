@@ -130,7 +130,7 @@ fn prefix_ipv4_config_builder() -> ConfigBuilder {
         .path("/prefix-list/seq/action")
         .set(|plist, cache, name, seq, args| {
             let action_str = args.string().context(ACTION_ERR)?;
-            let action = Action::from(&action_str).context(ACTION_ERR)?;
+            let action = Action::try_from(&action_str)?;
             let plist = cache_get(plist, cache, name).context(CONFIG_ERR)?;
             let seq = plist.seq.entry(seq).or_default();
             seq.action = action;

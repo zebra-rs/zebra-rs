@@ -1,17 +1,4 @@
-#[derive(Debug, PartialEq, Clone)]
-#[allow(non_camel_case_types, dead_code)]
-pub enum RibSubType {
-    NotApplicable,
-    OSPF_IA,
-    OSPF_NSSA_1,
-    OSPF_NSSA_2,
-    OSPF_External_1,
-    OSPF_External_2,
-    ISIS_Level_1,
-    ISIS_Level_2,
-    ISIS_Intra_Area,
-}
-
+/// RIB types.
 const RIB_KERNEL: u8 = 0;
 const RIB_CONNECTED: u8 = 1;
 const RIB_STATIC: u8 = 2;
@@ -21,7 +8,6 @@ const RIB_ISIS: u8 = 5;
 const RIB_BGP: u8 = 6;
 
 #[derive(Debug, PartialEq, Eq, Clone, Default, Copy)]
-// #[non_exhaustive]
 pub enum RibType {
     Kernel,
     Connected,
@@ -64,8 +50,25 @@ impl From<RibType> for u8 {
     }
 }
 
+impl TryFrom<String> for RibType {
+    type Error = ();
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "kernel" => Ok(RibType::Kernel),
+            "connected" => Ok(RibType::Connected),
+            "static" => Ok(RibType::Static),
+            "rip" => Ok(RibType::Rip),
+            "ospf" => Ok(RibType::Ospf),
+            "isis" => Ok(RibType::Isis),
+            "bgp" => Ok(RibType::Bgp),
+            _ => Err(()),
+        }
+    }
+}
+
 impl RibType {
-    pub fn char(&self) -> char {
+    pub fn abbrev(&self) -> char {
         match self {
             Self::Kernel => 'K',
             Self::Static => 'S',
@@ -79,18 +82,61 @@ impl RibType {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum RibSubType {
+    Default,
+    OspfIa,
+    OspfNssa1,
+    OspfNssa2,
+    OspfExternal1,
+    OspfExternal2,
+    IsisLevel1,
+    IsisLevel2,
+    IsisIntraArea,
+    Other(u8),
+}
+
+/// RIB sub types.
+const RIB_SUB_DEFAULT: u8 = 0;
+const RIB_SUB_OSPF_IA: u8 = 1;
+const RIB_SUB_OSPF_NSSA_1: u8 = 2;
+const RIB_SUB_OSPF_NSSA_2: u8 = 3;
+const RIB_SUB_OSPF_EXTERNAL_1: u8 = 4;
+const RIB_SUB_OSPF_EXTERNAL_2: u8 = 5;
+const RIB_SUB_ISIS_LEVEL_1: u8 = 6;
+const RIB_SUB_ISIS_LEVEL_2: u8 = 7;
+const RIB_SUB_ISIS_INTRA_AREA: u8 = 8;
+
+impl From<u8> for RibSubType {
+    fn from(d: u8) -> Self {
+        match d {
+            RIB_SUB_DEFAULT => Self::Default,
+            RIB_SUB_OSPF_IA => Self::OspfIa,
+            RIB_SUB_OSPF_NSSA_1 => Self::OspfNssa1,
+            RIB_SUB_OSPF_NSSA_2 => Self::OspfNssa2,
+            RIB_SUB_OSPF_EXTERNAL_1 => Self::OspfExternal1,
+            RIB_SUB_OSPF_EXTERNAL_2 => Self::OspfExternal2,
+            RIB_SUB_ISIS_LEVEL_1 => Self::IsisLevel1,
+            RIB_SUB_ISIS_LEVEL_2 => Self::IsisLevel2,
+            RIB_SUB_ISIS_INTRA_AREA => Self::IsisIntraArea,
+            _ => Self::Other(d),
+        }
+    }
+}
+
 impl RibSubType {
-    pub fn char(&self) -> String {
+    pub fn abbrev(&self) -> String {
         match self {
-            Self::NotApplicable => "  ".to_string(),
-            Self::OSPF_IA => "IA".to_string(),
-            Self::OSPF_NSSA_1 => "N1".to_string(),
-            Self::OSPF_NSSA_2 => "N2".to_string(),
-            Self::OSPF_External_1 => "E1".to_string(),
-            Self::OSPF_External_2 => "E2".to_string(),
-            Self::ISIS_Level_1 => "L1".to_string(),
-            Self::ISIS_Level_2 => "L2".to_string(),
-            Self::ISIS_Intra_Area => "ia".to_string(),
+            Self::Default => "  ".to_string(),
+            Self::OspfIa => "IA".to_string(),
+            Self::OspfNssa1 => "N1".to_string(),
+            Self::OspfNssa2 => "N2".to_string(),
+            Self::OspfExternal1 => "E1".to_string(),
+            Self::OspfExternal2 => "E2".to_string(),
+            Self::IsisLevel1 => "L1".to_string(),
+            Self::IsisLevel2 => "L2".to_string(),
+            Self::IsisIntraArea => "ia".to_string(),
+            Self::Other(_) => "  ".to_string(),
         }
     }
 }

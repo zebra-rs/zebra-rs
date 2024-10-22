@@ -21,7 +21,7 @@ impl RibEntry {
     pub fn new(rtype: RibType) -> Self {
         Self {
             rtype,
-            rsubtype: RibSubType::NotApplicable,
+            rsubtype: RibSubType::Default,
             selected: false,
             fib: false,
             valid: false,

@@ -21,8 +21,8 @@ pub(crate) fn rib_show(rib: &Rib, _args: Args) -> String {
             writeln!(
                 buf,
                 "{} {} {} {:?}{} {}",
-                e.rtype.char(),
-                e.rsubtype.char(),
+                e.rtype.abbrev(),
+                e.rsubtype.abbrev(),
                 e.selected(),
                 prefix,
                 e.distance(),

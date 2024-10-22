@@ -6,12 +6,14 @@ pub enum Action {
     Deny,
 }
 
-impl Action {
-    pub fn from(s: &str) -> Option<Self> {
-        match s {
-            "permit" => Some(Action::Permit),
-            "deny" => Some(Action::Deny),
-            _ => None,
+impl TryFrom<&String> for Action {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "permit" => Ok(Self::Permit),
+            "deny" => Ok(Self::Deny),
+            _ => Err(anyhow::Error::msg(format!("unknown action type {}", s))),
         }
     }
 }
