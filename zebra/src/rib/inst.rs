@@ -16,8 +16,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
-//use super::fib::netlink_srv6::{srv6_encap_add, srv6_encap_del};
-
 pub type ShowCallback = fn(&Rib, Args) -> String;
 
 pub enum Message {
@@ -123,25 +121,10 @@ impl Rib {
         }
     }
 
-    pub async fn rib_test(&self) {
-        // srv6_encap_add(&self.fib_handle.handle).await;
-        // srv6_encap_del(&self.fib_handle.handle).await;
-
-        // let dest: Ipv4Net = "1.1.1.1/32".parse().unwrap();
-        // let gateway: Ipv4Addr = "10.211.55.1".parse().unwrap();
-        // route_add(self.fib_handle.handle.clone(), dest, gateway).await;
-
-        // static prefix 1.1.1.1/32 nexthop 10.211.55.1.
-        // NexthopBuilder.address().build();
-    }
-
     pub async fn event_loop(&mut self) {
         if let Err(_err) = fib_dump(&self.fib_handle, self.fib.tx.clone()).await {
             // warn!("FIB dump error {}", err);
         }
-
-        // Dump done.
-        self.rib_test().await;
 
         loop {
             tokio::select! {
@@ -175,91 +158,51 @@ impl Rib {
         false
     }
 
-    // fn nexthop_validate(&mut self, nhop: &Ipv4Addr) {
-    //     validate(&self.rib, &mut self.nexthop);
-    // }
-
-    // XXX
     fn resolve_nexthop(&mut self) {
-        validate(&mut self.rib, &mut self.nexthop);
-    }
-}
-
-pub fn fib_update(prev: Option<&RibEntry>, new: Option<&RibEntry>) {
-    println!("UPDATE Prev {:?} New {:?}", prev, new)
-}
-
-fn rib_same(lhs: Option<&RibEntry>, rhs: Option<&RibEntry>) -> bool {
-    if lhs.is_none() && rhs.is_none() {
-        return true;
-    }
-    if lhs.is_none() && rhs.is_some() {
-        return false;
-    }
-    if lhs.is_some() && rhs.is_none() {
-        return false;
-    }
-    let lhs = lhs.unwrap();
-    let rhs = rhs.unwrap();
-    *lhs == *rhs
-}
-
-pub fn select(rib: &mut PrefixMap<Ipv4Net, Vec<RibEntry>>) {
-    for (_prefix, ribs) in rib.iter_mut() {
-        let mut selected: Option<&mut RibEntry> = None;
-        for rib in ribs.iter_mut() {
-            selected = Some(rib);
-        }
-        if let Some(r) = selected {
-            r.selected = true;
-        }
-    }
-}
-
-pub fn validate(rib: &mut PrefixMap<Ipv4Net, RibEntries>, nmap: &mut NexthopMap) {
-    nmap.need_resolve_all();
-    for (prefix, ribs) in rib.iter() {
-        for v in ribs.ribs.iter() {
-            if v.rtype == RibType::Static {
-                println!(" RIB: {} {:?}", prefix, v.rtype);
-                for n in v.nexthops.iter() {
-                    if let Some(nhop) = n.addr {
-                        let entry = nmap.map.entry(nhop).or_default();
-                        println!("  Nexthop: {} Resolved: {}", nhop, entry.resolved);
-                        if !entry.resolved {
-                            // entry.valid = lookup(rib, &nhop);
-                            entry.valid = true;
-                            entry.resolved = true;
+        //nmap.need_resolve_all();
+        for (prefix, ribs) in self.rib.iter() {
+            for v in ribs.ribs.iter() {
+                if v.rtype == RibType::Static {
+                    println!(" RIB: {} {:?}", prefix, v.rtype);
+                    for n in v.nexthops.iter() {
+                        if let Some(nhop) = n.addr {
+                            let entry = self.nexthop.map.entry(nhop).or_default();
+                            println!("  Nexthop: {} Resolved: {}", nhop, entry.resolved);
+                            if !entry.resolved {
+                                // entry.valid = lookup(rib, &nhop);
+                                entry.valid = true;
+                                entry.resolved = true;
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    for (_prefix, ribs) in rib.iter_mut() {
-        let mut _fib: Option<&mut RibEntry> = None;
-        for v in ribs.ribs.iter_mut() {
-            if v.fib {
-                // fib = Some(v);
+        for (_prefix, ribs) in self.rib.iter_mut() {
+            let mut _fib: Option<&mut RibEntry> = None;
+            for v in ribs.ribs.iter_mut() {
+                if v.fib {
+                    // fib = Some(v);
+                }
             }
-        }
-        let mut selected: Option<&mut RibEntry> = None;
-        for v in ribs.ribs.iter_mut() {
-            if let Some(other) = selected.as_ref() {
-                if v.distance < other.distance {
+            let mut selected: Option<&mut RibEntry> = None;
+            for v in ribs.ribs.iter_mut() {
+                if let Some(other) = selected.as_ref() {
+                    if v.distance < other.distance {
+                        selected = Some(v);
+                    }
+                } else {
                     selected = Some(v);
                 }
-            } else {
-                selected = Some(v);
             }
+            if let Some(selected) = selected {
+                selected.fib = true;
+            }
+            // if !rib_same(fib, selected) {
+            //     fib_update(fib, selected);
+            // }
         }
-        if let Some(selected) = selected {
-            selected.fib = true;
-        }
-        // if !rib_same(fib, selected) {
-        //     fib_update(fib, selected);
-        // }
     }
 }
 
