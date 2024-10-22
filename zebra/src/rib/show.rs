@@ -2,7 +2,7 @@ use crate::config::Args;
 
 use super::{
     entry::{RibSubType, RibType},
-    instance::ShowCallback,
+    inst::ShowCallback,
     link::link_show,
     Rib,
 };

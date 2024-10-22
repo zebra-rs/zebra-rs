@@ -26,11 +26,6 @@ pub enum RibSubType {
     ISIS_Intra_Area,
 }
 
-trait RibExt {
-    fn metric(&self) -> u32;
-}
-
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
     pub rtype: RibType,
@@ -39,15 +34,8 @@ pub struct RibEntry {
     pub fib: bool,
     pub distance: u8,
     pub metric: u32,
-    pub tag: u32,
     pub nexthops: Vec<Nexthop>,
     pub link_index: u32,
-}
-
-impl RibExt for RibEntry {
-    fn metric(&self) -> u32 {
-        self.metric
-    }
 }
 
 impl RibEntry {
@@ -59,7 +47,6 @@ impl RibEntry {
             fib: false,
             distance: 0,
             metric: 0,
-            tag: 0,
             nexthops: Vec::new(),
             link_index: 0,
         }

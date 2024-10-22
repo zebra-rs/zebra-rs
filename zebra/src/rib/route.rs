@@ -1,6 +1,6 @@
 use super::entry::{RibEntry, RibType};
 use super::fib::message::FibRoute;
-use super::instance::Rib;
+use super::inst::Rib;
 use super::nexthop::Nexthop;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;

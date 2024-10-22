@@ -1,6 +1,6 @@
 use super::{
     entry::{RibEntry, RibType},
-    instance::Rib,
+    inst::Rib,
 };
 use crate::{
     config::{Args, ConfigOp},

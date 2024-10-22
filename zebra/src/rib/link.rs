@@ -1,5 +1,5 @@
 use crate::config::Args;
-use crate::rib::instance::Message;
+use crate::rib::inst::Message;
 
 use super::entry::{RibEntry, RibType};
 use super::fib::message::{FibAddr, FibLink};
