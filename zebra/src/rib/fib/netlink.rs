@@ -321,9 +321,7 @@ pub async fn fib_dump(handle: &FibHandle, tx: UnboundedSender<FibMessage>) -> Re
     link_dump(handle.handle.clone(), tx.clone()).await?;
     address_dump(handle.handle.clone(), tx.clone()).await?;
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V4).await?;
-    println!("==== Ipv6 route start ===");
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V6).await?;
-    println!("==== Ipv6 route end ===");
     Ok(())
 }
 

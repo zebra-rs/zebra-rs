@@ -47,7 +47,6 @@ impl Rib {
             println!("Previous route {:?}", prev);
         }
         if let Some(selected) = selected {
-            println!("Found selected");
             ribs.ribs[selected].selected = true;
             ribs.ribs[selected].fib = true;
         }
