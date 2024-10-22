@@ -29,6 +29,20 @@ pub struct FibHandle {
     pub handle: rtnetlink::Handle,
 }
 
+trait SafeOp {
+    fn safe_sub(self, v: u8) -> u8;
+}
+
+impl SafeOp for u8 {
+    fn safe_sub(self, v: u8) -> u8 {
+        if self >= v {
+            self - v
+        } else {
+            0
+        }
+    }
+}
+
 impl FibHandle {
     pub fn new(rib_tx: UnboundedSender<FibMessage>) -> anyhow::Result<Self> {
         let (mut connection, handle, mut messages) = new_connection()?;
@@ -54,18 +68,24 @@ impl FibHandle {
         Ok(Self { handle })
     }
 
+    // Need to use MultiPath.
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
-        let nhop = entry.nexthops[0];
-        let _gateway = nhop.addr.unwrap();
         let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
             .destination_prefix(prefix.addr(), prefix.prefix_len())
-            //.gateway(gateway)
             .priority(entry.metric)
             .build();
 
-        let _nexthop: RouteNextHop = RouteNextHop::default();
-        let path: Vec<RouteNextHop> = Vec::new();
-        route.attributes.push(RouteAttribute::MultiPath(path));
+        let mut multipath: Vec<RouteNextHop> = Vec::new();
+        for nhop in entry.nexthops.iter() {
+            if let Some(addr) = nhop.addr {
+                let mut nexthop: RouteNextHop = RouteNextHop::default();
+                let addr: RouteAddress = RouteAddress::Inet(addr);
+                nexthop.attributes.push(RouteAttribute::Gateway(addr));
+                nexthop.hops = nhop.weight.safe_sub(1);
+                multipath.push(nexthop);
+            }
+        }
+        route.attributes.push(RouteAttribute::MultiPath(multipath));
 
         let result = self.handle.route().add(route).execute().await;
         match result {
@@ -82,15 +102,15 @@ impl FibHandle {
         let nhop = entry.nexthops[0];
         let gateway = nhop.addr.unwrap();
 
-        let message = RouteDelMessage::new();
-
-        // destination.
-        let mes = message
+        let mut route = RouteDelMessage::new()
             .destination(prefix.addr(), prefix.prefix_len())
             .gateway(gateway)
             .build();
+        route
+            .attributes
+            .push(RouteAttribute::Priority(entry.metric));
 
-        let result = self.handle.route().del(mes).execute().await;
+        let result = self.handle.route().del(route).execute().await;
         match result {
             Ok(()) => {
                 println!("Ok");

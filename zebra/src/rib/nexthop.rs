@@ -8,7 +8,7 @@ pub struct Nexthop {
     pub valid: bool,
     pub addr: Option<Ipv4Addr>,
     ifindex: Option<u32>,
-    weight: Option<u32>,
+    pub weight: u8,
 }
 
 impl Nexthop {

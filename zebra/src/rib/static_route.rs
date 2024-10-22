@@ -42,24 +42,25 @@ impl StaticRoute {
         if self.nexthops.is_empty() {
             return entries;
         }
-        let mut map: BTreeMap<(u8, u32), Vec<Ipv4Addr>> = BTreeMap::new();
+        let mut map: BTreeMap<(u8, u32), Vec<Nexthop>> = BTreeMap::new();
         let metric = self.metric.unwrap_or(0);
         let distance = self.distance.unwrap_or(1);
         for (p, n) in self.nexthops.iter() {
             let metric = n.metric.unwrap_or(metric);
             let distance = n.distance.unwrap_or(distance);
             let e = map.entry((distance, metric)).or_default();
-            e.push(*p);
+            let mut nhop = Nexthop::default();
+            nhop.addr = Some(*p);
+            if let Some(w) = n.weight {
+                nhop.weight = w;
+            }
+            e.push(nhop);
         }
         for ((d, m), v) in map.iter() {
             let mut entry = RibEntry::new(RibType::Static);
             entry.distance = *d;
             entry.metric = *m;
-            for n in v.iter() {
-                let mut nhop = Nexthop::default();
-                nhop.addr = Some(*n);
-                entry.nexthops.push(nhop);
-            }
+            entry.nexthops = v.clone();
             entry.valid = true;
             entries.push(entry);
         }
