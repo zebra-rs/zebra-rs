@@ -1,33 +1,8 @@
 use ipnet::Ipv4Net;
 
+use super::fib::FibHandle;
 use super::nexthop::Nexthop;
-use super::{Rib, StaticRoute};
-
-#[derive(Debug, PartialEq, Clone)]
-#[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
-pub enum RibType {
-    Kernel,
-    Connected,
-    Static,
-    RIP,
-    OSPF,
-    ISIS,
-    BGP,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-#[allow(non_camel_case_types, dead_code)]
-pub enum RibSubType {
-    NotApplicable,
-    OSPF_IA,
-    OSPF_NSSA_1,
-    OSPF_NSSA_2,
-    OSPF_External_1,
-    OSPF_External_2,
-    ISIS_Level_1,
-    ISIS_Level_2,
-    ISIS_Intra_Area,
-}
+use super::{Rib, RibSubType, RibType, StaticRoute};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
@@ -98,7 +73,7 @@ pub struct RibEntries {
 }
 
 impl RibEntries {
-    pub fn static_process(&mut self, prefix: &Ipv4Net) {
+    pub async fn static_process(&mut self, prefix: &Ipv4Net, fib: &FibHandle) {
         self.ribs.retain(|x| x.rtype != RibType::Static);
 
         if let Some(st) = &self.st {
@@ -106,6 +81,10 @@ impl RibEntries {
             self.ribs.append(&mut sts);
         }
 
+        self.process(prefix, fib).await;
+    }
+
+    pub async fn process(&mut self, prefix: &Ipv4Net, fib: &FibHandle) {
         let index = self
             .ribs
             .iter()
@@ -126,22 +105,16 @@ impl RibEntries {
             )
             .map(|(index, _)| index);
 
-        while let Some(fib) = self.fibs.pop() {
-            fib_delete(prefix, &fib);
+        while let Some(entry) = self.fibs.pop() {
+            println!("Del: {} [{}/{}]", prefix, entry.distance, entry.metric);
+            fib.route_ipv4_del(prefix, &entry).await;
         }
 
         if let Some(sindex) = index {
             let entry = self.ribs.get(sindex).unwrap();
-            fib_add(prefix, entry);
+            println!("Add: {} [{}/{}]", prefix, entry.distance, entry.metric);
+            fib.route_ipv4_add(prefix, entry).await;
             self.fibs.push(entry.clone());
         }
     }
-}
-
-fn fib_add(prefix: &Ipv4Net, entry: &RibEntry) {
-    println!("Add: {} [{}/{}]", prefix, entry.distance, entry.metric);
-}
-
-fn fib_delete(prefix: &Ipv4Net, entry: &RibEntry) {
-    println!("Del: {} [{}/{}]", prefix, entry.distance, entry.metric);
 }

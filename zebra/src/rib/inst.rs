@@ -7,7 +7,7 @@ use super::{Link, RibTxChannel};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
-use crate::rib::entry::RibType;
+use crate::rib::RibType;
 use crate::rib::{static_config_commit, static_config_exec};
 use crate::rib::{RibEntries, StaticRoute};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -107,7 +107,7 @@ impl Rib {
                 static_config_exec(self, path, args, msg.op);
             }
             ConfigOp::CommitEnd => {
-                static_config_commit(&mut self.rib, &mut self.cache);
+                static_config_commit(&mut self.rib, &mut self.cache, &self.fib_handle).await;
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
@@ -184,15 +184,6 @@ impl Rib {
         validate(&mut self.rib, &mut self.nexthop);
     }
 }
-
-// pub fn set_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr, valid: bool) {
-//     let entry = nexthop.entry(*addr).or_default();
-//     *entry = valid;
-// }
-
-// pub fn get_nexthop(nexthop: &mut BTreeMap<Ipv4Addr, bool>, addr: &Ipv4Addr) -> bool {
-//     *nexthop.entry(*addr).or_default()
-// }
 
 pub fn fib_update(prev: Option<&RibEntry>, new: Option<&RibEntry>) {
     println!("UPDATE Prev {:?} New {:?}", prev, new)

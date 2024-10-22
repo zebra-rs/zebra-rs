@@ -1,11 +1,6 @@
 use crate::config::Args;
 
-use super::{
-    entry::{RibSubType, RibType},
-    inst::ShowCallback,
-    link::link_show,
-    Rib,
-};
+use super::{inst::ShowCallback, link::link_show, Rib, RibSubType, RibType};
 use std::fmt::Write;
 
 impl RibType {

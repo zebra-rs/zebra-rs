@@ -1,7 +1,4 @@
-use super::{
-    entry::{RibEntry, RibType},
-    inst::Rib,
-};
+use super::{entry::RibEntry, inst::Rib, RibType};
 use crate::{
     config::{Args, ConfigOp},
     rib::nexthop::Nexthop,
@@ -32,7 +29,7 @@ async fn static_route_nexthop(rib: &mut Rib, mut args: Args, op: ConfigOp) -> Op
         rib.ipv4_add(dest, entry.clone());
         rib.ipv4_add(dest, entry);
 
-        rib.fib_handle.route_ipv4_add(dest, gateway).await;
+        // rib.fib_handle.route_ipv4_add(dest, gateway).await;
         // if let Some(handle) = rib.handle.as_ref() {
         //     route_add(handle.clone(), dest, gateway).await;
         // }

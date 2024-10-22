@@ -1,10 +1,10 @@
 use crate::config::Args;
 use crate::rib::inst::Message;
 
-use super::entry::{RibEntry, RibType};
+use super::entry::RibEntry;
 use super::fib::message::{FibAddr, FibLink};
 use super::fib::os_traffic_dump;
-use super::Rib;
+use super::{Rib, RibType};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
 

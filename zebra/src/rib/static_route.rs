@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv4Addr;
 
-use crate::rib::entry::{RibEntry, RibType};
+use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::Nexthop;
+use crate::rib::RibType;
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {

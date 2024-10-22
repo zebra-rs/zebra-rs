@@ -1,4 +1,5 @@
 use super::message::{FibAddr, FibLink, FibMessage, FibRoute};
+use crate::rib::entry::RibEntry;
 use crate::rib::link;
 use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
@@ -52,7 +53,47 @@ impl FibHandle {
         Ok(Self { handle })
     }
 
-    pub async fn route_ipv4_add(&self, _dest: Ipv4Net, _gateway: Ipv4Addr) {}
+    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        let nhop = entry.nexthops[0];
+        let gateway = nhop.addr.unwrap();
+        let route = RouteMessageBuilder::<Ipv4Addr>::new()
+            .destination_prefix(prefix.addr(), prefix.prefix_len())
+            .gateway(gateway)
+            .build();
+
+        let result = self.handle.route().add(route).execute().await;
+        match result {
+            Ok(()) => {
+                println!("Ok");
+            }
+            Err(err) => {
+                println!("Err: {}", err);
+            }
+        }
+    }
+
+    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        let nhop = entry.nexthops[0];
+        let gateway = nhop.addr.unwrap();
+
+        let message = RouteDelMessage::new();
+
+        // destination.
+        let mes = message
+            .destination(prefix.addr(), prefix.prefix_len())
+            .gateway(gateway)
+            .build();
+
+        let result = self.handle.route().del(mes).execute().await;
+        match result {
+            Ok(()) => {
+                println!("Ok");
+            }
+            Err(err) => {
+                println!("Err: {}", err);
+            }
+        }
+    }
 }
 
 fn flags_u32(f: &LinkFlags) -> u32 {

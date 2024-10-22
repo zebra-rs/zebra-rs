@@ -27,3 +27,6 @@ pub mod static_config;
 pub use static_config::{static_config_commit, static_config_exec};
 pub mod static_route;
 pub use static_route::StaticRoute;
+
+pub mod types;
+pub use types::{RibSubType, RibType};

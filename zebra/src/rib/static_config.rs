@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
+use super::fib::FibHandle;
 use super::Rib;
 use super::RibEntries;
 use crate::config::{Args, ConfigOp};
@@ -204,9 +205,10 @@ pub fn static_config_exec(rib: &mut Rib, path: String, args: Args, op: ConfigOp)
     let _ = builder.exec(path.as_str(), op, rib, args);
 }
 
-pub fn static_config_commit(
+pub async fn static_config_commit(
     rib: &mut PrefixMap<Ipv4Net, RibEntries>,
     cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
+    fib_handle: &FibHandle,
 ) {
     while let Some((p, s)) = cache.pop_first() {
         let entry = rib.entry(p).or_default();
@@ -215,6 +217,6 @@ pub fn static_config_commit(
         } else {
             entry.st = Some(s);
         }
-        entry.static_process(&p);
+        entry.static_process(&p, fib_handle).await;
     }
 }
