@@ -8,7 +8,8 @@ use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
 use netlink_packet_route::link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage};
 use netlink_packet_route::route::{
-    RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
+    RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteNextHop, RouteProtocol,
+    RouteScope, RouteType,
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
@@ -55,11 +56,16 @@ impl FibHandle {
 
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
         let nhop = entry.nexthops[0];
-        let gateway = nhop.addr.unwrap();
-        let route = RouteMessageBuilder::<Ipv4Addr>::new()
+        let _gateway = nhop.addr.unwrap();
+        let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
             .destination_prefix(prefix.addr(), prefix.prefix_len())
-            .gateway(gateway)
+            //.gateway(gateway)
+            .priority(entry.metric)
             .build();
+
+        let _nexthop: RouteNextHop = RouteNextHop::default();
+        let path: Vec<RouteNextHop> = Vec::new();
+        route.attributes.push(RouteAttribute::MultiPath(path));
 
         let result = self.handle.route().add(route).execute().await;
         match result {

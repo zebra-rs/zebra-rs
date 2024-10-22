@@ -186,7 +186,7 @@ fn static_config_builder() -> ConfigBuilder {
             let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
-            n.weight = Some(args.u32().context(WEIGHT_ERR)?);
+            n.weight = Some(args.u8().context(WEIGHT_ERR)?);
             Ok(())
         })
         .del(|rib, cache, prefix, args| {

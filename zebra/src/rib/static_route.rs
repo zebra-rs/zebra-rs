@@ -10,7 +10,7 @@ use crate::rib::RibType;
 pub struct StaticNexthop {
     pub distance: Option<u8>,
     pub metric: Option<u32>,
-    pub weight: Option<u32>,
+    pub weight: Option<u8>,
 }
 
 #[derive(Debug, Default, Clone)]
