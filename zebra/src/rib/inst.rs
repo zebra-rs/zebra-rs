@@ -3,6 +3,7 @@ use super::entry::RibEntry;
 use super::fib::fib_dump;
 use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop_map::NexthopMap;
+use super::util::IpAddrExt;
 use super::{Link, RibTxChannel};
 
 use crate::config::{path_from_command, Args};
@@ -10,10 +11,10 @@ use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Show
 use crate::rib::RibType;
 use crate::rib::{static_config_commit, static_config_exec};
 use crate::rib::{RibEntries, StaticRoute};
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
@@ -206,24 +207,9 @@ impl Rib {
     }
 }
 
-trait IpAddrExt<T> {
-    fn to_host_prefix(&self) -> T;
-}
-
-impl IpAddrExt<Ipv4Net> for Ipv4Addr {
-    fn to_host_prefix(&self) -> Ipv4Net {
-        Ipv4Net::new(*self, Self::BITS as u8).unwrap()
-    }
-}
-
-impl IpAddrExt<Ipv6Net> for Ipv6Addr {
-    fn to_host_prefix(&self) -> Ipv6Net {
-        Ipv6Net::new(*self, Self::BITS as u8).unwrap()
-    }
-}
-
 fn lookup(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, addr: &Ipv4Addr) -> bool {
-    let p = addr.to_host_prefix();
+    let host_prefix = addr.to_host_prefix();
+    let p = host_prefix;
     let Some((_, entry)) = rib.get_lpm(&p) else {
         return false;
     };
