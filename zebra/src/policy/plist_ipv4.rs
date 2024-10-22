@@ -16,6 +16,7 @@ pub struct PrefixListIpv4 {
 }
 
 impl PrefixListIpv4 {
+    #[allow(dead_code)]
     pub fn apply(&self, prefix: &Ipv4Net) -> Action {
         for (_, seq) in self.seq.iter() {
             if seq.apply(prefix) {

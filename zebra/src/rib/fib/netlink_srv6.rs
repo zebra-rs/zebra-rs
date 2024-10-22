@@ -7,10 +7,12 @@ use netlink_packet_route::route::{
 };
 use rtnetlink::RouteMessageBuilder;
 
+#[allow(dead_code)]
 pub struct RouteLwRequest {
     message: RouteMessage,
 }
 
+#[allow(dead_code)]
 pub async fn srv6_encap_add(handle: &rtnetlink::Handle) {
     // IPv6 segments.
     let seg1: Ipv6Addr = Ipv6Addr::from_str("fd00:c::").unwrap();
@@ -56,6 +58,7 @@ pub async fn srv6_encap_add(handle: &rtnetlink::Handle) {
     }
 }
 
+#[allow(dead_code)]
 pub async fn srv6_encap_del(handle: &rtnetlink::Handle) {
     // IPv6 segments.
     let seg1: Ipv6Addr = Ipv6Addr::from_str("fd00:c::").unwrap();

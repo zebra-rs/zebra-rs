@@ -284,24 +284,6 @@ async fn route_dump(
     Ok(())
 }
 
-pub async fn route_add(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
-    println!("XXX route_add");
-    let route = RouteMessageBuilder::<Ipv4Addr>::new()
-        .destination_prefix(dest.addr(), dest.prefix_len())
-        .gateway(gateway)
-        .build();
-
-    let result = handle.route().add(route).execute().await;
-    match result {
-        Ok(()) => {
-            println!("Ok");
-        }
-        Err(err) => {
-            println!("Err: {}", err);
-        }
-    }
-}
-
 #[derive(Default)]
 struct RouteDelMessage {
     message: RouteMessage,
@@ -338,26 +320,6 @@ impl RouteDelMessage {
 
     pub fn build(self) -> RouteMessage {
         self.message
-    }
-}
-
-pub async fn route_del(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
-    let message = RouteDelMessage::new();
-
-    // destination.
-    let mes = message
-        .destination(dest.addr(), dest.prefix_len())
-        .gateway(gateway)
-        .build();
-
-    let result = handle.route().del(mes).execute().await;
-    match result {
-        Ok(()) => {
-            println!("Ok");
-        }
-        Err(err) => {
-            println!("Err: {}", err);
-        }
     }
 }
 

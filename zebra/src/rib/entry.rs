@@ -54,7 +54,7 @@ impl RibEntry {
             }
             out
         } else {
-            format!("")
+            String::new()
         }
     }
 

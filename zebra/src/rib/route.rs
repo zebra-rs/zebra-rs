@@ -6,7 +6,7 @@ use super::RibType;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
 
-fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
+fn rib_same_type(ribs: &[RibEntry], entry: &RibEntry) -> Option<usize> {
     for (i, rib) in ribs.iter().enumerate() {
         if rib.rtype == entry.rtype {
             return Some(i);
@@ -22,11 +22,8 @@ impl Rib {
         let ribs = self.rib.entry(dest).or_default();
         let find = rib_same_type(&ribs.ribs, &e);
         let mut prev: Option<RibEntry> = None;
-        match find {
-            Some(index) => {
-                prev = Some(ribs.ribs.remove(index));
-            }
-            None => {}
+        if let Some(index) = find {
+            prev = Some(ribs.ribs.remove(index));
         }
 
         ribs.ribs.push(e);

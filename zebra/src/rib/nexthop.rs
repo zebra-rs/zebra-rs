@@ -2,25 +2,13 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Copy)]
+#[derive(Debug, Clone, PartialEq, Copy, Default)]
 pub struct Nexthop {
     pub onlink: bool,
     pub valid: bool,
     pub addr: Option<Ipv4Addr>,
     ifindex: Option<u32>,
     weight: Option<u32>,
-}
-
-impl Default for Nexthop {
-    fn default() -> Self {
-        Self {
-            onlink: false,
-            valid: false,
-            addr: None,
-            ifindex: None,
-            weight: None,
-        }
-    }
 }
 
 impl Nexthop {
@@ -51,8 +39,9 @@ impl NexthopBuilder {
     }
 
     pub fn build(&self) -> Nexthop {
-        let mut nexthop = Nexthop::default();
-        nexthop.addr = self.addr.clone();
-        nexthop
+        Nexthop {
+            addr: self.addr,
+            ..Default::default()
+        }
     }
 }

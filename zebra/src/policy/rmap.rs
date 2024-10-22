@@ -1,62 +1,49 @@
-// #![allow(dead_code)]
-// use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 
-#[derive(Debug)]
+use super::Action;
+
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct RouteMapTree {
+    pub rmap: BTreeMap<String, RouteMap>,
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
 pub struct RouteMap {
-    pub name: String,
+    pub seq: BTreeMap<u32, RouteMapEntry>,
+    pub delete: bool,
 }
 
-impl RouteMap {
-    pub fn new() -> Self {
-        Self {
-            name: String::from(""),
-        }
-    }
-}
-
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RouteMapEntry {
     pub seq: i32,
-    pub action: EntryAction,
-    pub matches: Vec<EntryMatch>,
+    pub action: Action,
+    pub matches: Vec<MatchEntry>,
+    pub sets: Vec<SetEntry>,
 }
 
-impl RouteMapEntry {
-    pub fn new(seq: i32) -> Self {
-        Self {
-            seq,
-            action: EntryAction::None,
-            matches: Vec::new(),
-        }
-    }
-
-    pub fn action(&mut self, action: EntryAction) {
-        self.action = action;
-    }
-
-    pub fn match_add(&mut self, _match_type: EntryMatch, _arg: &[&str]) {}
-
-    pub fn set_add(&mut self, _set_type: EntrySet, _arg: &str) {}
-}
-
+#[allow(dead_code)]
 #[derive(Debug)]
-pub enum EntryAction {
-    None,
-    Permit,
-    Deny,
-}
+pub struct MatchEntry {}
 
-#[allow(clippy::enum_variant_names)]
+#[allow(dead_code)]
 #[derive(Debug)]
-pub enum EntryMatch {
+pub struct SetEntry {}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum MatchType {
     PrefixList,
     CommList,
     ExtCommList,
     LargeCommList,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
-pub enum EntrySet {
+pub enum SetType {
     NextHop,
 }
 
@@ -77,21 +64,6 @@ pub enum EntrySet {
 //         }
 //     }
 // }
-
-pub fn policy_init() {
-    // let pmap = Policy::new();
-    // println!("{:?}", pmap);
-
-    // let rmap = RouteMap::new();
-    // println!("{:?}", rmap);
-
-    // let mut rentry = RouteMapEntry::new(5);
-    // rentry.action(EntryAction::Permit);
-    // rentry.match_add(EntryMatch::CommList, &["clist"]);
-    // rentry.match_del();
-    // rentry.set_add();
-    // rentry.set_del();
-}
 
 #[cfg(test)]
 mod tests {

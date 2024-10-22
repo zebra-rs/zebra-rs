@@ -3,6 +3,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use ipnet::{Ipv4Net, Ipv6Net};
 
 pub trait IpAddrExt<T> {
+    #[allow(dead_code)]
     fn to_host_prefix(&self) -> T;
 }
 
