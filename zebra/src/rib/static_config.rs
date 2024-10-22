@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
-use super::inst::RibEntries;
 use super::Rib;
+use super::RibEntries;
 use crate::config::{Args, ConfigOp};
 use crate::rib::StaticRoute;
 

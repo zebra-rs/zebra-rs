@@ -1,4 +1,7 @@
-use super::{nexthop::Nexthop, Rib};
+use ipnet::Ipv4Net;
+
+use super::nexthop::Nexthop;
+use super::{Rib, StaticRoute};
 
 #[derive(Debug, PartialEq, Clone)]
 #[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
@@ -86,5 +89,27 @@ impl RibEntry {
         let selected = if self.selected { '>' } else { ' ' };
         let fib = if self.fib { '*' } else { ' ' };
         format!("{}{}", fib, selected)
+    }
+}
+
+#[derive(Default)]
+pub struct RibEntries {
+    pub ribs: Vec<RibEntry>,
+    pub fibs: Vec<RibEntry>,
+    pub st: Option<StaticRoute>,
+}
+
+impl RibEntries {
+    pub fn static_process(&mut self, _prefix: &Ipv4Net) {
+        // Remove static RIB.
+        self.ribs.retain(|x| x.rtype != RibType::Static);
+
+        // Static -> RIB.
+        if let Some(st) = &self.st {
+            let mut sts: Vec<RibEntry> = st.to_ribs();
+            self.ribs.append(&mut sts);
+        }
+
+        // Path selection.
     }
 }

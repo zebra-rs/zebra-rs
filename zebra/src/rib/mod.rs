@@ -8,6 +8,7 @@ pub mod link;
 pub use link::{Link, LinkFlags, LinkType};
 
 pub mod entry;
+pub use entry::RibEntries;
 
 pub mod route;
 

@@ -1,15 +1,15 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
 use super::fib::fib_dump;
-// use super::fib::netlink::route_add;
 use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop_map::NexthopMap;
 use super::{Link, RibTxChannel};
+
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::rib::entry::RibType;
-use crate::rib::StaticRoute;
 use crate::rib::{static_config_commit, static_config_exec};
+use crate::rib::{RibEntries, StaticRoute};
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
@@ -22,28 +22,6 @@ pub type ShowCallback = fn(&Rib, Args) -> String;
 
 pub enum Message {
     ResolveNexthop,
-}
-
-#[derive(Default)]
-pub struct RibEntries {
-    pub ribs: Vec<RibEntry>,
-    pub fibs: Vec<RibEntry>,
-    pub st: Option<StaticRoute>,
-}
-
-impl RibEntries {
-    pub fn static_process(&mut self, _prefix: &Ipv4Net) {
-        // Remove static RIB.
-        self.ribs.retain(|x| x.rtype != RibType::Static);
-
-        // Static -> RIB.
-        if let Some(st) = &self.st {
-            let mut sts: Vec<RibEntry> = st.to_ribs();
-            self.ribs.append(&mut sts);
-        }
-
-        // Path selection.
-    }
 }
 
 pub struct Rib {
