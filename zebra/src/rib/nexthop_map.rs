@@ -5,7 +5,6 @@ use std::net::Ipv4Addr;
 pub struct NexthopResolve {
     pub resolved: bool,
     pub valid: bool,
-    refcnt: usize,
 }
 
 pub struct NexthopMap {

@@ -145,7 +145,7 @@ impl Rib {
         }
     }
 
-    fn lookup(&self, addr: &Ipv4Addr) -> bool {
+    fn _lookup(&self, addr: &Ipv4Addr) -> bool {
         let addr = Ipv4Net::new(*addr, 32).unwrap();
         let Some((a, b)) = self.rib.get_lpm(&addr) else {
             return false;
@@ -160,7 +160,7 @@ impl Rib {
     }
 
     fn resolve_nexthop(&mut self) {
-        //nmap.need_resolve_all();
+        self.nexthop.need_resolve_all();
         for (prefix, ribs) in self.rib.iter() {
             for v in ribs.ribs.iter() {
                 if v.rtype == RibType::Static {
@@ -207,7 +207,7 @@ impl Rib {
     }
 }
 
-fn lookup(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, addr: &Ipv4Addr) -> bool {
+fn _lookup(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, addr: &Ipv4Addr) -> bool {
     let host_prefix = addr.to_host_prefix();
     let p = host_prefix;
     let Some((_, entry)) = rib.get_lpm(&p) else {
