@@ -87,7 +87,7 @@ impl FibHandle {
         }
         route.attributes.push(RouteAttribute::MultiPath(multipath));
 
-        let result = self.handle.route().add(route).execute().await;
+        let result = self.handle.route().add(route).replace().execute().await;
         match result {
             Ok(()) => {
                 println!("Ok");
