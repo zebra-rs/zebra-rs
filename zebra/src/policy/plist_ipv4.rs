@@ -40,25 +40,13 @@ impl PrefixListIpv4Entry {
     pub fn apply(&self, prefix: &Ipv4Net) -> bool {
         if self.prefix.contains(prefix) {
             if let Some(le) = self.le {
-                if prefix.prefix_len() <= le {
-                    return true;
-                } else {
-                    return false;
-                }
+                return prefix.prefix_len() <= le;
             }
             if let Some(eq) = self.eq {
-                if prefix.prefix_len() == eq {
-                    return true;
-                } else {
-                    return false;
-                }
+                return prefix.prefix_len() == eq;
             }
             if let Some(ge) = self.ge {
-                if prefix.prefix_len() >= ge {
-                    return true;
-                } else {
-                    return false;
-                }
+                return prefix.prefix_len() >= ge;
             }
             self.prefix.prefix_len() == prefix.prefix_len()
         } else {

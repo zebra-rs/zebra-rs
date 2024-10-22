@@ -31,7 +31,7 @@ pub async fn srv6_encap_add(handle: &rtnetlink::Handle) {
         ..Default::default()
     };
     let seg6encap = Seg6IpTunnelEncap {
-        mode: Seg6IpTunnelMode::Encap.into(),
+        mode: Seg6IpTunnelMode::Encap,
         ipv6_sr_hdr: VecIpv6SrHdr(vec![ipv6_sr_hdr]),
     };
     let seg6_ip_tunnel = RouteSeg6IpTunnel::Seg6IpTunnel(seg6encap);
@@ -77,7 +77,7 @@ pub async fn srv6_encap_del(handle: &rtnetlink::Handle) {
         ..Default::default()
     };
     let seg6encap = Seg6IpTunnelEncap {
-        mode: Seg6IpTunnelMode::Encap.into(),
+        mode: Seg6IpTunnelMode::Encap,
         ipv6_sr_hdr: VecIpv6SrHdr(vec![ipv6_sr_hdr]),
     };
     let seg6_ip_tunnel = RouteSeg6IpTunnel::Seg6IpTunnel(seg6encap);

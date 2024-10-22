@@ -179,19 +179,13 @@ fn route_from_msg(msg: RouteMessage) -> FibRoute {
 
     for attr in msg.attributes.into_iter() {
         match attr {
-            RouteAttribute::Destination(m) => match m {
-                RouteAddress::Inet(n) => {
-                    route.route =
-                        IpNet::V4(Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap());
-                }
-                _ => {}
-            },
-            RouteAttribute::Gateway(g) => match g {
-                RouteAddress::Inet(n) => {
-                    route.gateway = IpAddr::V4(n);
-                }
-                _ => {}
-            },
+            RouteAttribute::Destination(RouteAddress::Inet(n)) => {
+                route.route =
+                    IpNet::V4(Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap());
+            }
+            RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
+                route.gateway = IpAddr::V4(n);
+            }
             RouteAttribute::EncapType(e) => {
                 println!("XXX EncapType {}", e);
             }

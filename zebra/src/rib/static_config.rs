@@ -47,9 +47,7 @@ fn cache_lookup<'a>(
     if cache.get(prefix).is_none() {
         cache.insert(*prefix, static_lookup(rib, prefix)?);
     }
-    let Some(cache) = cache.get_mut(prefix) else {
-        return None;
-    };
+    let cache = cache.get_mut(prefix)?;
     if cache.delete {
         None
     } else {
@@ -105,14 +103,14 @@ fn static_config_builder() -> ConfigBuilder {
     ConfigBuilder::default()
         .path("/routing/static/route")
         .set(|rib, cache, prefix, _| {
-            let _ = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let _ = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             Ok(())
         })
         .del(|rib, cache, prefix, _| {
-            if let Some(st) = cache.get_mut(&prefix) {
+            if let Some(st) = cache.get_mut(prefix) {
                 st.delete = true;
             } else {
-                let mut st = static_lookup(rib, &prefix).context(CONFIG_ERR)?;
+                let mut st = static_lookup(rib, prefix).context(CONFIG_ERR)?;
                 st.delete = true;
                 cache.insert(*prefix, st);
             }
@@ -120,49 +118,49 @@ fn static_config_builder() -> ConfigBuilder {
         })
         .path("/routing/static/route/metric")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             s.metric = Some(args.u32().context(METRIC_ERR)?);
             Ok(())
         })
         .del(|rib, cache, prefix, _| {
-            let s = cache_lookup(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
             s.metric = None;
             Ok(())
         })
         .path("/routing/static/route/distance")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             s.distance = Some(args.u8().context(DISTANCE_ERR)?);
             Ok(())
         })
         .del(|rib, cache, prefix, _| {
-            let s = cache_lookup(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
             s.distance = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let _ = s.nexthops.entry(naddr).or_default();
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
             Ok(())
         })
         .path("/routing/static/route/nexthop/metric")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
             n.metric = Some(args.u32().context(METRIC_ERR)?);
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.metric = None;
@@ -170,14 +168,14 @@ fn static_config_builder() -> ConfigBuilder {
         })
         .path("/routing/static/route/nexthop/distance")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
             n.distance = Some(args.u8().context(DISTANCE_ERR)?);
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.distance = None;
@@ -185,14 +183,14 @@ fn static_config_builder() -> ConfigBuilder {
         })
         .path("/routing/static/route/nexthop/weight")
         .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
             n.weight = Some(args.u32().context(WEIGHT_ERR)?);
             Ok(())
         })
         .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, &prefix).context(CONFIG_ERR)?;
+            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.weight = None;

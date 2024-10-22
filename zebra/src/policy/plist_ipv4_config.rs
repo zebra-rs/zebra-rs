@@ -84,9 +84,7 @@ fn cache_lookup<'a>(
     if cache.get(name).is_none() {
         cache.insert(name.to_string(), plist_lookup(plist, name)?);
     }
-    let Some(cache) = cache.get_mut(name) else {
-        return None;
-    };
+    let cache = cache.get_mut(name)?;
     if cache.delete {
         None
     } else {
@@ -105,14 +103,14 @@ fn prefix_ipv4_config_builder() -> ConfigBuilder {
     ConfigBuilder::default()
         .path("/prefix-list")
         .set(|plist, cache, name, _seq, _args| {
-            let _ = cache_get(plist, cache, &name).context(CONFIG_ERR)?;
+            let _ = cache_get(plist, cache, name).context(CONFIG_ERR)?;
             Ok(())
         })
         .del(|plist, cache, name, _seq, _args| {
             if let Some(plist) = cache.get_mut(name) {
                 plist.delete = true;
             } else {
-                let mut plist = plist_lookup(plist, &name).context(CONFIG_ERR)?;
+                let mut plist = plist_lookup(plist, name).context(CONFIG_ERR)?;
                 plist.delete = true;
                 cache.insert(name.to_string(), plist);
             }
