@@ -2,6 +2,7 @@ use ipnet::Ipv4Net;
 
 use super::fib::FibHandle;
 use super::nexthop::Nexthop;
+use super::util::IpAddrExt;
 use super::{Rib, RibSubType, RibType, StaticRoute};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +64,22 @@ impl RibEntry {
         let fib = if self.fib { '*' } else { ' ' };
         format!("{}{}", fib, selected)
     }
+
+    pub fn resolve(&mut self) {
+        if self.rtype != RibType::Static {
+            return;
+        }
+        println!("Start Resolve");
+        for nhop in self.nexthops.iter() {
+            if let Some(nhop) = nhop.addr {
+                let key: Ipv4Net = nhop.to_host_prefix();
+                println!("Key: {}", key);
+            }
+        }
+
+        self.valid = true;
+        //
+    }
 }
 
 #[derive(Default)]
@@ -78,6 +95,9 @@ impl RibEntries {
 
         if let Some(st) = &self.st {
             let mut sts: Vec<RibEntry> = st.to_ribs();
+            for st in sts.iter_mut() {
+                st.resolve();
+            }
             self.ribs.append(&mut sts);
         }
 
@@ -106,13 +126,11 @@ impl RibEntries {
             .map(|(index, _)| index);
 
         while let Some(entry) = self.fibs.pop() {
-            println!("Del: {} [{}/{}]", prefix, entry.distance, entry.metric);
             fib.route_ipv4_del(prefix, &entry).await;
         }
 
         if let Some(sindex) = index {
             let entry = self.ribs.get(sindex).unwrap();
-            println!("Add: {} [{}/{}]", prefix, entry.distance, entry.metric);
             fib.route_ipv4_add(prefix, entry).await;
             self.fibs.push(entry.clone());
         }
