@@ -2,7 +2,7 @@ use super::api::RibRx;
 use super::entry::RibEntry;
 use super::fib::fib_dump;
 use super::fib::{FibChannel, FibHandle, FibMessage};
-use super::nexthop_map::NexthopMap;
+use super::nexthop::Nexthop;
 use super::util::IpAddrExt;
 use super::{Link, RibTxChannel};
 
@@ -35,7 +35,6 @@ pub struct Rib {
     pub rib: PrefixMap<Ipv4Net, RibEntries>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    pub nexthop: NexthopMap,
     pub cache: BTreeMap<Ipv4Net, StaticRoute>,
 }
 
@@ -56,7 +55,6 @@ impl Rib {
             rib: PrefixMap::new(),
             tx,
             rx,
-            nexthop: NexthopMap::new(),
             cache: BTreeMap::new(),
         };
         rib.show_build();
@@ -70,7 +68,11 @@ impl Rib {
     fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::ResolveNexthop => {
-                self.resolve_nexthop();
+                println!("Resolve Nexthop");
+                let mut nhop = Nexthop::default();
+                let addr: Ipv4Addr = "1.1.1.1".parse().unwrap();
+                nhop.addr = addr;
+                self.resolve_nexthop(vec![nhop]);
             }
         }
     }
@@ -107,6 +109,8 @@ impl Rib {
             }
             ConfigOp::CommitEnd => {
                 static_config_commit(&mut self.rib, &mut self.cache, &self.fib_handle).await;
+                let msg = Message::ResolveNexthop;
+                let _ = self.tx.send(msg);
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
@@ -159,51 +163,26 @@ impl Rib {
         false
     }
 
-    fn resolve_nexthop(&mut self) {
-        self.nexthop.need_resolve_all();
-        for (prefix, ribs) in self.rib.iter() {
-            for v in ribs.ribs.iter() {
-                if v.rtype == RibType::Static {
-                    println!(" RIB: {} {:?}", prefix, v.rtype);
-                    for n in v.nexthops.iter() {
-                        if let Some(nhop) = n.addr {
-                            let entry = self.nexthop.map.entry(nhop).or_default();
-                            println!("  Nexthop: {} Resolved: {}", nhop, entry.resolved);
-                            if !entry.resolved {
-                                // entry.valid = lookup(rib, &nhop);
-                                entry.valid = true;
-                                entry.resolved = true;
-                            }
+    fn resolve_nexthop(&mut self, nexthops: Vec<Nexthop>) -> Vec<Nexthop> {
+        let nexthops: Vec<_> = nexthops
+            .into_iter()
+            .inspect(|x| {
+                let key = x.addr.to_host_prefix();
+                println!("K: {}", key);
+                if let Some((_, entries)) = self.rib.get_lpm(&key) {
+                    println!("R: lookup success len {}", entries.fibs.len());
+                    if !entries.fibs.is_empty() {
+                        let fib = entries.fibs.first().unwrap();
+                        for n in fib.nexthops.iter() {
+                            println!("N: {}", n.addr);
                         }
                     }
                 }
-            }
-        }
+            })
+            .collect();
+        println!("{:?}", nexthops);
 
-        for (_prefix, ribs) in self.rib.iter_mut() {
-            let mut _fib: Option<&mut RibEntry> = None;
-            for v in ribs.ribs.iter_mut() {
-                if v.fib {
-                    // fib = Some(v);
-                }
-            }
-            let mut selected: Option<&mut RibEntry> = None;
-            for v in ribs.ribs.iter_mut() {
-                if let Some(other) = selected.as_ref() {
-                    if v.distance < other.distance {
-                        selected = Some(v);
-                    }
-                } else {
-                    selected = Some(v);
-                }
-            }
-            if let Some(selected) = selected {
-                selected.fib = true;
-            }
-            // if !rib_same(fib, selected) {
-            //     fib_update(fib, selected);
-            // }
-        }
+        Vec::new()
     }
 }
 

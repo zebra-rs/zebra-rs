@@ -1,8 +1,4 @@
-use ipnet::Ipv4Net;
-
-use super::fib::FibHandle;
 use super::nexthop::Nexthop;
-use super::util::IpAddrExt;
 use super::{Rib, RibSubType, RibType, StaticRoute};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,22 +60,6 @@ impl RibEntry {
         let fib = if self.fib { '*' } else { ' ' };
         format!("{}{}", fib, selected)
     }
-
-    pub fn resolve(&mut self) {
-        if self.rtype != RibType::Static {
-            return;
-        }
-        println!("Start Resolve");
-        for nhop in self.nexthops.iter() {
-            if let Some(nhop) = nhop.addr {
-                let key: Ipv4Net = nhop.to_host_prefix();
-                println!("Key: {}", key);
-            }
-        }
-
-        self.valid = true;
-        //
-    }
 }
 
 #[derive(Default)]
@@ -87,52 +67,4 @@ pub struct RibEntries {
     pub ribs: Vec<RibEntry>,
     pub fibs: Vec<RibEntry>,
     pub st: Option<StaticRoute>,
-}
-
-impl RibEntries {
-    pub async fn static_process(&mut self, prefix: &Ipv4Net, fib: &FibHandle) {
-        self.ribs.retain(|x| x.rtype != RibType::Static);
-
-        if let Some(st) = &self.st {
-            let mut sts: Vec<RibEntry> = st.to_ribs();
-            for st in sts.iter_mut() {
-                st.resolve();
-            }
-            self.ribs.append(&mut sts);
-        }
-
-        self.process(prefix, fib).await;
-    }
-
-    pub async fn process(&mut self, prefix: &Ipv4Net, fib: &FibHandle) {
-        let index = self
-            .ribs
-            .iter()
-            .filter(|x| x.valid)
-            .enumerate()
-            .fold(
-                None,
-                |acc: Option<(usize, &RibEntry)>, (index, entry)| match acc {
-                    Some((_, aentry))
-                        if entry.distance > aentry.distance
-                            || (entry.distance == aentry.distance
-                                && entry.metric > aentry.metric) =>
-                    {
-                        acc
-                    }
-                    _ => Some((index, entry)),
-                },
-            )
-            .map(|(index, _)| index);
-
-        while let Some(entry) = self.fibs.pop() {
-            fib.route_ipv4_del(prefix, &entry).await;
-        }
-
-        if let Some(sindex) = index {
-            let entry = self.ribs.get(sindex).unwrap();
-            fib.route_ipv4_add(prefix, entry).await;
-            self.fibs.push(entry.clone());
-        }
-    }
 }

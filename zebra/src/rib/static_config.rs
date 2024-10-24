@@ -4,9 +4,12 @@ use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
+use super::entry::RibEntry;
 use super::fib::FibHandle;
 use super::Rib;
 use super::RibEntries;
+use super::RibType;
+
 use crate::config::{Args, ConfigOp};
 use crate::rib::StaticRoute;
 
@@ -203,18 +206,80 @@ pub fn static_config_exec(rib: &mut Rib, path: String, args: Args, op: ConfigOp)
     let _ = builder.exec(path.as_str(), op, rib, args);
 }
 
+fn rib_select(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net) -> Option<usize> {
+    let entries = rib.get_mut(prefix)?;
+
+    entries.ribs.retain(|x| x.rtype != RibType::Static);
+
+    if let Some(st) = &entries.st {
+        let mut sts: Vec<RibEntry> = st.to_ribs();
+        entries.ribs.append(&mut sts);
+    }
+
+    // for e in entries.ribs.iter() {
+    //     if e.rtype == RibType::Static {
+    //         resolve(rib, e);
+    //     }
+    // }
+
+    let index = entries
+        .ribs
+        .iter()
+        .filter(|x| x.valid)
+        .enumerate()
+        .fold(
+            None,
+            |acc: Option<(usize, &RibEntry)>, (index, entry)| match acc {
+                Some((_, aentry))
+                    if entry.distance > aentry.distance
+                        || (entry.distance == aentry.distance && entry.metric > aentry.metric) =>
+                {
+                    acc
+                }
+                _ => Some((index, entry)),
+            },
+        )
+        .map(|(index, _)| index);
+
+    index
+}
+
+async fn fib_update(
+    rib: &mut PrefixMap<Ipv4Net, RibEntries>,
+    prefix: &Ipv4Net,
+    fib: &FibHandle,
+    index: Option<usize>,
+) {
+    let Some(entries) = rib.get_mut(prefix) else {
+        return;
+    };
+
+    while let Some(entry) = entries.fibs.pop() {
+        fib.route_ipv4_del(prefix, &entry).await;
+    }
+
+    if let Some(sindex) = index {
+        let entry = entries.ribs.get(sindex).unwrap();
+        fib.route_ipv4_add(prefix, entry).await;
+        entries.fibs.push(entry.clone());
+    }
+}
+
 pub async fn static_config_commit(
     rib: &mut PrefixMap<Ipv4Net, RibEntries>,
     cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
-    fib_handle: &FibHandle,
+    fib: &FibHandle,
 ) {
     while let Some((p, s)) = cache.pop_first() {
-        let entry = rib.entry(p).or_default();
-        if s.delete {
-            entry.st = None;
-        } else {
-            entry.st = Some(s);
+        {
+            let entry = rib.entry(p).or_default();
+            if s.delete {
+                entry.st = None;
+            } else {
+                entry.st = Some(s);
+            }
+            let index = rib_select(rib, &p);
+            fib_update(rib, &p, fib, index).await;
         }
-        entry.static_process(&p, fib_handle).await;
     }
 }

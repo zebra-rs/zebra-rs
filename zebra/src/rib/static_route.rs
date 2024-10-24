@@ -50,7 +50,7 @@ impl StaticRoute {
             let distance = n.distance.unwrap_or(distance);
             let e = map.entry((distance, metric)).or_default();
             let mut nhop = Nexthop::default();
-            nhop.addr = Some(*p);
+            nhop.addr = *p;
             if let Some(w) = n.weight {
                 nhop.weight = w;
             }

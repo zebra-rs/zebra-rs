@@ -77,13 +77,11 @@ impl FibHandle {
 
         let mut multipath: Vec<RouteNextHop> = Vec::new();
         for nhop in entry.nexthops.iter() {
-            if let Some(addr) = nhop.addr {
-                let mut nexthop: RouteNextHop = RouteNextHop::default();
-                let addr: RouteAddress = RouteAddress::Inet(addr);
-                nexthop.attributes.push(RouteAttribute::Gateway(addr));
-                nexthop.hops = nhop.weight.safe_sub(1);
-                multipath.push(nexthop);
-            }
+            let mut nexthop: RouteNextHop = RouteNextHop::default();
+            let addr: RouteAddress = RouteAddress::Inet(nhop.addr);
+            nexthop.attributes.push(RouteAttribute::Gateway(addr));
+            nexthop.hops = nhop.weight.safe_sub(1);
+            multipath.push(nexthop);
         }
         route.attributes.push(RouteAttribute::MultiPath(multipath));
 
@@ -100,7 +98,7 @@ impl FibHandle {
 
     pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
         let nhop = entry.nexthops[0];
-        let gateway = nhop.addr.unwrap();
+        let gateway = nhop.addr;
 
         let mut route = RouteDelMessage::new()
             .destination(prefix.addr(), prefix.prefix_len())
