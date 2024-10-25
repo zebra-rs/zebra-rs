@@ -4,13 +4,12 @@ use super::fib::fib_dump;
 use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop::Nexthop;
 use super::util::IpAddrExt;
-use super::{Link, RibTxChannel};
+use super::{Link, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
+use crate::rib::RibEntries;
 use crate::rib::RibType;
-use crate::rib::{static_config_commit, static_config_exec};
-use crate::rib::{RibEntries, StaticRoute};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
@@ -28,12 +27,6 @@ pub enum Message {
         prefix: Ipv4Net,
         ribs: Vec<RibEntry>,
     },
-}
-
-#[derive(Default)]
-pub struct StaticConfig {
-    pub config: BTreeMap<Ipv4Net, StaticRoute>,
-    pub cache: BTreeMap<Ipv4Net, StaticRoute>,
 }
 
 pub struct Rib {
@@ -68,7 +61,7 @@ impl Rib {
             rib: PrefixMap::new(),
             tx,
             rx,
-            static_config: StaticConfig::default(),
+            static_config: StaticConfig::new(),
         };
         rib.show_build();
         Ok(rib)
@@ -137,17 +130,10 @@ impl Rib {
             ConfigOp::CommitStart => {}
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                static_config_exec(self, path, args, msg.op);
+                let _ = self.static_config.exec(path, args, msg.op);
             }
             ConfigOp::CommitEnd => {
-                static_config_commit(
-                    &mut self.static_config.config,
-                    &mut self.static_config.cache,
-                    self.tx.clone(),
-                )
-                .await;
-                // let msg = Message::ResolveNexthop;
-                // let _ = self.tx.send(msg);
+                self.static_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();

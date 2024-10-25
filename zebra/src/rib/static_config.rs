@@ -2,12 +2,64 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
+use tokio::sync::mpsc::UnboundedSender;
 
-use super::Rib;
-use super::RibType;
-
+use super::{Message, RibType, StaticRoute};
 use crate::config::{Args, ConfigOp};
-use crate::rib::StaticRoute;
+
+pub struct StaticConfig {
+    pub config: BTreeMap<Ipv4Net, StaticRoute>,
+    pub cache: BTreeMap<Ipv4Net, StaticRoute>,
+    builder: ConfigBuilder,
+}
+
+impl StaticConfig {
+    pub fn new() -> Self {
+        Self {
+            config: BTreeMap::new(),
+            cache: BTreeMap::new(),
+            builder: config_builder(),
+        }
+    }
+
+    pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
+        const CONFIG_ERR: &str = "missing config handler";
+        const PREFIX_ERR: &str = "missing prefix arg";
+
+        let func = self
+            .builder
+            .map
+            .get(&(path.to_string(), op))
+            .context(CONFIG_ERR)?;
+        let prefix: Ipv4Net = args.v4net().context(PREFIX_ERR)?;
+
+        func(&mut self.config, &mut self.cache, &prefix, &mut args)
+    }
+
+    pub fn commit(&mut self, tx: UnboundedSender<Message>) {
+        while let Some((p, s)) = self.cache.pop_first() {
+            {
+                if s.delete {
+                    self.config.remove(&p);
+                    let msg = Message::Ipv4Del {
+                        rtype: RibType::Static,
+                        prefix: p,
+                    };
+                    let _ = tx.send(msg);
+                } else {
+                    let ribs = s.to_ribs();
+                    self.config.insert(p, s);
+                    let msg = Message::Ipv4Add {
+                        rtype: RibType::Static,
+                        prefix: p,
+                        ribs,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
 
 fn static_get(rib: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> StaticRoute {
     let Some(entry) = rib.get(prefix) else {
@@ -47,10 +99,11 @@ fn cache_lookup<'a>(
         Some(cache)
     }
 }
+
 #[derive(Default)]
 struct ConfigBuilder {
     path: String,
-    map: BTreeMap<(String, ConfigOp), Handler>,
+    pub map: BTreeMap<(String, ConfigOp), Handler>,
 }
 
 type Handler = fn(
@@ -75,23 +128,9 @@ impl ConfigBuilder {
         self.map.insert((self.path.clone(), ConfigOp::Delete), func);
         self
     }
-
-    pub fn exec(&self, path: &str, op: ConfigOp, rib: &mut Rib, mut args: Args) -> Result<()> {
-        const CONFIG_ERR: &str = "missing config handler";
-        const PREFIX_ERR: &str = "missing prefix arg";
-
-        let func = self.map.get(&(path.to_string(), op)).context(CONFIG_ERR)?;
-        let prefix: Ipv4Net = args.v4net().context(PREFIX_ERR)?;
-        func(
-            &mut rib.static_config.config,
-            &mut rib.static_config.cache,
-            &prefix,
-            &mut args,
-        )
-    }
 }
 
-fn static_config_builder() -> ConfigBuilder {
+fn config_builder() -> ConfigBuilder {
     const CONFIG_ERR: &str = "missing config";
     const NEXTHOP_ERR: &str = "missing nexthop address";
     const METRIC_ERR: &str = "missing metric arg";
@@ -196,40 +235,32 @@ fn static_config_builder() -> ConfigBuilder {
         })
 }
 
-pub fn static_config_exec(rib: &mut Rib, path: String, args: Args, op: ConfigOp) {
-    let builder = static_config_builder();
-    let _ = builder.exec(path.as_str(), op, rib, args);
-}
-
-use super::inst::Message;
-use tokio::sync::mpsc::UnboundedSender;
-
-pub async fn static_config_commit(
-    config: &mut BTreeMap<Ipv4Net, StaticRoute>,
-    cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
-    tx: UnboundedSender<Message>,
-) {
-    while let Some((p, s)) = cache.pop_first() {
-        {
-            if s.delete {
-                println!("C: Delete");
-                config.remove(&p);
-                let msg = Message::Ipv4Del {
-                    rtype: RibType::Static,
-                    prefix: p,
-                };
-                let _ = tx.send(msg);
-            } else {
-                println!("C: Add");
-                let ribs = s.to_ribs();
-                config.insert(p, s);
-                let msg = Message::Ipv4Add {
-                    rtype: RibType::Static,
-                    prefix: p,
-                    ribs,
-                };
-                let _ = tx.send(msg);
-            }
-        }
-    }
-}
+// pub fn static_config_commit(
+//     config: &mut BTreeMap<Ipv4Net, StaticRoute>,
+//     cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
+//     tx: UnboundedSender<Message>,
+// ) {
+//     while let Some((p, s)) = cache.pop_first() {
+//         {
+//             if s.delete {
+//                 println!("C: Delete");
+//                 config.remove(&p);
+//                 let msg = Message::Ipv4Del {
+//                     rtype: RibType::Static,
+//                     prefix: p,
+//                 };
+//                 let _ = tx.send(msg);
+//             } else {
+//                 println!("C: Add");
+//                 let ribs = s.to_ribs();
+//                 config.insert(p, s);
+//                 let msg = Message::Ipv4Add {
+//                     rtype: RibType::Static,
+//                     prefix: p,
+//                     ribs,
+//                 };
+//                 let _ = tx.send(msg);
+//             }
+//         }
+//     }
+// }
