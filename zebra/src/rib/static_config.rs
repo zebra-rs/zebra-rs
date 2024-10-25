@@ -68,7 +68,7 @@ struct ConfigBuilder {
 }
 
 type Handler = fn(
-    rib: &mut BTreeMap<Ipv4Net, StaticRoute>,
+    config: &mut BTreeMap<Ipv4Net, StaticRoute>,
     cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
     prefix: &Ipv4Net,
     args: &mut Args,
@@ -91,36 +91,36 @@ impl ConfigBuilder {
     }
 }
 
-fn static_get(rib: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> StaticRoute {
-    let Some(entry) = rib.get(prefix) else {
+fn config_get(config: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> StaticRoute {
+    let Some(entry) = config.get(prefix) else {
         return StaticRoute::default();
     };
     entry.clone()
 }
 
-fn static_lookup(rib: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> Option<StaticRoute> {
-    let entry = rib.get(prefix)?;
+fn config_lookup(config: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> Option<StaticRoute> {
+    let entry = config.get(prefix)?;
     Some(entry.clone())
 }
 
 fn cache_get<'a>(
-    rib: &'a BTreeMap<Ipv4Net, StaticRoute>,
+    config: &'a BTreeMap<Ipv4Net, StaticRoute>,
     cache: &'a mut BTreeMap<Ipv4Net, StaticRoute>,
     prefix: &'a Ipv4Net,
 ) -> Option<&'a mut StaticRoute> {
     if cache.get(prefix).is_none() {
-        cache.insert(*prefix, static_get(rib, prefix));
+        cache.insert(*prefix, config_get(config, prefix));
     }
     cache.get_mut(prefix)
 }
 
 fn cache_lookup<'a>(
-    rib: &'a BTreeMap<Ipv4Net, StaticRoute>,
+    config: &'a BTreeMap<Ipv4Net, StaticRoute>,
     cache: &'a mut BTreeMap<Ipv4Net, StaticRoute>,
     prefix: &'a Ipv4Net,
 ) -> Option<&'a mut StaticRoute> {
     if cache.get(prefix).is_none() {
-        cache.insert(*prefix, static_lookup(rib, prefix)?);
+        cache.insert(*prefix, config_lookup(config, prefix)?);
     }
     let cache = cache.get_mut(prefix)?;
     if cache.delete {
@@ -139,95 +139,95 @@ fn config_builder() -> ConfigBuilder {
 
     ConfigBuilder::default()
         .path("/routing/static/route")
-        .set(|rib, cache, prefix, _| {
-            let _ = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
+        .set(|config, cache, prefix, _| {
+            let _ = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             Ok(())
         })
-        .del(|rib, cache, prefix, _| {
+        .del(|config, cache, prefix, _| {
             if let Some(st) = cache.get_mut(prefix) {
                 st.delete = true;
             } else {
-                let mut st = static_lookup(rib, prefix).context(CONFIG_ERR)?;
+                let mut st = config_lookup(config, prefix).context(CONFIG_ERR)?;
                 st.delete = true;
                 cache.insert(*prefix, st);
             }
             Ok(())
         })
         .path("/routing/static/route/metric")
-        .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
+        .set(|config, cache, prefix, args| {
+            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             s.metric = Some(args.u32().context(METRIC_ERR)?);
             Ok(())
         })
-        .del(|rib, cache, prefix, _| {
-            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, prefix, _| {
+            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             s.metric = None;
             Ok(())
         })
         .path("/routing/static/route/distance")
-        .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
+        .set(|config, cache, prefix, args| {
+            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             s.distance = Some(args.u8().context(DISTANCE_ERR)?);
             Ok(())
         })
-        .del(|rib, cache, prefix, _| {
-            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, prefix, _| {
+            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             s.distance = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop")
-        .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
+        .set(|config, cache, prefix, args| {
+            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let _ = s.nexthops.entry(naddr).or_default();
             Ok(())
         })
-        .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, prefix, args| {
+            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
             Ok(())
         })
         .path("/routing/static/route/nexthop/metric")
-        .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
+        .set(|config, cache, prefix, args| {
+            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
             n.metric = Some(args.u32().context(METRIC_ERR)?);
             Ok(())
         })
-        .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, prefix, args| {
+            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.metric = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop/distance")
-        .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
+        .set(|config, cache, prefix, args| {
+            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
             n.distance = Some(args.u8().context(DISTANCE_ERR)?);
             Ok(())
         })
-        .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, prefix, args| {
+            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.distance = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop/weight")
-        .set(|rib, cache, prefix, args| {
-            let s = cache_get(rib, cache, prefix).context(CONFIG_ERR)?;
+        .set(|config, cache, prefix, args| {
+            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
             n.weight = Some(args.u8().context(WEIGHT_ERR)?);
             Ok(())
         })
-        .del(|rib, cache, prefix, args| {
-            let s = cache_lookup(rib, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, prefix, args| {
+            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.weight = None;
