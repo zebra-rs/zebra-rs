@@ -206,6 +206,11 @@ pub fn serve(mut rib: Rib) {
     });
 }
 
+fn rib_add(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
+    let entries = rib.entry(*prefix).or_default();
+    entries.ribs.push(entry);
+}
+
 fn rib_delete(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, rtype: RibType) {
     if let Some(entries) = rib.get_mut(prefix) {
         entries.ribs.retain(|x| x.rtype != rtype);
@@ -234,11 +239,6 @@ fn rib_select(rib: &PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net) -> Option<
         .map(|(index, _)| index);
 
     index
-}
-
-fn rib_add(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
-    let entries = rib.entry(*prefix).or_default();
-    entries.ribs.push(entry);
 }
 
 async fn rib_sync(
