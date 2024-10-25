@@ -274,8 +274,14 @@ pub async fn static_config_commit(
         {
             let entry = rib.entry(p).or_default();
             if s.delete {
+                // Static delete.
                 entry.st = None;
             } else {
+                // Static RIB update.
+                // send to ipv4_del(static, p);
+
+                // Static to ribs.
+                // send to ipv4_add(static, p, ribs);
                 entry.st = Some(s);
             }
             let index = rib_select(rib, &p);

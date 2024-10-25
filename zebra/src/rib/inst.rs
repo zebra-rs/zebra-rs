@@ -166,12 +166,14 @@ impl Rib {
     fn resolve_nexthop(&mut self, nexthops: Vec<Nexthop>) -> Vec<Nexthop> {
         let nexthops: Vec<_> = nexthops
             .into_iter()
-            .inspect(|x| {
+            .map(|mut x| {
                 let key = x.addr.to_host_prefix();
                 println!("K: {}", key);
                 if let Some((_, entries)) = self.rib.get_lpm(&key) {
                     println!("R: lookup success len {}", entries.fibs.len());
-                    if !entries.fibs.is_empty() {
+                    if entries.fibs.is_empty() {
+                        x.valid = false;
+                    } else {
                         let fib = entries.fibs.first().unwrap();
                         for n in fib.nexthops.iter() {
                             println!("N: {}", n.addr);
