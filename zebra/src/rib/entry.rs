@@ -1,5 +1,5 @@
 use super::nexthop::Nexthop;
-use super::{Rib, RibSubType, RibType, StaticRoute};
+use super::{Rib, RibSubType, RibType};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
@@ -66,5 +66,4 @@ impl RibEntry {
 pub struct RibEntries {
     pub ribs: Vec<RibEntry>,
     pub fibs: Vec<RibEntry>,
-    pub st: Option<StaticRoute>,
 }

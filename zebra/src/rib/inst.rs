@@ -14,13 +14,26 @@ use crate::rib::{RibEntries, StaticRoute};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
 
 pub enum Message {
-    ResolveNexthop,
+    Ipv4Del {
+        rtype: RibType,
+        prefix: Ipv4Net,
+    },
+    Ipv4Add {
+        rtype: RibType,
+        prefix: Ipv4Net,
+        ribs: Vec<RibEntry>,
+    },
+}
+
+#[derive(Default)]
+pub struct StaticConfig {
+    pub config: BTreeMap<Ipv4Net, StaticRoute>,
+    pub cache: BTreeMap<Ipv4Net, StaticRoute>,
 }
 
 pub struct Rib {
@@ -35,7 +48,7 @@ pub struct Rib {
     pub rib: PrefixMap<Ipv4Net, RibEntries>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    pub cache: BTreeMap<Ipv4Net, StaticRoute>,
+    pub static_config: StaticConfig,
 }
 
 impl Rib {
@@ -55,7 +68,7 @@ impl Rib {
             rib: PrefixMap::new(),
             tx,
             rx,
-            cache: BTreeMap::new(),
+            static_config: StaticConfig::default(),
         };
         rib.show_build();
         Ok(rib)
@@ -65,14 +78,33 @@ impl Rib {
         self.redists.push(tx);
     }
 
-    fn process_msg(&mut self, msg: Message) {
+    async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut ribs: Vec<RibEntry>) {
+        rib_delete(&mut self.rib, prefix, rtype);
+        while let Some(mut rib) = ribs.pop() {
+            rib.nexthops = self.resolve_nexthop(rib.nexthops);
+            rib_add(&mut self.rib, prefix, rib);
+        }
+        let index = rib_select(&self.rib, prefix);
+        rib_sync(&mut self.rib, prefix, index, &self.fib_handle).await;
+    }
+
+    async fn ipv4_route_del(&mut self, rtype: RibType, prefix: &Ipv4Net) {
+        rib_delete(&mut self.rib, prefix, rtype);
+        let index = rib_select(&self.rib, prefix);
+        rib_sync(&mut self.rib, prefix, index, &self.fib_handle).await;
+    }
+
+    async fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::ResolveNexthop => {
-                println!("Resolve Nexthop");
-                let mut nhop = Nexthop::default();
-                let addr: Ipv4Addr = "1.1.1.1".parse().unwrap();
-                nhop.addr = addr;
-                self.resolve_nexthop(vec![nhop]);
+            Message::Ipv4Add {
+                rtype,
+                prefix,
+                ribs,
+            } => {
+                self.ipv4_route_add(rtype, &prefix, ribs).await;
+            }
+            Message::Ipv4Del { rtype, prefix } => {
+                self.ipv4_route_del(rtype, &prefix).await;
             }
         }
     }
@@ -108,9 +140,14 @@ impl Rib {
                 static_config_exec(self, path, args, msg.op);
             }
             ConfigOp::CommitEnd => {
-                static_config_commit(&mut self.rib, &mut self.cache, &self.fib_handle).await;
-                let msg = Message::ResolveNexthop;
-                let _ = self.tx.send(msg);
+                static_config_commit(
+                    &mut self.static_config.config,
+                    &mut self.static_config.cache,
+                    self.tx.clone(),
+                )
+                .await;
+                // let msg = Message::ResolveNexthop;
+                // let _ = self.tx.send(msg);
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
@@ -134,7 +171,7 @@ impl Rib {
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
-                    self.process_msg(msg);
+                    self.process_msg(msg).await;
                 }
                 Some(msg) = self.fib.rx.recv() => {
                     self.process_fib_msg(msg);
@@ -149,56 +186,92 @@ impl Rib {
         }
     }
 
-    fn _lookup(&self, addr: &Ipv4Addr) -> bool {
-        let addr = Ipv4Net::new(*addr, 32).unwrap();
-        let Some((a, b)) = self.rib.get_lpm(&addr) else {
-            return false;
-        };
-        for e in b.ribs.iter() {
-            if e.rtype == RibType::Connected {
-                println!("Lookup {} onlink", a);
-                return true;
-            }
-        }
-        false
-    }
-
     fn resolve_nexthop(&mut self, nexthops: Vec<Nexthop>) -> Vec<Nexthop> {
         let nexthops: Vec<_> = nexthops
             .into_iter()
             .map(|mut x| {
                 let key = x.addr.to_host_prefix();
-                println!("K: {}", key);
                 if let Some((_, entries)) = self.rib.get_lpm(&key) {
-                    println!("R: lookup success len {}", entries.fibs.len());
-                    if entries.fibs.is_empty() {
+                    if entries.ribs.is_empty() {
                         x.valid = false;
                     } else {
-                        let fib = entries.fibs.first().unwrap();
-                        for n in fib.nexthops.iter() {
-                            println!("N: {}", n.addr);
+                        let fib = entries.ribs.first().unwrap();
+                        if fib.rtype == RibType::Connected {
+                            x.valid = true;
+                        } else if fib.rtype == RibType::Static {
+                            println!("Recursive Nexthop:");
+                            for n in fib.nexthops.iter() {
+                                println!("N: {}", n.addr);
+                            }
+                            x.recursive = fib.nexthops.clone();
                         }
                     }
                 }
+                x
             })
             .collect();
-        println!("{:?}", nexthops);
-
-        Vec::new()
+        nexthops
     }
-}
-
-fn _lookup(rib: &PrefixMap<Ipv4Net, Vec<RibEntry>>, addr: &Ipv4Addr) -> bool {
-    let host_prefix = addr.to_host_prefix();
-    let p = host_prefix;
-    let Some((_, entry)) = rib.get_lpm(&p) else {
-        return false;
-    };
-    entry.iter().any(|x| x.rtype == RibType::Connected)
 }
 
 pub fn serve(mut rib: Rib) {
     tokio::spawn(async move {
         rib.event_loop().await;
     });
+}
+
+fn rib_delete(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, rtype: RibType) {
+    if let Some(entries) = rib.get_mut(prefix) {
+        entries.ribs.retain(|x| x.rtype != rtype);
+    }
+}
+
+fn rib_select(rib: &PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net) -> Option<usize> {
+    let entries = rib.get(prefix)?;
+    let index = entries
+        .ribs
+        .iter()
+        .filter(|x| x.valid)
+        .enumerate()
+        .fold(
+            None,
+            |acc: Option<(usize, &RibEntry)>, (index, entry)| match acc {
+                Some((_, aentry))
+                    if entry.distance > aentry.distance
+                        || (entry.distance == aentry.distance && entry.metric > aentry.metric) =>
+                {
+                    acc
+                }
+                _ => Some((index, entry)),
+            },
+        )
+        .map(|(index, _)| index);
+
+    index
+}
+
+fn rib_add(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
+    let entries = rib.entry(*prefix).or_default();
+    entries.ribs.push(entry);
+}
+
+async fn rib_sync(
+    rib: &mut PrefixMap<Ipv4Net, RibEntries>,
+    prefix: &Ipv4Net,
+    index: Option<usize>,
+    fib: &FibHandle,
+) {
+    let Some(entries) = rib.get_mut(prefix) else {
+        return;
+    };
+
+    while let Some(entry) = entries.fibs.pop() {
+        fib.route_ipv4_del(prefix, &entry).await;
+    }
+
+    if let Some(sindex) = index {
+        let entry = entries.ribs.get(sindex).unwrap();
+        fib.route_ipv4_add(prefix, entry).await;
+        entries.fibs.push(entry.clone());
+    }
 }
