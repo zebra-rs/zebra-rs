@@ -61,6 +61,36 @@ impl StaticConfig {
     }
 }
 
+#[derive(Default)]
+struct ConfigBuilder {
+    path: String,
+    pub map: BTreeMap<(String, ConfigOp), Handler>,
+}
+
+type Handler = fn(
+    rib: &mut BTreeMap<Ipv4Net, StaticRoute>,
+    cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
+    prefix: &Ipv4Net,
+    args: &mut Args,
+) -> Result<()>;
+
+impl ConfigBuilder {
+    pub fn path(mut self, path: &str) -> Self {
+        self.path = path.to_string();
+        self
+    }
+
+    pub fn set(mut self, func: Handler) -> Self {
+        self.map.insert((self.path.clone(), ConfigOp::Set), func);
+        self
+    }
+
+    pub fn del(mut self, func: Handler) -> Self {
+        self.map.insert((self.path.clone(), ConfigOp::Delete), func);
+        self
+    }
+}
+
 fn static_get(rib: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> StaticRoute {
     let Some(entry) = rib.get(prefix) else {
         return StaticRoute::default();
@@ -97,36 +127,6 @@ fn cache_lookup<'a>(
         None
     } else {
         Some(cache)
-    }
-}
-
-#[derive(Default)]
-struct ConfigBuilder {
-    path: String,
-    pub map: BTreeMap<(String, ConfigOp), Handler>,
-}
-
-type Handler = fn(
-    rib: &mut BTreeMap<Ipv4Net, StaticRoute>,
-    cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
-    prefix: &Ipv4Net,
-    args: &mut Args,
-) -> Result<()>;
-
-impl ConfigBuilder {
-    pub fn path(mut self, path: &str) -> Self {
-        self.path = path.to_string();
-        self
-    }
-
-    pub fn set(mut self, func: Handler) -> Self {
-        self.map.insert((self.path.clone(), ConfigOp::Set), func);
-        self
-    }
-
-    pub fn del(mut self, func: Handler) -> Self {
-        self.map.insert((self.path.clone(), ConfigOp::Delete), func);
-        self
     }
 }
 
