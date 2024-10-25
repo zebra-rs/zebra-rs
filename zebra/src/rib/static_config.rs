@@ -234,33 +234,3 @@ fn config_builder() -> ConfigBuilder {
             Ok(())
         })
 }
-
-// pub fn static_config_commit(
-//     config: &mut BTreeMap<Ipv4Net, StaticRoute>,
-//     cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
-//     tx: UnboundedSender<Message>,
-// ) {
-//     while let Some((p, s)) = cache.pop_first() {
-//         {
-//             if s.delete {
-//                 println!("C: Delete");
-//                 config.remove(&p);
-//                 let msg = Message::Ipv4Del {
-//                     rtype: RibType::Static,
-//                     prefix: p,
-//                 };
-//                 let _ = tx.send(msg);
-//             } else {
-//                 println!("C: Add");
-//                 let ribs = s.to_ribs();
-//                 config.insert(p, s);
-//                 let msg = Message::Ipv4Add {
-//                     rtype: RibType::Static,
-//                     prefix: p,
-//                     ribs,
-//                 };
-//                 let _ = tx.send(msg);
-//             }
-//         }
-//     }
-// }
