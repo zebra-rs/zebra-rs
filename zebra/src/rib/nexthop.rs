@@ -4,14 +4,30 @@ use std::net::Ipv4Addr;
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nexthop {
-    pub valid: bool,
     pub addr: Ipv4Addr,
-    ifindex: Option<u32>,
+    pub invalid: bool,
+    onlink: bool,
+    ifindex: u32,
     pub weight: u8,
     pub recursive: Vec<Nexthop>,
+    pub resolved: Vec<usize>,
+    pub refcnt: usize,
 }
 
 impl Nexthop {
+    pub fn new(addr: Ipv4Addr) -> Self {
+        Self {
+            addr,
+            invalid: false,
+            onlink: false,
+            ifindex: 0,
+            weight: 0,
+            recursive: Vec::new(),
+            resolved: Vec::new(),
+            refcnt: 0,
+        }
+    }
+
     pub fn builder() -> NexthopBuilder {
         NexthopBuilder::default()
     }
@@ -20,11 +36,14 @@ impl Nexthop {
 impl Default for Nexthop {
     fn default() -> Self {
         Self {
-            valid: false,
             addr: Ipv4Addr::UNSPECIFIED,
-            ifindex: None,
+            invalid: false,
+            onlink: false,
+            ifindex: 0,
             weight: 0,
             recursive: Vec::new(),
+            resolved: Vec::new(),
+            refcnt: 0,
         }
     }
 }

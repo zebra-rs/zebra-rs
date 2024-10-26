@@ -13,6 +13,7 @@ pub use entry::RibEntries;
 pub mod route;
 
 pub mod nexthop;
+pub mod nexthop_map;
 
 pub mod show;
 

@@ -261,11 +261,11 @@ fn resolve_nexthop(rib: &PrefixMap<Ipv4Net, RibEntries>, nexthops: Vec<Nexthop>)
             let key = x.addr.to_host_prefix();
             if let Some((_, entries)) = rib.get_lpm(&key) {
                 if entries.ribs.is_empty() {
-                    x.valid = false;
+                    x.invalid = true;
                 } else {
                     let fib = entries.ribs.first().unwrap();
                     if fib.is_connected() {
-                        x.valid = true;
+                        x.invalid = false;
                     } else if fib.rtype == RibType::Static {
                         println!("Recursive Nexthop:");
                         for n in fib.nexthops.iter() {
