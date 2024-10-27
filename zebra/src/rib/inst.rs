@@ -2,9 +2,7 @@ use super::api::RibRx;
 use super::entry::RibEntry;
 use super::fib::fib_dump;
 use super::fib::{FibChannel, FibHandle, FibMessage};
-use super::nexthop::Nexthop;
-use super::util::IpAddrExt;
-use super::{Link, RibTxChannel, StaticConfig};
+use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -13,6 +11,7 @@ use crate::rib::RibType;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 pub type ShowCallback = fn(&Rib, Args) -> String;
@@ -29,6 +28,52 @@ pub enum Message {
     },
 }
 
+enum Resolve {
+    Onlink,
+    Recursive(Vec<usize>),
+    NotFound,
+}
+
+#[derive(Default)]
+struct ResolveOpt {
+    allow_default: bool,
+    limit: u8,
+}
+
+impl ResolveOpt {
+    // Use default route for recursive lookup.
+    pub fn allow_default(&self) -> bool {
+        self.allow_default
+    }
+
+    // Zero means infinite lookup.
+    pub fn limit(&self) -> u8 {
+        self.limit
+    }
+}
+
+fn rib_resolve(rib: &Rib, p: Ipv4Addr, opt: &ResolveOpt) -> Resolve {
+    let key: Ipv4Net = Ipv4Net::new(p, 32).unwrap();
+
+    let Some((p, entries)) = rib.table.get_lpm(&key) else {
+        return Resolve::NotFound;
+    };
+
+    if !opt.allow_default() && p.prefix_len() == 0 {
+        return Resolve::NotFound;
+    }
+
+    for entry in entries.ribs.iter() {
+        if entry.rtype == RibType::Connected {
+            return Resolve::Onlink;
+        }
+        if entry.rtype == RibType::Static {
+            return Resolve::Recursive(entry.nhops.clone());
+        }
+    }
+    Resolve::NotFound
+}
+
 pub struct Rib {
     pub api: RibTxChannel,
     pub cm: ConfigChannel,
@@ -38,10 +83,11 @@ pub struct Rib {
     pub fib_handle: FibHandle,
     pub redists: Vec<Sender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
-    pub rib: PrefixMap<Ipv4Net, RibEntries>,
+    pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
+    pub nmap: NexthopMap,
 }
 
 impl Rib {
@@ -58,10 +104,11 @@ impl Rib {
             fib_handle,
             redists: Vec::new(),
             links: BTreeMap::new(),
-            rib: PrefixMap::new(),
+            table: PrefixMap::new(),
             tx,
             rx,
             static_config: StaticConfig::new(),
+            nmap: NexthopMap::default(),
         };
         rib.show_build();
         Ok(rib)
@@ -72,23 +119,29 @@ impl Rib {
     }
 
     async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut ribs: Vec<RibEntry>) {
-        rib_delete(&mut self.rib, prefix, rtype);
+        rib_delete(&mut self.table, prefix, rtype);
         while let Some(mut rib) = ribs.pop() {
-            rib.nexthops = resolve_nexthop(&self.rib, rib.nexthops);
-            rib_add(&mut self.rib, prefix, rib);
+            rib.nhops.extend(
+                rib.nexthops
+                    .iter()
+                    .map(|nhop| self.nmap.register(nhop.addr)),
+            );
+            rib_add(&mut self.table, prefix, rib);
         }
-        let index = rib_select(&self.rib, prefix);
-        rib_sync(&mut self.rib, prefix, index, &self.fib_handle).await;
+        // Resolve nexthops.
 
-        rib_walk(&mut self.rib);
+        // let index = rib_select(&self.rib, prefix);
+        // rib_sync(&mut self.rib, prefix, index, &self.fib_handle).await;
+
+        // rib_walk(&mut self.rib);
     }
 
     async fn ipv4_route_del(&mut self, rtype: RibType, prefix: &Ipv4Net) {
-        rib_delete(&mut self.rib, prefix, rtype);
-        let index = rib_select(&self.rib, prefix);
-        rib_sync(&mut self.rib, prefix, index, &self.fib_handle).await;
+        rib_delete(&mut self.table, prefix, rtype);
+        // let index = rib_select(&self.rib, prefix);
+        // rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
 
-        rib_walk(&mut self.rib);
+        // rib_walk(&mut self.rib);
     }
 
     async fn process_msg(&mut self, msg: Message) {
@@ -239,44 +292,44 @@ async fn rib_sync(
     }
 }
 
-fn rib_walk(rib: &mut PrefixMap<Ipv4Net, RibEntries>) {
-    println!("-- Walk Start --");
-    let mut map: BTreeMap<Ipv4Net, Vec<Nexthop>> = BTreeMap::new();
-    for (p, entries) in rib.iter() {
-        for entry in entries.ribs.iter() {
-            if entry.is_static() {
-                println!("Static");
-                map.insert(*p, resolve_nexthop(rib, entry.nexthops.clone()));
-            }
-        }
-        println!("P: {}", p);
-    }
-    println!("-- Walk Start --");
-}
+// fn rib_walk(rib: &mut PrefixMap<Ipv4Net, RibEntries>) {
+//     println!("-- Walk Start --");
+//     let mut map: BTreeMap<Ipv4Net, Vec<Nexthop>> = BTreeMap::new();
+//     for (p, entries) in rib.iter() {
+//         for entry in entries.ribs.iter() {
+//             if entry.is_static() {
+//                 println!("Static");
+//                 //map.insert(*p, resolve_nexthop(rib, entry.nexthops.clone()));
+//             }
+//         }
+//         println!("P: {}", p);
+//     }
+//     println!("-- Walk Start --");
+// }
 
-fn resolve_nexthop(rib: &PrefixMap<Ipv4Net, RibEntries>, nexthops: Vec<Nexthop>) -> Vec<Nexthop> {
-    let nexthops: Vec<_> = nexthops
-        .into_iter()
-        .map(|mut x| {
-            let key = x.addr.to_host_prefix();
-            if let Some((_, entries)) = rib.get_lpm(&key) {
-                if entries.ribs.is_empty() {
-                    x.invalid = true;
-                } else {
-                    let fib = entries.ribs.first().unwrap();
-                    if fib.is_connected() {
-                        x.invalid = false;
-                    } else if fib.rtype == RibType::Static {
-                        println!("Recursive Nexthop:");
-                        for n in fib.nexthops.iter() {
-                            println!("N: {}", n.addr);
-                        }
-                        x.recursive = fib.nexthops.clone();
-                    }
-                }
-            }
-            x
-        })
-        .collect();
-    nexthops
-}
+// fn resolve_nexthop(rib: &PrefixMap<Ipv4Net, RibEntries>, nexthops: Vec<Nexthop>) -> Vec<Nexthop> {
+//     let nexthops: Vec<_> = nexthops
+//         .into_iter()
+//         .map(|mut x| {
+//             let key = x.addr.to_host_prefix();
+//             if let Some((_, entries)) = rib.get_lpm(&key) {
+//                 if entries.ribs.is_empty() {
+//                     x.invalid = true;
+//                 } else {
+//                     let fib = entries.ribs.first().unwrap();
+//                     if fib.is_connected() {
+//                         x.invalid = false;
+//                     } else if fib.rtype == RibType::Static {
+//                         println!("Recursive Nexthop:");
+//                         for n in fib.nexthops.iter() {
+//                             println!("N: {}", n.addr);
+//                         }
+//                         x.recursive = fib.nexthops.clone();
+//                     }
+//                 }
+//             }
+//             x
+//         })
+//         .collect();
+//     nexthops
+// }

@@ -16,7 +16,7 @@ pub(crate) fn rib_show(rib: &Rib, _args: Args) -> String {
 
     buf.push_str(SHOW_IPV4_HEADER);
 
-    for (prefix, entry) in rib.rib.iter() {
+    for (prefix, entry) in rib.table.iter() {
         for e in entry.ribs.iter() {
             writeln!(
                 buf,

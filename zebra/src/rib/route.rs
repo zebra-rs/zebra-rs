@@ -19,7 +19,7 @@ impl Rib {
     pub fn ipv4_add(&mut self, dest: Ipv4Net, e: RibEntry) {
         //nexthop_resolve(&self.rib, &e.nexthops[0]);
 
-        let ribs = self.rib.entry(dest).or_default();
+        let ribs = self.table.entry(dest).or_default();
         let find = rib_same_type(&ribs.ribs, &e);
         let mut prev: Option<RibEntry> = None;
         if let Some(index) = find {
@@ -70,7 +70,7 @@ impl Rib {
 
     pub fn route_del(&mut self, r: FibRoute) {
         if let IpNet::V4(v4) = r.route {
-            if let Some(_ribs) = self.rib.get(&v4) {
+            if let Some(_ribs) = self.table.get(&v4) {
                 //
             }
         }

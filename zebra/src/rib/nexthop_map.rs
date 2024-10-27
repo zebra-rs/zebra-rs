@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 use super::nexthop::Nexthop;
 
 #[derive(Default)]
-struct NexthopMap {
+pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
     values: Vec<Option<Nexthop>>,
 }

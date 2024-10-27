@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
+
 use super::nexthop::Nexthop;
 use super::{Rib, RibSubType, RibType};
 
@@ -11,7 +14,9 @@ pub struct RibEntry {
     pub distance: u8,
     pub metric: u32,
     pub nexthops: Vec<Nexthop>,
+    pub nhops: Vec<usize>,
     pub link_index: u32,
+    pub resolved: BTreeSet<Ipv4Addr>,
 }
 
 impl RibEntry {
@@ -25,7 +30,9 @@ impl RibEntry {
             distance: 0,
             metric: 0,
             nexthops: Vec::new(),
+            nhops: Vec::new(),
             link_index: 0,
+            resolved: BTreeSet::new(),
         }
     }
 
