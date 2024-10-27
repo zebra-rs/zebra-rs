@@ -1,6 +1,3 @@
-use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
-
 use super::nexthop::Nexthop;
 use super::{Rib, RibSubType, RibType};
 
@@ -15,8 +12,8 @@ pub struct RibEntry {
     pub metric: u32,
     pub nexthops: Vec<Nexthop>,
     pub nhops: Vec<usize>,
-    pub link_index: u32,
-    pub resolved: BTreeSet<Ipv4Addr>,
+    pub resolved: Vec<Nexthop>,
+    pub ifindex: u32,
 }
 
 impl RibEntry {
@@ -31,8 +28,8 @@ impl RibEntry {
             metric: 0,
             nexthops: Vec::new(),
             nhops: Vec::new(),
-            link_index: 0,
-            resolved: BTreeSet::new(),
+            ifindex: 0,
+            resolved: Vec::new(),
         }
     }
 
@@ -53,8 +50,8 @@ impl RibEntry {
     }
 
     pub fn gateway(&self, rib: &Rib) -> String {
-        if self.rtype == RibType::Connected {
-            if let Some(name) = rib.link_name(self.link_index) {
+        if self.is_connected() {
+            if let Some(name) = rib.link_name(self.ifindex) {
                 format!("directly connected {}", name)
             } else {
                 "directly connected unknown".to_string()

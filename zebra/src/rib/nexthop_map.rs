@@ -6,7 +6,7 @@ use prefix_trie::PrefixMap;
 use super::{
     inst::{rib_resolve, Resolve, ResolveOpt},
     nexthop::Nexthop,
-    Rib, RibEntries,
+    RibEntries,
 };
 
 #[derive(Default)]

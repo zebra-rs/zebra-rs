@@ -268,7 +268,7 @@ impl Rib {
         if let Some(link) = self.links.get_mut(&addr.link_index) {
             if link_addr_update(link, addr.clone()).is_some() {
                 let mut e = RibEntry::new(RibType::Connected);
-                e.link_index = link.index;
+                e.ifindex = link.index;
                 e.distance = 0;
                 e.selected = true;
                 e.fib = true;

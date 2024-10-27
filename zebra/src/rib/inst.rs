@@ -79,7 +79,7 @@ pub fn rib_resolve(
     Resolve::NotFound
 }
 
-fn resolve(nmap: &NexthopMap, nexthops: &[usize], opt: &ResolveOpt) -> (BTreeSet<Ipv4Addr>, u8) {
+fn resolve(nmap: &NexthopMap, nexthops: &[usize], opt: &ResolveOpt) -> (Vec<Nexthop>, u8) {
     let mut acc: BTreeSet<Ipv4Addr> = BTreeSet::new();
     let mut sea_depth: u8 = 0;
     nexthops
@@ -88,7 +88,11 @@ fn resolve(nmap: &NexthopMap, nexthops: &[usize], opt: &ResolveOpt) -> (BTreeSet
         .for_each(|nhop| {
             resolve_func(nmap, nhop, &mut acc, &mut sea_depth, opt, 0);
         });
-    (acc, sea_depth)
+    let mut nvec: Vec<Nexthop> = Vec::new();
+    for a in acc.iter() {
+        nvec.push(Nexthop::new(*a));
+    }
+    (nvec, sea_depth)
 }
 
 fn resolve_func(
@@ -181,19 +185,24 @@ impl Rib {
             );
             rib_add(&mut self.table, prefix, rib);
         }
-        // Resolve nexthops.
+        // Resolve all nexthops.
         self.nmap.resolve(&self.table);
 
-        // Select route.
+        // Resolve RIB entry nexthop.
         let entry = self.table.get_mut(prefix);
         if let Some(entry) = entry {
             for e in entry.ribs.iter_mut() {
                 if e.is_static() {
-                    let resolved = resolve(&self.nmap, &e.nhops, &ResolveOpt::default());
-                    println!("nhops: {prefix} {:?} -> {:?}", e.nhops, resolved);
+                    let (resolved, depth) = resolve(&self.nmap, &e.nhops, &ResolveOpt::default());
+                    println!("nhops: {prefix} {:?} -> {:?} {}", e.nhops, resolved, depth);
+                    e.resolved = resolved;
                 }
             }
         }
+
+        // Select and FIB update.
+        let index = rib_select(&self.table, prefix);
+        rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
     }
 
     async fn ipv4_route_del(&mut self, rtype: RibType, prefix: &Ipv4Net) {
