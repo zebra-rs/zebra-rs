@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 pub struct Nexthop {
     pub addr: Ipv4Addr,
     pub invalid: bool,
-    onlink: bool,
+    pub onlink: bool,
     ifindex: u32,
     pub weight: u8,
     pub recursive: Vec<Nexthop>,

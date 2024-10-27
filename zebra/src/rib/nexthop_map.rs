@@ -1,6 +1,13 @@
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
-use super::nexthop::Nexthop;
+use ipnet::Ipv4Net;
+use prefix_trie::PrefixMap;
+
+use super::{
+    inst::{rib_resolve, Resolve, ResolveOpt},
+    nexthop::Nexthop,
+    Rib, RibEntries,
+};
 
 #[derive(Default)]
 pub struct NexthopMap {
@@ -43,5 +50,21 @@ impl NexthopMap {
 
     pub fn lookup(&self, addr: Ipv4Addr) -> Option<usize> {
         self.map.get(&addr).copied()
+    }
+
+    pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
+        for n in self.values.iter_mut().flatten() {
+            match rib_resolve(table, n.addr, &ResolveOpt::default()) {
+                Resolve::NotFound => {
+                    n.invalid = true;
+                }
+                Resolve::Onlink => {
+                    n.onlink = true;
+                }
+                Resolve::Recursive(resolved) => {
+                    n.resolved = resolved;
+                }
+            }
+        }
     }
 }
