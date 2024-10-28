@@ -51,3 +51,6 @@ pub use large_community::*;
 
 pub mod rd;
 pub use rd::*;
+
+pub mod aigp;
+pub use aigp::*;
