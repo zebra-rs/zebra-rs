@@ -1,4 +1,5 @@
 use super::message::{FibAddr, FibLink, FibMessage, FibRoute};
+use crate::rib::entry::RibEntry;
 use crate::rib::link;
 use anyhow::Result;
 use ioctl_rs::SIOCGIFMTU;
@@ -23,17 +24,21 @@ impl FibHandle {
         Ok(Self { h })
     }
 
-    pub async fn route_ipv4_add(&self, dest: Ipv4Net, gateway: Ipv4Addr) {
-        let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
-            .with_gateway(IpAddr::V4(gateway));
-        self.h.add(&route).await.unwrap();
+    pub async fn route_ipv4_add(&self, dest: &Ipv4Net, entry: &RibEntry) {
+        if let Some(nexthop) = entry.nexthops.first() {
+            let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
+                .with_gateway(IpAddr::V4(nexthop.addr));
+            self.h.add(&route).await.unwrap();
+        }
     }
 
     #[allow(dead_code)]
-    pub async fn route_ipv4_del(&self, dest: Ipv4Net, gateway: Ipv4Addr) {
-        let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
-            .with_gateway(IpAddr::V4(gateway));
-        self.h.delete(&route).await.unwrap();
+    pub async fn route_ipv4_del(&self, dest: &Ipv4Net, entry: &RibEntry) {
+        if let Some(nexthop) = entry.nexthops.first() {
+            let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
+                .with_gateway(IpAddr::V4(nexthop.addr));
+            self.h.delete(&route).await.unwrap();
+        }
     }
 }
 
