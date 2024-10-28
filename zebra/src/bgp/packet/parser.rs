@@ -1,6 +1,6 @@
 use super::*;
 use crate::bgp::attr::{
-    Aggregator2, Aggregator4, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
+    Aggregator2, Aggregator4, Aigp, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
     AtomicAggregate, Attribute, AttributeFlags, AttributeType, Community, ExtCommunity,
     LargeCommunity, LocalPref, Med, MpNlriAttr, MpNlriReachHeader, MpNlriUnreachHeader,
     NextHopAttr, Origin, RouteDistinguisher,
@@ -243,6 +243,20 @@ fn parse_bgp_attr_ext_com(input: &[u8], length: u16) -> IResult<&[u8], Attribute
     Ok((input, Attribute::ExtCommunity(ecom)))
 }
 
+fn parse_bgp_attr_aigp(input: &[u8], length: u16) -> IResult<&[u8], Attribute> {
+    let (attr, input) = input.split_at(length as usize);
+    let (attr, typ) = be_u8(attr)?;
+    if typ != 1 {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
+    }
+    let (attr, length) = be_u16(attr)?;
+    if length != 11 {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
+    }
+    let (_, aigp) = Aigp::parse(attr)?;
+    Ok((input, Attribute::Aigp(aigp)))
+}
+
 fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
     let (input, flags) = be_u8(input)?;
     let flags = AttributeFlags::from_bits(flags).unwrap();
@@ -282,6 +296,7 @@ fn parse_bgp_attribute(input: &[u8], as4: bool) -> IResult<&[u8], Attribute> {
         AttributeType::MpUnreachNlri => parse_bgp_attr_mp_unreach(input, attr_len),
         AttributeType::LargeCom => parse_bgp_attr_large_com(input, attr_len),
         AttributeType::ExtendedCom => parse_bgp_attr_ext_com(input, attr_len),
+        AttributeType::Aigp => parse_bgp_attr_aigp(input, attr_len),
         _ => Err(nom::Err::Error(make_error(input, ErrorKind::Tag))),
     };
     var_name
