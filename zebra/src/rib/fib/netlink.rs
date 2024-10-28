@@ -1,4 +1,5 @@
 use super::message::{FibAddr, FibLink, FibMessage, FibRoute};
+use crate::rib::entry::RibEntry;
 use crate::rib::link;
 use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
@@ -7,7 +8,8 @@ use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
 use netlink_packet_route::link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage};
 use netlink_packet_route::route::{
-    RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
+    RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteNextHop, RouteProtocol,
+    RouteScope, RouteType,
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
@@ -25,6 +27,20 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
+}
+
+trait SafeOp {
+    fn safe_sub(self, v: u8) -> u8;
+}
+
+impl SafeOp for u8 {
+    fn safe_sub(self, v: u8) -> u8 {
+        if self >= v {
+            self - v
+        } else {
+            0
+        }
+    }
 }
 
 impl FibHandle {
@@ -52,7 +68,68 @@ impl FibHandle {
         Ok(Self { handle })
     }
 
-    pub async fn route_ipv4_add(&self, _dest: Ipv4Net, _gateway: Ipv4Addr) {}
+    // Need to use MultiPath.
+    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
+            .destination_prefix(prefix.addr(), prefix.prefix_len())
+            .priority(entry.metric)
+            .build();
+
+        let mut multipath: Vec<RouteNextHop> = Vec::new();
+        for nhop in entry.nexthops.iter() {
+            if nhop.recursive.is_empty() {
+                let mut nexthop: RouteNextHop = RouteNextHop::default();
+                let addr: RouteAddress = RouteAddress::Inet(nhop.addr);
+                nexthop.attributes.push(RouteAttribute::Gateway(addr));
+                nexthop.hops = nhop.weight.safe_sub(1);
+                multipath.push(nexthop);
+            } else {
+                for rhop in nhop.recursive.iter() {
+                    let mut nexthop: RouteNextHop = RouteNextHop::default();
+                    let addr: RouteAddress = RouteAddress::Inet(rhop.addr);
+                    nexthop.attributes.push(RouteAttribute::Gateway(addr));
+                    nexthop.hops = rhop.weight.safe_sub(1);
+                    multipath.push(nexthop);
+                }
+            }
+        }
+        route.attributes.push(RouteAttribute::MultiPath(multipath));
+
+        let result = self.handle.route().add(route).replace().execute().await;
+        match result {
+            Ok(()) => {
+                println!("Ok");
+            }
+            Err(err) => {
+                println!("Err: {}", err);
+            }
+        }
+    }
+
+    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        let Some(nhop) = entry.nexthops.first() else {
+            return;
+        };
+        let gateway = nhop.addr;
+
+        let mut route = RouteDelMessage::new()
+            .destination(prefix.addr(), prefix.prefix_len())
+            .gateway(gateway)
+            .build();
+        route
+            .attributes
+            .push(RouteAttribute::Priority(entry.metric));
+
+        let result = self.handle.route().del(route).execute().await;
+        match result {
+            Ok(()) => {
+                println!("Ok");
+            }
+            Err(err) => {
+                println!("Err: {}", err);
+            }
+        }
+    }
 }
 
 fn flags_u32(f: &LinkFlags) -> u32 {
@@ -138,19 +215,13 @@ fn route_from_msg(msg: RouteMessage) -> FibRoute {
 
     for attr in msg.attributes.into_iter() {
         match attr {
-            RouteAttribute::Destination(m) => match m {
-                RouteAddress::Inet(n) => {
-                    route.route =
-                        IpNet::V4(Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap());
-                }
-                _ => {}
-            },
-            RouteAttribute::Gateway(g) => match g {
-                RouteAddress::Inet(n) => {
-                    route.gateway = IpAddr::V4(n);
-                }
-                _ => {}
-            },
+            RouteAttribute::Destination(RouteAddress::Inet(n)) => {
+                route.route =
+                    IpNet::V4(Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap());
+            }
+            RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
+                route.gateway = IpAddr::V4(n);
+            }
             RouteAttribute::EncapType(e) => {
                 println!("XXX EncapType {}", e);
             }
@@ -243,24 +314,6 @@ async fn route_dump(
     Ok(())
 }
 
-pub async fn route_add(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
-    println!("XXX route_add");
-    let route = RouteMessageBuilder::<Ipv4Addr>::new()
-        .destination_prefix(dest.addr(), dest.prefix_len())
-        .gateway(gateway)
-        .build();
-
-    let result = handle.route().add(route).execute().await;
-    match result {
-        Ok(()) => {
-            println!("Ok");
-        }
-        Err(err) => {
-            println!("Err: {}", err);
-        }
-    }
-}
-
 #[derive(Default)]
 struct RouteDelMessage {
     message: RouteMessage,
@@ -300,33 +353,11 @@ impl RouteDelMessage {
     }
 }
 
-pub async fn route_del(handle: rtnetlink::Handle, dest: Ipv4Net, gateway: Ipv4Addr) {
-    let message = RouteDelMessage::new();
-
-    // destination.
-    let mes = message
-        .destination(dest.addr(), dest.prefix_len())
-        .gateway(gateway)
-        .build();
-
-    let result = handle.route().del(mes).execute().await;
-    match result {
-        Ok(()) => {
-            println!("Ok");
-        }
-        Err(err) => {
-            println!("Err: {}", err);
-        }
-    }
-}
-
 pub async fn fib_dump(handle: &FibHandle, tx: UnboundedSender<FibMessage>) -> Result<()> {
     link_dump(handle.handle.clone(), tx.clone()).await?;
     address_dump(handle.handle.clone(), tx.clone()).await?;
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V4).await?;
-    println!("==== Ipv6 route start ===");
     route_dump(handle.handle.clone(), tx.clone(), IpVersion::V6).await?;
-    println!("==== Ipv6 route end ===");
     Ok(())
 }
 

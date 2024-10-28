@@ -218,6 +218,12 @@ impl CapabilityDynamicCapability {
     }
 }
 
+impl Default for CapabilityDynamicCapability {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct AddPathValue {
     afi: Afi,
@@ -275,6 +281,12 @@ impl CapabilityExtendedMessage {
     }
 }
 
+impl Default for CapabilityExtendedMessage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityEnhancedRouteRefresh {
     header: CapabilityHeader,
@@ -285,6 +297,12 @@ impl CapabilityEnhancedRouteRefresh {
         Self {
             header: CapabilityHeader::new(CapabilityCode::EnhancedRouteRefresh, 0),
         }
+    }
+}
+
+impl Default for CapabilityEnhancedRouteRefresh {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -308,6 +326,12 @@ impl CapabilityLLGR {
             header: CapabilityHeader::new(CapabilityCode::EnhancedRouteRefresh, 0),
             values: Vec::new(),
         }
+    }
+}
+
+impl Default for CapabilityLLGR {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

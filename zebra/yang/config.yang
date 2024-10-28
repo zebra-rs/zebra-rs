@@ -89,8 +89,8 @@ module config {
               description "Metric of the route.";
             }
             leaf weight {
-              type uint32;
-              description "Metric of the route.";
+              type uint8;
+              description "Weight of ECMP route.";
             }
           }
           leaf distance {

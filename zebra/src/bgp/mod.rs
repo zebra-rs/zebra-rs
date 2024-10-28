@@ -1,5 +1,5 @@
-pub mod handler;
-pub use handler::{serve, Bgp};
+pub mod inst;
+pub use inst::{serve, Bgp};
 
 pub mod afi;
 pub use afi::*;

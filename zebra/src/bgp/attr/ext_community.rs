@@ -132,8 +132,10 @@ impl FromStr for ExtCommunity {
 
 impl From<RouteDistinguisher> for ExtCommunityValue {
     fn from(from: RouteDistinguisher) -> Self {
-        let mut to = ExtCommunityValue::default();
-        to.val = from.val;
+        let mut to = ExtCommunityValue {
+            val: from.val,
+            ..Default::default()
+        };
         match from.typ {
             RouteDistinguisherType::ASN => {
                 to.high_type = 0x00;

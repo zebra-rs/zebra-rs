@@ -1,4 +1,4 @@
-use super::handler::{Bgp, ShowCallback};
+use super::inst::{Bgp, ShowCallback};
 use super::packet::BgpType;
 use super::peer::{Peer, PeerCounter, PeerParam};
 use crate::config::Args;

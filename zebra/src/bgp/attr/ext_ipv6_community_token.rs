@@ -16,10 +16,8 @@ fn parse_ipv6_value(s: &str) -> Option<(Ipv6Addr, u16)> {
 
     // Normalize [3001:2001::] and 3001:2001::.
     let re = Regex::new(r"^\[?([^]]+)\]?$").unwrap();
-    let Some(caps) = re.captures(addr) else {
-        return None;
-    };
-    let addr: Ipv6Addr = (&caps[1]).parse::<Ipv6Addr>().ok()?;
+    let caps = re.captures(addr)?;
+    let addr: Ipv6Addr = (caps[1]).parse::<Ipv6Addr>().ok()?;
     let val = val.trim_start_matches(':');
     let val: u16 = val.parse::<u16>().ok()?;
     Some((addr, val))

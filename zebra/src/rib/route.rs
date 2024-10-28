@@ -1,11 +1,12 @@
-use super::entry::{RibEntry, RibType};
+use super::entry::RibEntry;
 use super::fib::message::FibRoute;
-use super::instance::Rib;
+use super::inst::Rib;
 use super::nexthop::Nexthop;
+use super::RibType;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
 
-fn rib_same_type(ribs: &Vec<RibEntry>, entry: &RibEntry) -> Option<usize> {
+fn rib_same_type(ribs: &[RibEntry], entry: &RibEntry) -> Option<usize> {
     for (i, rib) in ribs.iter().enumerate() {
         if rib.rtype == entry.rtype {
             return Some(i);
@@ -18,14 +19,11 @@ impl Rib {
     pub fn ipv4_add(&mut self, dest: Ipv4Net, e: RibEntry) {
         //nexthop_resolve(&self.rib, &e.nexthops[0]);
 
-        let ribs = self.rib.entry(dest).or_default();
+        let ribs = self.table.entry(dest).or_default();
         let find = rib_same_type(&ribs.ribs, &e);
         let mut prev: Option<RibEntry> = None;
-        match find {
-            Some(index) => {
-                prev = Some(ribs.ribs.remove(index));
-            }
-            None => {}
+        if let Some(index) = find {
+            prev = Some(ribs.ribs.remove(index));
         }
 
         ribs.ribs.push(e);
@@ -49,7 +47,6 @@ impl Rib {
             println!("Previous route {:?}", prev);
         }
         if let Some(selected) = selected {
-            println!("Found selected");
             ribs.ribs[selected].selected = true;
             ribs.ribs[selected].fib = true;
         }
@@ -73,7 +70,7 @@ impl Rib {
 
     pub fn route_del(&mut self, r: FibRoute) {
         if let IpNet::V4(v4) = r.route {
-            if let Some(_ribs) = self.rib.get(&v4) {
+            if let Some(_ribs) = self.table.get(&v4) {
                 //
             }
         }

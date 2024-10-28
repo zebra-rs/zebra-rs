@@ -55,7 +55,7 @@ impl CommunityList {
     }
 
     pub fn ensure(&mut self, seq: u32) {
-        if self.entry.get(&seq).is_some() {
+        if self.entry.contains_key(&seq) {
             return;
         }
         let entry = CommunityEntry::new(seq);
