@@ -1,10 +1,9 @@
 use crate::config::Args;
-use crate::rib::instance::Message;
 
-use super::entry::{RibEntry, RibType};
+use super::entry::RibEntry;
 use super::fib::message::{FibAddr, FibLink};
 use super::fib::os_traffic_dump;
-use super::Rib;
+use super::{Rib, RibType};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
 
@@ -269,14 +268,14 @@ impl Rib {
         if let Some(link) = self.links.get_mut(&addr.link_index) {
             if link_addr_update(link, addr.clone()).is_some() {
                 let mut e = RibEntry::new(RibType::Connected);
-                e.link_index = link.index;
+                e.ifindex = link.index;
                 e.distance = 0;
                 e.selected = true;
                 e.fib = true;
                 if let IpNet::V4(net) = addr.addr {
                     self.ipv4_add(net, e);
                     // Event for resolve.
-                    let _ = self.tx.clone().send(Message::ResolveNexthop);
+                    //let _ = self.tx.clone().send(Message::ResolveNexthop);
                 }
             }
         }

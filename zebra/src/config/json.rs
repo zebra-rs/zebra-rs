@@ -33,7 +33,7 @@ pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value, lines: &mut Vec
             let mut p = p.clone();
             if !entry.key.is_empty() {
                 if let Some(value) = map.get(&entry.key[0]) {
-                    p.push(value_without_quotes(&value));
+                    p.push(value_without_quotes(value));
                     lines.push(format!("set {}", p.join(" ")));
                 } else {
                     return;
@@ -47,7 +47,7 @@ pub fn json_to_list(entry: Rc<Entry>, p: Vec<String>, v: &Value, lines: &mut Vec
                     Some(entry) => {
                         let mut p = p.clone();
                         p.push(key.clone());
-                        json_to_list(entry.clone(), p, &value, lines);
+                        json_to_list(entry.clone(), p, value, lines);
                     }
                     None => {
                         return;
