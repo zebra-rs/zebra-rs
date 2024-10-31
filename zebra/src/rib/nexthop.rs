@@ -7,7 +7,7 @@ pub struct Nexthop {
     pub addr: Ipv4Addr,
     pub invalid: bool,
     pub onlink: bool,
-    ifindex: u32,
+    pub ifindex: u32,
     pub weight: u8,
     pub recursive: Vec<Nexthop>,
     pub resolved: Vec<usize>,

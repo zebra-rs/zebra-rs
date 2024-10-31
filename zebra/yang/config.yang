@@ -102,14 +102,11 @@ module config {
             description "Metric of the route.";
           }
         }
-      }
 
-      container static-srv6 {
-        ext:help "Static route configuration for SRv6";
-        list route {
+        list srv6 {
           key "prefix";
           leaf prefix {
-            type inet:ipv6-prefix;
+            type inet:ipv4-prefix;
           }
           leaf encap {
             type enumeration {
@@ -155,58 +152,22 @@ module config {
             type uint8;
           }
         }
-      }
 
-      container static-ietf {
-        container ipv4 {
-          description
-            "Support for a 'static' pseudo-protocol instance
-         consists of a list of routes.";
-          list route {
-            key "destination-prefix";
-            description
-              "A list of static routes.";
-            leaf destination-prefix {
-              type inet:ipv4-prefix;
-              description
-                "IPv4 destination prefix.";
-            }
-            leaf description {
-              type string;
-              description
-                "Textual description of the route.";
-            }
-            container next-hop {
-              description
-                "Support for next-hop.";
-              list next-hop {
-                key "index";
-                description
-                  "An entry in a next-hop list.
-
-               Modules for address families MUST augment this list
-               with a leaf containing a next-hop address of that
-               address family.";
-                leaf index {
-                  type string;
-                  description
-                    "A user-specified identifier utilized to uniquely
-                 reference the next-hop entry in the next-hop list.
-                 The value of this index has no semantic meaning
-                 other than for referencing the entry.";
-                }
-                leaf next-hop-address {
-                  type inet:ipv4-address;
-                  description
-                    "IPv4 address of the next hop.";
-                }
-                leaf outgoing-interface {
-                  type string;
-                  description
-                    "Name of the outgoing interface.";
-                }
-              }
-            }
+        list lsp {
+          key "prefix";
+          leaf prefix {
+            type inet:ipv4-prefix;
+          }
+          leaf-list push {
+            type uint32;
+          }
+          leaf "nexthop" {
+            type inet:ipv4-address;
+            description "Nexthop of the route";
+          }
+          leaf dev {
+            type string;
+            description "Outgoing interface";
           }
         }
       }
