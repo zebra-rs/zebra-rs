@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
-use super::{
+use crate::rib::{
     inst::{rib_resolve, Resolve, ResolveOpt},
     nexthop::Nexthop,
     RibEntries,

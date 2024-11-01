@@ -228,6 +228,18 @@ fn route_from_msg(msg: RouteMessage) -> FibRoute {
             RouteAttribute::Encap(e) => {
                 println!("XXX Encap {:?}", e);
             }
+            RouteAttribute::MultiPath(e) => {
+                println!("XXX Multipath");
+                println!("XXX Num nexthop {}", e.len());
+                for nhop in e.iter() {
+                    for attr in nhop.attributes.iter() {
+                        if let RouteAttribute::Gateway(RouteAddress::Inet(n)) = attr {
+                            let gate = IpAddr::V4(*n);
+                            println!("{}", gate);
+                        }
+                    }
+                }
+            }
             _ => {
                 //
             }

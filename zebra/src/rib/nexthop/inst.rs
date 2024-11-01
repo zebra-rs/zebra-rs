@@ -1,7 +1,6 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nexthop {
     pub addr: Ipv4Addr,
