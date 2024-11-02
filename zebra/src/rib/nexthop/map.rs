@@ -9,10 +9,21 @@ use crate::rib::{
     RibEntries,
 };
 
-#[derive(Default)]
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
     values: Vec<Option<Nexthop>>,
+}
+
+impl Default for NexthopMap {
+    fn default() -> Self {
+        let mut nmap = Self {
+            map: BTreeMap::new(),
+            values: Vec::new(),
+        };
+        // Pushing dummy for making first index to be 1.
+        nmap.values.push(None);
+        nmap
+    }
 }
 
 impl NexthopMap {

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::rib::Nexthop;
 
 #[allow(dead_code)]
@@ -9,8 +11,26 @@ pub struct NexthopResilience {
     unbalanced_time: u64,
 }
 
-#[derive(Default)]
-struct NexthopGroup {
-    nexthops: Vec<Nexthop>,
-    resilience: NexthopResilience,
+pub enum NexthopGroup {
+    Uni(NexthopUni),
+    Multi(NexthopMulti),
+    Protect(NexthopProtect),
+}
+
+pub struct NexthopUni {
+    //
+}
+
+pub struct NexthopWeight {
+    nhid: usize,
+    weight: u8,
+}
+
+pub struct NexthopMulti {
+    nhid: usize,
+    nhops: BTreeSet<usize>,
+}
+
+pub struct NexthopProtect {
+    //
 }

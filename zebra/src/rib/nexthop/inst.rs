@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::Ipv4Addr;
 
@@ -11,6 +12,7 @@ pub struct Nexthop {
     pub recursive: Vec<Nexthop>,
     pub resolved: Vec<usize>,
     pub refcnt: usize,
+    pub nhid: usize,
 }
 
 impl Nexthop {
@@ -24,6 +26,7 @@ impl Nexthop {
             recursive: Vec::new(),
             resolved: Vec::new(),
             refcnt: 0,
+            nhid: 0,
         }
     }
 
@@ -43,6 +46,7 @@ impl Default for Nexthop {
             recursive: Vec::new(),
             resolved: Vec::new(),
             refcnt: 0,
+            nhid: 0,
         }
     }
 }

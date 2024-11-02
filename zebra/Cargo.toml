@@ -3,6 +3,9 @@ name = "zebra"
 version = "0.6.4"
 edition = "2021"
 
+[lints.rust]
+unused = "allow"
+
 [dependencies]
 anyhow = "1.0"
 bytes = "1"

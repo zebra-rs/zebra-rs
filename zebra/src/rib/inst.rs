@@ -175,14 +175,21 @@ impl Rib {
         self.redists.push(tx);
     }
 
+    //
     async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut ribs: Vec<RibEntry>) {
         rib_delete(&mut self.table, prefix, rtype);
         while let Some(mut rib) = ribs.pop() {
+            for nhop in rib.nexthops.iter() {
+                println!("Nexthop lookup {}", nhop.addr);
+                let nhid = self.nmap.register(nhop.addr);
+                println!("Nexthop ID {}", nhid);
+            }
             rib.nhops.extend(
                 rib.nexthops
                     .iter()
                     .map(|nhop| self.nmap.register(nhop.addr)),
             );
+            //
             rib_add(&mut self.table, prefix, rib);
         }
         // Resolve all nexthops.
