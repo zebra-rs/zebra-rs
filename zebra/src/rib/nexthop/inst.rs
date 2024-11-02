@@ -12,7 +12,7 @@ pub struct Nexthop {
     pub recursive: Vec<Nexthop>,
     pub resolved: Vec<usize>,
     pub refcnt: usize,
-    pub nhid: usize,
+    pub ngid: usize,
 }
 
 impl Nexthop {
@@ -26,7 +26,7 @@ impl Nexthop {
             recursive: Vec::new(),
             resolved: Vec::new(),
             refcnt: 0,
-            nhid: 0,
+            ngid: 0,
         }
     }
 
@@ -46,7 +46,7 @@ impl Default for Nexthop {
             recursive: Vec::new(),
             resolved: Vec::new(),
             refcnt: 0,
-            nhid: 0,
+            ngid: 0,
         }
     }
 }

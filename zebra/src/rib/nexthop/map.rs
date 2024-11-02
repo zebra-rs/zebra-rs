@@ -9,9 +9,13 @@ use crate::rib::{
     RibEntries,
 };
 
+use super::NexthopGroup;
+
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
     values: Vec<Option<Nexthop>>,
+    gmap: BTreeMap<Ipv4Addr, usize>,
+    groups: Vec<Option<NexthopGroup>>,
 }
 
 impl Default for NexthopMap {
@@ -19,9 +23,12 @@ impl Default for NexthopMap {
         let mut nmap = Self {
             map: BTreeMap::new(),
             values: Vec::new(),
+            gmap: BTreeMap::new(),
+            groups: Vec::new(),
         };
         // Pushing dummy for making first index to be 1.
         nmap.values.push(None);
+        nmap.groups.push(None);
         nmap
     }
 }
@@ -41,6 +48,17 @@ impl NexthopMap {
         self.map.insert(addr, index);
         self.values.push(Some(Nexthop::new(addr)));
         index
+    }
+
+    pub fn register_group(&mut self, addr: Ipv4Addr) -> usize {
+        if let Some(&index) = self.gmap.get(&addr) {
+            index
+        } else {
+            let index = self.values.len();
+            self.gmap.insert(addr, index);
+            self.groups.push(Some(NexthopGroup::new_unipath(&addr)));
+            index
+        }
     }
 
     pub fn unregister(&mut self, addr: Ipv4Addr) {
