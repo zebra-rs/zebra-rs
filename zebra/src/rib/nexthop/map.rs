@@ -15,7 +15,7 @@ pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
     values: Vec<Option<Nexthop>>,
     gmap: BTreeMap<Ipv4Addr, usize>,
-    groups: Vec<Option<NexthopGroup>>,
+    groups: Vec<NexthopGroup>,
 }
 
 impl Default for NexthopMap {
@@ -28,7 +28,8 @@ impl Default for NexthopMap {
         };
         // Pushing dummy for making first index to be 1.
         nmap.values.push(None);
-        nmap.groups.push(None);
+        nmap.groups
+            .push(NexthopGroup::new_unipath(&Ipv4Addr::UNSPECIFIED, 0));
         nmap
     }
 }
@@ -56,7 +57,7 @@ impl NexthopMap {
         } else {
             let index = self.values.len();
             self.gmap.insert(addr, index);
-            self.groups.push(Some(NexthopGroup::new_unipath(&addr)));
+            self.groups.push(NexthopGroup::new_unipath(&addr, index));
             index
         }
     }
@@ -75,6 +76,10 @@ impl NexthopMap {
 
     pub fn get(&self, index: usize) -> Option<&Nexthop> {
         self.values.get(index)?.as_ref()
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut NexthopGroup> {
+        self.groups.get_mut(index)
     }
 
     pub fn lookup(&self, addr: Ipv4Addr) -> Option<usize> {

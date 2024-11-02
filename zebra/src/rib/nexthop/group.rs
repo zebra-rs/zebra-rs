@@ -1,6 +1,10 @@
+use ipnet::Ipv4Net;
+use prefix_trie::PrefixMap;
+use NexthopGroup::*;
+
 use std::{collections::BTreeSet, net::Ipv4Addr};
 
-//use crate::rib::Nexthop;
+use crate::rib::entry::RibEntries;
 
 #[allow(dead_code)]
 #[derive(Default)]
@@ -18,15 +22,16 @@ pub enum NexthopGroup {
 }
 
 impl NexthopGroup {
-    pub fn new_unipath(addr: &Ipv4Addr) -> Self {
-        let uni: NexthopUni = NexthopUni::new(addr);
+    pub fn new_unipath(addr: &Ipv4Addr, ngid: usize) -> Self {
+        let mut uni: NexthopUni = NexthopUni::new(addr);
+        uni.common.ngid = ngid;
         NexthopGroup::Uni(uni)
     }
 }
 
 #[derive(Default)]
 pub struct NexthopGroupCommon {
-    group_id: usize,
+    ngid: usize,
     valid: bool,
     installed: bool,
     refcnt: usize,
@@ -35,6 +40,7 @@ pub struct NexthopGroupCommon {
 pub struct NexthopUni {
     common: NexthopGroupCommon,
     addr: Ipv4Addr,
+    ifindex: u32,
 }
 
 impl NexthopUni {
@@ -42,6 +48,7 @@ impl NexthopUni {
         Self {
             common: NexthopGroupCommon::default(),
             addr: *addr,
+            ifindex: 0,
         }
     }
 }
@@ -62,17 +69,33 @@ pub struct NexthopProtect {
     backup: Vec<usize>,
 }
 
-pub trait CommonTrait {
+pub trait GroupTrait {
     fn common(&self) -> &NexthopGroupCommon;
     fn common_mut(&mut self) -> &mut NexthopGroupCommon;
+
+    fn ngid(&self) -> usize;
+    fn set_ngid(&mut self, ngid: usize);
+
     fn is_valid(&self) -> bool;
     fn set_valid(&mut self, valid: bool);
+
     fn refcnt(&self) -> usize;
 }
 
-use NexthopGroup::*;
+impl NexthopGroup {
+    pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
+        match self {
+            Uni(uni) => {
+                //
+            }
+            _ => {
+                // TODO.
+            }
+        }
+    }
+}
 
-impl CommonTrait for NexthopGroup {
+impl GroupTrait for NexthopGroup {
     fn common(&self) -> &NexthopGroupCommon {
         match self {
             Uni(uni) => &uni.common,
@@ -87,6 +110,14 @@ impl CommonTrait for NexthopGroup {
             Multi(multi) => &mut multi.common,
             Protect(protect) => &mut protect.common,
         }
+    }
+
+    fn ngid(&self) -> usize {
+        self.common().ngid
+    }
+
+    fn set_ngid(&mut self, ngid: usize) {
+        self.common_mut().ngid = ngid;
     }
 
     fn is_valid(&self) -> bool {
@@ -109,7 +140,7 @@ mod tests {
     #[test]
     fn test_uni() {
         let addr: Ipv4Addr = "10.211.55.2".parse().unwrap();
-        let mut unipath = NexthopGroup::new_unipath(&addr);
+        let mut unipath = NexthopGroup::new_unipath(&addr, 0);
         assert_eq!(false, unipath.is_valid());
         unipath.set_valid(true);
         assert_eq!(true, unipath.is_valid());

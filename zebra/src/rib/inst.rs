@@ -7,8 +7,8 @@ use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
-use crate::rib::RibEntries;
 use crate::rib::RibType;
+use crate::rib::{GroupTrait, RibEntries};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -218,8 +218,20 @@ impl Rib {
         rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
     }
 
-    async fn ipv4_route_add_uni(&mut self, rtype: RibType, prefix: &Ipv4Net, mut ribs: RibEntry) {
+    async fn ipv4_route_add_uni(&mut self, rtype: RibType, prefix: &Ipv4Net, mut rib: RibEntry) {
         rib_delete(&mut self.table, prefix, rtype);
+        for nhop in rib.nexthops.iter_mut() {
+            let ngid = self.nmap.register_group(nhop.addr);
+            nhop.ngid = ngid;
+        }
+        for nhop in rib.nexthops.iter() {
+            let ngid = nhop.ngid;
+            if let Some(uni) = self.nmap.get_mut(ngid) {
+                println!("ngid {} {}", ngid, uni.is_valid());
+                uni.resolve(&self.table);
+            }
+        }
+
         // while let Some(mut rib) = ribs.pop() {
         //     // for nhop in rib.nexthops.iter() {
         //     //     println!("Nexthop lookup {}", nhop.addr);
