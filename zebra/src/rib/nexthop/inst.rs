@@ -1,17 +1,17 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nexthop {
     pub addr: Ipv4Addr,
     pub invalid: bool,
     pub onlink: bool,
-    ifindex: u32,
+    pub ifindex: u32,
     pub weight: u8,
     pub recursive: Vec<Nexthop>,
     pub resolved: Vec<usize>,
     pub refcnt: usize,
+    pub ngid: usize,
 }
 
 impl Nexthop {
@@ -25,6 +25,7 @@ impl Nexthop {
             recursive: Vec::new(),
             resolved: Vec::new(),
             refcnt: 0,
+            ngid: 0,
         }
     }
 
@@ -44,6 +45,7 @@ impl Default for Nexthop {
             recursive: Vec::new(),
             resolved: Vec::new(),
             refcnt: 0,
+            ngid: 0,
         }
     }
 }

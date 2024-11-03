@@ -1,10 +1,12 @@
-use super::entry::RibEntry;
-use super::fib::message::FibRoute;
-use super::inst::Rib;
-use super::nexthop::Nexthop;
-use super::RibType;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::IpAddr;
+
+use crate::fib::message::FibRoute;
+
+use super::entry::RibEntry;
+use super::inst::Rib;
+use super::nexthop::Nexthop;
+use super::{Message, RibType};
 
 fn rib_same_type(ribs: &[RibEntry], entry: &RibEntry) -> Option<usize> {
     for (i, rib) in ribs.iter().enumerate() {
@@ -16,53 +18,21 @@ fn rib_same_type(ribs: &[RibEntry], entry: &RibEntry) -> Option<usize> {
 }
 
 impl Rib {
-    pub fn ipv4_add(&mut self, dest: Ipv4Net, e: RibEntry) {
-        //nexthop_resolve(&self.rib, &e.nexthops[0]);
-
-        let ribs = self.table.entry(dest).or_default();
-        let find = rib_same_type(&ribs.ribs, &e);
-        let mut prev: Option<RibEntry> = None;
-        if let Some(index) = find {
-            prev = Some(ribs.ribs.remove(index));
-        }
-
-        ribs.ribs.push(e);
-
-        // Path selection.
-        let mut selected: Option<usize> = None;
-        let mut srib: Option<&RibEntry> = None;
-        for (i, rib) in ribs.ribs.iter().enumerate() {
-            if let Some(x) = srib {
-                if rib.distance < x.distance {
-                    srib = Some(rib);
-                    selected = Some(i);
-                }
-            } else {
-                srib = Some(rib);
-                selected = Some(i);
-            }
-        }
-
-        if let Some(prev) = prev {
-            println!("Previous route {:?}", prev);
-        }
-        if let Some(selected) = selected {
-            ribs.ribs[selected].selected = true;
-            ribs.ribs[selected].fib = true;
-        }
-    }
-
     pub fn route_add(&mut self, r: FibRoute) {
         if let IpNet::V4(v4) = r.route {
             let mut e = RibEntry::new(RibType::Kernel);
             e.distance = 0;
-            e.selected = true;
-            e.fib = true;
+            e.set_selected(true);
+            e.set_fib(true);
             if let IpAddr::V4(addr) = r.gateway {
                 if !addr.is_unspecified() {
                     let nexthop = Nexthop::builder().addr(addr).build();
                     e.nexthops.push(nexthop);
-                    self.ipv4_add(v4, e);
+                    let _ = self.tx.send(Message::Ipv4Add {
+                        rtype: RibType::Kernel,
+                        prefix: v4,
+                        ribs: vec![e],
+                    });
                 }
             }
         }

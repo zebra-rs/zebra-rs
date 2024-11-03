@@ -3,16 +3,35 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
-use super::{
+use crate::rib::{
     inst::{rib_resolve, Resolve, ResolveOpt},
     nexthop::Nexthop,
     RibEntries,
 };
 
-#[derive(Default)]
+use super::NexthopGroup;
+
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
     values: Vec<Option<Nexthop>>,
+    gmap: BTreeMap<Ipv4Addr, usize>,
+    groups: Vec<NexthopGroup>,
+}
+
+impl Default for NexthopMap {
+    fn default() -> Self {
+        let mut nmap = Self {
+            map: BTreeMap::new(),
+            values: Vec::new(),
+            gmap: BTreeMap::new(),
+            groups: Vec::new(),
+        };
+        // Pushing dummy for making first index to be 1.
+        nmap.values.push(None);
+        nmap.groups
+            .push(NexthopGroup::new_uni(&Ipv4Addr::UNSPECIFIED, 0));
+        nmap
+    }
 }
 
 impl NexthopMap {
@@ -32,6 +51,17 @@ impl NexthopMap {
         index
     }
 
+    pub fn register_group(&mut self, addr: Ipv4Addr) -> usize {
+        if let Some(&index) = self.gmap.get(&addr) {
+            index
+        } else {
+            let index = self.values.len();
+            self.gmap.insert(addr, index);
+            self.groups.push(NexthopGroup::new_uni(&addr, index));
+            index
+        }
+    }
+
     pub fn unregister(&mut self, addr: Ipv4Addr) {
         // Decrement refcnt; if it reaches zero, remove the nexthop at this index.
         if let Some(&index) = self.map.get(&addr) {
@@ -48,6 +78,10 @@ impl NexthopMap {
         self.values.get(index)?.as_ref()
     }
 
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut NexthopGroup> {
+        self.groups.get_mut(index)
+    }
+
     pub fn lookup(&self, addr: Ipv4Addr) -> Option<usize> {
         self.map.get(&addr).copied()
     }
@@ -58,7 +92,7 @@ impl NexthopMap {
                 Resolve::NotFound => {
                     n.invalid = true;
                 }
-                Resolve::Onlink => {
+                Resolve::Onlink(_) => {
                     n.onlink = true;
                 }
                 Resolve::Recursive(resolved) => {

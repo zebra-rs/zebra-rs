@@ -8,6 +8,8 @@ use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{cell::RefCell, rc::Rc};
 
+const INDENT_LEVEL: usize = 2;
+
 #[derive(Clone)]
 pub struct Args(pub VecDeque<String>);
 
@@ -162,7 +164,7 @@ impl Config {
 
         if self.display_entry() {
             if depth != 0 {
-                out.push_str(&" ".repeat(depth * 4).to_string());
+                out.push_str(&" ".repeat(depth * INDENT_LEVEL).to_string());
             }
             self.prefix_write(out);
 
@@ -203,7 +205,7 @@ impl Config {
 
         if self.display_entry() && brace {
             if depth != 0 {
-                out.push_str(&" ".repeat(depth * 4).to_string());
+                out.push_str(&" ".repeat(depth * INDENT_LEVEL).to_string());
             }
             out.push_str("}\n");
         }

@@ -1,12 +1,12 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::fib::fib_dump;
-use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop::Nexthop;
-use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
+use super::{Link, NexthopMap, RibTxChannel, StaticConfig, Vrf};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
+use crate::fib::fib_dump;
+use crate::fib::{FibChannel, FibHandle, FibMessage};
 use crate::rib::RibEntries;
 use crate::rib::RibType;
 use ipnet::Ipv4Net;
@@ -30,7 +30,8 @@ pub enum Message {
 }
 
 pub enum Resolve {
-    Onlink,
+    Onlink(u32),
+    #[allow(dead_code)]
     Recursive(Vec<usize>),
     NotFound,
 }
@@ -38,6 +39,7 @@ pub enum Resolve {
 #[derive(Default)]
 pub struct ResolveOpt {
     allow_default: bool,
+    #[allow(dead_code)]
     limit: u8,
 }
 
@@ -48,6 +50,7 @@ impl ResolveOpt {
     }
 
     // Zero means infinite lookup.
+    #[allow(dead_code)]
     pub fn limit(&self) -> u8 {
         self.limit
     }
@@ -58,7 +61,9 @@ pub fn rib_resolve(
     p: Ipv4Addr,
     opt: &ResolveOpt,
 ) -> Resolve {
-    let key: Ipv4Net = Ipv4Net::new(p, 32).unwrap();
+    let Ok(key) = Ipv4Net::new(p, Ipv4Addr::BITS as u8) else {
+        return Resolve::NotFound;
+    };
 
     let Some((p, entries)) = table.get_lpm(&key) else {
         return Resolve::NotFound;
@@ -70,7 +75,7 @@ pub fn rib_resolve(
 
     for entry in entries.ribs.iter() {
         if entry.rtype == RibType::Connected {
-            return Resolve::Onlink;
+            return Resolve::Onlink(entry.ifindex);
         }
         if entry.rtype == RibType::Static {
             return Resolve::Recursive(entry.nhops.clone());
@@ -175,42 +180,32 @@ impl Rib {
         self.redists.push(tx);
     }
 
-    async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut ribs: Vec<RibEntry>) {
-        rib_delete(&mut self.table, prefix, rtype);
-        while let Some(mut rib) = ribs.pop() {
-            rib.nhops.extend(
-                rib.nexthops
-                    .iter()
-                    .map(|nhop| self.nmap.register(nhop.addr)),
-            );
-            rib_add(&mut self.table, prefix, rib);
-        }
-        // Resolve all nexthops.
-        self.nmap.resolve(&self.table);
+    async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut rib: RibEntry) {
+        let replace = rib_replace(&mut self.table, prefix, rib.rtype);
 
-        // Resolve RIB entry nexthop.
-        let entry = self.table.get_mut(prefix);
-        if let Some(entry) = entry {
-            for e in entry.ribs.iter_mut() {
-                if e.is_static() {
-                    let (resolved, depth) = resolve(&self.nmap, &e.nhops, &ResolveOpt::default());
-                    println!("nhops: {prefix} {:?} -> {:?} {}", e.nhops, resolved, depth);
-                    e.resolved = resolved;
+        if !rib.is_system() {
+            for nhop in rib.nexthops.iter_mut() {
+                let ngid = self.nmap.register_group(nhop.addr);
+                nhop.ngid = ngid;
+            }
+            for nhop in rib.nexthops.iter() {
+                let ngid = nhop.ngid;
+                if let Some(uni) = self.nmap.get_mut(ngid) {
+                    uni.resolve(&self.table);
+                    uni.sync(&self.fib_handle).await;
                 }
             }
         }
+        rib_add(&mut self.table, prefix, rib);
 
-        // Select and FIB update.
-        let index = rib_select(&self.table, prefix);
-        rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
+        let selected = rib_select(&self.table, prefix);
+        rib_sync(&mut self.table, prefix, selected, replace, &self.fib_handle).await;
     }
 
     async fn ipv4_route_del(&mut self, rtype: RibType, prefix: &Ipv4Net) {
-        rib_delete(&mut self.table, prefix, rtype);
-        // let index = rib_select(&self.rib, prefix);
-        // rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
-
-        // rib_walk(&mut self.rib);
+        let replace = rib_replace(&mut self.table, prefix, rtype);
+        let selected = rib_select(&self.table, prefix);
+        rib_sync(&mut self.table, prefix, selected, replace, &self.fib_handle).await;
     }
 
     async fn process_msg(&mut self, msg: Message) {
@@ -218,9 +213,11 @@ impl Rib {
             Message::Ipv4Add {
                 rtype,
                 prefix,
-                ribs,
+                mut ribs,
             } => {
-                self.ipv4_route_add(rtype, &prefix, ribs).await;
+                while let Some(rib) = ribs.pop() {
+                    self.ipv4_route_add(rtype, &prefix, rib).await;
+                }
             }
             Message::Ipv4Del { rtype, prefix } => {
                 self.ipv4_route_del(rtype, &prefix).await;
@@ -310,10 +307,18 @@ fn rib_add(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: Ri
     entries.ribs.push(entry);
 }
 
-fn rib_delete(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, rtype: RibType) {
-    if let Some(entries) = rib.get_mut(prefix) {
-        entries.ribs.retain(|x| x.rtype != rtype);
-    }
+fn rib_replace(
+    rib: &mut PrefixMap<Ipv4Net, RibEntries>,
+    prefix: &Ipv4Net,
+    rtype: RibType,
+) -> Vec<RibEntry> {
+    let Some(entries) = rib.get_mut(prefix) else {
+        return vec![];
+    };
+    let (remain, replace): (Vec<_>, Vec<_>) =
+        entries.ribs.drain(..).partition(|x| x.rtype != rtype);
+    entries.ribs = remain;
+    replace
 }
 
 fn rib_select(rib: &PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net) -> Option<usize> {
@@ -321,7 +326,7 @@ fn rib_select(rib: &PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net) -> Option<
     let index = entries
         .ribs
         .iter()
-        .filter(|x| x.valid)
+        .filter(|x| x.is_valid())
         .enumerate()
         .fold(
             None,
@@ -344,19 +349,22 @@ async fn rib_sync(
     rib: &mut PrefixMap<Ipv4Net, RibEntries>,
     prefix: &Ipv4Net,
     index: Option<usize>,
+    mut replace: Vec<RibEntry>,
     fib: &FibHandle,
 ) {
     let Some(entries) = rib.get_mut(prefix) else {
         return;
     };
 
-    while let Some(entry) = entries.fibs.pop() {
-        fib.route_ipv4_del(prefix, &entry).await;
+    while let Some(entry) = replace.pop() {
+        if entry.is_fib() {
+            fib.route_ipv4_del(prefix, &entry).await;
+        }
     }
 
     if let Some(sindex) = index {
-        let entry = entries.ribs.get(sindex).unwrap();
-        fib.route_ipv4_add(prefix, entry).await;
-        entries.fibs.push(entry.clone());
+        let entry = entries.ribs.get_mut(sindex).unwrap();
+        fib.route_ipv4_add(prefix, &entry).await;
+        entry.set_fib(true);
     }
 }
