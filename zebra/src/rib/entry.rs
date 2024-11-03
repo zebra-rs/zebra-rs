@@ -89,5 +89,4 @@ impl RibEntry {
 #[derive(Default)]
 pub struct RibEntries {
     pub ribs: Vec<RibEntry>,
-    // pub fibs: Vec<RibEntry>,
 }
