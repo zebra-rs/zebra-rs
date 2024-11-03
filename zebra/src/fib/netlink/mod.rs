@@ -1,7 +1,9 @@
+pub mod dump;
 pub mod handle;
-pub use handle::*;
 pub mod srv6;
 pub mod stats;
-pub use stats::*;
-pub mod dump;
+pub mod sysctl;
+
 pub use dump::*;
+pub use handle::*;
+pub use stats::*;

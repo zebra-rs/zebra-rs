@@ -1,6 +1,5 @@
-use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
-use crate::rib::entry::RibEntry;
-use crate::rib::{link, NexthopGroup, NexthopGroupTrait};
+use std::net::{IpAddr, Ipv4Addr};
+
 use futures::stream::StreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_REQUEST};
@@ -19,8 +18,12 @@ use rtnetlink::{
     },
     new_connection,
 };
-use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::UnboundedSender;
+
+use crate::fib::sysctl::sysctl_enable;
+use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
+use crate::rib::entry::RibEntry;
+use crate::rib::{link, NexthopGroup, NexthopGroupTrait};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
@@ -28,6 +31,8 @@ pub struct FibHandle {
 
 impl FibHandle {
     pub fn new(rib_tx: UnboundedSender<FibMessage>) -> anyhow::Result<Self> {
+        sysctl_enable();
+
         let (mut connection, handle, mut messages) = new_connection()?;
 
         let mgroup_flags = RTMGRP_LINK
