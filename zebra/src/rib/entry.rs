@@ -7,7 +7,7 @@ pub struct RibEntry {
     pub rsubtype: RibSubType,
     pub selected: bool,
     pub fib: bool,
-    pub valid: bool,
+    valid: bool,
     pub distance: u8,
     pub metric: u32,
     pub nexthops: Vec<Nexthop>,
@@ -39,6 +39,10 @@ impl RibEntry {
 
     pub fn is_connected(&self) -> bool {
         self.rtype == RibType::Connected
+    }
+
+    pub fn is_valid(&self) -> bool {
+        true
     }
 
     pub fn distance(&self) -> String {

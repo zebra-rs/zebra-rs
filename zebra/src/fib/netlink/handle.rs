@@ -1,4 +1,4 @@
-use super::message::{FibAddr, FibLink, FibMessage, FibRoute};
+use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::{link, NexthopGroup, NexthopGroupTrait};
 use anyhow::Result;
@@ -69,37 +69,22 @@ impl FibHandle {
         Ok(Self { handle })
     }
 
-    // Need to use MultiPath.
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
         let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
             .destination_prefix(prefix.addr(), prefix.prefix_len())
             .priority(entry.metric)
             .build();
 
-        let mut multipath: Vec<RouteNextHop> = Vec::new();
-        for nhop in entry.nexthops.iter() {
-            if nhop.recursive.is_empty() {
-                let mut nexthop: RouteNextHop = RouteNextHop::default();
-                let addr: RouteAddress = RouteAddress::Inet(nhop.addr);
-                nexthop.attributes.push(RouteAttribute::Gateway(addr));
-                nexthop.hops = nhop.weight.safe_sub(1);
-                multipath.push(nexthop);
-            } else {
-                for rhop in nhop.recursive.iter() {
-                    let mut nexthop: RouteNextHop = RouteNextHop::default();
-                    let addr: RouteAddress = RouteAddress::Inet(rhop.addr);
-                    nexthop.attributes.push(RouteAttribute::Gateway(addr));
-                    nexthop.hops = rhop.weight.safe_sub(1);
-                    multipath.push(nexthop);
-                }
-            }
+        if let Some(nhop) = entry.nexthops.first() {
+            route
+                .attributes
+                .push(RouteAttribute::Nhid(nhop.ngid as u32));
         }
-        route.attributes.push(RouteAttribute::MultiPath(multipath));
 
         let result = self.handle.route().add(route).replace().execute().await;
         match result {
             Ok(()) => {
-                println!("Ok");
+                println!("IPv4 route add uni Ok");
             }
             Err(err) => {
                 println!("Err: {}", err);

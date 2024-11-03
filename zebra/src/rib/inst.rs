@@ -178,48 +178,6 @@ impl Rib {
     }
 
     //
-    async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut ribs: Vec<RibEntry>) {
-        rib_delete(&mut self.table, prefix, rtype);
-        while let Some(mut rib) = ribs.pop() {
-            // for nhop in rib.nexthops.iter() {
-            //     println!("Nexthop lookup {}", nhop.addr);
-            //     let nhid = self.nmap.register(nhop.addr);
-            //     println!("Nexthop ID {}", nhid);
-            // }
-            for nhop in rib.nexthops.iter_mut() {
-                let ngid = self.nmap.register_group(nhop.addr);
-                nhop.ngid = ngid;
-                println!("Nexthop Group {}", ngid);
-            }
-
-            rib.nhops.extend(
-                rib.nexthops
-                    .iter()
-                    .map(|nhop| self.nmap.register(nhop.addr)),
-            );
-            rib_add(&mut self.table, prefix, rib);
-        }
-
-        // Resolve all nexthops.
-        //self.nmap.resolve(&self.table);
-
-        // Resolve RIB entry nexthop.
-        let entry = self.table.get_mut(prefix);
-        if let Some(entry) = entry {
-            for e in entry.ribs.iter_mut() {
-                if e.is_static() {
-                    let (resolved, depth) = resolve(&self.nmap, &e.nhops, &ResolveOpt::default());
-                    println!("nhops: {prefix} {:?} -> {:?} {}", e.nhops, resolved, depth);
-                    e.resolved = resolved;
-                }
-            }
-        }
-
-        // Select and FIB update.
-        let index = rib_select(&self.table, prefix);
-        rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
-    }
-
     async fn ipv4_route_add_uni(&mut self, rtype: RibType, prefix: &Ipv4Net, mut rib: RibEntry) {
         rib_delete(&mut self.table, prefix, rtype);
         for nhop in rib.nexthops.iter_mut() {
@@ -229,55 +187,14 @@ impl Rib {
         for nhop in rib.nexthops.iter() {
             let ngid = nhop.ngid;
             if let Some(uni) = self.nmap.get_mut(ngid) {
-                println!("ngid {} {}", ngid, uni.is_valid());
                 uni.resolve(&self.table);
                 uni.sync(&self.fib_handle).await;
             }
         }
+        rib_add(&mut self.table, prefix, rib);
 
-        // while let Some(mut rib) = ribs.pop() {
-        //     // for nhop in rib.nexthops.iter() {
-        //     //     println!("Nexthop lookup {}", nhop.addr);
-        //     //     let nhid = self.nmap.register(nhop.addr);
-        //     //     println!("Nexthop ID {}", nhid);
-        //     // }
-        //     for nhop in rib.nexthops.iter_mut() {
-        //         let ngid = self.nmap.register_group(nhop.addr);
-        //         nhop.ngid = ngid;
-        //         println!("Nexthop Group {}", ngid);
-        //     }
-
-        //     rib.nhops.extend(
-        //         rib.nexthops
-        //             .iter()
-        //             .map(|nhop| self.nmap.register(nhop.addr)),
-        //     );
-        //     rib_add(&mut self.table, prefix, rib);
-        // }
-
-        // // Resolve all nexthops.
-        // //self.nmap.resolve(&self.table);
-
-        // // Resolve nexthops.
-        // for nhop in rib.nexthops.iter() {
-        //     println!("ngid {}", nhop.ngid);
-        // }
-
-        // // Resolve RIB entry nexthop.
-        // let entry = self.table.get_mut(prefix);
-        // if let Some(entry) = entry {
-        //     for e in entry.ribs.iter_mut() {
-        //         if e.is_static() {
-        //             let (resolved, depth) = resolve(&self.nmap, &e.nhops, &ResolveOpt::default());
-        //             println!("nhops: {prefix} {:?} -> {:?} {}", e.nhops, resolved, depth);
-        //             e.resolved = resolved;
-        //         }
-        //     }
-        // }
-
-        // // Select and FIB update.
-        // let index = rib_select(&self.table, prefix);
-        // rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
+        let index = rib_select(&self.table, prefix);
+        rib_sync(&mut self.table, prefix, index, &self.fib_handle).await;
     }
 
     async fn ipv4_route_del(&mut self, rtype: RibType, prefix: &Ipv4Net) {
@@ -398,7 +315,7 @@ fn rib_select(rib: &PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net) -> Option<
     let index = entries
         .ribs
         .iter()
-        .filter(|x| x.valid)
+        .filter(|x| x.is_valid())
         .enumerate()
         .fold(
             None,

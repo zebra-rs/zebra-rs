@@ -10,15 +10,6 @@ use crate::rib::{
     inst::{rib_resolve, Resolve, ResolveOpt},
 };
 
-#[allow(dead_code)]
-#[derive(Default)]
-pub struct NexthopResilience {
-    buckets: u16,
-    idle_timer: u32,
-    unbalanced_timer: u32,
-    unbalanced_time: u64,
-}
-
 pub enum NexthopGroup {
     Uni(NexthopUni),
     Multi(NexthopMulti),
@@ -26,7 +17,7 @@ pub enum NexthopGroup {
 }
 
 impl NexthopGroup {
-    pub fn new_unipath(addr: &Ipv4Addr, ngid: usize) -> Self {
+    pub fn new_uni(addr: &Ipv4Addr, ngid: usize) -> Self {
         let mut uni: NexthopUni = NexthopUni::new(addr);
         uni.common.ngid = ngid;
         NexthopGroup::Uni(uni)
@@ -85,6 +76,7 @@ pub struct NexthopProtect {
 
 pub trait NexthopGroupTrait {
     fn common(&self) -> &NexthopGroupCommon;
+
     fn common_mut(&mut self) -> &mut NexthopGroupCommon;
 
     fn ngid(&self) -> usize {
@@ -134,6 +126,7 @@ impl NexthopGroup {
     pub async fn sync(&mut self, fib: &FibHandle) {
         if self.is_valid() && !self.is_installed() {
             fib.nexthop_add(self).await;
+            self.set_installed(true);
         }
     }
 }
@@ -163,7 +156,7 @@ mod tests {
     #[test]
     fn test_uni() {
         let addr: Ipv4Addr = "10.211.55.2".parse().unwrap();
-        let mut unipath = NexthopGroup::new_unipath(&addr, 0);
+        let mut unipath = NexthopGroup::new_uni(&addr, 0);
         assert_eq!(false, unipath.is_valid());
         unipath.set_valid(true);
         assert_eq!(true, unipath.is_valid());

@@ -29,7 +29,7 @@ impl Default for NexthopMap {
         // Pushing dummy for making first index to be 1.
         nmap.values.push(None);
         nmap.groups
-            .push(NexthopGroup::new_unipath(&Ipv4Addr::UNSPECIFIED, 0));
+            .push(NexthopGroup::new_uni(&Ipv4Addr::UNSPECIFIED, 0));
         nmap
     }
 }
@@ -57,7 +57,7 @@ impl NexthopMap {
         } else {
             let index = self.values.len();
             self.gmap.insert(addr, index);
-            self.groups.push(NexthopGroup::new_unipath(&addr, index));
+            self.groups.push(NexthopGroup::new_uni(&addr, index));
             index
         }
     }
