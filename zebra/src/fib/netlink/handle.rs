@@ -57,6 +57,10 @@ impl FibHandle {
     }
 
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        if entry.is_system() {
+            return;
+        }
+
         let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
             .destination_prefix(prefix.addr(), prefix.prefix_len())
             .priority(entry.metric)
@@ -80,6 +84,9 @@ impl FibHandle {
     }
 
     pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        if entry.is_system() {
+            return;
+        }
         let mut route = RouteDelMessage::new()
             .destination(prefix.addr(), prefix.prefix_len())
             .build();

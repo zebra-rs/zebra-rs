@@ -181,17 +181,19 @@ impl Rib {
     }
 
     async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut rib: RibEntry) {
-        let replace = rib_replace(&mut self.table, prefix, rtype);
+        let replace = rib_replace(&mut self.table, prefix, rib.rtype);
 
-        for nhop in rib.nexthops.iter_mut() {
-            let ngid = self.nmap.register_group(nhop.addr);
-            nhop.ngid = ngid;
-        }
-        for nhop in rib.nexthops.iter() {
-            let ngid = nhop.ngid;
-            if let Some(uni) = self.nmap.get_mut(ngid) {
-                uni.resolve(&self.table);
-                uni.sync(&self.fib_handle).await;
+        if !rib.is_system() {
+            for nhop in rib.nexthops.iter_mut() {
+                let ngid = self.nmap.register_group(nhop.addr);
+                nhop.ngid = ngid;
+            }
+            for nhop in rib.nexthops.iter() {
+                let ngid = nhop.ngid;
+                if let Some(uni) = self.nmap.get_mut(ngid) {
+                    uni.resolve(&self.table);
+                    uni.sync(&self.fib_handle).await;
+                }
             }
         }
         rib_add(&mut self.table, prefix, rib);

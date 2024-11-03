@@ -5,8 +5,8 @@ use super::{Rib, RibSubType, RibType};
 pub struct RibEntry {
     pub rtype: RibType,
     pub rsubtype: RibSubType,
-    pub selected: bool,
-    pub fib: bool,
+    selected: bool,
+    fib: bool,
     valid: bool,
     pub distance: u8,
     pub metric: u32,
@@ -45,12 +45,24 @@ impl RibEntry {
         true
     }
 
+    pub fn is_system(&self) -> bool {
+        self.rtype == RibType::Connected || self.rtype == RibType::Kernel
+    }
+
     pub fn is_fib(&self) -> bool {
         self.fib
     }
 
     pub fn set_fib(&mut self, fib: bool) {
         self.fib = fib;
+    }
+
+    pub fn is_selected(&self) -> bool {
+        self.selected
+    }
+
+    pub fn set_selected(&mut self, selected: bool) {
+        self.selected = selected;
     }
 
     pub fn distance(&self) -> String {
