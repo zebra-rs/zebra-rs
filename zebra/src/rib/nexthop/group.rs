@@ -1,8 +1,8 @@
+use std::net::Ipv4Addr;
+
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use NexthopGroup::*;
-
-use std::{collections::BTreeSet, net::Ipv4Addr};
 
 use crate::fib::FibHandle;
 use crate::rib::{

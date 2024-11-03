@@ -7,8 +7,8 @@ use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::fib::fib_dump;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
+use crate::rib::RibEntries;
 use crate::rib::RibType;
-use crate::rib::{NexthopGroupTrait, RibEntries};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -31,6 +31,7 @@ pub enum Message {
 
 pub enum Resolve {
     Onlink(u32),
+    #[allow(dead_code)]
     Recursive(Vec<usize>),
     NotFound,
 }
@@ -38,6 +39,7 @@ pub enum Resolve {
 #[derive(Default)]
 pub struct ResolveOpt {
     allow_default: bool,
+    #[allow(dead_code)]
     limit: u8,
 }
 
@@ -48,6 +50,7 @@ impl ResolveOpt {
     }
 
     // Zero means infinite lookup.
+    #[allow(dead_code)]
     pub fn limit(&self) -> u8 {
         self.limit
     }
