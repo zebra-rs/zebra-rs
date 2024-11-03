@@ -71,7 +71,35 @@ impl FibHandle {
         let result = self.handle.route().add(route).replace().execute().await;
         match result {
             Ok(()) => {
-                println!("IPv4 route add uni Ok");
+                //
+            }
+            Err(err) => {
+                println!("Err: {}", err);
+            }
+        }
+    }
+
+    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        let mut route = RouteDelMessage::new()
+            .destination(prefix.addr(), prefix.prefix_len())
+            .build();
+
+        // Nexthop group.
+        if let Some(nhop) = entry.nexthops.first() {
+            route
+                .attributes
+                .push(RouteAttribute::Nhid(nhop.ngid as u32));
+        }
+
+        // Metric.
+        route
+            .attributes
+            .push(RouteAttribute::Priority(entry.metric));
+
+        let result = self.handle.route().del(route).execute().await;
+        match result {
+            Ok(()) => {
+                println!("Route ipv4 del uni Ok");
             }
             Err(err) => {
                 println!("Err: {}", err);
@@ -131,31 +159,6 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("netlink error: {}", e);
-            }
-        }
-    }
-
-    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
-        let Some(nhop) = entry.nexthops.first() else {
-            return;
-        };
-        let gateway = nhop.addr;
-
-        let mut route = RouteDelMessage::new()
-            .destination(prefix.addr(), prefix.prefix_len())
-            .gateway(gateway)
-            .build();
-        route
-            .attributes
-            .push(RouteAttribute::Priority(entry.metric));
-
-        let result = self.handle.route().del(route).execute().await;
-        match result {
-            Ok(()) => {
-                println!("Ok");
-            }
-            Err(err) => {
-                println!("Err: {}", err);
             }
         }
     }

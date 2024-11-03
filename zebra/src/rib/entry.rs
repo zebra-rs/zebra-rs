@@ -45,6 +45,14 @@ impl RibEntry {
         true
     }
 
+    pub fn is_fib(&self) -> bool {
+        self.fib
+    }
+
+    pub fn set_fib(&mut self, fib: bool) {
+        self.fib = fib;
+    }
+
     pub fn distance(&self) -> String {
         if self.rtype != RibType::Connected {
             format!(" [{}/{}]", &self.distance, &self.metric)
@@ -81,5 +89,5 @@ impl RibEntry {
 #[derive(Default)]
 pub struct RibEntries {
     pub ribs: Vec<RibEntry>,
-    pub fibs: Vec<RibEntry>,
+    // pub fibs: Vec<RibEntry>,
 }
