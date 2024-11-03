@@ -1,12 +1,12 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::fib::fib_dump;
-use super::fib::{FibChannel, FibHandle, FibMessage};
 use super::nexthop::Nexthop;
 use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
+use crate::fib::fib_dump;
+use crate::fib::{FibChannel, FibHandle, FibMessage};
 use crate::rib::RibType;
 use crate::rib::{NexthopGroupTrait, RibEntries};
 use ipnet::Ipv4Net;

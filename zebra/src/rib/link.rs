@@ -1,8 +1,8 @@
 use crate::config::Args;
+use crate::fib::message::{FibAddr, FibLink};
+use crate::fib::os_traffic_dump;
 
 use super::entry::RibEntry;
-use super::fib::message::{FibAddr, FibLink};
-use super::fib::os_traffic_dump;
 use super::{Rib, RibType};
 use ipnet::IpNet;
 use std::fmt::{self, Write};

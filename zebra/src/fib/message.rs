@@ -1,7 +1,8 @@
-use super::{LinkFlags, LinkType};
 use ipnet::IpNet;
 use std::net::IpAddr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+use super::{LinkFlags, LinkType};
 
 #[derive(Debug)]
 pub struct FibChannel {

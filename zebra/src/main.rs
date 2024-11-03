@@ -10,6 +10,7 @@ mod rib;
 use rib::Rib;
 mod policy;
 use policy::Policy;
+mod fib;
 
 use clap::Parser;
 

@@ -25,4 +25,4 @@ pub use macos::FibHandle;
 pub mod message;
 pub use message::{FibChannel, FibMessage};
 
-pub use super::{LinkFlags, LinkType};
+pub use crate::rib::{LinkFlags, LinkType};

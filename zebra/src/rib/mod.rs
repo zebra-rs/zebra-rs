@@ -17,8 +17,6 @@ pub use nexthop::*;
 
 pub mod show;
 
-pub mod fib;
-
 pub mod srv6;
 
 pub mod static_config;

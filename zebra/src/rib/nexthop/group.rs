@@ -4,9 +4,9 @@ use NexthopGroup::*;
 
 use std::{collections::BTreeSet, net::Ipv4Addr};
 
+use crate::fib::FibHandle;
 use crate::rib::{
     entry::RibEntries,
-    fib::FibHandle,
     inst::{rib_resolve, Resolve, ResolveOpt},
 };
 

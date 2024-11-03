@@ -1,10 +1,12 @@
+use ipnet::{IpNet, Ipv4Net};
+use std::net::IpAddr;
+
+use crate::fib::message::FibRoute;
+
 use super::entry::RibEntry;
-use super::fib::message::FibRoute;
 use super::inst::Rib;
 use super::nexthop::Nexthop;
 use super::RibType;
-use ipnet::{IpNet, Ipv4Net};
-use std::net::IpAddr;
 
 fn rib_same_type(ribs: &[RibEntry], entry: &RibEntry) -> Option<usize> {
     for (i, rib) in ribs.iter().enumerate() {
