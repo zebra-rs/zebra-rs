@@ -2,9 +2,14 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use futures::stream::StreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use netlink_packet_core::{NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_REQUEST};
+use netlink_packet_core::{
+    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE,
+    NLM_F_REQUEST,
+};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
-use netlink_packet_route::link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage};
+use netlink_packet_route::link::{
+    InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
+};
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopMessage};
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
@@ -23,7 +28,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::{link, NexthopGroup, NexthopGroupTrait};
+use crate::rib::{link, NexthopGroup, NexthopGroupTrait, Vrf};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
@@ -136,12 +141,12 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_REPLACE;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("netlink error: {}", e);
+                println!("NewNexthop error: {}", e);
             }
         }
     }
@@ -165,7 +170,62 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("netlink error: {}", e);
+                println!("DelNexthop error: {}", e);
+            }
+        }
+    }
+
+    pub async fn vrf_add(&self, vrf: &Vrf) {
+        let mut msg = LinkMessage::default();
+
+        let name = LinkAttribute::IfName(vrf.name.clone());
+        msg.attributes.push(name);
+
+        let vrf = InfoVrf::TableId(vrf.id);
+        let data = InfoData::Vrf(vec![vrf]);
+        let link_data = LinkInfo::Data(data);
+
+        let kind = InfoKind::Vrf;
+        let link_kind = LinkInfo::Kind(kind);
+
+        let link_info = LinkAttribute::LinkInfo(vec![link_kind, link_data]);
+        msg.attributes.push(link_info);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        // req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewLink error: {}", e);
+            }
+        }
+    }
+
+    pub async fn vrf_del(&self, vrf: &Vrf) {
+        let mut msg = LinkMessage::default();
+
+        let name = LinkAttribute::IfName(vrf.name.clone());
+        msg.attributes.push(name);
+
+        let vrf = InfoVrf::TableId(vrf.id);
+        let data = InfoData::Vrf(vec![vrf]);
+        let link_data = LinkInfo::Data(data);
+
+        let kind = InfoKind::Vrf;
+        let link_kind = LinkInfo::Kind(kind);
+
+        let link_info = LinkAttribute::LinkInfo(vec![link_kind, link_data]);
+        msg.attributes.push(link_info);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("DelLink error: {}", e);
             }
         }
     }
