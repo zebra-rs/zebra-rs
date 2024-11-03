@@ -6,10 +6,10 @@ use std::path::PathBuf;
 mod bgp;
 use bgp::Bgp;
 mod rib;
-//use rib::fib::netlink_srv6::srv6_encap;
 use rib::Rib;
 mod policy;
 use policy::Policy;
+mod fib;
 
 use clap::Parser;
 

@@ -4,8 +4,10 @@ use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{Message, RibType, StaticRoute};
 use crate::config::{Args, ConfigOp};
+use crate::rib::{Message, RibType};
+
+use super::StaticRoute;
 
 pub struct StaticConfig {
     pub config: BTreeMap<Ipv4Net, StaticRoute>,

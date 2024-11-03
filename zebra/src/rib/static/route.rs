@@ -61,7 +61,7 @@ impl StaticRoute {
             entry.distance = *d;
             entry.metric = *m;
             entry.nexthops = v.clone();
-            entry.valid = true;
+            // entry.valid = true;
             entries.push(entry);
         }
         entries

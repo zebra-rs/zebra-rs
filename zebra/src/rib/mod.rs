@@ -13,21 +13,19 @@ pub use entry::RibEntries;
 pub mod route;
 
 pub mod nexthop;
-pub mod nexthop_map;
-pub use nexthop_map::NexthopMap;
+pub use nexthop::*;
 
 pub mod show;
 
-pub mod fib;
-
 pub mod srv6;
-
-pub mod static_config;
-pub use static_config::StaticConfig;
-pub mod static_route;
-pub use static_route::StaticRoute;
 
 pub mod types;
 pub use types::{RibSubType, RibType};
 
 pub mod util;
+
+pub mod r#static;
+pub use r#static::*;
+
+pub mod vrf;
+pub use vrf::*;
