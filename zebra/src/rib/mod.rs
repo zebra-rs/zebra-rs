@@ -19,11 +19,6 @@ pub mod show;
 
 pub mod srv6;
 
-// pub mod static_config;
-// pub use static_config::StaticConfig;
-// pub mod static_route;
-// pub use static_route::StaticRoute;
-
 pub mod types;
 pub use types::{RibSubType, RibType};
 
