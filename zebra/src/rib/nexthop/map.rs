@@ -92,7 +92,7 @@ impl NexthopMap {
                 Resolve::NotFound => {
                     n.invalid = true;
                 }
-                Resolve::Onlink => {
+                Resolve::Onlink(_) => {
                     n.onlink = true;
                 }
                 Resolve::Recursive(resolved) => {

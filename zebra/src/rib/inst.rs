@@ -8,7 +8,7 @@ use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::rib::RibType;
-use crate::rib::{GroupTrait, RibEntries};
+use crate::rib::{NexthopGroupTrait, RibEntries};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -30,7 +30,7 @@ pub enum Message {
 }
 
 pub enum Resolve {
-    Onlink,
+    Onlink(u32),
     Recursive(Vec<usize>),
     NotFound,
 }
@@ -58,7 +58,9 @@ pub fn rib_resolve(
     p: Ipv4Addr,
     opt: &ResolveOpt,
 ) -> Resolve {
-    let key: Ipv4Net = Ipv4Net::new(p, 32).unwrap();
+    let Ok(key) = Ipv4Net::new(p, Ipv4Addr::BITS as u8) else {
+        return Resolve::NotFound;
+    };
 
     let Some((p, entries)) = table.get_lpm(&key) else {
         return Resolve::NotFound;
@@ -70,7 +72,7 @@ pub fn rib_resolve(
 
     for entry in entries.ribs.iter() {
         if entry.rtype == RibType::Connected {
-            return Resolve::Onlink;
+            return Resolve::Onlink(entry.ifindex);
         }
         if entry.rtype == RibType::Static {
             return Resolve::Recursive(entry.nhops.clone());
@@ -229,6 +231,7 @@ impl Rib {
             if let Some(uni) = self.nmap.get_mut(ngid) {
                 println!("ngid {} {}", ngid, uni.is_valid());
                 uni.resolve(&self.table);
+                uni.sync(&self.fib_handle).await;
             }
         }
 

@@ -4,7 +4,11 @@ use NexthopGroup::*;
 
 use std::{collections::BTreeSet, net::Ipv4Addr};
 
-use crate::rib::entry::RibEntries;
+use crate::rib::{
+    entry::RibEntries,
+    fib::FibHandle,
+    inst::{rib_resolve, Resolve, ResolveOpt},
+};
 
 #[allow(dead_code)]
 #[derive(Default)]
@@ -39,8 +43,8 @@ pub struct NexthopGroupCommon {
 
 pub struct NexthopUni {
     common: NexthopGroupCommon,
-    addr: Ipv4Addr,
-    ifindex: u32,
+    pub addr: Ipv4Addr,
+    pub ifindex: u32,
 }
 
 impl NexthopUni {
@@ -50,6 +54,16 @@ impl NexthopUni {
             addr: *addr,
             ifindex: 0,
         }
+    }
+}
+
+impl NexthopGroupTrait for NexthopUni {
+    fn common(&self) -> &NexthopGroupCommon {
+        &self.common
+    }
+
+    fn common_mut(&mut self) -> &mut NexthopGroupCommon {
+        &mut self.common
     }
 }
 
@@ -69,48 +83,9 @@ pub struct NexthopProtect {
     backup: Vec<usize>,
 }
 
-pub trait GroupTrait {
+pub trait NexthopGroupTrait {
     fn common(&self) -> &NexthopGroupCommon;
     fn common_mut(&mut self) -> &mut NexthopGroupCommon;
-
-    fn ngid(&self) -> usize;
-    fn set_ngid(&mut self, ngid: usize);
-
-    fn is_valid(&self) -> bool;
-    fn set_valid(&mut self, valid: bool);
-
-    fn refcnt(&self) -> usize;
-}
-
-impl NexthopGroup {
-    pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
-        match self {
-            Uni(uni) => {
-                //
-            }
-            _ => {
-                // TODO.
-            }
-        }
-    }
-}
-
-impl GroupTrait for NexthopGroup {
-    fn common(&self) -> &NexthopGroupCommon {
-        match self {
-            Uni(uni) => &uni.common,
-            Multi(multi) => &multi.common,
-            Protect(protect) => &protect.common,
-        }
-    }
-
-    fn common_mut(&mut self) -> &mut NexthopGroupCommon {
-        match self {
-            Uni(uni) => &mut uni.common,
-            Multi(multi) => &mut multi.common,
-            Protect(protect) => &mut protect.common,
-        }
-    }
 
     fn ngid(&self) -> usize {
         self.common().ngid
@@ -128,8 +103,56 @@ impl GroupTrait for NexthopGroup {
         self.common_mut().valid = valid;
     }
 
+    fn is_installed(&self) -> bool {
+        self.common().installed
+    }
+
+    fn set_installed(&mut self, installed: bool) {
+        self.common_mut().installed = installed;
+    }
+
     fn refcnt(&self) -> usize {
         self.common().refcnt
+    }
+}
+
+impl NexthopGroup {
+    pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
+        let Uni(uni) = self else {
+            return;
+        };
+        let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
+        match resolve {
+            Resolve::Onlink(ifindex) => {
+                uni.ifindex = ifindex;
+                self.set_valid(true);
+            }
+            _ => {}
+        }
+    }
+
+    pub async fn sync(&mut self, fib: &FibHandle) {
+        if self.is_valid() && !self.is_installed() {
+            fib.nexthop_add(self).await;
+        }
+    }
+}
+
+impl NexthopGroupTrait for NexthopGroup {
+    fn common(&self) -> &NexthopGroupCommon {
+        match self {
+            Uni(uni) => &uni.common,
+            Multi(multi) => &multi.common,
+            Protect(protect) => &protect.common,
+        }
+    }
+
+    fn common_mut(&mut self) -> &mut NexthopGroupCommon {
+        match self {
+            Uni(uni) => &mut uni.common,
+            Multi(multi) => &mut multi.common,
+            Protect(protect) => &mut protect.common,
+        }
     }
 }
 

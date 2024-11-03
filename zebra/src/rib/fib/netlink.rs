@@ -1,12 +1,13 @@
 use super::message::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::link;
+use crate::rib::{link, NexthopGroup, NexthopGroupTrait};
 use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
+use netlink_packet_core::{NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_REQUEST};
 use netlink_packet_route::address::{AddressAttribute, AddressMessage};
 use netlink_packet_route::link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage};
+use netlink_packet_route::nexthop::{NexthopAttribute, NexthopMessage};
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteNextHop, RouteProtocol,
     RouteScope, RouteType,
@@ -102,6 +103,62 @@ impl FibHandle {
             }
             Err(err) => {
                 println!("Err: {}", err);
+            }
+        }
+    }
+
+    pub async fn nexthop_add(&self, nexthop: &NexthopGroup) {
+        let NexthopGroup::Uni(uni) = nexthop else {
+            return;
+        };
+        // Nexthop message.
+        let mut msg = NexthopMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.protocol = RouteProtocol::Static;
+
+        // Nexthop group ID.
+        let attr = NexthopAttribute::Id(uni.ngid() as u32);
+        msg.attributes.push(attr);
+
+        // Gateway address.
+        let attr = NexthopAttribute::Gateway(RouteAddress::Inet(uni.addr));
+        msg.attributes.push(attr);
+
+        // Outgoing if.
+        let attr = NexthopAttribute::Oif(uni.ifindex);
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("netlink error: {}", e);
+            }
+        }
+    }
+
+    pub async fn nexthop_del(&self, nexthop: &NexthopGroup) {
+        let NexthopGroup::Uni(uni) = nexthop else {
+            return;
+        };
+        // Nexthop message.
+        let mut msg = NexthopMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.protocol = RouteProtocol::Static;
+
+        // Nexthop group ID.
+        let attr = NexthopAttribute::Id(uni.ngid() as u32);
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelNexthop(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("netlink error: {}", e);
             }
         }
     }
