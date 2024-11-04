@@ -11,7 +11,7 @@ static SHOW_IPV4_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static,
 
 "#;
 
-pub(crate) fn rib_show(rib: &Rib, _args: Args) -> String {
+pub(crate) fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
     let mut buf = String::new();
 
     buf.push_str(SHOW_IPV4_HEADER);

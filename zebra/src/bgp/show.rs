@@ -80,7 +80,7 @@ fn show_bgp_route(bgp: &Bgp) -> String {
     buf
 }
 
-fn show_bgp(bgp: &Bgp, args: Args) -> String {
+fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> String {
     if args.is_empty() {
         show_bgp_route(bgp)
     } else {
@@ -249,7 +249,7 @@ fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_bgp_neighbor(bgp: &Bgp, args: Args) -> String {
+fn show_bgp_neighbor(bgp: &Bgp, args: Args, json: bool) -> String {
     let mut out = String::new();
 
     if args.is_empty() {
@@ -267,7 +267,7 @@ fn show_bgp_neighbor(bgp: &Bgp, args: Args) -> String {
     out
 }
 
-fn show_community_list(bgp: &Bgp, _args: Args) -> String {
+fn show_community_list(bgp: &Bgp, _args: Args, json: bool) -> String {
     let mut out = String::from("community-list");
     for (name, clist) in bgp.clist.0.iter() {
         writeln!(out, "name: {:?}", name).unwrap();
