@@ -41,6 +41,6 @@ cap:
 	sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/debug/zebra
 
 run:
-	@cargo build --bin zebra --quiet
+	@cargo build --bin zebra
 	@sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/debug/zebra
 	@target/debug/zebra
