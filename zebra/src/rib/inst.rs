@@ -220,7 +220,7 @@ impl Rib {
         }
     }
 
-    fn process_fib_msg(&mut self, msg: FibMessage) {
+    pub fn process_fib_msg(&mut self, msg: FibMessage) {
         match msg {
             FibMessage::NewLink(link) => {
                 self.link_add(link);
@@ -268,7 +268,7 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
-        if let Err(_err) = fib_dump(&self.fib_handle, self.fib.tx.clone()).await {
+        if let Err(_err) = fib_dump(self).await {
             // warn!("FIB dump error {}", err);
         }
 
