@@ -232,6 +232,42 @@ impl FibHandle {
         }
     }
 
+    pub async fn link_bind_vrf(&self, ifindex: u32, vrfid: u32) {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+
+        let attr = LinkAttribute::Controller(vrfid);
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("link_bind_vrf error: {}", e);
+            }
+        }
+    }
+
+    pub async fn link_set_mtu(&self, ifindex: u32, mtu: u32) {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+
+        let attr = LinkAttribute::Mtu(mtu);
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("DelLink error: {}", e);
+            }
+        }
+    }
+
     pub async fn addr_add_ipv4(&self, ifindex: u32, prefix: &Ipv4Net, secondary: bool) {
         let mut msg = AddressMessage::default();
         msg.header.family = AddressFamily::Inet;
