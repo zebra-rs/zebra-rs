@@ -6,7 +6,9 @@ use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE,
     NLM_F_REQUEST,
 };
-use netlink_packet_route::address::{AddressAttribute, AddressMessage};
+use netlink_packet_route::address::{
+    AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope, CacheInfo,
+};
 use netlink_packet_route::link::{
     InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
 };
@@ -77,13 +79,13 @@ impl FibHandle {
                 .push(RouteAttribute::Nhid(nhop.ngid as u32));
         }
 
-        let result = self.handle.route().add(route).replace().execute().await;
+        let result = self.handle.route().add(route).execute().await;
         match result {
-            Ok(()) => {
-                //
+            Ok(_) => {
+                // println!("route_ipv4_add: Ok");
             }
             Err(err) => {
-                println!("Err: {}", err);
+                println!("route_ipv4_add: {}", err);
             }
         }
     }
@@ -110,11 +112,11 @@ impl FibHandle {
 
         let result = self.handle.route().del(route).execute().await;
         match result {
-            Ok(()) => {
-                println!("Route ipv4 del uni Ok");
+            Ok(_) => {
+                // println!("route_ipv4_del Ok");
             }
             Err(err) => {
-                println!("Err: {}", err);
+                println!("route_ipv4_del: {}", err);
             }
         }
     }
@@ -141,12 +143,12 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_REPLACE;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewNexthop error: {}", e);
+                println!("NewNexthop error: {} ngid: {}", e, uni.ngid());
             }
         }
     }
@@ -226,6 +228,55 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("DelLink error: {}", e);
+            }
+        }
+    }
+
+    pub async fn addr_add_ipv4(&self, ifindex: u32, prefix: &Ipv4Net, secondary: bool) {
+        let mut msg = AddressMessage::default();
+        msg.header.family = AddressFamily::Inet;
+        msg.header.prefix_len = prefix.prefix_len();
+        msg.header.index = ifindex;
+        msg.header.scope = AddressScope::Universe;
+        if secondary {
+            msg.header.flags = AddressHeaderFlags::Secondary;
+        }
+        let attr = AddressAttribute::Local(IpAddr::V4(prefix.addr()));
+        msg.attributes.push(attr);
+
+        // If interface is p2p.
+        if false {
+            let attr = AddressAttribute::Address(IpAddr::V4(prefix.addr()));
+            msg.attributes.push(attr);
+        }
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewAddress(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewAddress error: {}", e);
+            }
+        }
+    }
+
+    pub async fn addr_del_ipv4(&self, ifindex: u32, prefix: &Ipv4Net) {
+        let mut msg = AddressMessage::default();
+        msg.header.family = AddressFamily::Inet;
+        msg.header.prefix_len = prefix.prefix_len();
+        msg.header.index = ifindex;
+
+        let attr = AddressAttribute::Local(IpAddr::V4(prefix.addr()));
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelAddress(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("DelAddress error: {}", e);
             }
         }
     }

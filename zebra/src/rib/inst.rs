@@ -277,6 +277,11 @@ impl Rib {
             // warn!("FIB dump error {}", err);
         }
 
+        // Address add.
+        let prefix: Ipv4Net = "1.1.1.1/32".parse().unwrap();
+        self.fib_handle.addr_add_ipv4(1, &prefix, false).await;
+        self.fib_handle.addr_del_ipv4(1, &prefix).await;
+
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {

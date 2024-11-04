@@ -262,5 +262,23 @@ module config {
         }
       }
     }
+    container interfaces {
+      list interface {
+        key "name";
+        leaf name {
+          type string;
+        }
+      }
+    }
+    list vrf {
+      key "name";
+      leaf name {
+        type string;
+      }
+      leaf id {
+        mandatory true;
+        type uint32;
+      }
+    }
   }
 }
