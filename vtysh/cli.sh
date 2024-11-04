@@ -230,7 +230,7 @@ _cli_exec ()
 {
   declare -i first=1
 
-  if [[ ${SHOW_MODE} == "json" ]];then
+  if [[ ${CLI_FORMAT} == "json" ]];then
     JSON_FLAG="-j"
   else
     JSON_FLAG=""
