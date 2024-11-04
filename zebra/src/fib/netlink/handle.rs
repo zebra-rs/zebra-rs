@@ -29,7 +29,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::{link, NexthopGroup, NexthopGroupTrait, Vrf};
+use crate::rib::{link, GroupNexthop, GroupTrait, Vrf};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
@@ -130,8 +130,8 @@ impl FibHandle {
         }
     }
 
-    pub async fn nexthop_add(&self, nexthop: &NexthopGroup) {
-        let NexthopGroup::Uni(uni) = nexthop else {
+    pub async fn nexthop_add(&self, nexthop: &GroupNexthop) {
+        let GroupNexthop::Uni(uni) = nexthop else {
             return;
         };
         // Nexthop message.
@@ -170,8 +170,8 @@ impl FibHandle {
         }
     }
 
-    pub async fn nexthop_del(&self, nexthop: &NexthopGroup) {
-        let NexthopGroup::Uni(uni) = nexthop else {
+    pub async fn nexthop_del(&self, nexthop: &GroupNexthop) {
+        let GroupNexthop::Uni(uni) = nexthop else {
             return;
         };
         // Nexthop message.

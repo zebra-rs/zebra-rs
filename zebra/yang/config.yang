@@ -80,10 +80,6 @@ module config {
               type inet:ipv4-address;
               description "Nexthop of the route";
             }
-            leaf distance {
-              type uint8;
-              description "Distance of the route.";
-            }
             leaf metric {
               type uint32;
               description "Metric of the route.";

@@ -204,21 +204,6 @@ fn config_builder() -> ConfigBuilder {
             n.metric = None;
             Ok(())
         })
-        .path("/routing/static/route/nexthop/distance")
-        .set(|config, cache, prefix, args| {
-            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
-            let n = s.nexthops.entry(naddr).or_default();
-            n.distance = Some(args.u8().context(DISTANCE_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, prefix, args| {
-            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
-            let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
-            n.distance = None;
-            Ok(())
-        })
         .path("/routing/static/route/nexthop/weight")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;

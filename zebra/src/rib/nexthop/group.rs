@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use NexthopGroup::*;
+use GroupNexthop::*;
 
 use crate::fib::FibHandle;
 use crate::rib::{
@@ -10,74 +10,74 @@ use crate::rib::{
     inst::{rib_resolve, Resolve, ResolveOpt},
 };
 
-pub enum NexthopGroup {
-    Uni(NexthopUni),
-    Multi(NexthopMulti),
-    Protect(NexthopProtect),
+pub enum GroupNexthop {
+    Uni(GroupUni),
+    Multi(GroupMulti),
+    Protect(GroupProtect),
 }
 
-impl NexthopGroup {
+impl GroupNexthop {
     pub fn new_uni(addr: &Ipv4Addr, ngid: usize) -> Self {
-        let mut uni: NexthopUni = NexthopUni::new(addr);
+        let mut uni: GroupUni = GroupUni::new(addr);
         uni.common.ngid = ngid;
-        NexthopGroup::Uni(uni)
+        GroupNexthop::Uni(uni)
     }
 }
 
 #[derive(Default)]
-pub struct NexthopGroupCommon {
+pub struct GroupCommon {
     ngid: usize,
     valid: bool,
     installed: bool,
     refcnt: usize,
 }
 
-pub struct NexthopUni {
-    common: NexthopGroupCommon,
+pub struct GroupUni {
+    common: GroupCommon,
     pub addr: Ipv4Addr,
     pub ifindex: u32,
 }
 
-impl NexthopUni {
+impl GroupUni {
     pub fn new(addr: &Ipv4Addr) -> Self {
         Self {
-            common: NexthopGroupCommon::default(),
+            common: GroupCommon::default(),
             addr: *addr,
             ifindex: 0,
         }
     }
 }
 
-impl NexthopGroupTrait for NexthopUni {
-    fn common(&self) -> &NexthopGroupCommon {
+impl GroupTrait for GroupUni {
+    fn common(&self) -> &GroupCommon {
         &self.common
     }
 
-    fn common_mut(&mut self) -> &mut NexthopGroupCommon {
+    fn common_mut(&mut self) -> &mut GroupCommon {
         &mut self.common
     }
 }
 
-pub struct NexthopWeight {
+pub struct GroupWeight {
     weight: u8,
     nhop: usize,
 }
 
-pub struct NexthopMulti {
-    common: NexthopGroupCommon,
-    nhops: Vec<NexthopWeight>,
+pub struct GroupMulti {
+    common: GroupCommon,
+    nhops: Vec<GroupWeight>,
 }
 
-pub struct NexthopProtect {
-    common: NexthopGroupCommon,
+pub struct GroupProtect {
+    common: GroupCommon,
     primary: usize,
     backup: Vec<usize>,
 }
 
-pub trait NexthopGroupTrait {
-    fn common(&self) -> &NexthopGroupCommon;
+pub trait GroupTrait {
+    fn common(&self) -> &GroupCommon;
 
-    fn common_mut(&mut self) -> &mut NexthopGroupCommon;
+    fn common_mut(&mut self) -> &mut GroupCommon;
 
     fn ngid(&self) -> usize {
         self.common().ngid
@@ -108,7 +108,7 @@ pub trait NexthopGroupTrait {
     }
 }
 
-impl NexthopGroup {
+impl GroupNexthop {
     pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
         let Uni(uni) = self else {
             return;
@@ -131,8 +131,8 @@ impl NexthopGroup {
     }
 }
 
-impl NexthopGroupTrait for NexthopGroup {
-    fn common(&self) -> &NexthopGroupCommon {
+impl GroupTrait for GroupNexthop {
+    fn common(&self) -> &GroupCommon {
         match self {
             Uni(uni) => &uni.common,
             Multi(multi) => &multi.common,
@@ -140,7 +140,7 @@ impl NexthopGroupTrait for NexthopGroup {
         }
     }
 
-    fn common_mut(&mut self) -> &mut NexthopGroupCommon {
+    fn common_mut(&mut self) -> &mut GroupCommon {
         match self {
             Uni(uni) => &mut uni.common,
             Multi(multi) => &mut multi.common,

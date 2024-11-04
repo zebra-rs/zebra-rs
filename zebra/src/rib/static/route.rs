@@ -8,7 +8,6 @@ use crate::rib::RibType;
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
-    pub distance: Option<u8>,
     pub metric: Option<u32>,
     pub weight: Option<u8>,
 }
@@ -28,9 +27,9 @@ impl fmt::Display for StaticRoute {
 
         write!(f, "[{}/{}]", distance, metric).unwrap();
         for (p, n) in self.nexthops.iter() {
-            let distance = n.distance.unwrap_or(distance);
             let metric = n.metric.unwrap_or(metric);
-            writeln!(f, "  {} [{}/{}]", p, distance, metric).unwrap();
+            let weight = n.weight.unwrap_or(1);
+            writeln!(f, "  {} metric {} weight {}", p, metric, weight).unwrap();
         }
         write!(f, "")
     }
@@ -42,13 +41,13 @@ impl StaticRoute {
         if self.nexthops.is_empty() {
             return entries;
         }
-        let mut map: BTreeMap<(u8, u32), Vec<Nexthop>> = BTreeMap::new();
+        let mut map: BTreeMap<u32, Vec<Nexthop>> = BTreeMap::new();
         let metric = self.metric.unwrap_or(0);
         let distance = self.distance.unwrap_or(1);
+
         for (p, n) in self.nexthops.iter() {
             let metric = n.metric.unwrap_or(metric);
-            let distance = n.distance.unwrap_or(distance);
-            let e = map.entry((distance, metric)).or_default();
+            let e = map.entry(metric).or_default();
             let mut nhop = Nexthop::default();
             nhop.addr = *p;
             if let Some(w) = n.weight {
@@ -56,9 +55,9 @@ impl StaticRoute {
             }
             e.push(nhop);
         }
-        for ((d, m), v) in map.iter() {
+        for (m, v) in map.iter() {
             let mut entry = RibEntry::new(RibType::Static);
-            entry.distance = *d;
+            entry.distance = distance;
             entry.metric = *m;
             entry.nexthops = v.clone();
             // entry.valid = true;
@@ -66,4 +65,43 @@ impl StaticRoute {
         }
         entries
     }
+
+    // pub fn to_entry(&self) -> Option<RibEntry> {
+    //     if self.nexthops.is_empty() {
+    //         return None;
+    //     }
+    //     let mut entry = RibEntry::new(RibType::Static);
+
+    //     let distance = self.distance.unwrap_or(1);
+    //     entry.distance = distance;
+
+    //     if self.nexthops.len() == 1 {
+    //         // Uni nexthop.
+    //         // NexthopUni::new()
+    //     }
+
+    //     let mut map: BTreeMap<u32, Vec<Nexthop>> = BTreeMap::new();
+    //     let metric = self.metric.unwrap_or(0);
+
+    //     for (p, n) in self.nexthops.iter() {
+    //         let metric = n.metric.unwrap_or(metric);
+    //         let e = map.entry(metric).or_default();
+
+    //         let mut nhop = Nexthop::default();
+    //         nhop.addr = *p;
+    //         if let Some(w) = n.weight {
+    //             nhop.weight = w;
+    //         }
+    //         e.push(nhop);
+    //     }
+    //     for ((d, m), v) in map.iter() {
+    //         let mut entry = RibEntry::new(RibType::Static);
+    //         entry.distance = *d;
+    //         entry.metric = *m;
+    //         entry.nexthops = v.clone();
+    //         // entry.valid = true;
+    //         entries.push(entry);
+    //     }
+    //     Some(entry)
+    // }
 }

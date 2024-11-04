@@ -1,9 +1,7 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
 use super::nexthop::Nexthop;
-use super::{
-    Link, NexthopGroup, NexthopGroupTrait, NexthopMap, NexthopUni, RibTxChannel, StaticConfig,
-};
+use super::{GroupNexthop, GroupTrait, GroupUni, Link, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
