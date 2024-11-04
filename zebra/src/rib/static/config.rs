@@ -51,11 +51,7 @@ impl StaticConfig {
                 } else {
                     let ribs = s.to_ribs();
                     self.config.insert(p, s);
-                    let msg = Message::Ipv4Add {
-                        rtype: RibType::Static,
-                        prefix: p,
-                        ribs,
-                    };
+                    let msg = Message::Ipv4Add { prefix: p, ribs };
                     let _ = tx.send(msg);
                 }
             }

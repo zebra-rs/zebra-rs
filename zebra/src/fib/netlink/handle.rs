@@ -7,7 +7,7 @@ use netlink_packet_core::{
     NLM_F_REQUEST,
 };
 use netlink_packet_route::address::{
-    AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope, CacheInfo,
+    AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
     InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
@@ -18,7 +18,6 @@ use netlink_packet_route::route::{
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
-use rtnetlink::RouteMessageBuilder;
 use rtnetlink::{
     constants::{
         RTMGRP_IPV4_IFADDR, RTMGRP_IPV4_ROUTE, RTMGRP_IPV6_IFADDR, RTMGRP_IPV6_ROUTE, RTMGRP_LINK,
@@ -38,7 +37,7 @@ pub struct FibHandle {
 
 impl FibHandle {
     pub fn new(rib_tx: UnboundedSender<FibMessage>) -> anyhow::Result<Self> {
-        sysctl_enable();
+        let _ = sysctl_enable();
 
         let (mut connection, handle, mut messages) = new_connection()?;
 
@@ -67,25 +66,32 @@ impl FibHandle {
         if entry.is_system() {
             return;
         }
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.destination_prefix_length = prefix.prefix_len();
 
-        let mut route = RouteMessageBuilder::<Ipv4Addr>::new()
-            .destination_prefix(prefix.addr(), prefix.prefix_len())
-            .priority(entry.metric)
-            .build();
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = RouteProtocol::Static;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+
+        let attr = RouteAttribute::Destination(RouteAddress::Inet(prefix.addr()));
+        msg.attributes.push(attr);
+
+        let attr = RouteAttribute::Priority(entry.metric);
+        msg.attributes.push(attr);
 
         if let Some(nhop) = entry.nexthops.first() {
-            route
-                .attributes
-                .push(RouteAttribute::Nhid(nhop.ngid as u32));
+            msg.attributes.push(RouteAttribute::Nhid(nhop.ngid as u32));
         }
 
-        let result = self.handle.route().add(route).execute().await;
-        match result {
-            Ok(_) => {
-                // println!("route_ipv4_add: Ok");
-            }
-            Err(err) => {
-                println!("route_ipv4_add: {}", err);
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewRoute error: {}", e);
             }
         }
     }
@@ -94,29 +100,32 @@ impl FibHandle {
         if entry.is_system() {
             return;
         }
-        let mut route = RouteDelMessage::new()
-            .destination(prefix.addr(), prefix.prefix_len())
-            .build();
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.header.destination_prefix_length = prefix.prefix_len();
 
-        // Nexthop group.
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = RouteProtocol::Static;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+
+        let attr = RouteAttribute::Destination(RouteAddress::Inet(prefix.addr()));
+        msg.attributes.push(attr);
+
+        let attr = RouteAttribute::Priority(entry.metric);
+        msg.attributes.push(attr);
+
         if let Some(nhop) = entry.nexthops.first() {
-            route
-                .attributes
-                .push(RouteAttribute::Nhid(nhop.ngid as u32));
+            msg.attributes.push(RouteAttribute::Nhid(nhop.ngid as u32));
         }
 
-        // Metric.
-        route
-            .attributes
-            .push(RouteAttribute::Priority(entry.metric));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
 
-        let result = self.handle.route().del(route).execute().await;
-        match result {
-            Ok(_) => {
-                // println!("route_ipv4_del Ok");
-            }
-            Err(err) => {
-                println!("route_ipv4_del: {}", err);
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewRoute error: {}", e);
             }
         }
     }
@@ -471,44 +480,5 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             }
             _ => {}
         }
-    }
-}
-
-#[derive(Default)]
-struct RouteDelMessage {
-    message: RouteMessage,
-}
-
-impl RouteDelMessage {
-    pub fn new() -> Self {
-        let mut msg = Self {
-            message: RouteMessage::default(),
-        };
-        msg.message.header.table = RouteHeader::RT_TABLE_MAIN;
-        msg.message.header.protocol = RouteProtocol::Static;
-        msg.message.header.scope = RouteScope::Universe;
-        msg.message.header.kind = RouteType::Unicast;
-
-        msg.message.header.address_family = AddressFamily::Inet;
-        msg
-    }
-
-    pub fn destination(mut self, dest: Ipv4Addr, prefixlen: u8) -> Self {
-        self.message
-            .attributes
-            .push(RouteAttribute::Destination(RouteAddress::Inet(dest)));
-        self.message.header.destination_prefix_length = prefixlen;
-        self
-    }
-
-    pub fn gateway(mut self, gateway: Ipv4Addr) -> Self {
-        self.message
-            .attributes
-            .push(RouteAttribute::Gateway(RouteAddress::Inet(gateway)));
-        self
-    }
-
-    pub fn build(self) -> RouteMessage {
-        self.message
     }
 }

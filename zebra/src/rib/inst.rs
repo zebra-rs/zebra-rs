@@ -1,7 +1,7 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
 use super::nexthop::Nexthop;
-use super::{Link, NexthopMap, RibTxChannel, StaticConfig, Vrf};
+use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -23,7 +23,6 @@ pub enum Message {
         prefix: Ipv4Net,
     },
     Ipv4Add {
-        rtype: RibType,
         prefix: Ipv4Net,
         ribs: Vec<RibEntry>,
     },
@@ -180,7 +179,7 @@ impl Rib {
         self.redists.push(tx);
     }
 
-    async fn ipv4_route_add(&mut self, rtype: RibType, prefix: &Ipv4Net, mut rib: RibEntry) {
+    async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
         let replace = rib_replace(&mut self.table, prefix, rib.rtype);
 
         if !rib.is_system() {
@@ -210,13 +209,9 @@ impl Rib {
 
     async fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Ipv4Add {
-                rtype,
-                prefix,
-                mut ribs,
-            } => {
+            Message::Ipv4Add { prefix, mut ribs } => {
                 while let Some(rib) = ribs.pop() {
-                    self.ipv4_route_add(rtype, &prefix, rib).await;
+                    self.ipv4_route_add(&prefix, rib).await;
                 }
             }
             Message::Ipv4Del { rtype, prefix } => {

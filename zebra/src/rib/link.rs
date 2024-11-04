@@ -275,7 +275,6 @@ impl Rib {
                 if let IpNet::V4(net) = addr.addr {
                     // self.ipv4_add(net, e);
                     let msg = Message::Ipv4Add {
-                        rtype: RibType::Connected,
                         prefix: net,
                         ribs: vec![e],
                     };

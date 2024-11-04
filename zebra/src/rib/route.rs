@@ -1,4 +1,4 @@
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::IpNet;
 use std::net::IpAddr;
 
 use crate::fib::message::FibRoute;
@@ -7,15 +7,6 @@ use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::Nexthop;
 use super::{Message, RibType};
-
-fn rib_same_type(ribs: &[RibEntry], entry: &RibEntry) -> Option<usize> {
-    for (i, rib) in ribs.iter().enumerate() {
-        if rib.rtype == entry.rtype {
-            return Some(i);
-        }
-    }
-    None
-}
 
 impl Rib {
     pub fn route_add(&mut self, r: FibRoute) {
@@ -29,7 +20,6 @@ impl Rib {
                     let nexthop = Nexthop::builder().addr(addr).build();
                     e.nexthops.push(nexthop);
                     let _ = self.tx.send(Message::Ipv4Add {
-                        rtype: RibType::Kernel,
                         prefix: v4,
                         ribs: vec![e],
                     });
