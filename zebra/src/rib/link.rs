@@ -183,7 +183,7 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     cb(&link.name, buf);
 }
 
-pub fn link_show(rib: &Rib, mut args: Args) -> String {
+pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
     let cb = os_traffic_dump();
     let mut buf = String::new();
 

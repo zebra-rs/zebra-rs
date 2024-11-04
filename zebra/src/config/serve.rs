@@ -177,6 +177,7 @@ impl Show for ShowService {
         let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
         let req = DisplayRequest {
             paths: request.paths.clone(),
+            json: request.json,
             resp: bus_tx.clone(),
         };
         if is_bgp(&req.paths) {

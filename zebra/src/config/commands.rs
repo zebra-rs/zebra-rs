@@ -33,6 +33,8 @@ pub fn exec_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/show/version"), show_version);
     mode.install_func(String::from("/show/ip/route"), show_ip_route_prefix);
     mode.install_func(String::from("/configure"), configure);
+    mode.install_func(String::from("/cli/format/json"), cli_format_json);
+    mode.install_func(String::from("/cli/format/terminal"), cli_format_terminal);
     mode
 }
 
@@ -71,6 +73,18 @@ fn show_ip_route_prefix(_config: &ConfigManager) -> (ExecCode, String) {
 fn configure(_config: &ConfigManager) -> (ExecCode, String) {
     let cli_command = r#"SuccessExec
 CLI_MODE=configure;CLI_MODE_STR=Configure;CLI_PRIVILEGE=15;_cli_refresh"#;
+    (ExecCode::Success, cli_command.to_string())
+}
+
+fn cli_format_json(_config: &ConfigManager) -> (ExecCode, String) {
+    let cli_command = r#"SuccessExec
+CLI_FORMAT=json;_cli_refresh"#;
+    (ExecCode::Success, cli_command.to_string())
+}
+
+fn cli_format_terminal(_config: &ConfigManager) -> (ExecCode, String) {
+    let cli_command = r#"SuccessExec
+CLI_FORMAT=terminal;_cli_refresh"#;
     (ExecCode::Success, cli_command.to_string())
 }
 

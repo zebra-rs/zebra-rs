@@ -140,5 +140,6 @@ impl ShowChannel {
 #[derive(Debug)]
 pub struct DisplayRequest {
     pub paths: Vec<CommandPath>,
+    pub json: bool,
     pub resp: mpsc::Sender<String>,
 }
