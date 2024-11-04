@@ -83,8 +83,6 @@ fn exec_request(exec_type: i32, mode: &String, commands: &Vec<String>) -> ExecRe
         mode: mode.to_owned(),
         line: command_string(commands),
         args: commands.to_owned(),
-        commands: vec![], // not used.
-        content: 0,       // not used.
     }
 }
 

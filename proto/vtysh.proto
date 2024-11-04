@@ -18,21 +18,13 @@ enum ExecType {
   COMPLETE_DYNAMIC = 4;
 }
 
-// Command reply format type.
-enum ExecConentType {
-  CONTENT_TEXT = 0;
-  CONTENT_JSON = 1;
-}
-
 // The request message containing user input string.
 message ExecRequest {
   ExecType type = 1;
   string mode = 2;
   uint32 privilege = 3;
   string line = 4;
-  repeated string commands = 5;
-  repeated string args = 6;
-  ExecConentType content = 7;
+  repeated string args = 5;
 }
 
 // Command exec code.
