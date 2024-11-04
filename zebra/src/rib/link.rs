@@ -273,10 +273,9 @@ impl Rib {
                 e.set_selected(true);
                 e.set_fib(true);
                 if let IpNet::V4(net) = addr.addr {
-                    // self.ipv4_add(net, e);
                     let msg = Message::Ipv4Add {
                         prefix: net,
-                        ribs: vec![e],
+                        rib: e,
                     };
                     let _ = self.tx.send(msg);
                 }

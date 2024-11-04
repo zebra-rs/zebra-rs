@@ -19,10 +19,7 @@ impl Rib {
                 if !addr.is_unspecified() {
                     let nexthop = Nexthop::builder().addr(addr).build();
                     e.nexthops.push(nexthop);
-                    let _ = self.tx.send(Message::Ipv4Add {
-                        prefix: v4,
-                        ribs: vec![e],
-                    });
+                    let _ = self.tx.send(Message::Ipv4Add { prefix: v4, rib: e });
                 }
             }
         }

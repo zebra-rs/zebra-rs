@@ -18,14 +18,8 @@ use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 pub type ShowCallback = fn(&Rib, Args, bool) -> String;
 
 pub enum Message {
-    Ipv4Del {
-        rtype: RibType,
-        prefix: Ipv4Net,
-    },
-    Ipv4Add {
-        prefix: Ipv4Net,
-        ribs: Vec<RibEntry>,
-    },
+    Ipv4Del { prefix: Ipv4Net, rib: RibEntry },
+    Ipv4Add { prefix: Ipv4Net, rib: RibEntry },
 }
 
 pub enum Resolve {
@@ -201,21 +195,19 @@ impl Rib {
         rib_sync(&mut self.table, prefix, selected, replace, &self.fib_handle).await;
     }
 
-    async fn ipv4_route_del(&mut self, rtype: RibType, prefix: &Ipv4Net) {
-        let replace = rib_replace(&mut self.table, prefix, rtype);
+    async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, rib: RibEntry) {
+        let replace = rib_replace(&mut self.table, prefix, rib.rtype);
         let selected = rib_select(&self.table, prefix);
         rib_sync(&mut self.table, prefix, selected, replace, &self.fib_handle).await;
     }
 
     async fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Ipv4Add { prefix, mut ribs } => {
-                while let Some(rib) = ribs.pop() {
-                    self.ipv4_route_add(&prefix, rib).await;
-                }
+            Message::Ipv4Add { prefix, rib } => {
+                self.ipv4_route_add(&prefix, rib).await;
             }
-            Message::Ipv4Del { rtype, prefix } => {
-                self.ipv4_route_del(rtype, &prefix).await;
+            Message::Ipv4Del { prefix, rib } => {
+                self.ipv4_route_del(&prefix, rib).await;
             }
         }
     }

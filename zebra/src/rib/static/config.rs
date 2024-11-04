@@ -5,6 +5,7 @@ use ipnet::Ipv4Net;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
+use crate::rib::entry::RibEntry;
 use crate::rib::{Message, RibType};
 
 use super::StaticRoute;
@@ -44,15 +45,17 @@ impl StaticConfig {
                 if s.delete {
                     self.config.remove(&p);
                     let msg = Message::Ipv4Del {
-                        rtype: RibType::Static,
                         prefix: p,
+                        rib: RibEntry::new(RibType::Static),
                     };
                     let _ = tx.send(msg);
                 } else {
-                    let ribs = s.to_ribs();
+                    let mut ribs = s.to_ribs();
                     self.config.insert(p, s);
-                    let msg = Message::Ipv4Add { prefix: p, ribs };
-                    let _ = tx.send(msg);
+                    while let Some(rib) = ribs.pop() {
+                        let msg = Message::Ipv4Add { prefix: p, rib };
+                        let _ = tx.send(msg);
+                    }
                 }
             }
         }
