@@ -24,7 +24,7 @@ pub enum Message {
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
 pub type PCallback = fn(&mut CommunityListMap, Args, ConfigOp) -> Option<()>;
-pub type ShowCallback = fn(&Bgp, Args) -> String;
+pub type ShowCallback = fn(&Bgp, Args, bool) -> String;
 
 #[allow(dead_code)]
 pub struct Bgp {
@@ -108,7 +108,7 @@ impl Bgp {
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
-            let output = f(self, args);
+            let output = f(self, args, msg.json);
             msg.resp.send(output).await.unwrap();
         }
     }

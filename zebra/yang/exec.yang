@@ -82,4 +82,18 @@ module exec {
       }
     }
   }
+  container cli {
+    ext:help "Command line interface";
+    leaf format {
+      ext:help "CLI output format";
+      type enumeration {
+        enum terminal {
+          description "Terminal output format";
+        }
+        enum json {
+          description "JSON output";
+        }
+      }
+    }
+  }
 }
