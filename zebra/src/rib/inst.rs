@@ -1,7 +1,9 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
 use super::nexthop::Nexthop;
-use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
+use super::{
+    Link, NexthopGroup, NexthopGroupTrait, NexthopMap, NexthopUni, RibTxChannel, StaticConfig,
+};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -14,12 +16,14 @@ use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 
 pub type ShowCallback = fn(&Rib, Args, bool) -> String;
 
 pub enum Message {
     Ipv4Del { prefix: Ipv4Net, rib: RibEntry },
     Ipv4Add { prefix: Ipv4Net, rib: RibEntry },
+    Shutdown { tx: oneshot::Sender<()> },
 }
 
 pub enum Resolve {
@@ -77,57 +81,57 @@ pub fn rib_resolve(
     Resolve::NotFound
 }
 
-fn resolve(nmap: &NexthopMap, nexthops: &[usize], opt: &ResolveOpt) -> (Vec<Nexthop>, u8) {
-    let mut acc: BTreeSet<Ipv4Addr> = BTreeSet::new();
-    let mut sea_depth: u8 = 0;
-    nexthops
-        .iter()
-        .filter_map(|r| nmap.get(*r))
-        .for_each(|nhop| {
-            resolve_func(nmap, nhop, &mut acc, &mut sea_depth, opt, 0);
-        });
-    let mut nvec: Vec<Nexthop> = Vec::new();
-    for a in acc.iter() {
-        nvec.push(Nexthop::new(*a));
-    }
-    (nvec, sea_depth)
-}
+// fn resolve(nmap: &NexthopMap, nexthops: &[usize], opt: &ResolveOpt) -> (Vec<Nexthop>, u8) {
+//     let mut acc: BTreeSet<Ipv4Addr> = BTreeSet::new();
+//     let mut sea_depth: u8 = 0;
+//     nexthops
+//         .iter()
+//         .filter_map(|r| nmap.get(*r))
+//         .for_each(|nhop| {
+//             resolve_func(nmap, nhop, &mut acc, &mut sea_depth, opt, 0);
+//         });
+//     let mut nvec: Vec<Nexthop> = Vec::new();
+//     for a in acc.iter() {
+//         nvec.push(Nexthop::new(*a));
+//     }
+//     (nvec, sea_depth)
+// }
 
-fn resolve_func(
-    nmap: &NexthopMap,
-    nhop: &Nexthop,
-    acc: &mut BTreeSet<Ipv4Addr>,
-    sea_depth: &mut u8,
-    opt: &ResolveOpt,
-    depth: u8,
-) {
-    if opt.limit() > 0 && depth >= opt.limit() {
-        return;
-    }
+// fn resolve_func(
+//     nmap: &NexthopMap,
+//     nhop: &Nexthop,
+//     acc: &mut BTreeSet<Ipv4Addr>,
+//     sea_depth: &mut u8,
+//     opt: &ResolveOpt,
+//     depth: u8,
+// ) {
+//     if opt.limit() > 0 && depth >= opt.limit() {
+//         return;
+//     }
 
-    // if sea_depth depth is not current one.
-    if *sea_depth < depth {
-        *sea_depth = depth;
-    }
+//     // if sea_depth depth is not current one.
+//     if *sea_depth < depth {
+//         *sea_depth = depth;
+//     }
 
-    // Early exit if the current nexthop is invalid
-    if nhop.invalid {
-        return;
-    }
+//     // Early exit if the current nexthop is invalid
+//     if nhop.invalid {
+//         return;
+//     }
 
-    // Directly insert if on-link, otherwise recursively resolve nexthops
-    if nhop.onlink {
-        acc.insert(nhop.addr);
-        return;
-    }
+//     // Directly insert if on-link, otherwise recursively resolve nexthops
+//     if nhop.onlink {
+//         acc.insert(nhop.addr);
+//         return;
+//     }
 
-    nhop.resolved
-        .iter()
-        .filter_map(|r| nmap.get(*r))
-        .for_each(|nhop| {
-            resolve_func(nmap, nhop, acc, sea_depth, opt, depth + 1);
-        });
-}
+//     nhop.resolved
+//         .iter()
+//         .filter_map(|r| nmap.get(*r))
+//         .for_each(|nhop| {
+//             resolve_func(nmap, nhop, acc, sea_depth, opt, depth + 1);
+//         });
+// }
 
 pub struct Rib {
     pub api: RibTxChannel,
@@ -209,6 +213,10 @@ impl Rib {
             Message::Ipv4Del { prefix, rib } => {
                 self.ipv4_route_del(&prefix, rib).await;
             }
+            Message::Shutdown { tx } => {
+                self.nmap.shutdown(&self.fib_handle).await;
+                let _ = tx.send(());
+            }
         }
     }
 
@@ -284,8 +292,16 @@ impl Rib {
 }
 
 pub fn serve(mut rib: Rib) {
+    let rib_tx = rib.tx.clone();
     tokio::spawn(async move {
         rib.event_loop().await;
+    });
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let _ = rib_tx.send(Message::Shutdown { tx });
+        rx.await.unwrap();
+        std::process::exit(0);
     });
 }
 

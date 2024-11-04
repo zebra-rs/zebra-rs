@@ -152,7 +152,7 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
@@ -168,8 +168,7 @@ impl FibHandle {
         };
         // Nexthop message.
         let mut msg = NexthopMessage::default();
-        msg.header.address_family = AddressFamily::Inet;
-        msg.header.protocol = RouteProtocol::Static;
+        msg.header.address_family = AddressFamily::Unspec;
 
         // Nexthop group ID.
         let attr = NexthopAttribute::Id(uni.ngid() as u32);
