@@ -41,12 +41,15 @@ impl fmt::Display for Nexthop {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq)]
 pub enum NexthopSet {
+    #[default]
+    None,
     Uni(Nexthop),
     Multi(NexthopMulti),
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct NexthopMulti {
     pub metric: u32,
     pub nexthops: BTreeMap<Ipv4Addr, Nexthop>,

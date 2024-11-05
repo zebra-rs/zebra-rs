@@ -1,5 +1,5 @@
 use super::nexthop::Nexthop;
-use super::{Rib, RibSubType, RibType};
+use super::{NexthopSet, Rib, RibSubType, RibType};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
@@ -11,6 +11,9 @@ pub struct RibEntry {
     pub distance: u8,
     pub metric: u32,
     pub nexthops: Vec<Nexthop>,
+
+    // Nexthop set. Nexthop can be unipath, multipath and protected path.
+    pub nhopset: NexthopSet,
 
     // Connected RIB's ifindex.
     pub ifindex: u32,
@@ -27,6 +30,7 @@ impl RibEntry {
             distance: 0,
             metric: 0,
             nexthops: Vec::new(),
+            nhopset: NexthopSet::default(),
             ifindex: 0,
         }
     }

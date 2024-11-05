@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::Nexthop;
-use crate::rib::{NexthopMulti, RibType};
+use crate::rib::{NexthopMulti, NexthopSet, RibType};
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
@@ -109,6 +109,7 @@ impl StaticRoute {
                 nhop.weight = n.weight.unwrap_or(0);
                 multi.nexthops.insert(*p, nhop);
             }
+            entry.nhopset = NexthopSet::Multi(multi);
         } else {
             // Protected.
         }
