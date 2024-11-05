@@ -166,10 +166,6 @@ fn rib_prev(entries: &Vec<RibEntry>) -> Option<usize> {
     entries.iter().position(|e| e.is_selected())
 }
 
-fn rib_fib(entries: &Vec<RibEntry>) -> Option<usize> {
-    entries.iter().position(|e| e.is_fib())
-}
-
 pub fn rib_next(ribs: &Vec<RibEntry>) -> Option<usize> {
     let index = ribs
         .iter()
@@ -209,24 +205,27 @@ pub async fn rib_selection(
     // New select.
     let next = rib_next(&entries.ribs);
 
-    if prev == next {
+    if prev.is_some() && prev == next {
         println!("prev and next is same");
         return;
     }
 
     if let Some(replace) = replace {
+        println!("replace");
         if replace.is_fib() {
             fib.route_ipv4_del(prefix, &replace).await;
             for nhop in replace.nexthops.iter() {
-                nmap.unregister(nhop.gid, fib);
+                println!("replace nexthop {}", nhop.gid);
+                nmap.unregister(nhop.gid, fib).await;
             }
         }
     }
     if let Some(prev) = prev {
+        println!("prev");
         let prev = entries.ribs.get_mut(prev).unwrap();
         fib.route_ipv4_del(prefix, prev).await;
         for nhop in prev.nexthops.iter() {
-            nmap.unregister(nhop.gid, fib);
+            nmap.unregister(nhop.gid, fib).await;
         }
         prev.set_selected(false);
         prev.set_fib(false);
@@ -242,29 +241,5 @@ pub async fn rib_selection(
             }
             fib.route_ipv4_add(prefix, &next).await;
         }
-    }
-}
-
-pub async fn rib_sync(
-    rib: &mut PrefixMap<Ipv4Net, RibEntries>,
-    prefix: &Ipv4Net,
-    index: Option<usize>,
-    mut replace: Vec<RibEntry>,
-    fib: &FibHandle,
-) {
-    let Some(entries) = rib.get_mut(prefix) else {
-        return;
-    };
-
-    while let Some(entry) = replace.pop() {
-        if entry.is_fib() {
-            fib.route_ipv4_del(prefix, &entry).await;
-        }
-    }
-
-    if let Some(sindex) = index {
-        let entry = entries.ribs.get_mut(sindex).unwrap();
-        fib.route_ipv4_add(prefix, &entry).await;
-        entry.set_fib(true);
     }
 }

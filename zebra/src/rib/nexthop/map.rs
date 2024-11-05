@@ -1,12 +1,6 @@
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
-use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
-
-use crate::{
-    fib::FibHandle,
-    rib::{nexthop::Nexthop, RibEntries},
-};
+use crate::fib::FibHandle;
 
 use super::{GroupSet, GroupTrait};
 
@@ -30,22 +24,6 @@ impl Default for NexthopMap {
 }
 
 impl NexthopMap {
-    // pub fn register(&mut self, addr: Ipv4Addr) -> usize {
-    //     // When indexed nexthop is None, set a new one.
-    //     if let Some(&index) = self.map.get(&addr) {
-    //         self.values[index]
-    //             .get_or_insert_with(|| Nexthop::new(addr))
-    //             .refcnt += 1;
-    //         return index;
-    //     }
-
-    //     // Insert new nexthop if the address does not exist
-    //     let index = self.values.len();
-    //     self.map.insert(addr, index);
-    //     self.values.push(Some(Nexthop::new(addr)));
-    //     index
-    // }
-
     pub async fn register_group(&mut self, addr: Ipv4Addr, ifindex: u32, fib: &FibHandle) -> usize {
         if let Some(&index) = self.map.get(&addr) {
             if let Some(group) = self.get_mut(index) {
@@ -72,33 +50,9 @@ impl NexthopMap {
         }
     }
 
-    // pub fn get(&self, index: usize) -> Option<&Nexthop> {
-    //     self.values.get(index)?.as_ref()
-    // }
-
     pub fn get_mut(&mut self, index: usize) -> Option<&mut GroupSet> {
         self.groups.get_mut(index)
     }
-
-    pub fn lookup(&self, addr: Ipv4Addr) -> Option<usize> {
-        self.map.get(&addr).copied()
-    }
-
-    // pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
-    //     for n in self.groups.iter_mut().flatten() {
-    //         match rib_resolve(table, n.addr, &ResolveOpt::default()) {
-    //             Resolve::NotFound => {
-    //                 n.invalid = true;
-    //             }
-    //             Resolve::Onlink(_) => {
-    //                 n.onlink = true;
-    //             }
-    //             Resolve::Recursive(resolved) => {
-    //                 n.resolved = resolved;
-    //             }
-    //         }
-    //     }
-    // }
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {
         for grp in self.groups.iter() {

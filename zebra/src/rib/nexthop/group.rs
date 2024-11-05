@@ -127,8 +127,8 @@ pub trait GroupTrait {
 
     fn refcnt_dec(&mut self) {
         let refcnt = self.refcnt_mut();
-        if *refcnt > 1 {
-            *refcnt += 1;
+        if *refcnt > 0 {
+            *refcnt -= 1;
         }
     }
 }

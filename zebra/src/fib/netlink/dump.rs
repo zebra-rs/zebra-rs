@@ -3,11 +3,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use anyhow::Result;
 use futures::stream::TryStreamExt;
 use rtnetlink::{IpVersion, RouteMessageBuilder};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{fib::FibMessage, rib::Rib};
 
-use super::{addr_from_msg, link_from_msg, route_from_msg, FibHandle};
+use super::{addr_from_msg, link_from_msg, route_from_msg};
 
 pub async fn fib_dump(rib: &mut Rib) -> Result<()> {
     link_dump(rib, rib.fib_handle.handle.clone()).await?;

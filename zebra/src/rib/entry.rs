@@ -35,10 +35,6 @@ impl RibEntry {
         }
     }
 
-    pub fn is_static(&self) -> bool {
-        self.rtype == RibType::Static
-    }
-
     pub fn is_connected(&self) -> bool {
         self.rtype == RibType::Connected
     }

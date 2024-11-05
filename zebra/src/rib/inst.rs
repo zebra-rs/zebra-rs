@@ -1,19 +1,15 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::nexthop::Nexthop;
-use super::route::{rib_add, rib_replace, rib_sync};
-use super::{GroupSet, GroupTrait, GroupUni, Link, NexthopMap, RibTxChannel, StaticConfig};
+use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::fib::fib_dump;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
 use crate::rib::RibEntries;
-use crate::rib::RibType;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::Ipv4Addr;
+use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
