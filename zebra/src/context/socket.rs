@@ -7,11 +7,12 @@ use super::Context;
 
 impl Context {
     async fn connect<A: ToSocketAddrs>(addr: &str) -> io::Result<()> {
-        let addrs = "127.0.0.1:8080".parse::<SocketAddr>().unwrap();
+        let sock_addr = addr.parse::<SocketAddr>().unwrap();
 
         let socket = TcpSocket::new_v4()?;
         socket.bind_device(Some(b"vrf1"));
-        let stream = socket.connect(addrs).await?;
+
+        let stream = socket.connect(sock_addr).await?;
 
         Ok(())
     }
