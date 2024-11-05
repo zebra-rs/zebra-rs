@@ -211,17 +211,14 @@ pub async fn rib_selection(
     }
 
     if let Some(replace) = replace {
-        println!("replace");
         if replace.is_fib() {
             fib.route_ipv4_del(prefix, &replace).await;
             for nhop in replace.nexthops.iter() {
-                println!("replace nexthop {}", nhop.gid);
                 nmap.unregister(nhop.gid, fib).await;
             }
         }
     }
     if let Some(prev) = prev {
-        println!("prev");
         let prev = entries.ribs.get_mut(prev).unwrap();
         fib.route_ipv4_del(prefix, prev).await;
         for nhop in prev.nexthops.iter() {

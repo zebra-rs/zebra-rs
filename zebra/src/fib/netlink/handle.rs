@@ -26,10 +26,11 @@ use rtnetlink::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::context::vrf::Vrf;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::{link, GroupSet, GroupTrait, Vrf};
+use crate::rib::{link, GroupSet, GroupTrait};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
