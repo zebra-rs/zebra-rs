@@ -5,11 +5,7 @@ use prefix_trie::PrefixMap;
 
 use crate::{
     fib::FibHandle,
-    rib::{
-        inst::{rib_resolve, Resolve, ResolveOpt},
-        nexthop::Nexthop,
-        RibEntries,
-    },
+    rib::{nexthop::Nexthop, RibEntries},
 };
 
 use super::{GroupSet, GroupTrait};

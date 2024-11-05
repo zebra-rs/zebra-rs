@@ -5,10 +5,8 @@ use prefix_trie::PrefixMap;
 use GroupSet::*;
 
 use crate::fib::FibHandle;
-use crate::rib::{
-    entry::RibEntries,
-    inst::{rib_resolve, Resolve, ResolveOpt},
-};
+use crate::rib::entry::RibEntries;
+use crate::rib::route::{rib_resolve, Resolve, ResolveOpt};
 
 pub enum GroupSet {
     Uni(GroupUni),
