@@ -24,7 +24,7 @@ impl Default for NexthopMap {
         // Pushing dummy for making first index to be 1.
         // nmap.values.push(None);
         nmap.groups
-            .push(GroupSet::new_uni(&Ipv4Addr::UNSPECIFIED, 0));
+            .push(GroupSet::new_uni(&Ipv4Addr::UNSPECIFIED, 0, 0));
         nmap
     }
 }
@@ -46,14 +46,17 @@ impl NexthopMap {
     //     index
     // }
 
-    pub fn register_group(&mut self, addr: Ipv4Addr) -> usize {
+    pub async fn register_group(&mut self, addr: Ipv4Addr, ifindex: u32, fib: &FibHandle) -> usize {
         if let Some(&index) = self.map.get(&addr) {
             index
         } else {
-            let index = self.groups.len();
-            self.map.insert(addr, index);
-            self.groups.push(GroupSet::new_uni(&addr, index));
-            index
+            let gid = self.groups.len();
+            self.map.insert(addr, gid);
+            let mut uni = GroupSet::new_uni(&addr, ifindex, gid);
+            fib.nexthop_add(&uni).await;
+            uni.set_installed(true);
+            self.groups.push(uni);
+            gid
         }
     }
 

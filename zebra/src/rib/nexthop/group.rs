@@ -15,8 +15,9 @@ pub enum GroupSet {
 }
 
 impl GroupSet {
-    pub fn new_uni(addr: &Ipv4Addr, gid: usize) -> Self {
+    pub fn new_uni(addr: &Ipv4Addr, ifindex: u32, gid: usize) -> Self {
         let mut uni: GroupUni = GroupUni::new(addr);
+        uni.ifindex = ifindex;
         uni.common.gid = gid;
         GroupSet::Uni(uni)
     }

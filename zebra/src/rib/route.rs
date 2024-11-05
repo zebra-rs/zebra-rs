@@ -8,7 +8,7 @@ use crate::fib::FibHandle;
 use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::Nexthop;
-use super::{Message, RibEntries, RibType};
+use super::{Message, NexthopMap, RibEntries, RibType};
 
 impl Rib {
     pub fn route_add(&mut self, r: FibRoute) {
@@ -36,47 +36,44 @@ impl Rib {
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
-
-        if rib.is_protocol() {
-            for nhop in rib.nexthops.iter_mut() {
-                // let gid = self.nmap.register_group(nhop.addr);
-                // nhop.gid = gid;
-
-                // Resolve nexthop.
-                let resolve = rib_resolve(&self.table, nhop.addr, &ResolveOpt::default());
-                let ifindex = resolve.is_valid();
-                if ifindex != 0 {
-                    println!("Nexthop {} is resolved to ifindex {}", nhop.addr, ifindex);
-                    nhop.set_valid(true);
-                    nhop.ifindex = ifindex;
-                }
-            }
-            // RibEntry valid.
-            let valid = nexthop_valid(&rib.nexthops);
-            println!("Nexthop valid {}", valid);
-            rib.set_valid(valid);
-
-            // for nhop in rib.nexthops.iter() {
-            //     let gid = nhop.gid;
-            //     if let Some(uni) = self.nmap.get_mut(gid) {
-            //         uni.resolve(&self.table);
-            //         uni.sync(&self.fib_handle).await;
-            //     }
-            // }
-        }
+        rib_resolve_nexthop(&mut rib, &self.table);
         rib_add(&mut self.table, prefix, rib);
-        rib_selection(&mut self.table, prefix, replace.pop(), &self.fib_handle).await;
-
-        // let selected = rib_select(&self.table, prefix);
-        // rib_sync(&mut self.table, prefix, selected, replace, &self.fib_handle).await;
+        rib_selection(
+            &mut self.table,
+            prefix,
+            replace.pop(),
+            &mut self.nmap,
+            &self.fib_handle,
+        )
+        .await;
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, rib: RibEntry) {
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
-        // let selected = rib_select(&self.table, prefix);
-        // rib_sync(&mut self.table, prefix, selected, replace, &self.fib_handle).await;
-        rib_selection(&mut self.table, prefix, replace.pop(), &self.fib_handle);
+        rib_selection(
+            &mut self.table,
+            prefix,
+            replace.pop(),
+            &mut self.nmap,
+            &self.fib_handle,
+        )
+        .await;
     }
+}
+
+fn rib_resolve_nexthop(rib: &mut RibEntry, table: &PrefixMap<Ipv4Net, RibEntries>) {
+    if !rib.is_protocol() {
+        return;
+    }
+    for nhop in rib.nexthops.iter_mut() {
+        let resolve = rib_resolve(table, nhop.addr, &ResolveOpt::default());
+        let ifindex = resolve.is_valid();
+        if ifindex != 0 {
+            nhop.set_valid(true);
+            nhop.ifindex = ifindex;
+        }
+    }
+    rib.set_valid(nexthop_valid(&rib.nexthops));
 }
 
 fn nexthop_valid(nhops: &Vec<Nexthop>) -> bool {
@@ -199,6 +196,7 @@ pub async fn rib_selection(
     rib: &mut PrefixMap<Ipv4Net, RibEntries>,
     prefix: &Ipv4Net,
     replace: Option<RibEntry>,
+    nmap: &mut NexthopMap,
     fib: &FibHandle,
 ) {
     let Some(entries) = rib.get_mut(prefix) else {
@@ -207,11 +205,9 @@ pub async fn rib_selection(
 
     // Selected.
     let prev = rib_prev(&entries.ribs);
-    println!("prev: {:?}", prev);
 
     // New select.
     let next = rib_next(&entries.ribs);
-    println!("next: {:?}", next);
 
     if prev == next {
         println!("prev and next is same");
@@ -234,6 +230,13 @@ pub async fn rib_selection(
         next.set_selected(true);
         next.set_fib(true);
         // Add Route.
+        if next.is_protocol() {
+            for nhop in next.nexthops.iter_mut() {
+                nhop.gid = nmap.register_group(nhop.addr, nhop.ifindex, fib).await;
+                println!("nexthop gid {}", nhop.gid);
+            }
+            fib.route_ipv4_add(prefix, &next).await;
+        }
     }
 }
 
