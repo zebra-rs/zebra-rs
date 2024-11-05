@@ -50,9 +50,9 @@ impl StaticConfig {
                     };
                     let _ = tx.send(msg);
                 } else {
-                    let mut ribs = s.to_ribs();
+                    let entry = s.to_entry();
                     self.config.insert(p, s);
-                    while let Some(rib) = ribs.pop() {
+                    if let Some(rib) = entry {
                         let msg = Message::Ipv4Add { prefix: p, rib };
                         let _ = tx.send(msg);
                     }

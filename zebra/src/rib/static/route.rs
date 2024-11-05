@@ -36,36 +36,6 @@ impl fmt::Display for StaticRoute {
 }
 
 impl StaticRoute {
-    pub fn to_ribs(&self) -> Vec<RibEntry> {
-        let mut entries: Vec<RibEntry> = Vec::new();
-        if self.nexthops.is_empty() {
-            return entries;
-        }
-        let mut map: BTreeMap<u32, Vec<Nexthop>> = BTreeMap::new();
-        let metric = self.metric.unwrap_or(0);
-        let distance = self.distance.unwrap_or(1);
-
-        for (p, n) in self.nexthops.iter() {
-            let metric = n.metric.unwrap_or(metric);
-            let e = map.entry(metric).or_default();
-            let mut nhop = Nexthop::default();
-            nhop.addr = *p;
-            if let Some(w) = n.weight {
-                nhop.weight = w;
-            }
-            e.push(nhop);
-        }
-        for (m, v) in map.iter() {
-            let mut entry = RibEntry::new(RibType::Static);
-            entry.distance = distance;
-            entry.metric = *m;
-            entry.nexthops = v.clone();
-            // entry.valid = true;
-            entries.push(entry);
-        }
-        entries
-    }
-
     pub fn to_entry(&self) -> Option<RibEntry> {
         if self.nexthops.is_empty() {
             return None;
