@@ -48,6 +48,9 @@ impl NexthopMap {
 
     pub async fn register_group(&mut self, addr: Ipv4Addr, ifindex: u32, fib: &FibHandle) -> usize {
         if let Some(&index) = self.map.get(&addr) {
+            if let Some(group) = self.get_mut(index) {
+                group.refcnt_inc();
+            }
             index
         } else {
             let gid = self.groups.len();
@@ -60,15 +63,12 @@ impl NexthopMap {
         }
     }
 
-    pub fn unregister(&mut self, addr: Ipv4Addr) {
-        // Decrement refcnt; if it reaches zero, remove the nexthop at this index.
-        if let Some(&index) = self.map.get(&addr) {
-            // if let Some(ref mut nhop) = self.groups.[index] {
-            //     nhop.refcnt -= 1;
-            //     if nhop.refcnt == 0 {
-            //         // self.values[index] = None;
-            //     }
-            // }
+    pub async fn unregister(&mut self, gid: usize, fib: &FibHandle) {
+        if let Some(group) = self.groups.get_mut(gid) {
+            group.refcnt_dec();
+            if group.refcnt() == 0 {
+                fib.nexthop_del(group).await;
+            }
         }
     }
 

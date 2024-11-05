@@ -23,12 +23,22 @@ impl GroupSet {
     }
 }
 
-#[derive(Default)]
 pub struct GroupCommon {
     gid: usize,
     valid: bool,
     installed: bool,
     refcnt: usize,
+}
+
+impl Default for GroupCommon {
+    fn default() -> Self {
+        Self {
+            gid: 0,
+            valid: false,
+            installed: false,
+            refcnt: 1,
+        }
+    }
 }
 
 pub struct GroupUni {
@@ -104,6 +114,22 @@ pub trait GroupTrait {
 
     fn refcnt(&self) -> usize {
         self.common().refcnt
+    }
+
+    fn refcnt_mut(&mut self) -> &mut usize {
+        &mut self.common_mut().refcnt
+    }
+
+    fn refcnt_inc(&mut self) {
+        let refcnt = self.refcnt_mut();
+        *refcnt += 1;
+    }
+
+    fn refcnt_dec(&mut self) {
+        let refcnt = self.refcnt_mut();
+        if *refcnt > 1 {
+            *refcnt += 1;
+        }
     }
 }
 

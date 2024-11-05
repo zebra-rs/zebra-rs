@@ -216,14 +216,20 @@ pub async fn rib_selection(
 
     if let Some(replace) = replace {
         if replace.is_fib() {
-            // Delete route.
+            fib.route_ipv4_del(prefix, &replace).await;
+            for nhop in replace.nexthops.iter() {
+                nmap.unregister(nhop.gid, fib);
+            }
         }
     }
     if let Some(prev) = prev {
         let prev = entries.ribs.get_mut(prev).unwrap();
+        fib.route_ipv4_del(prefix, prev).await;
+        for nhop in prev.nexthops.iter() {
+            nmap.unregister(nhop.gid, fib);
+        }
         prev.set_selected(false);
         prev.set_fib(false);
-        // Delete Route.
     }
     if let Some(next) = next {
         let next = entries.ribs.get_mut(next).unwrap();
@@ -233,7 +239,6 @@ pub async fn rib_selection(
         if next.is_protocol() {
             for nhop in next.nexthops.iter_mut() {
                 nhop.gid = nmap.register_group(nhop.addr, nhop.ifindex, fib).await;
-                println!("nexthop gid {}", nhop.gid);
             }
             fib.route_ipv4_add(prefix, &next).await;
         }
