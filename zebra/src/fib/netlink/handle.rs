@@ -456,6 +456,7 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
         match msg {
             RouteNetlinkMessage::NewLink(msg) => {
                 let link = link_from_msg(msg);
+                println!("NewLink: {:?}", link);
                 let msg = FibMessage::NewLink(link);
                 tx.send(msg).unwrap();
             }

@@ -35,29 +35,67 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
+        println!("IPv4 route add: {} {}", rib.rtype.abbrev(), prefix);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
         rib_resolve_nexthop(&mut rib, &self.table);
         rib_add(&mut self.table, prefix, rib);
-        rib_selection(
-            &mut self.table,
-            prefix,
-            replace.pop(),
-            &mut self.nmap,
-            &self.fib_handle,
-        )
-        .await;
+        self.rib_selection(prefix, replace.pop()).await;
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, rib: RibEntry) {
+        println!("IPv4 route del: {} {}", rib.rtype.abbrev(), prefix);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
-        rib_selection(
-            &mut self.table,
-            prefix,
-            replace.pop(),
-            &mut self.nmap,
-            &self.fib_handle,
-        )
-        .await;
+        self.rib_selection(prefix, replace.pop()).await;
+    }
+
+    pub async fn rib_selection(&mut self, prefix: &Ipv4Net, replace: Option<RibEntry>) {
+        let Some(entries) = self.table.get_mut(prefix) else {
+            return;
+        };
+
+        // Selected.
+        let prev = rib_prev(&entries.ribs);
+
+        // New select.
+        let next = rib_next(&entries.ribs);
+
+        if prev.is_some() && prev == next {
+            println!("prev and next is same");
+            return;
+        }
+
+        if let Some(replace) = replace {
+            if replace.is_protocol() && replace.is_fib() {
+                self.fib_handle.route_ipv4_del(prefix, &replace).await;
+                for nhop in replace.nexthops.iter() {
+                    self.nmap.unregister(nhop.gid, &self.fib_handle).await;
+                }
+            }
+        }
+        if let Some(prev) = prev {
+            let prev = entries.ribs.get_mut(prev).unwrap();
+            self.fib_handle.route_ipv4_del(prefix, prev).await;
+            for nhop in prev.nexthops.iter() {
+                self.nmap.unregister(nhop.gid, &self.fib_handle).await;
+            }
+            prev.set_selected(false);
+            prev.set_fib(false);
+        }
+        if let Some(next) = next {
+            let next = entries.ribs.get_mut(next).unwrap();
+            next.set_selected(true);
+            next.set_fib(true);
+            // Add Route.
+            if next.is_protocol() {
+                for nhop in next.nexthops.iter_mut() {
+                    nhop.gid = self
+                        .nmap
+                        .register_group(nhop.addr, nhop.ifindex, &self.fib_handle)
+                        .await;
+                }
+                self.fib_handle.route_ipv4_add(prefix, &next).await;
+            }
+        }
     }
 }
 
@@ -126,12 +164,6 @@ impl ResolveOpt {
     pub fn allow_default(&self) -> bool {
         self.allow_default
     }
-
-    // Zero means infinite lookup.
-    #[allow(dead_code)]
-    pub fn limit(&self) -> u8 {
-        self.limit
-    }
 }
 
 pub fn rib_resolve(
@@ -186,57 +218,4 @@ pub fn rib_next(ribs: &Vec<RibEntry>) -> Option<usize> {
         .map(|(index, _)| index);
 
     index
-}
-
-pub async fn rib_selection(
-    rib: &mut PrefixMap<Ipv4Net, RibEntries>,
-    prefix: &Ipv4Net,
-    replace: Option<RibEntry>,
-    nmap: &mut NexthopMap,
-    fib: &FibHandle,
-) {
-    let Some(entries) = rib.get_mut(prefix) else {
-        return;
-    };
-
-    // Selected.
-    let prev = rib_prev(&entries.ribs);
-
-    // New select.
-    let next = rib_next(&entries.ribs);
-
-    if prev.is_some() && prev == next {
-        println!("prev and next is same");
-        return;
-    }
-
-    if let Some(replace) = replace {
-        if replace.is_fib() {
-            fib.route_ipv4_del(prefix, &replace).await;
-            for nhop in replace.nexthops.iter() {
-                nmap.unregister(nhop.gid, fib).await;
-            }
-        }
-    }
-    if let Some(prev) = prev {
-        let prev = entries.ribs.get_mut(prev).unwrap();
-        fib.route_ipv4_del(prefix, prev).await;
-        for nhop in prev.nexthops.iter() {
-            nmap.unregister(nhop.gid, fib).await;
-        }
-        prev.set_selected(false);
-        prev.set_fib(false);
-    }
-    if let Some(next) = next {
-        let next = entries.ribs.get_mut(next).unwrap();
-        next.set_selected(true);
-        next.set_fib(true);
-        // Add Route.
-        if next.is_protocol() {
-            for nhop in next.nexthops.iter_mut() {
-                nhop.gid = nmap.register_group(nhop.addr, nhop.ifindex, fib).await;
-            }
-            fib.route_ipv4_add(prefix, &next).await;
-        }
-    }
 }
