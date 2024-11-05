@@ -267,16 +267,12 @@ impl Rib {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.link_index) {
             if link_addr_update(link, addr.clone()).is_some() {
-                let mut e = RibEntry::new(RibType::Connected);
-                e.ifindex = link.index;
-                e.distance = 0;
-                e.set_selected(true);
-                e.set_fib(true);
-                if let IpNet::V4(net) = addr.addr {
-                    let msg = Message::Ipv4Add {
-                        prefix: net,
-                        rib: e,
-                    };
+                let mut rib = RibEntry::new(RibType::Connected);
+                rib.ifindex = link.index;
+                rib.set_fib(true);
+                rib.set_valid(true);
+                if let IpNet::V4(prefix) = addr.addr {
+                    let msg = Message::Ipv4Add { prefix, rib };
                     let _ = self.tx.send(msg);
                 }
             }

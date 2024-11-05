@@ -43,8 +43,12 @@ impl RibEntry {
         self.rtype == RibType::Connected
     }
 
+    pub fn set_valid(&mut self, valid: bool) {
+        self.valid = valid;
+    }
+
     pub fn is_valid(&self) -> bool {
-        true
+        self.valid
     }
 
     pub fn is_protocol(&self) -> bool {

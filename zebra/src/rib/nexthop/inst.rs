@@ -5,8 +5,7 @@ use std::net::Ipv4Addr;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nexthop {
     pub addr: Ipv4Addr,
-    pub invalid: bool,
-    pub onlink: bool,
+    valid: bool,
     pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
@@ -19,14 +18,21 @@ impl Nexthop {
         nhop.addr = addr;
         nhop
     }
+
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    pub fn set_valid(&mut self, valid: bool) {
+        self.valid = valid;
+    }
 }
 
 impl Default for Nexthop {
     fn default() -> Self {
         Self {
             addr: Ipv4Addr::UNSPECIFIED,
-            invalid: false,
-            onlink: false,
+            valid: false,
             ifindex: 0,
             metric: 0,
             weight: 0,
