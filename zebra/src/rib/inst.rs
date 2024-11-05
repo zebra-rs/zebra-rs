@@ -178,14 +178,14 @@ impl Rib {
     async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
         let replace = rib_replace(&mut self.table, prefix, rib.rtype);
 
-        if !rib.is_system() {
+        if rib.is_protocol() {
             for nhop in rib.nexthops.iter_mut() {
-                let ngid = self.nmap.register_group(nhop.addr);
-                nhop.ngid = ngid;
+                let gid = self.nmap.register_group(nhop.addr);
+                nhop.gid = gid;
             }
             for nhop in rib.nexthops.iter() {
-                let ngid = nhop.ngid;
-                if let Some(uni) = self.nmap.get_mut(ngid) {
+                let gid = nhop.gid;
+                if let Some(uni) = self.nmap.get_mut(gid) {
                     uni.resolve(&self.table);
                     uni.sync(&self.fib_handle).await;
                 }

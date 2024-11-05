@@ -63,7 +63,7 @@ impl FibHandle {
     }
 
     pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
-        if entry.is_system() {
+        if !entry.is_protocol() {
             return;
         }
         let mut msg = RouteMessage::default();
@@ -82,7 +82,7 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         if let Some(nhop) = entry.nexthops.first() {
-            msg.attributes.push(RouteAttribute::Nhid(nhop.ngid as u32));
+            msg.attributes.push(RouteAttribute::Nhid(nhop.gid as u32));
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
@@ -97,7 +97,7 @@ impl FibHandle {
     }
 
     pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
-        if entry.is_system() {
+        if !entry.is_protocol() {
             return;
         }
         let mut msg = RouteMessage::default();
@@ -116,7 +116,7 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         if let Some(nhop) = entry.nexthops.first() {
-            msg.attributes.push(RouteAttribute::Nhid(nhop.ngid as u32));
+            msg.attributes.push(RouteAttribute::Nhid(nhop.gid as u32));
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
@@ -140,7 +140,7 @@ impl FibHandle {
         msg.header.protocol = RouteProtocol::Static;
 
         // Nexthop group ID.
-        let attr = NexthopAttribute::Id(uni.ngid() as u32);
+        let attr = NexthopAttribute::Id(uni.gid() as u32);
         msg.attributes.push(attr);
 
         // Gateway address.
@@ -158,7 +158,7 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             match msg.payload {
                 NetlinkPayload::Error(e) => {
-                    println!("NewNexthop error: {} ngid: {}", e, uni.ngid());
+                    println!("NewNexthop error: {} gid: {}", e, uni.gid());
                 }
                 NetlinkPayload::Done(m) => {
                     println!("NewNexthop done {:?}", m);
@@ -179,7 +179,7 @@ impl FibHandle {
         msg.header.address_family = AddressFamily::Unspec;
 
         // Nexthop group ID.
-        let attr = NexthopAttribute::Id(uni.ngid() as u32);
+        let attr = NexthopAttribute::Id(uni.gid() as u32);
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelNexthop(msg));

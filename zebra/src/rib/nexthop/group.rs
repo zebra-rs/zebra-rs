@@ -17,16 +17,16 @@ pub enum GroupSet {
 }
 
 impl GroupSet {
-    pub fn new_uni(addr: &Ipv4Addr, ngid: usize) -> Self {
+    pub fn new_uni(addr: &Ipv4Addr, gid: usize) -> Self {
         let mut uni: GroupUni = GroupUni::new(addr);
-        uni.common.ngid = ngid;
+        uni.common.gid = gid;
         GroupSet::Uni(uni)
     }
 }
 
 #[derive(Default)]
 pub struct GroupCommon {
-    ngid: usize,
+    gid: usize,
     valid: bool,
     installed: bool,
     refcnt: usize,
@@ -79,12 +79,12 @@ pub trait GroupTrait {
 
     fn common_mut(&mut self) -> &mut GroupCommon;
 
-    fn ngid(&self) -> usize {
-        self.common().ngid
+    fn gid(&self) -> usize {
+        self.common().gid
     }
 
-    fn set_ngid(&mut self, ngid: usize) {
-        self.common_mut().ngid = ngid;
+    fn set_gid(&mut self, gid: usize) {
+        self.common_mut().gid = gid;
     }
 
     fn is_valid(&self) -> bool {

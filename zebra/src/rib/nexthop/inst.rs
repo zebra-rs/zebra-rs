@@ -10,7 +10,7 @@ pub struct Nexthop {
     pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
-    pub ngid: usize,
+    pub gid: usize,
 }
 
 impl Nexthop {
@@ -30,7 +30,7 @@ impl Default for Nexthop {
             ifindex: 0,
             metric: 0,
             weight: 0,
-            ngid: 0,
+            gid: 0,
         }
     }
 }

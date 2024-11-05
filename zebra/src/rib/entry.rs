@@ -47,8 +47,11 @@ impl RibEntry {
         true
     }
 
-    pub fn is_system(&self) -> bool {
-        self.rtype == RibType::Connected || self.rtype == RibType::Kernel
+    pub fn is_protocol(&self) -> bool {
+        match self.rtype {
+            RibType::Static | RibType::Rip | RibType::Ospf | RibType::Isis | RibType::Bgp => true,
+            _ => false,
+        }
     }
 
     pub fn is_fib(&self) -> bool {
