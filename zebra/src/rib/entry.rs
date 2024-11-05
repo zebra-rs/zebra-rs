@@ -11,8 +11,8 @@ pub struct RibEntry {
     pub distance: u8,
     pub metric: u32,
     pub nexthops: Vec<Nexthop>,
-    pub nhops: Vec<usize>,
-    pub resolved: Vec<Nexthop>,
+
+    // Connected RIB's ifindex.
     pub ifindex: u32,
 }
 
@@ -27,9 +27,7 @@ impl RibEntry {
             distance: 0,
             metric: 0,
             nexthops: Vec::new(),
-            nhops: Vec::new(),
             ifindex: 0,
-            resolved: Vec::new(),
         }
     }
 

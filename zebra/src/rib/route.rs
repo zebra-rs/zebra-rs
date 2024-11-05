@@ -17,7 +17,8 @@ impl Rib {
             e.set_fib(true);
             if let IpAddr::V4(addr) = r.gateway {
                 if !addr.is_unspecified() {
-                    let nexthop = Nexthop::builder().addr(addr).build();
+                    let mut nexthop = Nexthop::default();
+                    nexthop.addr = addr;
                     e.nexthops.push(nexthop);
                     let _ = self.tx.send(Message::Ipv4Add { prefix: v4, rib: e });
                 }

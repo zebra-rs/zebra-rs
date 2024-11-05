@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use GroupNexthop::*;
+use GroupSet::*;
 
 use crate::fib::FibHandle;
 use crate::rib::{
@@ -10,17 +10,17 @@ use crate::rib::{
     inst::{rib_resolve, Resolve, ResolveOpt},
 };
 
-pub enum GroupNexthop {
+pub enum GroupSet {
     Uni(GroupUni),
     Multi(GroupMulti),
     Protect(GroupProtect),
 }
 
-impl GroupNexthop {
+impl GroupSet {
     pub fn new_uni(addr: &Ipv4Addr, ngid: usize) -> Self {
         let mut uni: GroupUni = GroupUni::new(addr);
         uni.common.ngid = ngid;
-        GroupNexthop::Uni(uni)
+        GroupSet::Uni(uni)
     }
 }
 
@@ -108,7 +108,7 @@ pub trait GroupTrait {
     }
 }
 
-impl GroupNexthop {
+impl GroupSet {
     pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
         let Uni(uni) = self else {
             return;
@@ -131,7 +131,7 @@ impl GroupNexthop {
     }
 }
 
-impl GroupTrait for GroupNexthop {
+impl GroupTrait for GroupSet {
     fn common(&self) -> &GroupCommon {
         match self {
             Uni(uni) => &uni.common,

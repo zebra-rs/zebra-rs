@@ -1,7 +1,7 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
 use super::nexthop::Nexthop;
-use super::{GroupNexthop, GroupTrait, GroupUni, Link, NexthopMap, RibTxChannel, StaticConfig};
+use super::{GroupSet, GroupTrait, GroupUni, Link, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -27,7 +27,7 @@ pub enum Message {
 pub enum Resolve {
     Onlink(u32),
     #[allow(dead_code)]
-    Recursive(Vec<usize>),
+    Recursive(u8),
     NotFound,
 }
 
@@ -73,7 +73,7 @@ pub fn rib_resolve(
             return Resolve::Onlink(entry.ifindex);
         }
         if entry.rtype == RibType::Static {
-            return Resolve::Recursive(entry.nhops.clone());
+            return Resolve::Recursive(1);
         }
     }
     Resolve::NotFound

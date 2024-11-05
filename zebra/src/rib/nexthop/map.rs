@@ -12,11 +12,11 @@ use crate::{
     },
 };
 
-use super::{GroupNexthop, GroupTrait};
+use super::{GroupSet, GroupTrait};
 
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
-    groups: Vec<GroupNexthop>,
+    groups: Vec<GroupSet>,
 }
 
 impl Default for NexthopMap {
@@ -28,7 +28,7 @@ impl Default for NexthopMap {
         // Pushing dummy for making first index to be 1.
         // nmap.values.push(None);
         nmap.groups
-            .push(GroupNexthop::new_uni(&Ipv4Addr::UNSPECIFIED, 0));
+            .push(GroupSet::new_uni(&Ipv4Addr::UNSPECIFIED, 0));
         nmap
     }
 }
@@ -56,7 +56,7 @@ impl NexthopMap {
         } else {
             let index = self.groups.len();
             self.map.insert(addr, index);
-            self.groups.push(GroupNexthop::new_uni(&addr, index));
+            self.groups.push(GroupSet::new_uni(&addr, index));
             index
         }
     }
@@ -77,7 +77,7 @@ impl NexthopMap {
     //     self.values.get(index)?.as_ref()
     // }
 
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut GroupNexthop> {
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut GroupSet> {
         self.groups.get_mut(index)
     }
 
