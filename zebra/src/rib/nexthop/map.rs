@@ -2,11 +2,11 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use crate::fib::FibHandle;
 
-use super::{GroupSet, GroupTrait};
+use super::{GroupProtect, GroupSet, GroupTrait};
 
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
-    groups: Vec<GroupSet>,
+    pub groups: Vec<GroupSet>,
 }
 
 impl Default for NexthopMap {
@@ -17,8 +17,7 @@ impl Default for NexthopMap {
         };
         // Pushing dummy for making first index to be 1.
         // nmap.values.push(None);
-        nmap.groups
-            .push(GroupSet::new_uni(&Ipv4Addr::UNSPECIFIED, 0, 0));
+        nmap.groups.push(GroupSet::Protect(GroupProtect::default()));
         nmap
     }
 }
@@ -35,6 +34,7 @@ impl NexthopMap {
             self.map.insert(addr, gid);
             let mut uni = GroupSet::new_uni(&addr, ifindex, gid);
             fib.nexthop_add(&uni).await;
+            uni.set_valid(true);
             uni.set_installed(true);
             self.groups.push(uni);
             gid

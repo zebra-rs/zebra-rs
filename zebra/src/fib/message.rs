@@ -2,6 +2,8 @@ use ipnet::IpNet;
 use std::net::IpAddr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::rib::link::IFF_UP;
+
 use super::{LinkFlags, LinkType};
 
 #[derive(Debug)]
@@ -31,6 +33,10 @@ impl FibLink {
         Self {
             ..Default::default()
         }
+    }
+
+    pub fn is_up(&self) -> bool {
+        (self.flags.0 & IFF_UP) == IFF_UP
     }
 }
 

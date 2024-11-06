@@ -16,6 +16,8 @@ use tokio::sync::oneshot;
 pub type ShowCallback = fn(&Rib, Args, bool) -> String;
 
 pub enum Message {
+    LinkUp { ifindex: u32 },
+    LinkDown { ifindex: u32 },
     Ipv4Del { prefix: Ipv4Net, rib: RibEntry },
     Ipv4Add { prefix: Ipv4Net, rib: RibEntry },
     Shutdown { tx: oneshot::Sender<()> },
@@ -76,6 +78,12 @@ impl Rib {
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
                 let _ = tx.send(());
+            }
+            Message::LinkUp { ifindex } => {
+                self.link_up(ifindex);
+            }
+            Message::LinkDown { ifindex } => {
+                self.link_down(ifindex).await;
             }
         }
     }

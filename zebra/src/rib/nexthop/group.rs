@@ -67,16 +67,19 @@ impl GroupTrait for GroupUni {
     }
 }
 
+#[derive(Default)]
 pub struct GroupWeight {
     weight: u8,
     nhop: usize,
 }
 
+#[derive(Default)]
 pub struct GroupMulti {
     common: GroupCommon,
     nhops: Vec<GroupWeight>,
 }
 
+#[derive(Default)]
 pub struct GroupProtect {
     common: GroupCommon,
     primary: usize,

@@ -3,6 +3,7 @@ use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 
 use super::entry::RibEntry;
+use super::util::IpNetExt;
 use super::{Message, Rib, RibType};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
@@ -236,7 +237,23 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub fn link_add(&mut self, oslink: FibLink) {
-        if !self.links.contains_key(&oslink.index) {
+        if let Some(mut link) = self.links.get_mut(&oslink.index) {
+            if link.is_up() {
+                if !oslink.is_up() {
+                    link.flags = oslink.flags;
+                    let _ = self.tx.send(Message::LinkDown {
+                        ifindex: link.index,
+                    });
+                }
+            } else {
+                if oslink.is_up() {
+                    link.flags = oslink.flags;
+                    let _ = self.tx.send(Message::LinkUp {
+                        ifindex: link.index,
+                    });
+                }
+            }
+        } else {
             let link = Link::from(oslink);
             self.links.insert(link.index, link);
         }
@@ -272,6 +289,7 @@ impl Rib {
                 rib.set_fib(true);
                 rib.set_valid(true);
                 if let IpNet::V4(prefix) = addr.addr {
+                    let prefix = prefix.apply_mask();
                     let msg = Message::Ipv4Add { prefix, rib };
                     let _ = self.tx.send(msg);
                 }

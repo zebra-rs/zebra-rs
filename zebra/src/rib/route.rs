@@ -4,13 +4,71 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::fib::message::FibRoute;
 use crate::fib::FibHandle;
+use crate::rib::util::IpNetExt;
 
 use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::Nexthop;
-use super::{Message, NexthopMap, RibEntries, RibType};
+use super::{GroupSet, GroupTrait, Message, NexthopMap, RibEntries, RibType};
+
+pub async fn ipv4_entry_sync(p: &Ipv4Net, entries: &mut RibEntries, nmap: &mut NexthopMap) {
+    for rib in entries.ribs.iter_mut() {
+        // rib_resolve_nexthop(rib, nmap);
+    }
+}
+
+pub async fn ipv4_route_sync(table: &mut PrefixMap<Ipv4Net, RibEntries>, nmap: &mut NexthopMap) {
+    for (p, entries) in table.iter_mut() {
+        ipv4_entry_sync(p, entries, nmap);
+    }
+}
 
 impl Rib {
+    pub async fn link_down(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        println!("link down: {}", link.name);
+
+        // Remove connected route.
+        for addr4 in link.addr4.iter() {
+            if let IpNet::V4(addr) = addr4.addr {
+                let prefix = addr.apply_mask();
+                println!("Connected: {:?} down - removing from RIB", prefix);
+                let mut rib = RibEntry::new(RibType::Connected);
+                rib.ifindex = ifindex;
+                let msg = Message::Ipv4Del { prefix, rib };
+                self.tx.send(msg);
+            }
+        }
+    }
+
+    pub fn link_up(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        println!("link up {}", link.name);
+
+        // Add connected route.
+        for addr4 in link.addr4.iter() {
+            if let IpNet::V4(addr) = addr4.addr {
+                let prefix = addr.apply_mask();
+                println!("Connected: {:?} add - adding to RIB", prefix);
+                let mut rib = RibEntry::new(RibType::Connected);
+                rib.ifindex = ifindex;
+                let msg = Message::Ipv4Add { prefix, rib };
+                self.tx.send(msg);
+            }
+        }
+
+        // RIB resolve all.
+        for (p, entries) in self.table.iter() {
+            for rib in entries.ribs.iter() {
+                println!("P: {} ifindex", p);
+            }
+        }
+    }
+
     pub fn route_add(&mut self, r: FibRoute) {
         if let IpNet::V4(prefix) = r.route {
             let mut rib = RibEntry::new(RibType::Kernel);
@@ -34,18 +92,25 @@ impl Rib {
         }
     }
 
+    pub async fn ipv4_sync(&mut self) {
+        ipv4_nexthop_sync(&mut self.nmap, &self.table);
+        ipv4_route_sync(&mut self.table, &mut self.nmap).await;
+    }
+
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
         println!("IPv4 route add: {} {}", rib.rtype.abbrev(), prefix);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
         rib_resolve_nexthop(&mut rib, &self.table);
         rib_add(&mut self.table, prefix, rib);
         self.rib_selection(prefix, replace.pop()).await;
+        self.ipv4_sync().await;
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, rib: RibEntry) {
         println!("IPv4 route del: {} {}", rib.rtype.abbrev(), prefix);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
         self.rib_selection(prefix, replace.pop()).await;
+        self.ipv4_sync().await;
     }
 
     pub async fn rib_selection(&mut self, prefix: &Ipv4Net, replace: Option<RibEntry>) {
@@ -218,4 +283,34 @@ pub fn rib_next(ribs: &Vec<RibEntry>) -> Option<usize> {
         .map(|(index, _)| index);
 
     index
+}
+
+pub fn ipv4_nexthop_sync(nmap: &mut NexthopMap, table: &PrefixMap<Ipv4Net, RibEntries>) {
+    //for grp in nmap.
+    for nhop in nmap.groups.iter_mut() {
+        if let GroupSet::Uni(uni) = nhop {
+            if uni.refcnt() == 0 {
+                continue;
+            }
+            println!(
+                "IPv4 nexthop: {} refcnt {} is_valid {} is_installed {}",
+                uni.addr,
+                uni.refcnt(),
+                uni.is_valid(),
+                uni.is_installed()
+            );
+            let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
+            println!(
+                "resolve: -> {} [{}]",
+                resolve.is_valid() != 0,
+                resolve.is_valid()
+            );
+            if resolve.is_valid() == 0 {
+                uni.set_valid(false);
+                uni.set_installed(false);
+            } else {
+                uni.set_valid(true);
+            }
+        }
+    }
 }
