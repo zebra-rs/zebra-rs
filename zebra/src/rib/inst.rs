@@ -21,6 +21,7 @@ pub enum Message {
     Ipv4Del { prefix: Ipv4Net, rib: RibEntry },
     Ipv4Add { prefix: Ipv4Net, rib: RibEntry },
     Shutdown { tx: oneshot::Sender<()> },
+    Resolve,
 }
 
 pub struct Rib {
@@ -84,6 +85,9 @@ impl Rib {
             }
             Message::LinkDown { ifindex } => {
                 self.link_down(ifindex).await;
+            }
+            Message::Resolve => {
+                self.ipv4_route_resolve().await;
             }
         }
     }

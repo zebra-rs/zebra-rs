@@ -16,9 +16,8 @@ pub enum GroupSet {
 
 impl GroupSet {
     pub fn new_uni(addr: &Ipv4Addr, ifindex: u32, gid: usize) -> Self {
-        let mut uni: GroupUni = GroupUni::new(addr);
+        let mut uni: GroupUni = GroupUni::new(gid, addr);
         uni.ifindex = ifindex;
-        uni.common.gid = gid;
         GroupSet::Uni(uni)
     }
 }
@@ -30,13 +29,22 @@ pub struct GroupCommon {
     refcnt: usize,
 }
 
+impl GroupCommon {
+    pub fn new(gid: usize) -> Self {
+        Self {
+            gid,
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for GroupCommon {
     fn default() -> Self {
         Self {
             gid: 0,
             valid: false,
             installed: false,
-            refcnt: 1,
+            refcnt: 0,
         }
     }
 }
@@ -48,9 +56,9 @@ pub struct GroupUni {
 }
 
 impl GroupUni {
-    pub fn new(addr: &Ipv4Addr) -> Self {
+    pub fn new(gid: usize, addr: &Ipv4Addr) -> Self {
         Self {
-            common: GroupCommon::default(),
+            common: GroupCommon::new(gid),
             addr: *addr,
             ifindex: 0,
         }

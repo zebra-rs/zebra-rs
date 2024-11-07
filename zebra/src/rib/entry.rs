@@ -1,5 +1,7 @@
-use super::nexthop::Nexthop;
-use super::{NexthopSet, Rib, RibSubType, RibType};
+use crate::fib::FibHandle;
+
+use super::nexthop::{GroupTrait, Nexthop};
+use super::{GroupSet, NexthopMap, NexthopSet, Rib, RibSubType, RibType};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
@@ -100,6 +102,25 @@ impl RibEntry {
         let selected = if self.selected { '>' } else { ' ' };
         let fib = if self.fib { '*' } else { ' ' };
         format!("{}{}", fib, selected)
+    }
+
+    pub fn is_valid_nexthop(&self, nmap: &NexthopMap) -> bool {
+        self.nexthops
+            .iter()
+            .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid()))
+    }
+
+    pub async fn nexthop_sync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
+        for nhop in &mut self.nexthops {
+            let Some(group) = nmap.get_mut(nhop.gid) else {
+                continue;
+            };
+            if !group.is_valid() || group.is_installed() {
+                continue;
+            }
+            fib.nexthop_add(group).await;
+            group.set_installed(true);
+        }
     }
 }
 

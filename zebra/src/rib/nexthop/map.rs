@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use crate::fib::FibHandle;
 
-use super::{GroupProtect, GroupSet, GroupTrait};
+use super::{GroupProtect, GroupSet, GroupTrait, GroupUni};
 
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
@@ -23,39 +23,31 @@ impl Default for NexthopMap {
 }
 
 impl NexthopMap {
-    pub async fn register_group(&mut self, addr: Ipv4Addr, ifindex: u32, fib: &FibHandle) -> usize {
-        if let Some(&index) = self.map.get(&addr) {
-            if let Some(group) = self.get_mut(index) {
-                group.refcnt_inc();
-            }
-            index
-        } else {
-            let gid = self.groups.len();
-            self.map.insert(addr, gid);
-            let mut uni = GroupSet::new_uni(&addr, ifindex, gid);
-            fib.nexthop_add(&uni).await;
-            uni.set_valid(true);
-            uni.set_installed(true);
-            self.groups.push(uni);
-            gid
-        }
-    }
-
-    pub async fn unregister(&mut self, gid: usize, fib: &FibHandle) {
-        if let Some(group) = self.groups.get_mut(gid) {
-            group.refcnt_dec();
-            if group.refcnt() == 0 {
-                fib.nexthop_del(group).await;
-            }
-        }
+    pub fn get(&self, index: usize) -> Option<&GroupSet> {
+        self.groups.get(index)
     }
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut GroupSet> {
         self.groups.get_mut(index)
     }
 
-    pub fn get(&self, index: usize) -> Option<&GroupSet> {
-        self.groups.get(index)
+    fn new_gid(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub fn fetch_uni(&mut self, addr: &Ipv4Addr) -> Option<&mut GroupSet> {
+        let gid = if let Some(&gid) = self.map.get(addr) {
+            gid
+        } else {
+            let gid = self.new_gid();
+            let group = GroupSet::Uni(GroupUni::new(gid, addr));
+
+            self.map.insert(*addr, gid);
+            self.groups.push(group);
+
+            gid
+        };
+        self.groups.get_mut(gid)
     }
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {
