@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv4Addr;
 
+use super::NexthopMap;
+use crate::rib::nexthop::group::GroupTrait;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nexthop {
     pub addr: Ipv4Addr,
-    valid: bool,
+    //valid: bool,
     pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
@@ -19,12 +22,15 @@ impl Nexthop {
         nhop
     }
 
-    pub fn is_valid(&self) -> bool {
-        self.valid
-    }
-
-    pub fn set_valid(&mut self, valid: bool) {
-        self.valid = valid;
+    pub fn is_valid(&self, nmap: &NexthopMap) -> bool {
+        if self.gid == 0 {
+            return false;
+        }
+        if let Some(group) = nmap.get(self.gid) {
+            group.is_valid()
+        } else {
+            false
+        }
     }
 }
 
@@ -32,7 +38,6 @@ impl Default for Nexthop {
     fn default() -> Self {
         Self {
             addr: Ipv4Addr::UNSPECIFIED,
-            valid: false,
             ifindex: 0,
             metric: 0,
             weight: 0,

@@ -54,6 +54,10 @@ impl NexthopMap {
         self.groups.get_mut(index)
     }
 
+    pub fn get(&self, index: usize) -> Option<&GroupSet> {
+        self.groups.get(index)
+    }
+
     pub async fn shutdown(&mut self, fib: &FibHandle) {
         for grp in self.groups.iter() {
             if grp.is_installed() {
