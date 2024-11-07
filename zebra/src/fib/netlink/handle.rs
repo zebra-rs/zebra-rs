@@ -1,3 +1,4 @@
+use core::time;
 use std::net::{IpAddr, Ipv4Addr};
 
 use futures::stream::StreamExt;
@@ -132,6 +133,8 @@ impl FibHandle {
     }
 
     pub async fn nexthop_add(&self, nexthop: &GroupSet) {
+        std::thread::sleep(time::Duration::from_secs(1));
+
         let GroupSet::Uni(uni) = nexthop else {
             return;
         };
@@ -159,7 +162,13 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             match msg.payload {
                 NetlinkPayload::Error(e) => {
-                    println!("NewNexthop error: {} gid: {}", e, uni.gid());
+                    println!(
+                        "NewNexthop error: {} gid: {} addr: {} ifindex:: {}",
+                        e,
+                        uni.gid(),
+                        uni.addr,
+                        uni.ifindex,
+                    );
                 }
                 NetlinkPayload::Done(m) => {
                     println!("NewNexthop done {:?}", m);

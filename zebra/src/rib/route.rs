@@ -60,8 +60,10 @@ pub async fn ipv4_entry_selection(
 // Resolve RibEntries.  gid is already resolved.
 fn ipv4_entry_resolve(p: &Ipv4Net, entries: &mut RibEntries, nmap: &NexthopMap) {
     for entry in entries.ribs.iter_mut() {
-        let valid = entry.is_valid_nexthop(nmap);
-        entry.set_valid(valid);
+        if entry.is_protocol() {
+            let valid = entry.is_valid_nexthop(nmap);
+            entry.set_valid(valid);
+        }
     }
 }
 
@@ -95,6 +97,8 @@ impl Rib {
             }
         }
         // Resolve all RIB.
+        let msg = Message::Resolve;
+        let _ = self.tx.send(msg);
     }
 
     pub fn link_up(&mut self, ifindex: u32) {
@@ -109,12 +113,16 @@ impl Rib {
                 let prefix = addr.apply_mask();
                 println!("Connected: {:?} add - adding to RIB", prefix);
                 let mut rib = RibEntry::new(RibType::Connected);
+                rib.set_fib(true);
+                rib.set_valid(true);
                 rib.ifindex = ifindex;
                 let msg = Message::Ipv4Add { prefix, rib };
                 let _ = self.tx.send(msg);
             }
         }
         // Resolve all RIB.
+        let msg = Message::Resolve;
+        let _ = self.tx.send(msg);
     }
 
     pub fn route_add(&mut self, r: FibRoute) {
@@ -155,6 +163,7 @@ impl Rib {
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
+        println!("ipv4_route_resolve");
         ipv4_nexthop_sync(&mut self.nmap, &self.table);
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle).await;
     }
@@ -313,18 +322,18 @@ pub fn ipv4_nexthop_sync(nmap: &mut NexthopMap, table: &PrefixMap<Ipv4Net, RibEn
                 uni.is_installed()
             );
             let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
-            println!(
-                "resolve: uni id {}-> {} [{}]",
-                uni.gid(),
-                resolve.is_valid() != 0,
-                resolve.is_valid()
-            );
             if resolve.is_valid() == 0 {
                 uni.set_valid(false);
                 uni.set_installed(false);
             } else {
                 uni.set_valid(true);
             }
+            println!(
+                "resolve: uni id {} is_valid {} is_installed {}",
+                uni.gid(),
+                uni.is_valid(),
+                uni.is_installed()
+            );
         }
     }
 }
