@@ -26,3 +26,5 @@ pub mod util;
 
 pub mod r#static;
 pub use r#static::*;
+
+pub mod resolve;
