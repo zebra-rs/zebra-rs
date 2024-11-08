@@ -3,16 +3,15 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Nexthop {
+pub struct NexthopUni {
     pub addr: Ipv4Addr,
-    //valid: bool,
     pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
     pub gid: usize,
 }
 
-impl Nexthop {
+impl NexthopUni {
     pub fn new(addr: Ipv4Addr) -> Self {
         let mut nhop = Self::default();
         nhop.addr = addr;
@@ -20,7 +19,7 @@ impl Nexthop {
     }
 }
 
-impl Default for Nexthop {
+impl Default for NexthopUni {
     fn default() -> Self {
         Self {
             addr: Ipv4Addr::UNSPECIFIED,
@@ -32,22 +31,28 @@ impl Default for Nexthop {
     }
 }
 
-impl fmt::Display for Nexthop {
+impl fmt::Display for NexthopUni {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.addr)
     }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
-pub enum NexthopSet {
+pub enum Nexthop {
     #[default]
-    None,
-    Uni(Nexthop),
+    Onlink,
+    Uni(NexthopUni),
     Multi(NexthopMulti),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct NexthopMulti {
+    // ECMP or UCMP multipath.  metric will be the same.
     pub metric: u32,
-    pub nexthops: BTreeMap<Ipv4Addr, Nexthop>,
+
+    // For UCMP, we have weight.
+    pub nexthops: Vec<NexthopUni>,
+
+    // Nexthop Group id for multipath.
+    pub gid: usize,
 }

@@ -4,7 +4,7 @@ use crate::fib::os_traffic_dump;
 
 use super::entry::RibEntry;
 use super::util::IpNetExt;
-use super::{Message, Rib, RibType};
+use super::{Message, Nexthop, Rib, RibType};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
 

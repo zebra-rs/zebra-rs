@@ -6,11 +6,12 @@ use crate::fib::message::FibRoute;
 use crate::fib::FibHandle;
 use crate::rib::resolve::{rib_resolve, ResolveOpt};
 use crate::rib::util::IpNetExt;
+use crate::rib::Nexthop;
 
 use super::entry::RibEntry;
 use super::inst::Rib;
-use super::nexthop::Nexthop;
-use super::{GroupSet, GroupTrait, Message, NexthopMap, RibEntries, RibType};
+use super::nexthop::NexthopUni;
+use super::{Group, GroupTrait, Message, NexthopMap, RibEntries, RibType};
 
 pub async fn ipv4_entry_selection(
     prefix: &Ipv4Net,
@@ -128,8 +129,8 @@ impl Rib {
             rib.set_fib(true);
             if let IpAddr::V4(addr) = r.gateway {
                 if !addr.is_unspecified() {
-                    let nexthop = Nexthop::new(addr);
-                    rib.nexthops.push(nexthop);
+                    let nexthop = NexthopUni::new(addr);
+                    rib.nexthop = Nexthop::Uni(nexthop);
                     let _ = self.tx.send(Message::Ipv4Add { prefix, rib });
                 }
             }
@@ -182,10 +183,10 @@ fn rib_resolve_nexthop(
     if !rib.is_protocol() {
         return;
     }
-    for nhop in rib.nexthops.iter_mut() {
+    if let Nexthop::Uni(uni) = &mut rib.nexthop {
         // Only GroupUni is handled.
-        let Some(group) = nmap.fetch_uni(&nhop.addr) else {
-            continue;
+        let Some(group) = nmap.fetch_uni(&uni.addr) else {
+            return;
         };
         // When this is first time allocation, resolve the nexthop group.
         if group.refcnt() == 0 {
@@ -195,7 +196,7 @@ fn rib_resolve_nexthop(
         group.refcnt_inc();
 
         // Set the nexthop group id to the nexthop.
-        nhop.gid = group.gid();
+        uni.gid = group.gid();
     }
     // If one of nexthop is valid, the entry is valid.
     rib.set_valid(rib.is_valid_nexthop(nmap));
@@ -249,7 +250,7 @@ pub fn ipv4_nexthop_sync(nmap: &mut NexthopMap, table: &PrefixMap<Ipv4Net, RibEn
     //for grp in nmap.
     for nhop in nmap.groups.iter_mut() {
         if let Some(nhop) = nhop {
-            if let GroupSet::Uni(uni) = nhop {
+            if let Group::Uni(uni) = nhop {
                 if uni.refcnt() == 0 {
                     continue;
                 }

@@ -31,7 +31,7 @@ use crate::context::vrf::Vrf;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::{link, GroupSet, GroupTrait};
+use crate::rib::{link, Group, GroupTrait, Nexthop};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
@@ -83,8 +83,8 @@ impl FibHandle {
         let attr = RouteAttribute::Priority(entry.metric);
         msg.attributes.push(attr);
 
-        if let Some(nhop) = entry.nexthops.first() {
-            msg.attributes.push(RouteAttribute::Nhid(nhop.gid as u32));
+        if let Nexthop::Uni(uni) = &entry.nexthop {
+            msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
@@ -117,8 +117,8 @@ impl FibHandle {
         let attr = RouteAttribute::Priority(entry.metric);
         msg.attributes.push(attr);
 
-        if let Some(nhop) = entry.nexthops.first() {
-            msg.attributes.push(RouteAttribute::Nhid(nhop.gid as u32));
+        if let Nexthop::Uni(uni) = &entry.nexthop {
+            msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
@@ -132,10 +132,10 @@ impl FibHandle {
         }
     }
 
-    pub async fn nexthop_add(&self, nexthop: &GroupSet) {
+    pub async fn nexthop_add(&self, nexthop: &Group) {
         std::thread::sleep(time::Duration::from_secs(1));
 
-        let GroupSet::Uni(uni) = nexthop else {
+        let Group::Uni(uni) = nexthop else {
             return;
         };
         // Nexthop message.
@@ -180,8 +180,8 @@ impl FibHandle {
         }
     }
 
-    pub async fn nexthop_del(&self, nexthop: &GroupSet) {
-        let GroupSet::Uni(uni) = nexthop else {
+    pub async fn nexthop_del(&self, nexthop: &Group) {
+        let Group::Uni(uni) = nexthop else {
             return;
         };
         // Nexthop message.

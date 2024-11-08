@@ -2,11 +2,11 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use crate::fib::FibHandle;
 
-use super::{GroupSet, GroupTrait, GroupUni};
+use super::{Group, GroupTrait, GroupUni};
 
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
-    pub groups: Vec<Option<GroupSet>>,
+    pub groups: Vec<Option<Group>>,
 }
 
 impl Default for NexthopMap {
@@ -21,7 +21,7 @@ impl Default for NexthopMap {
 }
 
 impl NexthopMap {
-    pub fn get(&self, index: usize) -> Option<&GroupSet> {
+    pub fn get(&self, index: usize) -> Option<&Group> {
         if let Some(grp) = self.groups.get(index) {
             grp.as_ref()
         } else {
@@ -29,7 +29,7 @@ impl NexthopMap {
         }
     }
 
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut GroupSet> {
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut Group> {
         if let Some(grp) = self.groups.get_mut(index) {
             grp.as_mut()
         } else {
@@ -41,12 +41,12 @@ impl NexthopMap {
         self.groups.len()
     }
 
-    pub fn fetch_uni(&mut self, addr: &Ipv4Addr) -> Option<&mut GroupSet> {
+    pub fn fetch_uni(&mut self, addr: &Ipv4Addr) -> Option<&mut Group> {
         let gid = if let Some(&gid) = self.map.get(addr) {
             gid
         } else {
             let gid = self.new_gid();
-            let group = GroupSet::Uni(GroupUni::new(gid, addr));
+            let group = Group::Uni(GroupUni::new(gid, addr));
 
             self.map.insert(*addr, gid);
             self.groups.push(Some(group));

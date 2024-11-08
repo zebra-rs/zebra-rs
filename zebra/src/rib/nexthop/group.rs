@@ -2,23 +2,23 @@ use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use GroupSet::*;
+use Group::*;
 
 use crate::fib::FibHandle;
 use crate::rib::entry::RibEntries;
 use crate::rib::resolve::{rib_resolve, Resolve, ResolveOpt};
 
-pub enum GroupSet {
+pub enum Group {
     Uni(GroupUni),
     Multi(GroupMulti),
     Protect(GroupProtect),
 }
 
-impl GroupSet {
+impl Group {
     pub fn new_uni(addr: &Ipv4Addr, ifindex: u32, gid: usize) -> Self {
         let mut uni: GroupUni = GroupUni::new(gid, addr);
         uni.ifindex = ifindex;
-        GroupSet::Uni(uni)
+        Group::Uni(uni)
     }
 }
 
@@ -140,7 +140,7 @@ pub trait GroupTrait {
     }
 }
 
-impl GroupSet {
+impl Group {
     pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
         let Uni(uni) = self else {
             return;
@@ -156,7 +156,7 @@ impl GroupSet {
     }
 }
 
-impl GroupTrait for GroupSet {
+impl GroupTrait for Group {
     fn common(&self) -> &GroupCommon {
         match self {
             Uni(uni) => &uni.common,

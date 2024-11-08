@@ -3,8 +3,8 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 use crate::rib::entry::RibEntry;
-use crate::rib::nexthop::Nexthop;
-use crate::rib::{NexthopMulti, NexthopSet, RibType};
+use crate::rib::nexthop::NexthopUni;
+use crate::rib::{Nexthop, NexthopMulti, RibType};
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
@@ -50,11 +50,11 @@ impl StaticRoute {
             let Some((p, n)) = self.nexthops.iter().next() else {
                 return None;
             };
-            let mut nhop = Nexthop::default();
+            let mut nhop = NexthopUni::default();
             nhop.addr = *p;
             nhop.metric = n.metric.unwrap_or(metric);
             nhop.weight = n.weight.unwrap_or(0);
-            entry.nexthops.push(nhop);
+            entry.nexthop = Nexthop::Uni(nhop);
             return Some(entry);
         }
 
@@ -73,13 +73,13 @@ impl StaticRoute {
             let mut multi = NexthopMulti::default();
             multi.metric = *metric;
             for (p, n) in pair.iter() {
-                let mut nhop = Nexthop::default();
+                let mut nhop = NexthopUni::default();
                 nhop.addr = *p;
                 nhop.metric = n.metric.unwrap_or(*metric);
                 nhop.weight = n.weight.unwrap_or(0);
-                multi.nexthops.insert(*p, nhop);
+                multi.nexthops.push(nhop);
             }
-            entry.nhopset = NexthopSet::Multi(multi);
+            entry.nexthop = Nexthop::Multi(multi);
         } else {
             // Protected.
         }

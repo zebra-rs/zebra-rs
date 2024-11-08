@@ -1,7 +1,7 @@
 use crate::fib::FibHandle;
 
-use super::nexthop::{GroupTrait, Nexthop};
-use super::{NexthopMap, NexthopSet, Rib, RibSubType, RibType};
+use super::nexthop::{GroupTrait, NexthopUni};
+use super::{Nexthop, NexthopMap, Rib, RibSubType, RibType};
 
 // #[derive(Default)]
 // pub struct RibEntries {
@@ -19,10 +19,7 @@ pub struct RibEntry {
     valid: bool,
     pub distance: u8,
     pub metric: u32,
-    pub nexthops: Vec<Nexthop>,
-
-    // Nexthop set. Nexthop can be unipath, multipath and protected path.
-    pub nhopset: NexthopSet,
+    pub nexthop: Nexthop,
 
     // Connected RIB's ifindex.
     pub ifindex: u32,
@@ -38,8 +35,7 @@ impl RibEntry {
             valid: false,
             distance: 0,
             metric: 0,
-            nexthops: Vec::new(),
-            nhopset: NexthopSet::default(),
+            nexthop: Nexthop::default(),
             ifindex: 0,
         }
     }
@@ -98,11 +94,9 @@ impl RibEntry {
             } else {
                 "directly connected unknown".to_string()
             }
-        } else if !self.nexthops.is_empty() {
+        } else if let Nexthop::Uni(uni) = &self.nexthop {
             let mut out: String = String::from("via ");
-            for n in self.nexthops.iter() {
-                out += &format!("{} ", n);
-            }
+            out += &format!("{} ", uni.addr);
             out
         } else {
             String::new()
@@ -116,18 +110,20 @@ impl RibEntry {
     }
 
     pub fn is_valid_nexthop(&self, nmap: &NexthopMap) -> bool {
-        self.nexthops
-            .iter()
-            .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid()))
+        if let Nexthop::Uni(uni) = &self.nexthop {
+            nmap.get(uni.gid).map_or(false, |group| group.is_valid())
+        } else {
+            false
+        }
     }
 
     pub async fn nexthop_sync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
-        for nhop in &mut self.nexthops {
-            let Some(group) = nmap.get_mut(nhop.gid) else {
-                continue;
+        if let Nexthop::Uni(uni) = &mut self.nexthop {
+            let Some(group) = nmap.get_mut(uni.gid) else {
+                return;
             };
             if !group.is_valid() || group.is_installed() {
-                continue;
+                return;
             }
             fib.nexthop_add(group).await;
             group.set_installed(true);
@@ -135,8 +131,8 @@ impl RibEntry {
     }
 
     pub async fn nexthop_unsync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
-        for nhop in &self.nexthops {
-            if let Some(group) = nmap.get_mut(nhop.gid) {
+        if let Nexthop::Uni(uni) = &self.nexthop {
+            if let Some(group) = nmap.get_mut(uni.gid) {
                 group.refcnt_dec();
 
                 if group.refcnt() == 0 {
@@ -145,7 +141,7 @@ impl RibEntry {
                         fib.nexthop_del(group).await;
                     }
                     // Remove nexthop group since it's no longer referenced
-                    nmap.groups[nhop.gid] = None;
+                    nmap.groups[uni.gid] = None;
                 }
             }
         }
