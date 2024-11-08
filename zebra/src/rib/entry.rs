@@ -112,6 +112,10 @@ impl RibEntry {
     pub fn is_valid_nexthop(&self, nmap: &NexthopMap) -> bool {
         match &self.nexthop {
             Nexthop::Uni(uni) => nmap.get(uni.gid).map_or(false, |group| group.is_valid()),
+            Nexthop::Multi(multi) => multi
+                .nexthops
+                .iter()
+                .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid())),
             _ => false,
         }
     }
@@ -126,6 +130,18 @@ impl RibEntry {
             }
             fib.nexthop_add(group).await;
             group.set_installed(true);
+        }
+        if let Nexthop::Multi(multi) = &mut self.nexthop {
+            for uni in multi.nexthops.iter_mut() {
+                let Some(group) = nmap.get_mut(uni.gid) else {
+                    return;
+                };
+                if !group.is_valid() || group.is_installed() {
+                    return;
+                }
+                fib.nexthop_add(group).await;
+                group.set_installed(true);
+            }
         }
     }
 

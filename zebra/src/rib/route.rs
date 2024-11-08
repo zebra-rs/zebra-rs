@@ -213,6 +213,7 @@ fn rib_resolve_nexthop(
     }
     // If one of nexthop is valid, the entry is valid.
     rib.set_valid(rib.is_valid_nexthop(nmap));
+    println!("Is valid {}", rib.is_valid());
 }
 
 pub fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
