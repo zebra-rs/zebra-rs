@@ -1,6 +1,6 @@
 use crate::config::Args;
 
-use super::{inst::ShowCallback, link::link_show, Rib};
+use super::{inst::ShowCallback, link::link_show, nexthop_show, Rib};
 use std::fmt::Write;
 
 static SHOW_IPV4_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
@@ -42,5 +42,6 @@ impl Rib {
     pub fn show_build(&mut self) {
         self.show_add("/show/interfaces", link_show);
         self.show_add("/show/ip/route", rib_show);
+        self.show_add("/show/nexthop", nexthop_show);
     }
 }
