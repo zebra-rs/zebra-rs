@@ -56,6 +56,12 @@ impl NexthopMap {
         self.get_mut(gid)
     }
 
+    pub fn clear(&mut self, index: usize) {
+        if index < self.groups.len() {
+            self.groups.remove(index);
+        }
+    }
+
     pub async fn shutdown(&mut self, fib: &FibHandle) {
         for grp in self.groups.iter() {
             if let Some(grp) = grp {

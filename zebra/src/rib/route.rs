@@ -19,42 +19,37 @@ pub async fn ipv4_entry_selection(
     nmap: &mut NexthopMap,
     fib: &FibHandle,
 ) {
+    if let Some(mut replace) = replace {
+        if replace.is_protocol() && replace.is_fib() {
+            fib.route_ipv4_del(prefix, &replace).await;
+            replace.nexthop_unsync(nmap, fib).await;
+        }
+    }
     // Selected.
     let prev = rib_prev(&entries);
 
     // New select.
     let next = rib_next(&entries);
 
-    if prev.is_some() && prev == next {
-        println!("prev and next is same");
+    if prev == next {
         return;
-    }
-
-    if let Some(replace) = replace {
-        if replace.is_protocol() && replace.is_fib() {
-            fib.route_ipv4_del(prefix, &replace).await;
-            // for nhop in replace.nexthops.iter() {
-            //     nmap.unregister(nhop.gid, fib).await;
-            // }
-        }
     }
     if let Some(prev) = prev {
         let prev = entries.get_mut(prev).unwrap();
-        fib.route_ipv4_del(prefix, prev).await;
-        // for nhop in prev.nexthops.iter() {
-        //     nmap.unregister(nhop.gid, fib).await;
-        // }
         prev.set_selected(false);
+
+        fib.route_ipv4_del(prefix, prev).await;
         prev.set_fib(false);
     }
     if let Some(next) = next {
         let next = entries.get_mut(next).unwrap();
         next.set_selected(true);
-        next.set_fib(true);
+
         if next.is_protocol() {
             next.nexthop_sync(nmap, fib).await;
             fib.route_ipv4_add(prefix, &next).await;
         }
+        next.set_fib(true);
     }
 }
 
@@ -206,17 +201,17 @@ fn rib_resolve_nexthop(
     rib.set_valid(rib.is_valid_nexthop(nmap));
 }
 
-pub fn rib_add(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
-    let entries = rib.entry(*prefix).or_default();
+pub fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
+    let entries = table.entry(*prefix).or_default();
     entries.push(entry);
 }
 
 pub fn rib_replace(
-    rib: &mut PrefixMap<Ipv4Net, RibEntries>,
+    table: &mut PrefixMap<Ipv4Net, RibEntries>,
     prefix: &Ipv4Net,
     rtype: RibType,
 ) -> Vec<RibEntry> {
-    let Some(entries) = rib.get_mut(prefix) else {
+    let Some(entries) = table.get_mut(prefix) else {
         return vec![];
     };
     let (remain, replace): (Vec<_>, Vec<_>) = entries.drain(..).partition(|x| x.rtype != rtype);
@@ -228,8 +223,8 @@ fn rib_prev(entries: &Vec<RibEntry>) -> Option<usize> {
     entries.iter().position(|e| e.is_selected())
 }
 
-pub fn rib_next(ribs: &Vec<RibEntry>) -> Option<usize> {
-    let index = ribs
+fn rib_next(entries: &RibEntries) -> Option<usize> {
+    let index = entries
         .iter()
         .filter(|x| x.is_valid())
         .enumerate()

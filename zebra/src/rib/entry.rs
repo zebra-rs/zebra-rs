@@ -133,4 +133,21 @@ impl RibEntry {
             group.set_installed(true);
         }
     }
+
+    pub async fn nexthop_unsync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
+        for nhop in &self.nexthops {
+            if let Some(group) = nmap.get_mut(nhop.gid) {
+                group.refcnt_dec();
+
+                if group.refcnt() == 0 {
+                    // If ref count is zero and the nexthop is installed, remove it from FIB
+                    if group.is_installed() {
+                        fib.nexthop_del(group).await;
+                    }
+                    // Remove nexthop group since it's no longer referenced
+                    nmap.groups[nhop.gid] = None;
+                }
+            }
+        }
+    }
 }
