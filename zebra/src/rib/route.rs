@@ -173,6 +173,26 @@ impl Rib {
     }
 }
 
+fn resolve_nexthop(
+    uni: &mut NexthopUni,
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv4Net, RibEntries>,
+) {
+    // Only GroupUni is handled.
+    let Some(group) = nmap.fetch_uni(&uni.addr) else {
+        return;
+    };
+    // When this is first time allocation, resolve the nexthop group.
+    if group.refcnt() == 0 {
+        group.resolve(table);
+    }
+    // Reference counter increment.
+    group.refcnt_inc();
+
+    // Set the nexthop group id to the nexthop.
+    uni.gid = group.gid();
+}
+
 // Function is called when rib is added.
 fn rib_resolve_nexthop(
     rib: &mut RibEntry,
@@ -184,19 +204,12 @@ fn rib_resolve_nexthop(
         return;
     }
     if let Nexthop::Uni(uni) = &mut rib.nexthop {
-        // Only GroupUni is handled.
-        let Some(group) = nmap.fetch_uni(&uni.addr) else {
-            return;
-        };
-        // When this is first time allocation, resolve the nexthop group.
-        if group.refcnt() == 0 {
-            group.resolve(table);
+        resolve_nexthop(uni, nmap, table);
+    }
+    if let Nexthop::Multi(multi) = &mut rib.nexthop {
+        for uni in multi.nexthops.iter_mut() {
+            resolve_nexthop(uni, nmap, table);
         }
-        // Reference counter increment.
-        group.refcnt_inc();
-
-        // Set the nexthop group id to the nexthop.
-        uni.gid = group.gid();
     }
     // If one of nexthop is valid, the entry is valid.
     rib.set_valid(rib.is_valid_nexthop(nmap));

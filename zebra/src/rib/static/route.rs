@@ -65,17 +65,17 @@ impl StaticRoute {
             e.push((*p, n.clone()));
         }
 
+        // ECMP/UCMP case.
         if map.len() == 1 {
-            // ECMP/UCMP case.
-            let Some((metric, pair)) = map.iter().next() else {
+            let Some((metric, pair)) = map.pop_first() else {
                 return None;
             };
             let mut multi = NexthopMulti::default();
-            multi.metric = *metric;
+            multi.metric = metric;
             for (p, n) in pair.iter() {
                 let mut nhop = NexthopUni::default();
                 nhop.addr = *p;
-                nhop.metric = n.metric.unwrap_or(*metric);
+                nhop.metric = n.metric.unwrap_or(metric);
                 nhop.weight = n.weight.unwrap_or(0);
                 multi.nexthops.push(nhop);
             }

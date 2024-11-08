@@ -110,10 +110,9 @@ impl RibEntry {
     }
 
     pub fn is_valid_nexthop(&self, nmap: &NexthopMap) -> bool {
-        if let Nexthop::Uni(uni) = &self.nexthop {
-            nmap.get(uni.gid).map_or(false, |group| group.is_valid())
-        } else {
-            false
+        match &self.nexthop {
+            Nexthop::Uni(uni) => nmap.get(uni.gid).map_or(false, |group| group.is_valid()),
+            _ => false,
         }
     }
 

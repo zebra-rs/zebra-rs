@@ -43,6 +43,7 @@ pub enum Nexthop {
     Onlink,
     Uni(NexthopUni),
     Multi(NexthopMulti),
+    Protect(NexthopProtect),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -55,4 +56,10 @@ pub struct NexthopMulti {
 
     // Nexthop Group id for multipath.
     pub gid: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct NexthopProtect {
+    // Metric sorted BTreeMap.
+    pub nexthops: BTreeMap<u32, NexthopUni>,
 }
