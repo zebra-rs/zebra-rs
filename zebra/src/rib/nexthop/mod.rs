@@ -8,4 +8,4 @@ pub mod map;
 pub use map::*;
 
 pub mod show;
-pub use show::*;
+pub use show::nexthop_show;

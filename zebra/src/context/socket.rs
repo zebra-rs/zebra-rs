@@ -10,9 +10,9 @@ impl Context {
         let sock_addr = addr.parse::<SocketAddr>().unwrap();
 
         let socket = TcpSocket::new_v4()?;
-        socket.bind_device(Some(b"vrf1"));
+        let _ = socket.bind_device(Some(b"vrf1"));
 
-        let stream = socket.connect(sock_addr).await?;
+        let _stream = socket.connect(sock_addr).await?;
 
         Ok(())
     }

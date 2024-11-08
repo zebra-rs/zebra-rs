@@ -103,10 +103,6 @@ pub trait GroupTrait {
         self.common().gid
     }
 
-    fn set_gid(&mut self, gid: usize) {
-        self.common_mut().gid = gid;
-    }
-
     fn is_valid(&self) -> bool {
         self.common().valid
     }
@@ -156,13 +152,6 @@ impl GroupSet {
                 self.set_valid(true);
             }
             _ => {}
-        }
-    }
-
-    pub async fn sync(&mut self, fib: &FibHandle) {
-        if self.is_valid() && !self.is_installed() {
-            fib.nexthop_add(self).await;
-            self.set_installed(true);
         }
     }
 }

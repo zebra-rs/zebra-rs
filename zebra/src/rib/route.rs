@@ -58,7 +58,7 @@ pub async fn ipv4_entry_selection(
 }
 
 // Resolve RibEntries.  gid is already resolved.
-fn ipv4_entry_resolve(p: &Ipv4Net, entries: &mut RibEntries, nmap: &NexthopMap) {
+fn ipv4_entry_resolve(_p: &Ipv4Net, entries: &mut RibEntries, nmap: &NexthopMap) {
     for entry in entries.ribs.iter_mut() {
         if entry.is_protocol() {
             let valid = entry.is_valid_nexthop(nmap);
@@ -310,30 +310,32 @@ pub fn rib_next(ribs: &Vec<RibEntry>) -> Option<usize> {
 pub fn ipv4_nexthop_sync(nmap: &mut NexthopMap, table: &PrefixMap<Ipv4Net, RibEntries>) {
     //for grp in nmap.
     for nhop in nmap.groups.iter_mut() {
-        if let GroupSet::Uni(uni) = nhop {
-            if uni.refcnt() == 0 {
-                continue;
+        if let Some(nhop) = nhop {
+            if let GroupSet::Uni(uni) = nhop {
+                if uni.refcnt() == 0 {
+                    continue;
+                }
+                println!(
+                    "IPv4 nexthop: {} refcnt {} is_valid {} is_installed {}",
+                    uni.addr,
+                    uni.refcnt(),
+                    uni.is_valid(),
+                    uni.is_installed()
+                );
+                let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
+                if resolve.is_valid() == 0 {
+                    uni.set_valid(false);
+                    uni.set_installed(false);
+                } else {
+                    uni.set_valid(true);
+                }
+                println!(
+                    "resolve: uni id {} is_valid {} is_installed {}",
+                    uni.gid(),
+                    uni.is_valid(),
+                    uni.is_installed()
+                );
             }
-            println!(
-                "IPv4 nexthop: {} refcnt {} is_valid {} is_installed {}",
-                uni.addr,
-                uni.refcnt(),
-                uni.is_valid(),
-                uni.is_installed()
-            );
-            let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
-            if resolve.is_valid() == 0 {
-                uni.set_valid(false);
-                uni.set_installed(false);
-            } else {
-                uni.set_valid(true);
-            }
-            println!(
-                "resolve: uni id {} is_valid {} is_installed {}",
-                uni.gid(),
-                uni.is_valid(),
-                uni.is_installed()
-            );
         }
     }
 }

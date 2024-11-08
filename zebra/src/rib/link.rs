@@ -237,7 +237,7 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub fn link_add(&mut self, oslink: FibLink) {
-        if let Some(mut link) = self.links.get_mut(&oslink.index) {
+        if let Some(link) = self.links.get_mut(&oslink.index) {
             if link.is_up() {
                 if !oslink.is_up() {
                     link.flags = oslink.flags;

@@ -1,7 +1,7 @@
 use crate::fib::FibHandle;
 
 use super::nexthop::{GroupTrait, Nexthop};
-use super::{GroupSet, NexthopMap, NexthopSet, Rib, RibSubType, RibType};
+use super::{NexthopMap, NexthopSet, Rib, RibSubType, RibType};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {

@@ -2,11 +2,11 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use crate::fib::FibHandle;
 
-use super::{GroupProtect, GroupSet, GroupTrait, GroupUni};
+use super::{GroupSet, GroupTrait, GroupUni};
 
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
-    pub groups: Vec<GroupSet>,
+    pub groups: Vec<Option<GroupSet>>,
 }
 
 impl Default for NexthopMap {
@@ -15,20 +15,26 @@ impl Default for NexthopMap {
             map: BTreeMap::new(),
             groups: Vec::new(),
         };
-        // Pushing dummy for making first index to be 1.
-        // nmap.values.push(None);
-        nmap.groups.push(GroupSet::Protect(GroupProtect::default()));
+        nmap.groups.push(None);
         nmap
     }
 }
 
 impl NexthopMap {
     pub fn get(&self, index: usize) -> Option<&GroupSet> {
-        self.groups.get(index)
+        if let Some(grp) = self.groups.get(index) {
+            grp.as_ref()
+        } else {
+            None
+        }
     }
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut GroupSet> {
-        self.groups.get_mut(index)
+        if let Some(grp) = self.groups.get_mut(index) {
+            grp.as_mut()
+        } else {
+            None
+        }
     }
 
     fn new_gid(&self) -> usize {
@@ -43,17 +49,19 @@ impl NexthopMap {
             let group = GroupSet::Uni(GroupUni::new(gid, addr));
 
             self.map.insert(*addr, gid);
-            self.groups.push(group);
+            self.groups.push(Some(group));
 
             gid
         };
-        self.groups.get_mut(gid)
+        self.get_mut(gid)
     }
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {
         for grp in self.groups.iter() {
-            if grp.is_installed() {
-                fib.nexthop_del(grp).await;
+            if let Some(grp) = grp {
+                if grp.is_installed() {
+                    fib.nexthop_del(grp).await;
+                }
             }
         }
     }
