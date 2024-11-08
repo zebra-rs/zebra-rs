@@ -19,10 +19,10 @@ pub async fn ipv4_entry_selection(
     fib: &FibHandle,
 ) {
     // Selected.
-    let prev = rib_prev(&entries.ribs);
+    let prev = rib_prev(&entries);
 
     // New select.
-    let next = rib_next(&entries.ribs);
+    let next = rib_next(&entries);
 
     if prev.is_some() && prev == next {
         println!("prev and next is same");
@@ -38,7 +38,7 @@ pub async fn ipv4_entry_selection(
         }
     }
     if let Some(prev) = prev {
-        let prev = entries.ribs.get_mut(prev).unwrap();
+        let prev = entries.get_mut(prev).unwrap();
         fib.route_ipv4_del(prefix, prev).await;
         // for nhop in prev.nexthops.iter() {
         //     nmap.unregister(nhop.gid, fib).await;
@@ -47,7 +47,7 @@ pub async fn ipv4_entry_selection(
         prev.set_fib(false);
     }
     if let Some(next) = next {
-        let next = entries.ribs.get_mut(next).unwrap();
+        let next = entries.get_mut(next).unwrap();
         next.set_selected(true);
         next.set_fib(true);
         if next.is_protocol() {
@@ -59,7 +59,7 @@ pub async fn ipv4_entry_selection(
 
 // Resolve RibEntries.  gid is already resolved.
 fn ipv4_entry_resolve(_p: &Ipv4Net, entries: &mut RibEntries, nmap: &NexthopMap) {
-    for entry in entries.ribs.iter_mut() {
+    for entry in entries.iter_mut() {
         if entry.is_protocol() {
             let valid = entry.is_valid_nexthop(nmap);
             entry.set_valid(valid);
@@ -207,7 +207,7 @@ fn rib_resolve_nexthop(
 
 pub fn rib_add(rib: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = rib.entry(*prefix).or_default();
-    entries.ribs.push(entry);
+    entries.push(entry);
 }
 
 pub fn rib_replace(
@@ -218,9 +218,8 @@ pub fn rib_replace(
     let Some(entries) = rib.get_mut(prefix) else {
         return vec![];
     };
-    let (remain, replace): (Vec<_>, Vec<_>) =
-        entries.ribs.drain(..).partition(|x| x.rtype != rtype);
-    entries.ribs = remain;
+    let (remain, replace): (Vec<_>, Vec<_>) = entries.drain(..).partition(|x| x.rtype != rtype);
+    *entries = remain;
     replace
 }
 
@@ -270,7 +269,7 @@ pub fn rib_resolve(
         return Resolve::NotFound;
     }
 
-    for entry in entries.ribs.iter() {
+    for entry in entries.iter() {
         if entry.rtype == RibType::Connected {
             return Resolve::Onlink(entry.ifindex);
         }

@@ -3,6 +3,13 @@ use crate::fib::FibHandle;
 use super::nexthop::{GroupTrait, Nexthop};
 use super::{NexthopMap, NexthopSet, Rib, RibSubType, RibType};
 
+// #[derive(Default)]
+// pub struct RibEntries {
+//     pub ribs: Vec<RibEntry>,
+// }
+
+pub type RibEntries = Vec<RibEntry>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibEntry {
     pub rtype: RibType,
@@ -122,9 +129,4 @@ impl RibEntry {
             group.set_installed(true);
         }
     }
-}
-
-#[derive(Default)]
-pub struct RibEntries {
-    pub ribs: Vec<RibEntry>,
 }
