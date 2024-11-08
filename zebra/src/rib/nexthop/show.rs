@@ -11,7 +11,7 @@ pub fn nexthop_show(rib: &Rib, _args: Args, _json: bool) -> String {
     for grp in rib.nmap.groups.iter() {
         if let Some(grp) = grp {
             if let GroupSet::Uni(uni) = grp {
-                writeln!(buf, "ID: {}", uni.gid()).unwrap();
+                writeln!(buf, "ID: {} refcnt: {}", uni.gid(), uni.refcnt()).unwrap();
                 writeln!(buf, "  Nexthop: {}", uni.addr).unwrap();
             }
         }
