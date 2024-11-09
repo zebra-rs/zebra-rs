@@ -31,7 +31,7 @@ async fn address_dump(rib: &mut Rib, handle: rtnetlink::Handle) -> Result<()> {
     while let Some(msg) = addresses.try_next().await? {
         let addr = addr_from_msg(msg);
         let msg = FibMessage::NewAddr(addr);
-        rib.process_fib_msg(msg);
+        rib.process_fib_msg(msg).await;
     }
     Ok(())
 }
@@ -46,7 +46,7 @@ async fn route_dump(rib: &mut Rib, handle: rtnetlink::Handle, ip_version: IpVers
         let route = route_from_msg(msg);
         if let Some(route) = route {
             let msg = FibMessage::NewRoute(route);
-            rib.process_fib_msg(msg);
+            rib.process_fib_msg(msg).await;
         }
     }
     Ok(())

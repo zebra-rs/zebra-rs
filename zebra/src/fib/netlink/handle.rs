@@ -489,11 +489,6 @@ impl RouteBuilder {
 }
 
 pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
-    let mut route = FibRoute {
-        prefix: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
-        entry: RibEntry::new(RibType::Kernel),
-    };
-
     let mut builder = RouteBuilder::new();
 
     if msg.header.protocol == RouteProtocol::Dhcp {
@@ -501,6 +496,15 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
     }
     if msg.header.scope == RouteScope::Link {
         builder = builder.rtype(RibType::Connected);
+    }
+    if msg.header.scope == RouteScope::Host {
+        return None;
+    }
+    if msg.header.destination_prefix_length == 0 {
+        if msg.header.address_family == AddressFamily::Inet {
+            let prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
+            builder = builder.ipv4_prefix(prefix);
+        }
     }
 
     for attr in msg.attributes.into_iter() {
@@ -547,7 +551,11 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
         return None;
     }
 
-    Some(route)
+    let (prefix, entry) = builder.build();
+
+    let msg = FibRoute { prefix, entry };
+
+    Some(msg)
 }
 
 fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
@@ -576,6 +584,7 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             RouteNetlinkMessage::NewRoute(msg) => {
                 let route = route_from_msg(msg);
                 if let Some(route) = route {
+                    println!("XXX {}", route.prefix);
                     let msg = FibMessage::NewRoute(route);
                     tx.send(msg).unwrap();
                 }

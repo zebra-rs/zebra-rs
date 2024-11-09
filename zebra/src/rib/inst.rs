@@ -92,7 +92,7 @@ impl Rib {
         }
     }
 
-    pub fn process_fib_msg(&mut self, msg: FibMessage) {
+    pub async fn process_fib_msg(&mut self, msg: FibMessage) {
         match msg {
             FibMessage::NewLink(link) => {
                 self.link_add(link);
@@ -108,12 +108,12 @@ impl Rib {
             }
             FibMessage::NewRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
-                    self.ipv4_route_add(&prefix, route.entry);
+                    self.ipv4_route_add(&prefix, route.entry).await;
                 }
             }
             FibMessage::DelRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
-                    self.ipv4_route_del(&prefix, route.entry);
+                    self.ipv4_route_del(&prefix, route.entry).await;
                 }
             }
         }
@@ -154,7 +154,7 @@ impl Rib {
                     self.process_msg(msg).await;
                 }
                 Some(msg) = self.fib.rx.recv() => {
-                    self.process_fib_msg(msg);
+                    self.process_fib_msg(msg).await;
                 }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg).await;

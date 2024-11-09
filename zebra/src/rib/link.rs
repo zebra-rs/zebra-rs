@@ -284,15 +284,15 @@ impl Rib {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.link_index) {
             if link_addr_update(link, addr.clone()).is_some() {
-                let mut rib = RibEntry::new(RibType::Connected);
-                rib.ifindex = link.index;
-                rib.set_fib(true);
-                rib.set_valid(true);
-                if let IpNet::V4(prefix) = addr.addr {
-                    let prefix = prefix.apply_mask();
-                    let msg = Message::Ipv4Add { prefix, rib };
-                    let _ = self.tx.send(msg);
-                }
+                // let mut rib = RibEntry::new(RibType::Connected);
+                // rib.ifindex = link.index;
+                // rib.set_fib(true);
+                // rib.set_valid(true);
+                // if let IpNet::V4(prefix) = addr.addr {
+                //     let prefix = prefix.apply_mask();
+                //     let msg = Message::Ipv4Add { prefix, rib };
+                //     let _ = self.tx.send(msg);
+                // }
             }
         }
     }
