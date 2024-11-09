@@ -201,15 +201,12 @@ impl FibHandle {
     }
 
     pub async fn nexthop_del(&self, nexthop: &Group) {
-        let Group::Uni(uni) = nexthop else {
-            return;
-        };
         // Nexthop message.
         let mut msg = NexthopMessage::default();
         msg.header.address_family = AddressFamily::Unspec;
 
         // Nexthop group ID.
-        let attr = NexthopAttribute::Id(uni.gid() as u32);
+        let attr = NexthopAttribute::Id(nexthop.gid() as u32);
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelNexthop(msg));
