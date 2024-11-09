@@ -11,7 +11,7 @@ use std::fmt::Write;
 
 static SHOW_IPV4_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
-       E1/E2 - OSPF external type 1/2
+       E1/E2 - OSPF external type 1/2 D - DHCP route
        i - IS-IS, L1/L2 - IS-IS level-1/2, ia - IS-IS inter area
        > - selected route, * - FIB route, S - Stale route
 
