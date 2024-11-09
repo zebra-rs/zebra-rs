@@ -446,9 +446,11 @@ struct RouteBuilder {
 
 impl RouteBuilder {
     pub fn new() -> Self {
+        let mut entry = RibEntry::new(RibType::Kernel);
+        entry.set_valid(true);
         Self {
             prefix: None,
-            entry: RibEntry::new(RibType::Kernel),
+            entry,
         }
     }
 
@@ -473,6 +475,11 @@ impl RouteBuilder {
 
     pub fn nexthop(mut self, nexthop: Nexthop) -> Self {
         self.entry.nexthop = nexthop;
+        self
+    }
+
+    pub fn oif(mut self, oif: u32) -> Self {
+        self.entry.ifindex = oif;
         self
     }
 
@@ -541,7 +548,9 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
             RouteAttribute::Encap(e) => {
                 println!("XXX Encap {:?}", e);
             }
-
+            RouteAttribute::Oif(ifindex) => {
+                builder = builder.oif(ifindex);
+            }
             _ => {
                 //
             }
@@ -584,7 +593,6 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             RouteNetlinkMessage::NewRoute(msg) => {
                 let route = route_from_msg(msg);
                 if let Some(route) = route {
-                    println!("XXX {}", route.prefix);
                     let msg = FibMessage::NewRoute(route);
                     tx.send(msg).unwrap();
                 }
