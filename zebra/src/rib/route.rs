@@ -56,7 +56,7 @@ pub async fn ipv4_entry_selection(
 }
 
 // Resolve RibEntries.  gid is already resolved.
-fn ipv4_entry_resolve(_p: &Ipv4Net, entries: &mut RibEntries, nmap: &NexthopMap) {
+fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {
     for entry in entries.iter_mut() {
         if entry.is_protocol() {
             let valid = entry.is_valid_nexthop(nmap);
@@ -71,7 +71,7 @@ pub async fn ipv4_route_sync(
     fib: &FibHandle,
 ) {
     for (p, entries) in table.iter_mut() {
-        ipv4_entry_resolve(p, entries, nmap);
+        ipv4_entry_resolve(entries, nmap);
         ipv4_entry_selection(p, entries, None, nmap, fib).await;
     }
 }
