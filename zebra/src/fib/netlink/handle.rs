@@ -1,4 +1,3 @@
-use core::time;
 use std::net::{IpAddr, Ipv4Addr};
 
 use futures::stream::StreamExt;
@@ -491,7 +490,7 @@ impl RouteBuilder {
         let Some(prefix) = &self.prefix else {
             return false;
         };
-        if let IpNet::V4(prefix) = &prefix {
+        if let IpNet::V4(_) = &prefix {
             return true;
         } else {
             return false;

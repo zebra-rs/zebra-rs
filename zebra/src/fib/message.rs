@@ -1,5 +1,4 @@
 use ipnet::IpNet;
-use std::net::IpAddr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::rib::{entry::RibEntry, link::IFF_UP};

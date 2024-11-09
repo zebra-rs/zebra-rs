@@ -21,7 +21,7 @@ pub fn rib_entry_show(
     rib: &Rib,
     prefix: &Ipv4Net,
     e: &RibEntry,
-    json: bool,
+    _json: bool,
 ) -> anyhow::Result<String> {
     let mut buf = String::new();
 

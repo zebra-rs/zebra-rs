@@ -1,17 +1,7 @@
-use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
-
-use tracing::instrument::WithSubscriber;
-
 use crate::fib::FibHandle;
 
 use super::nexthop::{GroupTrait, NexthopUni};
-use super::{Nexthop, NexthopMap, NexthopMulti, Rib, RibSubType, RibType};
-
-// #[derive(Default)]
-// pub struct RibEntries {
-//     pub ribs: Vec<RibEntry>,
-// }
+use super::{Nexthop, NexthopMap, NexthopMulti, RibSubType, RibType};
 
 pub type RibEntries = Vec<RibEntry>;
 

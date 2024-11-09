@@ -1,9 +1,7 @@
 use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv4Addr};
 
-use crate::fib::message::FibRoute;
 use crate::fib::FibHandle;
 use crate::rib::resolve::{rib_resolve, ResolveOpt};
 use crate::rib::util::IpNetExt;
@@ -173,12 +171,7 @@ fn resolve_nexthop_uni(
     group.is_valid()
 }
 
-fn resolve_nexthop_multi(
-    multi: &mut NexthopMulti,
-    nmap: &mut NexthopMap,
-    table: &PrefixMap<Ipv4Net, RibEntries>,
-    multi_valid: bool,
-) {
+fn resolve_nexthop_multi(multi: &mut NexthopMulti, nmap: &mut NexthopMap, multi_valid: bool) {
     // Create set with gid:u32 and weight:u8.
     let mut set: BTreeSet<(usize, u8)> = BTreeSet::new();
 
@@ -220,7 +213,7 @@ fn rib_resolve_nexthop(
                 multi_valid = true;
             }
         }
-        resolve_nexthop_multi(multi, nmap, table, multi_valid);
+        resolve_nexthop_multi(multi, nmap, multi_valid);
     }
     // If one of nexthop is valid, the entry is valid.
     rib.set_valid(rib.is_valid_nexthop(nmap));

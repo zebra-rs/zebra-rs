@@ -2,9 +2,7 @@ use crate::config::Args;
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 
-use super::entry::RibEntry;
-use super::util::IpNetExt;
-use super::{Message, Nexthop, Rib, RibType};
+use super::{Message, Rib};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
 

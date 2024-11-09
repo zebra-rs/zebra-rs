@@ -5,7 +5,6 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use Group::*;
 
-use crate::fib::FibHandle;
 use crate::rib::entry::RibEntries;
 use crate::rib::resolve::{rib_resolve, Resolve, ResolveOpt};
 
