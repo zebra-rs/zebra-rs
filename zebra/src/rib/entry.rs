@@ -84,30 +84,6 @@ impl RibEntry {
         self.selected = selected;
     }
 
-    // pub fn distance(&self) -> String {
-    //     if self.rtype != RibType::Connected {
-    //         format!(" [{}/{}]", &self.distance, &self.metric)
-    //     } else {
-    //         String::new()
-    //     }
-    // }
-
-    // pub fn gateway(&self, rib: &Rib) -> String {
-    //     if self.is_connected() {
-    //         if let Some(name) = rib.link_name(self.ifindex) {
-    //             format!("directly connected {}", name)
-    //         } else {
-    //             "directly connected unknown".to_string()
-    //         }
-    //     } else if let Nexthop::Uni(uni) = &self.nexthop {
-    //         let mut out: String = String::from("via ");
-    //         out += &format!("{} ", uni.addr);
-    //         out
-    //     } else {
-    //         String::new()
-    //     }
-    // }
-
     pub fn selected(&self) -> String {
         let selected = if self.selected { '>' } else { ' ' };
         let fib = if self.fib { '*' } else { ' ' };
