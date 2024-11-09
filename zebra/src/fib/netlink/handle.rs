@@ -507,6 +507,9 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
     if msg.header.scope == RouteScope::Host {
         return None;
     }
+    if msg.header.kind != RouteType::Unicast {
+        return None;
+    }
     if msg.header.destination_prefix_length == 0 {
         if msg.header.address_family == AddressFamily::Inet {
             let prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();

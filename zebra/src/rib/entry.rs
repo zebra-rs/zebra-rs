@@ -167,15 +167,9 @@ async fn uni_group_sync(uni: &NexthopUni, nmap: &mut NexthopMap, fib: &FibHandle
 }
 
 async fn multi_group_sync(multi: &NexthopMulti, nmap: &mut NexthopMap, fib: &FibHandle) {
-    println!("multi sync {}", multi.gid);
     let Some(group) = nmap.get_mut(multi.gid) else {
         return;
     };
-    println!(
-        "multi is_valid {} is_installed {}",
-        group.is_valid(),
-        group.is_installed()
-    );
     if !group.is_valid() || group.is_installed() {
         return;
     }

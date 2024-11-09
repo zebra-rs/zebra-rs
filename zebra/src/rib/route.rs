@@ -213,7 +213,6 @@ fn rib_resolve_nexthop(
         let _ = resolve_nexthop_uni(uni, nmap, table);
     }
     if let Nexthop::Multi(multi) = &mut rib.nexthop {
-        println!("multi resolve");
         let mut multi_valid = false;
         for uni in multi.nexthops.iter_mut() {
             let valid = resolve_nexthop_uni(uni, nmap, table);
@@ -225,7 +224,6 @@ fn rib_resolve_nexthop(
     }
     // If one of nexthop is valid, the entry is valid.
     rib.set_valid(rib.is_valid_nexthop(nmap));
-    println!("Is valid {}", rib.is_valid());
 }
 
 pub fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {

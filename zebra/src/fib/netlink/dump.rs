@@ -21,7 +21,7 @@ async fn link_dump(rib: &mut Rib, handle: rtnetlink::Handle) -> Result<()> {
     while let Some(msg) = links.try_next().await? {
         let link = link_from_msg(msg);
         let msg = FibMessage::NewLink(link);
-        rib.process_fib_msg(msg);
+        rib.process_fib_msg(msg).await;
     }
     Ok(())
 }
