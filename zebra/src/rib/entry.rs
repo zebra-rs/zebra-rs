@@ -130,6 +130,18 @@ impl RibEntry {
                 }
             }
             Nexthop::Multi(multi) => {
+                if let Some(group) = nmap.get_mut(multi.gid) {
+                    group.refcnt_dec();
+
+                    if group.refcnt() == 0 {
+                        // If ref count is zero and the nexthop is installed, remove it from FIB
+                        if group.is_installed() {
+                            fib.nexthop_del(group).await;
+                        }
+                        // Remove nexthop group since it's no longer referenced
+                        nmap.groups[multi.gid] = None;
+                    }
+                }
                 for uni in multi.nexthops.iter() {
                     if let Some(group) = nmap.get_mut(uni.gid) {
                         group.refcnt_dec();
@@ -142,18 +154,6 @@ impl RibEntry {
                             // Remove nexthop group since it's no longer referenced
                             nmap.groups[uni.gid] = None;
                         }
-                    }
-                }
-                if let Some(group) = nmap.get_mut(multi.gid) {
-                    group.refcnt_dec();
-
-                    if group.refcnt() == 0 {
-                        // If ref count is zero and the nexthop is installed, remove it from FIB
-                        if group.is_installed() {
-                            fib.nexthop_del(group).await;
-                        }
-                        // Remove nexthop group since it's no longer referenced
-                        nmap.groups[multi.gid] = None;
                     }
                 }
             }

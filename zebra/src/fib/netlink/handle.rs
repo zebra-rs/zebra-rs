@@ -217,7 +217,12 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelNexthop error: {}", e);
+                println!(
+                    "DelNexthop error: {} gid: {} refcnt: {}",
+                    e,
+                    nexthop.gid(),
+                    nexthop.refcnt()
+                );
             }
         }
     }
