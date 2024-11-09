@@ -2,7 +2,7 @@ use ipnet::IpNet;
 use std::net::IpAddr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::rib::link::IFF_UP;
+use crate::rib::{entry::RibEntry, link::IFF_UP};
 
 use super::{LinkFlags, LinkType};
 
@@ -58,8 +58,8 @@ impl FibAddr {
 
 #[derive(Debug)]
 pub struct FibRoute {
-    pub route: IpNet,
-    pub gateway: IpAddr,
+    pub prefix: IpNet,
+    pub entry: RibEntry,
 }
 
 #[allow(dead_code)]

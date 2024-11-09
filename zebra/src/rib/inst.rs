@@ -7,7 +7,7 @@ use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Show
 use crate::fib::fib_dump;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
 use crate::rib::RibEntries;
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
@@ -107,10 +107,14 @@ impl Rib {
                 self.addr_del(addr);
             }
             FibMessage::NewRoute(route) => {
-                self.route_add(route);
+                if let IpNet::V4(prefix) = route.prefix {
+                    self.ipv4_route_add(&prefix, route.entry);
+                }
             }
             FibMessage::DelRoute(route) => {
-                self.route_del(route);
+                if let IpNet::V4(prefix) = route.prefix {
+                    self.ipv4_route_del(&prefix, route.entry);
+                }
             }
         }
     }

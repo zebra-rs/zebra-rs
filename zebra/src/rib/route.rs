@@ -123,29 +123,6 @@ impl Rib {
         let _ = self.tx.send(msg);
     }
 
-    pub fn route_add(&mut self, r: FibRoute) {
-        if let IpNet::V4(prefix) = r.route {
-            let mut rib = RibEntry::new(RibType::Kernel);
-            rib.set_valid(true);
-            rib.set_fib(true);
-            if let IpAddr::V4(addr) = r.gateway {
-                if !addr.is_unspecified() {
-                    let nexthop = NexthopUni::new(addr);
-                    rib.nexthop = Nexthop::Uni(nexthop);
-                    let _ = self.tx.send(Message::Ipv4Add { prefix, rib });
-                }
-            }
-        }
-    }
-
-    pub fn route_del(&mut self, r: FibRoute) {
-        if let IpNet::V4(v4) = r.route {
-            if let Some(_ribs) = self.table.get(&v4) {
-                //
-            }
-        }
-    }
-
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
         println!("IPv4 route add: {} {}", rib.rtype.abbrev(), prefix);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);

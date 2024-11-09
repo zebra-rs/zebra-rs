@@ -31,7 +31,7 @@ use crate::context::vrf::Vrf;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::{link, Group, GroupTrait, Nexthop};
+use crate::rib::{link, Group, GroupTrait, Nexthop, NexthopMulti, NexthopUni, RibType};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
@@ -136,8 +136,6 @@ impl FibHandle {
     }
 
     pub async fn nexthop_add(&self, nexthop: &Group) {
-        std::thread::sleep(time::Duration::from_secs(1));
-
         // Nexthop message.
         let mut msg = NexthopMessage::default();
         msg.header.protocol = RouteProtocol::Zebra;
@@ -441,20 +439,97 @@ pub fn addr_from_msg(msg: AddressMessage) -> FibAddr {
     os_addr
 }
 
-pub fn route_from_msg(msg: RouteMessage) -> FibRoute {
+struct RouteBuilder {
+    pub prefix: Option<IpNet>,
+    pub entry: RibEntry,
+}
+
+impl RouteBuilder {
+    pub fn new() -> Self {
+        Self {
+            prefix: None,
+            entry: RibEntry::new(RibType::Kernel),
+        }
+    }
+
+    pub fn build(self) -> (IpNet, RibEntry) {
+        (self.prefix.unwrap(), self.entry)
+    }
+
+    pub fn ipv4_prefix(mut self, prefix: Ipv4Net) -> Self {
+        self.prefix = Some(IpNet::V4(prefix));
+        self
+    }
+
+    pub fn ipv6_prefix(mut self, prefix: Ipv6Net) -> Self {
+        self.prefix = Some(IpNet::V6(prefix));
+        self
+    }
+
+    pub fn rtype(mut self, rtype: RibType) -> Self {
+        self.entry.rtype = rtype;
+        self
+    }
+
+    pub fn nexthop(mut self, nexthop: Nexthop) -> Self {
+        self.entry.nexthop = nexthop;
+        self
+    }
+
+    pub fn is_ipv4(&self) -> bool {
+        let Some(prefix) = &self.prefix else {
+            return false;
+        };
+        if let IpNet::V4(prefix) = &prefix {
+            return true;
+        } else {
+            return false;
+        }
+    }
+}
+
+pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
     let mut route = FibRoute {
-        route: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
-        gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        prefix: IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).unwrap(),
+        entry: RibEntry::new(RibType::Kernel),
     };
+
+    let mut builder = RouteBuilder::new();
+
+    if msg.header.protocol == RouteProtocol::Dhcp {
+        builder = builder.rtype(RibType::Dhcp);
+    }
+    if msg.header.scope == RouteScope::Link {
+        builder = builder.rtype(RibType::Connected);
+    }
 
     for attr in msg.attributes.into_iter() {
         match attr {
             RouteAttribute::Destination(RouteAddress::Inet(n)) => {
-                route.route =
-                    IpNet::V4(Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap());
+                let prefix = Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap();
+                builder = builder.ipv4_prefix(prefix);
+            }
+            RouteAttribute::Destination(RouteAddress::Inet6(n)) => {
+                let prefix = Ipv6Net::new(n, msg.header.destination_prefix_length).unwrap();
+                builder = builder.ipv6_prefix(prefix);
             }
             RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
-                route.gateway = IpAddr::V4(n);
+                let mut uni = NexthopUni::default();
+                uni.addr = n;
+                builder = builder.nexthop(Nexthop::Uni(uni));
+            }
+            RouteAttribute::MultiPath(e) => {
+                let mut multi = NexthopMulti::default();
+                for nhop in e.iter() {
+                    for attr in nhop.attributes.iter() {
+                        if let RouteAttribute::Gateway(RouteAddress::Inet(n)) = attr {
+                            let mut uni = NexthopUni::default();
+                            uni.addr = *n;
+                            multi.nexthops.push(uni);
+                        }
+                    }
+                }
+                builder = builder.nexthop(Nexthop::Multi(multi));
             }
             RouteAttribute::EncapType(e) => {
                 println!("XXX EncapType {}", e);
@@ -462,24 +537,17 @@ pub fn route_from_msg(msg: RouteMessage) -> FibRoute {
             RouteAttribute::Encap(e) => {
                 println!("XXX Encap {:?}", e);
             }
-            RouteAttribute::MultiPath(e) => {
-                println!("XXX Multipath");
-                println!("XXX Num nexthop {}", e.len());
-                for nhop in e.iter() {
-                    for attr in nhop.attributes.iter() {
-                        if let RouteAttribute::Gateway(RouteAddress::Inet(n)) = attr {
-                            let gate = IpAddr::V4(*n);
-                            println!("{}", gate);
-                        }
-                    }
-                }
-            }
+
             _ => {
                 //
             }
         }
     }
-    route
+    if !builder.is_ipv4() {
+        return None;
+    }
+
+    Some(route)
 }
 
 fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
@@ -507,15 +575,17 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             }
             RouteNetlinkMessage::NewRoute(msg) => {
                 let route = route_from_msg(msg);
-                if !route.gateway.is_unspecified() {
+                if let Some(route) = route {
                     let msg = FibMessage::NewRoute(route);
                     tx.send(msg).unwrap();
                 }
             }
             RouteNetlinkMessage::DelRoute(msg) => {
                 let route = route_from_msg(msg);
-                let msg = FibMessage::DelRoute(route);
-                tx.send(msg).unwrap();
+                if let Some(route) = route {
+                    let msg = FibMessage::DelRoute(route);
+                    tx.send(msg).unwrap();
+                }
             }
             _ => {}
         }
