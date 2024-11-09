@@ -55,6 +55,7 @@ impl StaticRoute {
             nhop.metric = n.metric.unwrap_or(metric);
             nhop.weight = n.weight.unwrap_or(0);
             entry.nexthop = Nexthop::Uni(nhop);
+            entry.metric = metric;
             return Some(entry);
         }
 

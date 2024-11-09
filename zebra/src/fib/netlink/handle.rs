@@ -170,7 +170,9 @@ impl FibHandle {
                 let mut vec = Vec::<NexthopGroup>::new();
                 for (id, weight) in multi.set.iter() {
                     let mut grp = NexthopGroup::default();
+                    let weight = if *weight > 0 { *weight - 1 } else { 0 };
                     grp.id = *id as u32;
+                    grp.weight = weight;
                     vec.push(grp);
                 }
                 let attr = NexthopAttribute::Group(vec);

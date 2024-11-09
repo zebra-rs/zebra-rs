@@ -124,7 +124,7 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
-        println!("IPv4 route add: {} {}", rib.rtype.abbrev(), prefix);
+        println!("IPv4 route add: {} {} metric {}", rib.rtype.abbrev(), prefix, rib.metric);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
         rib_resolve_nexthop(&mut rib, &self.table, &mut self.nmap);
         rib_add(&mut self.table, prefix, rib);
