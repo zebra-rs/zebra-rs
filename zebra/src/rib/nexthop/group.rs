@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
@@ -63,6 +64,17 @@ impl GroupUni {
             ifindex: 0,
         }
     }
+
+    pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
+        let resolve = rib_resolve(table, self.addr, &ResolveOpt::default());
+        match resolve {
+            Resolve::Onlink(ifindex) => {
+                self.ifindex = ifindex;
+                self.set_valid(true);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl GroupTrait for GroupUni {
@@ -75,16 +87,28 @@ impl GroupTrait for GroupUni {
     }
 }
 
-#[derive(Default)]
-pub struct GroupWeight {
-    weight: u8,
-    nhop: usize,
-}
-
-#[derive(Default)]
 pub struct GroupMulti {
     common: GroupCommon,
-    nhops: Vec<GroupWeight>,
+    pub set: BTreeSet<(usize, u8)>,
+}
+
+impl GroupMulti {
+    pub fn new(gid: usize) -> Self {
+        Self {
+            common: GroupCommon::new(gid),
+            set: BTreeSet::new(),
+        }
+    }
+}
+
+impl GroupTrait for GroupMulti {
+    fn common(&self) -> &GroupCommon {
+        &self.common
+    }
+
+    fn common_mut(&mut self) -> &mut GroupCommon {
+        &mut self.common
+    }
 }
 
 #[derive(Default)]
@@ -136,22 +160,6 @@ pub trait GroupTrait {
         let refcnt = self.refcnt_mut();
         if *refcnt > 0 {
             *refcnt -= 1;
-        }
-    }
-}
-
-impl Group {
-    pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
-        let Uni(uni) = self else {
-            return;
-        };
-        let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
-        match resolve {
-            Resolve::Onlink(ifindex) => {
-                uni.ifindex = ifindex;
-                self.set_valid(true);
-            }
-            _ => {}
         }
     }
 }

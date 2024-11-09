@@ -197,7 +197,7 @@ fn fetch(peer: &Peer) -> Neighbor {
 // 	return buf;
 // }
 
-fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
+fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
     writeln!(
         out,
         r#"BGP neighbor is {}, remote AS {}, local AS {}, {} link
@@ -258,7 +258,7 @@ fn show_bgp_neighbor(bgp: &Bgp, args: Args, _json: bool) -> String {
             neighbors.push(fetch(peer));
         }
         for neighbor in neighbors.iter() {
-            render(neighbor, &mut out).unwrap();
+            render(&mut out, neighbor).unwrap();
         }
         // out = serde_json::to_string(&neighbors).unwrap();
     } else {

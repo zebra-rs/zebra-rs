@@ -1,7 +1,12 @@
+use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
+
+use tracing::instrument::WithSubscriber;
+
 use crate::fib::FibHandle;
 
 use super::nexthop::{GroupTrait, NexthopUni};
-use super::{Nexthop, NexthopMap, Rib, RibSubType, RibType};
+use super::{Nexthop, NexthopMap, NexthopMulti, Rib, RibSubType, RibType};
 
 // #[derive(Default)]
 // pub struct RibEntries {
@@ -79,29 +84,29 @@ impl RibEntry {
         self.selected = selected;
     }
 
-    pub fn distance(&self) -> String {
-        if self.rtype != RibType::Connected {
-            format!(" [{}/{}]", &self.distance, &self.metric)
-        } else {
-            String::new()
-        }
-    }
+    // pub fn distance(&self) -> String {
+    //     if self.rtype != RibType::Connected {
+    //         format!(" [{}/{}]", &self.distance, &self.metric)
+    //     } else {
+    //         String::new()
+    //     }
+    // }
 
-    pub fn gateway(&self, rib: &Rib) -> String {
-        if self.is_connected() {
-            if let Some(name) = rib.link_name(self.ifindex) {
-                format!("directly connected {}", name)
-            } else {
-                "directly connected unknown".to_string()
-            }
-        } else if let Nexthop::Uni(uni) = &self.nexthop {
-            let mut out: String = String::from("via ");
-            out += &format!("{} ", uni.addr);
-            out
-        } else {
-            String::new()
-        }
-    }
+    // pub fn gateway(&self, rib: &Rib) -> String {
+    //     if self.is_connected() {
+    //         if let Some(name) = rib.link_name(self.ifindex) {
+    //             format!("directly connected {}", name)
+    //         } else {
+    //             "directly connected unknown".to_string()
+    //         }
+    //     } else if let Nexthop::Uni(uni) = &self.nexthop {
+    //         let mut out: String = String::from("via ");
+    //         out += &format!("{} ", uni.addr);
+    //         out
+    //     } else {
+    //         String::new()
+    //     }
+    // }
 
     pub fn selected(&self) -> String {
         let selected = if self.selected { '>' } else { ' ' };
@@ -122,26 +127,13 @@ impl RibEntry {
 
     pub async fn nexthop_sync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
         if let Nexthop::Uni(uni) = &mut self.nexthop {
-            let Some(group) = nmap.get_mut(uni.gid) else {
-                return;
-            };
-            if !group.is_valid() || group.is_installed() {
-                return;
-            }
-            fib.nexthop_add(group).await;
-            group.set_installed(true);
+            uni_group_sync(uni, nmap, fib).await;
         }
         if let Nexthop::Multi(multi) = &mut self.nexthop {
             for uni in multi.nexthops.iter_mut() {
-                let Some(group) = nmap.get_mut(uni.gid) else {
-                    return;
-                };
-                if !group.is_valid() || group.is_installed() {
-                    return;
-                }
-                fib.nexthop_add(group).await;
-                group.set_installed(true);
+                uni_group_sync(uni, nmap, fib).await;
             }
+            multi_group_sync(multi, nmap, fib).await;
         }
     }
 
@@ -161,4 +153,32 @@ impl RibEntry {
             }
         }
     }
+}
+
+async fn uni_group_sync(uni: &NexthopUni, nmap: &mut NexthopMap, fib: &FibHandle) {
+    let Some(group) = nmap.get_mut(uni.gid) else {
+        return;
+    };
+    if !group.is_valid() || group.is_installed() {
+        return;
+    }
+    fib.nexthop_add(group).await;
+    group.set_installed(true);
+}
+
+async fn multi_group_sync(multi: &NexthopMulti, nmap: &mut NexthopMap, fib: &FibHandle) {
+    println!("multi sync {}", multi.gid);
+    let Some(group) = nmap.get_mut(multi.gid) else {
+        return;
+    };
+    println!(
+        "multi is_valid {} is_installed {}",
+        group.is_valid(),
+        group.is_installed()
+    );
+    if !group.is_valid() || group.is_installed() {
+        return;
+    }
+    fib.nexthop_add(group).await;
+    group.set_installed(true);
 }

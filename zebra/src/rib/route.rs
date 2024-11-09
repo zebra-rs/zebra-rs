@@ -1,5 +1,6 @@
 use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::fib::message::FibRoute;
@@ -11,7 +12,7 @@ use crate::rib::Nexthop;
 use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::NexthopUni;
-use super::{Group, GroupTrait, Message, NexthopMap, RibEntries, RibType};
+use super::{Group, GroupTrait, Message, NexthopMap, NexthopMulti, RibEntries, RibType};
 
 pub async fn ipv4_entry_selection(
     prefix: &Ipv4Net,
@@ -173,14 +174,14 @@ impl Rib {
     }
 }
 
-fn resolve_nexthop(
+fn resolve_nexthop_uni(
     uni: &mut NexthopUni,
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
-) {
+) -> bool {
     // Only GroupUni is handled.
-    let Some(group) = nmap.fetch_uni(&uni.addr) else {
-        return;
+    let Some(Group::Uni(group)) = nmap.fetch_uni(&uni.addr) else {
+        return false;
     };
     // When this is first time allocation, resolve the nexthop group.
     if group.refcnt() == 0 {
@@ -191,6 +192,34 @@ fn resolve_nexthop(
 
     // Set the nexthop group id to the nexthop.
     uni.gid = group.gid();
+
+    group.is_valid()
+}
+
+fn resolve_nexthop_multi(
+    multi: &mut NexthopMulti,
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv4Net, RibEntries>,
+    multi_valid: bool,
+) {
+    // Create set with gid:u32 and weight:u8.
+    let mut set: BTreeSet<(usize, u8)> = BTreeSet::new();
+
+    for nhop in multi.nexthops.iter() {
+        set.insert((nhop.gid, nhop.weight));
+    }
+
+    let Some(Group::Multi(group)) = nmap.fetch_multi(&set) else {
+        return;
+    };
+
+    group.set_valid(multi_valid);
+
+    // Reference counter increment.
+    group.refcnt_inc();
+
+    // Set the nexthop group id to the nexthop.
+    multi.gid = group.gid();
 }
 
 // Function is called when rib is added.
@@ -204,12 +233,18 @@ fn rib_resolve_nexthop(
         return;
     }
     if let Nexthop::Uni(uni) = &mut rib.nexthop {
-        resolve_nexthop(uni, nmap, table);
+        let _ = resolve_nexthop_uni(uni, nmap, table);
     }
     if let Nexthop::Multi(multi) = &mut rib.nexthop {
+        println!("multi resolve");
+        let mut multi_valid = false;
         for uni in multi.nexthops.iter_mut() {
-            resolve_nexthop(uni, nmap, table);
+            let valid = resolve_nexthop_uni(uni, nmap, table);
+            if valid {
+                multi_valid = true;
+            }
         }
+        resolve_nexthop_multi(multi, nmap, table, multi_valid);
     }
     // If one of nexthop is valid, the entry is valid.
     rib.set_valid(rib.is_valid_nexthop(nmap));

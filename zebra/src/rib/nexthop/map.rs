@@ -1,11 +1,15 @@
-use std::{collections::BTreeMap, net::Ipv4Addr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::Ipv4Addr,
+};
 
 use crate::fib::FibHandle;
 
-use super::{Group, GroupTrait, GroupUni};
+use super::{Group, GroupMulti, GroupTrait, GroupUni};
 
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
+    set: BTreeMap<BTreeSet<(usize, u8)>, usize>,
     pub groups: Vec<Option<Group>>,
 }
 
@@ -13,6 +17,7 @@ impl Default for NexthopMap {
     fn default() -> Self {
         let mut nmap = Self {
             map: BTreeMap::new(),
+            set: BTreeMap::new(),
             groups: Vec::new(),
         };
         nmap.groups.push(None);
@@ -56,10 +61,20 @@ impl NexthopMap {
         self.get_mut(gid)
     }
 
-    pub fn clear(&mut self, index: usize) {
-        if index < self.groups.len() {
-            self.groups.remove(index);
-        }
+    pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
+        let gid = if let Some(&gid) = self.set.get(&set) {
+            gid
+        } else {
+            let gid = self.new_gid();
+            let mut multi = GroupMulti::new(gid);
+            multi.set = set.clone();
+
+            self.set.insert(set.clone(), gid);
+            self.groups.push(Some(Group::Multi(multi)));
+
+            gid
+        };
+        self.get_mut(gid)
     }
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {

@@ -13,7 +13,7 @@ use netlink_packet_route::address::{
 use netlink_packet_route::link::{
     InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
 };
-use netlink_packet_route::nexthop::{NexthopAttribute, NexthopMessage};
+use netlink_packet_route::nexthop::{NexthopAttribute, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
 };
@@ -86,6 +86,9 @@ impl FibHandle {
         if let Nexthop::Uni(uni) = &entry.nexthop {
             msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
         }
+        if let Nexthop::Multi(multi) = &entry.nexthop {
+            msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+        }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
@@ -135,25 +138,50 @@ impl FibHandle {
     pub async fn nexthop_add(&self, nexthop: &Group) {
         std::thread::sleep(time::Duration::from_secs(1));
 
-        let Group::Uni(uni) = nexthop else {
-            return;
-        };
         // Nexthop message.
         let mut msg = NexthopMessage::default();
-        msg.header.address_family = AddressFamily::Inet;
-        msg.header.protocol = RouteProtocol::Static;
+        msg.header.protocol = RouteProtocol::Zebra;
 
-        // Nexthop group ID.
-        let attr = NexthopAttribute::Id(uni.gid() as u32);
-        msg.attributes.push(attr);
+        match nexthop {
+            Group::Uni(uni) => {
+                // IPv4.
+                msg.header.address_family = AddressFamily::Inet;
 
-        // Gateway address.
-        let attr = NexthopAttribute::Gateway(RouteAddress::Inet(uni.addr));
-        msg.attributes.push(attr);
+                // Nexthop group ID.
+                let attr = NexthopAttribute::Id(uni.gid() as u32);
+                msg.attributes.push(attr);
 
-        // Outgoing if.
-        let attr = NexthopAttribute::Oif(uni.ifindex);
-        msg.attributes.push(attr);
+                // Gateway address.
+                let attr = NexthopAttribute::Gateway(RouteAddress::Inet(uni.addr));
+                msg.attributes.push(attr);
+
+                // Outgoing if.
+                let attr = NexthopAttribute::Oif(uni.ifindex);
+                msg.attributes.push(attr);
+            }
+            Group::Multi(multi) => {
+                // Unspec.
+                msg.header.address_family = AddressFamily::Unspec;
+
+                let attr = NexthopAttribute::Id(multi.gid() as u32);
+                msg.attributes.push(attr);
+
+                let attr = NexthopAttribute::GroupType(0);
+                msg.attributes.push(attr);
+
+                let mut vec = Vec::<NexthopGroup>::new();
+                for (id, weight) in multi.set.iter() {
+                    let mut grp = NexthopGroup::default();
+                    grp.id = *id as u32;
+                    vec.push(grp);
+                }
+                let attr = NexthopAttribute::Group(vec);
+                msg.attributes.push(attr);
+            }
+            _ => {
+                return;
+            }
+        }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
@@ -162,13 +190,7 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             match msg.payload {
                 NetlinkPayload::Error(e) => {
-                    println!(
-                        "NewNexthop error: {} gid: {} addr: {} ifindex:: {}",
-                        e,
-                        uni.gid(),
-                        uni.addr,
-                        uni.ifindex,
-                    );
+                    println!("NewNexthop error: {}", e);
                 }
                 NetlinkPayload::Done(m) => {
                     println!("NewNexthop done {:?}", m);
