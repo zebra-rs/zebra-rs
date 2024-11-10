@@ -62,7 +62,7 @@ impl NexthopMap {
     }
 
     pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
-        let gid = if let Some(&gid) = self.set.get(&set) {
+        let gid = if let Some(&gid) = self.set.get(set) {
             gid
         } else {
             let gid = self.new_gid();
@@ -79,7 +79,7 @@ impl NexthopMap {
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {
         for (_, id) in self.set.iter() {
-            let entry = self.get(*id as usize);
+            let entry = self.get(*id);
             if let Some(grp) = entry {
                 if grp.is_installed() {
                     fib.nexthop_del(grp).await;
@@ -87,7 +87,7 @@ impl NexthopMap {
             }
         }
         for (_, id) in self.map.iter() {
-            let entry = self.get(*id as usize);
+            let entry = self.get(*id);
             if let Some(grp) = entry {
                 if grp.is_installed() {
                     fib.nexthop_del(grp).await;

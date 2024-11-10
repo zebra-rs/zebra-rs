@@ -243,13 +243,11 @@ impl Rib {
                         ifindex: link.index,
                     });
                 }
-            } else {
-                if oslink.is_up() {
-                    link.flags = oslink.flags;
-                    let _ = self.tx.send(Message::LinkUp {
-                        ifindex: link.index,
-                    });
-                }
+            } else if oslink.is_up() {
+                link.flags = oslink.flags;
+                let _ = self.tx.send(Message::LinkUp {
+                    ifindex: link.index,
+                });
             }
         } else {
             let link = Link::from(oslink);
@@ -261,10 +259,10 @@ impl Rib {
         self.links.remove(&oslink.index);
     }
 
-    pub fn link_name(&self, link_index: u32) -> Option<&String> {
+    pub fn link_name(&self, link_index: u32) -> String {
         match self.links.get(&link_index) {
-            Some(link) => Some(&link.name),
-            _ => None,
+            Some(link) => link.name.clone(),
+            _ => String::from("unknown"),
         }
     }
 

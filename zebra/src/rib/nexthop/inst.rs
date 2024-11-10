@@ -13,9 +13,10 @@ pub struct NexthopUni {
 
 impl NexthopUni {
     pub fn new(addr: Ipv4Addr) -> Self {
-        let mut nhop = Self::default();
-        nhop.addr = addr;
-        nhop
+        Self {
+            addr,
+            ..Default::default()
+        }
     }
 }
 

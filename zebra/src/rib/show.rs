@@ -42,11 +42,7 @@ pub fn rib_entry_show(
     let offset = buf.len();
 
     if e.is_connected() {
-        if let Some(name) = rib.link_name(e.ifindex) {
-            writeln!(buf, " directly connected {}", name).unwrap();
-        } else {
-            writeln!(buf, " directly connected unknown").unwrap();
-        }
+        writeln!(buf, " directly connected {}", rib.link_name(e.ifindex)).unwrap();
     } else {
         match &e.nexthop {
             Nexthop::Uni(uni) => {

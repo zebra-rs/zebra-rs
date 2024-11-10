@@ -22,6 +22,7 @@ impl Group {
     }
 }
 
+#[derive(Default)]
 pub struct GroupCommon {
     gid: usize,
     valid: bool,
@@ -34,17 +35,6 @@ impl GroupCommon {
         Self {
             gid,
             ..Default::default()
-        }
-    }
-}
-
-impl Default for GroupCommon {
-    fn default() -> Self {
-        Self {
-            gid: 0,
-            valid: false,
-            installed: false,
-            refcnt: 0,
         }
     }
 }
@@ -66,12 +56,9 @@ impl GroupUni {
 
     pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
         let resolve = rib_resolve(table, self.addr, &ResolveOpt::default());
-        match resolve {
-            Resolve::Onlink(ifindex) => {
-                self.ifindex = ifindex;
-                self.set_valid(true);
-            }
-            _ => {}
+        if let Resolve::Onlink(ifindex) = resolve {
+            self.ifindex = ifindex;
+            self.set_valid(true);
         }
     }
 }
@@ -178,19 +165,5 @@ impl GroupTrait for Group {
             Multi(multi) => &mut multi.common,
             Protect(protect) => &mut protect.common,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_uni() {
-        let addr: Ipv4Addr = "10.211.55.2".parse().unwrap();
-        let mut unipath = NexthopGroup::new_uni(&addr, 0);
-        assert_eq!(false, unipath.is_valid());
-        unipath.set_valid(true);
-        assert_eq!(true, unipath.is_valid());
     }
 }

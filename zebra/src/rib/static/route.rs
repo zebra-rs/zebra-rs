@@ -47,13 +47,13 @@ impl StaticRoute {
         let metric = self.metric.unwrap_or(0);
 
         if self.nexthops.len() == 1 {
-            let Some((p, n)) = self.nexthops.iter().next() else {
-                return None;
+            let (p, n) = self.nexthops.iter().next()?;
+            let mut nhop = NexthopUni {
+                addr: *p,
+                metric: n.metric.unwrap_or(metric),
+                weight: n.weight.unwrap_or(0),
+                ..Default::default()
             };
-            let mut nhop = NexthopUni::default();
-            nhop.addr = *p;
-            nhop.metric = n.metric.unwrap_or(metric);
-            nhop.weight = n.weight.unwrap_or(0);
             entry.nexthop = Nexthop::Uni(nhop);
             entry.metric = metric;
             return Some(entry);
@@ -68,16 +68,18 @@ impl StaticRoute {
 
         // ECMP/UCMP case.
         if map.len() == 1 {
-            let Some((metric, pair)) = map.pop_first() else {
-                return None;
+            let (metric, pair) = map.pop_first()?;
+            let mut multi = NexthopMulti {
+                metric,
+                ..Default::default()
             };
-            let mut multi = NexthopMulti::default();
-            multi.metric = metric;
             for (p, n) in pair.iter() {
-                let mut nhop = NexthopUni::default();
-                nhop.addr = *p;
-                nhop.metric = n.metric.unwrap_or(metric);
-                nhop.weight = n.weight.unwrap_or(0);
+                let mut nhop = NexthopUni {
+                    addr: *p,
+                    metric: n.metric.unwrap_or(metric),
+                    weight: n.weight.unwrap_or(0),
+                    ..Default::default()
+                };
                 multi.nexthops.push(nhop);
             }
             entry.nexthop = Nexthop::Multi(multi);

@@ -26,10 +26,10 @@ pub async fn ipv4_entry_selection(
         }
     }
     // Selected.
-    let prev = rib_prev(&entries);
+    let prev = rib_prev(entries);
 
     // New select.
-    let next = rib_next(&entries);
+    let next = rib_next(entries);
 
     if prev == next {
         return;
@@ -47,7 +47,7 @@ pub async fn ipv4_entry_selection(
 
         if next.is_protocol() {
             next.nexthop_sync(nmap, fib).await;
-            fib.route_ipv4_add(prefix, &next).await;
+            fib.route_ipv4_add(prefix, next).await;
         }
         next.set_fib(true);
     }
@@ -237,7 +237,7 @@ pub fn rib_replace(
     replace
 }
 
-fn rib_prev(entries: &Vec<RibEntry>) -> Option<usize> {
+fn rib_prev(entries: &[RibEntry]) -> Option<usize> {
     entries.iter().position(|e| e.is_selected())
 }
 
@@ -264,33 +264,21 @@ fn rib_next(entries: &RibEntries) -> Option<usize> {
 }
 
 pub fn ipv4_nexthop_sync(nmap: &mut NexthopMap, table: &PrefixMap<Ipv4Net, RibEntries>) {
-    //for grp in nmap.
-    for nhop in nmap.groups.iter_mut() {
-        if let Some(nhop) = nhop {
-            if let Group::Uni(uni) = nhop {
-                if uni.refcnt() == 0 {
-                    continue;
-                }
-                println!(
-                    "IPv4 nexthop: {} refcnt {} is_valid {} is_installed {}",
-                    uni.addr,
-                    uni.refcnt(),
-                    uni.is_valid(),
-                    uni.is_installed()
-                );
-                let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
-                if resolve.is_valid() == 0 {
-                    uni.set_valid(false);
-                    uni.set_installed(false);
-                } else {
-                    uni.set_valid(true);
-                }
-                println!(
-                    "resolve: uni id {} is_valid {} is_installed {}",
-                    uni.gid(),
-                    uni.is_valid(),
-                    uni.is_installed()
-                );
+    for nhop in nmap.groups.iter_mut().flatten() {
+        if let Group::Uni(uni) = nhop {
+            if uni.refcnt() == 0 {
+                continue;
+            }
+
+            // Resolve the next hop
+            let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
+
+            // Update the status of the next hop
+            if resolve.is_valid() == 0 {
+                uni.set_valid(false);
+                uni.set_installed(false);
+            } else {
+                uni.set_valid(true);
             }
         }
     }

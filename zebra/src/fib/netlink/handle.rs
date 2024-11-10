@@ -490,11 +490,7 @@ impl RouteBuilder {
         let Some(prefix) = &self.prefix else {
             return false;
         };
-        if let IpNet::V4(_) = &prefix {
-            return true;
-        } else {
-            return false;
-        }
+        matches!(prefix, IpNet::V4(_))
     }
 }
 
@@ -513,11 +509,10 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
     if msg.header.kind != RouteType::Unicast {
         return None;
     }
-    if msg.header.destination_prefix_length == 0 {
-        if msg.header.address_family == AddressFamily::Inet {
-            let prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
-            builder = builder.ipv4_prefix(prefix);
-        }
+    if msg.header.destination_prefix_length == 0 && msg.header.address_family == AddressFamily::Inet
+    {
+        let prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
+        builder = builder.ipv4_prefix(prefix);
     }
 
     for attr in msg.attributes.into_iter() {
@@ -531,8 +526,10 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
                 builder = builder.ipv6_prefix(prefix);
             }
             RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
-                let mut uni = NexthopUni::default();
-                uni.addr = n;
+                let mut uni = NexthopUni {
+                    addr: n,
+                    ..Default::default()
+                };
                 builder = builder.nexthop(Nexthop::Uni(uni));
             }
             RouteAttribute::MultiPath(e) => {
@@ -540,8 +537,10 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
                 for nhop in e.iter() {
                     for attr in nhop.attributes.iter() {
                         if let RouteAttribute::Gateway(RouteAddress::Inet(n)) = attr {
-                            let mut uni = NexthopUni::default();
-                            uni.addr = *n;
+                            let mut uni = NexthopUni {
+                                addr: *n,
+                                ..Default::default()
+                            };
                             multi.nexthops.push(uni);
                         }
                     }
