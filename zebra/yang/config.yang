@@ -69,6 +69,15 @@ module config {
       // uses "policy:defined-sets";
       container ospf {
         presence "Enables configuration of OSPFv2";
+        list network {
+          key prefix;
+          leaf prefix {
+            type inet:ipv4-prefix;
+          }
+          leaf area {
+            type uint8;
+          }
+        }
       }
       container static {
         ext:help "Static route configuration";

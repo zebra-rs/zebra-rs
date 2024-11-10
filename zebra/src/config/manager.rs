@@ -164,9 +164,7 @@ impl ConfigManager {
                 continue;
             }
             if op == ConfigOp::Set && line == "routing ospf" {
-                println!("Enable OSPF {}", line);
                 spawn_ospf(self);
-                println!("Enable OSPF done");
             }
         }
         for line in diff.lines() {

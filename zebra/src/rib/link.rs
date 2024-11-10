@@ -2,6 +2,7 @@ use crate::config::Args;
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 
+use super::api::RibRx;
 use super::{Message, Rib};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
@@ -283,6 +284,7 @@ impl Rib {
             if link_addr_update(link, addr.clone()).is_some() {
                 //
             }
+            self.api_addr_add(&addr);
         }
     }
 

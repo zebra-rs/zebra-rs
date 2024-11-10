@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
-use super::{Link, Rib};
+use super::{link::LinkAddr, Link, Rib};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -41,13 +41,20 @@ impl RibRxChannel {
 // Message from rib to protocol module.
 pub enum RibRx {
     Link(Link),
-    Addr(),
+    Addr(LinkAddr),
 }
 
 impl Rib {
     pub fn api_link_add(&self, link: &Link) {
         for tx in self.redists.iter() {
             let link = RibRx::Link(link.clone());
+            let _ = tx.send(link);
+        }
+    }
+
+    pub fn api_addr_add(&self, addr: &LinkAddr) {
+        for tx in self.redists.iter() {
+            let link = RibRx::Addr(addr.clone());
             let _ = tx.send(link);
         }
     }
