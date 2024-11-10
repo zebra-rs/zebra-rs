@@ -54,7 +54,7 @@ impl Link {
 #[derive(Default, Debug, Clone)]
 pub struct LinkAddr {
     pub addr: IpNet,
-    pub link_index: u32,
+    pub ifindex: u32,
     pub secondary: bool,
 }
 
@@ -62,7 +62,7 @@ impl LinkAddr {
     pub fn from(osaddr: FibAddr) -> Self {
         Self {
             addr: osaddr.addr,
-            link_index: osaddr.link_index,
+            ifindex: osaddr.link_index,
             secondary: osaddr.secondary,
         }
     }
@@ -279,24 +279,16 @@ impl Rib {
 
     pub fn addr_add(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
-        if let Some(link) = self.links.get_mut(&addr.link_index) {
+        if let Some(link) = self.links.get_mut(&addr.ifindex) {
             if link_addr_update(link, addr.clone()).is_some() {
-                // let mut rib = RibEntry::new(RibType::Connected);
-                // rib.ifindex = link.index;
-                // rib.set_fib(true);
-                // rib.set_valid(true);
-                // if let IpNet::V4(prefix) = addr.addr {
-                //     let prefix = prefix.apply_mask();
-                //     let msg = Message::Ipv4Add { prefix, rib };
-                //     let _ = self.tx.send(msg);
-                // }
+                //
             }
         }
     }
 
     pub fn addr_del(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
-        if let Some(link) = self.links.get_mut(&addr.link_index) {
+        if let Some(link) = self.links.get_mut(&addr.ifindex) {
             link_addr_del(link, addr);
         }
     }
