@@ -67,6 +67,9 @@ module config {
       ext:help "Routing configuration";
       uses "ietf-bgp:bgp";
       // uses "policy:defined-sets";
+      container ospf {
+        presence "Enables configuration of OSPFv2";
+      }
       container static {
         ext:help "Static route configuration";
         list route {

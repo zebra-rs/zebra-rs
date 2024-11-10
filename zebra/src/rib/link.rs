@@ -6,7 +6,7 @@ use super::{Message, Rib};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Link {
     pub index: u32,
     pub name: String,
@@ -251,6 +251,7 @@ impl Rib {
             }
         } else {
             let link = Link::from(oslink);
+            self.api_link_add(&link);
             self.links.insert(link.index, link);
         }
     }

@@ -1,5 +1,5 @@
 pub mod api;
-pub use api::RibTxChannel;
+pub use api::{RibRxChannel, RibTxChannel};
 
 pub mod inst;
 pub use inst::{serve, Message, Rib};

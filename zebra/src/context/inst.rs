@@ -5,4 +5,7 @@
 // 3. Config context
 //
 // Context holds VRF related contexts.
-pub struct Context {}
+#[derive(Default)]
+pub struct Context {
+    //
+}

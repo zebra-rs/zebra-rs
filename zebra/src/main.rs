@@ -11,6 +11,8 @@ mod policy;
 use policy::Policy;
 mod context;
 mod fib;
+mod ospf;
+mod ldp;
 
 use clap::Parser;
 
@@ -62,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
     let policy = Policy::new();
 
-    let mut config = ConfigManager::new(system_path(&arg))?;
+    let mut config = ConfigManager::new(system_path(&arg), rib.tx.clone())?;
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());

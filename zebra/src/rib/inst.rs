@@ -22,6 +22,7 @@ pub enum Message {
     Ipv4Add { prefix: Ipv4Net, rib: RibEntry },
     Shutdown { tx: oneshot::Sender<()> },
     Resolve,
+    Subscribe { tx: UnboundedSender<RibRx> },
 }
 
 pub struct Rib {
@@ -31,7 +32,7 @@ pub struct Rib {
     pub show_cb: HashMap<String, ShowCallback>,
     pub fib: FibChannel,
     pub fib_handle: FibHandle,
-    pub redists: Vec<Sender<RibRx>>,
+    pub redists: Vec<UnboundedSender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub tx: UnboundedSender<Message>,
@@ -64,7 +65,13 @@ impl Rib {
         Ok(rib)
     }
 
-    pub fn subscribe(&mut self, tx: Sender<RibRx>) {
+    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>) {
+        // Link dump.
+        for (_, link) in self.links.iter() {
+            println!("RIB sending {}", link.name);
+            let msg = RibRx::Link(link.clone());
+            let _ = tx.send(msg);
+        }
         self.redists.push(tx);
     }
 
@@ -88,6 +95,10 @@ impl Rib {
             }
             Message::Resolve => {
                 self.ipv4_route_resolve().await;
+            }
+            Message::Subscribe { tx } => {
+                println!("RIB is subscribed");
+                self.subscribe(tx);
             }
         }
     }

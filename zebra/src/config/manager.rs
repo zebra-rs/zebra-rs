@@ -57,11 +57,15 @@ pub struct ConfigManager {
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
-    pub cm_clients: HashMap<String, UnboundedSender<ConfigRequest>>,
+    pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
+    pub rib_tx: UnboundedSender<crate::rib::Message>,
 }
 
 impl ConfigManager {
-    pub fn new(mut system_path: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(
+        mut system_path: PathBuf,
+        rib_tx: UnboundedSender<crate::rib::Message>,
+    ) -> anyhow::Result<Self> {
         let yang_path = system_path.to_string_lossy().to_string();
         system_path.pop();
         system_path.push("zebra.conf");
@@ -74,7 +78,8 @@ impl ConfigManager {
             store: ConfigStore::new(),
             tx,
             rx,
-            cm_clients: HashMap::new(),
+            cm_clients: RefCell::new(HashMap::new()),
+            rib_tx,
         };
         cm.init()?;
 
@@ -98,8 +103,8 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub fn subscribe(&mut self, name: &str, cm_tx: UnboundedSender<ConfigRequest>) {
-        self.cm_clients.insert(name.to_owned(), cm_tx);
+    pub fn subscribe(&self, name: &str, cm_tx: UnboundedSender<ConfigRequest>) {
+        self.cm_clients.borrow_mut().insert(name.to_owned(), cm_tx);
     }
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
@@ -141,9 +146,28 @@ impl ConfigManager {
 
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
 
-        for (_, tx) in self.cm_clients.iter() {
+        for (_, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
+        }
+        // Protocol swpan.
+        for line in diff.lines() {
+            let first_char = line.chars().next().unwrap();
+            let op = match first_char {
+                '+' => ConfigOp::Set,
+                '-' => ConfigOp::Delete,
+                _ => continue,
+            };
+            let line = remove_first_char(line);
+            let paths = self.paths(line.clone());
+            if paths.is_none() {
+                continue;
+            }
+            if op == ConfigOp::Set && line == "routing ospf" {
+                println!("Enable OSPF {}", line);
+                spawn_ospf(self);
+                println!("Enable OSPF done");
+            }
         }
         for line in diff.lines() {
             if !line.is_empty() {
@@ -159,13 +183,13 @@ impl ConfigManager {
                     continue;
                 }
                 let paths = paths.unwrap();
-                for (_, tx) in self.cm_clients.iter() {
+                for (_, tx) in self.cm_clients.borrow().iter() {
                     tx.send(ConfigRequest::new(paths.clone(), op.clone()))
                         .unwrap();
                 }
             }
         }
-        for (_, tx) in self.cm_clients.iter() {
+        for (_, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
                 .unwrap();
         }
@@ -233,7 +257,7 @@ impl ConfigManager {
     }
 
     pub async fn comps_dynamic(&self) -> Vec<String> {
-        if let Some(tx) = self.cm_clients.get("rib") {
+        if let Some(tx) = self.cm_clients.borrow().get("rib") {
             let (comp_tx, comp_rx) = oneshot::channel();
             let req = ConfigRequest {
                 // input: "".to_string(),
@@ -331,6 +355,17 @@ fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
         run.dir.borrow_mut().push(dir.clone());
     }
     Rc::new(run)
+}
+
+use crate::context::Context;
+use crate::ospf::inst;
+
+fn spawn_ospf(config: &ConfigManager) {
+    // Can we spawn new task here?
+    let ctx = Context::default();
+    let mut ospf = inst::Ospf::new(ctx, config.rib_tx.clone());
+    config.subscribe("ospf", ospf.cm.tx.clone());
+    inst::serve(ospf);
 }
 
 pub async fn event_loop(mut config: ConfigManager) {
