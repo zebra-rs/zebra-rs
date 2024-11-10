@@ -161,6 +161,10 @@ fn is_bgp(paths: &[CommandPath]) -> bool {
         .any(|x| x.name == "bgp" || x.name == "community-list")
 }
 
+fn is_ospf(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "ospf")
+}
+
 fn is_policy(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "prefix-list")
 }
@@ -182,6 +186,10 @@ impl Show for ShowService {
         };
         if is_bgp(&req.paths) {
             if let Some(tx) = self.show_clients.get("bgp") {
+                tx.send(req).unwrap();
+            }
+        } else if is_ospf(&req.paths) {
+            if let Some(tx) = self.show_clients.get("ospf") {
                 tx.send(req).unwrap();
             }
         } else if is_policy(&req.paths) {

@@ -14,6 +14,7 @@ use crate::{
     rib::RibRxChannel,
 };
 
+use super::area::OspfArea;
 use super::link::OspfLink;
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
@@ -24,7 +25,8 @@ pub struct Ospf {
     pub callbacks: HashMap<String, Callback>,
     pub rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink>,
-    pub table: PrefixMap<Ipv4Net, u32>,
+    pub areas: BTreeMap<u8, OspfArea>,
+    pub table: PrefixMap<Ipv4Net, OspfAddr>,
 }
 
 impl Ospf {
@@ -40,6 +42,7 @@ impl Ospf {
             callbacks: HashMap::new(),
             rx: chan.rx,
             links: BTreeMap::new(),
+            areas: BTreeMap::new(),
             table: PrefixMap::new(),
         }
     }
@@ -58,14 +61,22 @@ impl Ospf {
             //
         } else {
             let link = OspfLink::from(link);
+            self.links.insert(link.index, link);
         }
     }
 
     fn addr_add(&mut self, addr: LinkAddr) {
         println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
-        if let IpNet::V4(prefix) = &addr.addr {
-            let addr = OspfAddr::from(&addr, prefix);
-        }
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+        let IpNet::V4(prefix) = &addr.addr else {
+            return;
+        };
+        let addr = OspfAddr::from(&addr, prefix);
+        link.addr.push(addr.clone());
+        let entry = self.table.entry(*prefix).or_default();
+        *entry = addr;
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
