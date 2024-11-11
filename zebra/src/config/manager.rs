@@ -159,6 +159,7 @@ impl ConfigManager {
                 .unwrap();
         }
         // Protocol swpan.
+        let mut ospf = false;
         for line in diff.lines() {
             let first_char = line.chars().next().unwrap();
             let op = match first_char {
@@ -171,7 +172,8 @@ impl ConfigManager {
             if paths.is_none() {
                 continue;
             }
-            if op == ConfigOp::Set && line == "routing ospf" {
+            if !ospf && op == ConfigOp::Set && line.starts_with("routing ospf") {
+                ospf = true;
                 spawn_ospf(self);
             }
         }
@@ -367,7 +369,6 @@ impl ConfigManager {
                     let reply = DisplayTxResponse { tx: tx.clone() };
                     req.resp.send(reply).unwrap();
                 }
-                println!("{:?}", req.paths);
             }
         }
     }

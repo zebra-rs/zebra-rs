@@ -52,13 +52,17 @@ impl Ospf {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
         };
+        ospf.callback_build();
         ospf.show_build();
         ospf
     }
 
+    pub fn callback_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks.insert(path.to_string(), cb);
+    }
+
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        // println!("path: {}", path);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
