@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::area::OspfArea;
+use super::config::OspfNetworkConfig;
 use super::link::OspfLink;
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
@@ -26,7 +27,7 @@ pub struct Ospf {
     pub rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink>,
     pub areas: BTreeMap<u8, OspfArea>,
-    pub table: PrefixMap<Ipv4Net, OspfAddr>,
+    pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
 }
 
 impl Ospf {
@@ -76,7 +77,7 @@ impl Ospf {
         let addr = OspfAddr::from(&addr, prefix);
         link.addr.push(addr.clone());
         let entry = self.table.entry(*prefix).or_default();
-        *entry = addr;
+        entry.addr = Some(addr);
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {

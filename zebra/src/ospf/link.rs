@@ -7,6 +7,7 @@ pub struct OspfLink {
     pub name: String,
     pub mtu: u32,
     pub addr: Vec<OspfAddr>,
+    pub enable: bool,
 }
 
 impl OspfLink {
@@ -16,6 +17,7 @@ impl OspfLink {
             name: link.name.to_owned(),
             mtu: link.mtu,
             addr: Vec::new(),
+            enable: false,
         }
     }
 }

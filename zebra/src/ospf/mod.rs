@@ -10,3 +10,5 @@ pub mod area;
 pub mod show;
 
 pub mod neighbor;
+
+pub mod config;

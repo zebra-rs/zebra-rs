@@ -69,13 +69,34 @@ module config {
       // uses "policy:defined-sets";
       container ospf {
         presence "Enables configuration of OSPFv2";
+        leaf router-id {
+          type inet:ipv4-address;
+        }
         list network {
           key prefix;
           leaf prefix {
             type inet:ipv4-prefix;
           }
           leaf area {
+            mandatory true;
             type uint8;
+          }
+        }
+      }
+      container ldp {
+        leaf router-id {
+          type inet:ipv4-address;
+        }
+        leaf target-address {
+          type inet:ipv4-address;
+        }
+        list interface {
+          key "name";
+          leaf name {
+            type string;
+          }
+          leaf enable {
+            type empty;
           }
         }
       }
