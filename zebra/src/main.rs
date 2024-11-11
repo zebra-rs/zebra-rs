@@ -9,7 +9,10 @@ mod rib;
 use rib::Rib;
 mod policy;
 use policy::Policy;
+mod context;
 mod fib;
+mod ldp;
+mod ospf;
 
 use clap::Parser;
 
@@ -61,14 +64,14 @@ async fn main() -> anyhow::Result<()> {
 
     let policy = Policy::new();
 
-    let mut config = ConfigManager::new(system_path(&arg))?;
+    let mut config = ConfigManager::new(system_path(&arg), rib.tx.clone())?;
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());
+    config.subscribe_show("rib", rib.show.tx.clone());
+    config.subscribe_show("bgp", bgp.show.tx.clone());
 
     let mut cli = Cli::new(config.tx.clone());
-    cli.subscribe("rib", rib.show.tx.clone());
-    cli.subscribe("bgp", bgp.show.tx.clone());
 
     config::serve(cli);
 

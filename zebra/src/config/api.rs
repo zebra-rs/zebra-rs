@@ -118,10 +118,22 @@ pub struct DeployResponse {
 }
 
 #[derive(Debug)]
+pub struct DisplayTxRequest {
+    pub paths: Vec<CommandPath>,
+    pub resp: Sender<DisplayTxResponse>,
+}
+
+#[derive(Debug)]
+pub struct DisplayTxResponse {
+    pub tx: UnboundedSender<DisplayRequest>,
+}
+
+#[derive(Debug)]
 pub enum Message {
     Execute(ExecuteRequest),
     Completion(CompletionRequest),
     Deploy(DeployRequest),
+    DisplayTx(DisplayTxRequest),
 }
 
 #[derive(Debug)]

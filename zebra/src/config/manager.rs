@@ -1,4 +1,4 @@
-use crate::config::api::DeployResponse;
+use crate::config::api::{DeployResponse, DisplayTxResponse};
 
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::commands::Mode;
@@ -11,7 +11,7 @@ use super::parse::State;
 use super::paths::{path_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
-use super::{Completion, Config, ConfigRequest, ExecCode};
+use super::{Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
 use libyang::{to_entry, Entry, YangStore};
 use similar::TextDiff;
 use std::cell::RefCell;
@@ -57,11 +57,16 @@ pub struct ConfigManager {
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
-    pub cm_clients: HashMap<String, UnboundedSender<ConfigRequest>>,
+    pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
+    pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
+    pub rib_tx: UnboundedSender<crate::rib::Message>,
 }
 
 impl ConfigManager {
-    pub fn new(mut system_path: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(
+        mut system_path: PathBuf,
+        rib_tx: UnboundedSender<crate::rib::Message>,
+    ) -> anyhow::Result<Self> {
         let yang_path = system_path.to_string_lossy().to_string();
         system_path.pop();
         system_path.push("zebra.conf");
@@ -74,7 +79,9 @@ impl ConfigManager {
             store: ConfigStore::new(),
             tx,
             rx,
-            cm_clients: HashMap::new(),
+            cm_clients: RefCell::new(HashMap::new()),
+            show_clients: RefCell::new(HashMap::new()),
+            rib_tx,
         };
         cm.init()?;
 
@@ -98,8 +105,14 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub fn subscribe(&mut self, name: &str, cm_tx: UnboundedSender<ConfigRequest>) {
-        self.cm_clients.insert(name.to_owned(), cm_tx);
+    pub fn subscribe(&self, name: &str, cm_tx: UnboundedSender<ConfigRequest>) {
+        self.cm_clients.borrow_mut().insert(name.to_owned(), cm_tx);
+    }
+
+    pub fn subscribe_show(&self, name: &str, show_tx: UnboundedSender<DisplayRequest>) {
+        self.show_clients
+            .borrow_mut()
+            .insert(name.to_owned(), show_tx);
     }
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
@@ -141,9 +154,26 @@ impl ConfigManager {
 
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
 
-        for (_, tx) in self.cm_clients.iter() {
+        for (_, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
+        }
+        // Protocol swpan.
+        for line in diff.lines() {
+            let first_char = line.chars().next().unwrap();
+            let op = match first_char {
+                '+' => ConfigOp::Set,
+                '-' => ConfigOp::Delete,
+                _ => continue,
+            };
+            let line = remove_first_char(line);
+            let paths = self.paths(line.clone());
+            if paths.is_none() {
+                continue;
+            }
+            if op == ConfigOp::Set && line == "routing ospf" {
+                spawn_ospf(self);
+            }
         }
         for line in diff.lines() {
             if !line.is_empty() {
@@ -159,13 +189,13 @@ impl ConfigManager {
                     continue;
                 }
                 let paths = paths.unwrap();
-                for (_, tx) in self.cm_clients.iter() {
+                for (_, tx) in self.cm_clients.borrow().iter() {
                     tx.send(ConfigRequest::new(paths.clone(), op.clone()))
                         .unwrap();
                 }
             }
         }
-        for (_, tx) in self.cm_clients.iter() {
+        for (_, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
                 .unwrap();
         }
@@ -233,7 +263,7 @@ impl ConfigManager {
     }
 
     pub async fn comps_dynamic(&self) -> Vec<String> {
-        if let Some(tx) = self.cm_clients.get("rib") {
+        if let Some(tx) = self.cm_clients.borrow().get("rib") {
             let (comp_tx, comp_rx) = oneshot::channel();
             let req = ConfigRequest {
                 // input: "".to_string(),
@@ -314,14 +344,47 @@ impl ConfigManager {
                 }
                 let _ = self.commit_config();
 
-                let resp = DeployResponse {
-                    // code: 0,
-                    // output: String::from("hogehoge"),
-                };
+                let resp = DeployResponse {};
                 req.resp.send(resp).unwrap();
+            }
+            Message::DisplayTx(req) => {
+                if is_bgp(&req.paths) {
+                    if let Some(tx) = self.show_clients.borrow().get("bgp") {
+                        let reply = DisplayTxResponse { tx: tx.clone() };
+                        req.resp.send(reply).unwrap();
+                    }
+                } else if is_ospf(&req.paths) {
+                    if let Some(tx) = self.show_clients.borrow().get("ospf") {
+                        let reply = DisplayTxResponse { tx: tx.clone() };
+                        req.resp.send(reply).unwrap();
+                    }
+                } else if is_policy(&req.paths) {
+                    if let Some(tx) = self.show_clients.borrow().get("policy") {
+                        let reply = DisplayTxResponse { tx: tx.clone() };
+                        req.resp.send(reply).unwrap();
+                    }
+                } else if let Some(tx) = self.show_clients.borrow().get("rib") {
+                    let reply = DisplayTxResponse { tx: tx.clone() };
+                    req.resp.send(reply).unwrap();
+                }
+                println!("{:?}", req.paths);
             }
         }
     }
+}
+
+fn is_bgp(paths: &[CommandPath]) -> bool {
+    paths
+        .iter()
+        .any(|x| x.name == "bgp" || x.name == "community-list")
+}
+
+fn is_ospf(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "ospf")
+}
+
+fn is_policy(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "prefix-list")
 }
 
 fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
@@ -331,6 +394,18 @@ fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
         run.dir.borrow_mut().push(dir.clone());
     }
     Rc::new(run)
+}
+
+use crate::context::Context;
+use crate::ospf::inst;
+
+fn spawn_ospf(config: &ConfigManager) {
+    // Can we spawn new task here?
+    let ctx = Context::default();
+    let mut ospf = inst::Ospf::new(ctx, config.rib_tx.clone());
+    config.subscribe("ospf", ospf.cm.tx.clone());
+    config.subscribe_show("ospf", ospf.show.tx.clone());
+    inst::serve(ospf);
 }
 
 pub async fn event_loop(mut config: ConfigManager) {

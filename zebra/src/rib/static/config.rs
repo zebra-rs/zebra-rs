@@ -5,6 +5,7 @@ use ipnet::Ipv4Net;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
+use crate::rib::entry::RibEntry;
 use crate::rib::{Message, RibType};
 
 use super::StaticRoute;
@@ -44,19 +45,17 @@ impl StaticConfig {
                 if s.delete {
                     self.config.remove(&p);
                     let msg = Message::Ipv4Del {
-                        rtype: RibType::Static,
                         prefix: p,
+                        rib: RibEntry::new(RibType::Static),
                     };
                     let _ = tx.send(msg);
                 } else {
-                    let ribs = s.to_ribs();
+                    let entry = s.to_entry();
                     self.config.insert(p, s);
-                    let msg = Message::Ipv4Add {
-                        rtype: RibType::Static,
-                        prefix: p,
-                        ribs,
-                    };
-                    let _ = tx.send(msg);
+                    if let Some(rib) = entry {
+                        let msg = Message::Ipv4Add { prefix: p, rib };
+                        let _ = tx.send(msg);
+                    }
                 }
             }
         }
@@ -203,21 +202,6 @@ fn config_builder() -> ConfigBuilder {
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.metric = None;
-            Ok(())
-        })
-        .path("/routing/static/route/nexthop/distance")
-        .set(|config, cache, prefix, args| {
-            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
-            let n = s.nexthops.entry(naddr).or_default();
-            n.distance = Some(args.u8().context(DISTANCE_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, prefix, args| {
-            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
-            let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
-            n.distance = None;
             Ok(())
         })
         .path("/routing/static/route/nexthop/weight")

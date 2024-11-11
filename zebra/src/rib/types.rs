@@ -6,6 +6,7 @@ const RIB_RIP: u8 = 3;
 const RIB_OSPF: u8 = 4;
 const RIB_ISIS: u8 = 5;
 const RIB_BGP: u8 = 6;
+const RIB_DHCP: u8 = 7;
 
 #[derive(Debug, PartialEq, Eq, Clone, Default, Copy)]
 pub enum RibType {
@@ -17,6 +18,7 @@ pub enum RibType {
     Ospf,
     Isis,
     Bgp,
+    Dhcp,
     Other(u8),
 }
 
@@ -30,6 +32,7 @@ impl From<u8> for RibType {
             RIB_OSPF => Self::Ospf,
             RIB_ISIS => Self::Isis,
             RIB_BGP => Self::Bgp,
+            RIB_DHCP => Self::Dhcp,
             _ => Self::Other(d),
         }
     }
@@ -45,6 +48,7 @@ impl From<RibType> for u8 {
             RibType::Ospf => RIB_OSPF,
             RibType::Isis => RIB_ISIS,
             RibType::Bgp => RIB_BGP,
+            RibType::Dhcp => RIB_DHCP,
             RibType::Other(d) => d,
         }
     }
@@ -62,6 +66,7 @@ impl TryFrom<String> for RibType {
             "ospf" => Ok(RibType::Ospf),
             "isis" => Ok(RibType::Isis),
             "bgp" => Ok(RibType::Bgp),
+            "dhcp" => Ok(RibType::Dhcp),
             _ => Err(()),
         }
     }
@@ -77,6 +82,7 @@ impl RibType {
             Self::Ospf => 'O',
             Self::Rip => 'R',
             Self::Isis => 'i',
+            Self::Dhcp => 'D',
             Self::Other(_) => '?',
         }
     }

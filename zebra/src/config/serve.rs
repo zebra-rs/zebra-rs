@@ -8,7 +8,8 @@ use tonic::Response;
 use crate::config::api::DeployRequest;
 
 use super::api::{
-    CompletionRequest, CompletionResponse, DisplayRequest, ExecuteRequest, ExecuteResponse, Message,
+    CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest, ExecuteRequest,
+    ExecuteResponse, Message,
 };
 use super::vtysh::apply_server::{Apply, ApplyServer};
 use super::vtysh::exec_server::{Exec, ExecServer};
@@ -152,17 +153,7 @@ fn exec_commands(resp: &ExecuteResponse) -> (ExecCode, String, Vec<CommandPath>)
 
 #[derive(Debug)]
 struct ShowService {
-    show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
-}
-
-fn is_bgp(paths: &[CommandPath]) -> bool {
-    paths
-        .iter()
-        .any(|x| x.name == "bgp" || x.name == "community-list")
-}
-
-fn is_policy(paths: &[CommandPath]) -> bool {
-    paths.iter().any(|x| x.name == "prefix-list")
+    pub tx: mpsc::Sender<Message>,
 }
 
 #[tonic::async_trait]
@@ -174,23 +165,21 @@ impl Show for ShowService {
         request: tonic::Request<ShowRequest>,
     ) -> std::result::Result<Response<Self::ShowStream>, tonic::Status> {
         let request = request.get_ref();
+
+        let (tx, rx) = oneshot::channel();
+        let query = DisplayTxRequest {
+            paths: request.paths.clone(),
+            resp: tx,
+        };
+        self.tx.send(Message::DisplayTx(query)).await.unwrap();
+        let serve = rx.await.unwrap();
         let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
         let req = DisplayRequest {
             paths: request.paths.clone(),
             json: request.json,
             resp: bus_tx.clone(),
         };
-        if is_bgp(&req.paths) {
-            if let Some(tx) = self.show_clients.get("bgp") {
-                tx.send(req).unwrap();
-            }
-        } else if is_policy(&req.paths) {
-            if let Some(tx) = self.show_clients.get("policy") {
-                tx.send(req).unwrap();
-            }
-        } else if let Some(tx) = self.show_clients.get("rib") {
-            tx.send(req).unwrap();
-        }
+        serve.tx.send(req).unwrap();
 
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
@@ -274,14 +263,7 @@ pub fn serve(cli: Cli) {
     let exec_service = ExecService { tx: cli.tx.clone() };
     let exec_server = ExecServer::new(exec_service);
 
-    let mut show_service = ShowService {
-        show_clients: HashMap::new(),
-    };
-    for (client, tx) in cli.show_clients.iter() {
-        show_service
-            .show_clients
-            .insert(client.to_string(), tx.clone());
-    }
+    let mut show_service = ShowService { tx: cli.tx.clone() };
     let show_server = ShowServer::new(show_service);
 
     let apply_service = ApplyService { tx: cli.tx.clone() };

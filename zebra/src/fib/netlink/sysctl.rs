@@ -8,6 +8,14 @@ const CTLNAMES: &[&str] = &[
     "net.vrf.strict_mode",
 ];
 
+// TODO: We need to have per interface config.
+//
+// net.mpls.conf.enp0s6.input=1
+// net.mpls.conf.enp0s7.input=1
+// net.mpls.conf.dum0.input=1
+//
+// net.mpls.platform_labels=1024
+
 pub fn sysctl_enable() -> anyhow::Result<()> {
     for ctlname in CTLNAMES.iter() {
         let ctl = sysctl::Ctl::new(ctlname)?;

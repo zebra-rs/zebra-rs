@@ -36,7 +36,7 @@ pub struct Bgp {
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    pub rib: Sender<RibTx>,
+    pub rib: UnboundedSender<RibTx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
     pub pcallbacks: HashMap<String, PCallback>,
@@ -47,7 +47,7 @@ pub struct Bgp {
 }
 
 impl Bgp {
-    pub fn new(rib: Sender<RibTx>) -> Self {
+    pub fn new(rib: UnboundedSender<RibTx>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut bgp = Self {
             asn: 0,

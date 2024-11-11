@@ -2,12 +2,12 @@ use crate::config::Args;
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 
-use super::entry::RibEntry;
-use super::{Message, Rib, RibType};
+use super::api::RibRx;
+use super::{Message, Rib};
 use ipnet::IpNet;
 use std::fmt::{self, Write};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Link {
     pub index: u32,
     pub name: String,
@@ -55,7 +55,7 @@ impl Link {
 #[derive(Default, Debug, Clone)]
 pub struct LinkAddr {
     pub addr: IpNet,
-    pub link_index: u32,
+    pub ifindex: u32,
     pub secondary: bool,
 }
 
@@ -63,7 +63,7 @@ impl LinkAddr {
     pub fn from(osaddr: FibAddr) -> Self {
         Self {
             addr: osaddr.addr,
-            link_index: osaddr.link_index,
+            ifindex: osaddr.link_index,
             secondary: osaddr.secondary,
         }
     }
@@ -183,7 +183,7 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     cb(&link.name, buf);
 }
 
-pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
+pub fn link_show(rib: &Rib, mut args: Args, _json: bool) -> String {
     let cb = os_traffic_dump();
     let mut buf = String::new();
 
@@ -236,8 +236,23 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub fn link_add(&mut self, oslink: FibLink) {
-        if !self.links.contains_key(&oslink.index) {
+        if let Some(link) = self.links.get_mut(&oslink.index) {
+            if link.is_up() {
+                if !oslink.is_up() {
+                    link.flags = oslink.flags;
+                    let _ = self.tx.send(Message::LinkDown {
+                        ifindex: link.index,
+                    });
+                }
+            } else if oslink.is_up() {
+                link.flags = oslink.flags;
+                let _ = self.tx.send(Message::LinkUp {
+                    ifindex: link.index,
+                });
+            }
+        } else {
             let link = Link::from(oslink);
+            self.api_link_add(&link);
             self.links.insert(link.index, link);
         }
     }
@@ -246,10 +261,10 @@ impl Rib {
         self.links.remove(&oslink.index);
     }
 
-    pub fn link_name(&self, link_index: u32) -> Option<&String> {
+    pub fn link_name(&self, link_index: u32) -> String {
         match self.links.get(&link_index) {
-            Some(link) => Some(&link.name),
-            _ => None,
+            Some(link) => link.name.clone(),
+            _ => String::from("unknown"),
         }
     }
 
@@ -265,29 +280,17 @@ impl Rib {
 
     pub fn addr_add(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
-        if let Some(link) = self.links.get_mut(&addr.link_index) {
+        if let Some(link) = self.links.get_mut(&addr.ifindex) {
             if link_addr_update(link, addr.clone()).is_some() {
-                let mut e = RibEntry::new(RibType::Connected);
-                e.ifindex = link.index;
-                e.distance = 0;
-                e.set_selected(true);
-                e.set_fib(true);
-                if let IpNet::V4(net) = addr.addr {
-                    // self.ipv4_add(net, e);
-                    let msg = Message::Ipv4Add {
-                        rtype: RibType::Connected,
-                        prefix: net,
-                        ribs: vec![e],
-                    };
-                    let _ = self.tx.send(msg);
-                }
+                //
             }
+            self.api_addr_add(&addr);
         }
     }
 
     pub fn addr_del(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
-        if let Some(link) = self.links.get_mut(&addr.link_index) {
+        if let Some(link) = self.links.get_mut(&addr.ifindex) {
             link_addr_del(link, addr);
         }
     }
