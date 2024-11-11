@@ -1,4 +1,4 @@
-use crate::config::api::DeployResponse;
+use crate::config::api::{DeployResponse, DisplayTxResponse};
 
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::commands::Mode;
@@ -11,7 +11,7 @@ use super::parse::State;
 use super::paths::{path_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
-use super::{Completion, Config, ConfigRequest, ExecCode};
+use super::{Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
 use libyang::{to_entry, Entry, YangStore};
 use similar::TextDiff;
 use std::cell::RefCell;
@@ -58,6 +58,7 @@ pub struct ConfigManager {
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
     pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
+    pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     pub rib_tx: UnboundedSender<crate::rib::Message>,
 }
 
@@ -79,6 +80,7 @@ impl ConfigManager {
             tx,
             rx,
             cm_clients: RefCell::new(HashMap::new()),
+            show_clients: RefCell::new(HashMap::new()),
             rib_tx,
         };
         cm.init()?;
@@ -105,6 +107,12 @@ impl ConfigManager {
 
     pub fn subscribe(&self, name: &str, cm_tx: UnboundedSender<ConfigRequest>) {
         self.cm_clients.borrow_mut().insert(name.to_owned(), cm_tx);
+    }
+
+    pub fn subscribe_show(&self, name: &str, show_tx: UnboundedSender<DisplayRequest>) {
+        self.show_clients
+            .borrow_mut()
+            .insert(name.to_owned(), show_tx);
     }
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
@@ -336,14 +344,47 @@ impl ConfigManager {
                 }
                 let _ = self.commit_config();
 
-                let resp = DeployResponse {
-                    // code: 0,
-                    // output: String::from("hogehoge"),
-                };
+                let resp = DeployResponse {};
                 req.resp.send(resp).unwrap();
+            }
+            Message::DisplayTx(req) => {
+                if is_bgp(&req.paths) {
+                    if let Some(tx) = self.show_clients.borrow().get("bgp") {
+                        let reply = DisplayTxResponse { tx: tx.clone() };
+                        req.resp.send(reply).unwrap();
+                    }
+                } else if is_ospf(&req.paths) {
+                    if let Some(tx) = self.show_clients.borrow().get("ospf") {
+                        let reply = DisplayTxResponse { tx: tx.clone() };
+                        req.resp.send(reply).unwrap();
+                    }
+                } else if is_policy(&req.paths) {
+                    if let Some(tx) = self.show_clients.borrow().get("policy") {
+                        let reply = DisplayTxResponse { tx: tx.clone() };
+                        req.resp.send(reply).unwrap();
+                    }
+                } else if let Some(tx) = self.show_clients.borrow().get("rib") {
+                    let reply = DisplayTxResponse { tx: tx.clone() };
+                    req.resp.send(reply).unwrap();
+                }
+                println!("{:?}", req.paths);
             }
         }
     }
+}
+
+fn is_bgp(paths: &[CommandPath]) -> bool {
+    paths
+        .iter()
+        .any(|x| x.name == "bgp" || x.name == "community-list")
+}
+
+fn is_ospf(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "ospf")
+}
+
+fn is_policy(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "prefix-list")
 }
 
 fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
@@ -363,6 +404,7 @@ fn spawn_ospf(config: &ConfigManager) {
     let ctx = Context::default();
     let mut ospf = inst::Ospf::new(ctx, config.rib_tx.clone());
     config.subscribe("ospf", ospf.cm.tx.clone());
+    config.subscribe_show("ospf", ospf.show.tx.clone());
     inst::serve(ospf);
 }
 

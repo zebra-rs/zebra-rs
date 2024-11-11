@@ -4,6 +4,7 @@ use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -19,6 +20,7 @@ use super::config::OspfNetworkConfig;
 use super::link::OspfLink;
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
+pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
 
 pub struct Ospf {
     ctx: Context,
@@ -28,6 +30,8 @@ pub struct Ospf {
     pub links: BTreeMap<u32, OspfLink>,
     pub areas: BTreeMap<u8, OspfArea>,
     pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
+    pub show: ShowChannel,
+    pub show_cb: HashMap<String, ShowCallback>,
 }
 
 impl Ospf {
@@ -37,7 +41,7 @@ impl Ospf {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
-        Self {
+        let mut ospf = Self {
             ctx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
@@ -45,7 +49,11 @@ impl Ospf {
             links: BTreeMap::new(),
             areas: BTreeMap::new(),
             table: PrefixMap::new(),
-        }
+            show: ShowChannel::new(),
+            show_cb: HashMap::new(),
+        };
+        ospf.show_build();
+        ospf
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -78,6 +86,8 @@ impl Ospf {
         link.addr.push(addr.clone());
         let entry = self.table.entry(*prefix).or_default();
         entry.addr = Some(addr);
+
+        // Going to check.  supernet's network config.
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
@@ -94,14 +104,25 @@ impl Ospf {
         }
     }
 
+    async fn process_show_msg(&self, msg: DisplayRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.show_cb.get(&path) {
+            let output = f(self, args, msg.json);
+            msg.resp.send(output).await.unwrap();
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_rib_msg(msg);
+                }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);
                 }
-                Some(msg) = self.rx.recv() => {
-                    self.process_rib_msg(msg);
+                Some(msg) = self.show.rx.recv() => {
+                    self.process_show_msg(msg).await;
                 }
             }
         }

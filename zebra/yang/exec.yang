@@ -73,6 +73,23 @@ module exec {
           }
         }
       }
+
+      container ospf {
+        ext:help "OSPF commands";
+        presence "OSPF instance";
+        leaf interface {
+          ext:help "OSPF interface";
+          type empty;
+        }
+        leaf neighbor {
+          ext:help "OSPF neighbor";
+          type empty;
+        }
+        leaf database {
+          ext:help "OSPF database";
+          type empty;
+        }
+      }
     }
     container ipv6 {
       ext:help "Show IPv6 commands";
