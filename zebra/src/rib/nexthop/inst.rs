@@ -1,84 +1,66 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Nexthop {
+pub struct NexthopUni {
     pub addr: Ipv4Addr,
-    pub invalid: bool,
-    pub onlink: bool,
     pub ifindex: u32,
+    pub metric: u32,
     pub weight: u8,
-    pub recursive: Vec<Nexthop>,
-    pub resolved: Vec<usize>,
-    pub refcnt: usize,
-    pub ngid: usize,
+    pub gid: usize,
 }
 
-impl Nexthop {
+impl NexthopUni {
     pub fn new(addr: Ipv4Addr) -> Self {
         Self {
             addr,
-            invalid: false,
-            onlink: false,
-            ifindex: 0,
-            weight: 0,
-            recursive: Vec::new(),
-            resolved: Vec::new(),
-            refcnt: 0,
-            ngid: 0,
+            ..Default::default()
         }
-    }
-
-    pub fn builder() -> NexthopBuilder {
-        NexthopBuilder::default()
     }
 }
 
-impl Default for Nexthop {
+impl Default for NexthopUni {
     fn default() -> Self {
         Self {
             addr: Ipv4Addr::UNSPECIFIED,
-            invalid: false,
-            onlink: false,
             ifindex: 0,
+            metric: 0,
             weight: 0,
-            recursive: Vec::new(),
-            resolved: Vec::new(),
-            refcnt: 0,
-            ngid: 0,
+            gid: 0,
         }
     }
 }
 
-impl fmt::Display for Nexthop {
+impl fmt::Display for NexthopUni {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.addr)
     }
 }
 
-#[derive(Debug)]
-pub struct NexthopBuilder {
-    addr: Ipv4Addr,
+#[derive(Debug, Default, Clone, PartialEq)]
+pub enum Nexthop {
+    #[default]
+    Onlink,
+    Uni(NexthopUni),
+    Multi(NexthopMulti),
+    Protect(NexthopProtect),
 }
 
-impl Default for NexthopBuilder {
-    fn default() -> Self {
-        Self {
-            addr: Ipv4Addr::UNSPECIFIED,
-        }
-    }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct NexthopMulti {
+    // ECMP or UCMP multipath.  metric will be the same.
+    pub metric: u32,
+
+    // For UCMP, we have weight.
+    pub nexthops: Vec<NexthopUni>,
+
+    // Nexthop Group id for multipath.
+    pub gid: usize,
 }
 
-impl NexthopBuilder {
-    pub fn addr(mut self, addr: Ipv4Addr) -> Self {
-        self.addr = addr;
-        self
-    }
-
-    pub fn build(&self) -> Nexthop {
-        Nexthop {
-            addr: self.addr,
-            ..Default::default()
-        }
-    }
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct NexthopProtect {
+    // Metric sorted BTreeMap.
+    pub nexthops: BTreeMap<u32, NexthopUni>,
 }

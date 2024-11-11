@@ -7,7 +7,7 @@ all:
 	RUSTFLAGS="--cfg tokio_unstable" cargo build --release
 	cd vtysh;./configure;make
 
-run:
+console:
 	RUSTFLAGS="--cfg tokio_unstable" cargo run --bin zebra --release
 
 install:
@@ -41,6 +41,6 @@ cap:
 	sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/debug/zebra
 
 run:
-	cargo build --bin zebra
-	sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/debug/zebra
-	target/debug/zebra
+	@cargo build --bin zebra
+	@sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/debug/zebra
+	@target/debug/zebra

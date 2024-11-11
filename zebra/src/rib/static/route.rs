@@ -3,12 +3,11 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 use crate::rib::entry::RibEntry;
-use crate::rib::nexthop::Nexthop;
-use crate::rib::RibType;
+use crate::rib::nexthop::NexthopUni;
+use crate::rib::{Nexthop, NexthopMulti, RibType};
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
-    pub distance: Option<u8>,
     pub metric: Option<u32>,
     pub weight: Option<u8>,
 }
@@ -28,42 +27,65 @@ impl fmt::Display for StaticRoute {
 
         write!(f, "[{}/{}]", distance, metric).unwrap();
         for (p, n) in self.nexthops.iter() {
-            let distance = n.distance.unwrap_or(distance);
             let metric = n.metric.unwrap_or(metric);
-            writeln!(f, "  {} [{}/{}]", p, distance, metric).unwrap();
+            let weight = n.weight.unwrap_or(1);
+            writeln!(f, "  {} metric {} weight {}", p, metric, weight).unwrap();
         }
         write!(f, "")
     }
 }
 
 impl StaticRoute {
-    pub fn to_ribs(&self) -> Vec<RibEntry> {
-        let mut entries: Vec<RibEntry> = Vec::new();
+    pub fn to_entry(&self) -> Option<RibEntry> {
         if self.nexthops.is_empty() {
-            return entries;
+            return None;
         }
-        let mut map: BTreeMap<(u8, u32), Vec<Nexthop>> = BTreeMap::new();
+
+        let mut entry = RibEntry::new(RibType::Static);
+        entry.distance = self.distance.unwrap_or(1);
+
         let metric = self.metric.unwrap_or(0);
-        let distance = self.distance.unwrap_or(1);
-        for (p, n) in self.nexthops.iter() {
+
+        if self.nexthops.len() == 1 {
+            let (p, n) = self.nexthops.iter().next()?;
+            let mut nhop = NexthopUni {
+                addr: *p,
+                metric: n.metric.unwrap_or(metric),
+                weight: n.weight.unwrap_or(0),
+                ..Default::default()
+            };
+            entry.nexthop = Nexthop::Uni(nhop);
+            entry.metric = metric;
+            return Some(entry);
+        }
+
+        let mut map: BTreeMap<u32, Vec<(Ipv4Addr, StaticNexthop)>> = BTreeMap::new();
+        for (p, n) in self.nexthops.clone().iter() {
             let metric = n.metric.unwrap_or(metric);
-            let distance = n.distance.unwrap_or(distance);
-            let e = map.entry((distance, metric)).or_default();
-            let mut nhop = Nexthop::default();
-            nhop.addr = *p;
-            if let Some(w) = n.weight {
-                nhop.weight = w;
+            let e = map.entry(metric).or_default();
+            e.push((*p, n.clone()));
+        }
+
+        // ECMP/UCMP case.
+        if map.len() == 1 {
+            let (metric, pair) = map.pop_first()?;
+            let mut multi = NexthopMulti {
+                metric,
+                ..Default::default()
+            };
+            for (p, n) in pair.iter() {
+                let mut nhop = NexthopUni {
+                    addr: *p,
+                    metric: n.metric.unwrap_or(metric),
+                    weight: n.weight.unwrap_or(0),
+                    ..Default::default()
+                };
+                multi.nexthops.push(nhop);
             }
-            e.push(nhop);
+            entry.nexthop = Nexthop::Multi(multi);
+        } else {
+            // Protected.
         }
-        for ((d, m), v) in map.iter() {
-            let mut entry = RibEntry::new(RibType::Static);
-            entry.distance = *d;
-            entry.metric = *m;
-            entry.nexthops = v.clone();
-            // entry.valid = true;
-            entries.push(entry);
-        }
-        entries
+        Some(entry)
     }
 }

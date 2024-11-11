@@ -28,6 +28,10 @@ module exec {
       ext:help "Show version";
       type empty;
     }
+    leaf nexthop {
+      ext:help "Show nexthop group";
+      type empty;
+    }
     leaf community-list {
       ext:help "Show community-list";
       type empty;
@@ -67,6 +71,23 @@ module exec {
           leaf address {
             type string;
           }
+        }
+      }
+
+      container ospf {
+        ext:help "OSPF commands";
+        presence "OSPF instance";
+        leaf interface {
+          ext:help "OSPF interface";
+          type empty;
+        }
+        leaf neighbor {
+          ext:help "OSPF neighbor";
+          type empty;
+        }
+        leaf database {
+          ext:help "OSPF database";
+          type empty;
         }
       }
     }

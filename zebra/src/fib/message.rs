@@ -1,6 +1,7 @@
 use ipnet::IpNet;
-use std::net::IpAddr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+use crate::rib::{entry::RibEntry, link::IFF_UP};
 
 use super::{LinkFlags, LinkType};
 
@@ -32,6 +33,10 @@ impl FibLink {
             ..Default::default()
         }
     }
+
+    pub fn is_up(&self) -> bool {
+        (self.flags.0 & IFF_UP) == IFF_UP
+    }
 }
 
 #[derive(Default, Debug)]
@@ -52,8 +57,8 @@ impl FibAddr {
 
 #[derive(Debug)]
 pub struct FibRoute {
-    pub route: IpNet,
-    pub gateway: IpAddr,
+    pub prefix: IpNet,
+    pub entry: RibEntry,
 }
 
 #[allow(dead_code)]

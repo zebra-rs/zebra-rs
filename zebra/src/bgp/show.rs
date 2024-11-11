@@ -80,7 +80,7 @@ fn show_bgp_route(bgp: &Bgp) -> String {
     buf
 }
 
-fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> String {
+fn show_bgp(bgp: &Bgp, args: Args, _json: bool) -> String {
     if args.is_empty() {
         show_bgp_route(bgp)
     } else {
@@ -197,7 +197,7 @@ fn fetch(peer: &Peer) -> Neighbor {
 // 	return buf;
 // }
 
-fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
+fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
     writeln!(
         out,
         r#"BGP neighbor is {}, remote AS {}, local AS {}, {} link
@@ -249,7 +249,7 @@ fn render(neighbor: &Neighbor, out: &mut String) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_bgp_neighbor(bgp: &Bgp, args: Args, json: bool) -> String {
+fn show_bgp_neighbor(bgp: &Bgp, args: Args, _json: bool) -> String {
     let mut out = String::new();
 
     if args.is_empty() {
@@ -258,7 +258,7 @@ fn show_bgp_neighbor(bgp: &Bgp, args: Args, json: bool) -> String {
             neighbors.push(fetch(peer));
         }
         for neighbor in neighbors.iter() {
-            render(neighbor, &mut out).unwrap();
+            render(&mut out, neighbor).unwrap();
         }
         // out = serde_json::to_string(&neighbors).unwrap();
     } else {
@@ -267,7 +267,7 @@ fn show_bgp_neighbor(bgp: &Bgp, args: Args, json: bool) -> String {
     out
 }
 
-fn show_community_list(bgp: &Bgp, _args: Args, json: bool) -> String {
+fn show_community_list(bgp: &Bgp, _args: Args, _json: bool) -> String {
     let mut out = String::from("community-list");
     for (name, clist) in bgp.clist.0.iter() {
         writeln!(out, "name: {:?}", name).unwrap();

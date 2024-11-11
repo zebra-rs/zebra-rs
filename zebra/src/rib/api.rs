@@ -1,15 +1,17 @@
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+
+use super::{link::LinkAddr, Link, Rib};
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct RibTxChannel {
-    pub tx: Sender<RibTx>,
-    pub rx: Receiver<RibTx>,
+    pub tx: UnboundedSender<RibTx>,
+    pub rx: UnboundedReceiver<RibTx>,
 }
 
 impl RibTxChannel {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::unbounded_channel();
         Self { tx, rx }
     }
 }
@@ -19,28 +21,41 @@ impl RibTxChannel {
 pub enum RibTx {
     RouteAdd(),
     RouteDel(),
-    NexthopResgister(),
-    NexthopUnresgister(),
+    NexthopRegister(),
+    NexthopUnregister(),
 }
 
 #[allow(dead_code)]
 pub struct RibRxChannel {
-    pub tx: Sender<RibRx>,
-    pub rx: Receiver<RibRx>,
+    pub tx: UnboundedSender<RibRx>,
+    pub rx: UnboundedReceiver<RibRx>,
 }
 
 impl RibRxChannel {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::unbounded_channel();
         Self { tx, rx }
     }
 }
 
 // Message from rib to protocol module.
-#[allow(dead_code)]
 pub enum RibRx {
-    RedistAdd(),
-    RedistDel(),
-    Link(),
-    Nexthop(),
+    Link(Link),
+    Addr(LinkAddr),
+}
+
+impl Rib {
+    pub fn api_link_add(&self, link: &Link) {
+        for tx in self.redists.iter() {
+            let link = RibRx::Link(link.clone());
+            let _ = tx.send(link);
+        }
+    }
+
+    pub fn api_addr_add(&self, addr: &LinkAddr) {
+        for tx in self.redists.iter() {
+            let link = RibRx::Addr(addr.clone());
+            let _ = tx.send(link);
+        }
+    }
 }
