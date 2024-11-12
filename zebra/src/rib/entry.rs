@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::fib::FibHandle;
 
 use super::nexthop::{GroupTrait, NexthopUni};
@@ -5,7 +7,7 @@ use super::{Nexthop, NexthopMap, NexthopMulti, RibSubType, RibType};
 
 pub type RibEntries = Vec<RibEntry>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RibEntry {
     pub rtype: RibType,
     pub rsubtype: RibSubType,
@@ -174,4 +176,22 @@ async fn multi_group_sync(multi: &NexthopMulti, nmap: &mut NexthopMap, fib: &Fib
     }
     fib.nexthop_add(group).await;
     group.set_installed(true);
+}
+
+impl PartialEq for RibEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.distance == other.distance && self.metric == other.metric
+    }
+}
+
+impl PartialOrd for RibEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.distance.partial_cmp(&other.distance).and_then(|ord| {
+            if ord == Ordering::Equal {
+                self.metric.partial_cmp(&other.metric)
+            } else {
+                Some(ord)
+            }
+        })
+    }
 }

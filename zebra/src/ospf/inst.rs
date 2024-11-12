@@ -69,7 +69,7 @@ impl Ospf {
     }
 
     fn link_add(&mut self, link: Link) {
-        println!("OSPF: LinkAdd {} {}", link.name, link.index);
+        // println!("OSPF: LinkAdd {} {}", link.name, link.index);
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
@@ -79,7 +79,7 @@ impl Ospf {
     }
 
     fn addr_add(&mut self, addr: LinkAddr) {
-        println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
+        // println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };

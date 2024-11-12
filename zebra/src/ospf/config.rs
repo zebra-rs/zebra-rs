@@ -16,5 +16,15 @@ impl Ospf {
 
 fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     println!("OSPF network config");
+    let network = args.v4net()?;
+    let id = args.u8()?;
+    println!(" netwwork {}", network);
+    println!(" area {}", id);
+    let area = OspfArea { id };
+    if op == ConfigOp::Set {
+        let entry = ospf.table.entry(network).or_default();
+        entry.area = Some(area);
+    }
+
     Some(())
 }
