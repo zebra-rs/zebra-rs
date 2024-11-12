@@ -195,18 +195,18 @@ fn resolve_nexthop_multi(multi: &mut NexthopMulti, nmap: &mut NexthopMap, multi_
 
 // Function is called when rib is added.
 fn rib_resolve_nexthop(
-    rib: &mut RibEntry,
+    entry: &mut RibEntry,
     table: &PrefixMap<Ipv4Net, RibEntries>,
     nmap: &mut NexthopMap,
 ) {
     // Only protocol entry.
-    if !rib.is_protocol() {
+    if !entry.is_protocol() {
         return;
     }
-    if let Nexthop::Uni(uni) = &mut rib.nexthop {
+    if let Nexthop::Uni(uni) = &mut entry.nexthop {
         let _ = resolve_nexthop_uni(uni, nmap, table);
     }
-    if let Nexthop::Multi(multi) = &mut rib.nexthop {
+    if let Nexthop::Multi(multi) = &mut entry.nexthop {
         let mut multi_valid = false;
         for uni in multi.nexthops.iter_mut() {
             let valid = resolve_nexthop_uni(uni, nmap, table);
@@ -216,8 +216,17 @@ fn rib_resolve_nexthop(
         }
         resolve_nexthop_multi(multi, nmap, multi_valid);
     }
+    if let Nexthop::Protect(pro) = &mut entry.nexthop {
+        let mut pro_valid = false;
+        for uni in pro.nexthops.iter_mut() {
+            let valid = resolve_nexthop_uni(uni, nmap, table);
+            if valid {
+                pro_valid = true;
+            }
+        }
+    }
     // If one of nexthop is valid, the entry is valid.
-    rib.set_valid(rib.is_valid_nexthop(nmap));
+    entry.set_valid(entry.is_valid_nexthop(nmap));
 }
 
 fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {

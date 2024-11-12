@@ -63,10 +63,7 @@ impl FibHandle {
         Ok(Self { handle })
     }
 
-    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
-        if !entry.is_protocol() {
-            return;
-        }
+    pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
@@ -79,14 +76,15 @@ impl FibHandle {
         let attr = RouteAttribute::Destination(RouteAddress::Inet(prefix.addr()));
         msg.attributes.push(attr);
 
-        let attr = RouteAttribute::Priority(entry.metric);
-        msg.attributes.push(attr);
-
-        if let Nexthop::Uni(uni) = &entry.nexthop {
+        if let Nexthop::Uni(uni) = &nexthop {
             msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+            let attr = RouteAttribute::Priority(uni.metric);
+            msg.attributes.push(attr);
         }
-        if let Nexthop::Multi(multi) = &entry.nexthop {
+        if let Nexthop::Multi(multi) = &nexthop {
             msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+            let attr = RouteAttribute::Priority(multi.metric);
+            msg.attributes.push(attr);
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
@@ -100,7 +98,30 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        if !entry.is_protocol() {
+            return;
+        }
+        match &entry.nexthop {
+            Nexthop::Uni(_) => {
+                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Multi(_) => {
+                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Protect(pro) => {
+                for uni in pro.nexthops.iter() {
+                    self.route_ipv4_add_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                        .await;
+                }
+            }
+            _ => {
+                //
+            }
+        }
+    }
+
+    pub async fn route_ipv4_del_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
         if !entry.is_protocol() {
             return;
         }
@@ -119,8 +140,15 @@ impl FibHandle {
         let attr = RouteAttribute::Priority(entry.metric);
         msg.attributes.push(attr);
 
-        if let Nexthop::Uni(uni) = &entry.nexthop {
+        if let Nexthop::Uni(uni) = &nexthop {
             msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+            let attr = RouteAttribute::Priority(uni.metric);
+            msg.attributes.push(attr);
+        }
+        if let Nexthop::Multi(multi) = &nexthop {
+            msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+            let attr = RouteAttribute::Priority(multi.metric);
+            msg.attributes.push(attr);
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
@@ -130,6 +158,29 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("NewRoute error: {}", e);
+            }
+        }
+    }
+
+    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        if !entry.is_protocol() {
+            return;
+        }
+        match &entry.nexthop {
+            Nexthop::Uni(_) => {
+                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Multi(_) => {
+                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Protect(pro) => {
+                for uni in pro.nexthops.iter() {
+                    self.route_ipv4_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                        .await;
+                }
+            }
+            _ => {
+                //
             }
         }
     }

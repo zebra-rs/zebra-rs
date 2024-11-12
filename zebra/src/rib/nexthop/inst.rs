@@ -26,7 +26,7 @@ impl Default for NexthopUni {
             addr: Ipv4Addr::UNSPECIFIED,
             ifindex: 0,
             metric: 0,
-            weight: 0,
+            weight: 1,
             gid: 0,
         }
     }
@@ -62,5 +62,5 @@ pub struct NexthopMulti {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct NexthopProtect {
     // Metric sorted BTreeMap.
-    pub nexthops: BTreeMap<u32, NexthopUni>,
+    pub nexthops: Vec<NexthopUni>,
 }

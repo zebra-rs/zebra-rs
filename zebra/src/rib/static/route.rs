@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::NexthopUni;
-use crate::rib::{Nexthop, NexthopMulti, RibType};
+use crate::rib::{Nexthop, NexthopMulti, NexthopProtect, RibType};
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
@@ -18,21 +18,6 @@ pub struct StaticRoute {
     pub metric: Option<u32>,
     pub nexthops: BTreeMap<Ipv4Addr, StaticNexthop>,
     pub delete: bool,
-}
-
-impl fmt::Display for StaticRoute {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let distance = self.distance.unwrap_or(1);
-        let metric = self.metric.unwrap_or(0);
-
-        write!(f, "[{}/{}]", distance, metric).unwrap();
-        for (p, n) in self.nexthops.iter() {
-            let metric = n.metric.unwrap_or(metric);
-            let weight = n.weight.unwrap_or(1);
-            writeln!(f, "  {} metric {} weight {}", p, metric, weight).unwrap();
-        }
-        write!(f, "")
-    }
 }
 
 impl StaticRoute {
@@ -68,13 +53,13 @@ impl StaticRoute {
 
         // ECMP/UCMP case.
         if map.len() == 1 {
-            let (metric, pair) = map.pop_first()?;
+            let (metric, set) = map.pop_first()?;
             entry.metric = metric;
             let mut multi = NexthopMulti {
                 metric,
                 ..Default::default()
             };
-            for (p, n) in pair.iter() {
+            for (p, n) in set.iter() {
                 let mut nhop = NexthopUni {
                     addr: *p,
                     metric: n.metric.unwrap_or(metric),
@@ -85,7 +70,21 @@ impl StaticRoute {
             }
             entry.nexthop = Nexthop::Multi(multi);
         } else {
-            // Protected.
+            let mut pro = NexthopProtect::default();
+            for (index, (metric, set)) in map.iter_mut().enumerate() {
+                if index == 0 {
+                    entry.metric = *metric;
+                }
+                let (p, n) = set.first()?;
+                let mut nhop = NexthopUni {
+                    addr: *p,
+                    metric: *metric,
+                    weight: n.weight.unwrap_or(1),
+                    ..Default::default()
+                };
+                pro.nexthops.push(nhop);
+            }
+            entry.nexthop = Nexthop::Protect(pro);
         }
         Some(entry)
     }

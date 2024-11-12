@@ -89,6 +89,10 @@ impl RibEntry {
                 .nexthops
                 .iter()
                 .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid())),
+            Nexthop::Protect(pro) => pro
+                .nexthops
+                .iter()
+                .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid())),
             _ => false,
         }
     }
@@ -102,6 +106,11 @@ impl RibEntry {
                 uni_group_sync(uni, nmap, fib).await;
             }
             multi_group_sync(multi, nmap, fib).await;
+        }
+        if let Nexthop::Protect(pro) = &mut self.nexthop {
+            for uni in pro.nexthops.iter_mut() {
+                uni_group_sync(uni, nmap, fib).await;
+            }
         }
     }
 
