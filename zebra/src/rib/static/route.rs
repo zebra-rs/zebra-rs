@@ -51,7 +51,7 @@ impl StaticRoute {
             let mut nhop = NexthopUni {
                 addr: *p,
                 metric: n.metric.unwrap_or(metric),
-                weight: n.weight.unwrap_or(0),
+                weight: n.weight.unwrap_or(1),
                 ..Default::default()
             };
             entry.nexthop = Nexthop::Uni(nhop);
@@ -69,6 +69,7 @@ impl StaticRoute {
         // ECMP/UCMP case.
         if map.len() == 1 {
             let (metric, pair) = map.pop_first()?;
+            entry.metric = metric;
             let mut multi = NexthopMulti {
                 metric,
                 ..Default::default()
@@ -77,7 +78,7 @@ impl StaticRoute {
                 let mut nhop = NexthopUni {
                     addr: *p,
                     metric: n.metric.unwrap_or(metric),
-                    weight: n.weight.unwrap_or(0),
+                    weight: n.weight.unwrap_or(1),
                     ..Default::default()
                 };
                 multi.nexthops.push(nhop);

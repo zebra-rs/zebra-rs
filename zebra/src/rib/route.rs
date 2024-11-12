@@ -167,6 +167,7 @@ fn resolve_nexthop_uni(
 
     // Set the nexthop group id to the nexthop.
     uni.gid = group.gid();
+    uni.ifindex = group.ifindex;
 
     group.is_valid()
 }

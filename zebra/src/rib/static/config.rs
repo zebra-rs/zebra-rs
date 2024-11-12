@@ -139,7 +139,7 @@ fn config_builder() -> ConfigBuilder {
     const WEIGHT_ERR: &str = "missing weight arg";
 
     ConfigBuilder::default()
-        .path("/routing/static/route")
+        .path("/routing/static/ipv4/route")
         .set(|config, cache, prefix, _| {
             let _ = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             Ok(())
@@ -154,7 +154,7 @@ fn config_builder() -> ConfigBuilder {
             }
             Ok(())
         })
-        .path("/routing/static/route/metric")
+        .path("/routing/static/ipv4/route/metric")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             s.metric = Some(args.u32().context(METRIC_ERR)?);
@@ -165,7 +165,7 @@ fn config_builder() -> ConfigBuilder {
             s.metric = None;
             Ok(())
         })
-        .path("/routing/static/route/distance")
+        .path("/routing/static/ipv4/route/distance")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             s.distance = Some(args.u8().context(DISTANCE_ERR)?);
@@ -176,7 +176,7 @@ fn config_builder() -> ConfigBuilder {
             s.distance = None;
             Ok(())
         })
-        .path("/routing/static/route/nexthop")
+        .path("/routing/static/ipv4/route/nexthop")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
@@ -189,7 +189,7 @@ fn config_builder() -> ConfigBuilder {
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
             Ok(())
         })
-        .path("/routing/static/route/nexthop/metric")
+        .path("/routing/static/ipv4/route/nexthop/metric")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
@@ -204,7 +204,7 @@ fn config_builder() -> ConfigBuilder {
             n.metric = None;
             Ok(())
         })
-        .path("/routing/static/route/nexthop/weight")
+        .path("/routing/static/ipv4/route/nexthop/weight")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;

@@ -53,7 +53,14 @@ pub fn rib_entry_show(
                     if i != 0 {
                         buf.push_str(&" ".repeat(offset).to_string());
                     }
-                    writeln!(buf, " via {}", uni.addr).unwrap();
+                    writeln!(
+                        buf,
+                        " via {}, {}, weight {}",
+                        uni.addr,
+                        rib.link_name(uni.ifindex),
+                        uni.weight
+                    )
+                    .unwrap();
                 }
                 //
             }
