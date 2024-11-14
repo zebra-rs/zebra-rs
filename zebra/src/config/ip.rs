@@ -58,11 +58,9 @@ pub fn match_ipv4_addr(src: &str) -> (MatchType, usize) {
 }
 
 pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
-    println!("match_ipv4_net");
     let p = src.find('/');
     if p.is_none() {
         let (m, pos) = match_ipv4_addr(src);
-        println!("match_ipv4_addr {:?}", m);
         if m == MatchType::None {
             return (m, pos);
         } else {
