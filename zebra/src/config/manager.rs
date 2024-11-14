@@ -320,7 +320,6 @@ impl ConfigManager {
                         resp.code = ExecCode::Nomatch;
                     }
                 }
-                println!("resp.code {:?}", resp.code);
                 req.resp.send(resp).unwrap();
             }
             Message::Deploy(req) => {
