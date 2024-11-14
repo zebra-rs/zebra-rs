@@ -116,66 +116,34 @@ impl RibEntry {
 
     pub async fn nexthop_unsync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
         match &self.nexthop {
+            Nexthop::Onlink => {}
             Nexthop::Uni(uni) => {
-                if let Some(group) = nmap.get_mut(uni.gid) {
-                    group.refcnt_dec();
-
-                    if group.refcnt() == 0 {
-                        // If ref count is zero and the nexthop is installed, remove it from FIB
-                        if group.is_installed() {
-                            fib.nexthop_del(group).await;
-                        }
-                        // Remove nexthop group since it's no longer referenced
-                        nmap.groups[uni.gid] = None;
-                    }
-                }
+                self.handle_nexthop_group(nmap, fib, uni.gid).await;
             }
             Nexthop::Multi(multi) => {
-                if let Some(group) = nmap.get_mut(multi.gid) {
-                    group.refcnt_dec();
-
-                    if group.refcnt() == 0 {
-                        // If ref count is zero and the nexthop is installed, remove it from FIB
-                        if group.is_installed() {
-                            fib.nexthop_del(group).await;
-                        }
-                        // Remove nexthop group since it's no longer referenced
-                        nmap.groups[multi.gid] = None;
-                    }
-                }
-                for uni in multi.nexthops.iter() {
-                    if let Some(group) = nmap.get_mut(uni.gid) {
-                        group.refcnt_dec();
-
-                        if group.refcnt() == 0 {
-                            // If ref count is zero and the nexthop is installed, remove it from FIB
-                            if group.is_installed() {
-                                fib.nexthop_del(group).await;
-                            }
-                            // Remove nexthop group since it's no longer referenced
-                            nmap.groups[uni.gid] = None;
-                        }
-                    }
+                self.handle_nexthop_group(nmap, fib, multi.gid).await;
+                for uni in &multi.nexthops {
+                    self.handle_nexthop_group(nmap, fib, uni.gid).await;
                 }
             }
             Nexthop::Protect(pro) => {
-                for uni in pro.nexthops.iter() {
-                    if let Some(group) = nmap.get_mut(uni.gid) {
-                        group.refcnt_dec();
-
-                        if group.refcnt() == 0 {
-                            // If ref count is zero and the nexthop is installed, remove it from FIB
-                            if group.is_installed() {
-                                fib.nexthop_del(group).await;
-                            }
-                            // Remove nexthop group since it's no longer referenced
-                            nmap.groups[uni.gid] = None;
-                        }
-                    }
+                for uni in &pro.nexthops {
+                    self.handle_nexthop_group(nmap, fib, uni.gid).await;
                 }
             }
-            _ => {
-                //
+        }
+    }
+
+    async fn handle_nexthop_group(&self, nmap: &mut NexthopMap, fib: &FibHandle, gid: usize) {
+        if let Some(group) = nmap.get_mut(gid) {
+            group.refcnt_dec();
+            if group.refcnt() == 0 {
+                // If ref count is zero and the nexthop is installed, remove it from FIB
+                if group.is_installed() {
+                    fib.nexthop_del(group).await;
+                }
+                // Remove nexthop group since it's no longer referenced
+                nmap.groups[gid] = None;
             }
         }
     }

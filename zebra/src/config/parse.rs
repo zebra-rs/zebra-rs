@@ -528,12 +528,14 @@ pub fn parse(
         if s.delete {
             comps_add_config(&mut mx.comps, s.ymatch, &config);
         } else {
-            comps_add_all(&mut mx.comps, s.ymatch, &next, &s);
+            if mx.matched_type != MatchType::Incomplete {
+                comps_add_all(&mut mx.comps, s.ymatch, &next, &s);
 
-            if s.set {
-                let mut comps = Vec::new();
-                comps_add_config(&mut comps, s.ymatch, &config);
-                comps_append(&mut comps, &mut mx.comps);
+                if s.set {
+                    let mut comps = Vec::new();
+                    comps_add_config(&mut comps, s.ymatch, &config);
+                    comps_append(&mut comps, &mut mx.comps);
+                }
             }
         }
     }
@@ -549,6 +551,9 @@ pub fn parse(
         }
         (ExecCode::Success, mx.comps, s)
     } else {
+        if mx.matched_type == MatchType::Incomplete {
+            return (ExecCode::Incomplete, mx.comps, s);
+        }
         if next.name == "set" {
             s.set = true;
         }

@@ -28,6 +28,7 @@ mod commands;
 mod files;
 mod ip;
 mod json;
+mod ospf;
 mod parse;
 mod token;
 mod util;
