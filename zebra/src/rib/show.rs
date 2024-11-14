@@ -49,7 +49,7 @@ pub fn rib_entry_show(
                 //
             }
             Nexthop::Uni(uni) => {
-                writeln!(buf, " via {}", uni.addr).unwrap();
+                writeln!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex)).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {

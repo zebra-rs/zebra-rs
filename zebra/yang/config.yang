@@ -133,41 +133,8 @@ module config {
               description "Metric of the route.";
             }
           }
-        }
-        container ipv6 {
-          ext:help "IPv6 configuration";
-          list route {
-            key "prefix";
-            leaf prefix {
-              type inet:ipv6-prefix;
-            }
-            list nexthop {
-              key "address";
-              leaf "address" {
-                type inet:ipv6-address;
-                description "Nexthop of the route";
-              }
-              leaf metric {
-                type uint32;
-                description "Metric of the route.";
-              }
-              leaf weight {
-                type uint8;
-                description "Weight of ECMP route.";
-              }
-            }
-            leaf distance {
-              type uint8;
-              description "Distance of the route.";
-            }
-            leaf metric {
-              type uint32;
-              description "Metric of the route.";
-            }
-          }
-        }
 
-        list srv6 {
+                list srv6 {
           key "prefix";
           leaf prefix {
             type inet:ipv4-prefix;
@@ -234,6 +201,40 @@ module config {
             description "Outgoing interface";
           }
         }
+}
+        container ipv6 {
+          ext:help "IPv6 configuration";
+          list route {
+            key "prefix";
+            leaf prefix {
+              type inet:ipv6-prefix;
+            }
+            list nexthop {
+              key "address";
+              leaf "address" {
+                type inet:ipv6-address;
+                description "Nexthop of the route";
+              }
+              leaf metric {
+                type uint32;
+                description "Metric of the route.";
+              }
+              leaf weight {
+                type uint8;
+                description "Weight of ECMP route.";
+              }
+            }
+            leaf distance {
+              type uint8;
+              description "Distance of the route.";
+            }
+            leaf metric {
+              type uint32;
+              description "Metric of the route.";
+            }
+          }
+        }
+
       }
     }
 

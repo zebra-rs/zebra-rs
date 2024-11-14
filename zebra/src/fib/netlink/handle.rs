@@ -508,7 +508,15 @@ impl RouteBuilder {
         }
     }
 
-    pub fn build(self) -> (IpNet, RibEntry) {
+    pub fn build(mut self) -> (IpNet, RibEntry) {
+        match &mut self.entry.nexthop {
+            Nexthop::Uni(uni) => {
+                uni.ifindex = self.entry.ifindex;
+            }
+            _ => {
+                //
+            }
+        }
         (self.prefix.unwrap(), self.entry)
     }
 
