@@ -10,6 +10,7 @@ use crate::rib::Nexthop;
 use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::NexthopUni;
+use super::resolve::Resolve;
 use super::{Group, GroupTrait, Message, NexthopMap, NexthopMulti, RibEntries, RibType};
 
 impl Rib {
@@ -44,38 +45,42 @@ impl Rib {
         // Add connected route.
         for addr4 in link.addr4.iter() {
             if let IpNet::V4(addr) = addr4.addr {
-                let prefix = addr.apply_mask();
-                println!("Connected: {:?} add - adding to RIB", prefix);
-                let mut rib = RibEntry::new(RibType::Connected);
-                rib.set_fib(true);
-                rib.set_valid(true);
-                rib.ifindex = ifindex;
-                let msg = Message::Ipv4Add { prefix, rib };
-                let _ = self.tx.send(msg);
+                // let prefix = addr.apply_mask();
+                // println!("Connected: {:?} add - adding to RIB", prefix);
+                // let mut rib = RibEntry::new(RibType::Connected);
+                // rib.set_fib(true);
+                // rib.set_valid(true);
+                // rib.ifindex = ifindex;
+                // let msg = Message::Ipv4Add { prefix, rib };
+                // let _ = self.tx.send(msg);
             }
         }
         // Resolve all RIB.
-        let msg = Message::Resolve;
-        let _ = self.tx.send(msg);
+        // let msg = Message::Resolve;
+        // let _ = self.tx.send(msg);
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
-        // println!("IPv4 route add: {} {}", rib.rtype.abbrev(), prefix);
+        println!("IPv4 route add: {} {}", rib.rtype.abbrev(), prefix);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
         rib_resolve_nexthop(&mut rib, &self.table, &mut self.nmap);
+        if rib.is_connected() {
+            let msg = Message::Resolve;
+            let _ = self.tx.send(msg);
+        }
         rib_add(&mut self.table, prefix, rib);
         self.rib_selection(prefix, replace.pop()).await;
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, rib: RibEntry) {
-        // println!("IPv4 route del: {} {}", rib.rtype.abbrev(), prefix);
+        println!("IPv4 route del: {} {}", rib.rtype.abbrev(), prefix);
         let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
         self.rib_selection(prefix, replace.pop()).await;
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
         println!("ipv4_route_resolve");
-        ipv4_nexthop_sync(&mut self.nmap, &self.table);
+        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle).await;
     }
 
@@ -268,22 +273,28 @@ fn rib_next(entries: &RibEntries) -> Option<usize> {
     index
 }
 
-fn ipv4_nexthop_sync(nmap: &mut NexthopMap, table: &PrefixMap<Ipv4Net, RibEntries>) {
+async fn ipv4_nexthop_sync(
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv4Net, RibEntries>,
+    fib: &FibHandle,
+) {
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            if uni.refcnt() == 0 {
-                continue;
-            }
-
             // Resolve the next hop
             let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
 
             // Update the status of the next hop
-            if resolve.is_valid() == 0 {
+            let ifindex = resolve.is_valid();
+            if ifindex == 0 {
                 uni.set_valid(false);
                 uni.set_installed(false);
             } else {
+                uni.set_ifindex(ifindex);
                 uni.set_valid(true);
+                if !uni.is_installed() {
+                    uni.set_installed(true);
+                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                }
             }
         }
     }

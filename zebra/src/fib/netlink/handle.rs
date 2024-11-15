@@ -157,7 +157,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute error: {}", e);
+                println!("DelRoute error: {}", e);
             }
         }
     }
@@ -545,6 +545,11 @@ impl RouteBuilder {
         self
     }
 
+    pub fn metric(mut self, metric: u32) -> Self {
+        self.entry.metric = metric;
+        self
+    }
+
     pub fn is_ipv4(&self) -> bool {
         let Some(prefix) = &self.prefix else {
             return false;
@@ -556,17 +561,17 @@ impl RouteBuilder {
 pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
     let mut builder = RouteBuilder::new();
 
-    if msg.header.protocol == RouteProtocol::Dhcp {
-        builder = builder.rtype(RibType::Dhcp);
-    }
-    if msg.header.scope == RouteScope::Link {
-        builder = builder.rtype(RibType::Connected);
-    }
     if msg.header.scope == RouteScope::Host {
         return None;
     }
     if msg.header.kind != RouteType::Unicast {
         return None;
+    }
+    if msg.header.protocol == RouteProtocol::Dhcp {
+        builder = builder.rtype(RibType::Dhcp);
+    }
+    if msg.header.scope == RouteScope::Link {
+        builder = builder.rtype(RibType::Connected);
     }
     if msg.header.destination_prefix_length == 0 && msg.header.address_family == AddressFamily::Inet
     {
@@ -576,6 +581,9 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
 
     for attr in msg.attributes.into_iter() {
         match attr {
+            RouteAttribute::Priority(metric) => {
+                builder = builder.metric(metric);
+            }
             RouteAttribute::Destination(RouteAddress::Inet(n)) => {
                 let prefix = Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap();
                 builder = builder.ipv4_prefix(prefix);
@@ -583,6 +591,9 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
             RouteAttribute::Destination(RouteAddress::Inet6(n)) => {
                 let prefix = Ipv6Net::new(n, msg.header.destination_prefix_length).unwrap();
                 builder = builder.ipv6_prefix(prefix);
+            }
+            RouteAttribute::Oif(ifindex) => {
+                builder = builder.oif(ifindex);
             }
             RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
                 let mut uni = NexthopUni {
@@ -612,9 +623,7 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
             RouteAttribute::Encap(e) => {
                 println!("XXX Encap {:?}", e);
             }
-            RouteAttribute::Oif(ifindex) => {
-                builder = builder.oif(ifindex);
-            }
+
             _ => {
                 //
             }
