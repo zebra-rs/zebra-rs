@@ -12,7 +12,7 @@ use netlink_packet_route::address::{
 use netlink_packet_route::link::{
     InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
 };
-use netlink_packet_route::nexthop::{NexthopAttribute, NexthopGroup, NexthopMessage};
+use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
 };
@@ -189,6 +189,7 @@ impl FibHandle {
         // Nexthop message.
         let mut msg = NexthopMessage::default();
         msg.header.protocol = RouteProtocol::Zebra;
+        msg.header.flags = NexthopFlags::Onlink;
 
         match nexthop {
             Group::Uni(uni) => {

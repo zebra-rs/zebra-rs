@@ -11,7 +11,9 @@ use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::NexthopUni;
 use super::resolve::Resolve;
-use super::{Group, GroupTrait, Message, NexthopMap, NexthopMulti, RibEntries, RibType};
+use super::{
+    Group, GroupTrait, Message, NexthopMap, NexthopMulti, NexthopProtect, RibEntries, RibType,
+};
 
 impl Rib {
     pub async fn link_down(&mut self, ifindex: u32) {
@@ -60,16 +62,23 @@ impl Rib {
         // let _ = self.tx.send(msg);
     }
 
-    pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut rib: RibEntry) {
-        println!("IPv4 route add: {} {}", rib.rtype.abbrev(), prefix);
-        let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
-        rib_resolve_nexthop(&mut rib, &self.table, &mut self.nmap);
-        if rib.is_connected() {
+    pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
+        println!("IPv4 route add: {} {}", entry.rtype.abbrev(), prefix);
+        let is_connected = entry.is_connected();
+        if entry.is_protocol() {
+            let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
+            rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap);
+            rib_add(&mut self.table, prefix, entry);
+            self.rib_selection(prefix, replace.pop()).await;
+        } else {
+            rib_add_resolved(&mut self.table, prefix, entry);
+            self.rib_selection(prefix, None).await;
+        }
+
+        if is_connected {
             let msg = Message::Resolve;
             let _ = self.tx.send(msg);
         }
-        rib_add(&mut self.table, prefix, rib);
-        self.rib_selection(prefix, replace.pop()).await;
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, rib: RibEntry) {
@@ -234,9 +243,53 @@ fn rib_resolve_nexthop(
     entry.set_valid(entry.is_valid_nexthop(nmap));
 }
 
+fn rib_rtype(entries: &[RibEntry], rtype: RibType) -> Option<usize> {
+    entries.iter().position(|e| e.rtype == rtype)
+}
+
 fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = table.entry(*prefix).or_default();
     entries.push(entry);
+}
+
+fn rib_add_resolved(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
+    println!("rib_add_resolve");
+    let entries = table.entry(*prefix).or_default();
+    let index = rib_rtype(entries, entry.rtype);
+    match index {
+        None => {
+            entries.push(entry);
+        }
+        Some(index) => {
+            println!("rib_add_resolve index {}", index);
+            let e = entries.get_mut(index).unwrap();
+            let nhop = match &e.nexthop {
+                Nexthop::Uni(uni) => {
+                    println!("rib_add_resolve uni");
+                    let Nexthop::Uni(euni) = entry.nexthop else {
+                        return;
+                    };
+                    println!("rib_add_resolve uni metric {}", uni.metric);
+                    println!("rib_add_resolve euni metric {}", euni.metric);
+                    if uni.metric == euni.metric {
+                        Nexthop::Uni(euni)
+                    } else {
+                        let mut prot = NexthopProtect::default();
+                        prot.nexthops.push(uni.clone());
+                        prot.nexthops.push(euni);
+                        // Sort nexthops by metric.
+                        prot.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
+                        Nexthop::Protect(prot)
+                    }
+                }
+                Nexthop::Protect(pro) => Nexthop::Protect(pro.clone()),
+                _ => {
+                    return;
+                }
+            };
+            e.nexthop = nhop;
+        }
+    }
 }
 
 fn rib_replace(

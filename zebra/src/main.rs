@@ -11,6 +11,7 @@ mod policy;
 use policy::Policy;
 mod context;
 mod fib;
+mod isis;
 mod ldp;
 mod ospf;
 
