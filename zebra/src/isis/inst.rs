@@ -28,6 +28,7 @@ pub struct Isis {
     pub links: BTreeMap<u32, IsisLink>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
+    // pub sock:
 }
 
 impl Isis {

@@ -71,7 +71,7 @@ impl Rib {
             rib_add(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         } else {
-            rib_add_resolved(&mut self.table, prefix, entry);
+            rib_add_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, None).await;
         }
 
@@ -81,10 +81,15 @@ impl Rib {
         }
     }
 
-    pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, rib: RibEntry) {
-        println!("IPv4 route del: {} {}", rib.rtype.abbrev(), prefix);
-        let mut replace = rib_replace(&mut self.table, prefix, rib.rtype);
-        self.rib_selection(prefix, replace.pop()).await;
+    pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry) {
+        println!("IPv4 route del: {} {}", entry.rtype.abbrev(), prefix);
+        if entry.is_protocol() {
+            let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
+            self.rib_selection(prefix, replace.pop()).await;
+        } else {
+            let mut replace = rib_replace_system(&mut self.table, prefix, entry);
+            self.rib_selection(prefix, replace.pop()).await;
+        }
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
@@ -252,8 +257,7 @@ fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: 
     entries.push(entry);
 }
 
-fn rib_add_resolved(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
-    println!("rib_add_resolve");
+fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = table.entry(*prefix).or_default();
     let index = rib_rtype(entries, entry.rtype);
     match index {
@@ -261,16 +265,12 @@ fn rib_add_resolved(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net
             entries.push(entry);
         }
         Some(index) => {
-            println!("rib_add_resolve index {}", index);
             let e = entries.get_mut(index).unwrap();
             let nhop = match &e.nexthop {
                 Nexthop::Uni(uni) => {
-                    println!("rib_add_resolve uni");
                     let Nexthop::Uni(euni) = entry.nexthop else {
                         return;
                     };
-                    println!("rib_add_resolve uni metric {}", uni.metric);
-                    println!("rib_add_resolve euni metric {}", euni.metric);
                     if uni.metric == euni.metric {
                         Nexthop::Uni(euni)
                     } else {
@@ -290,6 +290,48 @@ fn rib_add_resolved(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net
             e.nexthop = nhop;
         }
     }
+}
+
+fn rib_replace_system(
+    table: &mut PrefixMap<Ipv4Net, RibEntries>,
+    prefix: &Ipv4Net,
+    entry: RibEntry,
+) -> Vec<RibEntry> {
+    let entries = table.entry(*prefix).or_default();
+    let index = rib_rtype(entries, entry.rtype);
+    let Some(index) = index else {
+        return vec![];
+    };
+    let e = entries.get_mut(index).unwrap();
+    let replace = match &mut e.nexthop {
+        Nexthop::Uni(uni) => {
+            if uni.metric == entry.metric {
+                true
+            } else {
+                false
+            }
+        }
+        Nexthop::Multi(multi) => {
+            if multi.metric == entry.metric {
+                true
+            } else {
+                false
+            }
+        }
+        Nexthop::Protect(pro) => {
+            pro.nexthops.retain(|x| x.metric != entry.metric);
+            if pro.nexthops.len() == 1 {
+                let uni = pro.nexthops.pop().unwrap();
+                e.nexthop = Nexthop::Uni(uni);
+            }
+            false
+        }
+        _ => false,
+    };
+    if replace {
+        return rib_replace(table, prefix, entry.rtype);
+    }
+    return vec![];
 }
 
 fn rib_replace(

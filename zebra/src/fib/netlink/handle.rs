@@ -513,6 +513,7 @@ impl RouteBuilder {
         match &mut self.entry.nexthop {
             Nexthop::Uni(uni) => {
                 uni.ifindex = self.entry.ifindex;
+                uni.metric = self.entry.metric;
             }
             _ => {
                 //

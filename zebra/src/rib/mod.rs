@@ -28,3 +28,5 @@ pub mod r#static;
 pub use r#static::*;
 
 pub mod resolve;
+
+pub mod nanomsg;

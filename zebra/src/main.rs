@@ -82,6 +82,8 @@ async fn main() -> anyhow::Result<()> {
 
     rib::serve(rib);
 
+    rib::nanomsg::serve();
+
     println!("zebra: started");
 
     config::event_loop(config).await;
