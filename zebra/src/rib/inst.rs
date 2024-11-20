@@ -1,6 +1,6 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::{Link, NexthopMap, RibTxChannel, StaticConfig};
+use super::{Link, LspConfig, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -38,6 +38,7 @@ pub struct Rib {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
+    pub lsp_config: LspConfig,
     pub nmap: NexthopMap,
 }
 
@@ -59,6 +60,7 @@ impl Rib {
             tx,
             rx,
             static_config: StaticConfig::new(),
+            lsp_config: LspConfig::new(),
             nmap: NexthopMap::default(),
         };
         rib.show_build();
@@ -137,7 +139,12 @@ impl Rib {
             ConfigOp::CommitStart => {}
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                let _ = self.static_config.exec(path, args, msg.op);
+                println!("Path: {path}");
+                if path.as_str().starts_with("/routing/static/ipv4/route") {
+                    let _ = self.static_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/routing/static/ipv4/lsp") {
+                    let _ = self.lsp_config.exec(path, args, msg.op);
+                }
             }
             ConfigOp::CommitEnd => {
                 self.static_config.commit(self.tx.clone());

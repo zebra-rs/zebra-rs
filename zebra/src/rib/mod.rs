@@ -27,6 +27,9 @@ pub mod util;
 pub mod r#static;
 pub use r#static::*;
 
+pub mod lsp;
+pub use lsp::*;
+
 pub mod resolve;
 
 pub mod nanomsg;

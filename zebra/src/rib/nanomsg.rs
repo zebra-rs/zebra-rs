@@ -2,7 +2,7 @@ use std::io::Read;
 
 use nanomsg::{Protocol, Socket};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{from_value, Value};
 
 struct Nanomsg {
     socket: Socket,
@@ -14,12 +14,37 @@ struct Mesg {
     data: Value,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RouterIdRequest {
+    #[serde(alias = "vrf-id")]
+    vrf_id: u32,
+}
+
+
+
 impl Nanomsg {
     pub fn new() -> anyhow::Result<Self> {
         let mut socket = Socket::new(Protocol::Pair)?;
         socket.bind("ipc:///tmp/ipc/pair/fibd_isisd")?;
         let nanomsg = Self { socket };
         Ok(nanomsg)
+    }
+
+    pub fn parse(&self, text: &String) {
+        let value: Result<Mesg, serde_json::Error> = serde_json::from_str(&text);
+        match value {
+            Ok(msg) => {
+                println!("method {:?}", msg.method);
+                if msg.method == "router-id:request" {
+                    let data: Result<RouterIdRequest, _> = from_value(msg.data);
+                    println!("{:?}", data);
+                }
+            }
+            Err(err) => {
+                println!("err {}", err);
+                // break;
+            }
+        }
     }
 
     pub async fn event_loop(&mut self) {
@@ -30,20 +55,7 @@ impl Nanomsg {
                 Ok(_) => {
                     println!("{}", text);
                     text.pop();
-                    let value: Result<Mesg, serde_json::Error> = serde_json::from_str(&text);
-                    match value {
-                        Ok(msg) => {
-                            println!("method {:?}", msg.method);
-                            if msg.method == "vrf:request" {
-                                println!("VRF REquest");
-                                //
-                            }
-                        }
-                        Err(err) => {
-                            println!("err {}", err);
-                            // break;
-                        }
-                    }
+                    self.parse(&text);
                 }
                 Err(err) => {
                     break;

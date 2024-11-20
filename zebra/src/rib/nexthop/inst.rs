@@ -2,12 +2,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv4Addr;
 
+use netlink_packet_route::route::MplsLabel;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NexthopUni {
     pub addr: Ipv4Addr,
     pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
+    pub mpls: Option<Vec<MplsLabel>>,
     pub gid: usize,
 }
 
@@ -27,6 +30,7 @@ impl Default for NexthopUni {
             ifindex: 0,
             metric: 0,
             weight: 1,
+            mpls: None,
             gid: 0,
         }
     }

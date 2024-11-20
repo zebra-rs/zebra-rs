@@ -322,6 +322,7 @@ fn rib_replace_system(
             pro.nexthops.retain(|x| x.metric != entry.metric);
             if pro.nexthops.len() == 1 {
                 let uni = pro.nexthops.pop().unwrap();
+                e.metric = uni.metric;
                 e.nexthop = Nexthop::Uni(uni);
             }
             false
