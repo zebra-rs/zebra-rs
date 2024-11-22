@@ -48,6 +48,10 @@ impl NexthopMap {
 
     pub fn fetch_uni(&mut self, addr: &Ipv4Addr) -> Option<&mut Group> {
         let gid = if let Some(&gid) = self.map.get(addr) {
+            let update = self.groups.get_mut(gid)?;
+            if update.is_none() {
+                *update = Some(Group::Uni(GroupUni::new(gid, addr)));
+            }
             gid
         } else {
             let gid = self.new_gid();
@@ -63,6 +67,12 @@ impl NexthopMap {
 
     pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
         let gid = if let Some(&gid) = self.set.get(set) {
+            let update = self.groups.get_mut(gid)?;
+            if update.is_none() {
+                let mut multi = GroupMulti::new(gid);
+                multi.set = set.clone();
+                *update = Some(Group::Multi(multi));
+            }
             gid
         } else {
             let gid = self.new_gid();

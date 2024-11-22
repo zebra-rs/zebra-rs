@@ -173,4 +173,12 @@ impl GroupTrait for Group {
             Protect(protect) => &mut protect.common,
         }
     }
+
+    fn refcnt(&self) -> usize {
+        match self {
+            Group::Uni(uni) => uni.refcnt(),
+            Group::Multi(multi) => multi.refcnt(),
+            _ => 0,
+        }
+    }
 }
