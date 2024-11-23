@@ -266,7 +266,7 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
         }
         Some(index) => {
             let e = entries.get_mut(index).unwrap();
-            let nhop = match &e.nexthop {
+            let nhop = match &mut e.nexthop {
                 Nexthop::Uni(uni) => {
                     let Nexthop::Uni(euni) = entry.nexthop else {
                         return;
@@ -274,15 +274,25 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                     if uni.metric == euni.metric {
                         Nexthop::Uni(euni)
                     } else {
-                        let mut prot = NexthopProtect::default();
-                        prot.nexthops.push(uni.clone());
-                        prot.nexthops.push(euni);
-                        // Sort nexthops by metric.
-                        prot.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
-                        Nexthop::Protect(prot)
+                        let mut pro = NexthopProtect::default();
+                        pro.nexthops.push(uni.clone());
+                        pro.nexthops.push(euni);
+                        pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
+                        e.metric = pro.metric();
+                        println!("e.metric {}", e.metric);
+                        println!("e.rtype {}", e.rtype.abbrev());
+                        Nexthop::Protect(pro)
                     }
                 }
-                Nexthop::Protect(pro) => Nexthop::Protect(pro.clone()),
+                Nexthop::Protect(pro) => {
+                    let Nexthop::Uni(euni) = entry.nexthop else {
+                        return;
+                    };
+                    pro.nexthops.push(euni);
+                    pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
+                    e.metric = pro.metric();
+                    Nexthop::Protect(pro.clone())
+                }
                 _ => {
                     return;
                 }

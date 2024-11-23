@@ -68,3 +68,12 @@ pub struct NexthopProtect {
     // Metric sorted BTreeMap.
     pub nexthops: Vec<NexthopUni>,
 }
+
+impl NexthopProtect {
+    pub fn metric(&self) -> u32 {
+        match self.nexthops.first() {
+            Some(nhop) => nhop.metric,
+            None => 0,
+        }
+    }
+}
