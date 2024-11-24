@@ -45,6 +45,7 @@ async fn route_dump(rib: &mut Rib, handle: rtnetlink::Handle, ip_version: IpVers
     while let Some(msg) = routes.try_next().await? {
         let route = route_from_msg(msg);
         if let Some(route) = route {
+            println!("Add {}", route);
             let msg = FibMessage::NewRoute(route);
             rib.process_fib_msg(msg).await;
         }

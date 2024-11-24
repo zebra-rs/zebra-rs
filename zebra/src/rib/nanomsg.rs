@@ -30,6 +30,8 @@ struct MsgSend {
 #[serde(untagged)]
 enum MsgEnum {
     Interface(InterfaceMsg),
+    IsisGlobal(IsisGlobal),
+    IsisInstance(IsisInstance),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,14 +58,40 @@ struct InterfaceMsg {
     if_hw_addr: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct IsisGlobal {
+    hostname: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IsisInstance {
+    #[serde(rename = "instance-tag")]
+    instance_tag: String,
+}
+
 use std::io::Write;
 
 impl Nanomsg {
     pub fn new() -> anyhow::Result<Self> {
         let mut socket = Socket::new(Protocol::Pair)?;
-        socket.bind("ipc:///tmp/ipc/pair/fibd_isisd")?;
+        // socket.bind("ipc:///tmp/ipc/pair/fibd_isisd")?;
+        socket.bind("ipc:///tmp/ipc/pair/config-ng_isisd")?;
         let nanomsg = Self { socket };
         Ok(nanomsg)
+    }
+
+    fn isis_global_update(&self) -> MsgEnum {
+        let msg = IsisGlobal {
+            hostname: "zebra".into(),
+        };
+        MsgEnum::IsisGlobal(msg)
+    }
+
+    fn isis_instance_add(&self) -> MsgEnum {
+        let msg = IsisInstance {
+            instance_tag: "zebra".into(),
+        };
+        MsgEnum::IsisInstance(msg)
     }
 
     pub fn parse(&mut self, text: &String) -> anyhow::Result<()> {
@@ -71,6 +99,25 @@ impl Nanomsg {
         match value {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
+                if msg.method == "isis-global:request" {
+                    // isis-global:update
+                    let msg = MsgSend {
+                        method: String::from("isis-global:update"),
+                        data: self.isis_global_update(),
+                    };
+                    self.socket.write(to_string(&msg)?.as_bytes());
+                }
+                if msg.method == "isis-instance:request" {
+                    // isis-instance:add
+                    let msg = MsgSend {
+                        method: String::from("isis-instance:add"),
+                        data: self.isis_instance_add(),
+                    };
+                    self.socket.write(to_string(&msg)?.as_bytes());
+                }
+                if msg.method == "" {
+                    // isis-if:add
+                }
                 if msg.method == "router-id:request" {
                     let data: Result<RouterIdRequest, _> = from_value(msg.data);
                     println!("{:?}", data);

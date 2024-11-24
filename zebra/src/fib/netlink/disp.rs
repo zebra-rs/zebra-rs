@@ -7,12 +7,16 @@ impl Display for FibRoute {
         write!(
             f,
             r#"FibRoute:
-prefix: {}
-entry:
-rtype: {:?}
-distance: {}
-metric: {}"#,
-            self.prefix, self.entry.rtype, self.entry.distance, self.entry.metric
+  prefix: {}
+  rtype: {:?}
+  distance: {}
+  metric: {}
+  nexthop: {}"#,
+            self.prefix,
+            self.entry.rtype,
+            self.entry.distance,
+            self.entry.metric,
+            self.entry.nexthop
         )
     }
 }

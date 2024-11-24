@@ -43,23 +43,6 @@ impl Rib {
             return;
         };
         println!("link up {}", link.name);
-
-        // Add connected route.
-        for addr4 in link.addr4.iter() {
-            if let IpNet::V4(addr) = addr4.addr {
-                // let prefix = addr.apply_mask();
-                // println!("Connected: {:?} add - adding to RIB", prefix);
-                // let mut rib = RibEntry::new(RibType::Connected);
-                // rib.set_fib(true);
-                // rib.set_valid(true);
-                // rib.ifindex = ifindex;
-                // let msg = Message::Ipv4Add { prefix, rib };
-                // let _ = self.tx.send(msg);
-            }
-        }
-        // Resolve all RIB.
-        // let msg = Message::Resolve;
-        // let _ = self.tx.send(msg);
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
@@ -93,7 +76,6 @@ impl Rib {
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
-        println!("ipv4_route_resolve");
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle).await;
     }
@@ -279,8 +261,6 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                         pro.nexthops.push(euni);
                         pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
                         e.metric = pro.metric();
-                        println!("e.metric {}", e.metric);
-                        println!("e.rtype {}", e.rtype.abbrev());
                         Nexthop::Protect(pro)
                     }
                 }

@@ -137,11 +137,10 @@ impl Rib {
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
             ConfigOp::CommitStart => {
-                println!("Path: CommitStart!");
+                //
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                println!("Path: {path}");
                 if path.as_str().starts_with("/routing/static/ipv4/route") {
                     let _ = self.static_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/routing/static/ipv4/lsp") {
@@ -149,7 +148,6 @@ impl Rib {
                 }
             }
             ConfigOp::CommitEnd => {
-                println!("Path: CommitEnd!");
                 self.static_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {

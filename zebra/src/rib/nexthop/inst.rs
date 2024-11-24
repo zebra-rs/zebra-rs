@@ -36,12 +36,6 @@ impl Default for NexthopUni {
     }
 }
 
-impl fmt::Display for NexthopUni {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.addr)
-    }
-}
-
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum Nexthop {
     #[default]
