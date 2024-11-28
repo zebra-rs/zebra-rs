@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::{io::Read, thread, time::Duration};
 
 use nanomsg::{Protocol, Socket};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ enum MsgEnum {
     Interface(InterfaceMsg),
     IsisGlobal(IsisGlobal),
     IsisInstance(IsisInstance),
+    IsisIf(IsisIf),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,9 +65,34 @@ struct IsisGlobal {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct IsisNet {
+    add: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct IsisInstance {
     #[serde(rename = "instance-tag")]
     instance_tag: String,
+    #[serde(rename = "log-adjacency-changes")]
+    log_adjacency_changes: bool,
+    net: IsisNet,
+    #[serde(rename = "is-type")]
+    is_type: u32,
+    #[serde(rename = "metric-style")]
+    metric_style: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IsisIf {
+    ifname: String,
+    #[serde(rename = "instance-tag")]
+    instance_tag: String,
+    #[serde(rename = "ipv4-enable")]
+    ipv4_enable: bool,
+    #[serde(rename = "network-type")]
+    network_type: u32,
+    #[serde(rename = "circuit-type")]
+    circuit_type: u32,
 }
 
 use std::io::Write;
@@ -88,10 +114,28 @@ impl Nanomsg {
     }
 
     fn isis_instance_add(&self) -> MsgEnum {
+        let net = IsisNet {
+            add: vec!["49.0000.0000.0000.0001.00".into()],
+        };
         let msg = IsisInstance {
             instance_tag: "zebra".into(),
+            log_adjacency_changes: true,
+            net,
+            is_type: 1,
+            metric_style: 2,
         };
         MsgEnum::IsisInstance(msg)
+    }
+
+    fn isis_if_add(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "enp0s6".into(),
+            instance_tag: "zebra".into(),
+            ipv4_enable: true,
+            network_type: 1,
+            circuit_type: 1,
+        };
+        MsgEnum::IsisIf(msg)
     }
 
     pub fn parse(&mut self, text: &String) -> anyhow::Result<()> {
@@ -100,6 +144,7 @@ impl Nanomsg {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
                 if msg.method == "isis-global:request" {
+                    thread::sleep(Duration::from_secs(1));
                     // isis-global:update
                     let msg = MsgSend {
                         method: String::from("isis-global:update"),
@@ -114,9 +159,12 @@ impl Nanomsg {
                         data: self.isis_instance_add(),
                     };
                     self.socket.write(to_string(&msg)?.as_bytes());
-                }
-                if msg.method == "" {
-                    // isis-if:add
+
+                    let msg = MsgSend {
+                        method: String::from("isis-if:add"),
+                        data: self.isis_if_add(),
+                    };
+                    self.socket.write(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     let data: Result<RouterIdRequest, _> = from_value(msg.data);
