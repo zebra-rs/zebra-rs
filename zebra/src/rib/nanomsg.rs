@@ -66,6 +66,7 @@ struct IsisGlobal {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IsisNet {
+    del: Vec<String>,
     add: Vec<String>,
 }
 
@@ -80,6 +81,8 @@ struct IsisInstance {
     is_type: u32,
     #[serde(rename = "metric-style")]
     metric_style: u32,
+    #[serde(rename = "segment-routing")]
+    segment_routing: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,7 +118,8 @@ impl Nanomsg {
 
     fn isis_instance_add(&self) -> MsgEnum {
         let net = IsisNet {
-            add: vec!["49.0000.0000.0000.0001.00".into()],
+            del: vec![],
+            add: vec!["49.0000.0000.0000.0003.00".into()],
         };
         let msg = IsisInstance {
             instance_tag: "zebra".into(),
@@ -123,6 +127,7 @@ impl Nanomsg {
             net,
             is_type: 1,
             metric_style: 2,
+            segment_routing: "mpls".into(),
         };
         MsgEnum::IsisInstance(msg)
     }
@@ -130,6 +135,17 @@ impl Nanomsg {
     fn isis_if_add(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "enp0s6".into(),
+            instance_tag: "zebra".into(),
+            ipv4_enable: true,
+            network_type: 1,
+            circuit_type: 1,
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
+    fn isis_if_add_lo(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "lo".into(),
             instance_tag: "zebra".into(),
             ipv4_enable: true,
             network_type: 1,
@@ -157,6 +173,12 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("isis-instance:add"),
                         data: self.isis_instance_add(),
+                    };
+                    self.socket.write(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("isis-if:add"),
+                        data: self.isis_if_add_lo(),
                     };
                     self.socket.write(to_string(&msg)?.as_bytes());
 

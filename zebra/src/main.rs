@@ -57,6 +57,8 @@ fn trace_set() {
 async fn main() -> anyhow::Result<()> {
     trace_set();
 
+    isis::packet::parser::parse_test();
+
     let arg = Arg::parse();
     let mut rib = Rib::new()?;
 
