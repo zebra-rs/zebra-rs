@@ -44,7 +44,7 @@ pub struct IsisPacket {
 #[nom(Selector = "IsisPduType")]
 pub enum IsisPdu {
     #[nom(Selector = "IsisPduType(ISIS_L1LAN_HELLO_PDU)")]
-    L1Hello(IsisHello),
+    L1Hello(IsisL1Hello),
     #[nom(Selector = "IsisPduType(ISIS_L1LSP_PDU)")]
     L1Lsp(IsisL1Lsp),
 }
@@ -144,34 +144,34 @@ impl Display for IsisL1Lsp {
 }
 
 #[derive(Debug, NomBE)]
-pub struct IsisHello {
+pub struct IsisL1Hello {
     pdu_length: u16,
     lifetime: u16,
     lsp_id: [u8; 8],
 }
 
 #[derive(Debug)]
-enum IsisSubTlv {
+pub enum IsisSubTlv {
     Ipv4IntfAddr(IsisSubTlvIpv4IntfAddr),
 }
 
 #[derive(Debug)]
-struct IsisSubTlvIpv4IntfAddr {
+pub struct IsisSubTlvIpv4IntfAddr {
     //
 }
 
 #[derive(Debug)]
-struct IsisTlvAreaAddr {
+pub struct IsisTlvAreaAddr {
     area_addr: [u8; 4],
 }
 
 #[derive(Debug)]
-struct IsisTlvExtIsReach {
+pub struct IsisTlvExtIsReach {
     sub_tlvs: Vec<IsisSubTlv>,
 }
 
 #[derive(Debug)]
-struct IsisTlvHostname {
+pub struct IsisTlvHostname {
     hostname: String,
 }
 
@@ -182,7 +182,7 @@ impl Display for IsisTlvHostname {
 }
 
 #[derive(Debug, NomBE)]
-struct IsisTlvTeRouterId {
+pub struct IsisTlvTeRouterId {
     router_id: Ipv4Addr,
 }
 
@@ -193,7 +193,7 @@ impl Display for IsisTlvTeRouterId {
 }
 
 #[derive(Default, Debug, NomBE)]
-struct IsisTlvUnknown {
+pub struct IsisTlvUnknown {
     typ: u8,
     length: u8,
     values: Vec<u8>,
