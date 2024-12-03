@@ -4,11 +4,11 @@ use std::{
     process::exit,
 };
 
-use nom::bytes::streaming::take;
+use nom::bytes::complete::take;
 use nom::{
     error::{make_error, ErrorKind},
-    number::streaming::{be_u32, be_u8},
-    IResult,
+    number::complete::{be_u32, be_u8},
+    {Err, IResult, Needed},
 };
 use nom_derive::*;
 
@@ -16,12 +16,15 @@ use crate::bgp::packet::many0;
 
 const ISIS_IRDP_DISC: u8 = 0x83;
 
+// IS-IS PDU Types.
+const ISIS_L1LAN_IIH_PDU: u8 = 0x0F; // L1LAN IIH Pdu Type
+const ISIS_L2LAN_IIH_PDU: u8 = 0x10; // L2LAN IIH Pdu Type
+const ISIS_P2P_IIH_PDU: u8 = 0x11; // P2P IIH Pdu Type
 const ISIS_L1LSP_PDU: u8 = 0x12; // L1LSP Pdu Type
 const ISIS_L2LSP_PDU: u8 = 0x14; // L2LSP Pdu Type
 
-const ISIS_P2P_IIH_PDU: u8 = 0x11; // P2P IIH Pdu Type
-const ISIS_L1LAN_IIH_PDU: u8 = 0x0F; // L1LAN IIH Pdu Type
-const ISIS_L2LAN_IIH_PDU: u8 = 0x10; // L2LAN IIH Pdu Type
+#[derive(Debug, PartialEq, Eq, Clone, Copy, NomBE)]
+pub struct IsisPduType(pub u8);
 
 #[derive(Debug)]
 pub enum IsisPacket {
@@ -35,7 +38,7 @@ pub struct IsisHeader {
     length_indicator: u8,
     id_extension: u8,
     id_length: u8,
-    pdu_type: u8,
+    pdu_type: IsisPduType,
     version: u8,
     reserved: u8,
     max_area_addr: u8,
@@ -56,7 +59,7 @@ impl Display for IsisHeader {
             self.length_indicator,
             self.id_extension,
             self.id_length,
-            self.pdu_type,
+            self.pdu_type.0,
             self.reserved,
             self.max_area_addr
         )
@@ -111,9 +114,20 @@ pub struct IsisHello {
 
 enum IsisTlv {
     AreaAddr(IsisTlvAreaAddr),
+    ExtIsReach(IsisTlvExtIsReach),
     Hostname(IsisTlvHostname),
     TeRouterId(IsisTlvTeRouterId),
     Unknown(IsisTlvUnknown),
+}
+
+#[derive(Debug)]
+enum IsisSubTlv {
+    Ipv4IntfAddr(IsisSubTlvIpv4IntfAddr),
+}
+
+#[derive(Debug)]
+struct IsisSubTlvIpv4IntfAddr {
+    //
 }
 
 #[derive(Debug)]
@@ -122,11 +136,16 @@ struct IsisTlvAreaAddr {
 }
 
 #[derive(Debug)]
+struct IsisTlvExtIsReach {
+    sub_tlvs: Vec<IsisSubTlv>,
+}
+
+#[derive(Debug)]
 struct IsisTlvHostname {
     hostname: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, NomBE)]
 struct IsisTlvTeRouterId {
     router_id: Ipv4Addr,
 }
@@ -138,38 +157,40 @@ struct IsisTlvUnknown {
     values: Vec<u8>,
 }
 
-fn parse_tlv_area_addr(input: &[u8]) -> IResult<&[u8], IsisTlvAreaAddr> {
-    if input.len() != 4 {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+pub trait ParseBe<T> {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], T>;
+}
+
+impl ParseBe<Ipv4Addr> for Ipv4Addr {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        if input.len() != 4 {
+            return Err(Err::Incomplete(Needed::new(4)));
+        }
+        let (input, addr) = be_u32(input)?;
+        Ok((input, Self::from(addr)))
     }
-    let (input, area_addr) = take(4usize)(input)?;
-    let area_addr = IsisTlvAreaAddr {
-        area_addr: [area_addr[0], area_addr[1], area_addr[2], area_addr[3]],
-    };
-    Ok((input, area_addr))
 }
 
-fn parse_tlv_hostname(input: &[u8]) -> IResult<&[u8], IsisTlvHostname> {
-    let hostname = IsisTlvHostname {
-        hostname: String::from_utf8_lossy(&input).to_string(),
-    };
-    println!("{:?}", hostname);
-    Ok((input, hostname))
-}
-
-fn parse_ipv4_addr(input: &[u8]) -> IResult<&[u8], Ipv4Addr> {
-    if input.len() < 4 {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+impl ParseBe<IsisTlvAreaAddr> for IsisTlvAreaAddr {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        if input.len() != 4 {
+            return Err(Err::Incomplete(Needed::new(4)));
+        }
+        let (input, area_addr) = take(4usize)(input)?;
+        let area_addr = Self {
+            area_addr: [area_addr[0], area_addr[1], area_addr[2], area_addr[3]],
+        };
+        Ok((input, area_addr))
     }
-    let (input, addr) = be_u32(input)?;
-    Ok((input, Ipv4Addr::from(addr)))
 }
 
-fn parse_tlv_te_router_id(input: &[u8]) -> IResult<&[u8], IsisTlvTeRouterId> {
-    let (input, router_id) = parse_ipv4_addr(input)?;
-    let router_id = IsisTlvTeRouterId { router_id };
-    println!("{:?}", router_id);
-    Ok((input, router_id))
+impl ParseBe<IsisTlvHostname> for IsisTlvHostname {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let hostname = Self {
+            hostname: String::from_utf8_lossy(&input).to_string(),
+        };
+        Ok((input, hostname))
+    }
 }
 
 fn parse_tlvs(input: &[u8]) -> IResult<&[u8], IsisTlv> {
@@ -185,15 +206,15 @@ fn parse_tlvs(input: &[u8]) -> IResult<&[u8], IsisTlv> {
     println!("XX input len {}", input.len());
     match typ {
         ISIS_AREA_ADDR_TLV => {
-            let (_, area_addr) = parse_tlv_area_addr(tlv)?;
+            let (_, area_addr) = IsisTlvAreaAddr::parse_be(tlv)?;
             Ok((input, IsisTlv::AreaAddr(area_addr)))
         }
         ISIS_DYNAMIC_HOSTNAME_TLV => {
-            let (_, hostname) = parse_tlv_hostname(tlv)?;
+            let (_, hostname) = IsisTlvHostname::parse_be(tlv)?;
             Ok((input, IsisTlv::Hostname(hostname)))
         }
         ISIS_TE_ROUTER_ID_TLV => {
-            let (_, router_id) = parse_tlv_te_router_id(tlv)?;
+            let (_, router_id) = IsisTlvTeRouterId::parse_be(tlv)?;
             Ok((input, IsisTlv::TeRouterId(router_id)))
         }
         _ => {
