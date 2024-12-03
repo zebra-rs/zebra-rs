@@ -1,3 +1,4 @@
+use std::mem;
 use std::{
     fmt::{Display, Formatter, Result},
     net::Ipv4Addr,
@@ -112,14 +113,6 @@ pub struct IsisHello {
     lsp_id: [u8; 8],
 }
 
-enum IsisTlv {
-    AreaAddr(IsisTlvAreaAddr),
-    ExtIsReach(IsisTlvExtIsReach),
-    Hostname(IsisTlvHostname),
-    TeRouterId(IsisTlvTeRouterId),
-    Unknown(IsisTlvUnknown),
-}
-
 #[derive(Debug)]
 enum IsisSubTlv {
     Ipv4IntfAddr(IsisSubTlvIpv4IntfAddr),
@@ -163,7 +156,7 @@ pub trait ParseBe<T> {
 
 impl ParseBe<Ipv4Addr> for Ipv4Addr {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        if input.len() != 4 {
+        if input.len() < 4 {
             return Err(Err::Incomplete(Needed::new(4)));
         }
         let (input, addr) = be_u32(input)?;
@@ -173,7 +166,7 @@ impl ParseBe<Ipv4Addr> for Ipv4Addr {
 
 impl ParseBe<IsisTlvAreaAddr> for IsisTlvAreaAddr {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        if input.len() != 4 {
+        if input.len() < 4 {
             return Err(Err::Incomplete(Needed::new(4)));
         }
         let (input, area_addr) = take(4usize)(input)?;
@@ -193,34 +186,55 @@ impl ParseBe<IsisTlvHostname> for IsisTlvHostname {
     }
 }
 
+#[derive(Debug, NomBE)]
+pub struct IsisTlvType(pub u8);
+
+impl IsisTlvType {
+    pub fn is_known(&self) -> bool {
+        match self.0 {
+            ISIS_AREA_ADDR_TLV | ISIS_TE_ROUTER_ID_TLV | ISIS_DYNAMIC_HOSTNAME_TLV => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(NomBE)]
+struct TypeLen {
+    pub typ: IsisTlvType,
+    pub len: u8,
+}
+
+#[derive(Debug, NomBE)]
+#[nom(Selector = "IsisTlvType")]
+enum IsisTlv {
+    #[nom(Selector = "IsisTlvType(ISIS_AREA_ADDR_TLV)")]
+    AreaAddr(IsisTlvAreaAddr),
+    // #[nom(Selector = "IsisTlvType(0x12u8)")]
+    // ExtIsReach(IsisTlvExtIsReach),
+    #[nom(Selector = "IsisTlvType(ISIS_DYNAMIC_HOSTNAME_TLV)")]
+    Hostname(IsisTlvHostname),
+    #[nom(Selector = "IsisTlvType(ISIS_TE_ROUTER_ID_TLV)")]
+    TeRouterId(IsisTlvTeRouterId),
+    #[nom(Selector = "IsisTlvType(_)")]
+    Unknown(IsisTlvUnknown),
+}
+
 fn parse_tlvs(input: &[u8]) -> IResult<&[u8], IsisTlv> {
-    if input.len() < 2 {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+    if input.len() < mem::size_of::<TypeLen>() {
+        return Err(Err::Incomplete(Needed::new(mem::size_of::<TypeLen>())));
     }
-    let (input, typ) = be_u8(input)?;
-    let (input, len) = be_u8(input)?;
-    if input.len() < len as usize {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+    let (input, tl) = TypeLen::parse_be(input)?;
+    if input.len() < tl.len as usize {
+        return Err(Err::Incomplete(Needed::new(tl.len as usize)));
     }
-    let (tlv, input) = input.split_at(len as usize);
-    println!("XX input len {}", input.len());
-    match typ {
-        ISIS_AREA_ADDR_TLV => {
-            let (_, area_addr) = IsisTlvAreaAddr::parse_be(tlv)?;
-            Ok((input, IsisTlv::AreaAddr(area_addr)))
-        }
-        ISIS_DYNAMIC_HOSTNAME_TLV => {
-            let (_, hostname) = IsisTlvHostname::parse_be(tlv)?;
-            Ok((input, IsisTlv::Hostname(hostname)))
-        }
-        ISIS_TE_ROUTER_ID_TLV => {
-            let (_, router_id) = IsisTlvTeRouterId::parse_be(tlv)?;
-            Ok((input, IsisTlv::TeRouterId(router_id)))
-        }
-        _ => {
-            let tlv = IsisTlvUnknown::default();
-            Ok((input, IsisTlv::Unknown(tlv)))
-        }
+    let (tlv, input) = input.split_at(tl.len as usize);
+    if tl.typ.is_known() {
+        let (_, val) = IsisTlv::parse_be(tlv, tl.typ)?;
+        println!("{:?}", val);
+        Ok((input, val))
+    } else {
+        let tlv = IsisTlvUnknown::default();
+        Ok((input, IsisTlv::Unknown(tlv)))
     }
 }
 
