@@ -6,35 +6,28 @@ use std::{
 };
 
 use nom::bytes::complete::take;
-use nom::{
-    error::{make_error, ErrorKind},
-    number::complete::{be_u32, be_u8},
-    {Err, IResult, Needed},
-};
+use nom::error::{make_error, ErrorKind};
+use nom::number::complete::{be_u32, be_u8};
+use nom::{Err, IResult, Needed};
 use nom_derive::*;
 
 use crate::bgp::packet::many0;
 
+// IS-IS discriminator.
 const ISIS_IRDP_DISC: u8 = 0x83;
 
 // IS-IS PDU Types.
-const ISIS_L1LAN_IIH_PDU: u8 = 0x0F; // L1LAN IIH Pdu Type
-const ISIS_L2LAN_IIH_PDU: u8 = 0x10; // L2LAN IIH Pdu Type
-const ISIS_P2P_IIH_PDU: u8 = 0x11; // P2P IIH Pdu Type
-const ISIS_L1LSP_PDU: u8 = 0x12; // L1LSP Pdu Type
-const ISIS_L2LSP_PDU: u8 = 0x14; // L2LSP Pdu Type
+const ISIS_L1LAN_HELLO_PDU: u8 = 0x0F;
+const ISIS_L2LAN_HELLO_PDU: u8 = 0x10;
+const ISIS_P2P_HELLO_PDU: u8 = 0x11;
+const ISIS_L1LSP_PDU: u8 = 0x12;
+const ISIS_L2LSP_PDU: u8 = 0x14;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, NomBE)]
 pub struct IsisPduType(pub u8);
 
-#[derive(Debug)]
-pub enum IsisPacket {
-    Hello(IsisHello),
-    L1Lsp(IsisL1Lsp),
-}
-
 #[derive(Debug, NomBE)]
-pub struct IsisHeader {
+pub struct IsisPacket {
     discriminator: u8,
     length_indicator: u8,
     id_extension: u8,
@@ -43,9 +36,20 @@ pub struct IsisHeader {
     version: u8,
     reserved: u8,
     max_area_addr: u8,
+    #[nom(Parse = "{ |x| IsisPdu::parse_be(x, pdu_type) }")]
+    pdu: IsisPdu,
 }
 
-impl Display for IsisHeader {
+#[derive(Debug, NomBE)]
+#[nom(Selector = "IsisPduType")]
+pub enum IsisPdu {
+    #[nom(Selector = "IsisPduType(ISIS_L1LAN_HELLO_PDU)")]
+    L1Hello(IsisHello),
+    #[nom(Selector = "IsisPduType(ISIS_L1LSP_PDU)")]
+    L1Lsp(IsisL1Lsp),
+}
+
+impl Display for IsisPacket {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(
             f,
@@ -54,16 +58,34 @@ impl Display for IsisHeader {
  Version/Protocol ID Extension: {}
  ID Length: {}
  PDU Type: 0x{:x}
+ Version: {}
  Reserved: {}
- Maximum Area Address: {}"#,
+ Maximum Area Address: {}
+{}"#,
             self.discriminator,
             self.length_indicator,
             self.id_extension,
             self.id_length,
             self.pdu_type.0,
+            self.version,
             self.reserved,
-            self.max_area_addr
+            self.max_area_addr,
+            self.pdu,
         )
+    }
+}
+
+impl Display for IsisPdu {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        use IsisPdu::*;
+        match self {
+            L1Hello(v) => {
+                write!(f, "hello")
+            }
+            L1Lsp(v) => {
+                write!(f, "{}", v)
+            }
+        }
     }
 }
 
@@ -77,10 +99,14 @@ const ISIS_DYNAMIC_HOSTNAME_TLV: u8 = 137;
 const ISIS_IPV6IF_ADDR_TLV: u8 = 232;
 const ISIS_ROUTER_CAP_TLV: u8 = 242;
 
-// L1 LSP.
-#[derive(Debug, NomBE)]
+#[derive(Debug)]
 pub struct IsisL1Lsp {
-    header: IsisHeader,
+    h: IsisL1LspHead,
+    tlvs: Vec<IsisTlv>,
+}
+
+#[derive(Debug, NomBE)]
+pub struct IsisL1LspHead {
     pdu_length: u16,
     lifetime: u16,
     lsp_id: [u8; 8],
@@ -89,25 +115,36 @@ pub struct IsisL1Lsp {
     types: u8,
 }
 
+impl ParseBe<IsisL1Lsp> for IsisL1Lsp {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, h) = IsisL1LspHead::parse_be(input)?;
+        let (input, tlvs) = many0(IsisTlv::parse_tlvs)(input)?;
+        let packet = IsisL1Lsp { h, tlvs };
+        Ok((input, packet))
+    }
+}
+
 impl Display for IsisL1Lsp {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(
             f,
-            r#"{}
-ISIS Link State Protocol:
+            r#"IS-IS L1 LSP
  PDU length: {}
- Remaining lifetime: {}
- Sequence number: {}
- Types: 0x{:x}
-"#,
-            self.header, self.pdu_length, self.lifetime, self.seq_number, self.types
-        )
+ Lifetime: {}
+ Sequence number: 0x{:x}
+ Checksum: 0x{:x}
+ Type block: {:x}"#,
+            self.h.pdu_length, self.h.lifetime, self.h.seq_number, self.h.checksum, self.h.types,
+        )?;
+        for tlv in self.tlvs.iter() {
+            write!(f, "\n{}", tlv)?;
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, NomBE)]
 pub struct IsisHello {
-    header: IsisHeader,
     pdu_length: u16,
     lifetime: u16,
     lsp_id: [u8; 8],
@@ -138,9 +175,21 @@ struct IsisTlvHostname {
     hostname: String,
 }
 
+impl Display for IsisTlvHostname {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  Hostname: {}", self.hostname)
+    }
+}
+
 #[derive(Debug, NomBE)]
 struct IsisTlvTeRouterId {
     router_id: Ipv4Addr,
+}
+
+impl Display for IsisTlvTeRouterId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  TE Router id: {}", self.router_id)
+    }
 }
 
 #[derive(Default, Debug, NomBE)]
@@ -219,51 +268,43 @@ enum IsisTlv {
     Unknown(IsisTlvUnknown),
 }
 
-fn parse_tlvs(input: &[u8]) -> IResult<&[u8], IsisTlv> {
-    if input.len() < mem::size_of::<TypeLen>() {
-        return Err(Err::Incomplete(Needed::new(mem::size_of::<TypeLen>())));
-    }
-    let (input, tl) = TypeLen::parse_be(input)?;
-    if input.len() < tl.len as usize {
-        return Err(Err::Incomplete(Needed::new(tl.len as usize)));
-    }
-    let (tlv, input) = input.split_at(tl.len as usize);
-    if tl.typ.is_known() {
-        let (_, val) = IsisTlv::parse_be(tlv, tl.typ)?;
-        println!("{:?}", val);
-        Ok((input, val))
-    } else {
-        let tlv = IsisTlvUnknown::default();
-        Ok((input, IsisTlv::Unknown(tlv)))
+impl IsisTlv {
+    pub fn parse_tlvs(input: &[u8]) -> IResult<&[u8], Self> {
+        if input.len() < mem::size_of::<TypeLen>() {
+            return Err(Err::Incomplete(Needed::new(mem::size_of::<TypeLen>())));
+        }
+        let (input, tl) = TypeLen::parse_be(input)?;
+        if input.len() < tl.len as usize {
+            return Err(Err::Incomplete(Needed::new(tl.len as usize)));
+        }
+        let (tlv, input) = input.split_at(tl.len as usize);
+        if tl.typ.is_known() {
+            let (_, val) = Self::parse_be(tlv, tl.typ)?;
+            Ok((input, val))
+        } else {
+            let tlv = IsisTlvUnknown::default();
+            Ok((input, Self::Unknown(tlv)))
+        }
     }
 }
 
-pub fn parse_l1_lsp(input: &[u8]) -> IResult<&[u8], IsisL1Lsp> {
-    let (input, packet) = IsisL1Lsp::parse(input)?;
-    println!("Remaining len {}", input.len());
-
-    let (input, tlvs) = many0(parse_tlvs)(input)?;
-
-    Ok((input, packet))
+impl Display for IsisTlv {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        use IsisTlv::*;
+        match self {
+            Hostname(v) => write!(f, "{}", v),
+            TeRouterId(v) => write!(f, "{}", v),
+            _ => {
+                write!(f, "  Unknown")
+            }
+        }
+    }
 }
 
 pub fn parse(input: &[u8]) -> IResult<&[u8], IsisPacket> {
-    if input.len() < 5 {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
-    }
-    let pdu_type = input[4];
-
-    match pdu_type {
-        ISIS_L1LSP_PDU => {
-            let (input, packet) = parse_l1_lsp(input)?;
-            println!("{}", packet);
-            Ok((input, IsisPacket::L1Lsp(packet)))
-        }
-        _ => {
-            let (input, packet) = IsisL1Lsp::parse(input)?;
-            Ok((input, IsisPacket::L1Lsp(packet)))
-        }
-    }
+    let (input, packet) = IsisPacket::parse_be(input)?;
+    println!("{}", packet);
+    Ok((input, packet))
 }
 
 pub fn parse_test() {
@@ -287,8 +328,7 @@ pub fn parse_test() {
     ];
 
     // Do something with the binary data
-    let ret = parse(&binary_data[17..]);
-    println!("{:?}", ret);
+    let _ = parse(&binary_data[17..]);
 
     exit(0);
 }
