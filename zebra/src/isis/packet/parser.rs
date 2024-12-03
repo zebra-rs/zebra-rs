@@ -1,11 +1,13 @@
 use std::{
     fmt::{Display, Formatter, Result},
+    net::Ipv4Addr,
     process::exit,
 };
 
+use nom::bytes::streaming::take;
 use nom::{
     error::{make_error, ErrorKind},
-    number::streaming::be_u8,
+    number::streaming::{be_u32, be_u8},
     IResult,
 };
 use nom_derive::*;
@@ -21,6 +23,7 @@ const ISIS_P2P_IIH_PDU: u8 = 0x11; // P2P IIH Pdu Type
 const ISIS_L1LAN_IIH_PDU: u8 = 0x0F; // L1LAN IIH Pdu Type
 const ISIS_L2LAN_IIH_PDU: u8 = 0x10; // L2LAN IIH Pdu Type
 
+#[derive(Debug)]
 pub enum IsisPacket {
     Hello(IsisHello),
     L1Lsp(IsisL1Lsp),
@@ -107,13 +110,25 @@ pub struct IsisHello {
 }
 
 enum IsisTlv {
+    AreaAddr(IsisTlvAreaAddr),
     Hostname(IsisTlvHostname),
+    TeRouterId(IsisTlvTeRouterId),
     Unknown(IsisTlvUnknown),
 }
 
-#[derive(Default, Debug, NomBE)]
+#[derive(Debug)]
+struct IsisTlvAreaAddr {
+    area_addr: [u8; 4],
+}
+
+#[derive(Debug)]
 struct IsisTlvHostname {
     hostname: String,
+}
+
+#[derive(Debug)]
+struct IsisTlvTeRouterId {
+    router_id: Ipv4Addr,
 }
 
 #[derive(Default, Debug, NomBE)]
@@ -123,12 +138,38 @@ struct IsisTlvUnknown {
     values: Vec<u8>,
 }
 
+fn parse_tlv_area_addr(input: &[u8]) -> IResult<&[u8], IsisTlvAreaAddr> {
+    if input.len() != 4 {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+    }
+    let (input, area_addr) = take(4usize)(input)?;
+    let area_addr = IsisTlvAreaAddr {
+        area_addr: [area_addr[0], area_addr[1], area_addr[2], area_addr[3]],
+    };
+    Ok((input, area_addr))
+}
+
 fn parse_tlv_hostname(input: &[u8]) -> IResult<&[u8], IsisTlvHostname> {
     let hostname = IsisTlvHostname {
         hostname: String::from_utf8_lossy(&input).to_string(),
     };
     println!("{:?}", hostname);
     Ok((input, hostname))
+}
+
+fn parse_ipv4_addr(input: &[u8]) -> IResult<&[u8], Ipv4Addr> {
+    if input.len() < 4 {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+    }
+    let (input, addr) = be_u32(input)?;
+    Ok((input, Ipv4Addr::from(addr)))
+}
+
+fn parse_tlv_te_router_id(input: &[u8]) -> IResult<&[u8], IsisTlvTeRouterId> {
+    let (input, router_id) = parse_ipv4_addr(input)?;
+    let router_id = IsisTlvTeRouterId { router_id };
+    println!("{:?}", router_id);
+    Ok((input, router_id))
 }
 
 fn parse_tlvs(input: &[u8]) -> IResult<&[u8], IsisTlv> {
@@ -143,9 +184,17 @@ fn parse_tlvs(input: &[u8]) -> IResult<&[u8], IsisTlv> {
     let (tlv, input) = input.split_at(len as usize);
     println!("XX input len {}", input.len());
     match typ {
+        ISIS_AREA_ADDR_TLV => {
+            let (_, area_addr) = parse_tlv_area_addr(tlv)?;
+            Ok((input, IsisTlv::AreaAddr(area_addr)))
+        }
         ISIS_DYNAMIC_HOSTNAME_TLV => {
             let (_, hostname) = parse_tlv_hostname(tlv)?;
             Ok((input, IsisTlv::Hostname(hostname)))
+        }
+        ISIS_TE_ROUTER_ID_TLV => {
+            let (_, router_id) = parse_tlv_te_router_id(tlv)?;
+            Ok((input, IsisTlv::TeRouterId(router_id)))
         }
         _ => {
             let tlv = IsisTlvUnknown::default();
@@ -203,7 +252,8 @@ pub fn parse_test() {
     ];
 
     // Do something with the binary data
-    parse(&binary_data[17..]);
+    let ret = parse(&binary_data[17..]);
+    println!("{:?}", ret);
 
     exit(0);
 }
