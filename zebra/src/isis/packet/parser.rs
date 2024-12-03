@@ -5,9 +5,12 @@ use std::{
 
 use nom::{
     error::{make_error, ErrorKind},
+    number::streaming::be_u8,
     IResult,
 };
 use nom_derive::*;
+
+use crate::bgp::packet::many0;
 
 const ISIS_IRDP_DISC: u8 = 0x83;
 
@@ -57,12 +60,26 @@ impl Display for IsisHeader {
     }
 }
 
+// L1 LSP TLVs.
+const ISIS_AREA_ADDR_TLV: u8 = 1;
+const ISIS_EXT_IS_REACH_TLV: u8 = 22;
+const ISIS_PROT_SUPPORTED_TLV: u8 = 129;
+const ISIS_IPV4IF_ADDR_TLV: u8 = 132;
+const ISIS_TE_ROUTER_ID_TLV: u8 = 134;
+const ISIS_DYNAMIC_HOSTNAME_TLV: u8 = 137;
+const ISIS_IPV6IF_ADDR_TLV: u8 = 232;
+const ISIS_ROUTER_CAP_TLV: u8 = 242;
+
+// L1 LSP.
 #[derive(Debug, NomBE)]
 pub struct IsisL1Lsp {
     header: IsisHeader,
     pdu_length: u16,
     lifetime: u16,
     lsp_id: [u8; 8],
+    seq_number: u32,
+    checksum: u16,
+    types: u8,
 }
 
 impl Display for IsisL1Lsp {
@@ -73,8 +90,10 @@ impl Display for IsisL1Lsp {
 ISIS Link State Protocol:
  PDU length: {}
  Remaining lifetime: {}
+ Sequence number: {}
+ Types: 0x{:x}
 "#,
-            self.header, self.pdu_length, self.lifetime
+            self.header, self.pdu_length, self.lifetime, self.seq_number, self.types
         )
     }
 }
@@ -87,6 +106,63 @@ pub struct IsisHello {
     lsp_id: [u8; 8],
 }
 
+enum IsisTlv {
+    Hostname(IsisTlvHostname),
+    Unknown(IsisTlvUnknown),
+}
+
+#[derive(Default, Debug, NomBE)]
+struct IsisTlvHostname {
+    hostname: String,
+}
+
+#[derive(Default, Debug, NomBE)]
+struct IsisTlvUnknown {
+    typ: u8,
+    length: u8,
+    values: Vec<u8>,
+}
+
+fn parse_tlv_hostname(input: &[u8]) -> IResult<&[u8], IsisTlvHostname> {
+    let hostname = IsisTlvHostname {
+        hostname: String::from_utf8_lossy(&input).to_string(),
+    };
+    println!("{:?}", hostname);
+    Ok((input, hostname))
+}
+
+fn parse_tlvs(input: &[u8]) -> IResult<&[u8], IsisTlv> {
+    if input.len() < 2 {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+    }
+    let (input, typ) = be_u8(input)?;
+    let (input, len) = be_u8(input)?;
+    if input.len() < len as usize {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+    }
+    let (tlv, input) = input.split_at(len as usize);
+    println!("XX input len {}", input.len());
+    match typ {
+        ISIS_DYNAMIC_HOSTNAME_TLV => {
+            let (_, hostname) = parse_tlv_hostname(tlv)?;
+            Ok((input, IsisTlv::Hostname(hostname)))
+        }
+        _ => {
+            let tlv = IsisTlvUnknown::default();
+            Ok((input, IsisTlv::Unknown(tlv)))
+        }
+    }
+}
+
+pub fn parse_l1_lsp(input: &[u8]) -> IResult<&[u8], IsisL1Lsp> {
+    let (input, packet) = IsisL1Lsp::parse(input)?;
+    println!("Remaining len {}", input.len());
+
+    let (input, tlvs) = many0(parse_tlvs)(input)?;
+
+    Ok((input, packet))
+}
+
 pub fn parse(input: &[u8]) -> IResult<&[u8], IsisPacket> {
     if input.len() < 5 {
         return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
@@ -95,7 +171,7 @@ pub fn parse(input: &[u8]) -> IResult<&[u8], IsisPacket> {
 
     match pdu_type {
         ISIS_L1LSP_PDU => {
-            let (input, packet) = IsisL1Lsp::parse(input)?;
+            let (input, packet) = parse_l1_lsp(input)?;
             println!("{}", packet);
             Ok((input, IsisPacket::L1Lsp(packet)))
         }
