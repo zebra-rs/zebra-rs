@@ -53,7 +53,7 @@ impl Display for IsisPacket {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(
             f,
-            r#"Interdomain Routing Protocol Discreminator: ISIS (0x{:x})
+            r#"IRPD: ISIS (0x{:x})
  Length Indicator: {}
  Version/Protocol ID Extension: {}
  ID Length: {}
@@ -150,6 +150,21 @@ pub struct IsisL1Hello {
     lsp_id: [u8; 8],
 }
 
+#[derive(Debug, NomBE)]
+#[nom(Selector = "IsisTlvType")]
+enum IsisTlv {
+    #[nom(Selector = "IsisTlvType(ISIS_AREA_ADDR_TLV)")]
+    AreaAddr(IsisTlvAreaAddr),
+    #[nom(Selector = "IsisTlvType(ISIS_EXT_IS_REACH_TLV)")]
+    ExtIsReach(IsisTlvExtIsReach),
+    #[nom(Selector = "IsisTlvType(ISIS_DYNAMIC_HOSTNAME_TLV)")]
+    Hostname(IsisTlvHostname),
+    #[nom(Selector = "IsisTlvType(ISIS_TE_ROUTER_ID_TLV)")]
+    TeRouterId(IsisTlvTeRouterId),
+    #[nom(Selector = "IsisTlvType(_)")]
+    Unknown(IsisTlvUnknown),
+}
+
 #[derive(Debug)]
 pub enum IsisSubTlv {
     Ipv4IntfAddr(IsisSubTlvIpv4IntfAddr),
@@ -165,9 +180,44 @@ pub struct IsisTlvAreaAddr {
     area_addr: [u8; 4],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct IsisTlvExtIsReach {
-    sub_tlvs: Vec<IsisSubTlv>,
+    neighbor_id: [u8; 7],
+    metric: u32,
+    subs: Vec<IsisSubTlv>,
+}
+
+fn u8_3array_to_u32_be(array: &[u8]) -> u32 {
+    if array.len() < 3 {
+        0
+    } else {
+        ((array[0] as u32) << 16) | ((array[1] as u32) << 8) | (array[2] as u32)
+    }
+}
+
+impl ParseBe<IsisTlvExtIsReach> for IsisTlvExtIsReach {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let mut tlv = Self::default();
+        let (input, neighbor_id) = take(7usize)(input)?;
+        tlv.neighbor_id.copy_from_slice(&neighbor_id[..]);
+        let (input, metric) = take(3usize)(input)?;
+        tlv.metric = u8_3array_to_u32_be(&metric[..]);
+        let (input, sublen) = be_u8(input)?;
+        println!("XXX sublen {}", sublen);
+        Ok((input, tlv))
+    }
+}
+
+impl Display for IsisTlvExtIsReach {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            r#"  Extended IS Reachability:
+   Neighbor ID: {:?}
+   Metric: {}"#,
+            self.neighbor_id, self.metric
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -188,7 +238,7 @@ pub struct IsisTlvTeRouterId {
 
 impl Display for IsisTlvTeRouterId {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  TE Router id: {}", self.router_id)
+        write!(f, "  TE Router ID: {}", self.router_id)
     }
 }
 
@@ -241,7 +291,10 @@ pub struct IsisTlvType(pub u8);
 impl IsisTlvType {
     pub fn is_known(&self) -> bool {
         match self.0 {
-            ISIS_AREA_ADDR_TLV | ISIS_TE_ROUTER_ID_TLV | ISIS_DYNAMIC_HOSTNAME_TLV => true,
+            ISIS_AREA_ADDR_TLV
+            | ISIS_TE_ROUTER_ID_TLV
+            | ISIS_DYNAMIC_HOSTNAME_TLV
+            | ISIS_EXT_IS_REACH_TLV => true,
             _ => false,
         }
     }
@@ -253,26 +306,8 @@ struct TypeLen {
     pub len: u8,
 }
 
-#[derive(Debug, NomBE)]
-#[nom(Selector = "IsisTlvType")]
-enum IsisTlv {
-    #[nom(Selector = "IsisTlvType(ISIS_AREA_ADDR_TLV)")]
-    AreaAddr(IsisTlvAreaAddr),
-    // #[nom(Selector = "IsisTlvType(0x12u8)")]
-    // ExtIsReach(IsisTlvExtIsReach),
-    #[nom(Selector = "IsisTlvType(ISIS_DYNAMIC_HOSTNAME_TLV)")]
-    Hostname(IsisTlvHostname),
-    #[nom(Selector = "IsisTlvType(ISIS_TE_ROUTER_ID_TLV)")]
-    TeRouterId(IsisTlvTeRouterId),
-    #[nom(Selector = "IsisTlvType(_)")]
-    Unknown(IsisTlvUnknown),
-}
-
 impl IsisTlv {
     pub fn parse_tlvs(input: &[u8]) -> IResult<&[u8], Self> {
-        if input.len() < mem::size_of::<TypeLen>() {
-            return Err(Err::Incomplete(Needed::new(mem::size_of::<TypeLen>())));
-        }
         let (input, tl) = TypeLen::parse_be(input)?;
         if input.len() < tl.len as usize {
             return Err(Err::Incomplete(Needed::new(tl.len as usize)));
@@ -294,6 +329,7 @@ impl Display for IsisTlv {
         match self {
             Hostname(v) => write!(f, "{}", v),
             TeRouterId(v) => write!(f, "{}", v),
+            ExtIsReach(v) => write!(f, "{}", v),
             _ => {
                 write!(f, "  Unknown")
             }
@@ -308,6 +344,9 @@ pub fn parse(input: &[u8]) -> IResult<&[u8], IsisPacket> {
 }
 
 pub fn parse_test() {
+    let test: &[u8] = &[0x01];
+    let _ = IsisTlv::parse_tlvs(&test);
+
     //  ISIS-all-level-1: ISIS LSP.
     let binary_data: &[u8] = &[
         0x01, 0x80, 0xC2, 0x00, 0x00, 0x14, 0x00, 0x1C, 0x42, 0xE5, 0xC4, 0x21, 0x00, 0xCE, 0xFE,
