@@ -10,7 +10,6 @@ use crate::rib::Nexthop;
 use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::NexthopUni;
-use super::resolve::Resolve;
 use super::{
     Group, GroupTrait, Message, NexthopMap, NexthopMulti, NexthopProtect, RibEntries, RibType,
 };

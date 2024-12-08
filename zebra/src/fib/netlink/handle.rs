@@ -63,7 +63,7 @@ impl FibHandle {
         Ok(Self { handle })
     }
 
-    pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
+    pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, _entry: &RibEntry, nexthop: &Nexthop) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();

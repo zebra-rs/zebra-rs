@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::net::Ipv4Addr;
 
 use netlink_packet_route::route::MplsLabel;

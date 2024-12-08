@@ -10,7 +10,7 @@ use crate::rib::RibEntries;
 use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
 pub type ShowCallback = fn(&Rib, Args, bool) -> String;

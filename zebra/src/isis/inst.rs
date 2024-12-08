@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use ipnet::{IpNet, Ipv4Net};
-use prefix_trie::PrefixMap;
+use ipnet::IpNet;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};

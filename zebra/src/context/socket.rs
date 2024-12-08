@@ -1,7 +1,7 @@
 use tokio::net::TcpSocket;
 
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 
 use super::Context;
 

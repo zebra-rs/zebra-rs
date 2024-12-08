@@ -230,7 +230,7 @@ impl Nanomsg {
                     text.pop();
                     self.parse(&text);
                 }
-                Err(err) => {
+                Err(_err) => {
                     break;
                 }
             }
