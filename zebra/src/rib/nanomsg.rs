@@ -221,7 +221,6 @@ impl Nanomsg {
     }
 
     pub async fn event_loop(&mut self) {
-        println!("Here we are");
         let mut text = String::new();
         loop {
             match self.socket.read_to_string(&mut text) {
