@@ -27,6 +27,7 @@ pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChanne
 mod commands;
 mod files;
 mod ip;
+mod isis;
 mod json;
 mod ospf;
 mod parse;

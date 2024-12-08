@@ -5,6 +5,7 @@ use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, delete, set};
 use super::files::load_config_file;
+use super::isis::spawn_isis;
 use super::json::json_read;
 use super::ospf::spawn_ospf;
 use super::parse::parse;
@@ -161,6 +162,7 @@ impl ConfigManager {
         }
         // Protocol swpan.
         let mut ospf = false;
+        let mut isis = false;
         for line in diff.lines() {
             let first_char = line.chars().next().unwrap();
             let op = match first_char {
@@ -176,6 +178,10 @@ impl ConfigManager {
             if !ospf && op == ConfigOp::Set && line.starts_with("routing ospf") {
                 ospf = true;
                 spawn_ospf(self);
+            }
+            if !isis && op == ConfigOp::Set && line.starts_with("routing isis") {
+                isis = true;
+                spawn_isis(self);
             }
         }
         for line in diff.lines() {
@@ -361,6 +367,11 @@ impl ConfigManager {
                         let reply = DisplayTxResponse { tx: tx.clone() };
                         req.resp.send(reply).unwrap();
                     }
+                } else if is_isis(&req.paths) {
+                    if let Some(tx) = self.show_clients.borrow().get("isis") {
+                        let reply = DisplayTxResponse { tx: tx.clone() };
+                        req.resp.send(reply).unwrap();
+                    }
                 } else if is_policy(&req.paths) {
                     if let Some(tx) = self.show_clients.borrow().get("policy") {
                         let reply = DisplayTxResponse { tx: tx.clone() };
@@ -383,6 +394,10 @@ fn is_bgp(paths: &[CommandPath]) -> bool {
 
 fn is_ospf(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "ospf")
+}
+
+fn is_isis(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "isis")
 }
 
 fn is_policy(paths: &[CommandPath]) -> bool {
