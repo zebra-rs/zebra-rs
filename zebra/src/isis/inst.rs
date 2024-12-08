@@ -130,3 +130,7 @@ pub fn serve(mut isis: Isis) {
         isis.event_loop().await;
     });
 }
+
+pub struct Message {
+    //
+}
