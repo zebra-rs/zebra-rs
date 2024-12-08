@@ -668,7 +668,6 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             RouteNetlinkMessage::NewRoute(msg) => {
                 let route = route_from_msg(msg);
                 if let Some(route) = route {
-                    println!("Add {}", route);
                     let msg = FibMessage::NewRoute(route);
                     tx.send(msg).unwrap();
                 }
@@ -676,7 +675,6 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             RouteNetlinkMessage::DelRoute(msg) => {
                 let route = route_from_msg(msg);
                 if let Some(route) = route {
-                    println!("Del {}", route);
                     let msg = FibMessage::DelRoute(route);
                     tx.send(msg).unwrap();
                 }
