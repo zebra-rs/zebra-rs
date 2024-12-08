@@ -12,7 +12,7 @@ use netlink_packet_route::address::{
 use netlink_packet_route::link::{
     InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
 };
-use netlink_packet_route::nexthop::{NexthopAttribute, NexthopGroup, NexthopMessage};
+use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
     RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
 };
@@ -63,10 +63,7 @@ impl FibHandle {
         Ok(Self { handle })
     }
 
-    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
-        if !entry.is_protocol() {
-            return;
-        }
+    pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, _entry: &RibEntry, nexthop: &Nexthop) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
@@ -79,14 +76,15 @@ impl FibHandle {
         let attr = RouteAttribute::Destination(RouteAddress::Inet(prefix.addr()));
         msg.attributes.push(attr);
 
-        let attr = RouteAttribute::Priority(entry.metric);
-        msg.attributes.push(attr);
-
-        if let Nexthop::Uni(uni) = &entry.nexthop {
+        if let Nexthop::Uni(uni) = &nexthop {
             msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+            let attr = RouteAttribute::Priority(uni.metric);
+            msg.attributes.push(attr);
         }
-        if let Nexthop::Multi(multi) = &entry.nexthop {
+        if let Nexthop::Multi(multi) = &nexthop {
             msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+            let attr = RouteAttribute::Priority(multi.metric);
+            msg.attributes.push(attr);
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
@@ -100,7 +98,30 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        if !entry.is_protocol() {
+            return;
+        }
+        match &entry.nexthop {
+            Nexthop::Uni(_) => {
+                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Multi(_) => {
+                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Protect(pro) => {
+                for uni in pro.nexthops.iter() {
+                    self.route_ipv4_add_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                        .await;
+                }
+            }
+            _ => {
+                //
+            }
+        }
+    }
+
+    pub async fn route_ipv4_del_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
         if !entry.is_protocol() {
             return;
         }
@@ -119,8 +140,15 @@ impl FibHandle {
         let attr = RouteAttribute::Priority(entry.metric);
         msg.attributes.push(attr);
 
-        if let Nexthop::Uni(uni) = &entry.nexthop {
+        if let Nexthop::Uni(uni) = &nexthop {
             msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+            let attr = RouteAttribute::Priority(uni.metric);
+            msg.attributes.push(attr);
+        }
+        if let Nexthop::Multi(multi) = &nexthop {
+            msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+            let attr = RouteAttribute::Priority(multi.metric);
+            msg.attributes.push(attr);
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
@@ -129,7 +157,30 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute error: {}", e);
+                println!("DelRoute error: {}", e);
+            }
+        }
+    }
+
+    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        if !entry.is_protocol() {
+            return;
+        }
+        match &entry.nexthop {
+            Nexthop::Uni(_) => {
+                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Multi(_) => {
+                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::Protect(pro) => {
+                for uni in pro.nexthops.iter() {
+                    self.route_ipv4_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                        .await;
+                }
+            }
+            _ => {
+                //
             }
         }
     }
@@ -138,6 +189,7 @@ impl FibHandle {
         // Nexthop message.
         let mut msg = NexthopMessage::default();
         msg.header.protocol = RouteProtocol::Zebra;
+        msg.header.flags = NexthopFlags::Onlink;
 
         match nexthop {
             Group::Uni(uni) => {
@@ -457,7 +509,16 @@ impl RouteBuilder {
         }
     }
 
-    pub fn build(self) -> (IpNet, RibEntry) {
+    pub fn build(mut self) -> (IpNet, RibEntry) {
+        match &mut self.entry.nexthop {
+            Nexthop::Uni(uni) => {
+                uni.ifindex = self.entry.ifindex;
+                uni.metric = self.entry.metric;
+            }
+            _ => {
+                //
+            }
+        }
         (self.prefix.unwrap(), self.entry)
     }
 
@@ -486,6 +547,11 @@ impl RouteBuilder {
         self
     }
 
+    pub fn metric(mut self, metric: u32) -> Self {
+        self.entry.metric = metric;
+        self
+    }
+
     pub fn is_ipv4(&self) -> bool {
         let Some(prefix) = &self.prefix else {
             return false;
@@ -497,17 +563,17 @@ impl RouteBuilder {
 pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
     let mut builder = RouteBuilder::new();
 
-    if msg.header.protocol == RouteProtocol::Dhcp {
-        builder = builder.rtype(RibType::Dhcp);
-    }
-    if msg.header.scope == RouteScope::Link {
-        builder = builder.rtype(RibType::Connected);
-    }
     if msg.header.scope == RouteScope::Host {
         return None;
     }
     if msg.header.kind != RouteType::Unicast {
         return None;
+    }
+    if msg.header.protocol == RouteProtocol::Dhcp {
+        builder = builder.rtype(RibType::Dhcp);
+    }
+    if msg.header.scope == RouteScope::Link {
+        builder = builder.rtype(RibType::Connected);
     }
     if msg.header.destination_prefix_length == 0 && msg.header.address_family == AddressFamily::Inet
     {
@@ -517,6 +583,9 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
 
     for attr in msg.attributes.into_iter() {
         match attr {
+            RouteAttribute::Priority(metric) => {
+                builder = builder.metric(metric);
+            }
             RouteAttribute::Destination(RouteAddress::Inet(n)) => {
                 let prefix = Ipv4Net::new(n, msg.header.destination_prefix_length).unwrap();
                 builder = builder.ipv4_prefix(prefix);
@@ -524,6 +593,9 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
             RouteAttribute::Destination(RouteAddress::Inet6(n)) => {
                 let prefix = Ipv6Net::new(n, msg.header.destination_prefix_length).unwrap();
                 builder = builder.ipv6_prefix(prefix);
+            }
+            RouteAttribute::Oif(ifindex) => {
+                builder = builder.oif(ifindex);
             }
             RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
                 let mut uni = NexthopUni {
@@ -553,9 +625,7 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
             RouteAttribute::Encap(e) => {
                 println!("XXX Encap {:?}", e);
             }
-            RouteAttribute::Oif(ifindex) => {
-                builder = builder.oif(ifindex);
-            }
+
             _ => {
                 //
             }

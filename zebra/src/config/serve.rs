@@ -109,7 +109,8 @@ fn first_commands(resp: &CompletionResponse) -> String {
 
 fn comp_commands(resp: &CompletionResponse) -> String {
     let mut line = match resp.code {
-        ExecCode::Success | ExecCode::Incomplete => String::from("Success\n"),
+        ExecCode::Success => String::from("Success\n"),
+        ExecCode::Incomplete => String::from("Incomplete\n"),
         ExecCode::Nomatch => String::from("NoMatch\n"),
         ExecCode::Ambiguous => String::from("Ambiguous\n"),
         _ => String::from("NoMatch\n"),

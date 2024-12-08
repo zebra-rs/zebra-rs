@@ -1,4 +1,4 @@
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::{link::LinkAddr, Link, Rib};
 

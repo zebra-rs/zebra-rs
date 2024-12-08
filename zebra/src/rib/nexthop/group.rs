@@ -8,6 +8,7 @@ use Group::*;
 use crate::rib::entry::RibEntries;
 use crate::rib::resolve::{rib_resolve, Resolve, ResolveOpt};
 
+#[derive(Debug)]
 pub enum Group {
     Uni(GroupUni),
     Multi(GroupMulti),
@@ -22,7 +23,7 @@ impl Group {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct GroupCommon {
     gid: usize,
     valid: bool,
@@ -39,6 +40,7 @@ impl GroupCommon {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct GroupUni {
     common: GroupCommon,
     pub addr: Ipv4Addr,
@@ -61,6 +63,10 @@ impl GroupUni {
             self.set_valid(true);
         }
     }
+
+    pub fn set_ifindex(&mut self, ifindex: u32) {
+        self.ifindex = ifindex
+    }
 }
 
 impl GroupTrait for GroupUni {
@@ -73,6 +79,7 @@ impl GroupTrait for GroupUni {
     }
 }
 
+#[derive(Debug)]
 pub struct GroupMulti {
     common: GroupCommon,
     pub set: BTreeSet<(usize, u8)>,
@@ -97,7 +104,7 @@ impl GroupTrait for GroupMulti {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct GroupProtect {
     common: GroupCommon,
     primary: usize,
@@ -164,6 +171,14 @@ impl GroupTrait for Group {
             Uni(uni) => &mut uni.common,
             Multi(multi) => &mut multi.common,
             Protect(protect) => &mut protect.common,
+        }
+    }
+
+    fn refcnt(&self) -> usize {
+        match self {
+            Group::Uni(uni) => uni.refcnt(),
+            Group::Multi(multi) => multi.refcnt(),
+            _ => 0,
         }
     }
 }

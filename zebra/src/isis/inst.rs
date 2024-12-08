@@ -1,13 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
-use std::net::Ipv4Addr;
 
-use ipnet::{IpNet, Ipv4Net};
-use ospf_packet::Ospfv2Packet;
-use prefix_trie::PrefixMap;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use ipnet::IpNet;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::ospf::addr::OspfAddr;
+use crate::isis::addr::IsisAddr;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::Link;
@@ -17,61 +14,41 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::area::OspfArea;
-use super::config::OspfNetworkConfig;
-use super::link::OspfLink;
-use super::network::read_packet;
-use super::socket::ospf_socket;
+use super::link::IsisLink;
 
-pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
-pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
+pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
+pub type ShowCallback = fn(&Isis, Args, bool) -> String;
 
-pub struct Ospf {
+pub struct Isis {
     ctx: Context,
-    pub tx: UnboundedSender<Message>,
-    pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
-    pub rib_rx: UnboundedReceiver<RibRx>,
-    pub links: BTreeMap<u32, OspfLink>,
-    pub areas: BTreeMap<u8, OspfArea>,
-    pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
+    pub rx: UnboundedReceiver<RibRx>,
+    pub links: BTreeMap<u32, IsisLink>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
+    // pub sock:
 }
 
-impl Ospf {
+impl Isis {
     pub fn new(ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
         let chan = RibRxChannel::new();
         let msg = crate::rib::Message::Subscribe {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut ospf = Self {
+        let mut isis = Self {
             ctx,
-            tx,
-            rx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
-            rib_rx: chan.rx,
+            rx: chan.rx,
             links: BTreeMap::new(),
-            areas: BTreeMap::new(),
-            table: PrefixMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
         };
-        ospf.callback_build();
-        ospf.show_build();
-
-        if let Ok(sock) = ospf_socket() {
-            let tx = ospf.tx.clone();
-            tokio::spawn(async move {
-                read_packet(sock, tx).await;
-            });
-        }
-
-        ospf
+        // isis.callback_build();
+        isis.show_build();
+        isis
     }
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -86,27 +63,25 @@ impl Ospf {
     }
 
     fn link_add(&mut self, link: Link) {
-        // println!("OSPF: LinkAdd {} {}", link.name, link.index);
+        // println!("ISIS: LinkAdd {} {}", link.name, link.index);
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
-            let link = OspfLink::from(link);
+            let link = IsisLink::from(link);
             self.links.insert(link.index, link);
         }
     }
 
     fn addr_add(&mut self, addr: LinkAddr) {
-        // println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
+        // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
         let IpNet::V4(prefix) = &addr.addr else {
             return;
         };
-        let addr = OspfAddr::from(&addr, prefix);
+        let addr = IsisAddr::from(&addr, prefix);
         link.addr.push(addr.clone());
-        let entry = self.table.entry(*prefix).or_default();
-        entry.addr = Some(addr);
 
         // Going to check.  supernet's network config.
     }
@@ -136,7 +111,7 @@ impl Ospf {
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
-                Some(msg) = self.rib_rx.recv() => {
+                Some(msg) = self.rx.recv() => {
                     self.process_rib_msg(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
@@ -150,12 +125,8 @@ impl Ospf {
     }
 }
 
-pub fn serve(mut ospf: Ospf) {
+pub fn serve(mut isis: Isis) {
     tokio::spawn(async move {
-        ospf.event_loop().await;
+        isis.event_loop().await;
     });
-}
-
-pub enum Message {
-    Packet(Ospfv2Packet, Ipv4Addr, u32, Ipv4Addr),
 }

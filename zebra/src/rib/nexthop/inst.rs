@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
-use std::fmt;
 use std::net::Ipv4Addr;
+
+use netlink_packet_route::route::MplsLabel;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NexthopUni {
@@ -8,6 +8,7 @@ pub struct NexthopUni {
     pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
+    pub mpls: Option<Vec<MplsLabel>>,
     pub gid: usize,
 }
 
@@ -26,15 +27,10 @@ impl Default for NexthopUni {
             addr: Ipv4Addr::UNSPECIFIED,
             ifindex: 0,
             metric: 0,
-            weight: 0,
+            weight: 1,
+            mpls: None,
             gid: 0,
         }
-    }
-}
-
-impl fmt::Display for NexthopUni {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.addr)
     }
 }
 
@@ -62,5 +58,14 @@ pub struct NexthopMulti {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct NexthopProtect {
     // Metric sorted BTreeMap.
-    pub nexthops: BTreeMap<u32, NexthopUni>,
+    pub nexthops: Vec<NexthopUni>,
+}
+
+impl NexthopProtect {
+    pub fn metric(&self) -> u32 {
+        match self.nexthops.first() {
+            Some(nhop) => nhop.metric,
+            None => 0,
+        }
+    }
 }
