@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use ipnet::IpNet;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
@@ -15,15 +15,19 @@ use crate::{
 };
 
 use super::link::IsisLink;
+use super::network::read_packet;
+use super::socket::isis_socket;
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
 
 pub struct Isis {
     ctx: Context,
+    pub tx: UnboundedSender<Message>,
+    pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
-    pub rx: UnboundedReceiver<RibRx>,
+    pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, IsisLink>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -37,17 +41,28 @@ impl Isis {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
+        let (tx, rx) = mpsc::unbounded_channel();
         let mut isis = Self {
             ctx,
+            tx,
+            rx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
-            rx: chan.rx,
+            rib_rx: chan.rx,
             links: BTreeMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
         };
         // isis.callback_build();
         isis.show_build();
+
+        if let Ok(sock) = isis_socket() {
+            let tx = isis.tx.clone();
+            tokio::spawn(async move {
+                read_packet(sock, tx).await;
+            });
+        }
+
         isis
     }
 
@@ -111,7 +126,7 @@ impl Isis {
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
-                Some(msg) = self.rx.recv() => {
+                Some(msg) = self.rib_rx.recv() => {
                     self.process_rib_msg(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
