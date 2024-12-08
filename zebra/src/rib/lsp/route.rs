@@ -1,25 +1,27 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
+use netlink_packet_route::route::MplsLabel;
+
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::NexthopUni;
 use crate::rib::{Nexthop, NexthopMulti, NexthopProtect, RibType};
 
 #[derive(Debug, Default, Clone)]
-pub struct StaticNexthop {
+pub struct LspNexthop {
     pub metric: Option<u32>,
-    pub weight: Option<u8>,
+    pub encap: Vec<MplsLabel>,
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct StaticRoute {
+pub struct LspRoute {
     pub distance: Option<u8>,
     pub metric: Option<u32>,
-    pub nexthops: BTreeMap<Ipv4Addr, StaticNexthop>,
+    pub nexthops: BTreeMap<Ipv4Addr, LspNexthop>,
     pub delete: bool,
 }
 
-impl StaticRoute {
+impl LspRoute {
     pub fn to_entry(&self) -> Option<RibEntry> {
         if self.nexthops.is_empty() {
             return None;
@@ -35,7 +37,6 @@ impl StaticRoute {
             let mut nhop = NexthopUni {
                 addr: *p,
                 metric: n.metric.unwrap_or(metric),
-                weight: n.weight.unwrap_or(1),
                 ..Default::default()
             };
             entry.nexthop = Nexthop::Uni(nhop);
@@ -43,7 +44,7 @@ impl StaticRoute {
             return Some(entry);
         }
 
-        let mut map: BTreeMap<u32, Vec<(Ipv4Addr, StaticNexthop)>> = BTreeMap::new();
+        let mut map: BTreeMap<u32, Vec<(Ipv4Addr, LspNexthop)>> = BTreeMap::new();
         for (p, n) in self.nexthops.clone().iter() {
             let metric = n.metric.unwrap_or(metric);
             let e = map.entry(metric).or_default();
@@ -62,7 +63,6 @@ impl StaticRoute {
                 let mut nhop = NexthopUni {
                     addr: *p,
                     metric: n.metric.unwrap_or(metric),
-                    weight: n.weight.unwrap_or(1),
                     ..Default::default()
                 };
                 multi.nexthops.push(nhop);
@@ -78,7 +78,6 @@ impl StaticRoute {
                 let mut nhop = NexthopUni {
                     addr: *p,
                     metric: *metric,
-                    weight: n.weight.unwrap_or(1),
                     ..Default::default()
                 };
                 pro.nexthops.push(nhop);

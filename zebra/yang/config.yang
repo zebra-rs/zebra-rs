@@ -102,14 +102,97 @@ module config {
       }
       container static {
         ext:help "Static route configuration";
-        list route {
-          key "prefix";
-          leaf prefix {
-            type inet:ipv4-prefix;
+        container ipv4 {
+          ext:help "IPv4 configuration";
+          list route {
+            key "prefix";
+            leaf prefix {
+              type inet:ipv4-prefix;
+            }
+            list nexthop {
+              key "address";
+              leaf "address" {
+                type inet:ipv4-address;
+                description "Nexthop of the route";
+              }
+              leaf metric {
+                type uint32;
+                description "Metric of the route.";
+              }
+              leaf weight {
+                type uint8;
+                description "Weight of ECMP route.";
+              }
+            }
+            leaf distance {
+              type uint8;
+              description "Distance of the route.";
+            }
+            leaf metric {
+              type uint32;
+              description "Metric of the route.";
+            }
           }
-          list nexthop {
-            key "address";
-            leaf "address" {
+
+          list srv6 {
+            key "prefix";
+            leaf prefix {
+              type inet:ipv4-prefix;
+            }
+            leaf encap {
+              type enumeration {
+                enum seg6;
+                enum seg6local;
+              }
+            }
+            leaf mode {
+              type enumeration {
+                enum encap;
+                enum inline;
+              }
+            }
+            leaf-list segs {
+              type string;
+              description "SRv6 segments";
+            }
+            leaf action {
+              type enumeration {
+                enum End;
+                enum End.DT4;
+              }
+            }
+            leaf dev {
+              type string;
+              description "Outgoing interface";
+            }
+            leaf table {
+              type uint32;
+            }
+            leaf flavors {
+              type enumeration {
+                enum next-csid;
+                enum psp;
+                enum usp;
+                enum usd;
+              }
+            }
+            leaf lblen {
+              type uint8;
+            }
+            leaf nflen {
+              type uint8;
+            }
+          }
+
+          list lsp {
+            key "prefix";
+            leaf prefix {
+              type inet:ipv4-prefix;
+            }
+            leaf-list encap {
+              type uint32;
+            }
+            leaf "nexthop" {
               type inet:ipv4-address;
               description "Nexthop of the route";
             }
@@ -117,88 +200,41 @@ module config {
               type uint32;
               description "Metric of the route.";
             }
-            leaf weight {
+          }
+        }
+        container ipv6 {
+          ext:help "IPv6 configuration";
+          list route {
+            key "prefix";
+            leaf prefix {
+              type inet:ipv6-prefix;
+            }
+            list nexthop {
+              key "address";
+              leaf "address" {
+                type inet:ipv6-address;
+                description "Nexthop of the route";
+              }
+              leaf metric {
+                type uint32;
+                description "Metric of the route.";
+              }
+              leaf weight {
+                type uint8;
+                description "Weight of ECMP route.";
+              }
+            }
+            leaf distance {
               type uint8;
-              description "Weight of ECMP route.";
+              description "Distance of the route.";
             }
-          }
-          leaf distance {
-            type uint8;
-            description "Distance of the route.";
-          }
-          leaf metric {
-            type uint32;
-            description "Metric of the route.";
+            leaf metric {
+              type uint32;
+              description "Metric of the route.";
+            }
           }
         }
 
-        list srv6 {
-          key "prefix";
-          leaf prefix {
-            type inet:ipv4-prefix;
-          }
-          leaf encap {
-            type enumeration {
-              enum seg6;
-              enum seg6local;
-            }
-          }
-          leaf mode {
-            type enumeration {
-              enum encap;
-              enum inline;
-            }
-          }
-          leaf-list segs {
-            type string;
-            description "SRv6 segments";
-          }
-          leaf action {
-            type enumeration {
-              enum End;
-              enum End.DT4;
-            }
-          }
-          leaf dev {
-            type string;
-            description "Outgoing interface";
-          }
-          leaf table {
-            type uint32;
-          }
-          leaf flavors {
-            type enumeration {
-              enum next-csid;
-              enum psp;
-              enum usp;
-              enum usd;
-            }
-          }
-          leaf lblen {
-            type uint8;
-          }
-          leaf nflen {
-            type uint8;
-          }
-        }
-
-        list lsp {
-          key "prefix";
-          leaf prefix {
-            type inet:ipv4-prefix;
-          }
-          leaf-list push {
-            type uint32;
-          }
-          leaf "nexthop" {
-            type inet:ipv4-address;
-            description "Nexthop of the route";
-          }
-          leaf dev {
-            type string;
-            description "Outgoing interface";
-          }
-        }
       }
     }
 

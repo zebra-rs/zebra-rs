@@ -6,6 +6,7 @@ use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, delete, set};
 use super::files::load_config_file;
 use super::json::json_read;
+use super::ospf::spawn_ospf;
 use super::parse::parse;
 use super::parse::State;
 use super::paths::{path_trim, paths_str};
@@ -159,6 +160,7 @@ impl ConfigManager {
                 .unwrap();
         }
         // Protocol swpan.
+        let mut ospf = false;
         for line in diff.lines() {
             let first_char = line.chars().next().unwrap();
             let op = match first_char {
@@ -171,7 +173,8 @@ impl ConfigManager {
             if paths.is_none() {
                 continue;
             }
-            if op == ConfigOp::Set && line == "routing ospf" {
+            if !ospf && op == ConfigOp::Set && line.starts_with("routing ospf") {
+                ospf = true;
                 spawn_ospf(self);
             }
         }
@@ -367,7 +370,6 @@ impl ConfigManager {
                     let reply = DisplayTxResponse { tx: tx.clone() };
                     req.resp.send(reply).unwrap();
                 }
-                println!("{:?}", req.paths);
             }
         }
     }
@@ -394,18 +396,6 @@ fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
         run.dir.borrow_mut().push(dir.clone());
     }
     Rc::new(run)
-}
-
-use crate::context::Context;
-use crate::ospf::inst;
-
-fn spawn_ospf(config: &ConfigManager) {
-    // Can we spawn new task here?
-    let ctx = Context::default();
-    let mut ospf = inst::Ospf::new(ctx, config.rib_tx.clone());
-    config.subscribe("ospf", ospf.cm.tx.clone());
-    config.subscribe_show("ospf", ospf.show.tx.clone());
-    inst::serve(ospf);
 }
 
 pub async fn event_loop(mut config: ConfigManager) {

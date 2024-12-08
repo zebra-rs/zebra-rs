@@ -8,15 +8,15 @@ use crate::config::{Args, ConfigOp};
 use crate::rib::entry::RibEntry;
 use crate::rib::{Message, RibType};
 
-use super::StaticRoute;
+use super::LspRoute;
 
-pub struct StaticConfig {
-    pub config: BTreeMap<Ipv4Net, StaticRoute>,
-    pub cache: BTreeMap<Ipv4Net, StaticRoute>,
+pub struct LspConfig {
+    pub config: BTreeMap<Ipv4Net, LspRoute>,
+    pub cache: BTreeMap<Ipv4Net, LspRoute>,
     builder: ConfigBuilder,
 }
 
-impl StaticConfig {
+impl LspConfig {
     pub fn new() -> Self {
         Self {
             config: BTreeMap::new(),
@@ -69,8 +69,8 @@ struct ConfigBuilder {
 }
 
 type Handler = fn(
-    config: &mut BTreeMap<Ipv4Net, StaticRoute>,
-    cache: &mut BTreeMap<Ipv4Net, StaticRoute>,
+    config: &mut BTreeMap<Ipv4Net, LspRoute>,
+    cache: &mut BTreeMap<Ipv4Net, LspRoute>,
     prefix: &Ipv4Net,
     args: &mut Args,
 ) -> Result<()>;
@@ -92,23 +92,23 @@ impl ConfigBuilder {
     }
 }
 
-fn config_get(config: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> StaticRoute {
+fn config_get(config: &BTreeMap<Ipv4Net, LspRoute>, prefix: &Ipv4Net) -> LspRoute {
     let Some(entry) = config.get(prefix) else {
-        return StaticRoute::default();
+        return LspRoute::default();
     };
     entry.clone()
 }
 
-fn config_lookup(config: &BTreeMap<Ipv4Net, StaticRoute>, prefix: &Ipv4Net) -> Option<StaticRoute> {
+fn config_lookup(config: &BTreeMap<Ipv4Net, LspRoute>, prefix: &Ipv4Net) -> Option<LspRoute> {
     let entry = config.get(prefix)?;
     Some(entry.clone())
 }
 
 fn cache_get<'a>(
-    config: &'a BTreeMap<Ipv4Net, StaticRoute>,
-    cache: &'a mut BTreeMap<Ipv4Net, StaticRoute>,
+    config: &'a BTreeMap<Ipv4Net, LspRoute>,
+    cache: &'a mut BTreeMap<Ipv4Net, LspRoute>,
     prefix: &'a Ipv4Net,
-) -> Option<&'a mut StaticRoute> {
+) -> Option<&'a mut LspRoute> {
     if cache.get(prefix).is_none() {
         cache.insert(*prefix, config_get(config, prefix));
     }
@@ -116,10 +116,10 @@ fn cache_get<'a>(
 }
 
 fn cache_lookup<'a>(
-    config: &'a BTreeMap<Ipv4Net, StaticRoute>,
-    cache: &'a mut BTreeMap<Ipv4Net, StaticRoute>,
+    config: &'a BTreeMap<Ipv4Net, LspRoute>,
+    cache: &'a mut BTreeMap<Ipv4Net, LspRoute>,
     prefix: &'a Ipv4Net,
-) -> Option<&'a mut StaticRoute> {
+) -> Option<&'a mut LspRoute> {
     if cache.get(prefix).is_none() {
         cache.insert(*prefix, config_lookup(config, prefix)?);
     }
@@ -139,7 +139,7 @@ fn config_builder() -> ConfigBuilder {
     const WEIGHT_ERR: &str = "missing weight arg";
 
     ConfigBuilder::default()
-        .path("/routing/static/ipv4/route")
+        .path("/routing/static/ipv4/lsp")
         .set(|config, cache, prefix, _| {
             let _ = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             Ok(())
@@ -154,7 +154,7 @@ fn config_builder() -> ConfigBuilder {
             }
             Ok(())
         })
-        .path("/routing/static/ipv4/route/metric")
+        .path("/routing/static/ipv4/lsp/metric")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             s.metric = Some(args.u32().context(METRIC_ERR)?);
@@ -165,7 +165,7 @@ fn config_builder() -> ConfigBuilder {
             s.metric = None;
             Ok(())
         })
-        .path("/routing/static/ipv4/route/distance")
+        .path("/routing/static/ipv4/lsp/distance")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             s.distance = Some(args.u8().context(DISTANCE_ERR)?);
@@ -176,7 +176,7 @@ fn config_builder() -> ConfigBuilder {
             s.distance = None;
             Ok(())
         })
-        .path("/routing/static/ipv4/route/nexthop")
+        .path("/routing/static/ipv4/lsp/nexthop")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
@@ -189,7 +189,7 @@ fn config_builder() -> ConfigBuilder {
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
             Ok(())
         })
-        .path("/routing/static/ipv4/route/nexthop/metric")
+        .path("/routing/static/ipv4/lsp/nexthop/metric")
         .set(|config, cache, prefix, args| {
             let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
@@ -202,21 +202,6 @@ fn config_builder() -> ConfigBuilder {
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.metric = None;
-            Ok(())
-        })
-        .path("/routing/static/ipv4/route/nexthop/weight")
-        .set(|config, cache, prefix, args| {
-            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
-            let n = s.nexthops.entry(naddr).or_default();
-            n.weight = Some(args.u8().context(WEIGHT_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, prefix, args| {
-            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
-            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
-            let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
-            n.weight = None;
             Ok(())
         })
 }

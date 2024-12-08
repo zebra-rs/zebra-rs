@@ -41,6 +41,8 @@ cap:
 	sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/debug/zebra
 
 run:
+	@mkdir -p /tmp/ipc/pair
+	@sudo rm -f /tmp/ipc/pair/config-ng_isisd
 	@cargo build --bin zebra
 	@sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/debug/zebra
 	@target/debug/zebra

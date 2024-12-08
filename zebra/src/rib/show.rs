@@ -45,20 +45,41 @@ pub fn rib_entry_show(
         writeln!(buf, " directly connected {}", rib.link_name(e.ifindex)).unwrap();
     } else {
         match &e.nexthop {
+            Nexthop::Onlink => {
+                //
+            }
             Nexthop::Uni(uni) => {
-                writeln!(buf, " via {}", uni.addr).unwrap();
+                writeln!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex)).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
                     if i != 0 {
                         buf.push_str(&" ".repeat(offset).to_string());
                     }
-                    writeln!(buf, " via {}", uni.addr).unwrap();
+                    writeln!(
+                        buf,
+                        " via {}, {}, weight {}",
+                        uni.addr,
+                        rib.link_name(uni.ifindex),
+                        uni.weight
+                    )
+                    .unwrap();
                 }
-                //
             }
-            _ => {
-                //
+            Nexthop::Protect(pro) => {
+                for (i, uni) in pro.nexthops.iter().enumerate() {
+                    if i != 0 {
+                        buf.push_str(&" ".repeat(offset).to_string());
+                    }
+                    writeln!(
+                        buf,
+                        " via {}, {}, metric {}",
+                        uni.addr,
+                        rib.link_name(uni.ifindex),
+                        uni.metric
+                    )
+                    .unwrap();
+                }
             }
         }
     }

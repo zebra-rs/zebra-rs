@@ -1,3 +1,3 @@
 pub struct OspfArea {
-    id: u8,
+    pub id: u8,
 }
