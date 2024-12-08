@@ -36,13 +36,18 @@ pub async fn read_packet(sock: Socket, tx: UnboundedSender<Message>) {
 
             let dest: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_spec_dst.s_addr.to_be());
             let ifaddr: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_be());
-            let ifindex = pktinfo.ipi_ifindex;
+            let ifindex = pktinfo.ipi_ifindex as u32;
 
             let Some(input) = msg.iovs().next() else {
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
-            let ret = ospf_packet::parse(&input[IPV4_HEADER_LEN..]);
+            let Ok(packet) = ospf_packet::parse(&input[IPV4_HEADER_LEN..]) else {
+                return Err(ErrorKind::UnexpectedEof.into());
+            };
+
+            tx.send(Message::Packet(packet.1, ifaddr, ifindex, dest))
+                .unwrap();
 
             Ok(())
         })

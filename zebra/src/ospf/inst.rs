@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv4Addr;
 
 use ipnet::{IpNet, Ipv4Net};
 use ospf_packet::Ospfv2Packet;
@@ -156,5 +157,5 @@ pub fn serve(mut ospf: Ospf) {
 }
 
 pub enum Message {
-    Packet(Ospfv2Packet),
+    Packet(Ospfv2Packet, Ipv4Addr, u32, Ipv4Addr),
 }

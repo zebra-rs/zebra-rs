@@ -154,7 +154,7 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
-    pub fn parse(&mut self, text: &String) -> anyhow::Result<()> {
+    pub fn parse(&mut self, text: &str) -> anyhow::Result<()> {
         let value: Result<Msg, serde_json::Error> = serde_json::from_str(text);
         match value {
             Ok(msg) => {
@@ -166,7 +166,7 @@ impl Nanomsg {
                         method: String::from("isis-global:update"),
                         data: self.isis_global_update(),
                     };
-                    self.socket.write(to_string(&msg)?.as_bytes());
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "isis-instance:request" {
                     // isis-instance:add
@@ -174,19 +174,19 @@ impl Nanomsg {
                         method: String::from("isis-instance:add"),
                         data: self.isis_instance_add(),
                     };
-                    self.socket.write(to_string(&msg)?.as_bytes());
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
 
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
                         data: self.isis_if_add_lo(),
                     };
-                    self.socket.write(to_string(&msg)?.as_bytes());
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
 
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
                         data: self.isis_if_add(),
                     };
-                    self.socket.write(to_string(&msg)?.as_bytes());
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     let data: Result<RouterIdRequest, _> = from_value(msg.data);
@@ -209,7 +209,7 @@ impl Nanomsg {
                         method: String::from("interface:add"),
                         data: MsgEnum::Interface(intf_msg),
                     };
-                    self.socket.write(to_string(&msg)?.as_bytes());
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
             }
             Err(err) => {
