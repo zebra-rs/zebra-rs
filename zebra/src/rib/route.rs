@@ -294,20 +294,8 @@ fn rib_replace_system(
     };
     let e = entries.get_mut(index).unwrap();
     let replace = match &mut e.nexthop {
-        Nexthop::Uni(uni) => {
-            if uni.metric == entry.metric {
-                true
-            } else {
-                false
-            }
-        }
-        Nexthop::Multi(multi) => {
-            if multi.metric == entry.metric {
-                true
-            } else {
-                false
-            }
-        }
+        Nexthop::Uni(uni) => uni.metric == entry.metric,
+        Nexthop::Multi(multi) => multi.metric == entry.metric,
         Nexthop::Protect(pro) => {
             pro.nexthops.retain(|x| x.metric != entry.metric);
             if pro.nexthops.len() == 1 {
@@ -322,7 +310,7 @@ fn rib_replace_system(
     if replace {
         return rib_replace(table, prefix, entry.rtype);
     }
-    return vec![];
+    vec![]
 }
 
 fn rib_replace(

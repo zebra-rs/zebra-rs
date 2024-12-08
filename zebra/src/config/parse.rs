@@ -527,15 +527,13 @@ pub fn parse(
         mx.comps.clear();
         if s.delete {
             comps_add_config(&mut mx.comps, s.ymatch, &config);
-        } else {
-            if mx.matched_type != MatchType::Incomplete {
-                comps_add_all(&mut mx.comps, s.ymatch, &next, &s);
+        } else if mx.matched_type != MatchType::Incomplete {
+            comps_add_all(&mut mx.comps, s.ymatch, &next, &s);
 
-                if s.set {
-                    let mut comps = Vec::new();
-                    comps_add_config(&mut comps, s.ymatch, &config);
-                    comps_append(&mut comps, &mut mx.comps);
-                }
+            if s.set {
+                let mut comps = Vec::new();
+                comps_add_config(&mut comps, s.ymatch, &config);
+                comps_append(&mut comps, &mut mx.comps);
             }
         }
     }

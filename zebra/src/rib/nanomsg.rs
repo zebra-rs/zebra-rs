@@ -155,7 +155,7 @@ impl Nanomsg {
     }
 
     pub fn parse(&mut self, text: &String) -> anyhow::Result<()> {
-        let value: Result<Msg, serde_json::Error> = serde_json::from_str(&text);
+        let value: Result<Msg, serde_json::Error> = serde_json::from_str(text);
         match value {
             Ok(msg) => {
                 println!("method {:?}", msg.method);

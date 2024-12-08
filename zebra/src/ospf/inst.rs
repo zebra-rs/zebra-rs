@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv4Addr;
 
+use alphanumeric_sort::sort_slice_by_c_str_key;
 use ipnet::{IpNet, Ipv4Net};
+use nix::sys::socket::sockopt::Ipv4PacketInfo;
 use prefix_trie::PrefixMap;
+use socket2::Socket;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -18,6 +22,7 @@ use crate::{
 use super::area::OspfArea;
 use super::config::OspfNetworkConfig;
 use super::link::OspfLink;
+use super::network::{ospf_socket, read_packet};
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
@@ -54,6 +59,13 @@ impl Ospf {
         };
         ospf.callback_build();
         ospf.show_build();
+
+        if let Ok(sock) = ospf_socket() {
+            tokio::spawn(async move {
+                read_packet(sock).await;
+            });
+        }
+
         ospf
     }
 
