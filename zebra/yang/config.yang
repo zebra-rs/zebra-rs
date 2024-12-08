@@ -83,6 +83,9 @@ module config {
           }
         }
       }
+      container isis {
+        presence "Enables configuration of IS-IS";
+      }
       container ldp {
         leaf router-id {
           type inet:ipv4-address;

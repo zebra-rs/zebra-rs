@@ -64,12 +64,12 @@ impl Ospf {
         ospf.callback_build();
         ospf.show_build();
 
-        if let Ok(sock) = ospf_socket() {
-            let tx = ospf.tx.clone();
-            tokio::spawn(async move {
-                read_packet(sock, tx).await;
-            });
-        }
+        // if let Ok(sock) = ospf_socket() {
+        //     let tx = ospf.tx.clone();
+        //     tokio::spawn(async move {
+        //         read_packet(sock, tx).await;
+        //     });
+        // }
 
         ospf
     }

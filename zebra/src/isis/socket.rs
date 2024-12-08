@@ -1,10 +1,6 @@
-use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
-use std::os::raw::c_int;
-use std::str::FromStr;
 
 use nix::sys::socket::{self, LinkAddr, SockaddrLike};
-use socket2::InterfaceIndexOrAddress;
 use socket2::{Domain, Protocol, Socket, Type};
 
 const ISIS_BPF_FILTER: [libc::sock_filter; 10] = [
@@ -36,8 +32,8 @@ const fn bpf_filter_block(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filte
 
 pub fn isis_socket() -> Result<Socket, std::io::Error> {
     let socket = Socket::new(
-        Domain::IPV4,
-        Type::RAW,
+        Domain::PACKET,
+        Type::DGRAM,
         Some(Protocol::from(libc::ETH_P_ALL)),
     )?;
 
@@ -45,9 +41,9 @@ pub fn isis_socket() -> Result<Socket, std::io::Error> {
 
     let ifindex: u32 = 3;
     let sockaddr = link_addr(libc::ETH_P_ALL as u16, ifindex);
+
     socket::bind(socket.as_raw_fd(), &sockaddr)?;
 
-    // Attach BPF filter.
     socket.attach_filter(&ISIS_BPF_FILTER)?;
 
     Ok(socket)
