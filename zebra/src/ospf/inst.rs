@@ -1,13 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net};
 use ospf_packet::Ospfv2Packet;
 use prefix_trie::PrefixMap;
+use socket2::Socket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
+use crate::ospf::socket::ospf_join_if;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::Link;
@@ -38,6 +41,7 @@ pub struct Ospf {
     pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
+    pub sock: Arc<Socket>,
 }
 
 impl Ospf {
@@ -47,6 +51,8 @@ impl Ospf {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
+        let sock = Arc::new(ospf_socket().unwrap());
+
         let (tx, rx) = mpsc::unbounded_channel();
         let mut ospf = Self {
             ctx,
@@ -60,16 +66,16 @@ impl Ospf {
             table: PrefixMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
+            sock,
         };
         ospf.callback_build();
         ospf.show_build();
 
-        if let Ok(sock) = ospf_socket() {
-            let tx = ospf.tx.clone();
-            tokio::spawn(async move {
-                read_packet(sock, tx).await;
-            });
-        }
+        let tx = ospf.tx.clone();
+        let sock = ospf.sock.clone();
+        tokio::spawn(async move {
+            read_packet(sock, tx).await;
+        });
 
         ospf
     }
@@ -86,7 +92,7 @@ impl Ospf {
     }
 
     fn link_add(&mut self, link: Link) {
-        // println!("OSPF: LinkAdd {} {}", link.name, link.index);
+        println!("OSPF: LinkAdd {} {}", link.name, link.index);
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
@@ -96,7 +102,7 @@ impl Ospf {
     }
 
     fn addr_add(&mut self, addr: LinkAddr) {
-        // println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
+        println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
@@ -121,10 +127,10 @@ impl Ospf {
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
-            RibRx::Link(link) => {
+            RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
-            RibRx::Addr(addr) => {
+            RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
             }
             _ => {

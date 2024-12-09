@@ -16,9 +16,14 @@ impl RibTxChannel {
     }
 }
 
+pub struct Subscription {
+    pub tx: UnboundedSender<RibRx>,
+}
+
 // Message from protocol module to rib.
 #[allow(dead_code)]
 pub enum RibTx {
+    Subscribe(Subscription),
     RouteAdd(),
     RouteDel(),
     NexthopRegister(),
@@ -40,21 +45,23 @@ impl RibRxChannel {
 
 // Message from rib to protocol module.
 pub enum RibRx {
-    Link(Link),
-    Addr(LinkAddr),
+    LinkAdd(Link),
+    LinkDel(Link),
+    AddrAdd(LinkAddr),
+    AddrDel(LinkAddr),
 }
 
 impl Rib {
     pub fn api_link_add(&self, link: &Link) {
         for tx in self.redists.iter() {
-            let link = RibRx::Link(link.clone());
+            let link = RibRx::LinkAdd(link.clone());
             let _ = tx.send(link);
         }
     }
 
     pub fn api_addr_add(&self, addr: &LinkAddr) {
         for tx in self.redists.iter() {
-            let link = RibRx::Addr(addr.clone());
+            let link = RibRx::AddrAdd(addr.clone());
             let _ = tx.send(link);
         }
     }

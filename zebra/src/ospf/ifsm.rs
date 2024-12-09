@@ -1,12 +1,12 @@
 // Interface state machine.
 #[derive(Debug, Default)]
 pub enum IfsmState {
-    #[default]
     None,
+    #[default]
     Down,
     Loopback,
     Waiting,
-    PointToPoin,
+    PointToPoint,
     DROther,
     Backup,
     DR,
@@ -102,14 +102,14 @@ impl IfsmState {
                 IfsmEvent::UnloopInd => (ospf_ifsm_ignore, IfsmState::Waiting),
                 IfsmEvent::InterfaceDown => (ospf_ifsm_interface_down, IfsmState::Down),
             },
-            IfsmState::PointToPoin => match ev {
+            IfsmState::PointToPoint => match ev {
                 IfsmEvent::None => (ospf_ifsm_ignore, IfsmState::None),
-                IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, IfsmState::PointToPoin),
-                IfsmEvent::WaitTimer => (ospf_ifsm_ignore, IfsmState::PointToPoin),
-                IfsmEvent::BackupSeen => (ospf_ifsm_ignore, IfsmState::PointToPoin),
-                IfsmEvent::NeighborChange => (ospf_ifsm_ignore, IfsmState::PointToPoin),
+                IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, IfsmState::PointToPoint),
+                IfsmEvent::WaitTimer => (ospf_ifsm_ignore, IfsmState::PointToPoint),
+                IfsmEvent::BackupSeen => (ospf_ifsm_ignore, IfsmState::PointToPoint),
+                IfsmEvent::NeighborChange => (ospf_ifsm_ignore, IfsmState::PointToPoint),
                 IfsmEvent::LoopInd => (ospf_ifsm_loop_ind, IfsmState::Loopback),
-                IfsmEvent::UnloopInd => (ospf_ifsm_ignore, IfsmState::PointToPoin),
+                IfsmEvent::UnloopInd => (ospf_ifsm_ignore, IfsmState::PointToPoint),
                 IfsmEvent::InterfaceDown => (ospf_ifsm_interface_down, IfsmState::Down),
             },
             IfsmState::DROther => match ev {

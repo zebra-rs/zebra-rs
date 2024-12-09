@@ -13,9 +13,6 @@ pub fn ospf_socket() -> Result<Socket, std::io::Error> {
 
     socket.set_nonblocking(true);
 
-    let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
-    socket.join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
-
     let optval = true as c_int;
     unsafe {
         libc::setsockopt(
@@ -28,4 +25,14 @@ pub fn ospf_socket() -> Result<Socket, std::io::Error> {
     };
 
     Ok(socket)
+}
+
+pub fn ospf_join_if(socket: &Socket, ifindex: u32) {
+    let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
+    socket.join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
+}
+
+pub fn ospf_leave_if(socket: &Socket, ifindex: u32) {
+    let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
+    socket.leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
 }

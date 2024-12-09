@@ -103,10 +103,10 @@ impl Isis {
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
-            RibRx::Link(link) => {
+            RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
-            RibRx::Addr(addr) => {
+            RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
             }
             _ => {
