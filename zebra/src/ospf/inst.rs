@@ -64,12 +64,12 @@ impl Ospf {
         ospf.callback_build();
         ospf.show_build();
 
-        // if let Ok(sock) = ospf_socket() {
-        //     let tx = ospf.tx.clone();
-        //     tokio::spawn(async move {
-        //         read_packet(sock, tx).await;
-        //     });
-        // }
+        if let Ok(sock) = ospf_socket() {
+            let tx = ospf.tx.clone();
+            tokio::spawn(async move {
+                read_packet(sock, tx).await;
+            });
+        }
 
         ospf
     }
@@ -111,6 +111,14 @@ impl Ospf {
         // Going to check.  supernet's network config.
     }
 
+    pub fn process_msg(&mut self, msg: Message) {
+        match msg {
+            Message::Packet(packet, _ifaddr, _addr, _dest) => {
+                println!("{}", packet);
+            }
+        }
+    }
+
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::Link(link) => {
@@ -136,6 +144,9 @@ impl Ospf {
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_msg(msg);
+                }
                 Some(msg) = self.rib_rx.recv() => {
                     self.process_rib_msg(msg);
                 }
