@@ -1,5 +1,9 @@
+use crate::ospf::socket::ospf_join_if;
+
+use super::link::OspfLink;
+
 // Interface state machine.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum IfsmState {
     None,
     #[default]
@@ -12,7 +16,7 @@ pub enum IfsmState {
     DR,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum IfsmEvent {
     #[default]
     None,
@@ -25,38 +29,58 @@ pub enum IfsmEvent {
     InterfaceDown,
 }
 
-pub type IfsmFunc = fn(&mut OspfInterface) -> IfsmState;
+pub type IfsmFunc = fn(&mut OspfLink) -> IfsmState;
 
-pub struct OspfInterface {
-    //
-}
-
-pub fn ospf_ifsm_ignore(_intf: &mut OspfInterface) -> IfsmState {
+pub fn ospf_ifsm_ignore(_link: &mut OspfLink) -> IfsmState {
     IfsmState::None
 }
 
-pub fn ospf_ifsm_loop_ind(_intf: &mut OspfInterface) -> IfsmState {
+pub fn ospf_ifsm_loop_ind(_link: &mut OspfLink) -> IfsmState {
     IfsmState::None
 }
 
-pub fn ospf_ifsm_interface_up(_intf: &mut OspfInterface) -> IfsmState {
+pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> IfsmState {
+    println!("ospf_ifsm_interface_up");
+    ospf_join_if(&link.sock, link.index);
+
+    // Comment out until we support pointopoint interface.
+    // if link.is_pointopoint() {
+    //     return IfsmState::PointToPoint;
+    // }
+
+    if link.ident.priority == 0 {
+        IfsmState::DROther
+    } else {
+        IfsmState::Waiting
+    }
+}
+
+pub fn ospf_ifsm_interface_down(_link: &mut OspfLink) -> IfsmState {
     IfsmState::None
 }
 
-pub fn ospf_ifsm_interface_down(_intf: &mut OspfInterface) -> IfsmState {
+pub fn ospf_ifsm_wait_timer(_link: &mut OspfLink) -> IfsmState {
     IfsmState::None
 }
 
-pub fn ospf_ifsm_wait_timer(_intf: &mut OspfInterface) -> IfsmState {
+pub fn ospf_ifsm_backup_seen(_link: &mut OspfLink) -> IfsmState {
     IfsmState::None
 }
 
-pub fn ospf_ifsm_backup_seen(_intf: &mut OspfInterface) -> IfsmState {
+pub fn ospf_ifsm_neighbor_change(_link: &mut OspfLink) -> IfsmState {
     IfsmState::None
 }
 
-pub fn ospf_ifsm_neighbor_change(_intf: &mut OspfInterface) -> IfsmState {
-    IfsmState::None
+pub fn ospf_ifsm(link: &mut OspfLink, ev: IfsmEvent) {
+    let (func, fsm_next) = link.state.fsm(ev);
+    let next = func(link);
+    let state = if fsm_next != IfsmState::None {
+        fsm_next
+    } else {
+        next
+    };
+    println!("{:?} -> {:?}", link.state, state);
+    link.state = state;
 }
 
 impl IfsmState {
