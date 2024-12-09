@@ -22,6 +22,7 @@ use crate::{
 
 use super::area::OspfArea;
 use super::config::OspfNetworkConfig;
+use super::ifsm::{ospf_ifsm, IfsmEvent};
 use super::link::OspfLink;
 use super::network::read_packet;
 use super::socket::ospf_socket;
@@ -96,8 +97,12 @@ impl Ospf {
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
-            let link = OspfLink::from(link);
+            let link = OspfLink::from(link, self.sock.clone());
+            let index = link.index;
             self.links.insert(link.index, link);
+            self.tx
+                .send(Message::Ifsm(index, IfsmEvent::InterfaceUp))
+                .unwrap();
         }
     }
 
@@ -121,6 +126,12 @@ impl Ospf {
         match msg {
             Message::Packet(packet, _ifaddr, _addr, _dest) => {
                 println!("{}", packet);
+            }
+            Message::Ifsm(index, ev) => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                ospf_ifsm(link, ev);
             }
         }
     }
@@ -175,4 +186,5 @@ pub fn serve(mut ospf: Ospf) {
 
 pub enum Message {
     Packet(Ospfv2Packet, Ipv4Addr, u32, Ipv4Addr),
+    Ifsm(u32, IfsmEvent),
 }
