@@ -11,6 +11,8 @@ const OSPF_IP_PROTO: i32 = 89;
 pub fn ospf_socket() -> Result<Socket, std::io::Error> {
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
 
+    socket.set_nonblocking(true);
+
     let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
     socket.join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
 

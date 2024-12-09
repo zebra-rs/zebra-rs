@@ -193,11 +193,11 @@ pub fn serve(mut rib: Rib) {
     tokio::spawn(async move {
         rib.event_loop().await;
     });
-    // tokio::spawn(async move {
-    //     tokio::signal::ctrl_c().await.unwrap();
-    //     let (tx, rx) = oneshot::channel::<()>();
-    //     let _ = rib_tx.send(Message::Shutdown { tx });
-    //     rx.await.unwrap();
-    //     std::process::exit(0);
-    // });
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let _ = rib_tx.send(Message::Shutdown { tx });
+        rx.await.unwrap();
+        std::process::exit(0);
+    });
 }
