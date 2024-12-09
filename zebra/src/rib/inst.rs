@@ -70,10 +70,10 @@ impl Rib {
     pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>) {
         // Link dump.
         for (_, link) in self.links.iter() {
-            let msg = RibRx::Link(link.clone());
+            let msg = RibRx::LinkAdd(link.clone());
             let _ = tx.send(msg);
             for addr in link.addr4.iter() {
-                let msg = RibRx::Addr(addr.clone());
+                let msg = RibRx::AddrAdd(addr.clone());
                 let _ = tx.send(msg);
             }
         }
@@ -102,6 +102,9 @@ impl Rib {
                 self.ipv4_route_resolve().await;
             }
             Message::Subscribe { tx } => {
+                // for (_, link) in self.links.iter() {
+                //     tx.send(RibRx::LinkAdd(link.clone())).unwrap();
+                // }
                 self.subscribe(tx);
             }
         }

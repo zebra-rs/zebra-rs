@@ -1,6 +1,6 @@
 use crate::rib::Link;
 
-use super::addr::OspfAddr;
+use super::{addr::OspfAddr, ifsm::IfsmState};
 
 pub struct OspfLink {
     pub index: u32,
@@ -8,6 +8,7 @@ pub struct OspfLink {
     pub mtu: u32,
     pub addr: Vec<OspfAddr>,
     pub enable: bool,
+    pub state: IfsmState,
 }
 
 impl OspfLink {
@@ -18,6 +19,7 @@ impl OspfLink {
             mtu: link.mtu,
             addr: Vec::new(),
             enable: false,
+            state: IfsmState::Down,
         }
     }
 }

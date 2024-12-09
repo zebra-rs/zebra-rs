@@ -1,6 +1,7 @@
 use std::io::{ErrorKind, IoSliceMut};
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 
 use nix::sys::socket::{self, ControlMessageOwned, SockaddrIn};
 use socket2::Socket;
@@ -10,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ospf::Message;
 
-pub async fn read_packet(sock: Socket, tx: UnboundedSender<Message>) {
+pub async fn read_packet(sock: Arc<Socket>, tx: UnboundedSender<Message>) {
     const IPV4_HEADER_LEN: usize = 20;
 
     let sock = AsyncFd::new(sock).unwrap();
