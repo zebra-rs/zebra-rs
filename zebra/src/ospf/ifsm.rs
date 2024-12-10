@@ -19,10 +19,8 @@ pub enum IfsmState {
     DR,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum IfsmEvent {
-    #[default]
-    None,
     InterfaceUp,
     WaitTimer,
     BackupSeen,
@@ -116,7 +114,6 @@ impl IfsmState {
         use IfsmState::*;
         match self {
             Down => match ev {
-                IfsmEvent::None => (ospf_ifsm_ignore, None),
                 IfsmEvent::InterfaceUp => (ospf_ifsm_interface_up, None),
                 IfsmEvent::WaitTimer => (ospf_ifsm_ignore, Some(Down)),
                 IfsmEvent::BackupSeen => (ospf_ifsm_ignore, Some(Down)),
@@ -126,7 +123,6 @@ impl IfsmState {
                 IfsmEvent::InterfaceDown => (ospf_ifsm_ignore, Some(Down)),
             },
             Loopback => match ev {
-                IfsmEvent::None => (ospf_ifsm_ignore, None),
                 IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, Some(Loopback)),
                 IfsmEvent::WaitTimer => (ospf_ifsm_ignore, Some(Loopback)),
                 IfsmEvent::BackupSeen => (ospf_ifsm_ignore, Some(Loopback)),
@@ -136,7 +132,6 @@ impl IfsmState {
                 IfsmEvent::InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             Waiting => match ev {
-                IfsmEvent::None => (ospf_ifsm_ignore, None),
                 IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, Some(Waiting)),
                 IfsmEvent::WaitTimer => (ospf_ifsm_wait_timer, None),
                 IfsmEvent::BackupSeen => (ospf_ifsm_backup_seen, None),
@@ -146,7 +141,6 @@ impl IfsmState {
                 IfsmEvent::InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             PointToPoint => match ev {
-                IfsmEvent::None => (ospf_ifsm_ignore, None),
                 IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, Some(PointToPoint)),
                 IfsmEvent::WaitTimer => (ospf_ifsm_ignore, Some(PointToPoint)),
                 IfsmEvent::BackupSeen => (ospf_ifsm_ignore, Some(PointToPoint)),
@@ -156,7 +150,6 @@ impl IfsmState {
                 IfsmEvent::InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             DROther => match ev {
-                IfsmEvent::None => (ospf_ifsm_ignore, None),
                 IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, Some(DROther)),
                 IfsmEvent::WaitTimer => (ospf_ifsm_ignore, Some(DROther)),
                 IfsmEvent::BackupSeen => (ospf_ifsm_ignore, Some(DROther)),
@@ -166,7 +159,6 @@ impl IfsmState {
                 IfsmEvent::InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             Backup => match ev {
-                IfsmEvent::None => (ospf_ifsm_ignore, None),
                 IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, Some(Backup)),
                 IfsmEvent::WaitTimer => (ospf_ifsm_ignore, Some(Backup)),
                 IfsmEvent::BackupSeen => (ospf_ifsm_ignore, Some(Backup)),
@@ -176,7 +168,6 @@ impl IfsmState {
                 IfsmEvent::InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             DR => match ev {
-                IfsmEvent::None => (ospf_ifsm_ignore, None),
                 IfsmEvent::InterfaceUp => (ospf_ifsm_ignore, Some(DR)),
                 IfsmEvent::WaitTimer => (ospf_ifsm_ignore, Some(DR)),
                 IfsmEvent::BackupSeen => (ospf_ifsm_ignore, Some(DR)),
