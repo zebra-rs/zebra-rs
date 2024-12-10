@@ -36,6 +36,9 @@ pub struct OspfLink {
     pub sock: Arc<Socket>,
     pub ident: OspfIdentity,
     pub hello_timer: Option<Timer>,
+    pub hello_interval: u16,
+    pub priority: u8,
+    pub dead_interval: u32,
 }
 
 impl OspfLink {
@@ -51,6 +54,9 @@ impl OspfLink {
             sock,
             ident: OspfIdentity::new(),
             hello_timer: None,
+            hello_interval: 10,
+            priority: 1,
+            dead_interval: 40,
         }
     }
 }

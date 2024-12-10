@@ -25,7 +25,7 @@ use super::config::OspfNetworkConfig;
 use super::ifsm::{ospf_ifsm, IfsmEvent};
 use super::link::OspfLink;
 use super::network::read_packet;
-use super::socket::ospf_socket;
+use super::socket::ospf_socket_ipv4;
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
@@ -52,7 +52,7 @@ impl Ospf {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
-        let sock = Arc::new(ospf_socket().unwrap());
+        let sock = Arc::new(ospf_socket_ipv4().unwrap());
 
         let (tx, rx) = mpsc::unbounded_channel();
         let mut ospf = Self {

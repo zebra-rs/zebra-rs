@@ -1,10 +1,8 @@
 use crate::ospf::socket::ospf_join_if;
 
-use super::{
-    link::OspfLink,
-    packet::ospf_hello,
-    task::{Timer, TimerType},
-};
+use super::link::OspfLink;
+use super::packet::ospf_hello_packet;
+use super::task::{Timer, TimerType};
 
 // Interface state machine.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -41,7 +39,7 @@ pub fn ospf_ifsm_loop_ind(_link: &mut OspfLink) -> Option<IfsmState> {
 }
 
 pub fn ospf_hello_send(oi: &OspfLink) {
-    let hello = ospf_hello(oi);
+    let hello = ospf_hello_packet(oi);
 }
 
 pub fn ospf_hello_timer() -> Timer {
@@ -109,6 +107,7 @@ pub fn ospf_ifsm(link: &mut OspfLink, event: IfsmEvent) {
         link.state = new_state;
     }
 }
+
 impl IfsmState {
     pub fn fsm(&self, ev: IfsmEvent) -> (IfsmFunc, Option<Self>) {
         use IfsmState::*;

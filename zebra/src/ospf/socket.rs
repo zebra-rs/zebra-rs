@@ -8,11 +8,27 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 const OSPF_IP_PROTO: i32 = 89;
 
-pub fn ospf_socket() -> Result<Socket, std::io::Error> {
+pub fn ospf_socket_ipv4() -> Result<Socket, std::io::Error> {
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
 
-    socket.set_nonblocking(true);
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    set_ipv4_pktinfo(&socket);
 
+    Ok(socket)
+}
+
+pub fn ospf_socket_ipv6() -> Result<Socket, std::io::Error> {
+    let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
+
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    set_ipv6_pktinfo(&socket);
+
+    Ok(socket)
+}
+
+pub fn set_ipv4_pktinfo(socket: &Socket) {
     let optval = true as c_int;
     unsafe {
         libc::setsockopt(
@@ -23,8 +39,19 @@ pub fn ospf_socket() -> Result<Socket, std::io::Error> {
             std::mem::size_of::<i32>() as libc::socklen_t,
         );
     };
+}
 
-    Ok(socket)
+pub fn set_ipv6_pktinfo(socket: &Socket) {
+    let optval = true as c_int;
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
+            &optval as *const _ as *const libc::c_void,
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        );
+    };
 }
 
 pub fn ospf_join_if(socket: &Socket, ifindex: u32) {
