@@ -4,7 +4,7 @@ use socket2::Socket;
 
 use crate::rib::Link;
 
-use super::{addr::OspfAddr, ifsm::IfsmState};
+use super::{addr::OspfAddr, ifsm::IfsmState, task::Timer};
 
 pub struct OspfIdentity {
     // pub prefix: Ipv4Net,
@@ -31,9 +31,11 @@ pub struct OspfLink {
     pub mtu: u32,
     pub addr: Vec<OspfAddr>,
     pub enable: bool,
+    pub area: Ipv4Addr,
     pub state: IfsmState,
     pub sock: Arc<Socket>,
     pub ident: OspfIdentity,
+    pub hello_timer: Option<Timer>,
 }
 
 impl OspfLink {
@@ -44,9 +46,11 @@ impl OspfLink {
             mtu: link.mtu,
             addr: Vec::new(),
             enable: false,
+            area: Ipv4Addr::UNSPECIFIED,
             state: IfsmState::Down,
             sock,
             ident: OspfIdentity::new(),
+            hello_timer: None,
         }
     }
 }

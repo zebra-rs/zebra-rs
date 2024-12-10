@@ -98,11 +98,12 @@ impl Ospf {
             //
         } else {
             let link = OspfLink::from(link, self.sock.clone());
-            let index = link.index;
+            if link.name == "enp0s6" {
+                self.tx
+                    .send(Message::Ifsm(link.index, IfsmEvent::InterfaceUp))
+                    .unwrap();
+            }
             self.links.insert(link.index, link);
-            self.tx
-                .send(Message::Ifsm(index, IfsmEvent::InterfaceUp))
-                .unwrap();
         }
     }
 
@@ -115,11 +116,14 @@ impl Ospf {
             return;
         };
         let addr = OspfAddr::from(&addr, prefix);
+        if addr.ifindex == 3 {
+            self.tx
+                .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp))
+                .unwrap();
+        }
         link.addr.push(addr.clone());
         let entry = self.table.entry(*prefix).or_default();
         entry.addr = Some(addr);
-
-        // Going to check.  supernet's network config.
     }
 
     pub fn process_msg(&mut self, msg: Message) {
