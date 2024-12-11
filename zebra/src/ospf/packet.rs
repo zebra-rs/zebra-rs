@@ -2,6 +2,11 @@ use std::net::Ipv4Addr;
 
 use ospf_packet::{OspfHello, Ospfv2Packet, Ospfv2Payload};
 
+use crate::ospf::{
+    neighbor::OspfNeighbor,
+    nfsm::{ospf_nfsm, NfsmEvent},
+};
+
 use super::link::OspfLink;
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -28,16 +33,17 @@ fn netmask_to_prefix_length(mask: Ipv4Addr) -> u8 {
     mask_bits.count_ones() as u8
 }
 
-pub fn ospf_hello_recv(oi: &mut OspfLink, packet: &Ospfv2Packet, src: Ipv4Addr) {
+pub fn ospf_hello_recv(oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
     println!("OSPF Hello from {}", src);
-
-    // If interface configured passive, return at here.
-
-    let Ospfv2Payload::Hello(ref hello) = packet.payload else {
+    let Some(addr) = oi.addr.first() else {
         return;
     };
 
-    let Some(addr) = oi.addr.first() else {
+    if oi.is_passive() {
+        return;
+    }
+
+    let Ospfv2Payload::Hello(ref hello) = packet.payload else {
         return;
     };
 
@@ -53,5 +59,10 @@ pub fn ospf_hello_recv(oi: &mut OspfLink, packet: &Ospfv2Packet, src: Ipv4Addr) 
         return;
     }
 
-    //
+    let nbr = oi
+        .nbrs
+        .entry(*src)
+        .or_insert_with(|| OspfNeighbor::new(oi.index, src, &packet.router_id));
+
+    ospf_nfsm(nbr, NfsmEvent::HelloReceived);
 }

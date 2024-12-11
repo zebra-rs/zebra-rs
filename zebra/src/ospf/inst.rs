@@ -136,7 +136,7 @@ impl Ospf {
 
                 match packet.typ.0 {
                     OSPF_HELLO => {
-                        ospf_hello_recv(link, &packet, src);
+                        ospf_hello_recv(link, &packet, &src);
                     }
                     _ => {
                         //

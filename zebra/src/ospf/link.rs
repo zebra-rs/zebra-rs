@@ -1,11 +1,12 @@
-use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use socket2::Socket;
 
 use crate::rib::Link;
 
+use super::neighbor::OspfNeighbor;
 use super::{addr::OspfAddr, ifsm::IfsmState, task::Timer};
 
 pub struct OspfIdentity {
@@ -35,12 +36,14 @@ pub struct OspfLink {
     pub enable: bool,
     pub area: Ipv4Addr,
     pub state: IfsmState,
+    pub ostate: IfsmState,
     pub sock: Arc<Socket>,
     pub ident: OspfIdentity,
     pub hello_timer: Option<Timer>,
     pub hello_interval: u16,
     pub priority: u8,
     pub dead_interval: u32,
+    pub nbrs: BTreeMap<Ipv4Addr, OspfNeighbor>,
 }
 
 impl OspfLink {
@@ -53,12 +56,18 @@ impl OspfLink {
             enable: false,
             area: Ipv4Addr::UNSPECIFIED,
             state: IfsmState::Down,
+            ostate: IfsmState::Down,
             sock,
             ident: OspfIdentity::new(),
             hello_timer: None,
             hello_interval: 10,
             priority: 1,
             dead_interval: 40,
+            nbrs: BTreeMap::new(),
         }
+    }
+
+    pub fn is_passive(&self) -> bool {
+        false
     }
 }
