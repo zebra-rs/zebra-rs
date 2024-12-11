@@ -1,4 +1,6 @@
-#[derive(Debug)]
+use super::neighbor::OspfNeighbor;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum NfsmState {
     Down,
     Attempt,
@@ -10,7 +12,7 @@ pub enum NfsmState {
     Full,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum NfsmEvent {
     HelloReceived,
     Start,
@@ -29,60 +31,83 @@ pub enum NfsmEvent {
 
 pub type NfsmFunc = fn(&mut OspfNeighbor) -> Option<NfsmState>;
 
-pub struct OspfNeighbor {
-    //
-}
-
 pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_hello_received(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_hello_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    println!("ospf_nfsm_hello_received");
+
+    /* Start or Restart Inactivity Timer. */
+    // OSPF_NFSM_TIMER_OFF (nbr->t_inactivity);
+    // OSPF_NFSM_TIMER_NBR (nbr->t_inactivity, ospf_inactivity_timer,
+    //     nbr->v_inactivity);
+
     None
 }
 
-pub fn ospf_nfsm_start(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_start(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_kill_nbr(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_kill_nbr(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_inactivity_timer(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_inactivity_timer(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_ll_down(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_ll_down(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_twoway_received(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_twoway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_oneway_received(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_nbreway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_adj_ok(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_adj_ok(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_negotiation_done(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_negotiation_done(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_exchange_done(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_exchange_done(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_bad_ls_req(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_bad_ls_req(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_seq_number_mismatch(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_seq_number_mismatch(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
+}
+
+pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent) {
+    // Decompose the result of the state function into the transition function
+    // and next state.
+    let (transition_func, fsm_next_state) = nbr.state.fsm(event);
+
+    // Determine the next state by prioritizing the computed state over the
+    // FSM-provided next state.
+    let next_state = transition_func(nbr).or(fsm_next_state);
+
+    // If a state transition occurs, update the state.
+    if let Some(new_state) = next_state {
+        println!(
+            "NFSM State Transition on {}: {:?} -> {:?}",
+            nbr.router_id, nbr.state, new_state
+        );
+        nbr.ostate = nbr.state;
+        nbr.state = new_state;
+    }
 }
 
 impl NfsmState {

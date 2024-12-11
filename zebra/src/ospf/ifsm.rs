@@ -109,6 +109,7 @@ pub fn ospf_ifsm(link: &mut OspfLink, event: IfsmEvent) {
             "IFSM State Transition on {}: {:?} -> {:?}",
             link.name, link.state, new_state
         );
+        link.ostate = link.state;
         link.state = new_state;
     }
 }
