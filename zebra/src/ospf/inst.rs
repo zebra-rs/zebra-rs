@@ -3,13 +3,14 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net};
-use ospf_packet::Ospfv2Packet;
+use ospf_packet::{OspfPacketType, Ospfv2Packet, OSPF_HELLO};
 use prefix_trie::PrefixMap;
 use socket2::Socket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
+use crate::ospf::packet::ospf_hello_recv;
 use crate::ospf::socket::ospf_join_if;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -128,8 +129,19 @@ impl Ospf {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Packet(packet, _ifaddr, _addr, _dest) => {
-                println!("{}", packet);
+            Message::Packet(packet, src, from, index, _dest) => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+
+                match packet.typ.0 {
+                    OSPF_HELLO => {
+                        ospf_hello_recv(link, &packet, src);
+                    }
+                    _ => {
+                        //
+                    }
+                }
             }
             Message::Ifsm(index, ev) => {
                 let Some(link) = self.links.get_mut(&index) else {
@@ -189,6 +201,6 @@ pub fn serve(mut ospf: Ospf) {
 }
 
 pub enum Message {
-    Packet(Ospfv2Packet, Ipv4Addr, u32, Ipv4Addr),
+    Packet(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
     Ifsm(u32, IfsmEvent),
 }

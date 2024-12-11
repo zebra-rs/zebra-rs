@@ -1,4 +1,6 @@
-use std::{net::Ipv4Addr, sync::Arc};
+use std::net::Ipv4Addr;
+use std::str::FromStr;
+use std::sync::Arc;
 
 use socket2::Socket;
 
@@ -17,7 +19,7 @@ pub struct OspfIdentity {
 impl OspfIdentity {
     pub fn new() -> Self {
         Self {
-            router_id: Ipv4Addr::UNSPECIFIED,
+            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
             d_router: Ipv4Addr::UNSPECIFIED,
             bd_router: Ipv4Addr::UNSPECIFIED,
             priority: 0,

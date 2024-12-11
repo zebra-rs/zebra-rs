@@ -31,12 +31,16 @@ pub async fn read_packet(sock: Arc<Socket>, tx: UnboundedSender<Message>) {
 
             let mut cmsgs = msg.cmsgs()?;
 
+            let Some(src) = msg.address else {
+                return Err(ErrorKind::AddrNotAvailable.into());
+            };
+
             let Some(ControlMessageOwned::Ipv4PacketInfo(pktinfo)) = cmsgs.next() else {
                 return Err(ErrorKind::AddrNotAvailable.into());
             };
 
-            let dest: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_spec_dst.s_addr.to_be());
-            let ifaddr: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_be());
+            let ifaddr: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_spec_dst.s_addr.to_be());
+            let group: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_be());
             let ifindex = pktinfo.ipi_ifindex as u32;
 
             let Some(input) = msg.iovs().next() else {
@@ -47,7 +51,15 @@ pub async fn read_packet(sock: Arc<Socket>, tx: UnboundedSender<Message>) {
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
-            tx.send(Message::Packet(packet.1, ifaddr, ifindex, dest))
+            println!(
+                "src {} ifaddr {} ifindex {} dest {}",
+                src.ip(),
+                group,
+                ifindex,
+                ifaddr
+            );
+
+            tx.send(Message::Packet(packet.1, src.ip(), group, ifindex, ifaddr))
                 .unwrap();
 
             Ok(())
