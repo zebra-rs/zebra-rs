@@ -130,6 +130,7 @@ impl Ospf {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Packet(packet, src, from, index, _dest) => {
+                println!("{}", packet);
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
