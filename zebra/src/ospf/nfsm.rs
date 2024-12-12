@@ -38,10 +38,8 @@ pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor) -> Option<NfsmState> {
 pub fn ospf_nfsm_hello_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     println!("ospf_nfsm_hello_received");
 
-    /* Start or Restart Inactivity Timer. */
-    // OSPF_NFSM_TIMER_OFF (nbr->t_inactivity);
-    // OSPF_NFSM_TIMER_NBR (nbr->t_inactivity, ospf_inactivity_timer,
-    //     nbr->v_inactivity);
+    // Start or Restart Inactivity Timer.
+    // t_inactivity
 
     None
 }
@@ -66,7 +64,7 @@ pub fn ospf_nfsm_twoway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_nbreway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_oneway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
