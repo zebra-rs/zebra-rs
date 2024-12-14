@@ -27,11 +27,11 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     hello.options.set_external(true);
     hello.priority = oi.priority;
     hello.router_dead_interval = oi.dead_interval;
-    for (addr, nbr) in oi.nbrs.iter() {
+    for (_, nbr) in oi.nbrs.iter() {
         if nbr.state == NfsmState::Down {
             continue;
         }
-        hello.neighbors.push(*addr);
+        hello.neighbors.push(nbr.ident.router_id);
     }
 
     let packet = Ospfv2Packet::new(&oi.ident.router_id, &oi.area, Ospfv2Payload::Hello(hello));
