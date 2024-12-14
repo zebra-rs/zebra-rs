@@ -17,6 +17,7 @@ pub struct OspfNeighbor {
     pub timer: NeighborTimer,
     pub v_inactivity: u64,
     pub options: HelloOption,
+    pub flag_init: bool,
     pub tx: UnboundedSender<Message>,
 }
 
@@ -41,6 +42,7 @@ impl OspfNeighbor {
             v_inactivity: dead_interval,
             ident: OspfIdentity::new(),
             options: 0.into(),
+            flag_init: true,
             tx,
         };
         nbr.ident.addr = *addr;
