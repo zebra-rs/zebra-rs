@@ -1,26 +1,51 @@
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
-use super::link::OspfLink;
+use ospf_packet::HelloOption;
+use tokio::sync::mpsc::UnboundedSender;
+
+use super::link::{OspfIdentity, OspfLink};
 use super::nfsm::NfsmState;
+use super::task::Timer;
+use super::Message;
 
 pub struct OspfNeighbor {
     pub ifindex: u32,
-    pub src: Ipv4Addr,
-    pub router_id: Ipv4Addr,
+    pub ident: OspfIdentity,
     pub state: NfsmState,
     pub ostate: NfsmState,
+    pub timer: NeighborTimer,
+    pub v_inactivity: u64,
+    pub options: HelloOption,
+    pub tx: UnboundedSender<Message>,
+}
+
+#[derive(Debug, Default)]
+pub struct NeighborTimer {
+    pub inactivity: Option<Timer>,
 }
 
 impl OspfNeighbor {
-    pub fn new(ifindex: u32, src: &Ipv4Addr, router_id: &Ipv4Addr) -> Self {
-        Self {
+    pub fn new(
+        tx: UnboundedSender<Message>,
+        ifindex: u32,
+        addr: &Ipv4Addr,
+        router_id: &Ipv4Addr,
+        dead_interval: u64,
+    ) -> Self {
+        let mut nbr = Self {
             ifindex,
-            src: *src,
-            router_id: *router_id,
             state: NfsmState::Down,
             ostate: NfsmState::Down,
-        }
+            timer: NeighborTimer::default(),
+            v_inactivity: dead_interval,
+            ident: OspfIdentity::new(),
+            options: 0.into(),
+            tx,
+        };
+        nbr.ident.addr = *addr;
+        nbr.ident.router_id = *router_id;
+        nbr
     }
 }
 
@@ -29,11 +54,7 @@ impl Display for OspfNeighbor {
         write!(
             f,
             "Interface index: {}\nRouter ID: {}",
-            self.ifindex, self.router_id
+            self.ifindex, self.ident.router_id
         )
     }
 }
-
-// pub fn ospf_nbr_get(oi: &mut OspfLink, src: &Ipv4Addr) -> &OspfNeighbor {
-//     //
-// }

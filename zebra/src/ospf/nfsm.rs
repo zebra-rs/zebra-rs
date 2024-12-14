@@ -1,3 +1,8 @@
+use crate::ospf::{
+    task::{Timer, TimerType},
+    Message,
+};
+
 use super::neighbor::OspfNeighbor;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -35,11 +40,23 @@ pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_hello_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+pub fn ospf_nfsm_hello_received(nbr: &mut OspfNeighbor) -> Option<NfsmState> {
     println!("ospf_nfsm_hello_received");
 
     // Start or Restart Inactivity Timer.
-    // t_inactivity
+    let tx = nbr.tx.clone();
+    let addr = nbr.ident.addr.clone();
+    let ifindex = nbr.ifindex;
+    let timer = Timer::new(Timer::second(40), TimerType::Once, move || {
+        use NfsmEvent::*;
+        let tx = tx.clone();
+        async move {
+            println!("XXX InactivityTimer expired");
+            tx.send(Message::Nfsm(addr, ifindex, InactivityTimer))
+                .unwrap();
+        }
+    });
+    nbr.timer.inactivity = Some(timer);
 
     None
 }
@@ -53,6 +70,7 @@ pub fn ospf_nfsm_kill_nbr(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
 }
 
 pub fn ospf_nfsm_inactivity_timer(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    //
     None
 }
 
@@ -101,7 +119,7 @@ pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent) {
     if let Some(new_state) = next_state {
         println!(
             "NFSM State Transition on {}: {:?} -> {:?}",
-            nbr.router_id, nbr.state, new_state
+            nbr.ident.router_id, nbr.state, new_state
         );
         nbr.ostate = nbr.state;
         nbr.state = new_state;
