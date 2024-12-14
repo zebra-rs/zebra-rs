@@ -73,7 +73,7 @@ impl OspfIdentity {
             router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
             d_router: Ipv4Addr::UNSPECIFIED,
             bd_router: Ipv4Addr::UNSPECIFIED,
-            priority: 0,
+            priority: 1,
         }
     }
 }

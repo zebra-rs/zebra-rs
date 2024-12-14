@@ -39,8 +39,9 @@ fn netmask_to_prefix_length(mask: Ipv4Addr) -> u8 {
 }
 
 fn ospf_hello_twoway_check(router_id: &Ipv4Addr, nbr: &OspfNeighbor, hello: &OspfHello) -> bool {
-    for nei in hello.neighbors.iter() {
-        if nei == router_id {
+    for neighbor in hello.neighbors.iter() {
+        println!("twoway_check {} <-> {}", router_id, neighbor);
+        if router_id == neighbor {
             return true;
         }
     }
@@ -80,7 +81,6 @@ fn ospf_hello_is_nbr_changed(nbr: &OspfNeighbor, prev: &OspfIdentity) -> bool {
 }
 
 pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
-    println!("OSPF Hello from {}", src);
     let Some(addr) = oi.addr.first() else {
         return;
     };

@@ -32,88 +32,6 @@ pub enum IfsmEvent {
 
 pub type IfsmFunc = fn(&mut OspfLink) -> Option<IfsmState>;
 
-pub fn ospf_ifsm_ignore(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
-}
-
-pub fn ospf_ifsm_loop_ind(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
-}
-
-pub fn ospf_hello_send(oi: &OspfLink) {
-    let hello = ospf_hello_packet(oi).unwrap();
-
-    let mut buf = BytesMut::new();
-    let _packet = hello.emit(&mut buf);
-}
-
-pub fn ospf_hello_timer() -> Timer {
-    Timer::new(Timer::second(10), TimerType::Infinite, move || async move {
-        println!("hello timer");
-    })
-}
-
-pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
-    println!("ospf_ifsm_interface_up");
-    if link.addr.is_empty() {
-        return None;
-    }
-
-    ospf_join_if(&link.sock, link.index);
-
-    ospf_hello_send(link);
-
-    let hello_timer = ospf_hello_timer();
-    link.hello_timer = Some(hello_timer);
-
-    // Comment out until we support pointopoint interface.
-    // if link.is_pointopoint() {
-    //     return IfsmState::PointToPoint;
-    // }
-
-    if link.ident.priority == 0 {
-        Some(IfsmState::DROther)
-    } else {
-        Some(IfsmState::Waiting)
-    }
-}
-
-pub fn ospf_ifsm_interface_down(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
-}
-
-pub fn ospf_ifsm_wait_timer(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
-}
-
-pub fn ospf_ifsm_backup_seen(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
-}
-
-pub fn ospf_ifsm_neighbor_change(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
-}
-
-pub fn ospf_ifsm(link: &mut OspfLink, event: IfsmEvent) {
-    // Decompose the result of the state function into the transition function
-    // and next state.
-    let (transition_func, fsm_next_state) = link.state.fsm(event);
-
-    // Determine the next state by prioritizing the computed state over the
-    // FSM-provided next state.
-    let next_state = transition_func(link).or(fsm_next_state);
-
-    // If a state transition occurs, update the state.
-    if let Some(new_state) = next_state {
-        println!(
-            "IFSM State Transition on {}: {:?} -> {:?}",
-            link.name, link.state, new_state
-        );
-        link.ostate = link.state;
-        link.state = new_state;
-    }
-}
-
 impl IfsmState {
     pub fn fsm(&self, ev: IfsmEvent) -> (IfsmFunc, Option<Self>) {
         use IfsmState::*;
@@ -183,4 +101,102 @@ impl IfsmState {
             },
         }
     }
+}
+
+pub fn ospf_ifsm_ignore(_link: &mut OspfLink) -> Option<IfsmState> {
+    None
+}
+
+pub fn ospf_ifsm_loop_ind(_link: &mut OspfLink) -> Option<IfsmState> {
+    None
+}
+
+pub fn ospf_hello_send(oi: &OspfLink) {
+    let hello = ospf_hello_packet(oi).unwrap();
+
+    let mut buf = BytesMut::new();
+    let _packet = hello.emit(&mut buf);
+}
+
+pub fn ospf_hello_timer(sec: u64, ifindex: u32) -> Timer {
+    Timer::new(Timer::second(10), TimerType::Infinite, move || async move {
+        println!("hello timer");
+    })
+}
+
+pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
+    println!("ospf_ifsm_interface_up");
+    if link.addr.is_empty() {
+        return None;
+    }
+
+    ospf_join_if(&link.sock, link.index);
+
+    // ospf_hello_send(link);
+
+    // let hello_timer = ospf_hello_timer();
+    // link.hello_timer = Some(hello_timer);
+
+    // Comment out until we support pointopoint interface.
+    // if link.is_pointopoint() {
+    //     return IfsmState::PointToPoint;
+    // }
+
+    if link.ident.priority == 0 {
+        Some(IfsmState::DROther)
+    } else {
+        Some(IfsmState::Waiting)
+    }
+}
+
+pub fn ospf_ifsm_interface_down(_link: &mut OspfLink) -> Option<IfsmState> {
+    None
+}
+
+pub fn ospf_ifsm_wait_timer(_link: &mut OspfLink) -> Option<IfsmState> {
+    None
+}
+
+pub fn ospf_ifsm_backup_seen(_link: &mut OspfLink) -> Option<IfsmState> {
+    None
+}
+
+pub fn ospf_ifsm_neighbor_change(_link: &mut OspfLink) -> Option<IfsmState> {
+    None
+}
+
+pub fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
+    use IfsmState::*;
+    match oi.state {
+        DROther => {
+            oi.hello_timer.get_or_insert(ospf_hello_timer(10, oi.index));
+        }
+        Waiting => {
+            oi.hello_timer.get_or_insert(ospf_hello_timer(10, oi.index));
+        }
+        _ => {
+            //
+        }
+    }
+}
+
+pub fn ospf_ifsm(oi: &mut OspfLink, event: IfsmEvent) {
+    // Decompose the result of the state function into the transition function
+    // and next state.
+    let (fsm_func, fsm_next_state) = oi.state.fsm(event);
+
+    // Determine the next state by prioritizing the computed state over the
+    // FSM-provided next state.
+    let next_state = fsm_func(oi).or(fsm_next_state);
+
+    // If a state transition occurs, update the state.
+    if let Some(new_state) = next_state {
+        println!(
+            "IFSM State Transition on {}: {:?} -> {:?}",
+            oi.name, oi.state, new_state
+        );
+        oi.ostate = oi.state;
+        oi.state = new_state;
+    }
+    ospf_ifsm_timer_set(oi);
 }
