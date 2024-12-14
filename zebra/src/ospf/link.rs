@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::Link;
 
-use super::neighbor::OspfNeighbor;
+use super::neigh::OspfNeighbor;
 use super::Message;
 use super::{addr::OspfAddr, ifsm::IfsmState, task::Timer};
 
@@ -30,6 +30,7 @@ pub struct OspfLink {
     pub nbrs: BTreeMap<Ipv4Addr, OspfNeighbor>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct OspfIdentity {
     pub addr: Ipv4Addr,
     pub router_id: Ipv4Addr,

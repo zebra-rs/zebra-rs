@@ -3,7 +3,7 @@ use crate::ospf::{
     Message,
 };
 
-use super::neighbor::OspfNeighbor;
+use super::neigh::OspfNeighbor;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum NfsmState {
