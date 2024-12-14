@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net};
@@ -26,6 +27,7 @@ use super::config::OspfNetworkConfig;
 use super::ifsm::{ospf_ifsm, IfsmEvent};
 use super::link::OspfLink;
 use super::network::read_packet;
+use super::nfsm::NfsmEvent;
 use super::socket::ospf_socket_ipv4;
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
@@ -44,6 +46,19 @@ pub struct Ospf {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<Socket>,
+    pub top: OspfTop,
+}
+
+pub struct OspfTop {
+    pub router_id: Ipv4Addr,
+}
+
+impl OspfTop {
+    pub fn new() -> Self {
+        Self {
+            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
+        }
+    }
 }
 
 impl Ospf {
@@ -58,6 +73,7 @@ impl Ospf {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut ospf = Self {
             ctx,
+            top: OspfTop::new(),
             tx,
             rx,
             cm: ConfigChannel::new(),
@@ -98,7 +114,7 @@ impl Ospf {
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
-            let link = OspfLink::from(link, self.sock.clone());
+            let link = OspfLink::from(self.tx.clone(), link, self.sock.clone());
             if link.name == "enp0s6" {
                 self.tx
                     .send(Message::Ifsm(link.index, IfsmEvent::InterfaceUp))
@@ -137,7 +153,7 @@ impl Ospf {
 
                 match packet.typ.0 {
                     OSPF_HELLO => {
-                        ospf_hello_recv(link, &packet, &src);
+                        ospf_hello_recv(&self.top, link, &packet, &src);
                     }
                     _ => {
                         //
@@ -149,6 +165,9 @@ impl Ospf {
                     return;
                 };
                 ospf_ifsm(link, ev);
+            }
+            Message::Nfsm(src, ifindex, ev) => {
+                //
             }
         }
     }
@@ -204,4 +223,5 @@ pub fn serve(mut ospf: Ospf) {
 pub enum Message {
     Packet(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
     Ifsm(u32, IfsmEvent),
+    Nfsm(Ipv4Addr, u32, NfsmEvent),
 }
