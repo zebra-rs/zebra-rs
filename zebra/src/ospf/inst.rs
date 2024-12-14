@@ -145,8 +145,8 @@ impl Ospf {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Packet(packet, src, from, index, _dest) => {
-                println!("{}", packet);
+            Message::Recv(packet, src, from, index, _dest) => {
+                // println!("Packet: {}", packet);
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
@@ -168,6 +168,9 @@ impl Ospf {
             }
             Message::Nfsm(src, ifindex, ev) => {
                 //
+            }
+            Message::Send(ifindex) => {
+                println!("Send Hello packet on {}", ifindex);
             }
         }
     }
@@ -221,7 +224,8 @@ pub fn serve(mut ospf: Ospf) {
 }
 
 pub enum Message {
-    Packet(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
     Ifsm(u32, IfsmEvent),
-    Nfsm(Ipv4Addr, u32, NfsmEvent),
+    Nfsm(u32, Ipv4Addr, NfsmEvent),
+    Recv(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
+    Send(u32),
 }

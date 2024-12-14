@@ -59,7 +59,7 @@ pub async fn read_packet(sock: Arc<Socket>, tx: UnboundedSender<Message>) {
                 ifaddr
             );
 
-            tx.send(Message::Packet(packet.1, src.ip(), group, ifindex, ifaddr))
+            tx.send(Message::Recv(packet.1, src.ip(), group, ifindex, ifaddr))
                 .unwrap();
 
             Ok(())
