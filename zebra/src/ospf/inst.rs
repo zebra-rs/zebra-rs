@@ -7,11 +7,12 @@ use ipnet::{IpNet, Ipv4Net};
 use ospf_packet::{OspfPacketType, Ospfv2Packet, OSPF_HELLO};
 use prefix_trie::PrefixMap;
 use socket2::Socket;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
-use crate::ospf::packet::ospf_hello_recv;
+use crate::ospf::packet::{ospf_hello_recv, ospf_hello_send};
 use crate::ospf::socket::ospf_join_if;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -45,7 +46,7 @@ pub struct Ospf {
     pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    pub sock: Arc<Socket>,
+    pub sock: Arc<AsyncFd<Socket>>,
     pub top: OspfTop,
 }
 
@@ -68,7 +69,7 @@ impl Ospf {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
-        let sock = Arc::new(ospf_socket_ipv4().unwrap());
+        let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4().unwrap()).unwrap());
 
         let (tx, rx) = mpsc::unbounded_channel();
         let mut ospf = Self {
@@ -143,7 +144,7 @@ impl Ospf {
         entry.addr = Some(addr);
     }
 
-    pub fn process_msg(&mut self, msg: Message) {
+    async fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Recv(packet, src, from, index, _dest) => {
                 // println!("Packet: {}", packet);
@@ -169,13 +170,16 @@ impl Ospf {
             Message::Nfsm(src, ifindex, ev) => {
                 //
             }
-            Message::Send(ifindex) => {
-                println!("Send Hello packet on {}", ifindex);
+            Message::Send(index) => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                ospf_hello_send(link).await;
             }
         }
     }
 
-    pub fn process_rib_msg(&mut self, msg: RibRx) {
+    fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
@@ -201,7 +205,7 @@ impl Ospf {
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
-                    self.process_msg(msg);
+                    self.process_msg(msg).await;
                 }
                 Some(msg) = self.rib_rx.recv() => {
                     self.process_rib_msg(msg);

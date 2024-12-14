@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use socket2::Socket;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::Link;
@@ -20,7 +21,7 @@ pub struct OspfLink {
     pub area: Ipv4Addr,
     pub state: IfsmState,
     pub ostate: IfsmState,
-    pub sock: Arc<Socket>,
+    pub sock: Arc<AsyncFd<Socket>>,
     pub ident: OspfIdentity,
     pub hello_timer: Option<Timer>,
     pub hello_interval: u16,
@@ -40,7 +41,7 @@ pub struct OspfIdentity {
 }
 
 impl OspfLink {
-    pub fn from(tx: UnboundedSender<Message>, link: Link, sock: Arc<Socket>) -> Self {
+    pub fn from(tx: UnboundedSender<Message>, link: Link, sock: Arc<AsyncFd<Socket>>) -> Self {
         Self {
             index: link.index,
             name: link.name.to_owned(),
