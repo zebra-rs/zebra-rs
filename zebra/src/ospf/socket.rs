@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use socket2::InterfaceIndexOrAddress;
 use socket2::{Domain, Protocol, Socket, Type};
+use tokio::io::unix::AsyncFd;
 
 const OSPF_IP_PROTO: i32 = 89;
 
@@ -13,6 +14,9 @@ pub fn ospf_socket_ipv4() -> Result<Socket, std::io::Error> {
 
     socket.set_nonblocking(true)?;
     socket.set_reuse_address(true)?;
+    socket.set_multicast_loop_v4(false)?;
+    socket.set_multicast_ttl_v4(1)?;
+    socket.set_tos(libc::IPTOS_PREC_INTERNETCONTROL as u32)?;
     set_ipv4_pktinfo(&socket);
 
     Ok(socket)
@@ -54,12 +58,16 @@ pub fn set_ipv6_pktinfo(socket: &Socket) {
     };
 }
 
-pub fn ospf_join_if(socket: &Socket, ifindex: u32) {
+pub fn ospf_join_if(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
-    socket.join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
+    socket
+        .get_ref()
+        .join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
 }
 
-pub fn ospf_leave_if(socket: &Socket, ifindex: u32) {
+pub fn ospf_leave_if(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
-    socket.leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
+    socket
+        .get_ref()
+        .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
 }

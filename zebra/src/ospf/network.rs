@@ -1,6 +1,7 @@
-use std::io::{ErrorKind, IoSliceMut};
+use std::io::{ErrorKind, IoSlice, IoSliceMut};
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use nix::sys::socket::{self, ControlMessageOwned, SockaddrIn};
@@ -11,10 +12,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ospf::Message;
 
-pub async fn read_packet(sock: Arc<Socket>, tx: UnboundedSender<Message>) {
+pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
     const IPV4_HEADER_LEN: usize = 20;
-
-    let sock = AsyncFd::new(sock).unwrap();
 
     let mut buf = [0u8; 1024 * 16];
     let mut iov = [IoSliceMut::new(&mut buf)];
@@ -52,7 +51,7 @@ pub async fn read_packet(sock: Arc<Socket>, tx: UnboundedSender<Message>) {
             };
 
             println!(
-                "src {} ifaddr {} ifindex {} dest {}",
+                "Read: src {} ifaddr {} ifindex {} dest {}",
                 src.ip(),
                 group,
                 ifindex,
@@ -66,4 +65,29 @@ pub async fn read_packet(sock: Arc<Socket>, tx: UnboundedSender<Message>) {
         })
         .await;
     }
+}
+
+pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, buf: &[u8], ifindex: u32) {
+    let iov = [IoSlice::new(&buf)];
+    let dest = Ipv4Addr::from_str("224.0.0.5").unwrap();
+    let sockaddr: SockaddrIn = std::net::SocketAddrV4::new(dest, 0).into();
+    let pktinfo = libc::in_pktinfo {
+        ipi_ifindex: ifindex as i32,
+        ipi_spec_dst: libc::in_addr { s_addr: 0 },
+        ipi_addr: libc::in_addr { s_addr: 0 },
+    };
+    let cmsg = [socket::ControlMessage::Ipv4PacketInfo(&pktinfo)];
+
+    sock.async_io(Interest::WRITABLE, |sock| {
+        let msg = socket::sendmsg(
+            sock.as_raw_fd(),
+            &iov,
+            &cmsg,
+            socket::MsgFlags::empty(),
+            Some(&sockaddr),
+        );
+        println!("{:?}", msg);
+        Ok(())
+    })
+    .await;
 }

@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use std::net::Ipv4Addr;
 
 use ospf_packet::{OspfHello, Ospfv2Packet, Ospfv2Payload};
@@ -5,6 +6,7 @@ use ospf_packet::{OspfHello, Ospfv2Packet, Ospfv2Payload};
 use crate::ospf::{
     ifsm::{IfsmEvent, IfsmState},
     neigh::OspfNeighbor,
+    network::write_packet,
     nfsm::{ospf_nfsm, NfsmEvent},
     Message,
 };
@@ -12,6 +14,7 @@ use crate::ospf::{
 use super::{
     inst::OspfTop,
     link::{OspfIdentity, OspfLink},
+    nfsm::NfsmState,
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -24,6 +27,12 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     hello.options.set_external(true);
     hello.priority = oi.priority;
     hello.router_dead_interval = oi.dead_interval;
+    for (addr, nbr) in oi.nbrs.iter() {
+        if nbr.state == NfsmState::Down {
+            continue;
+        }
+        hello.neighbors.push(*addr);
+    }
 
     let packet = Ospfv2Packet::new(&oi.ident.router_id, &oi.area, Ospfv2Payload::Hello(hello));
 
@@ -150,4 +159,15 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
             }
         }
     }
+}
+
+pub async fn ospf_hello_send(oi: &OspfLink) {
+    println!("Send Hello packet on {}", oi.name);
+
+    let packet = ospf_hello_packet(oi).unwrap();
+
+    let mut buf = BytesMut::new();
+    packet.emit(&mut buf);
+
+    write_packet(oi.sock.clone(), &buf, oi.index).await;
 }

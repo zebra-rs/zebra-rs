@@ -112,13 +112,6 @@ pub fn ospf_ifsm_loop_ind(_link: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
-pub fn ospf_hello_send(oi: &OspfLink) {
-    let hello = ospf_hello_packet(oi).unwrap();
-
-    let mut buf = BytesMut::new();
-    let _packet = hello.emit(&mut buf);
-}
-
 pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
