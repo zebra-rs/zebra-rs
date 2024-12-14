@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 
 use crate::ospf::socket::ospf_join_if;
+use crate::ospf::Message;
 
 use super::link::OspfLink;
 use super::packet::ospf_hello_packet;
@@ -118,9 +119,14 @@ pub fn ospf_hello_send(oi: &OspfLink) {
     let _packet = hello.emit(&mut buf);
 }
 
-pub fn ospf_hello_timer(sec: u64, ifindex: u32) -> Timer {
-    Timer::new(Timer::second(10), TimerType::Infinite, move || async move {
-        println!("hello timer");
+pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
+    let tx = oi.tx.clone();
+    let index = oi.index;
+    Timer::new(Timer::second(10), TimerType::Infinite, move || {
+        let tx = tx.clone();
+        async move {
+            tx.send(Message::Send(index));
+        }
     })
 }
 
@@ -131,11 +137,6 @@ pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
     }
 
     ospf_join_if(&link.sock, link.index);
-
-    // ospf_hello_send(link);
-
-    // let hello_timer = ospf_hello_timer();
-    // link.hello_timer = Some(hello_timer);
 
     // Comment out until we support pointopoint interface.
     // if link.is_pointopoint() {
@@ -168,11 +169,14 @@ pub fn ospf_ifsm_neighbor_change(_link: &mut OspfLink) -> Option<IfsmState> {
 pub fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
     use IfsmState::*;
     match oi.state {
+        Down => {
+            oi.hello_timer = None;
+        }
         DROther => {
-            oi.hello_timer.get_or_insert(ospf_hello_timer(10, oi.index));
+            oi.hello_timer.get_or_insert(ospf_hello_timer(oi));
         }
         Waiting => {
-            oi.hello_timer.get_or_insert(ospf_hello_timer(10, oi.index));
+            oi.hello_timer.get_or_insert(ospf_hello_timer(oi));
         }
         _ => {
             //

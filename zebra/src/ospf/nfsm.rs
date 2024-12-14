@@ -36,99 +36,6 @@ pub enum NfsmEvent {
 
 pub type NfsmFunc = fn(&mut OspfNeighbor) -> Option<NfsmState>;
 
-pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor) -> Option<NfsmState> {
-    println!("ospf_nfsm_ignore is called");
-    None
-}
-
-pub fn ospf_nfsm_hello_received(nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    println!("ospf_nfsm_hello_received");
-
-    // Start or Restart Inactivity Timer.
-    let tx = nbr.tx.clone();
-    let addr = nbr.ident.addr.clone();
-    let ifindex = nbr.ifindex;
-    let timer = Timer::new(Timer::second(40), TimerType::Once, move || {
-        use NfsmEvent::*;
-        let tx = tx.clone();
-        async move {
-            println!("XXX InactivityTimer expired");
-            tx.send(Message::Nfsm(ifindex, addr, InactivityTimer))
-                .unwrap();
-        }
-    });
-    nbr.timer.inactivity = Some(timer);
-
-    None
-}
-
-pub fn ospf_nfsm_start(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_kill_nbr(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_inactivity_timer(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    //
-    None
-}
-
-pub fn ospf_nfsm_ll_down(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_twoway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    println!("ospf_nfsm_twoway_received");
-    None
-}
-
-pub fn ospf_nfsm_oneway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    println!("ospf_nfsm_oneway_received");
-    None
-}
-
-pub fn ospf_nfsm_adj_ok(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_negotiation_done(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_exchange_done(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_bad_ls_req(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_seq_number_mismatch(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent) {
-    // Decompose the result of the state function into the transition function
-    // and next state.
-    let (fsm_func, fsm_next_state) = nbr.state.fsm(event);
-
-    // Determine the next state by prioritizing the computed state over the
-    // FSM-provided next state.
-    let next_state = fsm_func(nbr).or(fsm_next_state);
-
-    // If a state transition occurs, update the state.
-    if let Some(new_state) = next_state {
-        println!(
-            "NFSM State Transition on {}: {:?} -> {:?}",
-            nbr.ident.router_id, nbr.state, new_state
-        );
-        nbr.ostate = nbr.state;
-        nbr.state = new_state;
-    }
-}
-
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent) -> (NfsmFunc, Option<Self>) {
         use NfsmState::*;
@@ -254,5 +161,98 @@ impl NfsmState {
                 NfsmEvent::LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
         }
+    }
+}
+
+pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor) -> Option<NfsmState> {
+    println!("ospf_nfsm_ignore is called");
+    None
+}
+
+pub fn ospf_nfsm_hello_received(nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    println!("ospf_nfsm_hello_received");
+
+    // Start or Restart Inactivity Timer.
+    let tx = nbr.tx.clone();
+    let addr = nbr.ident.addr.clone();
+    let ifindex = nbr.ifindex;
+    let timer = Timer::new(Timer::second(40), TimerType::Once, move || {
+        use NfsmEvent::*;
+        let tx = tx.clone();
+        async move {
+            println!("XXX InactivityTimer expired");
+            tx.send(Message::Nfsm(ifindex, addr, InactivityTimer))
+                .unwrap();
+        }
+    });
+    nbr.timer.inactivity = Some(timer);
+
+    None
+}
+
+pub fn ospf_nfsm_start(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm_kill_nbr(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm_inactivity_timer(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    //
+    None
+}
+
+pub fn ospf_nfsm_ll_down(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm_twoway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    println!("ospf_nfsm_twoway_received");
+    None
+}
+
+pub fn ospf_nfsm_oneway_received(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    println!("ospf_nfsm_oneway_received");
+    None
+}
+
+pub fn ospf_nfsm_adj_ok(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm_negotiation_done(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm_exchange_done(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm_bad_ls_req(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm_seq_number_mismatch(_nbr: &mut OspfNeighbor) -> Option<NfsmState> {
+    None
+}
+
+pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent) {
+    // Decompose the result of the state function into the transition function
+    // and next state.
+    let (fsm_func, fsm_next_state) = nbr.state.fsm(event);
+
+    // Determine the next state by prioritizing the computed state over the
+    // FSM-provided next state.
+    let next_state = fsm_func(nbr).or(fsm_next_state);
+
+    // If a state transition occurs, update the state.
+    if let Some(new_state) = next_state {
+        println!(
+            "NFSM State Transition on {}: {:?} -> {:?}",
+            nbr.ident.router_id, nbr.state, new_state
+        );
+        nbr.ostate = nbr.state;
+        nbr.state = new_state;
     }
 }
