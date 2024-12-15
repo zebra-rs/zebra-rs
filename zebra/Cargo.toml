@@ -40,6 +40,7 @@ nix = { version = "0.29", features = ["fs", "net", "socket", "uio", "user"] }
 libc = "0.2.167"
 ospf-packet = { path = "../../ospf-packet" }
 isis-packet = { path = "../../isis-packet" }
+bitfield-struct = "0.9.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = { git = "https://github.com/zebra-rs/rtnetlink", rev = "2d7b1830e9bd9a049a757f0a79ccd16216450bf2" }

@@ -126,7 +126,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
         )
     });
 
-    ospf_nfsm(nbr, NfsmEvent::HelloReceived);
+    ospf_nfsm(nbr, NfsmEvent::HelloReceived, &oi.ident);
 
     // Remember identity.
     let ident = nbr.ident;
@@ -137,17 +137,21 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     nbr.ident.bd_router = hello.bd_router;
 
     if !ospf_hello_twoway_check(&top.router_id, &nbr, hello) {
-        ospf_nfsm(nbr, NfsmEvent::OneWayReceived);
+        println!("XX Oneway");
+        ospf_nfsm(nbr, NfsmEvent::OneWayReceived, &oi.ident);
     } else {
-        ospf_nfsm(nbr, NfsmEvent::TwoWayReceived);
+        println!("XX Twoway");
+        ospf_nfsm(nbr, NfsmEvent::TwoWayReceived, &oi.ident);
         nbr.options = (nbr.options.into_bits() | hello.options.into_bits()).into();
 
         if oi.state == IfsmState::Waiting {
             use IfsmEvent::*;
             if nbr.ident.addr == hello.bd_router {
+                println!("XX BackupSeen 1");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
             if nbr.ident.addr == hello.d_router && hello.bd_router.is_unspecified() {
+                println!("XX BackupSeen 2");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
         };
@@ -161,8 +165,12 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     }
 }
 
-pub async fn ospf_hello_send(oi: &OspfLink) {
-    println!("Send Hello packet on {}", oi.name);
+pub async fn ospf_hello_send(oi: &mut OspfLink) {
+    println!(
+        "Send Hello packet on {} with hello_sent flag {}",
+        oi.name,
+        oi.flags.hello_sent()
+    );
 
     let packet = ospf_hello_packet(oi).unwrap();
 
@@ -170,4 +178,6 @@ pub async fn ospf_hello_send(oi: &OspfLink) {
     packet.emit(&mut buf);
 
     write_packet(oi.sock.clone(), &buf, oi.index).await;
+
+    oi.flags.set_hello_sent(true);
 }

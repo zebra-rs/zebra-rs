@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net};
-use ospf_packet::{OspfPacketType, Ospfv2Packet, OSPF_HELLO};
+use ospf_packet::{OspfPacketType, Ospfv2Packet, OSPF_DATABASE_DESC, OSPF_HELLO};
 use prefix_trie::PrefixMap;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -155,6 +155,9 @@ impl Ospf {
                 match packet.typ.0 {
                     OSPF_HELLO => {
                         ospf_hello_recv(&self.top, link, &packet, &src);
+                    }
+                    OSPF_DATABASE_DESC => {
+                        // println!("DD: {}", packet);
                     }
                     _ => {
                         //

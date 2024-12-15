@@ -49,6 +49,15 @@ impl OspfNeighbor {
         nbr.ident.router_id = *router_id;
         nbr
     }
+
+    pub fn is_pointopoint(&self) -> bool {
+        // Return true is parent interface is one of following:
+        // PointToPoint
+        // VirtualLink
+        // PointToMultiPoint
+        // PointToMultiPointNBMA
+        false
+    }
 }
 
 impl Display for OspfNeighbor {

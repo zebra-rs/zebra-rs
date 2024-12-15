@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
+use bitfield_struct::bitfield;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,7 +18,6 @@ pub struct OspfLink {
     pub name: String,
     pub mtu: u32,
     pub addr: Vec<OspfAddr>,
-    // pub enable: bool,
     pub area: Ipv4Addr,
     pub state: IfsmState,
     pub ostate: IfsmState,
@@ -25,10 +25,13 @@ pub struct OspfLink {
     pub ident: OspfIdentity,
     pub hello_timer: Option<Timer>,
     pub hello_interval: u16,
+    pub wait_timer: Option<Timer>,
+    pub wait_interval: u16,
     pub priority: u8,
     pub dead_interval: u32,
     pub tx: UnboundedSender<Message>,
     pub nbrs: BTreeMap<Ipv4Addr, OspfNeighbor>,
+    pub flags: OspfLinkFlags,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +50,6 @@ impl OspfLink {
             name: link.name.to_owned(),
             mtu: link.mtu,
             addr: Vec::new(),
-            // enable: false,
             area: Ipv4Addr::UNSPECIFIED,
             state: IfsmState::Down,
             ostate: IfsmState::Down,
@@ -55,16 +57,31 @@ impl OspfLink {
             ident: OspfIdentity::new(),
             hello_timer: None,
             hello_interval: 10,
+            wait_timer: None,
+            wait_interval: 40,
             priority: 1,
             dead_interval: 40,
             tx,
             nbrs: BTreeMap::new(),
+            flags: 0.into(),
         }
     }
 
     pub fn is_passive(&self) -> bool {
         false
     }
+
+    pub fn is_dr_election_ready(&self) -> bool {
+        self.flags.hello_sent()
+    }
+}
+
+#[bitfield(u8, debug = true)]
+pub struct OspfLinkFlags {
+    pub hello_sent: bool,
+    pub resvd1: bool,
+    #[bits(6)]
+    pub resvd2: usize,
 }
 
 impl OspfIdentity {

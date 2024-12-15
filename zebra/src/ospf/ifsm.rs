@@ -1,9 +1,12 @@
+use std::net::Ipv4Addr;
+
 use bytes::BytesMut;
 
 use crate::ospf::socket::ospf_join_if;
 use crate::ospf::Message;
 
-use super::link::OspfLink;
+use super::link::{OspfIdentity, OspfLink};
+use super::nfsm::NfsmState;
 use super::packet::ospf_hello_packet;
 use super::task::{Timer, TimerType};
 
@@ -104,23 +107,42 @@ impl IfsmState {
     }
 }
 
-pub fn ospf_ifsm_ignore(_link: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_ifsm_ignore(oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
-pub fn ospf_ifsm_loop_ind(_link: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_ifsm_loop_ind(oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
 pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
-    Timer::new(Timer::second(10), TimerType::Infinite, move || {
-        let tx = tx.clone();
-        async move {
-            tx.send(Message::Send(index));
-        }
-    })
+    Timer::new(
+        Timer::second(oi.hello_interval.into()),
+        TimerType::Infinite,
+        move || {
+            let tx = tx.clone();
+            async move {
+                tx.send(Message::Send(index));
+            }
+        },
+    )
+}
+
+pub fn ospf_wait_timer(oi: &OspfLink) -> Timer {
+    let tx = oi.tx.clone();
+    let index = oi.index;
+    Timer::new(
+        Timer::second(oi.wait_interval.into()),
+        TimerType::Infinite,
+        move || {
+            let tx = tx.clone();
+            async move {
+                tx.send(Message::Ifsm(index, IfsmEvent::WaitTimer));
+            }
+        },
+    )
 }
 
 pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
@@ -143,20 +165,56 @@ pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
     }
 }
 
-pub fn ospf_ifsm_interface_down(_link: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_ifsm_interface_down(oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
-pub fn ospf_ifsm_wait_timer(_link: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_bdr_election() {}
+
+fn ospf_dr_election_init(oi: &OspfLink) -> Vec<OspfIdentity> {
+    let mut v: Vec<OspfIdentity> = oi
+        .nbrs
+        .values()
+        .filter(|nbr| nbr.state >= NfsmState::TwoWay)
+        .filter(|nbr| !nbr.ident.router_id.is_unspecified())
+        .filter(|nbr| nbr.ident.priority != 0)
+        .map(|nbr| nbr.ident.clone())
+        .collect();
+
+    if oi.flags.hello_sent() && !oi.ident.router_id.is_unspecified() && oi.ident.priority != 0 {
+        v.push(oi.ident.clone());
+    }
+    v
+}
+
+pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
+    println!("== DR election! ==");
+
+    let prev_dr = oi.ident.d_router;
+    let prev_bdr = oi.ident.bd_router;
+    let prev_state = oi.state;
+
+    let v = ospf_dr_election_init(oi);
+    for i in v.iter() {
+        println!("{:?}", i);
+    }
+
     None
 }
 
-pub fn ospf_ifsm_backup_seen(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
+pub fn ospf_ifsm_wait_timer(oi: &mut OspfLink) -> Option<IfsmState> {
+    println!("ospf_ifsm_wait_timer");
+    ospf_dr_election(oi)
 }
 
-pub fn ospf_ifsm_neighbor_change(_link: &mut OspfLink) -> Option<IfsmState> {
-    None
+pub fn ospf_ifsm_backup_seen(oi: &mut OspfLink) -> Option<IfsmState> {
+    println!("ospf_ifsm_backup_seen");
+    ospf_dr_election(oi)
+}
+
+pub fn ospf_ifsm_neighbor_change(oi: &mut OspfLink) -> Option<IfsmState> {
+    println!("ospf_ifsm_neighbor_change");
+    ospf_dr_election(oi)
 }
 
 pub fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
@@ -170,6 +228,7 @@ pub fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
         }
         Waiting => {
             oi.hello_timer.get_or_insert(ospf_hello_timer(oi));
+            oi.wait_timer.get_or_insert(ospf_wait_timer(oi));
         }
         _ => {
             //
