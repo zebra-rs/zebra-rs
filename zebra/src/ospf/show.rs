@@ -19,7 +19,7 @@ impl Ospf {
 
 fn render_link(out: &mut String, oi: &OspfLink) {
     writeln!(out, "{}", oi.name).unwrap();
-    writeln!(out, " {}", oi.ident.prefix).unwrap();
+    writeln!(out, " {} {}", oi.ident.prefix, oi.state).unwrap();
 }
 
 fn show_ospf_interface(ospf: &Ospf, args: Args, _json: bool) -> String {

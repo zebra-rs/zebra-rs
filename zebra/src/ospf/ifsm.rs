@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::net::Ipv4Addr;
 
 use bytes::BytesMut;
@@ -21,6 +22,22 @@ pub enum IfsmState {
     DROther,
     Backup,
     DR,
+}
+
+impl Display for IfsmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use IfsmState::*;
+        let state = match self {
+            Down => "Down",
+            Loopback => "Loopback",
+            Waiting => "Waiting",
+            PointToPoint => "PointToPoint",
+            DROther => "DROther",
+            Backup => "Backup",
+            DR => "DR",
+        };
+        write!(f, "{state}")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
