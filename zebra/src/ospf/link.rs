@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use bitfield_struct::bitfield;
+use ipnet::Ipv4Net;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,6 +18,7 @@ pub struct OspfLink {
     pub index: u32,
     pub name: String,
     pub mtu: u32,
+    pub enabled: bool,
     pub addr: Vec<OspfAddr>,
     pub area: Ipv4Addr,
     pub state: IfsmState,
@@ -36,7 +38,7 @@ pub struct OspfLink {
 
 #[derive(Debug, Clone, Copy)]
 pub struct OspfIdentity {
-    pub addr: Ipv4Addr,
+    pub prefix: Ipv4Net,
     pub router_id: Ipv4Addr,
     pub d_router: Ipv4Addr,
     pub bd_router: Ipv4Addr,
@@ -49,6 +51,7 @@ impl OspfLink {
             index: link.index,
             name: link.name.to_owned(),
             mtu: link.mtu,
+            enabled: false,
             addr: Vec::new(),
             area: Ipv4Addr::UNSPECIFIED,
             state: IfsmState::Down,
@@ -87,7 +90,7 @@ pub struct OspfLinkFlags {
 impl OspfIdentity {
     pub fn new() -> Self {
         Self {
-            addr: Ipv4Addr::UNSPECIFIED,
+            prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
             router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
             d_router: Ipv4Addr::UNSPECIFIED,
             bd_router: Ipv4Addr::UNSPECIFIED,

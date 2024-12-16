@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::ospf::{
     task::{Timer, TimerType},
     Message,
@@ -15,6 +17,23 @@ pub enum NfsmState {
     Exchange,
     Loading,
     Full,
+}
+
+impl Display for NfsmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use NfsmState::*;
+        let state = match self {
+            Down => "Down",
+            Attempt => "Attempt",
+            Init => "Init",
+            TwoWay => "TwoWay",
+            ExStart => "Extart",
+            Exchange => "Exchange",
+            Loading => "Loading",
+            Full => "Full",
+        };
+        write!(f, "{state}")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -198,13 +217,13 @@ pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor, oident: &OspfIdentity) -> Option
 
 pub fn ospf_inactivity_timer(nbr: &OspfNeighbor) -> Timer {
     let tx = nbr.tx.clone();
-    let addr = nbr.ident.addr.clone();
+    let prefix = nbr.ident.prefix.clone();
     let ifindex = nbr.ifindex;
     Timer::new(Timer::second(40), TimerType::Once, move || {
         use NfsmEvent::*;
         let tx = tx.clone();
         async move {
-            tx.send(Message::Nfsm(ifindex, addr, InactivityTimer))
+            tx.send(Message::Nfsm(ifindex, prefix, InactivityTimer))
                 .unwrap();
         }
     })
@@ -255,11 +274,11 @@ pub fn ospf_nfsm_twoway_received(
     }
 
     // If I'm DRouter or BDRouter.
-    if oident.addr == oident.d_router || oident.addr == oident.bd_router {
+    if oident.prefix.addr() == oident.d_router || oident.prefix.addr() == oident.bd_router {
         next_state = NfsmState::ExStart;
     }
     // If Neighbor is DRouter.
-    if nbr.ident.addr == oident.d_router || nbr.ident.addr == oident.bd_router {
+    if nbr.ident.prefix.addr() == oident.d_router || nbr.ident.prefix.addr() == oident.bd_router {
         next_state = NfsmState::ExStart;
     }
     Some(next_state)

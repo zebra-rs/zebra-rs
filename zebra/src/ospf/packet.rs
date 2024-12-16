@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 
 use ospf_packet::{OspfHello, Ospfv2Packet, Ospfv2Payload};
@@ -59,7 +60,7 @@ fn ospf_hello_twoway_check(router_id: &Ipv4Addr, nbr: &OspfNeighbor, hello: &Osp
 
 fn ospf_hello_is_nbr_changed(nbr: &OspfNeighbor, prev: &OspfIdentity) -> bool {
     let current = nbr.ident;
-    let nbr_addr = nbr.ident.addr;
+    let nbr_addr = nbr.ident.prefix.addr();
 
     // Non DR -> DR.
     if nbr_addr != prev.d_router && nbr_addr == current.d_router {
@@ -104,6 +105,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
 
     // Non PtoP interface's network mask check.
     let prefixlen = netmask_to_prefix_length(hello.network_mask);
+    let prefix = Ipv4Net::new(*src, prefixlen).unwrap();
 
     if addr.prefix.prefix_len() != prefixlen {
         println!(
@@ -115,12 +117,12 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     }
 
     let mut init = false;
-    let nbr = oi.nbrs.entry(*src).or_insert_with(|| {
+    let nbr = oi.nbrs.entry(packet.router_id).or_insert_with(|| {
         init = true;
         OspfNeighbor::new(
             oi.tx.clone(),
             oi.index,
-            src,
+            prefix,
             &packet.router_id,
             oi.dead_interval as u64,
         )
@@ -146,11 +148,11 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
 
         if oi.state == IfsmState::Waiting {
             use IfsmEvent::*;
-            if nbr.ident.addr == hello.bd_router {
+            if nbr.ident.prefix.addr() == hello.bd_router {
                 println!("XX BackupSeen 1");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
-            if nbr.ident.addr == hello.d_router && hello.bd_router.is_unspecified() {
+            if nbr.ident.prefix.addr() == hello.d_router && hello.bd_router.is_unspecified() {
                 println!("XX BackupSeen 2");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }

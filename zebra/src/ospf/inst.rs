@@ -142,6 +142,12 @@ impl Ospf {
         link.addr.push(addr.clone());
         let entry = self.table.entry(*prefix).or_default();
         entry.addr = Some(addr);
+
+        link.ident.prefix = *prefix;
+
+        if link.name == "enp0s6" {
+            link.enabled = true;
+        }
     }
 
     async fn process_msg(&mut self, msg: Message) {
@@ -224,6 +230,11 @@ impl Ospf {
     }
 }
 
+pub fn ospf_interface_enable(oi: &mut OspfLink, laddr: &LinkAddr) {
+    oi.enabled = true;
+    // oi.ident.addr = laddr.addr;
+}
+
 pub fn serve(mut ospf: Ospf) {
     tokio::spawn(async move {
         ospf.event_loop().await;
@@ -232,7 +243,7 @@ pub fn serve(mut ospf: Ospf) {
 
 pub enum Message {
     Ifsm(u32, IfsmEvent),
-    Nfsm(u32, Ipv4Addr, NfsmEvent),
+    Nfsm(u32, Ipv4Net, NfsmEvent),
     Recv(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
     Send(u32),
 }
