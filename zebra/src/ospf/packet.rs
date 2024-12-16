@@ -8,7 +8,7 @@ use crate::ospf::{network::write_packet, nfsm::ospf_nfsm};
 
 use super::{
     inst::OspfTop,
-    {Identity, IfsmEvent, IfsmState, Message, NfsmEvent, NfsmState, OspfLink, OspfNeighbor},
+    {Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink},
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -37,11 +37,11 @@ fn netmask_to_plen(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
 }
 
-fn ospf_hello_twoway_check(router_id: &Ipv4Addr, nbr: &OspfNeighbor, hello: &OspfHello) -> bool {
+fn ospf_hello_twoway_check(router_id: &Ipv4Addr, nbr: &Neighbor, hello: &OspfHello) -> bool {
     hello.neighbors.iter().any(|neighbor| router_id == neighbor)
 }
 
-fn ospf_hello_is_nbr_changed(nbr: &OspfNeighbor, prev: &Identity) -> bool {
+fn ospf_hello_is_nbr_changed(nbr: &Neighbor, prev: &Identity) -> bool {
     let current = nbr.ident;
     let nbr_addr = nbr.ident.prefix.addr();
 
@@ -82,7 +82,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     let mut init = false;
     let nbr = oi.nbrs.entry(*src).or_insert_with(|| {
         init = true;
-        OspfNeighbor::new(
+        Neighbor::new(
             oi.tx.clone(),
             oi.index,
             prefix,

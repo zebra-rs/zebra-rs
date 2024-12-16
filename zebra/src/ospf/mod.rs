@@ -8,7 +8,7 @@ pub mod ident;
 pub use ident::Identity;
 
 pub mod neigh;
-pub use neigh::OspfNeighbor;
+pub use neigh::Neighbor;
 
 pub mod ifsm;
 pub use ifsm::{IfsmEvent, IfsmState};

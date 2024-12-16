@@ -2,7 +2,7 @@ use std::{fmt::Write, net::Ipv4Addr};
 
 use crate::config::Args;
 
-use super::{neigh::OspfNeighbor, Ospf, OspfLink, ShowCallback};
+use super::{Neighbor, Ospf, OspfLink, ShowCallback};
 
 impl Ospf {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -42,7 +42,7 @@ fn show_ospf(ospf: &Ospf, args: Args, _json: bool) -> String {
     String::from("show ospf")
 }
 
-fn render_nbr(out: &mut String, router_id: &Ipv4Addr, nbr: &OspfNeighbor) {
+fn render_nbr(out: &mut String, router_id: &Ipv4Addr, nbr: &Neighbor) {
     writeln!(
         out,
         "{} {} {} {} DR: {} BDR: {}",
