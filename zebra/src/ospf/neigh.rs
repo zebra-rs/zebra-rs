@@ -25,6 +25,9 @@ pub struct OspfNeighbor {
 #[derive(Debug, Default)]
 pub struct NeighborTimer {
     pub inactivity: Option<Timer>,
+    pub db_desc_free: Option<Timer>,
+    pub db_desc: Option<Timer>,
+    pub ls_upd: Option<Timer>,
 }
 
 impl OspfNeighbor {
