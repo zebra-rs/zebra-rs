@@ -28,7 +28,7 @@ use super::config::OspfNetworkConfig;
 use super::ifsm::{ospf_ifsm, IfsmEvent};
 use super::link::OspfLink;
 use super::network::read_packet;
-use super::nfsm::NfsmEvent;
+use super::nfsm::{ospf_nfsm, NfsmEvent};
 use super::socket::ospf_socket_ipv4;
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
@@ -176,8 +176,14 @@ impl Ospf {
                 };
                 ospf_ifsm(link, ev);
             }
-            Message::Nfsm(src, ifindex, ev) => {
-                //
+            Message::Nfsm(index, src, ev) => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                let Some(nbr) = link.nbrs.get_mut(&src) else {
+                    return;
+                };
+                ospf_nfsm(nbr, ev, &link.ident);
             }
             Message::Send(index) => {
                 let Some(link) = self.links.get_mut(&index) else {

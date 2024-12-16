@@ -1,11 +1,6 @@
 use std::fmt::Display;
 
-use crate::ospf::{
-    task::{Timer, TimerType},
-    Message,
-};
-
-use super::{link::OspfIdentity, neigh::OspfNeighbor};
+use super::{Message, OspfIdentity, OspfNeighbor, Timer, TimerType};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
