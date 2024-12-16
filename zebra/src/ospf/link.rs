@@ -25,15 +25,22 @@ pub struct OspfLink {
     pub ostate: IfsmState,
     pub sock: Arc<AsyncFd<Socket>>,
     pub ident: OspfIdentity,
-    pub hello_timer: Option<Timer>,
     pub hello_interval: u16,
-    pub wait_timer: Option<Timer>,
     pub wait_interval: u16,
     pub priority: u8,
     pub dead_interval: u32,
     pub tx: UnboundedSender<Message>,
     pub nbrs: BTreeMap<Ipv4Addr, OspfNeighbor>,
     pub flags: OspfLinkFlags,
+    pub timer: LinkTimer,
+}
+
+#[derive(Default)]
+pub struct LinkTimer {
+    pub hello: Option<Timer>,
+    pub wait: Option<Timer>,
+    pub ls_ack: Option<Timer>,
+    pub ls_upd_event: Option<Timer>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,15 +65,14 @@ impl OspfLink {
             ostate: IfsmState::Down,
             sock,
             ident: OspfIdentity::new(),
-            hello_timer: None,
             hello_interval: 10,
-            wait_timer: None,
             wait_interval: 40,
             priority: 1,
             dead_interval: 40,
             tx,
             nbrs: BTreeMap::new(),
             flags: 0.into(),
+            timer: LinkTimer::default(),
         }
     }
 
@@ -96,5 +102,13 @@ impl OspfIdentity {
             bd_router: Ipv4Addr::UNSPECIFIED,
             priority: 1,
         }
+    }
+
+    pub fn is_declared_dr(&self) -> bool {
+        self.prefix.addr() == self.d_router
+    }
+
+    pub fn is_declared_bdr(&self) -> bool {
+        self.prefix.addr() == self.bd_router
     }
 }
