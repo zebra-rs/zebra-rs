@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use super::{Message, OspfIdentity, OspfNeighbor, Timer, TimerType};
+use super::{IfsmEvent, Message, OspfIdentity, OspfNeighbor, Timer, TimerType};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -392,7 +392,15 @@ fn ospf_nfsm_change_state(nbr: &mut OspfNeighbor, state: NfsmState) {
     }
 
     if nbr.ostate < NfsmState::TwoWay && nbr.state >= NfsmState::TwoWay {
-        //
+        nbr.tx
+            .send(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange))
+            .unwrap();
+    } else if nbr.ostate >= NfsmState::TwoWay && nbr.state < NfsmState::TwoWay {
+        nbr.tx
+            .send(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange))
+            .unwrap();
+
+        // ospf_nexthop_nbr_down(nbr);
     }
 }
 

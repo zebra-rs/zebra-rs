@@ -15,6 +15,7 @@ mod isis;
 mod ospf;
 
 use clap::Parser;
+use tracing::Level;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -48,16 +49,13 @@ fn system_path(arg: &Arg) -> PathBuf {
     }
 }
 
-fn trace_set() {
+fn tracing_set() {
     // console_subscriber::init();
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    trace_set();
-
-    // isis::packet::parser::parse_test();
-
     let arg = Arg::parse();
     let mut rib = Rib::new()?;
 
@@ -83,7 +81,8 @@ async fn main() -> anyhow::Result<()> {
 
     rib::serve(rib);
 
-    println!("zebra: started");
+    tracing_set();
+    tracing::info!("zebra started");
 
     config::event_loop(config).await;
 
