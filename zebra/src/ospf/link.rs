@@ -10,9 +10,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::Link;
 
-use super::neigh::OspfNeighbor;
-use super::Message;
-use super::{addr::OspfAddr, ifsm::IfsmState, task::Timer};
+use super::{addr::OspfAddr, task::Timer};
+use super::{Identity, IfsmState, Message, OspfNeighbor};
 
 pub struct OspfLink {
     pub index: u32,
@@ -24,7 +23,7 @@ pub struct OspfLink {
     pub state: IfsmState,
     pub ostate: IfsmState,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub ident: OspfIdentity,
+    pub ident: Identity,
     pub hello_interval: u16,
     pub wait_interval: u16,
     pub priority: u8,
@@ -34,6 +33,7 @@ pub struct OspfLink {
     pub flags: OspfLinkFlags,
     pub timer: LinkTimer,
     pub state_change: usize,
+    pub db_desc_in: usize,
     pub full_nbr_count: usize,
 }
 
@@ -43,15 +43,6 @@ pub struct LinkTimer {
     pub wait: Option<Timer>,
     pub ls_ack: Option<Timer>,
     pub ls_upd_event: Option<Timer>,
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct OspfIdentity {
-    pub prefix: Ipv4Net,
-    pub router_id: Ipv4Addr,
-    pub d_router: Ipv4Addr,
-    pub bd_router: Ipv4Addr,
-    pub priority: u8,
 }
 
 impl OspfLink {
@@ -66,7 +57,7 @@ impl OspfLink {
             state: IfsmState::Down,
             ostate: IfsmState::Down,
             sock,
-            ident: OspfIdentity::new(),
+            ident: Identity::new(),
             hello_interval: 10,
             wait_interval: 40,
             priority: 1,
@@ -76,6 +67,7 @@ impl OspfLink {
             flags: 0.into(),
             timer: LinkTimer::default(),
             state_change: 0,
+            db_desc_in: 0,
             full_nbr_count: 0,
         }
     }
@@ -103,24 +95,4 @@ pub struct OspfLinkFlags {
     pub resvd1: bool,
     #[bits(6)]
     pub resvd2: usize,
-}
-
-impl OspfIdentity {
-    pub fn new() -> Self {
-        Self {
-            prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
-            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
-            d_router: Ipv4Addr::UNSPECIFIED,
-            bd_router: Ipv4Addr::UNSPECIFIED,
-            priority: 1,
-        }
-    }
-
-    pub fn is_declared_dr(&self) -> bool {
-        self.prefix.addr() == self.d_router
-    }
-
-    pub fn is_declared_bdr(&self) -> bool {
-        self.prefix.addr() == self.bd_router
-    }
 }

@@ -4,12 +4,10 @@ use std::net::Ipv4Addr;
 use bytes::BytesMut;
 
 use crate::ospf::socket::{ospf_join_alldrouters, ospf_join_if, ospf_leave_alldrouters};
-use crate::ospf::Message;
 
-use super::link::{OspfIdentity, OspfLink};
-use super::nfsm::{NfsmEvent, NfsmState};
 use super::packet::ospf_hello_packet;
 use super::task::{Timer, TimerType};
+use super::{Identity, Message, NfsmEvent, NfsmState, OspfLink};
 
 // Interface state machine.
 #[derive(Debug, Default, PartialEq, PartialOrd, Eq, Clone, Copy)]
@@ -198,8 +196,8 @@ pub fn ospf_ifsm_interface_down(oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
-fn ospf_dr_election_init(oi: &OspfLink) -> Vec<OspfIdentity> {
-    let mut v: Vec<OspfIdentity> = oi
+fn ospf_dr_election_init(oi: &OspfLink) -> Vec<Identity> {
+    let mut v: Vec<Identity> = oi
         .nbrs
         .values()
         .filter(|nbr| nbr.state >= NfsmState::TwoWay)
@@ -214,7 +212,7 @@ fn ospf_dr_election_init(oi: &OspfLink) -> Vec<OspfIdentity> {
     v
 }
 
-pub fn ospf_dr_election_tiebreak(v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
+pub fn ospf_dr_election_tiebreak(v: Vec<Identity>) -> Option<Identity> {
     v.into_iter().max_by(|a, b| {
         a.priority
             .cmp(&b.priority)
@@ -224,9 +222,9 @@ pub fn ospf_dr_election_tiebreak(v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
 
 pub fn ospf_dr_election_dr(
     oi: &mut OspfLink,
-    bdr: Option<OspfIdentity>,
-    v: Vec<OspfIdentity>,
-) -> Option<OspfIdentity> {
+    bdr: Option<Identity>,
+    v: Vec<Identity>,
+) -> Option<Identity> {
     let dr_candidates: Vec<_> = v
         .clone()
         .into_iter()
@@ -247,7 +245,7 @@ pub fn ospf_dr_election_dr(
     dr
 }
 
-pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
+pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<Identity>) -> Option<Identity> {
     let non_dr_candidates: Vec<_> = v
         .into_iter()
         .filter(|ident| !ident.is_declared_dr())

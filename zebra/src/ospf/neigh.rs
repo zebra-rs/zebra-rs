@@ -2,22 +2,20 @@ use std::fmt::Display;
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
-use ospf_packet::HelloOption;
+use ospf_packet::OspfOptions;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::link::{OspfIdentity, OspfLink};
-use super::nfsm::NfsmState;
 use super::task::Timer;
-use super::Message;
+use super::{Identity, Message, NfsmState, OspfLink};
 
 pub struct OspfNeighbor {
     pub ifindex: u32,
-    pub ident: OspfIdentity,
+    pub ident: Identity,
     pub state: NfsmState,
     pub ostate: NfsmState,
     pub timer: NeighborTimer,
     pub v_inactivity: u64,
-    pub options: HelloOption,
+    pub options: OspfOptions,
     pub flag_init: bool,
     pub tx: UnboundedSender<Message>,
     pub state_change: usize,
@@ -45,7 +43,7 @@ impl OspfNeighbor {
             ostate: NfsmState::Down,
             timer: NeighborTimer::default(),
             v_inactivity: dead_interval,
-            ident: OspfIdentity::new(),
+            ident: Identity::new(),
             options: 0.into(),
             flag_init: true,
             tx,
