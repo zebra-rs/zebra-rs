@@ -20,6 +20,7 @@ pub struct OspfNeighbor {
     pub options: HelloOption,
     pub flag_init: bool,
     pub tx: UnboundedSender<Message>,
+    pub state_change: usize,
 }
 
 #[derive(Debug, Default)]
@@ -48,6 +49,7 @@ impl OspfNeighbor {
             options: 0.into(),
             flag_init: true,
             tx,
+            state_change: 0,
         };
         nbr.ident.prefix = prefix;
         nbr.ident.router_id = *router_id;

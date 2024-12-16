@@ -33,6 +33,8 @@ pub struct OspfLink {
     pub nbrs: BTreeMap<Ipv4Addr, OspfNeighbor>,
     pub flags: OspfLinkFlags,
     pub timer: LinkTimer,
+    pub state_change: usize,
+    pub full_nbr_count: usize,
 }
 
 #[derive(Default)]
@@ -43,7 +45,7 @@ pub struct LinkTimer {
     pub ls_upd_event: Option<Timer>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct OspfIdentity {
     pub prefix: Ipv4Net,
     pub router_id: Ipv4Addr,
@@ -73,11 +75,17 @@ impl OspfLink {
             nbrs: BTreeMap::new(),
             flags: 0.into(),
             timer: LinkTimer::default(),
+            state_change: 0,
+            full_nbr_count: 0,
         }
     }
 
     pub fn is_passive(&self) -> bool {
         false
+    }
+
+    pub fn is_multicast_if(&self) -> bool {
+        true
     }
 
     pub fn is_dr_election_ready(&self) -> bool {
