@@ -1,21 +1,14 @@
-use bytes::BytesMut;
-use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 
+use bytes::BytesMut;
+use ipnet::Ipv4Net;
 use ospf_packet::{OspfHello, Ospfv2Packet, Ospfv2Payload};
 
-use crate::ospf::{
-    ifsm::{IfsmEvent, IfsmState},
-    neigh::OspfNeighbor,
-    network::write_packet,
-    nfsm::{ospf_nfsm, NfsmEvent},
-    Message,
-};
+use crate::ospf::{network::write_packet, nfsm::ospf_nfsm};
 
 use super::{
     inst::OspfTop,
-    link::{OspfIdentity, OspfLink},
-    nfsm::NfsmState,
+    {IfsmEvent, IfsmState, Message, NfsmEvent, NfsmState, OspfIdentity, OspfLink, OspfNeighbor},
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -40,54 +33,24 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     Some(packet)
 }
 
-fn netmask_to_prefix_length(mask: Ipv4Addr) -> u8 {
-    // Convert the IPv4 subnet mask into a 32-bit integer
-    let mask_bits = u32::from(mask);
-
-    // Count the number of 1s (set bits) in the binary representation of the mask
-    mask_bits.count_ones() as u8
+fn netmask_to_plen(mask: Ipv4Addr) -> u8 {
+    u32::from(mask).count_ones() as u8
 }
 
 fn ospf_hello_twoway_check(router_id: &Ipv4Addr, nbr: &OspfNeighbor, hello: &OspfHello) -> bool {
-    for neighbor in hello.neighbors.iter() {
-        println!("twoway_check {} <-> {}", router_id, neighbor);
-        if router_id == neighbor {
-            return true;
-        }
-    }
-    false
+    hello.neighbors.iter().any(|neighbor| router_id == neighbor)
 }
 
 fn ospf_hello_is_nbr_changed(nbr: &OspfNeighbor, prev: &OspfIdentity) -> bool {
     let current = nbr.ident;
     let nbr_addr = nbr.ident.prefix.addr();
 
-    // Non DR -> DR.
-    if nbr_addr != prev.d_router && nbr_addr == current.d_router {
-        return true;
-    }
-
-    // DR -> Non DR.
-    if nbr_addr == prev.d_router && nbr_addr != current.d_router {
-        return true;
-    }
-
-    // Non Backup -> Backup.
-    if nbr_addr != prev.bd_router && nbr_addr == current.bd_router {
-        return true;
-    }
-
-    // Backup -> Non Backup.
-    if nbr_addr == prev.bd_router && nbr_addr != current.bd_router {
-        return true;
-    }
-
-    // Priority has been changed.
-    if prev.priority != current.priority {
-        return true;
-    }
-
-    false
+    // Check if any of these conditions indicate a change.
+    nbr_addr != prev.d_router && nbr_addr == current.d_router || // Non DR -> DR
+        nbr_addr == prev.d_router && nbr_addr != current.d_router || // DR -> Non DR
+        nbr_addr != prev.bd_router && nbr_addr == current.bd_router || // Non Backup -> Backup
+        nbr_addr == prev.bd_router && nbr_addr != current.bd_router || // Backup -> Non Backup
+        prev.priority != current.priority // Priority changed
 }
 
 pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
@@ -104,7 +67,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     };
 
     // Non PtoP interface's network mask check.
-    let prefixlen = netmask_to_prefix_length(hello.network_mask);
+    let prefixlen = netmask_to_plen(hello.network_mask);
     let prefix = Ipv4Net::new(*src, prefixlen).unwrap();
 
     if addr.prefix.prefix_len() != prefixlen {
