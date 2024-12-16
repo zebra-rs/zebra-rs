@@ -186,8 +186,6 @@ pub fn ospf_ifsm_interface_down(oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
-pub fn ospf_bdr_election() {}
-
 fn ospf_dr_election_init(oi: &OspfLink) -> Vec<OspfIdentity> {
     let mut v: Vec<OspfIdentity> = oi
         .nbrs
@@ -204,11 +202,30 @@ fn ospf_dr_election_init(oi: &OspfLink) -> Vec<OspfIdentity> {
     v
 }
 
-pub fn ospf_dr_election_bdr(oi: &mut OspfLink, mut v: Vec<OspfIdentity>) {
-    let mut v: Vec<_> = v
+pub fn ospf_dr_election_tiebreak(v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
+    v.into_iter().max_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then(a.router_id.cmp(&b.router_id))
+    })
+}
+
+pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
+    let non_dr_candidates: Vec<_> = v
         .into_iter()
-        .filter(|ident| ident.d_router.is_unspecified())
+        .filter(|ident| !ident.is_declared_dr())
         .collect();
+    let bdr_candidates: Vec<_> = non_dr_candidates
+        .iter()
+        .filter(|ident| ident.is_declared_bdr())
+        .cloned()
+        .collect();
+
+    if bdr_candidates.is_empty() {
+        ospf_dr_election_tiebreak(non_dr_candidates)
+    } else {
+        ospf_dr_election_tiebreak(bdr_candidates)
+    }
 }
 
 pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
