@@ -210,6 +210,26 @@ pub fn ospf_dr_election_tiebreak(v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
     })
 }
 
+pub fn ospf_dr_election_dr(oi: &mut OspfLink, bdr: Option<OspfIdentity>, v: Vec<OspfIdentity>) {
+    let dr_candidates: Vec<_> = v
+        .clone()
+        .into_iter()
+        .filter(|ident| ident.is_declared_dr())
+        .collect();
+
+    let mut dr = ospf_dr_election_tiebreak(v);
+
+    if dr.is_none() {
+        dr = bdr;
+    }
+
+    if let Some(ident) = dr {
+        oi.ident.d_router = ident.prefix.addr();
+    } else {
+        oi.ident.d_router = Ipv4Addr::UNSPECIFIED;
+    }
+}
+
 pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
     let non_dr_candidates: Vec<_> = v
         .into_iter()
@@ -221,11 +241,19 @@ pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<OspfIdentity>) -> Option<O
         .cloned()
         .collect();
 
-    if bdr_candidates.is_empty() {
+    let bdr = if bdr_candidates.is_empty() {
         ospf_dr_election_tiebreak(non_dr_candidates)
     } else {
         ospf_dr_election_tiebreak(bdr_candidates)
+    };
+
+    if let Some(ident) = bdr {
+        oi.ident.bd_router = ident.prefix.addr();
+    } else {
+        oi.ident.bd_router = Ipv4Addr::UNSPECIFIED;
     }
+
+    bdr
 }
 
 pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
@@ -240,6 +268,8 @@ pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
         println!("{:?}", i);
     }
     let bdr = ospf_dr_election_bdr(oi, v.clone());
+    ospf_dr_election_dr(oi, bdr, v);
+    // let new_state = ospf_ifsm_state(oi);
 
     None
 }
