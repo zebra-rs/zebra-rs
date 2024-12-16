@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::rib::Link;
 
 use super::{addr::OspfAddr, task::Timer};
-use super::{Identity, IfsmState, Message, OspfNeighbor};
+use super::{Identity, IfsmState, Message, Neighbor};
 
 pub struct OspfLink {
     pub index: u32,
@@ -29,7 +29,7 @@ pub struct OspfLink {
     pub priority: u8,
     pub dead_interval: u32,
     pub tx: UnboundedSender<Message>,
-    pub nbrs: BTreeMap<Ipv4Addr, OspfNeighbor>,
+    pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
     pub flags: OspfLinkFlags,
     pub timer: LinkTimer,
     pub state_change: usize,

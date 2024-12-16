@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::task::Timer;
 use super::{Identity, Message, NfsmState, OspfLink};
 
-pub struct OspfNeighbor {
+pub struct Neighbor {
     pub ifindex: u32,
     pub ident: Identity,
     pub state: NfsmState,
@@ -29,7 +29,7 @@ pub struct NeighborTimer {
     pub ls_upd: Option<Timer>,
 }
 
-impl OspfNeighbor {
+impl Neighbor {
     pub fn new(
         tx: UnboundedSender<Message>,
         ifindex: u32,
@@ -64,7 +64,7 @@ impl OspfNeighbor {
     }
 }
 
-impl Display for OspfNeighbor {
+impl Display for Neighbor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
