@@ -1,6 +1,7 @@
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
+use ipnet::Ipv4Net;
 use ospf_packet::HelloOption;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -30,7 +31,7 @@ impl OspfNeighbor {
     pub fn new(
         tx: UnboundedSender<Message>,
         ifindex: u32,
-        addr: &Ipv4Addr,
+        prefix: Ipv4Net,
         router_id: &Ipv4Addr,
         dead_interval: u64,
     ) -> Self {
@@ -45,7 +46,7 @@ impl OspfNeighbor {
             flag_init: true,
             tx,
         };
-        nbr.ident.addr = *addr;
+        nbr.ident.prefix = prefix;
         nbr.ident.router_id = *router_id;
         nbr
     }
