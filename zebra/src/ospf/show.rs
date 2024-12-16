@@ -19,7 +19,12 @@ impl Ospf {
 
 fn render_link(out: &mut String, oi: &OspfLink) {
     writeln!(out, "{}", oi.name).unwrap();
-    writeln!(out, " {} {}", oi.ident.prefix, oi.state).unwrap();
+    writeln!(
+        out,
+        " {} {} {} DR: {} BDR: {}",
+        oi.ident.prefix, oi.state, oi.ident.priority, oi.ident.bd_router, oi.ident.bd_router
+    )
+    .unwrap();
 }
 
 fn show_ospf_interface(ospf: &Ospf, args: Args, _json: bool) -> String {
@@ -40,8 +45,13 @@ fn show_ospf(ospf: &Ospf, args: Args, _json: bool) -> String {
 fn render_nbr(out: &mut String, router_id: &Ipv4Addr, nbr: &OspfNeighbor) {
     writeln!(
         out,
-        "{} {} {} {}",
-        router_id, nbr.ident.prefix, nbr.ident.priority, nbr.state
+        "{} {} {} {} DR: {} BDR: {}",
+        router_id,
+        nbr.ident.prefix,
+        nbr.ident.priority,
+        nbr.state,
+        nbr.ident.d_router,
+        nbr.ident.bd_router
     )
     .unwrap();
 }

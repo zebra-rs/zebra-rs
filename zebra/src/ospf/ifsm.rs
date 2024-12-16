@@ -204,6 +204,13 @@ fn ospf_dr_election_init(oi: &OspfLink) -> Vec<OspfIdentity> {
     v
 }
 
+pub fn ospf_dr_election_bdr(oi: &mut OspfLink, mut v: Vec<OspfIdentity>) {
+    let mut v: Vec<_> = v
+        .into_iter()
+        .filter(|ident| ident.d_router.is_unspecified())
+        .collect();
+}
+
 pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
     println!("== DR election! ==");
 
@@ -215,6 +222,7 @@ pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
     for i in v.iter() {
         println!("{:?}", i);
     }
+    let bdr = ospf_dr_election_bdr(oi, v.clone());
 
     None
 }
@@ -238,17 +246,29 @@ pub fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
     use IfsmState::*;
     match oi.state {
         Down => {
-            oi.hello_timer = None;
+            oi.timer.hello = None;
+            oi.timer.wait = None;
+            oi.timer.ls_ack = None;
+            oi.timer.ls_upd_event = None;
         }
-        DROther => {
-            oi.hello_timer.get_or_insert(ospf_hello_timer(oi));
+        Loopback => {
+            oi.timer.hello = None;
+            oi.timer.wait = None;
+            oi.timer.ls_ack = None;
+            oi.timer.ls_upd_event = None;
         }
         Waiting => {
-            oi.hello_timer.get_or_insert(ospf_hello_timer(oi));
-            oi.wait_timer.get_or_insert(ospf_wait_timer(oi));
+            oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
+            oi.timer.wait.get_or_insert(ospf_wait_timer(oi));
+            oi.timer.ls_ack = None;
         }
-        _ => {
-            //
+        PointToPoint => {
+            oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
+            oi.timer.wait = None;
+        }
+        DROther | Backup | DR => {
+            oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
+            oi.timer.wait = None;
         }
     }
 }
