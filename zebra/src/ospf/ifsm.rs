@@ -3,16 +3,16 @@ use std::net::Ipv4Addr;
 
 use bytes::BytesMut;
 
-use crate::ospf::socket::ospf_join_if;
+use crate::ospf::socket::{ospf_join_alldrouters, ospf_join_if, ospf_leave_alldrouters};
 use crate::ospf::Message;
 
 use super::link::{OspfIdentity, OspfLink};
-use super::nfsm::NfsmState;
+use super::nfsm::{NfsmEvent, NfsmState};
 use super::packet::ospf_hello_packet;
 use super::task::{Timer, TimerType};
 
 // Interface state machine.
-#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum IfsmState {
     #[default]
     Down,
@@ -124,6 +124,17 @@ impl IfsmState {
     }
 }
 
+fn ospf_ifsm_state(oi: &OspfLink) -> IfsmState {
+    use IfsmState::*;
+    if (oi.ident.is_declared_dr()) {
+        DR
+    } else if (oi.ident.is_declared_bdr()) {
+        Backup
+    } else {
+        DROther
+    }
+}
+
 pub fn ospf_ifsm_ignore(oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
@@ -210,7 +221,11 @@ pub fn ospf_dr_election_tiebreak(v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
     })
 }
 
-pub fn ospf_dr_election_dr(oi: &mut OspfLink, bdr: Option<OspfIdentity>, v: Vec<OspfIdentity>) {
+pub fn ospf_dr_election_dr(
+    oi: &mut OspfLink,
+    bdr: Option<OspfIdentity>,
+    v: Vec<OspfIdentity>,
+) -> Option<OspfIdentity> {
     let dr_candidates: Vec<_> = v
         .clone()
         .into_iter()
@@ -228,6 +243,7 @@ pub fn ospf_dr_election_dr(oi: &mut OspfLink, bdr: Option<OspfIdentity>, v: Vec<
     } else {
         oi.ident.d_router = Ipv4Addr::UNSPECIFIED;
     }
+    dr
 }
 
 pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<OspfIdentity>) -> Option<OspfIdentity> {
@@ -256,6 +272,18 @@ pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<OspfIdentity>) -> Option<O
     bdr
 }
 
+fn ospf_dr_election_dr_change(oi: &mut OspfLink) {
+    for (addr, nbr) in oi.nbrs.iter() {
+        if !nbr.ident.router_id.is_unspecified() {
+            if nbr.state >= NfsmState::TwoWay {
+                oi.tx
+                    .send(Message::Nfsm(oi.index, *addr, NfsmEvent::AdjOk))
+                    .unwrap();
+            }
+        }
+    }
+}
+
 pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
     println!("== DR election! ==");
 
@@ -268,10 +296,44 @@ pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
         println!("{:?}", i);
     }
     let bdr = ospf_dr_election_bdr(oi, v.clone());
-    ospf_dr_election_dr(oi, bdr, v);
-    // let new_state = ospf_ifsm_state(oi);
+    ospf_dr_election_dr(oi, bdr, v.clone());
+    let mut new_state = ospf_ifsm_state(oi);
 
-    None
+    if new_state != prev_state
+        && !(new_state == IfsmState::DROther && prev_state < IfsmState::DROther)
+    {
+        let bdr = ospf_dr_election_bdr(oi, v.clone());
+        let dr = ospf_dr_election_dr(oi, bdr, v);
+
+        if !oi.ident.d_router.is_unspecified() {
+            if bdr == dr {
+                oi.ident.bd_router = Ipv4Addr::UNSPECIFIED;
+            }
+        }
+        new_state = ospf_ifsm_state(oi);
+    }
+
+    if prev_dr != oi.ident.d_router || prev_bdr != oi.ident.bd_router {
+        ospf_dr_election_dr_change(oi);
+    }
+
+    if prev_dr != oi.ident.d_router {
+        // ospf_router_lsa_refresh_by_interface (oi);
+    }
+
+    if oi.is_multicast_if() {
+        if ((prev_state != IfsmState::DR && prev_state != IfsmState::Backup)
+            && (new_state == IfsmState::DR || new_state == IfsmState::Backup))
+        {
+            ospf_join_alldrouters(&oi.sock, oi.index);
+        } else if (prev_state == IfsmState::DR || prev_state == IfsmState::Backup)
+            && (new_state != IfsmState::DR && new_state != IfsmState::Backup)
+        {
+            ospf_leave_alldrouters(&oi.sock, oi.index);
+        }
+    }
+
+    Some(new_state)
 }
 
 pub fn ospf_ifsm_wait_timer(oi: &mut OspfLink) -> Option<IfsmState> {
@@ -320,6 +382,19 @@ pub fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
     }
 }
 
+fn ospf_ifsm_change_state(oi: &mut OspfLink, state: IfsmState) {
+    oi.ostate = oi.state;
+    oi.state = state;
+    oi.state_change += 1;
+
+    // if oi.is_nbma_if() {
+    // }
+
+    if oi.ostate != IfsmState::DR && oi.state == IfsmState::DR && oi.full_nbr_count > 0 {
+        //
+    }
+}
+
 pub fn ospf_ifsm(oi: &mut OspfLink, event: IfsmEvent) {
     // Decompose the result of the state function into the transition function
     // and next state.
@@ -335,8 +410,9 @@ pub fn ospf_ifsm(oi: &mut OspfLink, event: IfsmEvent) {
             "IFSM State Transition on {}: {:?} -> {:?}",
             oi.name, oi.state, new_state
         );
-        oi.ostate = oi.state;
-        oi.state = new_state;
+        if new_state != oi.state {
+            ospf_ifsm_change_state(oi, new_state);
+        }
     }
     ospf_ifsm_timer_set(oi);
 }

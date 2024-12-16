@@ -86,7 +86,6 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, buf: &[u8], ifindex: u32) 
             socket::MsgFlags::empty(),
             Some(&sockaddr),
         );
-        println!("{:?}", msg);
         Ok(())
     })
     .await;

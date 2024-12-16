@@ -45,7 +45,7 @@ pub enum NfsmEvent {
     ExchangeDone,
     BadLSReq,
     LoadingDone,
-    AdjOK,
+    AdjOk,
     SeqNumberMismatch,
     OneWayReceived,
     KillNbr,
@@ -67,7 +67,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_ignore, Some(Down)),
                 NfsmEvent::BadLSReq => (ospf_nfsm_ignore, Some(Down)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(Down)),
-                NfsmEvent::AdjOK => (ospf_nfsm_ignore, Some(Down)),
+                NfsmEvent::AdjOk => (ospf_nfsm_ignore, Some(Down)),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_ignore, Some(Down)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_ignore, Some(Down)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -82,7 +82,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_ignore, Some(Attempt)),
                 NfsmEvent::BadLSReq => (ospf_nfsm_ignore, Some(Attempt)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(Attempt)),
-                NfsmEvent::AdjOK => (ospf_nfsm_ignore, Some(Attempt)),
+                NfsmEvent::AdjOk => (ospf_nfsm_ignore, Some(Attempt)),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_ignore, Some(Attempt)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_ignore, Some(Attempt)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -97,7 +97,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_ignore, Some(Init)),
                 NfsmEvent::BadLSReq => (ospf_nfsm_ignore, Some(Init)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(Init)),
-                NfsmEvent::AdjOK => (ospf_nfsm_ignore, Some(Init)),
+                NfsmEvent::AdjOk => (ospf_nfsm_ignore, Some(Init)),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_ignore, Some(Init)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_ignore, Some(Init)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -112,7 +112,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_ignore, Some(TwoWay)),
                 NfsmEvent::BadLSReq => (ospf_nfsm_ignore, Some(TwoWay)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(TwoWay)),
-                NfsmEvent::AdjOK => (ospf_nfsm_adj_ok, None),
+                NfsmEvent::AdjOk => (ospf_nfsm_adj_ok, None),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_ignore, Some(TwoWay)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -127,7 +127,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_ignore, Some(ExStart)),
                 NfsmEvent::BadLSReq => (ospf_nfsm_ignore, Some(ExStart)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(ExStart)),
-                NfsmEvent::AdjOK => (ospf_nfsm_adj_ok, None),
+                NfsmEvent::AdjOk => (ospf_nfsm_adj_ok, None),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_ignore, Some(ExStart)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -142,7 +142,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_exchange_done, None),
                 NfsmEvent::BadLSReq => (ospf_nfsm_bad_ls_req, Some(ExStart)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(ExStart)),
-                NfsmEvent::AdjOK => (ospf_nfsm_adj_ok, None),
+                NfsmEvent::AdjOk => (ospf_nfsm_adj_ok, None),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -157,7 +157,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_ignore, Some(Loading)),
                 NfsmEvent::BadLSReq => (ospf_nfsm_bad_ls_req, Some(ExStart)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(Full)),
-                NfsmEvent::AdjOK => (ospf_nfsm_adj_ok, None),
+                NfsmEvent::AdjOk => (ospf_nfsm_adj_ok, None),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -172,7 +172,7 @@ impl NfsmState {
                 NfsmEvent::ExchangeDone => (ospf_nfsm_ignore, Some(Full)),
                 NfsmEvent::BadLSReq => (ospf_nfsm_bad_ls_req, Some(ExStart)),
                 NfsmEvent::LoadingDone => (ospf_nfsm_ignore, Some(Full)),
-                NfsmEvent::AdjOK => (ospf_nfsm_adj_ok, None),
+                NfsmEvent::AdjOk => (ospf_nfsm_adj_ok, None),
                 NfsmEvent::SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 NfsmEvent::OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
                 NfsmEvent::KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
@@ -255,7 +255,7 @@ pub fn ospf_inactivity_timer(nbr: &OspfNeighbor) -> Timer {
         use NfsmEvent::*;
         let tx = tx.clone();
         async move {
-            tx.send(Message::Nfsm(ifindex, prefix, InactivityTimer))
+            tx.send(Message::Nfsm(ifindex, prefix.addr(), InactivityTimer))
                 .unwrap();
         }
     })
@@ -274,22 +274,7 @@ pub fn ospf_nfsm_hello_received(
 }
 
 pub fn ospf_nfsm_start(_nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_kill_nbr(_nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
-    None
-}
-
-pub fn ospf_nfsm_inactivity_timer(
-    _nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
-    //
-    None
-}
-
-pub fn ospf_nfsm_ll_down(_nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+    println!("XXX ospf_nfsm_start");
     None
 }
 
@@ -316,19 +301,6 @@ pub fn ospf_nfsm_twoway_received(
     Some(next_state)
 }
 
-pub fn ospf_nfsm_oneway_received(
-    nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
-    println!("ospf_nfsm_oneway_received");
-    ospf_nfsm_reset_nbr(nbr);
-    None
-}
-
-pub fn ospf_nfsm_adj_ok(_nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
-    None
-}
-
 pub fn ospf_nfsm_negotiation_done(
     _nbr: &mut OspfNeighbor,
     oident: &OspfIdentity,
@@ -348,12 +320,72 @@ pub fn ospf_nfsm_bad_ls_req(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Op
     None
 }
 
+pub fn ospf_nfsm_adj_ok(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+    let mut adj_ok = false;
+    let mut next_state = nbr.state;
+
+    if nbr.is_pointopoint() {
+        adj_ok = true;
+    }
+
+    if oident.prefix.addr() == oident.d_router || oident.prefix.addr() == oident.bd_router {
+        adj_ok = true;
+    }
+
+    if nbr.ident.prefix.addr() == oident.d_router || nbr.ident.prefix.addr() == oident.bd_router {
+        adj_ok = true;
+    }
+
+    if nbr.state == NfsmState::TwoWay && adj_ok {
+        next_state = NfsmState::ExStart;
+    } else if nbr.state >= NfsmState::ExStart && !adj_ok {
+        next_state = NfsmState::TwoWay;
+
+        ospf_nfsm_reset_nbr(nbr);
+    }
+    Some(next_state)
+}
+
 pub fn ospf_nfsm_seq_number_mismatch(
     nbr: &mut OspfNeighbor,
     oident: &OspfIdentity,
 ) -> Option<NfsmState> {
     ospf_nfsm_reset_nbr(nbr);
     None
+}
+
+pub fn ospf_nfsm_oneway_received(
+    nbr: &mut OspfNeighbor,
+    oident: &OspfIdentity,
+) -> Option<NfsmState> {
+    println!("ospf_nfsm_oneway_received");
+    ospf_nfsm_reset_nbr(nbr);
+    None
+}
+
+pub fn ospf_nfsm_kill_nbr(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+    ospf_nfsm_change_state(nbr, NfsmState::Down);
+
+    None
+}
+
+pub fn ospf_nfsm_inactivity_timer(
+    nbr: &mut OspfNeighbor,
+    oident: &OspfIdentity,
+) -> Option<NfsmState> {
+    ospf_nfsm_kill_nbr(nbr, oident)
+}
+
+pub fn ospf_nfsm_ll_down(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+    ospf_nfsm_kill_nbr(nbr, oident)
+}
+
+fn ospf_nfsm_change_state(nbr: &mut OspfNeighbor, state: NfsmState) {
+    nbr.ostate = nbr.state;
+    nbr.state = state;
+    nbr.state_change += 1;
+
+    //
 }
 
 pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent, oident: &OspfIdentity) {
@@ -371,9 +403,9 @@ pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent, oident: &OspfIdentity
             "NFSM State Transition on {}: {:?} -> {:?}",
             nbr.ident.router_id, nbr.state, new_state
         );
-        nbr.ostate = nbr.state;
-        nbr.state = new_state;
+        if new_state != nbr.state {
+            ospf_nfsm_change_state(nbr, new_state);
+        }
     }
-
     ospf_nfsm_timer_set(nbr);
 }

@@ -243,7 +243,7 @@ pub fn serve(mut ospf: Ospf) {
 
 pub enum Message {
     Ifsm(u32, IfsmEvent),
-    Nfsm(u32, Ipv4Net, NfsmEvent),
+    Nfsm(u32, Ipv4Addr, NfsmEvent),
     Recv(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
     Send(u32),
 }

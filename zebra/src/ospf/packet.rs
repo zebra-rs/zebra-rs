@@ -117,7 +117,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     }
 
     let mut init = false;
-    let nbr = oi.nbrs.entry(packet.router_id).or_insert_with(|| {
+    let nbr = oi.nbrs.entry(*src).or_insert_with(|| {
         init = true;
         OspfNeighbor::new(
             oi.tx.clone(),
@@ -139,10 +139,10 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     nbr.ident.bd_router = hello.bd_router;
 
     if !ospf_hello_twoway_check(&top.router_id, &nbr, hello) {
-        println!("XX Oneway");
+        println!("opsf_nfsm:Oneway");
         ospf_nfsm(nbr, NfsmEvent::OneWayReceived, &oi.ident);
     } else {
-        println!("XX Twoway");
+        println!("Twoway");
         ospf_nfsm(nbr, NfsmEvent::TwoWayReceived, &oi.ident);
         nbr.options = (nbr.options.into_bits() | hello.options.into_bits()).into();
 
