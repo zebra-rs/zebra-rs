@@ -1,11 +1,17 @@
 pub mod inst;
-pub use inst::{Message, Ospf, ShowCallback};
+pub use inst::{Message, Ospf, OspfTop, ShowCallback};
 
 pub mod link;
 pub use link::{OspfIdentity, OspfLink};
 
 pub mod neigh;
 pub use neigh::OspfNeighbor;
+
+pub mod ifsm;
+pub use ifsm::{IfsmEvent, IfsmState};
+
+pub mod nfsm;
+pub use nfsm::{NfsmEvent, NfsmState};
 
 pub mod task;
 pub use task::{Timer, TimerType};
@@ -21,9 +27,5 @@ pub mod config;
 pub mod network;
 
 pub mod socket;
-
-pub mod ifsm;
-
-pub mod nfsm;
 
 pub mod packet;
