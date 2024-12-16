@@ -285,7 +285,7 @@ fn ospf_dr_election_dr_change(oi: &mut OspfLink) {
     }
 }
 
-pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
+fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
     println!("== DR election! ==");
 
     let prev_dr = oi.ident.d_router;
@@ -337,22 +337,22 @@ pub fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
     Some(new_state)
 }
 
-pub fn ospf_ifsm_wait_timer(oi: &mut OspfLink) -> Option<IfsmState> {
+fn ospf_ifsm_wait_timer(oi: &mut OspfLink) -> Option<IfsmState> {
     println!("ospf_ifsm_wait_timer");
     ospf_dr_election(oi)
 }
 
-pub fn ospf_ifsm_backup_seen(oi: &mut OspfLink) -> Option<IfsmState> {
+fn ospf_ifsm_backup_seen(oi: &mut OspfLink) -> Option<IfsmState> {
     println!("ospf_ifsm_backup_seen");
     ospf_dr_election(oi)
 }
 
-pub fn ospf_ifsm_neighbor_change(oi: &mut OspfLink) -> Option<IfsmState> {
+fn ospf_ifsm_neighbor_change(oi: &mut OspfLink) -> Option<IfsmState> {
     println!("ospf_ifsm_neighbor_change");
     ospf_dr_election(oi)
 }
 
-pub fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
+fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
     use IfsmState::*;
     match oi.state {
         Down => {
@@ -388,8 +388,9 @@ fn ospf_ifsm_change_state(oi: &mut OspfLink, state: IfsmState) {
     oi.state = state;
     oi.state_change += 1;
 
-    // if oi.is_nbma_if() {
-    // }
+    if oi.is_nbma_if() {
+        //
+    }
 
     if oi.ostate != IfsmState::DR && oi.state == IfsmState::DR && oi.full_nbr_count > 0 {
         //

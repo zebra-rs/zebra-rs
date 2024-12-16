@@ -88,6 +88,10 @@ impl OspfLink {
         true
     }
 
+    pub fn is_nbma_if(&self) -> bool {
+        false
+    }
+
     pub fn is_dr_election_ready(&self) -> bool {
         self.flags.hello_sent()
     }
