@@ -183,7 +183,7 @@ impl NfsmState {
     }
 }
 
-pub fn ospf_nfsm_reset_nbr(nbr: &OspfNeighbor) {
+pub fn ospf_nfsm_reset_nbr(nbr: &mut OspfNeighbor) {
     // /* Clear Database Summary list. */
     // if (!ospf_db_summary_isempty (nbr))
     //   ospf_db_summary_clear (nbr);
@@ -199,15 +199,47 @@ pub fn ospf_nfsm_reset_nbr(nbr: &OspfNeighbor) {
     // /* Cleanup from the DD pending list.  */
     // ospf_nbr_delete_dd_pending (nbr);
 
-    // /* Cancel thread. */
-    // OSPF_NFSM_TIMER_OFF (nbr->t_dd_inactivity);
-    // OSPF_NFSM_TIMER_OFF (nbr->t_db_desc);
-    // OSPF_NFSM_TIMER_OFF (nbr->t_ls_req);
-    // OSPF_NFSM_TIMER_OFF (nbr->t_ls_upd);
+    nbr.timer.inactivity = None;
+    nbr.timer.db_desc = None;
+    nbr.timer.db_desc_free = None;
+    nbr.timer.ls_upd = None;
 
     // for (i = 0; i < OSPF_NFSM_EVENT_MAX; i++)
     //   OSPF_NFSM_TIMER_OFF (nbr->t_events [i]);
     // }
+}
+
+pub fn ospf_nfsm_timer_set(nbr: &mut OspfNeighbor) {
+    use NfsmState::*;
+    match nbr.state {
+        Down | Attempt | Init | TwoWay => {
+            nbr.timer.inactivity = None;
+            nbr.timer.db_desc = None;
+            nbr.timer.db_desc_free = None;
+            nbr.timer.ls_upd = None;
+        }
+        ExStart => {
+            //     OSPF_NFSM_TIMER_ON (nbr->t_dd_inactivity,
+            //                         ospf_dd_inactivity_timer, nbr->v_dd_inactivity);
+            //     OSPF_NFSM_TIMER_ON (nbr->t_db_desc, ospf_db_desc_timer, nbr->v_db_desc);
+            nbr.timer.db_desc_free = None;
+            nbr.timer.ls_upd = None;
+        }
+        Exchange => {
+            //     if (!IS_DD_FLAGS_SET (&nbr->dd, FLAG_MS))
+            //       OSPF_NFSM_TIMER_OFF (nbr->t_db_desc);
+            nbr.timer.db_desc_free = None;
+        }
+        Loading => {
+            nbr.timer.db_desc = None;
+            nbr.timer.db_desc_free = None;
+        }
+        Full => {
+            nbr.timer.inactivity = None;
+            nbr.timer.db_desc = None;
+            nbr.timer.ls_upd = None;
+        }
+    }
 }
 
 pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
@@ -342,4 +374,6 @@ pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent, oident: &OspfIdentity
         nbr.ostate = nbr.state;
         nbr.state = new_state;
     }
+
+    ospf_nfsm_timer_set(nbr);
 }
