@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use super::{IfsmEvent, Message, OspfIdentity, OspfNeighbor, Timer, TimerType};
+use super::{Identity, IfsmEvent, Message, OspfNeighbor, Timer, TimerType};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -48,7 +48,7 @@ pub enum NfsmEvent {
     LLDown,
 }
 
-pub type NfsmFunc = fn(&mut OspfNeighbor, &OspfIdentity) -> Option<NfsmState>;
+pub type NfsmFunc = fn(&mut OspfNeighbor, &Identity) -> Option<NfsmState>;
 
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent) -> (NfsmFunc, Option<Self>) {
@@ -239,12 +239,12 @@ pub fn ospf_nfsm_timer_set(nbr: &mut OspfNeighbor) {
 }
 
 impl OspfNeighbor {
-    pub fn nfsm_ignore(&mut self, oident: &OspfIdentity) -> Option<NfsmState> {
+    pub fn nfsm_ignore(&mut self, oident: &Identity) -> Option<NfsmState> {
         None
     }
 }
 
-pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+pub fn ospf_nfsm_ignore(_on: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     println!("ospf_nfsm_ignore is called");
     None
 }
@@ -263,10 +263,7 @@ pub fn ospf_inactivity_timer(nbr: &OspfNeighbor) -> Timer {
     })
 }
 
-pub fn ospf_nfsm_hello_received(
-    nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
+pub fn ospf_nfsm_hello_received(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     println!("ospf_nfsm_hello_received");
 
     // Start or Restart Inactivity Timer.
@@ -275,15 +272,12 @@ pub fn ospf_nfsm_hello_received(
     None
 }
 
-pub fn ospf_nfsm_start(_nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+pub fn ospf_nfsm_start(_nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     println!("XXX ospf_nfsm_start");
     None
 }
 
-pub fn ospf_nfsm_twoway_received(
-    nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
+pub fn ospf_nfsm_twoway_received(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     println!("XXX ospf_nfsm_twoway_received");
     let mut next_state = NfsmState::TwoWay;
 
@@ -303,26 +297,20 @@ pub fn ospf_nfsm_twoway_received(
     Some(next_state)
 }
 
-pub fn ospf_nfsm_negotiation_done(
-    _nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
+pub fn ospf_nfsm_negotiation_done(_nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_exchange_done(
-    _nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
+pub fn ospf_nfsm_exchange_done(_nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_bad_ls_req(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+pub fn ospf_nfsm_bad_ls_req(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     ospf_nfsm_reset_nbr(nbr);
     None
 }
 
-pub fn ospf_nfsm_adj_ok(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+pub fn ospf_nfsm_adj_ok(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     let mut adj_ok = false;
     let mut next_state = nbr.state;
 
@@ -350,35 +338,29 @@ pub fn ospf_nfsm_adj_ok(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option
 
 pub fn ospf_nfsm_seq_number_mismatch(
     nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
+    oident: &Identity,
 ) -> Option<NfsmState> {
     ospf_nfsm_reset_nbr(nbr);
     None
 }
 
-pub fn ospf_nfsm_oneway_received(
-    nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
+pub fn ospf_nfsm_oneway_received(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     println!("ospf_nfsm_oneway_received");
     ospf_nfsm_reset_nbr(nbr);
     None
 }
 
-pub fn ospf_nfsm_kill_nbr(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+pub fn ospf_nfsm_kill_nbr(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     ospf_nfsm_change_state(nbr, NfsmState::Down);
 
     None
 }
 
-pub fn ospf_nfsm_inactivity_timer(
-    nbr: &mut OspfNeighbor,
-    oident: &OspfIdentity,
-) -> Option<NfsmState> {
+pub fn ospf_nfsm_inactivity_timer(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     ospf_nfsm_kill_nbr(nbr, oident)
 }
 
-pub fn ospf_nfsm_ll_down(nbr: &mut OspfNeighbor, oident: &OspfIdentity) -> Option<NfsmState> {
+pub fn ospf_nfsm_ll_down(nbr: &mut OspfNeighbor, oident: &Identity) -> Option<NfsmState> {
     ospf_nfsm_kill_nbr(nbr, oident)
 }
 
@@ -404,7 +386,7 @@ fn ospf_nfsm_change_state(nbr: &mut OspfNeighbor, state: NfsmState) {
     }
 }
 
-pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent, oident: &OspfIdentity) {
+pub fn ospf_nfsm(nbr: &mut OspfNeighbor, event: NfsmEvent, oident: &Identity) {
     // Decompose the result of the state function into the transition function
     // and next state.
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event);

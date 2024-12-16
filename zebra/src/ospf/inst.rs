@@ -4,7 +4,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net};
-use ospf_packet::{OspfPacketType, Ospfv2Packet, OSPF_DATABASE_DESC, OSPF_HELLO};
+use ospf_packet::{
+    OspfPacketType, Ospfv2Packet, OSPF_DATABASE_DESC, OSPF_HELLO, OSPF_LINK_STATE_ACK,
+    OSPF_LINK_STATE_REQUEST, OSPF_LINK_STATE_UPDATE,
+};
 use prefix_trie::PrefixMap;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -12,7 +15,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
-use crate::ospf::packet::{ospf_hello_recv, ospf_hello_send};
+use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send, ospf_ls_req_recv};
 use crate::ospf::socket::ospf_join_if;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -163,7 +166,17 @@ impl Ospf {
                         ospf_hello_recv(&self.top, link, &packet, &src);
                     }
                     OSPF_DATABASE_DESC => {
-                        // println!("DD: {}", packet);
+                        ospf_db_desc_recv(&self.top, link, &packet, &src);
+                    }
+                    OSPF_LINK_STATE_REQUEST => {
+                        println!("LS_REQ: {}", packet);
+                        ospf_ls_req_recv(&self.top, link, &packet, &src);
+                    }
+                    OSPF_LINK_STATE_UPDATE => {
+                        println!("LS_UPD: {}", packet);
+                    }
+                    OSPF_LINK_STATE_ACK => {
+                        println!("LS_ACK: {}", packet);
                     }
                     _ => {
                         //

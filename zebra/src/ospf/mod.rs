@@ -2,7 +2,10 @@ pub mod inst;
 pub use inst::{Message, Ospf, OspfTop, ShowCallback};
 
 pub mod link;
-pub use link::{OspfIdentity, OspfLink};
+pub use link::OspfLink;
+
+pub mod ident;
+pub use ident::Identity;
 
 pub mod neigh;
 pub use neigh::OspfNeighbor;

@@ -8,7 +8,7 @@ use crate::ospf::{network::write_packet, nfsm::ospf_nfsm};
 
 use super::{
     inst::OspfTop,
-    {IfsmEvent, IfsmState, Message, NfsmEvent, NfsmState, OspfIdentity, OspfLink, OspfNeighbor},
+    {Identity, IfsmEvent, IfsmState, Message, NfsmEvent, NfsmState, OspfLink, OspfNeighbor},
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -41,7 +41,7 @@ fn ospf_hello_twoway_check(router_id: &Ipv4Addr, nbr: &OspfNeighbor, hello: &Osp
     hello.neighbors.iter().any(|neighbor| router_id == neighbor)
 }
 
-fn ospf_hello_is_nbr_changed(nbr: &OspfNeighbor, prev: &OspfIdentity) -> bool {
+fn ospf_hello_is_nbr_changed(nbr: &OspfNeighbor, prev: &Identity) -> bool {
     let current = nbr.ident;
     let nbr_addr = nbr.ident.prefix.addr();
 
@@ -145,4 +145,39 @@ pub async fn ospf_hello_send(oi: &mut OspfLink) {
     write_packet(oi.sock.clone(), &buf, oi.index).await;
 
     oi.flags.set_hello_sent(true);
+}
+
+pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
+    use NfsmState::*;
+    println!("DB DESC: {}", packet);
+
+    // Find neighbor.
+    let Some(nbr) = oi.nbrs.get(src) else {
+        return;
+    };
+    println!("NBR: {}", nbr.ident.router_id);
+
+    // MTU check.
+
+    oi.db_desc_in += 1;
+
+    // RFC4222.
+    // nfsm_event(nbr, NfsmEvent::HelloReceived);
+
+    match nbr.state {
+        Down | Attempt => {
+            return;
+        }
+        TwoWay => {
+            // SET_FLAG (nbr.flags, OSPF_NEIGHBOR_DD_INIT);
+            // OSPF_NFSM_EVENT_EXECUTE (nbr, event);
+        }
+        _ => {
+            //
+        }
+    }
+}
+
+pub fn ospf_ls_req_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
+    println!("LS REQ: {}", packet);
 }
