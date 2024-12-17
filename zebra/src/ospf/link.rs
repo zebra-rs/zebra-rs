@@ -35,6 +35,7 @@ pub struct OspfLink {
     pub state_change: usize,
     pub db_desc_in: usize,
     pub full_nbr_count: usize,
+    pub ptx: UnboundedSender<Message>,
 }
 
 #[derive(Default)]
@@ -51,6 +52,7 @@ impl OspfLink {
         link: Link,
         sock: Arc<AsyncFd<Socket>>,
         router_id: Ipv4Addr,
+        ptx: UnboundedSender<Message>,
     ) -> Self {
         Self {
             index: link.index,
@@ -74,6 +76,7 @@ impl OspfLink {
             state_change: 0,
             db_desc_in: 0,
             full_nbr_count: 0,
+            ptx,
         }
     }
 

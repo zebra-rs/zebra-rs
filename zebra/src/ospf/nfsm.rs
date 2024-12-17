@@ -1,6 +1,10 @@
 use std::fmt::Display;
 
-use super::{Identity, IfsmEvent, Message, Neighbor, Timer, TimerType};
+use rand::Rng;
+
+use crate::ospf::packet::ospf_db_desc_send;
+
+use super::{Identity, IfsmEvent, Message, Neighbor, OspfLink, Timer, TimerType};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -348,7 +352,7 @@ pub fn ospf_nfsm_oneway_received(nbr: &mut Neighbor, oident: &Identity) -> Optio
 }
 
 pub fn ospf_nfsm_kill_nbr(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
-    ospf_nfsm_change_state(nbr, NfsmState::Down);
+    ospf_nfsm_change_state(nbr, NfsmState::Down, oident);
 
     None
 }
@@ -361,7 +365,9 @@ pub fn ospf_nfsm_ll_down(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmSt
     ospf_nfsm_kill_nbr(nbr, oident)
 }
 
-fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState) {
+fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identity) {
+    use NfsmState::*;
+
     nbr.ostate = nbr.state;
     nbr.state = state;
     nbr.state_change += 1;
@@ -370,16 +376,37 @@ fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState) {
         nbr.options = 0.into();
     }
 
-    if nbr.ostate < NfsmState::TwoWay && nbr.state >= NfsmState::TwoWay {
+    if nbr.ostate < TwoWay && nbr.state >= TwoWay {
         nbr.tx
             .send(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange))
             .unwrap();
-    } else if nbr.ostate >= NfsmState::TwoWay && nbr.state < NfsmState::TwoWay {
+    } else if nbr.ostate >= TwoWay && nbr.state < TwoWay {
         nbr.tx
             .send(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange))
             .unwrap();
 
         // ospf_nexthop_nbr_down(nbr);
+    }
+
+    if nbr.state == ExStart {
+        if !(nbr.ostate > TwoWay && nbr.ostate < Full) {
+            if nbr.flags.dd_init() {
+                // oi.dd_count_in += 1;
+            } else {
+                // oi.dd_count_out += 1;
+            }
+        }
+        if nbr.dd.seqnum == 0 {
+            let mut rng = rand::thread_rng();
+            nbr.dd.seqnum = rng.gen();
+        } else {
+            nbr.dd.seqnum += 1;
+        }
+        nbr.dd.flags.set_master(true);
+        nbr.dd.flags.set_more(true);
+        nbr.dd.flags.set_init(true);
+
+        ospf_db_desc_send(nbr, oident);
     }
 }
 
@@ -399,7 +426,7 @@ pub fn ospf_nfsm(nbr: &mut Neighbor, event: NfsmEvent, oident: &Identity) {
             nbr.ident.router_id, nbr.state, new_state
         );
         if new_state != nbr.state {
-            ospf_nfsm_change_state(nbr, new_state);
+            ospf_nfsm_change_state(nbr, new_state, oident);
         }
     }
     ospf_nfsm_timer_set(nbr);

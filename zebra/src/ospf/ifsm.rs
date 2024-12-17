@@ -5,7 +5,7 @@ use bytes::BytesMut;
 
 use crate::ospf::socket::{ospf_join_alldrouters, ospf_join_if, ospf_leave_alldrouters};
 
-use super::packet::ospf_hello_packet;
+use super::packet::{ospf_hello_packet, ospf_hello_send};
 use super::task::{Timer, TimerType};
 use super::{Identity, Message, NfsmEvent, NfsmState, OspfLink};
 
@@ -151,7 +151,7 @@ pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
         move || {
             let tx = tx.clone();
             async move {
-                tx.send(Message::Send(index));
+                tx.send(Message::HelloTimer(index));
             }
         },
     )
