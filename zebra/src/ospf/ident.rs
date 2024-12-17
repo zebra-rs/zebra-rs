@@ -13,10 +13,10 @@ pub struct Identity {
 }
 
 impl Identity {
-    pub fn new() -> Self {
+    pub fn new(router_id: Ipv4Addr) -> Self {
         Self {
             prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
-            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
+            router_id,
             d_router: Ipv4Addr::UNSPECIFIED,
             bd_router: Ipv4Addr::UNSPECIFIED,
             priority: 1,

@@ -46,7 +46,12 @@ pub struct LinkTimer {
 }
 
 impl OspfLink {
-    pub fn from(tx: UnboundedSender<Message>, link: Link, sock: Arc<AsyncFd<Socket>>) -> Self {
+    pub fn from(
+        tx: UnboundedSender<Message>,
+        link: Link,
+        sock: Arc<AsyncFd<Socket>>,
+        router_id: Ipv4Addr,
+    ) -> Self {
         Self {
             index: link.index,
             name: link.name.to_owned(),
@@ -57,7 +62,7 @@ impl OspfLink {
             state: IfsmState::Down,
             ostate: IfsmState::Down,
             sock,
-            ident: Identity::new(),
+            ident: Identity::new(router_id),
             hello_interval: 10,
             wait_interval: 40,
             priority: 1,

@@ -60,7 +60,7 @@ pub struct OspfTop {
 impl OspfTop {
     pub fn new() -> Self {
         Self {
-            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
+            router_id: Ipv4Addr::from_str("1.0.0.0").unwrap(),
         }
     }
 }
@@ -118,7 +118,7 @@ impl Ospf {
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
-            let link = OspfLink::from(self.tx.clone(), link, self.sock.clone());
+            let link = OspfLink::from(self.tx.clone(), link, self.sock.clone(), self.top.router_id);
             if link.name == "enp0s6" {
                 self.tx
                     .send(Message::Ifsm(link.index, IfsmEvent::InterfaceUp))

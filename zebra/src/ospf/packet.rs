@@ -152,10 +152,15 @@ pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet
     println!("DB DESC: {}", packet);
 
     // Find neighbor.
-    let Some(nbr) = oi.nbrs.get(src) else {
+    let Some(nbr) = oi.nbrs.get_mut(src) else {
         return;
     };
     println!("NBR: {}", nbr.ident.router_id);
+
+    // Get DD.
+    let Ospfv2Payload::DbDesc(ref dd) = packet.payload else {
+        return;
+    };
 
     // MTU check.
 
@@ -169,8 +174,42 @@ pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet
             return;
         }
         TwoWay => {
-            // SET_FLAG (nbr.flags, OSPF_NEIGHBOR_DD_INIT);
-            // OSPF_NFSM_EVENT_EXECUTE (nbr, event);
+            nbr.flags.set_dd_init(true);
+            ospf_nfsm(nbr, NfsmEvent::AdjOk, &oi.ident);
+            if nbr.state != ExStart {
+                println!("XX Not ExStart");
+                nbr.flags.set_dd_init(false);
+                return;
+            }
+            println!("XX ExStart");
+        }
+        Init => {
+            nbr.flags.set_dd_init(true);
+            ospf_nfsm(nbr, NfsmEvent::TwoWayReceived, &oi.ident);
+            if nbr.state != ExStart {
+                println!("XX Not ExStart");
+                nbr.flags.set_dd_init(false);
+                return;
+            }
+            println!("XX ExStart");
+        }
+        ExStart => {
+            println!(
+                "DbDesc: ExStart {} <-> {}",
+                nbr.ident.router_id, top.router_id
+            );
+            if dd.flags.is_all() && dd.lsa_headers.is_empty() && nbr.ident.router_id > top.router_id
+            {
+                println!("DbDesc: Slave");
+            } else if !dd.flags.master()
+                && !dd.flags.init()
+                && dd.seqnum == nbr.dd.seqnum
+                && nbr.ident.router_id < top.router_id
+            {
+                println!("DbDesc: Master");
+            } else {
+                println!("RECV[DD]:Negotioation fails.")
+            }
         }
         _ => {
             //
