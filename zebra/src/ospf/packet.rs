@@ -2,9 +2,9 @@ use std::net::Ipv4Addr;
 
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
-use ospf_packet::{OspfHello, Ospfv2Packet, Ospfv2Payload};
+use ospf_packet::{OspfDbDesc, OspfHello, Ospfv2Packet, Ospfv2Payload};
 
-use crate::ospf::{network::write_packet, nfsm::ospf_nfsm};
+use crate::ospf::nfsm::ospf_nfsm;
 
 use super::{
     inst::OspfTop,
@@ -88,6 +88,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
             prefix,
             &packet.router_id,
             oi.dead_interval as u64,
+            oi.ptx.clone(),
         )
     });
 
@@ -130,7 +131,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     }
 }
 
-pub async fn ospf_hello_send(oi: &mut OspfLink) {
+pub fn ospf_hello_send(oi: &mut OspfLink) {
     println!(
         "Send Hello packet on {} with hello_sent flag {}",
         oi.name,
@@ -138,13 +139,32 @@ pub async fn ospf_hello_send(oi: &mut OspfLink) {
     );
 
     let packet = ospf_hello_packet(oi).unwrap();
-
-    let mut buf = BytesMut::new();
-    packet.emit(&mut buf);
-
-    write_packet(oi.sock.clone(), &buf, oi.index).await;
+    oi.ptx.send(Message::Send(packet, oi.index, None)).unwrap();
 
     oi.flags.set_hello_sent(true);
+}
+
+pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
+    let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+    let mut dd = OspfDbDesc::default();
+
+    dd.if_mtu = 1500;
+    dd.flags = nbr.dd.flags;
+    dd.seqnum = nbr.dd.seqnum;
+    dd.options.set_external(true);
+
+    let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
+    nbr.ptx
+        .send(Message::Send(
+            packet,
+            nbr.ifindex,
+            Some(nbr.ident.prefix.addr()),
+        ))
+        .unwrap();
+}
+
+fn ospf_db_desc_proc(nbr: &mut Neighbor, dd: &OspfDbDesc) {
+    //
 }
 
 pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
@@ -173,25 +193,26 @@ pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet
         Down | Attempt => {
             return;
         }
-        TwoWay => {
+        Init | TwoWay => {
             nbr.flags.set_dd_init(true);
-            ospf_nfsm(nbr, NfsmEvent::AdjOk, &oi.ident);
+            let event = match nbr.state {
+                Init => NfsmEvent::TwoWayReceived,
+                TwoWay => NfsmEvent::AdjOk,
+                _ => unreachable!(),
+            };
+            ospf_nfsm(nbr, event, &oi.ident);
             if nbr.state != ExStart {
-                println!("XX Not ExStart");
                 nbr.flags.set_dd_init(false);
                 return;
             }
-            println!("XX ExStart");
         }
-        Init => {
-            nbr.flags.set_dd_init(true);
-            ospf_nfsm(nbr, NfsmEvent::TwoWayReceived, &oi.ident);
-            if nbr.state != ExStart {
-                println!("XX Not ExStart");
-                nbr.flags.set_dd_init(false);
-                return;
-            }
-            println!("XX ExStart");
+        _ => {
+            // Fall through to next match.
+        }
+    }
+    match nbr.state {
+        Down | Attempt | TwoWay | Init => {
+            // Already handled.
         }
         ExStart => {
             println!(
@@ -201,15 +222,25 @@ pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet
             if dd.flags.is_all() && dd.lsa_headers.is_empty() && nbr.ident.router_id > top.router_id
             {
                 println!("DbDesc: Slave");
+                nbr.dd.seqnum = dd.seqnum;
+                nbr.dd.flags.set_master(false);
+                nbr.dd.flags.set_init(false);
+                nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
             } else if !dd.flags.master()
                 && !dd.flags.init()
                 && dd.seqnum == nbr.dd.seqnum
                 && nbr.ident.router_id < top.router_id
             {
                 println!("DbDesc: Master");
+                nbr.dd.flags.set_init(false);
+                nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
             } else {
-                println!("RECV[DD]:Negotioation fails.")
+                println!("RECV[DD]:Negotioation fails.");
+                return;
             }
+            ospf_nfsm(nbr, NfsmEvent::NegotiationDone, &oi.ident);
+
+            ospf_db_desc_proc(nbr, dd);
         }
         _ => {
             //

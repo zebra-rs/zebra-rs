@@ -21,6 +21,7 @@ pub struct Neighbor {
     pub tx: UnboundedSender<Message>,
     pub state_change: usize,
     pub dd: NeighborDbDesc,
+    pub ptx: UnboundedSender<Message>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -59,6 +60,7 @@ impl Neighbor {
         prefix: Ipv4Net,
         router_id: &Ipv4Addr,
         dead_interval: u64,
+        ptx: UnboundedSender<Message>,
     ) -> Self {
         let mut nbr = Self {
             ifindex,
@@ -72,6 +74,7 @@ impl Neighbor {
             tx,
             state_change: 0,
             dd: NeighborDbDesc::new(),
+            ptx,
         };
         nbr.ident.prefix = prefix;
         nbr

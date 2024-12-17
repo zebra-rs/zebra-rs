@@ -30,7 +30,7 @@ use super::area::OspfArea;
 use super::config::OspfNetworkConfig;
 use super::ifsm::{ospf_ifsm, IfsmEvent};
 use super::link::OspfLink;
-use super::network::read_packet;
+use super::network::{read_packet, write_packet2};
 use super::nfsm::{ospf_nfsm, NfsmEvent};
 use super::socket::ospf_socket_ipv4;
 
@@ -41,6 +41,7 @@ pub struct Ospf {
     ctx: Context,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
+    pub ptx: UnboundedSender<Message>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
     pub rib_rx: UnboundedReceiver<RibRx>,
@@ -60,7 +61,7 @@ pub struct OspfTop {
 impl OspfTop {
     pub fn new() -> Self {
         Self {
-            router_id: Ipv4Addr::from_str("1.0.0.0").unwrap(),
+            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
         }
     }
 }
@@ -75,11 +76,13 @@ impl Ospf {
         let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4().unwrap()).unwrap());
 
         let (tx, rx) = mpsc::unbounded_channel();
+        let (ptx, prx) = mpsc::unbounded_channel();
         let mut ospf = Self {
             ctx,
             top: OspfTop::new(),
             tx,
             rx,
+            ptx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
@@ -98,7 +101,10 @@ impl Ospf {
         tokio::spawn(async move {
             read_packet(sock, tx).await;
         });
-
+        let sock = ospf.sock.clone();
+        tokio::spawn(async move {
+            write_packet2(sock, prx).await;
+        });
         ospf
     }
 
@@ -118,7 +124,13 @@ impl Ospf {
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
-            let link = OspfLink::from(self.tx.clone(), link, self.sock.clone(), self.top.router_id);
+            let link = OspfLink::from(
+                self.tx.clone(),
+                link,
+                self.sock.clone(),
+                self.top.router_id,
+                self.ptx.clone(),
+            );
             if link.name == "enp0s6" {
                 self.tx
                     .send(Message::Ifsm(link.index, IfsmEvent::InterfaceUp))
@@ -198,11 +210,14 @@ impl Ospf {
                 };
                 ospf_nfsm(nbr, ev, &link.ident);
             }
-            Message::Send(index) => {
+            Message::HelloTimer(index) => {
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
-                ospf_hello_send(link).await;
+                ospf_hello_send(link);
+            }
+            _ => {
+                //
             }
         }
     }
@@ -263,6 +278,7 @@ pub fn serve(mut ospf: Ospf) {
 pub enum Message {
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, Ipv4Addr, NfsmEvent),
+    HelloTimer(u32),
     Recv(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
-    Send(u32),
+    Send(Ospfv2Packet, u32, Option<Ipv4Addr>),
 }
