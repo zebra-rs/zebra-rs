@@ -1,8 +1,9 @@
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
+use bitfield_struct::bitfield;
 use ipnet::Ipv4Net;
-use ospf_packet::OspfOptions;
+use ospf_packet::{DbDescFlags, OspfOptions};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::task::Timer;
@@ -16,9 +17,17 @@ pub struct Neighbor {
     pub timer: NeighborTimer,
     pub v_inactivity: u64,
     pub options: OspfOptions,
-    pub flag_init: bool,
+    pub flags: NeighborFlags,
     pub tx: UnboundedSender<Message>,
     pub state_change: usize,
+    pub dd: NeighborDbDesc,
+}
+
+#[bitfield(u8, debug = true)]
+pub struct NeighborFlags {
+    pub dd_init: bool,
+    #[bits(7)]
+    pub resvd: u64,
 }
 
 #[derive(Debug, Default)]
@@ -27,6 +36,20 @@ pub struct NeighborTimer {
     pub db_desc_free: Option<Timer>,
     pub db_desc: Option<Timer>,
     pub ls_upd: Option<Timer>,
+}
+
+pub struct NeighborDbDesc {
+    pub flags: DbDescFlags,
+    pub seqnum: u32,
+}
+
+impl NeighborDbDesc {
+    pub fn new() -> Self {
+        Self {
+            flags: 0.into(),
+            seqnum: 0,
+        }
+    }
 }
 
 impl Neighbor {
@@ -43,14 +66,14 @@ impl Neighbor {
             ostate: NfsmState::Down,
             timer: NeighborTimer::default(),
             v_inactivity: dead_interval,
-            ident: Identity::new(),
+            ident: Identity::new(*router_id),
             options: 0.into(),
-            flag_init: true,
+            flags: 0.into(),
             tx,
             state_change: 0,
+            dd: NeighborDbDesc::new(),
         };
         nbr.ident.prefix = prefix;
-        nbr.ident.router_id = *router_id;
         nbr
     }
 
