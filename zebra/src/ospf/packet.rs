@@ -164,7 +164,17 @@ pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
 }
 
 fn ospf_db_desc_proc(nbr: &mut Neighbor, dd: &OspfDbDesc) {
-    //
+    nbr.dd.recv = dd.clone();
+}
+
+fn is_dd_dup(dd: &OspfDbDesc, prev: &OspfDbDesc) -> bool {
+    dd.options == prev.options && dd.flags == prev.flags && dd.seqnum == prev.seqnum
+}
+
+fn nbr_sched_event(nbr: &Neighbor, ev: NfsmEvent) {
+    nbr.tx
+        .send(Message::Nfsm(nbr.ifindex, nbr.ident.prefix.addr(), ev))
+        .unwrap();
 }
 
 pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
@@ -241,6 +251,26 @@ pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet
             ospf_nfsm(nbr, NfsmEvent::NegotiationDone, &oi.ident);
 
             ospf_db_desc_proc(nbr, dd);
+        }
+        Exchange => {
+            if is_dd_dup(&dd, &nbr.dd.recv) {
+                if nbr.dd.flags.master() {
+                    // Packet dup (Master).
+                } else {
+                    // Resend packet.
+                }
+                return;
+            }
+            if dd.flags.master() && !nbr.dd.recv.flags.master() {
+                println!("XXX MS-bit mismatch.");
+                nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
+            if dd.flags.init() {
+                println!("XXX Initi bit set");
+                nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
         }
         _ => {
             //
