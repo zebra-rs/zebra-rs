@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use bitfield_struct::bitfield;
 use ipnet::Ipv4Net;
-use ospf_packet::{DbDescFlags, OspfOptions};
+use ospf_packet::{DbDescFlags, OspfDbDesc, OspfOptions};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::task::Timer;
@@ -42,6 +42,7 @@ pub struct NeighborTimer {
 pub struct NeighborDbDesc {
     pub flags: DbDescFlags,
     pub seqnum: u32,
+    pub recv: OspfDbDesc,
 }
 
 impl NeighborDbDesc {
@@ -49,6 +50,7 @@ impl NeighborDbDesc {
         Self {
             flags: 0.into(),
             seqnum: 0,
+            recv: OspfDbDesc::default(),
         }
     }
 }
