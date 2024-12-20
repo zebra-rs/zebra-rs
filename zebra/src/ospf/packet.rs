@@ -16,7 +16,7 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
         return None;
     };
     let mut hello = OspfHello::default();
-    hello.network_mask = addr.prefix.netmask();
+    hello.netmask = addr.prefix.netmask();
     hello.hello_interval = oi.hello_interval;
     hello.options.set_external(true);
     hello.priority = oi.priority;
@@ -67,7 +67,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     };
 
     // Non PtoP interface's network mask check.
-    let prefixlen = netmask_to_plen(hello.network_mask);
+    let prefixlen = netmask_to_plen(hello.netmask);
     let prefix = Ipv4Net::new(*src, prefixlen).unwrap();
 
     if addr.prefix.prefix_len() != prefixlen {
