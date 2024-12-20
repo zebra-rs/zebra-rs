@@ -100,7 +100,7 @@ impl Ospf {
         });
         let sock = ospf.sock.clone();
         tokio::spawn(async move {
-            write_packet2(sock, prx).await;
+            write_packet(sock, prx).await;
         });
         ospf
     }
