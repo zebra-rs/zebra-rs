@@ -631,9 +631,9 @@ pub fn peer_send_open(peer: &mut Peer) {
         caps.push(CapabilityPacket::As4(cap));
     }
     if peer.config.route_refresh {
-        let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefresh);
+        let cap = CapabilityRouteRefresh::new(CapabilityType::RouteRefresh);
         caps.push(CapabilityPacket::RouteRefresh(cap));
-        let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefreshCisco);
+        let cap = CapabilityRouteRefresh::new(CapabilityType::RouteRefreshCisco);
         caps.push(CapabilityPacket::RouteRefresh(cap));
     }
     if let Some(restart_time) = peer.config.graceful_restart {
