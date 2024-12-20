@@ -3,6 +3,8 @@ use crate::bgp::BGP_VERSION;
 use crate::bgp::{Afi, Safi};
 use bytes::BufMut;
 use bytes::BytesMut;
+use nom::number::complete::be_u8;
+use nom::IResult;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 use std::net::Ipv4Addr;
@@ -50,21 +52,112 @@ newtype_enum! {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
-#[allow(clippy::upper_case_acronyms)]
+#[repr(u8)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum CapabilityType {
+    #[default]
+    MultiProtocol = 1,
+    RouteRefresh = 2,
+    ExtendedNextHop = 5,
+    ExtendedMessage = 6,
+    Role = 9,
+    GracefulRestart = 64,
+    As4 = 65,
+    DynamicCapability = 67,
+    AddPath = 69,
+    EnhancedRouteRefresh = 70,
+    Llgr = 71,
+    Fqdn = 73,
+    SoftwareVersion = 75,
+    PathLimit = 76,
+    RouteRefreshCisco = 128,
+    Unknown(u8),
+}
+
+impl From<CapabilityType> for u8 {
+    fn from(typ: CapabilityType) -> Self {
+        use CapabilityType::*;
+        match typ {
+            MultiProtocol => 1,
+            RouteRefresh => 2,
+            ExtendedNextHop => 5,
+            ExtendedMessage => 6,
+            Role => 9,
+            GracefulRestart => 64,
+            As4 => 65,
+            DynamicCapability => 67,
+            AddPath => 69,
+            EnhancedRouteRefresh => 70,
+            Llgr => 71,
+            Fqdn => 73,
+            SoftwareVersion => 75,
+            PathLimit => 76,
+            RouteRefreshCisco => 128,
+            Unknown(v) => v,
+        }
+    }
+}
+
+impl From<u8> for CapabilityType {
+    fn from(typ: u8) -> Self {
+        use CapabilityType::*;
+        match typ {
+            1 => MultiProtocol,
+            2 => RouteRefresh,
+            5 => ExtendedNextHop,
+            6 => ExtendedMessage,
+            9 => Role,
+            64 => GracefulRestart,
+            65 => As4,
+            67 => DynamicCapability,
+            69 => AddPath,
+            70 => EnhancedRouteRefresh,
+            71 => Llgr,
+            73 => Fqdn,
+            75 => SoftwareVersion,
+            76 => PathLimit,
+            128 => RouteRefreshCisco,
+            v => Unknown(v),
+        }
+    }
+}
+
+impl CapabilityType {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, typ) = be_u8(input)?;
+        let cap_type: Self = typ.into();
+        Ok((input, cap_type))
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, NomBE)]
+#[nom(Selector = "CapabilityType")]
 pub enum CapabilityPacket {
+    #[nom(Selector = "CapabilityType::MultiProtocol")]
     MultiProtocol(CapabilityMultiProtocol),
+    #[nom(Selector = "CapabilityType::RouteRefresh")]
     RouteRefresh(CapabilityRouteRefresh),
+    #[nom(Selector = "CapabilityType::ExtendedMessage")]
     ExtendedMessage(CapabilityExtendedMessage),
-    As4(CapabilityAs4),
-    DynamicCapability(CapabilityDynamicCapability),
-    AddPath(CapabilityAddPath),
+    #[nom(Selector = "CapabilityType::GracefulRestart")]
     GracefulRestart(CapabilityGracefulRestart),
+    #[nom(Selector = "CapabilityType::As4")]
+    As4(CapabilityAs4),
+    #[nom(Selector = "CapabilityType::DynamicCapability")]
+    DynamicCapability(CapabilityDynamicCapability),
+    #[nom(Selector = "CapabilityType::AddPath")]
+    AddPath(CapabilityAddPath),
+    #[nom(Selector = "CapabilityType::EnhancedRouteRefresh")]
     EnhancedRouteRefresh(CapabilityEnhancedRouteRefresh),
-    LLGR(CapabilityLLGR),
-    FQDN(CapabilityFQDN),
+    #[nom(Selector = "CapabilityType::Llgr")]
+    Llgr(CapabilityLLGR),
+    #[nom(Selector = "CapabilityType::Fqdn")]
+    Fqdn(CapabilityFQDN),
+    #[nom(Selector = "CapabilityType::SoftwareVersion")]
     SoftwareVersion(CapabilitySoftwareVersion),
+    #[nom(Selector = "CapabilityType::PathLimit")]
     PathLimit(CapabilityPathLimit),
+    #[nom(Selector = "_")]
     Unknown(CapabilityUnknown),
 }
 
@@ -109,10 +202,10 @@ impl CapabilityPacket {
             Self::EnhancedRouteRefresh(m) => {
                 cap_header_encode!(m, buf);
             }
-            Self::LLGR(m) => {
+            Self::Llgr(m) => {
                 cap_header_encode!(m, buf);
             }
-            Self::FQDN(m) => {
+            Self::Fqdn(m) => {
                 cap_header_encode!(m, buf);
                 buf.put_u8(m.hostname.len() as u8);
                 buf.put(&m.hostname[..]);

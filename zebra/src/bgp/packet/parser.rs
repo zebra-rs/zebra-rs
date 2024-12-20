@@ -64,7 +64,7 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             let (value, input) = input.split_at(cap.header.length as usize);
             let (_, values) = many0(LLGRValue::parse)(value)?;
             cap.values = values;
-            Ok((input, CapabilityPacket::LLGR(cap)))
+            Ok((input, CapabilityPacket::Llgr(cap)))
         }
         CapabilityCode::FQDN => {
             let (input, mut cap) = CapabilityFQDN::parse(input)?;
@@ -74,7 +74,7 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             let (input, domain_len) = be_u8(input)?;
             let (input, domain) = take(domain_len)(input)?;
             cap.domain = domain.to_vec();
-            Ok((input, CapabilityPacket::FQDN(cap)))
+            Ok((input, CapabilityPacket::Fqdn(cap)))
         }
         CapabilityCode::SoftwareVersion => {
             let (input, mut cap) = CapabilitySoftwareVersion::parse(input)?;
