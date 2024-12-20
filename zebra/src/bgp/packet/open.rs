@@ -151,9 +151,9 @@ pub enum CapabilityPacket {
     #[nom(Selector = "CapabilityType::EnhancedRouteRefresh")]
     EnhancedRouteRefresh(CapabilityEnhancedRouteRefresh),
     #[nom(Selector = "CapabilityType::Llgr")]
-    Llgr(CapabilityLLGR),
+    Llgr(CapabilityLlgr),
     #[nom(Selector = "CapabilityType::Fqdn")]
-    Fqdn(CapabilityFQDN),
+    Fqdn(CapabilityFqdn),
     #[nom(Selector = "CapabilityType::SoftwareVersion")]
     SoftwareVersion(CapabilitySoftwareVersion),
     #[nom(Selector = "CapabilityType::PathLimit")]
@@ -417,12 +417,12 @@ pub struct LLGRValue {
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityLLGR {
+pub struct CapabilityLlgr {
     pub header: CapabilityHeader,
     pub values: Vec<LLGRValue>,
 }
 
-impl CapabilityLLGR {
+impl CapabilityLlgr {
     pub fn new() -> Self {
         Self {
             header: CapabilityHeader::new(CapabilityCode::EnhancedRouteRefresh, 0),
@@ -431,20 +431,20 @@ impl CapabilityLLGR {
     }
 }
 
-impl Default for CapabilityLLGR {
+impl Default for CapabilityLlgr {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct CapabilityFQDN {
+pub struct CapabilityFqdn {
     header: CapabilityHeader,
     pub hostname: Vec<u8>,
     pub domain: Vec<u8>,
 }
 
-impl CapabilityFQDN {
+impl CapabilityFqdn {
     pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, header) = CapabilityHeader::parse_be(input)?;
 
@@ -464,7 +464,7 @@ impl CapabilityFQDN {
     }
 }
 
-impl CapabilityFQDN {
+impl CapabilityFqdn {
     pub fn new(hostname: &str, domain: &str) -> Self {
         Self {
             header: CapabilityHeader::new(
