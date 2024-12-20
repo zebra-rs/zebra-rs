@@ -27,7 +27,7 @@ use super::area::OspfArea;
 use super::config::OspfNetworkConfig;
 use super::ifsm::{ospf_ifsm, IfsmEvent};
 use super::link::OspfLink;
-use super::network::{read_packet, write_packet2};
+use super::network::{read_packet, write_packet};
 use super::nfsm::{ospf_nfsm, NfsmEvent};
 use super::socket::ospf_socket_ipv4;
 
