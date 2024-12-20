@@ -4,10 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net};
-use ospf_packet::{
-    OspfPacketType, Ospfv2Packet, OSPF_DATABASE_DESC, OSPF_HELLO, OSPF_LINK_STATE_ACK,
-    OSPF_LINK_STATE_REQUEST, OSPF_LINK_STATE_UPDATE,
-};
+use ospf_packet::{OspfType, Ospfv2Packet};
 use prefix_trie::PrefixMap;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -173,21 +170,21 @@ impl Ospf {
                     return;
                 };
 
-                match packet.typ.0 {
-                    OSPF_HELLO => {
+                match packet.typ {
+                    OspfType::Hello => {
                         ospf_hello_recv(&self.top, link, &packet, &src);
                     }
-                    OSPF_DATABASE_DESC => {
+                    OspfType::DbDesc => {
                         ospf_db_desc_recv(&self.top, link, &packet, &src);
                     }
-                    OSPF_LINK_STATE_REQUEST => {
+                    OspfType::LsRequest => {
                         println!("LS_REQ: {}", packet);
                         ospf_ls_req_recv(&self.top, link, &packet, &src);
                     }
-                    OSPF_LINK_STATE_UPDATE => {
+                    OspfType::LsUpdate => {
                         println!("LS_UPD: {}", packet);
                     }
-                    OSPF_LINK_STATE_ACK => {
+                    OspfType::LsAck => {
                         println!("LS_ACK: {}", packet);
                     }
                     _ => {
