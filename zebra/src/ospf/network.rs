@@ -69,7 +69,7 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
     }
 }
 
-pub async fn write_packet2(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<Message>) {
+pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<Message>) {
     loop {
         let msg = rx.recv().await;
         let Message::Send(packet, ifindex, dest) = msg.unwrap() else {
@@ -106,27 +106,3 @@ pub async fn write_packet2(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver
         .await;
     }
 }
-
-// pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, buf: &[u8], ifindex: u32) {
-//     let iov = [IoSlice::new(&buf)];
-//     let dest = Ipv4Addr::from_str("224.0.0.5").unwrap();
-//     let sockaddr: SockaddrIn = std::net::SocketAddrV4::new(dest, 0).into();
-//     let pktinfo = libc::in_pktinfo {
-//         ipi_ifindex: ifindex as i32,
-//         ipi_spec_dst: libc::in_addr { s_addr: 0 },
-//         ipi_addr: libc::in_addr { s_addr: 0 },
-//     };
-//     let cmsg = [socket::ControlMessage::Ipv4PacketInfo(&pktinfo)];
-
-//     sock.async_io(Interest::WRITABLE, |sock| {
-//         let msg = socket::sendmsg(
-//             sock.as_raw_fd(),
-//             &iov,
-//             &cmsg,
-//             socket::MsgFlags::empty(),
-//             Some(&sockaddr),
-//         );
-//         Ok(())
-//     })
-//     .await;
-// }
