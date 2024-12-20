@@ -3,7 +3,8 @@ use crate::bgp::BGP_VERSION;
 use crate::bgp::{Afi, Safi};
 use bytes::BufMut;
 use bytes::BytesMut;
-use nom::number::complete::be_u8;
+use nom::bytes::complete::take;
+use nom::number::complete::{be_u16, be_u32, be_u8};
 use nom::IResult;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
@@ -327,7 +328,6 @@ pub struct AddPathValue {
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityAddPath {
     pub header: CapabilityHeader,
-    #[nom(Ignore)]
     pub values: Vec<AddPathValue>,
 }
 
@@ -348,8 +348,18 @@ impl CapabilityAddPath {
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityGracefulRestart {
     pub header: CapabilityHeader,
-    #[nom(Ignore)]
+    #[nom(Parse = "parse_restart_time")]
     pub restart_time: u32,
+}
+
+pub fn parse_restart_time(input: &[u8]) -> IResult<&[u8], u32> {
+    if input.len() == 2 {
+        let (input, val) = be_u16(input)?;
+        Ok((input, val as u32))
+    } else {
+        let (input, val) = be_u32(input)?;
+        Ok((input, val))
+    }
 }
 
 impl CapabilityGracefulRestart {
@@ -409,7 +419,6 @@ pub struct LLGRValue {
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityLLGR {
     pub header: CapabilityHeader,
-    #[nom(Ignore)]
     pub values: Vec<LLGRValue>,
 }
 
@@ -428,13 +437,31 @@ impl Default for CapabilityLLGR {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CapabilityFQDN {
     header: CapabilityHeader,
-    #[nom(Ignore)]
     pub hostname: Vec<u8>,
-    #[nom(Ignore)]
     pub domain: Vec<u8>,
+}
+
+impl CapabilityFQDN {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, header) = CapabilityHeader::parse_be(input)?;
+
+        let (input, hostname_len) = be_u8(input)?;
+        let (input, hostname) = take(hostname_len)(input)?;
+        let hostname = hostname.to_vec();
+        let (input, domain_len) = be_u8(input)?;
+        let (input, domain) = take(domain_len)(input)?;
+        let domain = domain.to_vec();
+
+        let fqdn = Self {
+            header,
+            hostname,
+            domain,
+        };
+        Ok((input, fqdn))
+    }
 }
 
 impl CapabilityFQDN {
@@ -453,7 +480,6 @@ impl CapabilityFQDN {
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilitySoftwareVersion {
     pub header: CapabilityHeader,
-    #[nom(Ignore)]
     pub version: Vec<u8>,
 }
 
@@ -476,7 +502,6 @@ pub struct PathLimitValue {
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityPathLimit {
     pub header: CapabilityHeader,
-    #[nom(Ignore)]
     pub values: Vec<PathLimitValue>,
 }
 
@@ -497,7 +522,6 @@ impl CapabilityPathLimit {
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityUnknown {
     pub header: CapabilityHeader,
-    #[nom(Ignore)]
     pub data: Vec<u8>,
 }
 
