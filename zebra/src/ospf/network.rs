@@ -53,7 +53,7 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
 
             println!(
                 "Read: type {} src {} ifaddr {} ifindex {} dest {}",
-                packet.1.typ.0,
+                packet.1.typ,
                 src.ip(),
                 group,
                 ifindex,
