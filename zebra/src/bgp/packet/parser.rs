@@ -67,7 +67,7 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
             Ok((input, CapabilityPacket::Llgr(cap)))
         }
         CapabilityCode::FQDN => {
-            let (input, mut cap) = CapabilityFQDN::parse(input)?;
+            let (input, mut cap) = CapabilityFQDN::parse_be(input)?;
             let (input, hostname_len) = be_u8(input)?;
             let (input, hostname) = take(hostname_len)(input)?;
             cap.hostname = hostname.to_vec();
@@ -100,10 +100,17 @@ fn parse_bgp_capability_packet(input: &[u8]) -> IResult<&[u8], CapabilityPacket>
     }
 }
 
+fn cap_parse(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
+    let (_, cap_header) = peek(CapabilityHeader::parse)(input)?;
+    println!("XXX code: {}", cap_header.code);
+    // println!("XXX len: {}", cap_header.length);
+    CapabilityPacket::parse_be(input, cap_header.code.into())
+}
+
 fn parse_bgp_open_option_packet(input: &[u8]) -> IResult<&[u8], Vec<CapabilityPacket>> {
     let (input, header) = CapabilityHeader::parse(input)?;
     let (opts, input) = input.split_at(header.length as usize);
-    let (_, caps) = many0(parse_bgp_capability_packet)(opts)?;
+    let (_, caps) = many0(cap_parse)(opts)?;
     Ok((input, caps))
 }
 
