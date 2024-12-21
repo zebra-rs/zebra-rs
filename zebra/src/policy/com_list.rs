@@ -2,10 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::{
-    bgp::attr::Community,
-    config::{Args, ConfigOp},
-};
+use crate::bgp::packet::Community;
+use crate::config::{Args, ConfigOp};
 
 use super::Action;
 
