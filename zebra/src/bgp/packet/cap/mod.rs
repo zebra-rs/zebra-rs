@@ -1,2 +1,2 @@
 pub mod typ;
-pub use typ::CapabilityType;
+pub use typ::CapabilityCode;
