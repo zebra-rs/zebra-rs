@@ -18,9 +18,7 @@ use std::mem::size_of;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 fn cap_parse(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
-    let (_, cap_header) = peek(CapabilityHeader::parse)(input)?;
-    println!("XXX code: {}", cap_header.code);
-    // println!("XXX len: {}", cap_header.length);
+    let (input, cap_header) = CapabilityHeader::parse_be(input)?;
     CapabilityPacket::parse_be(input, cap_header.code.into())
 }
 
