@@ -100,7 +100,7 @@ fn parse_bgp_attr_mp_reach(input: &[u8], length: u16) -> IResult<&[u8], Attribut
     }
     let (attr, input) = input.split_at(length as usize);
     let (attr, header) = MpNlriReachHeader::parse(attr)?;
-    if header.afi == Afi::IP6 && header.safi == Safi::Unicast {
+    if header.afi == Afi2::Ip6 && header.safi == Safi2::Unicast {
         if header.nhop_len != 16 {
             return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
         }
@@ -115,7 +115,7 @@ fn parse_bgp_attr_mp_reach(input: &[u8], length: u16) -> IResult<&[u8], Attribut
         };
         return Ok((input, Attribute::MpReachNlri(mp_nlri)));
     }
-    if header.afi == Afi::IP && header.safi == Safi::MplsVpn {
+    if header.afi == Afi2::Ip && header.safi == Safi2::MplsVpn {
         println!("nhop len {}", header.nhop_len);
         // 12 = 8 + 4.
         let (attr, rd) = RouteDistinguisher::parse(attr)?;
@@ -141,7 +141,7 @@ fn parse_bgp_attr_mp_unreach(input: &[u8], length: u16) -> IResult<&[u8], Attrib
     }
     let (attr, input) = input.split_at(length as usize);
     let (attr, header) = MpNlriUnreachHeader::parse(attr)?;
-    if header.afi != Afi::IP6 || header.safi != Safi::Unicast {
+    if header.afi != Afi2::Ip6 || header.safi != Safi2::Unicast {
         return Err(nom::Err::Error(make_error(input, ErrorKind::Tag)));
     }
     let (_, withdrawal) = many0(parse_bgp_nlri_ipv6_prefix)(attr)?;

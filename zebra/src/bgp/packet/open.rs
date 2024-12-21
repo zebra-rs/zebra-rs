@@ -110,7 +110,7 @@ impl CapabilityPacket {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, Default, PartialEq, NomBE, Clone)]
 pub struct CapabilityHeader {
     pub code: u8,
     pub length: u8,
@@ -118,8 +118,12 @@ pub struct CapabilityHeader {
 
 pub trait Emit {
     fn code(&self) -> CapabilityCode;
-    fn len(&self) -> u8;
-    fn emit_value(&self, buf: &mut BytesMut);
+    fn len(&self) -> u8 {
+        0
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {}
+
     fn emit(&self, buf: &mut BytesMut, opt: bool) {
         if !opt {
             buf.put_u8(CAPABILITY_CODE);
