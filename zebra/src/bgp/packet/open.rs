@@ -64,73 +64,47 @@ pub enum CapabilityPacket {
     Unknown(CapabilityUnknown),
 }
 
-macro_rules! cap_header_encode {
-    ($m:expr, $buf:expr) => {
-        $buf.put_u8(CAPABILITY_CODE);
-        $buf.put_u8($m.header.length + 2);
-        $buf.put_u8($m.header.code);
-        $buf.put_u8($m.header.length);
-    };
-}
-
 impl CapabilityPacket {
     pub fn encode(&self, buf: &mut BytesMut) {
         match self {
             Self::MultiProtocol(m) => {
-                println!("XXX emit");
-                m.emit(buf);
-                // cap_header_encode!(m, buf);
-                // buf.put_u16(m.afi.0);
-                // buf.put_u8(0);
-                // buf.put_u8(m.safi.0);
+                m.emit(buf, false);
             }
             Self::RouteRefresh(m) => {
-                cap_header_encode!(m, buf);
+                m.emit(buf, false);
             }
             Self::ExtendedMessage(m) => {
-                cap_header_encode!(m, buf);
+                m.emit(buf, false);
             }
             Self::As4(m) => {
-                cap_header_encode!(m, buf);
-                buf.put_u32(m.asn);
+                m.emit(buf, false);
             }
             Self::DynamicCapability(m) => {
-                cap_header_encode!(m, buf);
+                m.emit(buf, false);
             }
             Self::AddPath(m) => {
-                cap_header_encode!(m, buf);
+                m.emit(buf, false);
             }
             Self::GracefulRestart(m) => {
-                cap_header_encode!(m, buf);
-                buf.put_u32(m.restart_time);
+                m.emit(buf, false);
             }
             Self::EnhancedRouteRefresh(m) => {
-                cap_header_encode!(m, buf);
+                m.emit(buf, false);
             }
             Self::Llgr(m) => {
-                cap_header_encode!(m, buf);
+                m.emit(buf, false);
             }
             Self::Fqdn(m) => {
-                cap_header_encode!(m, buf);
-                buf.put_u8(m.hostname.len() as u8);
-                buf.put(&m.hostname[..]);
-                buf.put_u8(m.domain.len() as u8);
-                buf.put(&m.domain[..]);
+                m.emit(buf, false);
             }
             Self::SoftwareVersion(m) => {
-                cap_header_encode!(m, buf);
+                m.emit(buf, false);
             }
             Self::PathLimit(m) => {
-                cap_header_encode!(m, buf);
-                for v in m.values.iter() {
-                    buf.put_u16(v.afi.0);
-                    buf.put_u8(v.safi.0);
-                    buf.put_u16(v.path_limit);
-                }
+                m.emit(buf, false);
             }
             Self::Unknown(m) => {
-                cap_header_encode!(m, buf);
-                buf.put(&m.data[..]);
+                m.emit(buf, false);
             }
         }
     }
@@ -146,9 +120,11 @@ pub trait Emit {
     fn code(&self) -> CapabilityCode;
     fn len(&self) -> u8;
     fn emit_value(&self, buf: &mut BytesMut);
-    fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u8(CAPABILITY_CODE);
-        buf.put_u8(self.len() + 2);
+    fn emit(&self, buf: &mut BytesMut, opt: bool) {
+        if !opt {
+            buf.put_u8(CAPABILITY_CODE);
+            buf.put_u8(self.len() + 2);
+        }
         buf.put_u8(self.code().into());
         buf.put_u8(self.len());
         self.emit_value(buf);
@@ -166,7 +142,6 @@ impl CapabilityHeader {
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityMultiProtocol {
-    header: CapabilityHeader,
     afi: Afi2,
     res: u8,
     safi: Safi2,
@@ -175,7 +150,6 @@ pub struct CapabilityMultiProtocol {
 impl CapabilityMultiProtocol {
     pub fn new(afi: &Afi2, safi: &Safi2) -> Self {
         Self {
-            header: CapabilityHeader::new(CapabilityCode::MultiProtocol, 4),
             afi: *afi,
             res: 0,
             safi: *safi,
@@ -200,43 +174,57 @@ impl Emit for CapabilityMultiProtocol {
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityRouteRefresh {
-    header: CapabilityHeader,
+pub struct CapabilityRouteRefresh {}
+
+impl Emit for CapabilityRouteRefresh {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::RouteRefresh
+    }
+
+    fn len(&self) -> u8 {
+        0
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {}
 }
 
 impl CapabilityRouteRefresh {
     pub fn new(typ: CapabilityCode) -> Self {
-        Self {
-            header: CapabilityHeader::new(typ, 0),
-        }
+        Self {}
     }
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityAs4 {
-    header: CapabilityHeader,
     pub asn: u32,
 }
 
 impl CapabilityAs4 {
     pub fn new(asn: u32) -> Self {
-        Self {
-            header: CapabilityHeader::new(CapabilityCode::As4, 4),
-            asn,
-        }
+        Self { asn }
+    }
+}
+
+impl Emit for CapabilityAs4 {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::As4
+    }
+
+    fn len(&self) -> u8 {
+        4
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.asn);
     }
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityDynamicCapability {
-    header: CapabilityHeader,
-}
+pub struct CapabilityDynamicCapability {}
 
 impl CapabilityDynamicCapability {
     pub fn new() -> Self {
-        Self {
-            header: CapabilityHeader::new(CapabilityCode::DynamicCapability, 0),
-        }
+        Self {}
     }
 }
 
@@ -246,36 +234,63 @@ impl Default for CapabilityDynamicCapability {
     }
 }
 
+impl Emit for CapabilityDynamicCapability {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::DynamicCapability
+    }
+
+    fn len(&self) -> u8 {
+        0
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {}
+}
+
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct AddPathValue {
-    afi: Afi,
-    safi: Safi,
+    afi: Afi2,
+    safi: Safi2,
     send_receive: u8,
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityAddPath {
-    pub header: CapabilityHeader,
     pub values: Vec<AddPathValue>,
 }
 
 impl CapabilityAddPath {
-    pub fn new(afi: Afi, safi: Safi, send_receive: u8) -> Self {
+    pub fn new(afi: Afi2, safi: Safi2, send_receive: u8) -> Self {
         let value = AddPathValue {
             afi,
             safi,
             send_receive,
         };
         Self {
-            header: CapabilityHeader::new(CapabilityCode::AddPath, 4),
             values: vec![value],
+        }
+    }
+}
+
+impl Emit for CapabilityAddPath {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::AddPath
+    }
+
+    fn len(&self) -> u8 {
+        (self.values.len() * 4) as u8
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        for val in self.values.iter() {
+            buf.put_u16(val.afi.into());
+            buf.put_u8(val.safi.into());
+            buf.put_u8(val.send_receive);
         }
     }
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityGracefulRestart {
-    pub header: CapabilityHeader,
     #[nom(Parse = "parse_restart_time")]
     pub restart_time: u32,
 }
@@ -292,23 +307,30 @@ pub fn parse_restart_time(input: &[u8]) -> IResult<&[u8], u32> {
 
 impl CapabilityGracefulRestart {
     pub fn new(restart_time: u32) -> Self {
-        Self {
-            header: CapabilityHeader::new(CapabilityCode::GracefulRestart, 4),
-            restart_time,
-        }
+        Self { restart_time }
+    }
+}
+
+impl Emit for CapabilityGracefulRestart {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::GracefulRestart
+    }
+
+    fn len(&self) -> u8 {
+        4
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.restart_time);
     }
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityExtendedMessage {
-    header: CapabilityHeader,
-}
+pub struct CapabilityExtendedMessage {}
 
 impl CapabilityExtendedMessage {
     pub fn new() -> Self {
-        Self {
-            header: CapabilityHeader::new(CapabilityCode::ExtendedMessage, 0),
-        }
+        Self {}
     }
 }
 
@@ -318,16 +340,24 @@ impl Default for CapabilityExtendedMessage {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityEnhancedRouteRefresh {
-    header: CapabilityHeader,
+impl Emit for CapabilityExtendedMessage {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::ExtendedMessage
+    }
+
+    fn len(&self) -> u8 {
+        0
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {}
 }
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityEnhancedRouteRefresh {}
 
 impl CapabilityEnhancedRouteRefresh {
     pub fn new() -> Self {
-        Self {
-            header: CapabilityHeader::new(CapabilityCode::EnhancedRouteRefresh, 0),
-        }
+        Self {}
     }
 }
 
@@ -337,25 +367,33 @@ impl Default for CapabilityEnhancedRouteRefresh {
     }
 }
 
+impl Emit for CapabilityEnhancedRouteRefresh {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::EnhancedRouteRefresh
+    }
+
+    fn len(&self) -> u8 {
+        0
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {}
+}
+
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct LLGRValue {
-    afi: Afi,
-    safi: Safi,
+    afi: Afi2,
+    safi: Safi2,
     flags_stale_time: u32,
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityLlgr {
-    pub header: CapabilityHeader,
     pub values: Vec<LLGRValue>,
 }
 
 impl CapabilityLlgr {
     pub fn new() -> Self {
-        Self {
-            header: CapabilityHeader::new(CapabilityCode::EnhancedRouteRefresh, 0),
-            values: Vec::new(),
-        }
+        Self { values: Vec::new() }
     }
 }
 
@@ -365,17 +403,32 @@ impl Default for CapabilityLlgr {
     }
 }
 
+impl Emit for CapabilityLlgr {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::Llgr
+    }
+
+    fn len(&self) -> u8 {
+        (self.values.len() * 7) as u8
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        for val in self.values.iter() {
+            buf.put_u16(val.afi.into());
+            buf.put_u8(val.safi.into());
+            buf.put_u32(val.flags_stale_time);
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct CapabilityFqdn {
-    header: CapabilityHeader,
     pub hostname: Vec<u8>,
     pub domain: Vec<u8>,
 }
 
 impl CapabilityFqdn {
     pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, header) = CapabilityHeader::parse_be(input)?;
-
         let (input, hostname_len) = be_u8(input)?;
         let (input, hostname) = take(hostname_len)(input)?;
         let hostname = hostname.to_vec();
@@ -383,11 +436,7 @@ impl CapabilityFqdn {
         let (input, domain) = take(domain_len)(input)?;
         let domain = domain.to_vec();
 
-        let fqdn = Self {
-            header,
-            hostname,
-            domain,
-        };
+        let fqdn = Self { hostname, domain };
         Ok((input, fqdn))
     }
 }
@@ -395,54 +444,93 @@ impl CapabilityFqdn {
 impl CapabilityFqdn {
     pub fn new(hostname: &str, domain: &str) -> Self {
         Self {
-            header: CapabilityHeader::new(
-                CapabilityCode::EnhancedRouteRefresh,
-                (2 + hostname.len() + domain.len()) as u8,
-            ),
             hostname: hostname.into(),
             domain: domain.into(),
         }
     }
 }
 
+impl Emit for CapabilityFqdn {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::Fqdn
+    }
+
+    fn len(&self) -> u8 {
+        (2 + self.hostname.len() + self.domain.len()) as u8
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.hostname.len() as u8);
+        buf.put(&self.hostname[..]);
+        buf.put_u8(self.domain.len() as u8);
+        buf.put(&self.domain[..]);
+    }
+}
+
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilitySoftwareVersion {
-    pub header: CapabilityHeader,
     pub version: Vec<u8>,
 }
 
 impl CapabilitySoftwareVersion {
     pub fn new(version: Vec<u8>) -> Self {
-        Self {
-            header: CapabilityHeader::new(CapabilityCode::SoftwareVersion, 1 + version.len() as u8),
-            version,
-        }
+        Self { version }
+    }
+}
+
+impl Emit for CapabilitySoftwareVersion {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::SoftwareVersion
+    }
+
+    fn len(&self) -> u8 {
+        self.version.len() as u8
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put(&self.version[..]);
     }
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct PathLimitValue {
-    pub afi: Afi,
-    pub safi: Safi,
+    pub afi: Afi2,
+    pub safi: Safi2,
     pub path_limit: u16,
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityPathLimit {
-    pub header: CapabilityHeader,
     pub values: Vec<PathLimitValue>,
 }
 
 impl CapabilityPathLimit {
-    pub fn new(afi: Afi, safi: Safi, path_limit: u16) -> Self {
+    pub fn new(afi: Afi2, safi: Safi2, path_limit: u16) -> Self {
         let value = PathLimitValue {
             afi,
             safi,
             path_limit,
         };
         Self {
-            header: CapabilityHeader::new(CapabilityCode::PathLimit, 5),
             values: vec![value],
+        }
+    }
+}
+
+impl Emit for CapabilityPathLimit {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::PathLimit
+    }
+
+    fn len(&self) -> u8 {
+        (self.values.len() * 5) as u8
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        for val in self.values.iter() {
+            buf.put_u16(val.afi.into());
+            buf.put_u8(val.safi.into());
+            buf.put_u16(val.path_limit);
         }
     }
 }
@@ -451,6 +539,29 @@ impl CapabilityPathLimit {
 pub struct CapabilityUnknown {
     pub header: CapabilityHeader,
     pub data: Vec<u8>,
+}
+
+impl Default for CapabilityUnknown {
+    fn default() -> Self {
+        Self {
+            header: CapabilityHeader::new(CapabilityCode::AddPath, 0),
+            data: Vec::new(),
+        }
+    }
+}
+
+impl Emit for CapabilityUnknown {
+    fn code(&self) -> CapabilityCode {
+        CapabilityCode::Unknown(100)
+    }
+
+    fn len(&self) -> u8 {
+        self.data.len() as u8
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put(&self.data[..]);
+    }
 }
 
 impl OpenPacket {
