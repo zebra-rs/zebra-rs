@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-use super::attr::*;
 use super::inst::Message;
+use super::packet::attr::*;
 use super::packet::*;
 use super::route::route_from_peer;
 use super::route::Route;

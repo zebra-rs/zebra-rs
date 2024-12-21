@@ -1,5 +1,4 @@
-use crate::bgp::attr::Attribute;
-
+use super::attr::Attribute;
 use super::{BgpHeader, BgpType, BGP_HEADER_LEN};
 use ipnet::Ipv4Net;
 use nom_derive::*;

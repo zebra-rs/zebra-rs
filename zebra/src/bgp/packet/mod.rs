@@ -1,13 +1,13 @@
-pub mod bgp;
 pub mod encode;
 pub mod notification;
 pub mod open;
+pub mod packet;
 pub mod parser;
 pub mod update;
 
-pub use bgp::*;
 pub use notification::*;
 pub use open::*;
+pub use packet::*;
 pub use parser::*;
 pub use update::*;
 
@@ -19,3 +19,6 @@ pub use cap::CapabilityCode;
 
 pub mod afi;
 pub use afi::*;
+
+pub mod attr;
+pub use attr::*;

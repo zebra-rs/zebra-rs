@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use nom::IResult;
 use nom_derive::*;
 
 use super::*;
@@ -50,6 +51,11 @@ pub enum CapabilityPacket {
 }
 
 impl CapabilityPacket {
+    pub fn parse_cap(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
+        let (input, cap_header) = CapabilityHeader::parse_be(input)?;
+        CapabilityPacket::parse_be(input, cap_header.code.into())
+    }
+
     pub fn encode(&self, buf: &mut BytesMut) {
         match self {
             Self::MultiProtocol(m) => {

@@ -1,7 +1,9 @@
-use crate::bgp::{attr::Attribute, packet::nlri_psize};
-
-use super::{BgpHeader, NotificationPacket, OpenPacket, UpdatePacket};
 use bytes::{BufMut, BytesMut};
+
+use crate::bgp::packet::nlri_psize;
+
+use super::attr::Attribute;
+use super::{BgpHeader, NotificationPacket, OpenPacket, UpdatePacket};
 
 impl From<BgpHeader> for BytesMut {
     fn from(header: BgpHeader) -> Self {

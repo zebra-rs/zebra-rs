@@ -1,9 +1,6 @@
-use nom::{
-    number::complete::{be_u16, be_u8},
-    IResult,
-};
+use nom::number::complete::{be_u16, be_u8};
+use nom::IResult;
 use nom_derive::*;
-use rusticata_macros::newtype_enum;
 
 #[repr(u16)]
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]

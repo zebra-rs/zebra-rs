@@ -1,10 +1,10 @@
-use super::*;
-use crate::bgp::attr::{
+use super::attr::{
     Aggregator2, Aggregator4, Aigp, As2Path, As2Segment, As4Path, As4Segment, AsSegmentHeader,
     AtomicAggregate, Attribute, AttributeFlags, AttributeType, Community, ExtCommunity,
     LargeCommunity, LocalPref, Med, MpNlriAttr, MpNlriReachHeader, MpNlriUnreachHeader,
     NextHopAttr, Origin, RouteDistinguisher,
 };
+use super::*;
 use cap::{CapabilityHeader, CapabilityPacket};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
@@ -16,42 +16,6 @@ use nom::IResult;
 use nom_derive::*;
 use std::mem::size_of;
 use std::net::{Ipv4Addr, Ipv6Addr};
-
-fn cap_parse(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
-    let (input, cap_header) = CapabilityHeader::parse_be(input)?;
-    CapabilityPacket::parse_be(input, cap_header.code.into())
-}
-
-fn parse_bgp_open_option_packet(input: &[u8]) -> IResult<&[u8], Vec<CapabilityPacket>> {
-    let (input, header) = CapabilityHeader::parse(input)?;
-    let (opts, input) = input.split_at(header.length as usize);
-    let (_, caps) = many0(cap_parse)(opts)?;
-    Ok((input, caps))
-}
-
-fn parse_bgp_open_packet(input: &[u8]) -> IResult<&[u8], OpenPacket> {
-    println!("Open Packet parse");
-    let (input, mut packet) = OpenPacket::parse(input)?;
-    let (input, len) = if packet.opt_param_len == 255 {
-        let (input, ext) = OpenExtended::parse(input)?;
-        if ext.non_ext_op_type != 255 {
-            // TODO Error.
-        }
-        (input, ext.ext_opt_parm_len)
-    } else {
-        (input, packet.opt_param_len as u16)
-    };
-    // Check optional open parameter length.
-    if input.len() != len as usize {
-        // TODO: Error.
-    }
-    let (opts, input) = input.split_at(len as usize);
-    let (_, caps) = many0(parse_bgp_open_option_packet)(opts)?;
-    for mut cap in caps.into_iter() {
-        packet.caps.append(&mut cap);
-    }
-    Ok((input, packet))
-}
 
 fn parse_bgp_attr_as2_segment(input: &[u8]) -> IResult<&[u8], As2Segment> {
     let (input, header) = AsSegmentHeader::parse(input)?;
@@ -335,7 +299,7 @@ pub fn peek_bgp_length(input: &[u8]) -> usize {
 pub fn parse_bgp_packet(input: &[u8], as4: bool) -> IResult<&[u8], BgpPacket> {
     let (_, header) = peek(BgpHeader::parse)(input)?;
     match header.typ {
-        BgpType::Open => map(parse_bgp_open_packet, BgpPacket::Open)(input),
+        BgpType::Open => map(OpenPacket::parse_packet, BgpPacket::Open)(input),
         BgpType::Update => {
             let (input, p) = parse_bgp_update_packet(input, as4)?;
             Ok((input, BgpPacket::Update(p)))

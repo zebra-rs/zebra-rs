@@ -1,5 +1,5 @@
 use super::{
-    attr::Attribute,
+    packet::Attribute,
     packet::UpdatePacket,
     peer::{ConfigRef, Peer},
 };

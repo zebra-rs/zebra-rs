@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use super::{NotificationPacket, OpenPacket, UpdatePacket};
 use nom_derive::*;
 
