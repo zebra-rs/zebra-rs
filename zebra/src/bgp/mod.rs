@@ -1,9 +1,6 @@
 pub mod inst;
 pub use inst::{serve, Bgp};
 
-pub mod afi;
-pub use afi::*;
-
 pub mod constant;
 pub use constant::*;
 
@@ -16,3 +13,5 @@ pub mod show;
 pub mod task;
 
 pub mod mrt;
+
+pub use packet::{Afi, AfiSafi, AfiSafis, Safi};

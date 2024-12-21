@@ -16,3 +16,6 @@ pub use many::many0;
 
 pub mod cap;
 pub use cap::CapabilityCode;
+
+pub mod afi;
+pub use afi::*;
