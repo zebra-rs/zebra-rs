@@ -1,5 +1,4 @@
 use std::net::Ipv4Addr;
-use std::str::FromStr;
 
 use ipnet::Ipv4Net;
 

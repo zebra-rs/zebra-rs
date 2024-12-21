@@ -1,5 +1,4 @@
 use crate::bgp::packet::{Afi2, Safi2};
-use crate::bgp::{Afi, Safi};
 use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom_derive::*;

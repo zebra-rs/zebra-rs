@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{Message, Ospf, OspfTop, ShowCallback};
+pub use inst::{Message, Ospf, ShowCallback};
 
 pub mod link;
 pub use link::OspfLink;

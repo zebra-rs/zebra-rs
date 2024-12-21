@@ -7,7 +7,7 @@ use ospf_packet::{DbDescFlags, OspfDbDesc, OspfOptions};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::task::Timer;
-use super::{Identity, Message, NfsmState, OspfLink};
+use super::{Identity, Message, NfsmState};
 
 pub struct Neighbor {
     pub ifindex: u32,

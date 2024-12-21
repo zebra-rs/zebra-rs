@@ -1,6 +1,5 @@
 use std::net::Ipv4Addr;
 
-use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use ospf_packet::{OspfDbDesc, OspfHello, Ospfv2Packet, Ospfv2Payload};
 

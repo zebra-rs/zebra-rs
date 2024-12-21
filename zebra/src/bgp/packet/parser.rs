@@ -5,7 +5,7 @@ use crate::bgp::attr::{
     LargeCommunity, LocalPref, Med, MpNlriAttr, MpNlriReachHeader, MpNlriUnreachHeader,
     NextHopAttr, Origin, RouteDistinguisher,
 };
-use crate::bgp::{Afi, Safi};
+use cap::{CapabilityHeader, CapabilityPacket};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nom::bytes::streaming::take;
 use nom::combinator::{map, peek};
