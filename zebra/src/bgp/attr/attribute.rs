@@ -1,3 +1,4 @@
+use crate::bgp::packet::{Afi2, Safi2};
 use crate::bgp::{Afi, Safi};
 use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -77,15 +78,15 @@ pub fn encode_tlv<T: AttributeEncoder>(buf: &mut BytesMut, attr_buf: BytesMut) {
 
 #[derive(Clone, Debug, NomBE)]
 pub struct MpNlriReachHeader {
-    pub afi: Afi,
-    pub safi: Safi,
+    pub afi: Afi2,
+    pub safi: Safi2,
     pub nhop_len: u8,
 }
 
 #[derive(Clone, Debug, NomBE)]
 pub struct MpNlriUnreachHeader {
-    pub afi: Afi,
-    pub safi: Safi,
+    pub afi: Afi2,
+    pub safi: Safi2,
 }
 
 #[derive(Clone, Debug)]
