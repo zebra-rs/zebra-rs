@@ -623,7 +623,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     };
     let mut caps = Vec::new();
     for afi_safi in peer.config.afi_safi.0.iter() {
-        let cap = CapabilityMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
+        let cap = CapabilityMultiProtocol::new(&afi_safi.afi.0.into(), &afi_safi.safi.0.into());
         caps.push(CapabilityPacket::MultiProtocol(cap));
     }
     if peer.config.four_octet {
