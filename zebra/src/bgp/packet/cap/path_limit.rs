@@ -4,7 +4,7 @@ use nom::IResult;
 use nom_derive::*;
 
 use super::{CapabilityCode, Emit};
-use crate::bgp::packet::{Afi2, Safi2};
+use crate::bgp::packet::{Afi, Safi};
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityPathLimit {
@@ -13,13 +13,13 @@ pub struct CapabilityPathLimit {
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct PathLimitValue {
-    pub afi: Afi2,
-    pub safi: Safi2,
+    pub afi: Afi,
+    pub safi: Safi,
     pub path_limit: u16,
 }
 
 impl CapabilityPathLimit {
-    pub fn new(afi: Afi2, safi: Safi2, path_limit: u16) -> Self {
+    pub fn new(afi: Afi, safi: Safi, path_limit: u16) -> Self {
         Self {
             values: vec![PathLimitValue {
                 afi,

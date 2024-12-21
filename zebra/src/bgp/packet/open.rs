@@ -11,7 +11,7 @@ use super::cap::CapabilityPacket;
 use super::cap::Emit;
 use super::BgpHeader;
 use super::CapabilityCode;
-use super::{Afi2, Safi2};
+use super::{Afi, Safi};
 
 use crate::bgp::BGP_VERSION;
 

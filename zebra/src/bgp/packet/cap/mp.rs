@@ -2,17 +2,17 @@ use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
 use super::{CapabilityCode, Emit};
-use crate::bgp::packet::{Afi2, Safi2};
+use crate::bgp::packet::{Afi, Safi};
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityMultiProtocol {
-    afi: Afi2,
+    afi: Afi,
     res: u8,
-    safi: Safi2,
+    safi: Safi,
 }
 
 impl CapabilityMultiProtocol {
-    pub fn new(afi: &Afi2, safi: &Safi2) -> Self {
+    pub fn new(afi: &Afi, safi: &Safi) -> Self {
         Self {
             afi: *afi,
             res: 0,
