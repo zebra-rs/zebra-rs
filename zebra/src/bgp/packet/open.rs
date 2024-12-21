@@ -9,6 +9,7 @@ use std::net::Ipv4Addr;
 
 use super::BgpHeader;
 use super::CapabilityCode;
+use super::{Afi2, Safi2};
 use crate::bgp::BGP_VERSION;
 use crate::bgp::{Afi, Safi};
 
@@ -166,18 +167,18 @@ impl CapabilityHeader {
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct CapabilityMultiProtocol {
     header: CapabilityHeader,
-    afi: Afi,
+    afi: Afi2,
     res: u8,
-    safi: Safi,
+    safi: Safi2,
 }
 
 impl CapabilityMultiProtocol {
-    pub fn new(afi: &Afi, safi: &Safi) -> Self {
+    pub fn new(afi: &Afi2, safi: &Safi2) -> Self {
         Self {
             header: CapabilityHeader::new(CapabilityCode::MultiProtocol, 4),
-            afi: afi.clone(),
+            afi: *afi,
             res: 0,
-            safi: safi.clone(),
+            safi: *safi,
         }
     }
 }
@@ -192,10 +193,9 @@ impl Emit for CapabilityMultiProtocol {
     }
 
     fn emit_value(&self, buf: &mut BytesMut) {
-        println!("XXX MP emit_value");
-        buf.put_u16(self.afi.0);
+        buf.put_u16(self.afi.into());
         buf.put_u8(0);
-        buf.put_u8(self.safi.0);
+        buf.put_u8(self.safi.into());
     }
 }
 
