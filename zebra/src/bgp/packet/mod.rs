@@ -15,4 +15,4 @@ pub mod many;
 pub use many::many0;
 
 pub mod cap;
-pub use cap::CapabilityType;
+pub use cap::CapabilityCode;

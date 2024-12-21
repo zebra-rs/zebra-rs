@@ -6,7 +6,7 @@ use nom_derive::*;
 
 #[repr(u8)]
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-pub enum CapabilityType {
+pub enum CapabilityCode {
     #[default]
     MultiProtocol = 1,
     RouteRefresh = 2,
@@ -26,9 +26,9 @@ pub enum CapabilityType {
     Unknown(u8),
 }
 
-impl From<CapabilityType> for u8 {
-    fn from(typ: CapabilityType) -> Self {
-        use CapabilityType::*;
+impl From<CapabilityCode> for u8 {
+    fn from(typ: CapabilityCode) -> Self {
+        use CapabilityCode::*;
         match typ {
             MultiProtocol => 1,
             RouteRefresh => 2,
@@ -50,9 +50,9 @@ impl From<CapabilityType> for u8 {
     }
 }
 
-impl From<u8> for CapabilityType {
+impl From<u8> for CapabilityCode {
     fn from(typ: u8) -> Self {
-        use CapabilityType::*;
+        use CapabilityCode::*;
         match typ {
             1 => MultiProtocol,
             2 => RouteRefresh,
@@ -74,7 +74,7 @@ impl From<u8> for CapabilityType {
     }
 }
 
-impl CapabilityType {
+impl CapabilityCode {
     pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, typ) = be_u8(input)?;
         let cap_type: Self = typ.into();
