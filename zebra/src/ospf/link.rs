@@ -1,9 +1,7 @@
-use std::str::FromStr;
 use std::sync::Arc;
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use bitfield_struct::bitfield;
-use ipnet::Ipv4Net;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;

@@ -13,7 +13,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send, ospf_ls_req_recv};
-use crate::ospf::socket::ospf_join_if;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::Link;
