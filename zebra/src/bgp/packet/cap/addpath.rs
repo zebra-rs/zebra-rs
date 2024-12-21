@@ -2,12 +2,12 @@ use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
 use super::{CapabilityCode, Emit};
-use crate::bgp::packet::{Afi2, Safi2};
+use crate::bgp::packet::{Afi, Safi};
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct AddPathValue {
-    afi: Afi2,
-    safi: Safi2,
+    afi: Afi,
+    safi: Safi,
     send_receive: u8,
 }
 
@@ -17,7 +17,7 @@ pub struct CapabilityAddPath {
 }
 
 impl CapabilityAddPath {
-    pub fn new(afi: Afi2, safi: Safi2, send_receive: u8) -> Self {
+    pub fn new(afi: Afi, safi: Safi, send_receive: u8) -> Self {
         Self {
             values: vec![AddPathValue {
                 afi,

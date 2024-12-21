@@ -5,26 +5,39 @@ use nom::{
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 
-#[derive(Clone, Debug, Eq, PartialEq, NomBE, Default)]
-pub struct Afi(pub u16);
-
-newtype_enum! {
-    impl display Afi {
-        IP = 1,
-        IP6 = 2,
-        L2VPN = 25,
-    }
+#[repr(u16)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum Afi {
+    #[default]
+    Ip = 1,
+    Ip6 = 2,
+    L2vpn = 25,
+    Unknown(u16),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, NomBE, Default)]
-pub struct Safi(pub u8);
+#[repr(u8)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum Safi {
+    #[default]
+    Unicast = 1,
+    Multicast = 2,
+    MplsLabel = 4,
+    Encap = 7,
+    Evpn = 70,
+    MplsVpn = 128,
+    Flowspec = 133,
+    Unknown(u8),
+}
 
-newtype_enum! {
-    impl display Safi {
-        Unicast = 1,
-        Multicast = 2,
-        MplsLabel = 4,
-        MplsVpn = 128,
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub struct AfiSafi {
+    pub afi: Afi,
+    pub safi: Safi,
+}
+
+impl AfiSafi {
+    pub fn new(afi: Afi, safi: Safi) -> Self {
+        Self { afi, safi }
     }
 }
 
@@ -42,51 +55,9 @@ impl AfiSafis {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Clone)]
-pub struct AfiSafi {
-    pub afi: Afi,
-    pub safi: Safi,
-}
-
-impl AfiSafi {
-    pub fn new(afi: Afi, safi: Safi) -> Self {
-        Self { afi, safi }
-    }
-}
-
-#[repr(u16)]
-#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-pub enum Afi2 {
-    #[default]
-    Ip = 1,
-    Ip6 = 2,
-    L2vpn = 25,
-    Unknown(u16),
-}
-
-#[repr(u8)]
-#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-pub enum Safi2 {
-    #[default]
-    Unicast = 1,
-    Multicast = 2,
-    MplsLabel = 4,
-    Encap = 7,
-    Evpn = 70,
-    MplsVpn = 128,
-    Flowspec = 133,
-    Unknown(u8),
-}
-
-#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-pub struct AfiSafi2 {
-    pub afi: Afi2,
-    pub safi: Safi2,
-}
-
-impl From<Afi2> for u16 {
-    fn from(afi: Afi2) -> Self {
-        use Afi2::*;
+impl From<Afi> for u16 {
+    fn from(afi: Afi) -> Self {
+        use Afi::*;
         match afi {
             Ip => 1,
             Ip6 => 2,
@@ -96,9 +67,9 @@ impl From<Afi2> for u16 {
     }
 }
 
-impl From<u16> for Afi2 {
+impl From<u16> for Afi {
     fn from(val: u16) -> Self {
-        use Afi2::*;
+        use Afi::*;
         match val {
             1 => Ip,
             2 => Ip6,
@@ -108,9 +79,9 @@ impl From<u16> for Afi2 {
     }
 }
 
-impl From<Safi2> for u8 {
-    fn from(safi: Safi2) -> Self {
-        use Safi2::*;
+impl From<Safi> for u8 {
+    fn from(safi: Safi) -> Self {
+        use Safi::*;
         match safi {
             Unicast => 1,
             Multicast => 2,
@@ -124,9 +95,9 @@ impl From<Safi2> for u8 {
     }
 }
 
-impl From<u8> for Safi2 {
+impl From<u8> for Safi {
     fn from(val: u8) -> Self {
-        use Safi2::*;
+        use Safi::*;
         match val {
             1 => Unicast,
             2 => Multicast,
@@ -140,7 +111,7 @@ impl From<u8> for Safi2 {
     }
 }
 
-impl Afi2 {
+impl Afi {
     pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, afi) = be_u16(input)?;
         let afi: Self = afi.into();
@@ -148,7 +119,7 @@ impl Afi2 {
     }
 }
 
-impl Safi2 {
+impl Safi {
     pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, safi) = be_u8(input)?;
         let safi: Self = safi.into();

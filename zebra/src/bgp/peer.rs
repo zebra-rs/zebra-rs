@@ -6,7 +6,7 @@ use super::route::route_from_peer;
 use super::route::Route;
 use super::task::*;
 use super::BGP_PORT;
-use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi, BGP_HOLD_TIME};
+use super::{Bgp, BGP_HOLD_TIME};
 use bytes::BytesMut;
 use cap::CapabilityAs4;
 use cap::CapabilityGracefulRestart;
@@ -185,7 +185,7 @@ impl Peer {
         };
         peer.config
             .afi_safi
-            .push(AfiSafi::new(Afi::IP, Safi::Unicast));
+            .push(AfiSafi::new(Afi::Ip, Safi::Unicast));
         peer.config.four_octet = true;
         peer.config.route_refresh = true;
         // peer.config.graceful_restart = Some(65535);
@@ -628,7 +628,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     };
     let mut caps = Vec::new();
     for afi_safi in peer.config.afi_safi.0.iter() {
-        let cap = CapabilityMultiProtocol::new(&afi_safi.afi.0.into(), &afi_safi.safi.0.into());
+        let cap = CapabilityMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
         caps.push(CapabilityPacket::MultiProtocol(cap));
     }
     if peer.config.four_octet {

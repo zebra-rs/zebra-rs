@@ -2,7 +2,7 @@ use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
 use super::{CapabilityCode, Emit};
-use crate::bgp::packet::{Afi2, Safi2};
+use crate::bgp::packet::{Afi, Safi};
 
 #[derive(Debug, Default, PartialEq, NomBE, Clone)]
 pub struct CapabilityLlgr {
@@ -11,8 +11,8 @@ pub struct CapabilityLlgr {
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct LLGRValue {
-    afi: Afi2,
-    safi: Safi2,
+    afi: Afi,
+    safi: Safi,
     flags_stale_time: u32,
 }
 
