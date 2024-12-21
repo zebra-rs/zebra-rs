@@ -118,6 +118,7 @@ pub struct CapabilityHeader {
 
 pub trait Emit {
     fn code(&self) -> CapabilityCode;
+
     fn len(&self) -> u8 {
         0
     }
@@ -177,24 +178,12 @@ impl Emit for CapabilityMultiProtocol {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, Default, PartialEq, NomBE, Clone)]
 pub struct CapabilityRouteRefresh {}
 
 impl Emit for CapabilityRouteRefresh {
     fn code(&self) -> CapabilityCode {
         CapabilityCode::RouteRefresh
-    }
-
-    fn len(&self) -> u8 {
-        0
-    }
-
-    fn emit_value(&self, buf: &mut BytesMut) {}
-}
-
-impl CapabilityRouteRefresh {
-    pub fn new(typ: CapabilityCode) -> Self {
-        Self {}
     }
 }
 
@@ -223,31 +212,13 @@ impl Emit for CapabilityAs4 {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, Default, PartialEq, NomBE, Clone)]
 pub struct CapabilityDynamicCapability {}
-
-impl CapabilityDynamicCapability {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Default for CapabilityDynamicCapability {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl Emit for CapabilityDynamicCapability {
     fn code(&self) -> CapabilityCode {
         CapabilityCode::DynamicCapability
     }
-
-    fn len(&self) -> u8 {
-        0
-    }
-
-    fn emit_value(&self, buf: &mut BytesMut) {}
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
@@ -264,13 +235,12 @@ pub struct CapabilityAddPath {
 
 impl CapabilityAddPath {
     pub fn new(afi: Afi2, safi: Safi2, send_receive: u8) -> Self {
-        let value = AddPathValue {
-            afi,
-            safi,
-            send_receive,
-        };
         Self {
-            values: vec![value],
+            values: vec![AddPathValue {
+                afi,
+                safi,
+                send_receive,
+            }],
         }
     }
 }
@@ -329,58 +299,27 @@ impl Emit for CapabilityGracefulRestart {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, Default, PartialEq, NomBE, Clone)]
 pub struct CapabilityExtendedMessage {}
-
-impl CapabilityExtendedMessage {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Default for CapabilityExtendedMessage {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl Emit for CapabilityExtendedMessage {
     fn code(&self) -> CapabilityCode {
         CapabilityCode::ExtendedMessage
     }
-
-    fn len(&self) -> u8 {
-        0
-    }
-
-    fn emit_value(&self, buf: &mut BytesMut) {}
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, Default, PartialEq, NomBE, Clone)]
 pub struct CapabilityEnhancedRouteRefresh {}
-
-impl CapabilityEnhancedRouteRefresh {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Default for CapabilityEnhancedRouteRefresh {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl Emit for CapabilityEnhancedRouteRefresh {
     fn code(&self) -> CapabilityCode {
         CapabilityCode::EnhancedRouteRefresh
     }
+}
 
-    fn len(&self) -> u8 {
-        0
-    }
-
-    fn emit_value(&self, buf: &mut BytesMut) {}
+#[derive(Debug, Default, PartialEq, NomBE, Clone)]
+pub struct CapabilityLlgr {
+    pub values: Vec<LLGRValue>,
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
@@ -388,23 +327,6 @@ pub struct LLGRValue {
     afi: Afi2,
     safi: Safi2,
     flags_stale_time: u32,
-}
-
-#[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityLlgr {
-    pub values: Vec<LLGRValue>,
-}
-
-impl CapabilityLlgr {
-    pub fn new() -> Self {
-        Self { values: Vec::new() }
-    }
-}
-
-impl Default for CapabilityLlgr {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Emit for CapabilityLlgr {
@@ -425,7 +347,7 @@ impl Emit for CapabilityLlgr {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct CapabilityFqdn {
     pub hostname: Vec<u8>,
     pub domain: Vec<u8>,
@@ -471,14 +393,16 @@ impl Emit for CapabilityFqdn {
     }
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
+#[derive(Debug, Default, PartialEq, NomBE, Clone)]
 pub struct CapabilitySoftwareVersion {
     pub version: Vec<u8>,
 }
 
 impl CapabilitySoftwareVersion {
-    pub fn new(version: Vec<u8>) -> Self {
-        Self { version }
+    pub fn new(version: &str) -> Self {
+        Self {
+            version: version.into(),
+        }
     }
 }
 
@@ -497,26 +421,25 @@ impl Emit for CapabilitySoftwareVersion {
 }
 
 #[derive(Debug, PartialEq, NomBE, Clone)]
+pub struct CapabilityPathLimit {
+    pub values: Vec<PathLimitValue>,
+}
+
+#[derive(Debug, PartialEq, NomBE, Clone)]
 pub struct PathLimitValue {
     pub afi: Afi2,
     pub safi: Safi2,
     pub path_limit: u16,
 }
 
-#[derive(Debug, PartialEq, NomBE, Clone)]
-pub struct CapabilityPathLimit {
-    pub values: Vec<PathLimitValue>,
-}
-
 impl CapabilityPathLimit {
     pub fn new(afi: Afi2, safi: Safi2, path_limit: u16) -> Self {
-        let value = PathLimitValue {
-            afi,
-            safi,
-            path_limit,
-        };
         Self {
-            values: vec![value],
+            values: vec![PathLimitValue {
+                afi,
+                safi,
+                path_limit,
+            }],
         }
     }
 }
