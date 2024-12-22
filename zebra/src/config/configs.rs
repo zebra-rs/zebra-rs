@@ -1,10 +1,10 @@
-use crate::bgp::packet::{Afi, AfiSafi, Safi};
+use bgp_packet::{Afi, AfiSafi, Safi};
 
 use super::parse::match_keyword;
 use super::parse::{Match, MatchType};
 use super::vtysh::{CommandPath, YangMatch};
 use super::Completion;
-// use crate::bgp::AfiSafi;
+
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr};

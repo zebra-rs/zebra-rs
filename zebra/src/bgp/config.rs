@@ -1,6 +1,7 @@
+use bgp_packet::AfiSafi;
+
 use super::{
     inst::Callback,
-    packet::AfiSafi,
     peer::{fsm_init, Peer, PeerType},
     Bgp,
 };

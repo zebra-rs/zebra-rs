@@ -1,8 +1,6 @@
-use super::{
-    packet::Attribute,
-    packet::UpdatePacket,
-    peer::{ConfigRef, Peer},
-};
+use bgp_packet::{Attribute, UpdatePacket};
+
+use super::peer::{ConfigRef, Peer};
 use std::net::IpAddr;
 
 // pub enum RouteFrom {

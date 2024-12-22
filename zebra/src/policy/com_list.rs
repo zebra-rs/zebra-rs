@@ -1,8 +1,7 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
-use crate::bgp::packet::Community;
+use bgp_packet::Community;
+
 use crate::config::{Args, ConfigOp};
 
 use super::Action;
