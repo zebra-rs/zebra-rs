@@ -1,4 +1,3 @@
-use super::super::packet::{parse_bgp_packet, parse_ipv4_prefix, BgpPacket};
 use nom::bytes::streaming::take;
 use nom::error::{make_error, ErrorKind};
 use nom::multi::many0;
@@ -7,6 +6,8 @@ use nom::IResult;
 use nom_derive::*;
 use rusticata_macros::newtype_enum;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use bgp_packet::{parse_bgp_packet, parse_ipv4_prefix, BgpPacket};
 
 const AFI_IP: u16 = 1;
 const AFI_IP6: u16 = 2;

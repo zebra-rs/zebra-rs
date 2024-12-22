@@ -1,12 +1,14 @@
-use super::inst::{Bgp, ShowCallback};
-use super::packet::BgpType;
-use super::peer::{Peer, PeerCounter, PeerParam};
-use crate::config::Args;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
+
+use bgp_packet::BgpType;
+use serde::Serialize;
+
+use super::inst::{Bgp, ShowCallback};
+use super::peer::{Peer, PeerCounter, PeerParam};
+use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
     let mut sent: u64 = 0;

@@ -1,18 +1,4 @@
-#![allow(dead_code)]
-use super::inst::Message;
-use super::packet::attr::*;
-use super::packet::*;
-use super::route::route_from_peer;
-use super::route::Route;
-use super::task::*;
-use super::BGP_PORT;
-use super::{Bgp, BGP_HOLD_TIME};
 use bytes::BytesMut;
-use cap::CapabilityAs4;
-use cap::CapabilityGracefulRestart;
-use cap::CapabilityMultiProtocol;
-use cap::CapabilityPacket;
-use cap::CapabilityRouteRefresh;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
 use prefix_trie::PrefixMap;
@@ -25,6 +11,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+use bgp_packet::*;
+
+use cap::CapabilityAs4;
+use cap::CapabilityGracefulRestart;
+use cap::CapabilityMultiProtocol;
+use cap::CapabilityPacket;
+use cap::CapabilityRouteRefresh;
+
+use super::inst::Message;
+use super::route::route_from_peer;
+use super::route::Route;
+use super::task::*;
+use super::BGP_PORT;
+use super::{Bgp, BGP_HOLD_TIME};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
