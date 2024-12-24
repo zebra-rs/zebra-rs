@@ -50,6 +50,7 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/commit"), commit);
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/list"), list);
+    mode.install_func(String::from("/diff"), diff);
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
     mode
@@ -141,6 +142,13 @@ fn commit(config: &ConfigManager) -> (ExecCode, String) {
         Ok(_) => (ExecCode::Show, String::from("")),
         Err(err) => (ExecCode::Show, err.to_string()),
     }
+}
+
+fn diff(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    let diff = config.diff_config(&mut output);
+    // config.store.candidate.borrow().list(&mut output);
+    (ExecCode::Show, output)
 }
 
 fn discard(config: &ConfigManager) -> (ExecCode, String) {
