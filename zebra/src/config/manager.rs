@@ -212,6 +212,38 @@ impl ConfigManager {
         Ok(())
     }
 
+    pub fn diff_config(&self, output: &mut String) -> anyhow::Result<()> {
+        let mut errors = Vec::<String>::new();
+        self.store.candidate.borrow().validate(&mut errors);
+        if !errors.is_empty() {
+            let errors = errors.join("\n");
+            return Err(anyhow::anyhow!(errors));
+        }
+        let mut running = String::new();
+        let mut candidate = String::new();
+        self.store.running.borrow().list(&mut running);
+        self.store.candidate.borrow().list(&mut candidate);
+
+        let text_diff = TextDiff::from_lines(&running, &candidate);
+        let mut binding = text_diff.unified_diff();
+        let mut diff = binding.context_radius(65535).to_string();
+        let diff = trim_first_line(&mut diff);
+
+        for line in diff.lines() {
+            if !line.is_empty() {
+                let first_char = line.chars().next().unwrap();
+                let _op = match first_char {
+                    '+' => ConfigOp::Set,
+                    '-' => ConfigOp::Delete,
+                    _ => continue,
+                };
+            }
+            output.push_str(line);
+            output.push('\n');
+        }
+        Ok(())
+    }
+
     fn load_mode(&self, yang: &mut YangStore, mode: &str) -> anyhow::Result<Rc<Entry>> {
         yang.read_with_resolve(mode)?;
         yang.identity_resolve();
