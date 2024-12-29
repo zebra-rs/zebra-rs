@@ -4,7 +4,7 @@ zebra:
 	RUSTFLAGS="--cfg tokio_unstable" cargo build --release
 
 all:
-	RUSTFLAGS="--cfg tokio_unstable" cargo build --release
+	cargo build --release
 	cd vtysh;./configure;make
 
 console:
