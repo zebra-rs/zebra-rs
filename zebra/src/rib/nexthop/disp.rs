@@ -14,7 +14,7 @@ impl Display for Nexthop {
             Nexthop::Multi(multi) => {
                 write!(f, "{}", multi)
             }
-            Nexthop::Protect(pro) => {
+            Nexthop::List(pro) => {
                 write!(f, "{}", pro)
             }
         }

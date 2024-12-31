@@ -216,7 +216,7 @@ fn rib_resolve_nexthop(
         }
         resolve_nexthop_multi(multi, nmap, multi_valid);
     }
-    if let Nexthop::Protect(pro) = &mut entry.nexthop {
+    if let Nexthop::List(pro) = &mut entry.nexthop {
         let mut pro_valid = false;
         for uni in pro.nexthops.iter_mut() {
             let valid = resolve_nexthop_uni(uni, nmap, table);
@@ -260,17 +260,17 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                         pro.nexthops.push(euni);
                         pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
                         e.metric = pro.metric();
-                        Nexthop::Protect(pro)
+                        Nexthop::List(pro)
                     }
                 }
-                Nexthop::Protect(pro) => {
+                Nexthop::List(pro) => {
                     let Nexthop::Uni(euni) = entry.nexthop else {
                         return;
                     };
                     pro.nexthops.push(euni);
                     pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
                     e.metric = pro.metric();
-                    Nexthop::Protect(pro.clone())
+                    Nexthop::List(pro.clone())
                 }
                 _ => {
                     return;
@@ -295,7 +295,7 @@ fn rib_replace_system(
     let replace = match &mut e.nexthop {
         Nexthop::Uni(uni) => uni.metric == entry.metric,
         Nexthop::Multi(multi) => multi.metric == entry.metric,
-        Nexthop::Protect(pro) => {
+        Nexthop::List(pro) => {
             pro.nexthops.retain(|x| x.metric != entry.metric);
             if pro.nexthops.len() == 1 {
                 let uni = pro.nexthops.pop().unwrap();

@@ -109,7 +109,7 @@ impl FibHandle {
             Nexthop::Multi(_) => {
                 self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
             }
-            Nexthop::Protect(pro) => {
+            Nexthop::List(pro) => {
                 for uni in pro.nexthops.iter() {
                     self.route_ipv4_add_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
                         .await;
@@ -173,7 +173,7 @@ impl FibHandle {
             Nexthop::Multi(_) => {
                 self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
             }
-            Nexthop::Protect(pro) => {
+            Nexthop::List(pro) => {
                 for uni in pro.nexthops.iter() {
                     self.route_ipv4_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
                         .await;
