@@ -40,7 +40,21 @@ pub enum Nexthop {
     Onlink,
     Uni(NexthopUni),
     Multi(NexthopMulti),
-    Protect(NexthopProtect),
+    List(NexthopProtect),
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct NexthopProtect {
+    pub nexthops: Vec<NexthopUni>,
+}
+
+impl NexthopProtect {
+    pub fn metric(&self) -> u32 {
+        match self.nexthops.first() {
+            Some(nhop) => nhop.metric,
+            None => 0,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -53,19 +67,4 @@ pub struct NexthopMulti {
 
     // Nexthop Group id for multipath.
     pub gid: usize,
-}
-
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct NexthopProtect {
-    // Metric sorted BTreeMap.
-    pub nexthops: Vec<NexthopUni>,
-}
-
-impl NexthopProtect {
-    pub fn metric(&self) -> u32 {
-        match self.nexthops.first() {
-            Some(nhop) => nhop.metric,
-            None => 0,
-        }
-    }
 }

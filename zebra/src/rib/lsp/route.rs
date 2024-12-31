@@ -82,7 +82,7 @@ impl LspRoute {
                 };
                 pro.nexthops.push(nhop);
             }
-            entry.nexthop = Nexthop::Protect(pro);
+            entry.nexthop = Nexthop::List(pro);
         }
         Some(entry)
     }
