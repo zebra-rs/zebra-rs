@@ -11,7 +11,7 @@ use super::entry::RibEntry;
 use super::inst::Rib;
 use super::nexthop::NexthopUni;
 use super::{
-    Group, GroupTrait, Message, NexthopMap, NexthopMulti, NexthopProtect, RibEntries, RibType,
+    Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMulti, RibEntries, RibType,
 };
 
 impl Rib {
@@ -256,7 +256,7 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                     if uni.metric == euni.metric {
                         Nexthop::Uni(euni)
                     } else {
-                        let mut pro = NexthopProtect::default();
+                        let mut pro = NexthopList::default();
                         pro.nexthops.push(uni.clone());
                         pro.nexthops.push(euni);
                         pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
