@@ -116,7 +116,7 @@ impl RibEntry {
 
     pub async fn nexthop_unsync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
         match &self.nexthop {
-            Nexthop::Onlink => {}
+            Nexthop::Link(_) => {}
             Nexthop::Uni(uni) => {
                 self.handle_nexthop_group(nmap, fib, uni.gid).await;
             }

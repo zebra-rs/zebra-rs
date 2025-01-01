@@ -45,7 +45,7 @@ pub fn rib_entry_show(
         writeln!(buf, " directly connected {}", rib.link_name(e.ifindex)).unwrap();
     } else {
         match &e.nexthop {
-            Nexthop::Onlink => {
+            Nexthop::Link(_) => {
                 //
             }
             Nexthop::Uni(uni) => {
