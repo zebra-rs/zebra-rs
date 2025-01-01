@@ -1,6 +1,7 @@
 use ipnet::{IpNet, Ipv4Net};
+use netlink_packet_route::nexthop;
 use prefix_trie::PrefixMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fib::FibHandle;
 use crate::rib::resolve::{rib_resolve, ResolveOpt};
@@ -45,7 +46,12 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
-        println!("IPv4 route add: {} {}", entry.rtype.abbrev(), prefix);
+        println!(
+            "IPv4 route add: {} {} metric {}",
+            entry.rtype.abbrev(),
+            prefix,
+            entry.metric
+        );
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
@@ -53,6 +59,7 @@ impl Rib {
             rib_add(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         } else {
+            println!("System add");
             rib_add_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, None).await;
         }
@@ -64,7 +71,12 @@ impl Rib {
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry) {
-        println!("IPv4 route del: {} {}", entry.rtype.abbrev(), prefix);
+        println!(
+            "IPv4 route del: {} {} metric {}",
+            entry.rtype.abbrev(),
+            prefix,
+            entry.metric
+        );
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             self.rib_selection(prefix, replace.pop()).await;
@@ -265,13 +277,24 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                     }
                 }
                 Nexthop::List(pro) => {
-                    let Nexthop::Uni(euni) = entry.nexthop else {
+                    // Current One.
+                    let mut btree = BTreeMap::new();
+
+                    for l in pro.nexthops.iter() {
+                        println!("");
+                        btree.insert(l.metric, l.clone());
+                    }
+
+                    let Nexthop::Uni(uni) = entry.nexthop else {
                         return;
                     };
-                    pro.nexthops.push(euni);
-                    pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
-                    e.metric = pro.metric();
-                    Nexthop::List(pro.clone())
+
+                    btree.insert(uni.metric, uni);
+
+                    let vec: Vec<_> = btree.iter().map(|(_, &ref value)| value.clone()).collect();
+                    let list = NexthopList { nexthops: vec };
+
+                    Nexthop::List(list)
                 }
                 _ => {
                     return;
