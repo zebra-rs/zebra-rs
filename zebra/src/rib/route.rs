@@ -45,7 +45,7 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
-        // println!("IPv4 route add: {} {}", entry.rtype.abbrev(), prefix);
+        println!("IPv4 route add: {} {}", entry.rtype.abbrev(), prefix);
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
@@ -64,11 +64,12 @@ impl Rib {
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry) {
-        // println!("IPv4 route del: {} {}", entry.rtype.abbrev(), prefix);
+        println!("IPv4 route del: {} {}", entry.rtype.abbrev(), prefix);
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             self.rib_selection(prefix, replace.pop()).await;
         } else {
+            println!("System route remove");
             let mut replace = rib_replace_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         }
@@ -286,26 +287,29 @@ fn rib_replace_system(
     prefix: &Ipv4Net,
     entry: RibEntry,
 ) -> Vec<RibEntry> {
+    println!("rib_replace_system {}", prefix);
     let entries = table.entry(*prefix).or_default();
     let index = rib_rtype(entries, entry.rtype);
     let Some(index) = index else {
         return vec![];
     };
+    println!("index {}", index);
     let e = entries.get_mut(index).unwrap();
     let replace = match &mut e.nexthop {
         Nexthop::Uni(uni) => uni.metric == entry.metric,
         Nexthop::Multi(multi) => multi.metric == entry.metric,
-        Nexthop::List(pro) => {
-            pro.nexthops.retain(|x| x.metric != entry.metric);
-            if pro.nexthops.len() == 1 {
-                let uni = pro.nexthops.pop().unwrap();
+        Nexthop::List(list) => {
+            list.nexthops.retain(|x| x.metric != entry.metric);
+            if list.nexthops.len() == 1 {
+                let uni = list.nexthops.pop().unwrap();
                 e.metric = uni.metric;
                 e.nexthop = Nexthop::Uni(uni);
             }
             false
         }
-        _ => false,
+        Nexthop::Link(ifindex) => true,
     };
+    println!("replace {}", replace);
     if replace {
         return rib_replace(table, prefix, entry.rtype);
     }
@@ -351,13 +355,16 @@ async fn ipv4_nexthop_sync(
     table: &PrefixMap<Ipv4Net, RibEntries>,
     fib: &FibHandle,
 ) {
+    println!("ipv4 nexthop sync");
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
+            println!("nhop: {} vald: {}", uni.addr, uni.is_valid());
             // Resolve the next hop
             let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
 
             // Update the status of the next hop
             let ifindex = resolve.is_valid();
+            println!("ifindex {:?}", ifindex);
             if ifindex == 0 {
                 uni.set_valid(false);
                 uni.set_installed(false);

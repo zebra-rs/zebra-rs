@@ -34,13 +34,18 @@ impl Default for NexthopUni {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Nexthop {
-    #[default]
-    Onlink,
+    Link(u32),
     Uni(NexthopUni),
-    Multi(NexthopMulti),
     List(NexthopProtect),
+    Multi(NexthopMulti),
+}
+
+impl Default for Nexthop {
+    fn default() -> Self {
+        Self::Link(0)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]

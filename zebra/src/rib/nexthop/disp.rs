@@ -5,7 +5,7 @@ use super::{Nexthop, NexthopMulti, NexthopProtect, NexthopUni};
 impl Display for Nexthop {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
-            Nexthop::Onlink => {
+            Nexthop::Link(_) => {
                 write!(f, "onlink")
             }
             Nexthop::Uni(uni) => {
