@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::{Nexthop, NexthopMulti, NexthopProtect, NexthopUni};
+use super::{Nexthop, NexthopList, NexthopMulti, NexthopUni};
 
 impl Display for Nexthop {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
@@ -33,7 +33,7 @@ impl Display for NexthopMulti {
     }
 }
 
-impl Display for NexthopProtect {
+impl Display for NexthopList {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "protect")
     }

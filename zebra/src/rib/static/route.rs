@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::NexthopUni;
-use crate::rib::{Nexthop, NexthopMulti, NexthopProtect, RibType};
+use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType};
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
@@ -69,7 +69,7 @@ impl StaticRoute {
             }
             entry.nexthop = Nexthop::Multi(multi);
         } else {
-            let mut pro = NexthopProtect::default();
+            let mut pro = NexthopList::default();
             for (index, (metric, set)) in map.iter_mut().enumerate() {
                 if index == 0 {
                     entry.metric = *metric;

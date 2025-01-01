@@ -38,7 +38,7 @@ impl Default for NexthopUni {
 pub enum Nexthop {
     Link(u32),
     Uni(NexthopUni),
-    List(NexthopProtect),
+    List(NexthopList),
     Multi(NexthopMulti),
 }
 
@@ -49,11 +49,11 @@ impl Default for Nexthop {
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct NexthopProtect {
+pub struct NexthopList {
     pub nexthops: Vec<NexthopUni>,
 }
 
-impl NexthopProtect {
+impl NexthopList {
     pub fn metric(&self) -> u32 {
         match self.nexthops.first() {
             Some(nhop) => nhop.metric,
