@@ -12,7 +12,6 @@ use crate::rib::resolve::{rib_resolve, Resolve, ResolveOpt};
 pub enum Group {
     Uni(GroupUni),
     Multi(GroupMulti),
-    Protect(GroupProtect),
 }
 
 impl Group {
@@ -104,13 +103,6 @@ impl GroupTrait for GroupMulti {
     }
 }
 
-#[derive(Default, Debug)]
-pub struct GroupProtect {
-    common: GroupCommon,
-    primary: usize,
-    backup: Vec<usize>,
-}
-
 pub trait GroupTrait {
     fn common(&self) -> &GroupCommon;
 
@@ -162,7 +154,6 @@ impl GroupTrait for Group {
         match self {
             Uni(uni) => &uni.common,
             Multi(multi) => &multi.common,
-            Protect(protect) => &protect.common,
         }
     }
 
@@ -170,7 +161,6 @@ impl GroupTrait for Group {
         match self {
             Uni(uni) => &mut uni.common,
             Multi(multi) => &mut multi.common,
-            Protect(protect) => &mut protect.common,
         }
     }
 
@@ -178,7 +168,6 @@ impl GroupTrait for Group {
         match self {
             Group::Uni(uni) => uni.refcnt(),
             Group::Multi(multi) => multi.refcnt(),
-            _ => 0,
         }
     }
 }
