@@ -263,7 +263,7 @@ impl Rib {
     pub fn link_name(&self, link_index: u32) -> String {
         match self.links.get(&link_index) {
             Some(link) => link.name.clone(),
-            _ => String::from("unknown"),
+            None => String::from("unknown"),
         }
     }
 

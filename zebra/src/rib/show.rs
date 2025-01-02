@@ -2,7 +2,7 @@ use ipnet::Ipv4Net;
 
 use crate::{config::Args, rib::Nexthop};
 
-use super::{entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show, Rib};
+use super::{entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show, Group, Rib};
 use std::fmt::Write;
 
 // Rendering.
@@ -49,7 +49,18 @@ pub fn rib_entry_show(
                 //
             }
             Nexthop::Uni(uni) => {
-                writeln!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex)).unwrap();
+                let grp = rib.nmap.get(uni.gid);
+
+                let ifindex: u32 = if let Some(grp) = grp {
+                    if let Group::Uni(grp) = grp {
+                        grp.ifindex
+                    } else {
+                        0
+                    }
+                } else {
+                    uni.ifindex
+                };
+                writeln!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
