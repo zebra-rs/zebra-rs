@@ -147,6 +147,10 @@ fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {
         if entry.is_protocol() {
             let valid = entry.is_valid_nexthop(nmap);
             entry.set_valid(valid);
+            println!("is protocol: valid {}", valid);
+            if !valid {
+                entry.ifindex = 0;
+            }
         }
     }
 }
@@ -157,6 +161,7 @@ async fn ipv4_route_sync(
     fib: &FibHandle,
 ) {
     for (p, entries) in table.iter_mut() {
+        println!("Resolve: {}", p);
         ipv4_entry_resolve(entries, nmap);
         ipv4_entry_selection(p, entries, None, nmap, fib).await;
     }
@@ -276,11 +281,11 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                         Nexthop::List(pro)
                     }
                 }
-                Nexthop::List(pro) => {
+                Nexthop::List(list) => {
                     // Current One.
                     let mut btree = BTreeMap::new();
 
-                    for l in pro.nexthops.iter() {
+                    for l in list.nexthops.iter() {
                         println!("");
                         btree.insert(l.metric, l.clone());
                     }
@@ -378,19 +383,18 @@ async fn ipv4_nexthop_sync(
     table: &PrefixMap<Ipv4Net, RibEntries>,
     fib: &FibHandle,
 ) {
-    println!("ipv4 nexthop sync");
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            println!("nhop: {} vald: {}", uni.addr, uni.is_valid());
+            println!("before: {:?}", uni);
             // Resolve the next hop
             let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
 
             // Update the status of the next hop
             let ifindex = resolve.is_valid();
-            println!("ifindex {:?}", ifindex);
             if ifindex == 0 {
                 uni.set_valid(false);
                 uni.set_installed(false);
+                uni.set_ifindex(0);
             } else {
                 uni.set_ifindex(ifindex);
                 uni.set_valid(true);
@@ -399,6 +403,7 @@ async fn ipv4_nexthop_sync(
                     fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
             }
+            println!("after: {:?}", uni);
         }
     }
 }
