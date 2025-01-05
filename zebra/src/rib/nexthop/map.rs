@@ -34,6 +34,19 @@ impl NexthopMap {
         }
     }
 
+    pub fn get_uni(&self, index: usize) -> Option<&GroupUni> {
+        self.groups
+            .get(index)
+            .and_then(|grp| grp.as_ref())
+            .and_then(|grp| {
+                if let Group::Uni(uni) = grp {
+                    Some(uni)
+                } else {
+                    None
+                }
+            })
+    }
+
     pub fn get_mut(&mut self, index: usize) -> Option<&mut Group> {
         if let Some(grp) = self.groups.get_mut(index) {
             grp.as_mut()

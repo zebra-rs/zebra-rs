@@ -33,7 +33,35 @@ impl Rib {
                 let _ = self.tx.send(msg);
             }
         }
-        // Resolve all RIB.
+        // Remove DHCP and Kernel routes.
+        for (prefix, rib) in self.table.iter() {
+            for entry in rib.iter() {
+                if entry.rtype == RibType::Dhcp || entry.rtype == RibType::Kernel {
+                    match &entry.nexthop {
+                        Nexthop::Link(_) => {
+                            //
+                        }
+                        Nexthop::Uni(uni) => {
+                            if uni.ifindex == ifindex {
+                                let msg = Message::Ipv4Del {
+                                    prefix: *prefix,
+                                    rib: entry.clone(),
+                                };
+                                self.tx.send(msg).unwrap();
+                            }
+                        }
+                        Nexthop::List(list) => {
+                            //
+                        }
+                        Nexthop::Multi(multi) => {
+                            //
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resolve RIB.
         let msg = Message::Resolve;
         let _ = self.tx.send(msg);
     }
@@ -141,16 +169,67 @@ async fn ipv4_entry_selection(
     }
 }
 
-// Resolve RibEntries.  gid is already resolved.
+fn nexthop_uni_resolve(nhop: &mut NexthopUni, nmap: &NexthopMap) {
+    if let Some(grp) = nmap.get_uni(nhop.gid) {
+        nhop.valid = grp.is_valid();
+        nhop.ifindex = grp.ifindex;
+    }
+}
+
+fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap) {
+    match &mut entry.nexthop {
+        Nexthop::Link(iflink) => {
+            tracing::info!("Nexthop::Link({}): this won't happen", iflink);
+        }
+        Nexthop::Uni(uni) => {
+            nexthop_uni_resolve(uni, nmap);
+        }
+        Nexthop::Multi(multi) => {
+            for uni in multi.nexthops.iter_mut() {
+                nexthop_uni_resolve(uni, nmap);
+            }
+        }
+        Nexthop::List(list) => {
+            for uni in list.nexthops.iter_mut() {
+                nexthop_uni_resolve(uni, nmap);
+            }
+        }
+    }
+}
+
+fn entry_update(entry: &mut RibEntry) {
+    match &entry.nexthop {
+        Nexthop::Link(iflink) => {
+            tracing::info!("Nexthop::Link({}): this won't happen", iflink);
+        }
+        Nexthop::Uni(uni) => {
+            entry.valid = uni.valid;
+            entry.metric = uni.metric;
+        }
+        Nexthop::Multi(multi) => {
+            for uni in multi.nexthops.iter() {
+                //
+            }
+        }
+        Nexthop::List(list) => {
+            for uni in list.nexthops.iter() {
+                if uni.valid {
+                    entry.metric = uni.metric;
+                    entry.valid = uni.valid;
+                    return;
+                }
+            }
+            entry.metric = 0;
+            entry.valid = false;
+        }
+    }
+}
+
 fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {
     for entry in entries.iter_mut() {
         if entry.is_protocol() {
-            let valid = entry.is_valid_nexthop(nmap);
-            entry.set_valid(valid);
-            println!("is protocol: valid {}", valid);
-            if !valid {
-                entry.ifindex = 0;
-            }
+            entry_resolve(entry, nmap);
+            entry_update(entry);
         }
     }
 }
