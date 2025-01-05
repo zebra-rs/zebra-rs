@@ -5,9 +5,10 @@ use netlink_packet_route::route::MplsLabel;
 #[derive(Debug, Clone, PartialEq)]
 pub struct NexthopUni {
     pub addr: Ipv4Addr,
-    pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
+    pub ifindex: u32,
+    pub valid: bool,
     pub mpls: Option<Vec<MplsLabel>>,
     pub gid: usize,
 }
@@ -30,6 +31,7 @@ impl Default for NexthopUni {
             weight: 1,
             mpls: None,
             gid: 0,
+            valid: false,
         }
     }
 }

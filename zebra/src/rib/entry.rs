@@ -13,7 +13,7 @@ pub struct RibEntry {
     pub rsubtype: RibSubType,
     selected: bool,
     fib: bool,
-    valid: bool,
+    pub valid: bool,
     pub distance: u8,
     pub metric: u32,
     pub nexthop: Nexthop,
