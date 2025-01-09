@@ -8,6 +8,10 @@ module config {
     prefix inet;
   }
 
+  import ietf-yang-types {
+    prefix yang;
+  }
+
   import extension {
     prefix ext;
   }
@@ -142,6 +146,18 @@ module config {
             leaf metric {
               type uint32;
               description "Metric of the route.";
+            }
+          }
+
+          list arp {
+            key "address";
+            leaf "address" {
+              type inet:ipv4-address;
+              description "ARP neighbor address";
+            }
+            leaf mac {
+              type yang:mac-address;
+              description "MAC Address";
             }
           }
 
