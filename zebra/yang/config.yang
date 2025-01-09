@@ -24,6 +24,10 @@ module config {
     prefix policy;
   }
 
+  import openconfig-isis-types {
+    prefix isis;
+  }
+
   grouping config {
     container system {
       ext:help "System configuration";
@@ -85,6 +89,10 @@ module config {
       }
       container isis {
         presence "Enables configuration of IS-IS";
+
+        leaf net {
+          type isis:net;
+        }
       }
       container ldp {
         leaf router-id {
