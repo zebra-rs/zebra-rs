@@ -72,6 +72,7 @@ fn ytype_str(ytype: &YangType) -> &'static str {
         YangType::Ipv4Prefix => "A.B.C.D/M",
         YangType::Ipv6Addr => "X:X::X:X",
         YangType::Ipv6Prefix => "X:X::X:X/M",
+        YangType::NsapAddr => "XX.XXXX..XXXX.XX",
     }
 }
 

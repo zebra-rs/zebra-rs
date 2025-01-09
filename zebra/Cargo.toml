@@ -16,7 +16,8 @@ tokio = { version = "1", features = ["full", "tracing"] }
 tokio-stream = "0.1"
 tonic = "0.12"
 console-subscriber = "0.1.5"
-libyang = { git = "https://github.com/zebra-rs/libyang" }
+#libyang = { git = "https://github.com/zebra-rs/libyang" }
+libyang = { path = "../../libyang" }
 regex = "1.10"
 similar = "2"
 dirs = "5"
