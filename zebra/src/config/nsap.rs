@@ -1,7 +1,6 @@
 use std::iter::{self, from_fn};
 
 use super::parse::MatchType;
-use super::util::is_whitespace;
 
 pub fn match_nsap_addr(src: &str) -> (MatchType, usize) {
     let mut pos = 0usize;
