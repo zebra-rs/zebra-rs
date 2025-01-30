@@ -81,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
 
     rib::serve(rib);
 
+    rib::nanomsg::serve();
+
     tracing_set();
     tracing::info!("zebra started");
 
