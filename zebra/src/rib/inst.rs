@@ -1,5 +1,6 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
+use super::intf::config::InterfaceConfig;
 use super::{Link, LspConfig, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
@@ -39,6 +40,7 @@ pub struct Rib {
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
     pub lsp_config: LspConfig,
+    // pub interface_config: InterfaceConfig,
     pub nmap: NexthopMap,
 }
 
@@ -148,6 +150,8 @@ impl Rib {
                     let _ = self.static_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/routing/static/ipv4/lsp") {
                     let _ = self.lsp_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/interface") {
+                    // let _ = self.interface_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
