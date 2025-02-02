@@ -3,7 +3,7 @@ use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 
 use super::{Message, Rib};
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net};
 use std::fmt::{self, Write};
 
 #[derive(Debug, Clone)]
@@ -16,6 +16,7 @@ pub struct Link {
     pub link_type: LinkType,
     pub label: bool,
     pub addr4: Vec<LinkAddr>,
+    pub addrv4: Vec<LinkAddr4>,
     pub addr6: Vec<LinkAddr>,
 }
 
@@ -30,6 +31,7 @@ impl Link {
             link_type: link.link_type,
             label: false,
             addr4: Vec::new(),
+            addrv4: Vec::new(),
             addr6: Vec::new(),
         }
     }
@@ -49,11 +51,22 @@ impl Link {
     pub fn is_up_and_running(&self) -> bool {
         self.is_up() && self.is_running()
     }
+
+    pub fn is_loopback(&self) -> bool {
+        (self.flags.0 & IFF_LOOPBACK) == IFF_LOOPBACK
+    }
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct LinkAddr {
     pub addr: IpNet,
+    pub ifindex: u32,
+    pub secondary: bool,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct LinkAddr4 {
+    pub ifaddr: Ipv4Net,
     pub ifindex: u32,
     pub secondary: bool,
 }

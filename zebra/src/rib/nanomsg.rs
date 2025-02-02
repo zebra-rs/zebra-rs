@@ -71,6 +71,12 @@ struct IsisNet {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct RouterId {
+    #[serde(rename = "router-id")]
+    router_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct IsisInstance {
     #[serde(rename = "instance-tag")]
     instance_tag: String,
@@ -83,6 +89,8 @@ struct IsisInstance {
     metric_style: u32,
     #[serde(rename = "segment-routing")]
     segment_routing: String,
+    #[serde(rename = "mpls-traffic-eng")]
+    mpls_traffic_eng: RouterId,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,22 +136,9 @@ impl Nanomsg {
             is_type: 1,
             metric_style: 2,
             segment_routing: "mpls".into(),
-        };
-        MsgEnum::IsisInstance(msg)
-    }
-
-    fn isis_instance_add2(&self) -> MsgEnum {
-        let net = IsisNet {
-            del: vec![],
-            add: vec!["49.0000.0000.0000.0002.00".into()],
-        };
-        let msg = IsisInstance {
-            instance_tag: "zebra".into(),
-            log_adjacency_changes: true,
-            net,
-            is_type: 1,
-            metric_style: 2,
-            segment_routing: "".into(),
+            mpls_traffic_eng: RouterId {
+                router_id: "3.3.3.3".into(),
+            },
         };
         MsgEnum::IsisInstance(msg)
     }
@@ -203,16 +198,14 @@ impl Nanomsg {
                         data: self.isis_if_add(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
-
-                    // isis-instance:add
-                    // let msg = MsgSend {
-                    //     method: String::from("isis-instance:add"),
-                    //     data: self.isis_instance_add2(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
-                    println!("XXX router id");
+                    println!("{}", msg.data);
+                    if let Some(vrf_id) = msg.data.get("vrf-id").and_then(|v| v.as_i64()) {
+                        println!("vrf-id: {}", vrf_id);
+                    } else {
+                        println!("no vrf-id");
+                    }
                 }
                 if msg.method == "router-id:request" {
                     let data: Result<RouterIdRequest, _> = from_value(msg.data);
