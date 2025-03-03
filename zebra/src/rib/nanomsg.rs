@@ -33,6 +33,7 @@ enum MsgEnum {
     IsisGlobal(IsisGlobal),
     IsisInstance(IsisInstance),
     IsisIf(IsisIf),
+    SegmentRouting(SegmentRouting),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,6 +95,12 @@ struct IsisInstance {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct PrefixSid {
+    // index: u32,
+    absolute: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct IsisIf {
     ifname: String,
     #[serde(rename = "instance-tag")]
@@ -104,6 +111,20 @@ struct IsisIf {
     network_type: u32,
     #[serde(rename = "circuit-type")]
     circuit_type: u32,
+    #[serde(rename = "prefix-sid")]
+    prefix_sid: Option<PrefixSid>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GlobalBlock {
+    begin: u32,
+    end: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SegmentRouting {
+    #[serde(rename = "global-block")]
+    global_block: GlobalBlock,
 }
 
 use std::io::Write;
@@ -133,23 +154,36 @@ impl Nanomsg {
             instance_tag: "zebra".into(),
             log_adjacency_changes: true,
             net,
-            is_type: 1,
+            is_type: 2,
             metric_style: 2,
             segment_routing: "mpls".into(),
             mpls_traffic_eng: RouterId {
-                router_id: "3.3.3.3".into(),
+                router_id: "2.2.2.3".into(),
             },
         };
         MsgEnum::IsisInstance(msg)
     }
 
-    fn isis_if_add(&self) -> MsgEnum {
+    fn isis_if_add_enp0s6(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "enp0s6".into(),
             instance_tag: "zebra".into(),
             ipv4_enable: true,
             network_type: 1,
-            circuit_type: 1,
+            circuit_type: 2,
+            prefix_sid: None,
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
+    fn isis_if_add_enp0s7(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "enp0s7".into(),
+            instance_tag: "zebra".into(),
+            ipv4_enable: true,
+            network_type: 1,
+            circuit_type: 2,
+            prefix_sid: None,
         };
         MsgEnum::IsisIf(msg)
     }
@@ -160,13 +194,37 @@ impl Nanomsg {
             instance_tag: "zebra".into(),
             ipv4_enable: true,
             network_type: 1,
-            circuit_type: 1,
+            circuit_type: 2,
+            prefix_sid: Some(PrefixSid { absolute: 16200 }),
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
+    fn segment_routing_update(&self) -> MsgEnum {
+        let msg = SegmentRouting {
+            global_block: GlobalBlock {
+                begin: 16000,
+                end: 23999,
+            },
+        };
+        MsgEnum::SegmentRouting(msg)
+    }
+
+    fn isis_if_add_lo_no_sid(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "lo".into(),
+            instance_tag: "zebra".into(),
+            ipv4_enable: true,
+            network_type: 1,
+            circuit_type: 2,
+            prefix_sid: None,
         };
         MsgEnum::IsisIf(msg)
     }
 
     pub fn parse(&mut self, text: &str) -> anyhow::Result<()> {
         let value: Result<Msg, serde_json::Error> = serde_json::from_str(text);
+        thread::sleep(Duration::from_millis(100));
         match value {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
@@ -195,9 +253,27 @@ impl Nanomsg {
 
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
-                        data: self.isis_if_add(),
+                        data: self.isis_if_add_enp0s6(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("isis-if:add"),
+                        data: self.isis_if_add_enp0s7(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    // let msg = MsgSend {
+                    //     method: String::from("isis-if:add"),
+                    //     data: self.isis_if_add_lo_no_sid(),
+                    // };
+                    // self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);
