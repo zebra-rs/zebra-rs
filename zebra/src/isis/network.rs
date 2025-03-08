@@ -5,11 +5,11 @@ use nix::sys::socket::{self, LinkAddr};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::isis::Message;
 
-pub async fn read_packet(sock: Socket, _tx: UnboundedSender<Message>) {
+pub async fn read_packet(sock: Socket, tx: UnboundedSender<Message>) {
     let sock = AsyncFd::new(sock).unwrap();
 
     let mut buf = [0u8; 1024 * 16];
@@ -24,6 +24,10 @@ pub async fn read_packet(sock: Socket, _tx: UnboundedSender<Message>) {
                 socket::MsgFlags::empty(),
             )?;
 
+            let Some(addr) = msg.address else {
+                return Err(ErrorKind::UnexpectedEof.into());
+            };
+
             let Some(input) = msg.iovs().next() else {
                 return Err(ErrorKind::UnexpectedEof.into());
             };
@@ -32,13 +36,17 @@ pub async fn read_packet(sock: Socket, _tx: UnboundedSender<Message>) {
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
-            println!("{}", packet.1);
-
-            // tx.send(Message::Packet(packet.1, ifaddr, ifindex, dest))
-            //     .unwrap();
+            tx.send(Message::Recv(packet.1, addr.ifindex() as u32))
+                .unwrap();
 
             Ok(())
         })
         .await;
+    }
+}
+
+pub async fn write_packet(sock: Socket, mut rx: UnboundedReceiver<Message>) {
+    loop {
+        let msg = rx.recv().await;
     }
 }

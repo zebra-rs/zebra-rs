@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use ipnet::IpNet;
+use isis_packet::IsisPacket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -21,6 +22,8 @@ use super::socket::isis_socket;
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
 
+pub struct Lsa {}
+
 pub struct Isis {
     ctx: Context,
     pub tx: UnboundedSender<Message>,
@@ -31,7 +34,15 @@ pub struct Isis {
     pub links: BTreeMap<u32, IsisLink>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    // pub sock:
+    pub lsa: Lsa,
+}
+
+impl Isis {
+    pub fn ifname(&self, ifindex: u32) -> String {
+        self.links
+            .get(&ifindex)
+            .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
+    }
 }
 
 impl Isis {
@@ -52,6 +63,7 @@ impl Isis {
             links: BTreeMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
+            lsa: Lsa {},
         };
         // isis.callback_build();
         isis.show_build();
@@ -78,7 +90,7 @@ impl Isis {
     }
 
     fn link_add(&mut self, link: Link) {
-        // println!("ISIS: LinkAdd {} {}", link.name, link.index);
+        println!("ISIS: LinkAdd {} {}", link.name, link.index);
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
@@ -123,6 +135,17 @@ impl Isis {
         }
     }
 
+    pub fn process_msg(&mut self, msg: Message) {
+        match msg {
+            Message::Recv(packet, ifindex) => {
+                self.hello_recv(packet, ifindex);
+            }
+            _ => {
+                //
+            }
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
@@ -135,6 +158,9 @@ impl Isis {
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
                 }
+                Some(msg) = self.rx.recv() => {
+                    self.process_msg(msg);
+                }
             }
         }
     }
@@ -146,6 +172,7 @@ pub fn serve(mut isis: Isis) {
     });
 }
 
-pub struct Message {
-    //
+pub enum Message {
+    Recv(IsisPacket, u32),
+    Send(IsisPacket, u32),
 }

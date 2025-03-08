@@ -96,8 +96,8 @@ struct IsisInstance {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PrefixSid {
-    // index: u32,
-    absolute: u32,
+    index: u32,
+    // absolute: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,6 +113,8 @@ struct IsisIf {
     circuit_type: u32,
     #[serde(rename = "prefix-sid")]
     prefix_sid: Option<PrefixSid>,
+    #[serde(rename = "adjacency-sid")]
+    adjacency_sid: Option<PrefixSid>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -122,9 +124,17 @@ struct GlobalBlock {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct LocalBlock {
+    begin: u32,
+    end: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct SegmentRouting {
     #[serde(rename = "global-block")]
     global_block: GlobalBlock,
+    #[serde(rename = "local-block")]
+    local_block: LocalBlock,
 }
 
 use std::io::Write;
@@ -172,6 +182,7 @@ impl Nanomsg {
             network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
+            adjacency_sid: Some(PrefixSid { index: 1 }),
         };
         MsgEnum::IsisIf(msg)
     }
@@ -184,6 +195,7 @@ impl Nanomsg {
             network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
+            adjacency_sid: None,
         };
         MsgEnum::IsisIf(msg)
     }
@@ -195,7 +207,8 @@ impl Nanomsg {
             ipv4_enable: true,
             network_type: 1,
             circuit_type: 2,
-            prefix_sid: Some(PrefixSid { absolute: 16200 }),
+            prefix_sid: Some(PrefixSid { index: 200 }),
+            adjacency_sid: None,
         };
         MsgEnum::IsisIf(msg)
     }
@@ -205,6 +218,10 @@ impl Nanomsg {
             global_block: GlobalBlock {
                 begin: 16000,
                 end: 23999,
+            },
+            local_block: LocalBlock {
+                begin: 15000,
+                end: 15999,
             },
         };
         MsgEnum::SegmentRouting(msg)
@@ -218,6 +235,7 @@ impl Nanomsg {
             network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
+            adjacency_sid: None,
         };
         MsgEnum::IsisIf(msg)
     }
