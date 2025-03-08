@@ -87,7 +87,7 @@ impl Rib {
             rib_add(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         } else {
-            println!("System add");
+            // println!("System add");
             rib_add_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, None).await;
         }
@@ -240,7 +240,6 @@ async fn ipv4_route_sync(
     fib: &FibHandle,
 ) {
     for (p, entries) in table.iter_mut() {
-        println!("Resolve: {}", p);
         ipv4_entry_resolve(entries, nmap);
         ipv4_entry_selection(p, entries, None, nmap, fib).await;
     }
