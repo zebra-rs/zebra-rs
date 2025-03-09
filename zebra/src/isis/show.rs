@@ -30,6 +30,16 @@ fn show_isis_interface(isis: &Isis, args: Args, _json: bool) -> String {
     String::from("show isis interface")
 }
 
+fn show_mac(mac: Option<[u8; 6]>) -> String {
+    mac.map(|mac| {
+        format!(
+            "{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        )
+    })
+    .unwrap_or_else(|| "N/A".to_string())
+}
+
 fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
@@ -44,7 +54,7 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
                 adj.pdu.circuit_type,
                 adj.state.to_string(),
                 adj.pdu.hold_timer,
-                10
+                show_mac(adj.mac),
             )
             .unwrap();
         }
