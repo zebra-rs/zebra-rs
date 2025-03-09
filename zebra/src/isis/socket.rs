@@ -40,7 +40,7 @@ pub fn isis_socket() -> Result<Socket, std::io::Error> {
     socket.set_nonblocking(true);
 
     let ifindex: u32 = 3;
-    let sockaddr = link_addr(libc::ETH_P_ALL as u16, ifindex);
+    let sockaddr = link_addr(libc::ETH_P_ALL as u16, ifindex, None);
 
     socket::bind(socket.as_raw_fd(), &sockaddr)?;
 
@@ -49,16 +49,20 @@ pub fn isis_socket() -> Result<Socket, std::io::Error> {
     Ok(socket)
 }
 
-fn link_addr(protocol: u16, ifindex: u32) -> LinkAddr {
+pub fn link_addr(protocol: u16, ifindex: u32, addr: Option<[u8; 6]>) -> LinkAddr {
     let mut sll = libc::sockaddr_ll {
         sll_family: libc::AF_PACKET as u16,
         sll_protocol: protocol.to_be(),
-        sll_ifindex: ifindex as _,
+        sll_ifindex: ifindex as i32,
         sll_halen: 0,
         sll_hatype: 0,
         sll_pkttype: 0,
         sll_addr: [0; 8],
     };
+    if let Some(addr) = addr {
+        sll.sll_halen = 6;
+        sll.sll_addr[..6].copy_from_slice(&addr);
+    }
     let ssl_len = std::mem::size_of_val(&sll) as libc::socklen_t;
     unsafe { LinkAddr::from_raw(&sll as *const _ as *const _, Some(ssl_len)) }.unwrap()
 }

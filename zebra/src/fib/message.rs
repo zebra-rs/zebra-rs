@@ -25,6 +25,7 @@ pub struct FibLink {
     pub flags: LinkFlags,
     pub link_type: LinkType,
     pub mtu: u32,
+    pub mac: Option<[u8; 6]>,
 }
 
 impl FibLink {
