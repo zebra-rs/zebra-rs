@@ -1,12 +1,3 @@
-#![allow(dead_code)]
-use super::attr::*;
-use super::inst::Message;
-use super::packet::*;
-use super::route::route_from_peer;
-use super::route::Route;
-use super::task::*;
-use super::BGP_PORT;
-use super::{Afi, AfiSafi, AfiSafis, Bgp, Safi, BGP_HOLD_TIME};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
@@ -20,6 +11,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+use bgp_packet::*;
+
+use cap::CapabilityAs4;
+use cap::CapabilityGracefulRestart;
+use cap::CapabilityMultiProtocol;
+use cap::CapabilityPacket;
+use cap::CapabilityRouteRefresh;
+
+use super::inst::Message;
+use super::route::route_from_peer;
+use super::route::Route;
+use super::task::*;
+use super::BGP_PORT;
+use super::{Bgp, BGP_HOLD_TIME};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -180,7 +186,7 @@ impl Peer {
         };
         peer.config
             .afi_safi
-            .push(AfiSafi::new(Afi::IP, Safi::Unicast));
+            .push(AfiSafi::new(Afi::Ip, Safi::Unicast));
         peer.config.four_octet = true;
         peer.config.route_refresh = true;
         // peer.config.graceful_restart = Some(65535);
@@ -631,10 +637,10 @@ pub fn peer_send_open(peer: &mut Peer) {
         caps.push(CapabilityPacket::As4(cap));
     }
     if peer.config.route_refresh {
-        let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefresh);
+        let cap = CapabilityRouteRefresh::default();
         caps.push(CapabilityPacket::RouteRefresh(cap));
-        let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefreshCisco);
-        caps.push(CapabilityPacket::RouteRefresh(cap));
+        // let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefreshCisco);
+        // caps.push(CapabilityPacket::RouteRefresh(cap));
     }
     if let Some(restart_time) = peer.config.graceful_restart {
         let cap = CapabilityGracefulRestart::new(restart_time);

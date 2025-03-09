@@ -13,7 +13,7 @@ pub struct RibEntry {
     pub rsubtype: RibSubType,
     selected: bool,
     fib: bool,
-    valid: bool,
+    pub valid: bool,
     pub distance: u8,
     pub metric: u32,
     pub nexthop: Nexthop,
@@ -89,7 +89,7 @@ impl RibEntry {
                 .nexthops
                 .iter()
                 .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid())),
-            Nexthop::Protect(pro) => pro
+            Nexthop::List(pro) => pro
                 .nexthops
                 .iter()
                 .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid())),
@@ -107,7 +107,7 @@ impl RibEntry {
             }
             multi_group_sync(multi, nmap, fib).await;
         }
-        if let Nexthop::Protect(pro) = &mut self.nexthop {
+        if let Nexthop::List(pro) = &mut self.nexthop {
             for uni in pro.nexthops.iter_mut() {
                 uni_group_sync(uni, nmap, fib).await;
             }
@@ -116,7 +116,7 @@ impl RibEntry {
 
     pub async fn nexthop_unsync(&mut self, nmap: &mut NexthopMap, fib: &FibHandle) {
         match &self.nexthop {
-            Nexthop::Onlink => {}
+            Nexthop::Link(_) => {}
             Nexthop::Uni(uni) => {
                 self.handle_nexthop_group(nmap, fib, uni.gid).await;
             }
@@ -126,7 +126,7 @@ impl RibEntry {
                     self.handle_nexthop_group(nmap, fib, uni.gid).await;
                 }
             }
-            Nexthop::Protect(pro) => {
+            Nexthop::List(pro) => {
                 for uni in &pro.nexthops {
                     self.handle_nexthop_group(nmap, fib, uni.gid).await;
                 }

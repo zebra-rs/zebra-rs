@@ -76,6 +76,11 @@ module configure {
     type empty;
   }
 
+  leaf diff {
+    ext:help "Diff between candidate config and running config";
+    type empty;
+  }
+
   leaf discard {
     ext:help "Discard candidate config";
     type empty;

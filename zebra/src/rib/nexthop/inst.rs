@@ -5,9 +5,10 @@ use netlink_packet_route::route::MplsLabel;
 #[derive(Debug, Clone, PartialEq)]
 pub struct NexthopUni {
     pub addr: Ipv4Addr,
-    pub ifindex: u32,
     pub metric: u32,
     pub weight: u8,
+    pub ifindex: u32,
+    pub valid: bool,
     pub mpls: Option<Vec<MplsLabel>>,
     pub gid: usize,
 }
@@ -30,17 +31,37 @@ impl Default for NexthopUni {
             weight: 1,
             mpls: None,
             gid: 0,
+            valid: false,
         }
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Nexthop {
-    #[default]
-    Onlink,
+    Link(u32),
     Uni(NexthopUni),
+    List(NexthopList),
     Multi(NexthopMulti),
-    Protect(NexthopProtect),
+}
+
+impl Default for Nexthop {
+    fn default() -> Self {
+        Self::Link(0)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct NexthopList {
+    pub nexthops: Vec<NexthopUni>,
+}
+
+impl NexthopList {
+    pub fn metric(&self) -> u32 {
+        match self.nexthops.first() {
+            Some(nhop) => nhop.metric,
+            None => 0,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -53,19 +74,4 @@ pub struct NexthopMulti {
 
     // Nexthop Group id for multipath.
     pub gid: usize,
-}
-
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct NexthopProtect {
-    // Metric sorted BTreeMap.
-    pub nexthops: Vec<NexthopUni>,
-}
-
-impl NexthopProtect {
-    pub fn metric(&self) -> u32 {
-        match self.nexthops.first() {
-            Some(nhop) => nhop.metric,
-            None => 0,
-        }
-    }
 }

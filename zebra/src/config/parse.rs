@@ -3,6 +3,8 @@ use super::comps::{
 };
 use super::configs::config_match;
 use super::ip::*;
+use super::mac::match_mac_addr;
+use super::nsap::match_nsap_addr;
 use super::util::*;
 use super::vtysh::{CommandPath, YangMatch};
 use super::{Completion, Config, ExecCode};
@@ -239,6 +241,14 @@ fn match_builder() -> MatchMap {
         .exec(|m, entry, input, _node| {
             m.process(entry, match_ipv6_net(input), cname("X:X::X:X/M"));
         })
+        .kind(YangType::MacAddr)
+        .exec(|m, entry, input, _node| {
+            m.process(entry, match_mac_addr(input), cname("XX:XX:XX:XX:XX:XX"));
+        })
+        .kind(YangType::NsapAddr)
+        .exec(|m, entry, input, _node| {
+            m.process(entry, match_nsap_addr(input), cname("XX.XXXX..XXXX.XX"));
+        })
         .kind(YangType::Enumeration)
         .exec(|m, entry, input, node| {
             for n in node.enum_stmt.iter() {
@@ -262,6 +272,8 @@ pub fn ytype_from_typedef(typedef: &Option<String>) -> Option<YangType> {
         "inet:ipv4-prefix" => Some(YangType::Ipv4Prefix),
         "inet:ipv6-address" => Some(YangType::Ipv6Addr),
         "inet:ipv6-prefix" => Some(YangType::Ipv6Prefix),
+        "yang:mac-address" => Some(YangType::MacAddr),
+        "isis:net" => Some(YangType::NsapAddr),
         _ => None,
     })
 }

@@ -1,6 +1,8 @@
-use crate::config::Args;
+use std::fmt::Write;
 
 use super::{inst::ShowCallback, Isis};
+
+use crate::config::Args;
 
 impl Isis {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -8,10 +10,11 @@ impl Isis {
     }
 
     pub fn show_build(&mut self) {
-        self.show_add("/show/ip/isis", show_isis);
-        self.show_add("/show/ip/isis/interface", show_isis_interface);
-        self.show_add("/show/ip/isis/neighbor", show_isis_neighbor);
-        self.show_add("/show/ip/opsf/database", show_isis_database);
+        self.show_add("/show/isis", show_isis);
+        self.show_add("/show/isis/summary", show_isis_summary);
+        self.show_add("/show/isis/interface", show_isis_interface);
+        self.show_add("/show/isis/neighbor", show_isis_neighbor);
+        self.show_add("/show/isis/database", show_isis_database);
     }
 }
 
@@ -19,12 +22,45 @@ fn show_isis(isis: &Isis, args: Args, _json: bool) -> String {
     String::from("show isis")
 }
 
+fn show_isis_summary(isis: &Isis, args: Args, _json: bool) -> String {
+    String::from("show isis summary")
+}
+
 fn show_isis_interface(isis: &Isis, args: Args, _json: bool) -> String {
     String::from("show isis interface")
 }
 
+fn show_mac(mac: Option<[u8; 6]>) -> String {
+    mac.map(|mac| {
+        format!(
+            "{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        )
+    })
+    .unwrap_or_else(|| "N/A".to_string())
+}
+
 fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
-    String::from("show isis neighbor")
+    let mut buf = String::new();
+
+    buf.push_str("System Id           Interface   L  State         Holdtime SNPA\n");
+    for (_, link) in &isis.links {
+        for (_, adj) in &link.adjs {
+            writeln!(
+                buf,
+                "{:<20}{:<12}{:<1}  {:<14}{:<9}{}",
+                adj.pdu.source_id.to_string(),
+                isis.ifname(adj.ifindex),
+                adj.pdu.circuit_type,
+                adj.state.to_string(),
+                adj.pdu.hold_timer,
+                show_mac(adj.mac),
+            )
+            .unwrap();
+        }
+    }
+
+    buf
 }
 
 fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {

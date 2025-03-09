@@ -4,8 +4,8 @@ use crate::rib::link::LinkAddr;
 
 #[derive(Default, Clone)]
 pub struct OspfAddr {
-    prefix: Ipv4Net,
-    ifindex: u32,
+    pub prefix: Ipv4Net,
+    pub ifindex: u32,
 }
 
 impl OspfAddr {

@@ -10,6 +10,7 @@ use super::{Group, GroupMulti, GroupTrait, GroupUni};
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
     set: BTreeMap<BTreeSet<(usize, u8)>, usize>,
+    mpls: BTreeMap<(Ipv4Addr, Vec<u32>), usize>,
     pub groups: Vec<Option<Group>>,
 }
 
@@ -18,6 +19,7 @@ impl Default for NexthopMap {
         let mut nmap = Self {
             map: BTreeMap::new(),
             set: BTreeMap::new(),
+            mpls: BTreeMap::new(),
             groups: Vec::new(),
         };
         nmap.groups.push(None);
@@ -32,6 +34,19 @@ impl NexthopMap {
         } else {
             None
         }
+    }
+
+    pub fn get_uni(&self, index: usize) -> Option<&GroupUni> {
+        self.groups
+            .get(index)
+            .and_then(|grp| grp.as_ref())
+            .and_then(|grp| {
+                if let Group::Uni(uni) = grp {
+                    Some(uni)
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut Group> {
@@ -85,6 +100,10 @@ impl NexthopMap {
             gid
         };
         self.get_mut(gid)
+    }
+
+    pub fn fetch_mpls(&mut self, addr: &Ipv4Addr, label: Vec<u32>) -> Option<&mut Group> {
+        None
     }
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {

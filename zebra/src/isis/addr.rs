@@ -2,10 +2,10 @@ use ipnet::Ipv4Net;
 
 use crate::rib::link::LinkAddr;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct IsisAddr {
-    prefix: Ipv4Net,
-    ifindex: u32,
+    pub prefix: Ipv4Net,
+    pub ifindex: u32,
 }
 
 impl IsisAddr {

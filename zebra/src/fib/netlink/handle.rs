@@ -109,7 +109,7 @@ impl FibHandle {
             Nexthop::Multi(_) => {
                 self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
             }
-            Nexthop::Protect(pro) => {
+            Nexthop::List(pro) => {
                 for uni in pro.nexthops.iter() {
                     self.route_ipv4_add_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
                         .await;
@@ -173,7 +173,7 @@ impl FibHandle {
             Nexthop::Multi(_) => {
                 self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
             }
-            Nexthop::Protect(pro) => {
+            Nexthop::List(pro) => {
                 for uni in pro.nexthops.iter() {
                     self.route_ipv4_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
                         .await;
@@ -461,6 +461,14 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
             }
             LinkAttribute::Mtu(mtu) => {
                 link.mtu = mtu;
+            }
+            LinkAttribute::Address(addr) => {
+                if addr.len() == 6 {
+                    let slice = addr.as_slice();
+                    let mut mac = [0u8; 6];
+                    mac.copy_from_slice(slice);
+                    link.mac = Some(mac);
+                }
             }
             _ => {}
         }

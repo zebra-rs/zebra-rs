@@ -1,5 +1,6 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
+use super::intf::config::InterfaceConfig;
 use super::{Link, LspConfig, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
@@ -39,6 +40,7 @@ pub struct Rib {
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
     pub lsp_config: LspConfig,
+    // pub interface_config: InterfaceConfig,
     pub nmap: NexthopMap,
 }
 
@@ -70,10 +72,10 @@ impl Rib {
     pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>) {
         // Link dump.
         for (_, link) in self.links.iter() {
-            let msg = RibRx::Link(link.clone());
+            let msg = RibRx::LinkAdd(link.clone());
             let _ = tx.send(msg);
             for addr in link.addr4.iter() {
-                let msg = RibRx::Addr(addr.clone());
+                let msg = RibRx::AddrAdd(addr.clone());
                 let _ = tx.send(msg);
             }
         }
@@ -102,6 +104,9 @@ impl Rib {
                 self.ipv4_route_resolve().await;
             }
             Message::Subscribe { tx } => {
+                // for (_, link) in self.links.iter() {
+                //     tx.send(RibRx::LinkAdd(link.clone())).unwrap();
+                // }
                 self.subscribe(tx);
             }
         }
@@ -145,6 +150,8 @@ impl Rib {
                     let _ = self.static_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/routing/static/ipv4/lsp") {
                     let _ = self.lsp_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/interface") {
+                    // let _ = self.interface_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -193,11 +200,11 @@ pub fn serve(mut rib: Rib) {
     tokio::spawn(async move {
         rib.event_loop().await;
     });
-    // tokio::spawn(async move {
-    //     tokio::signal::ctrl_c().await.unwrap();
-    //     let (tx, rx) = oneshot::channel::<()>();
-    //     let _ = rib_tx.send(Message::Shutdown { tx });
-    //     rx.await.unwrap();
-    //     std::process::exit(0);
-    // });
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let _ = rib_tx.send(Message::Shutdown { tx });
+        rx.await.unwrap();
+        std::process::exit(0);
+    });
 }

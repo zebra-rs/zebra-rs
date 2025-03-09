@@ -1,11 +1,11 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::{Nexthop, NexthopMulti, NexthopProtect, NexthopUni};
+use super::{Nexthop, NexthopList, NexthopMulti, NexthopUni};
 
 impl Display for Nexthop {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
-            Nexthop::Onlink => {
+            Nexthop::Link(_) => {
                 write!(f, "onlink")
             }
             Nexthop::Uni(uni) => {
@@ -14,7 +14,7 @@ impl Display for Nexthop {
             Nexthop::Multi(multi) => {
                 write!(f, "{}", multi)
             }
-            Nexthop::Protect(pro) => {
+            Nexthop::List(pro) => {
                 write!(f, "{}", pro)
             }
         }
@@ -33,7 +33,7 @@ impl Display for NexthopMulti {
     }
 }
 
-impl Display for NexthopProtect {
+impl Display for NexthopList {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "protect")
     }

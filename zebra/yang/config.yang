@@ -8,6 +8,10 @@ module config {
     prefix inet;
   }
 
+  import ietf-yang-types {
+    prefix yang;
+  }
+
   import extension {
     prefix ext;
   }
@@ -22,6 +26,10 @@ module config {
 
   import ietf-bgp-policy {
     prefix policy;
+  }
+
+  import openconfig-isis-types {
+    prefix isis;
   }
 
   grouping config {
@@ -83,6 +91,13 @@ module config {
           }
         }
       }
+      container isis {
+        presence "Enables configuration of IS-IS";
+
+        leaf net {
+          type isis:net;
+        }
+      }
       container ldp {
         leaf router-id {
           type inet:ipv4-address;
@@ -131,6 +146,18 @@ module config {
             leaf metric {
               type uint32;
               description "Metric of the route.";
+            }
+          }
+
+          list arp {
+            key "address";
+            leaf "address" {
+              type inet:ipv4-address;
+              description "ARP neighbor address";
+            }
+            leaf mac {
+              type yang:mac-address;
+              description "MAC Address";
             }
           }
 
@@ -204,6 +231,19 @@ module config {
         }
         container ipv6 {
           ext:help "IPv6 configuration";
+
+          list neighbor {
+            key "address";
+            leaf "address" {
+              type inet:ipv6-address;
+              description "ARP neighbor address";
+            }
+            leaf mac {
+              type yang:mac-address;
+              description "MAC Address";
+            }
+          }
+
           list route {
             key "prefix";
             leaf prefix {

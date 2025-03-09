@@ -100,7 +100,7 @@ message ExecModuleReply {
 // Configuration service
 enum ConfigType {
   SET = 0;
-  DELETE = 1;
+  DEL = 1;
   VALIDATE_START = 2;
   VALIDATE_END = 3;
   VALIDATE_SUCCESS = 4;
