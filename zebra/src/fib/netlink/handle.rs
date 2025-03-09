@@ -462,6 +462,14 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
             LinkAttribute::Mtu(mtu) => {
                 link.mtu = mtu;
             }
+            LinkAttribute::Address(addr) => {
+                if addr.len() == 6 {
+                    let slice = addr.as_slice();
+                    let mut mac = [0u8; 6];
+                    mac.copy_from_slice(slice);
+                    link.mac = Some(mac);
+                }
+            }
             _ => {}
         }
     }

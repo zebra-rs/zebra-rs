@@ -31,16 +31,18 @@ pub struct IsisAdj {
     pub state: AdjState,
     pub addr4: Vec<Ipv4Addr>,
     pub addr6: Vec<Ipv6Addr>,
+    pub mac: Option<[u8; 6]>,
 }
 
 impl IsisAdj {
-    pub fn new(pdu: IsisHello, ifindex: u32) -> Self {
+    pub fn new(pdu: IsisHello, ifindex: u32, mac: Option<[u8; 6]>) -> Self {
         Self {
             pdu,
             ifindex,
             state: AdjState::Down,
             addr4: Vec::new(),
             addr6: Vec::new(),
+            mac,
         }
     }
 }
