@@ -13,8 +13,6 @@ use super::socket::link_addr;
 use super::Message;
 
 pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
-    let sock = AsyncFd::new(sock).unwrap();
-
     let mut buf = [0u8; 1024 * 16];
     let mut iov = [IoSliceMut::new(&mut buf)];
 

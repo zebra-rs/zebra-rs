@@ -4,15 +4,15 @@ use super::task::{Timer, TimerType};
 use super::Message;
 
 use isis_packet::{
-    IsisHello, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr, IsisTlvIpv4IfAddr,
-    IsisTlvProtSupported, IsisType,
+    IsisHello, IsisPacket, IsisPdu, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvIpv4IfAddr,
+    IsisTlvIsNeighbor, IsisTlvProtSupported, IsisType,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::Link;
 
 use super::addr::IsisAddr;
-use super::adj::IsisAdj;
+use super::adj::{AdjState, IsisAdj};
 use super::Isis;
 
 #[derive(Debug, Default)]
@@ -72,7 +72,7 @@ impl IsisLink {
             },
             hold_timer: 30,
             pdu_len: 0,
-            priority: 64,
+            priority: 63,
             lan_id: [0u8; 7],
             tlvs: Vec::new(),
         };
@@ -120,6 +120,20 @@ impl Isis {
         link.ptx.send(Message::Send(packet, ifindex)).unwrap();
     }
 
+    pub fn lsp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            println!("Link not found {}", ifindex);
+            return;
+        };
+    }
+
+    pub fn csnp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            println!("Link not found {}", ifindex);
+            return;
+        };
+    }
+
     pub fn hello_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             println!("Link not found {}", ifindex);
@@ -133,17 +147,42 @@ impl Isis {
             _ => return,
         };
 
-        // Area ID.
-        // pdu.area_id();
-
-        let adj = link.adjs.get(&pdu.source_id);
-        match adj {
+        // Update adj.
+        match link.adjs.get(&pdu.source_id) {
             Some(adj) => {
                 println!("Update Adj {}", pdu.source_id);
+                // If adj state is Init and my is exists in Hello, migrate to
+                // Up.
             }
             None => {
+                // Need to check Level.
+                println!("New Adj {} MAC: {:?}", pdu.source_id, mac);
+
+                // Create a new adjacency.
                 let source_id = pdu.source_id.clone();
-                link.adjs.insert(source_id, IsisAdj::new(pdu, ifindex, mac));
+                let mut adj = IsisAdj::new(pdu.clone(), ifindex, mac);
+                adj.state = AdjState::Init;
+                link.adjs.insert(source_id, adj);
+
+                // If neighbor is on shared link, add it to hello pdu.
+                if let Some(mac) = mac {
+                    println!("XXX MAC {:?}", mac);
+                    isis_link_add_neighbor(link, &mac);
+                }
+            }
+        };
+        let adj = link.adjs.get_mut(&pdu.source_id).unwrap();
+        if adj.state == AdjState::Init {
+            // Take a look into self.
+            if let Some(mac) = link.mac {
+                for tlv in pdu.tlvs {
+                    if let IsisTlv::IsNeighbor(nei) = tlv {
+                        if mac == nei.addr {
+                            println!("XXX Found myself");
+                            adj.state = AdjState::Up;
+                        }
+                    }
+                }
             }
         }
     }
@@ -158,4 +197,11 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
             tx.send(Message::LinkTimer(index));
         }
     })
+}
+
+pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
+    let Some(ref mut hello) = link.hello else {
+        return;
+    };
+    hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());
 }

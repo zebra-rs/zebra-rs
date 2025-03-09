@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use isis_packet::{IsisPacket, IsisTlvIpv4IfAddr};
+use isis_packet::{IsisPacket, IsisTlvIpv4IfAddr, IsisType};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -162,9 +162,20 @@ impl Isis {
             Message::LinkTimer(ifindex) => {
                 self.hello_send(ifindex);
             }
-            Message::Recv(packet, ifindex, mac) => {
-                self.hello_recv(packet, ifindex, mac);
-            }
+            Message::Recv(packet, ifindex, mac) => match packet.pdu_type {
+                IsisType::L1Hello | IsisType::L2Hello => {
+                    self.hello_recv(packet, ifindex, mac);
+                }
+                IsisType::L2Lsp => {
+                    self.lsp_recv(packet, ifindex, mac);
+                }
+                IsisType::Csnp => {
+                    self.csnp_recv(packet, ifindex, mac);
+                }
+                _ => {
+                    //
+                }
+            },
             _ => {
                 //
             }
