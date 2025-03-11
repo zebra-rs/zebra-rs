@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::inst::NfsmEvent;
 use super::task::{Timer, TimerType};
 use super::Message;
 
@@ -181,25 +182,24 @@ impl Isis {
 
                 // Create a new adjacency.
                 let source_id = pdu.source_id.clone();
-                let mut adj = IsisAdj::new(pdu.clone(), ifindex, mac);
+                let mut adj = IsisAdj::new(pdu.clone(), ifindex, 2, mac, link.tx.clone());
                 adj.state = AdjState::Init;
                 link.l2adjs.insert(source_id, adj);
 
                 // If neighbor is on shared link, add it to hello pdu.
                 if let Some(mac) = mac {
-                    println!("XXX MAC {:?}", mac);
                     isis_link_add_neighbor(link, &mac);
                 }
             }
         };
         let adj = link.l2adjs.get_mut(&pdu.source_id).unwrap();
+
         if adj.state == AdjState::Init {
             // Take a look into self.
             if let Some(mac) = link.mac {
                 for tlv in pdu.tlvs {
                     if let IsisTlv::IsNeighbor(nei) = tlv {
                         if mac == nei.addr {
-                            println!("XXX Found myself");
                             adj.state = AdjState::Up;
 
                             // Send LSP.
@@ -209,6 +209,7 @@ impl Isis {
                 }
             }
         }
+        adj.inactivity_timer = Some(isis_inactivity_timer(&adj));
     }
 }
 
@@ -228,4 +229,22 @@ pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
         return;
     };
     hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());
+}
+
+pub fn isis_inactivity_timer(adj: &IsisAdj) -> Timer {
+    let tx = adj.tx.clone();
+    let sysid = adj.pdu.source_id.clone();
+    let ifindex = adj.ifindex;
+    Timer::new(
+        Timer::second(adj.pdu.hold_timer as u64),
+        TimerType::Once,
+        move || {
+            let tx = tx.clone();
+            let sysid = sysid.clone();
+            async move {
+                tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::InactivityTimer))
+                    .unwrap();
+            }
+        },
+    )
 }

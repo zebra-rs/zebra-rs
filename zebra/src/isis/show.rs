@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use isis_packet::IsisProto;
+use isis_packet::{nlpid_str, IsisHello, IsisProto, IsisTlv, IsisTlvProtoSupported};
 
 use super::{adj::IsisAdj, inst::ShowCallback, Isis};
 
@@ -54,7 +54,7 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
                 "{:<20}{:<12}{:<1}  {:<14}{:<9}{}",
                 adj.pdu.source_id.to_string(),
                 isis.ifname(adj.ifindex),
-                adj.pdu.circuit_type,
+                adj.level,
                 adj.state.to_string(),
                 adj.pdu.hold_timer,
                 show_mac(adj.mac),
@@ -84,14 +84,17 @@ struct Neighbor {
     pub protos: Vec<IsisProto>,
 }
 
-fn show_isis_neighbor_entry(buf: &mut String, adj: &IsisAdj) {
+fn proto(pdu: &IsisHello) -> Option<&IsisTlvProtoSupported> {
+    for tlv in &pdu.tlvs {
+        if let IsisTlv::ProtoSupported(proto) = tlv {
+            return Some(proto);
+        }
+    }
+    None
+}
+
+fn show_isis_neighbor_entry(buf: &mut String, isis: &Isis, adj: &IsisAdj) {
     writeln!(buf, " {}", adj.pdu.source_id).unwrap();
-    writeln!(
-        buf,
-        "    Circuit type: {}, Speaks: ",
-        circuit_type_str(adj.pdu.circuit_type)
-    )
-    .unwrap();
 
     // Interface: enp0s6, Level: 2, State: Up, Expires in 29s
     // Adjacency flaps: 1, Last: 13m44s ago
@@ -102,6 +105,29 @@ fn show_isis_neighbor_entry(buf: &mut String, adj: &IsisAdj) {
     //   49.0001
     // IPv4 Address(es):
     // 11.0.0.2
+
+    writeln!(
+        buf,
+        "    Interface: {}, Level: {}, State: {}",
+        isis.ifname(adj.ifindex),
+        adj.level,
+        adj.state.to_string(),
+    )
+    .unwrap();
+
+    write!(
+        buf,
+        "    Circuit type: {}, Speaks:",
+        circuit_type_str(adj.pdu.circuit_type)
+    )
+    .unwrap();
+
+    if let Some(proto) = proto(&adj.pdu) {
+        for nlpid in &proto.nlpids {
+            write!(buf, " {}", nlpid_str(*nlpid)).unwrap();
+        }
+    }
+    writeln!(buf, "").unwrap();
 }
 
 fn show_isis_neighbor_detail(isis: &Isis, args: Args, _json: bool) -> String {
@@ -109,7 +135,7 @@ fn show_isis_neighbor_detail(isis: &Isis, args: Args, _json: bool) -> String {
 
     for (_, link) in &isis.links {
         for (_, adj) in &link.l2adjs {
-            show_isis_neighbor_entry(&mut buf, adj);
+            show_isis_neighbor_entry(&mut buf, isis, adj);
         }
     }
 

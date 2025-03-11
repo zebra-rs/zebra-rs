@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use isis_packet::{IsisPacket, IsisTlvIpv4IfAddr, IsisType};
+use isis_packet::{IsisPacket, IsisSysId, IsisTlvIpv4IfAddr, IsisType};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -176,6 +176,9 @@ impl Isis {
                     //
                 }
             },
+            Message::Nfsm(ifindex, sysid, ev) => {
+                println!("ifindex {} sysid {:?} ev {:?}", ifindex, sysid, ev);
+            }
             _ => {
                 //
             }
@@ -208,8 +211,21 @@ pub fn serve(mut isis: Isis) {
     });
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum NfsmEvent {
+    InactivityTimer,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum IfsmEvent {
+    InterfaceUp,
+    InterfaceDown,
+}
+
 pub enum Message {
     Recv(IsisPacket, u32, Option<[u8; 6]>),
     Send(IsisPacket, u32),
     LinkTimer(u32),
+    Ifsm(u32, IfsmEvent),
+    Nfsm(u32, IsisSysId, NfsmEvent),
 }
