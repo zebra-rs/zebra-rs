@@ -1,6 +1,8 @@
 use std::fmt::Write;
 
-use super::{inst::ShowCallback, Isis};
+use isis_packet::IsisProto;
+
+use super::{adj::IsisAdj, inst::ShowCallback, Isis};
 
 use crate::config::Args;
 
@@ -14,6 +16,7 @@ impl Isis {
         self.show_add("/show/isis/summary", show_isis_summary);
         self.show_add("/show/isis/interface", show_isis_interface);
         self.show_add("/show/isis/neighbor", show_isis_neighbor);
+        self.show_add("/show/isis/neighbor/detail", show_isis_neighbor_detail);
         self.show_add("/show/isis/database", show_isis_database);
     }
 }
@@ -45,7 +48,7 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
 
     buf.push_str("System Id           Interface   L  State         Holdtime SNPA\n");
     for (_, link) in &isis.links {
-        for (_, adj) in &link.adjs {
+        for (_, adj) in &link.l2adjs {
             writeln!(
                 buf,
                 "{:<20}{:<12}{:<1}  {:<14}{:<9}{}",
@@ -65,4 +68,50 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
 
 fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
     String::from("show isis database")
+}
+
+fn circuit_type_str(circuit_type: u8) -> &'static str {
+    match circuit_type {
+        1 => "L1",
+        2 => "L2",
+        3 => "L1L2",
+        _ => "?",
+    }
+}
+
+// Local struct for showing neighbor.
+struct Neighbor {
+    pub protos: Vec<IsisProto>,
+}
+
+fn show_isis_neighbor_entry(buf: &mut String, adj: &IsisAdj) {
+    writeln!(buf, " {}", adj.pdu.source_id).unwrap();
+    writeln!(
+        buf,
+        "    Circuit type: {}, Speaks: ",
+        circuit_type_str(adj.pdu.circuit_type)
+    )
+    .unwrap();
+
+    // Interface: enp0s6, Level: 2, State: Up, Expires in 29s
+    // Adjacency flaps: 1, Last: 13m44s ago
+    // Circuit type: L1L2, Speaks: IPv4
+    // SNPA: 001c.4245.b235, LAN id: 0000.0000.0000.00
+    // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 13m44s ago
+    // Area Address(es):
+    //   49.0001
+    // IPv4 Address(es):
+    // 11.0.0.2
+}
+
+fn show_isis_neighbor_detail(isis: &Isis, args: Args, _json: bool) -> String {
+    let mut buf = String::new();
+
+    for (_, link) in &isis.links {
+        for (_, adj) in &link.l2adjs {
+            show_isis_neighbor_entry(&mut buf, adj);
+        }
+    }
+
+    buf
 }

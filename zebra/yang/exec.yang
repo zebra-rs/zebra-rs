@@ -99,9 +99,13 @@ module exec {
         ext:help "IS-IS summary";
         type empty;
       }
-      leaf neighbor {
+      container neighbor {
         ext:help "IS-IS neighbor";
-        type empty;
+        presence "IS-IS neighbor";
+        leaf detail {
+          ext:help "IS-IS neighbor detail";
+          type empty;
+        }
       }
     }
     container ipv6 {
