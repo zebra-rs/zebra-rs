@@ -18,6 +18,7 @@ impl Isis {
         self.show_add("/show/isis/neighbor", show_isis_neighbor);
         self.show_add("/show/isis/neighbor/detail", show_isis_neighbor_detail);
         self.show_add("/show/isis/database", show_isis_database);
+        self.show_add("/show/isis/database/detail", show_isis_database_detail);
     }
 }
 
@@ -67,6 +68,10 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
 }
 
 fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
+    String::from("show isis database")
+}
+
+fn show_isis_database_detail(isis: &Isis, args: Args, _json: bool) -> String {
     String::from("show isis database")
 }
 

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use isis_packet::{IsisPacket, IsisSysId, IsisTlvIpv4IfAddr, IsisType};
+use isis_packet::{IsisLsp, IsisLspId, IsisPacket, IsisSysId, IsisTlvIpv4IfAddr, IsisType};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -41,6 +41,12 @@ pub struct Isis {
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub lsa: Lsa,
+    pub l2lsdb: BTreeMap<IsisLspId, IsisLsp>,
+}
+
+pub enum Level {
+    L1,
+    L2,
 }
 
 impl Isis {
@@ -75,6 +81,7 @@ impl Isis {
             show_cb: HashMap::new(),
             sock,
             lsa: Lsa {},
+            l2lsdb: BTreeMap::new(),
         };
         // isis.callback_build();
         isis.show_build();

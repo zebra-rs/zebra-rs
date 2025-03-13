@@ -5,8 +5,8 @@ use super::task::{Timer, TimerType};
 use super::Message;
 
 use isis_packet::{
-    IsisHello, IsisPacket, IsisPdu, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvIpv4IfAddr,
-    IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
+    IsisHello, IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisSysId, IsisTlv, IsisTlvAreaAddr,
+    IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -69,7 +69,7 @@ impl IsisLink {
         let mut hello = IsisHello {
             circuit_type: 3,
             source_id: IsisSysId {
-                sys_id: [0, 0, 0, 0, 0, 2],
+                id: [0, 0, 0, 0, 0, 2],
             },
             hold_timer: 30,
             pdu_len: 0,
@@ -147,6 +147,21 @@ impl Isis {
             (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) | (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => pdu,
             _ => return,
         };
+
+        // DIS
+        if pdu.lsp_id.pseudo_id() != 0 {
+            for tlv in &pdu.tlvs {
+                if let IsisTlv::ExtIsReach(tlv) = tlv {
+                    for entry in &tlv.entries {
+                        //
+                    }
+                }
+            }
+        }
+
+        // println!("LSP PDU {}", pdu);
+        let lsp_id = pdu.lsp_id.clone();
+        self.l2lsdb.insert(lsp_id, pdu);
     }
 
     pub fn csnp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
