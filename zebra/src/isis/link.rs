@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::inst::NfsmEvent;
+use super::nfsm::NfsmEvent;
 use super::task::{Timer, TimerType};
 use super::Message;
 
@@ -136,6 +136,8 @@ impl Isis {
     }
 
     pub fn lsp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
+        println!("LSP PDU {}", packet);
+
         let Some(link) = self.links.get_mut(&ifindex) else {
             println!("Link not found {}", ifindex);
             return;
@@ -145,8 +147,6 @@ impl Isis {
             (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) | (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => pdu,
             _ => return,
         };
-
-        println!("LSP PDU {}", pdu);
     }
 
     pub fn csnp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
@@ -209,7 +209,7 @@ impl Isis {
                 }
             }
         }
-        adj.inactivity_timer = Some(isis_inactivity_timer(&adj));
+        adj.hold_timer = Some(isis_hold_timer(&adj));
     }
 }
 
@@ -231,7 +231,7 @@ pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
     hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());
 }
 
-pub fn isis_inactivity_timer(adj: &IsisAdj) -> Timer {
+pub fn isis_hold_timer(adj: &IsisAdj) -> Timer {
     let tx = adj.tx.clone();
     let sysid = adj.pdu.source_id.clone();
     let ifindex = adj.ifindex;
@@ -242,7 +242,7 @@ pub fn isis_inactivity_timer(adj: &IsisAdj) -> Timer {
             let tx = tx.clone();
             let sysid = sysid.clone();
             async move {
-                tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::InactivityTimer))
+                tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::HoldTimerExpire))
                     .unwrap();
             }
         },

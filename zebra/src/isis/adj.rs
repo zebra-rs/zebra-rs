@@ -38,7 +38,7 @@ pub struct IsisAdj {
     pub addr4: Vec<Ipv4Addr>,
     pub addr6: Vec<Ipv6Addr>,
     pub mac: Option<[u8; 6]>,
-    pub inactivity_timer: Option<Timer>,
+    pub hold_timer: Option<Timer>,
 }
 
 impl IsisAdj {
@@ -58,7 +58,7 @@ impl IsisAdj {
             addr4: Vec::new(),
             addr6: Vec::new(),
             mac,
-            inactivity_timer: None,
+            hold_timer: None,
         }
     }
 }
