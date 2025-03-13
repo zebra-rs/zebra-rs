@@ -20,6 +20,7 @@ use crate::{
 
 use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
+use super::nfsm::NfsmEvent;
 use super::socket::isis_socket;
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -209,11 +210,6 @@ pub fn serve(mut isis: Isis) {
     tokio::spawn(async move {
         isis.event_loop().await;
     });
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum NfsmEvent {
-    InactivityTimer,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
