@@ -16,6 +16,6 @@ pub enum NfsmEvent {
     HoldTimerExpire,
 }
 
-pub fn isis_nfsm_hello_received(nbr: &mut IsisAdj) -> Option<NfsmState> {
+pub fn isis_nfsm_hello_received(adj: &mut IsisAdj) -> Option<NfsmState> {
     None
 }

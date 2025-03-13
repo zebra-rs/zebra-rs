@@ -107,6 +107,14 @@ module exec {
           type empty;
         }
       }
+      container database {
+        ext:help "IS-IS database";
+        presence "IS-IS database";
+        leaf detail {
+          ext:help "IS-IS database detail";
+          type empty;
+        }
+      }
     }
     container ipv6 {
       ext:help "Show IPv6 commands";
