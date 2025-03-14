@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 use super::nfsm::NfsmEvent;
-use super::task::{Timer, TimerType};
+use super::task::{Task, Timer, TimerType};
 use super::Message;
 
 use isis_packet::{
-    IsisHello, IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisSysId, IsisTlv, IsisTlvAreaAddr,
-    IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
+    IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlv,
+    IsisTlvAreaAddr, IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -21,6 +21,8 @@ pub struct LinkTimer {
     pub hello: Option<Timer>,
 }
 
+pub struct Graph {}
+
 #[derive(Debug)]
 pub struct IsisLink {
     pub index: u32,
@@ -31,6 +33,7 @@ pub struct IsisLink {
     pub enabled: bool,
     pub dis: bool,
     pub l2adjs: BTreeMap<IsisSysId, IsisAdj>,
+    pub l2neigh: BTreeMap<IsisNeighborId, IsisAdj>,
     pub hello: Option<IsisHello>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
@@ -48,6 +51,7 @@ impl IsisLink {
             enabled: false,
             dis: false,
             l2adjs: BTreeMap::new(),
+            l2neigh: BTreeMap::new(),
             hello: None,
             timer: LinkTimer::default(),
             tx,
@@ -262,4 +266,12 @@ pub fn isis_hold_timer(adj: &IsisAdj) -> Timer {
             }
         },
     )
+}
+
+pub fn isis_spf(graph: Graph, tx: UnboundedSender<Message>) -> Task<()> {
+    let tx = tx.clone();
+    Task::spawn(async move {
+        let tx = tx.clone();
+        spf(graph, tx).await;
+    })
 }
