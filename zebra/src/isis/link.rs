@@ -268,10 +268,10 @@ pub fn isis_hold_timer(adj: &IsisAdj) -> Timer {
     )
 }
 
-pub fn isis_spf(graph: Graph, tx: UnboundedSender<Message>) -> Task<()> {
-    let tx = tx.clone();
-    Task::spawn(async move {
-        let tx = tx.clone();
-        spf(graph, tx).await;
-    })
-}
+// pub fn isis_spf(graph: Graph, tx: UnboundedSender<Message>) -> Task<()> {
+//     let tx = tx.clone();
+//     Task::spawn(async move {
+//         let tx = tx.clone();
+//         spf(graph, tx).await;
+//     })
+// }
