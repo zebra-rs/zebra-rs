@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use isis_packet::{nlpid_str, IsisHello, IsisProto, IsisTlv, IsisTlvProtoSupported};
+use isis_packet::{nlpid_str, IsisHello, IsisLspId, IsisProto, IsisTlv, IsisTlvProtoSupported};
 
 use super::{adj::IsisAdj, inst::ShowCallback, Isis};
 
@@ -67,8 +67,31 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
     buf
 }
 
+fn isis_lsp_id_str(lsp_id: &IsisLspId) -> String {
+    format!(
+        "{}.{:02x}-{:02x}",
+        lsp_id.sys_id(),
+        lsp_id.pseudo_id(),
+        lsp_id.fragment_id()
+    )
+}
+
 fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
-    String::from("show isis database")
+    let mut buf = String::new();
+
+    for (lsp_id, lsp) in &isis.l2lsdb {
+        writeln!(
+            buf,
+            "{:25} {:>4} 0x{:08x} 0x{:04x}",
+            isis_lsp_id_str(lsp_id),
+            lsp.pdu_len,
+            lsp.seq_number,
+            lsp.checksum
+        )
+        .unwrap();
+    }
+
+    buf
 }
 
 fn show_isis_database_detail(isis: &Isis, args: Args, _json: bool) -> String {
