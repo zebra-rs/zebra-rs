@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::inst::IfsmEvent;
 use super::nfsm::NfsmEvent;
 use super::task::{Task, Timer, TimerType};
 use super::Message;
@@ -86,7 +87,7 @@ impl IsisLink {
             .push(IsisTlvProtoSupported { nlpids: vec![0xcc] }.into());
         hello.tlvs.push(
             IsisTlvAreaAddr {
-                area_addr: [3, 0x49, 0, 1],
+                area_addr: vec![0x49, 0, 1],
             }
             .into(),
         );
@@ -120,17 +121,22 @@ impl Isis {
         let Some(hello) = &link.hello else {
             return;
         };
-        // println!("{}", hello);
 
         let packet = IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone()));
 
         link.ptx.send(Message::Send(packet, ifindex)).unwrap();
     }
 
-    pub fn lsp_send(&self, ifindex: u32) {
+    pub fn lsp_send(&mut self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
+
+        println!("Send LSP");
+
+        if self.l2lsp.is_none() {
+            self.l2lsp_gen();
+        }
     }
 
     pub fn dis_send(&self, ifindex: u32) {
@@ -221,8 +227,9 @@ impl Isis {
                         if mac == nei.addr {
                             adj.state = AdjState::Up;
 
-                            // Send LSP.
-                            // self.lsp_send(ifindex);
+                            self.tx
+                                .send(Message::Ifsm(ifindex, IfsmEvent::LspSend))
+                                .unwrap();
                         }
                     }
                 }

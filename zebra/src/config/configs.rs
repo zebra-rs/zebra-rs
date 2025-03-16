@@ -12,7 +12,7 @@ use std::{cell::RefCell, rc::Rc};
 
 const INDENT_LEVEL: usize = 2;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Args(pub VecDeque<String>);
 
 macro_rules! arg_parse_type {

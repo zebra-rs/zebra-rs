@@ -1,30 +1,28 @@
+use isis_packet::Nsap;
+
 use crate::config::{Args, ConfigOp};
 
-use super::{addr::OspfAddr, area::OspfArea, Ospf};
+use super::Isis;
 
-#[derive(Default)]
-pub struct OspfNetworkConfig {
-    pub area: Option<OspfArea>,
-    pub addr: Option<OspfAddr>,
-}
-
-impl Ospf {
+impl Isis {
     pub fn callback_build(&mut self) {
-        self.callback_add("/routing/ospf/network/area", config_ospf_network);
+        self.callback_add("/routing/isis/net", config_isis_net);
     }
 }
 
-fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
-    println!("OSPF network config");
-    let network = args.v4net()?;
-    let id = args.u8()?;
-    println!(" netwwork {}", network);
-    println!(" area {}", id);
-    let area = OspfArea { id };
-    if op == ConfigOp::Set {
-        let entry = ospf.table.entry(network).or_default();
-        entry.area = Some(area);
-    }
+fn config_isis_net(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let net = args.string()?;
+    let nsap = net.parse::<Nsap>().unwrap();
+
+    println!("NET {}", nsap);
+
+    isis.net = Some(nsap);
+
+    // let area = IsisArea { id };
+    // if op == ConfigOp::Set {
+    //     let entry = isis.table.entry(network).or_default();
+    //     entry.area = Some(area);
+    // }
 
     Some(())
 }

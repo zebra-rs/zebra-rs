@@ -16,3 +16,5 @@ pub mod adj;
 pub mod task;
 
 pub mod nfsm;
+
+pub mod config;

@@ -27,8 +27,8 @@ pub mod util;
 pub mod r#static;
 pub use r#static::*;
 
-pub mod lsp;
-pub use lsp::*;
+pub mod mpls;
+pub use mpls::*;
 
 pub mod resolve;
 
