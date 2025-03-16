@@ -1,8 +1,14 @@
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use isis_packet::{IsisLsp, IsisLspId, IsisPacket, IsisSysId, IsisTlvIpv4IfAddr, IsisType};
+use isis_packet::cap::{SegmentRoutingCapFlags, SidLabel};
+use isis_packet::{
+    IsisLsp, IsisLspId, IsisPacket, IsisProto, IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap,
+    IsisSubSegmentRoutingLB, IsisSysId, IsisTlvAreaAddr, IsisTlvHostname, IsisTlvIpv4IfAddr,
+    IsisTlvProtoSupported, IsisTlvRouterCap, IsisTlvTeRouterId, IsisType, Nsap,
+};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -26,8 +32,6 @@ use super::socket::isis_socket;
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
 
-pub struct Lsa {}
-
 pub struct Isis {
     ctx: Context,
     pub tx: UnboundedSender<Message>,
@@ -40,8 +44,9 @@ pub struct Isis {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub lsa: Lsa,
+    pub net: Option<Nsap>,
     pub l2lsdb: BTreeMap<IsisLspId, IsisLsp>,
+    pub l2lsp: Option<IsisLsp>,
 }
 
 pub enum Level {
@@ -80,10 +85,11 @@ impl Isis {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             sock,
-            lsa: Lsa {},
+            net: None,
             l2lsdb: BTreeMap::new(),
+            l2lsp: None,
         };
-        // isis.callback_build();
+        isis.callback_build();
         isis.show_build();
 
         let tx = isis.tx.clone();
@@ -99,12 +105,90 @@ impl Isis {
         isis
     }
 
+    pub fn l2lsp_gen(&self) {
+        let Some(net) = &self.net else {
+            return;
+        };
+        // LSP ID with no pseudo id and no frangmentation.
+        let lsp_id = IsisLspId::new(net.sys_id(), 0, 0);
+
+        // Generate own LSP for L2.
+        let mut lsp = IsisLsp {
+            lifetime: 360,
+            lsp_id,
+            seq_number: 1,
+            ..Default::default()
+        };
+
+        println!("XXX LSP Gen");
+
+        // Area address.
+        let area_addr = net.area_id.clone();
+        lsp.tlvs.push(IsisTlvAreaAddr { area_addr }.into());
+
+        // Supported protocol
+        let nlpids = vec![IsisProto::Ipv4.into()];
+        lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
+
+        // Hostname.
+        let hostname = "zebra".to_string();
+        lsp.tlvs.push(IsisTlvHostname { hostname }.into());
+
+        // Router capability. When TE-Router ID is configured, use the value. If
+        // not when Router ID is configured, use the value. Otherwise system
+        // default Router ID will be used.
+        let router_id: Ipv4Addr = "1.2.3.4".parse().unwrap();
+        let mut cap = IsisTlvRouterCap {
+            router_id,
+            flags: 0,
+            subs: Vec::new(),
+        };
+        // Sub: SR Capability
+        let mut flags = SegmentRoutingCapFlags::default();
+        flags.set_i_flag(true);
+        flags.set_v_flag(true);
+        let sid = SidLabel::Label(16000);
+        let sr_cap = IsisSubSegmentRoutingCap {
+            flags,
+            range: 8000,
+            sid,
+        };
+        cap.subs.push(sr_cap.into());
+
+        // Sub: SR Algorithms
+        let algo = IsisSubSegmentRoutingAlgo { algo: vec![0] };
+        cap.subs.push(algo.into());
+
+        // Sub: SR Local Block
+        let sid = SidLabel::Label(15000);
+        let lb = IsisSubSegmentRoutingLB {
+            flags: 0,
+            range: 3000,
+            sid,
+        };
+        cap.subs.push(lb.into());
+        lsp.tlvs.push(cap.into());
+
+        // TE Router ID.
+        let te_router_id = IsisTlvTeRouterId { router_id };
+        lsp.tlvs.push(te_router_id.into());
+
+        // IS Reachability.
+
+        // IPv4 Reachability.
+
+        // IPv6 Reachability.
+
+        // Update LSDB.
+    }
+
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
+        println!("XX path {} args {:?}", path, args);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
@@ -184,6 +268,20 @@ impl Isis {
                     //
                 }
             },
+            Message::Ifsm(ifindex, ev) => {
+                println!("ifindex {}  ev {:?}", ifindex, ev);
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
+                match ev {
+                    IfsmEvent::LspSend => {
+                        self.lsp_send(ifindex);
+                    }
+                    _ => {
+                        //
+                    }
+                }
+            }
             Message::Nfsm(ifindex, sysid, ev) => {
                 println!("ifindex {} sysid {:?} ev {:?}", ifindex, sysid, ev);
             }
@@ -223,6 +321,7 @@ pub fn serve(mut isis: Isis) {
 pub enum IfsmEvent {
     InterfaceUp,
     InterfaceDown,
+    LspSend,
 }
 
 pub enum Message {
