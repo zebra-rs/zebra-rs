@@ -58,6 +58,7 @@ impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent) -> (NfsmFunc, Option<Self>) {
         use NfsmEvent::*;
         use NfsmState::*;
+
         match self {
             Down => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Init)),
