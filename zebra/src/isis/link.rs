@@ -11,6 +11,7 @@ use isis_packet::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::isis::inst::Level;
 use crate::rib::Link;
 
 use super::addr::IsisAddr;
@@ -32,10 +33,10 @@ pub struct IsisLink {
     pub addr: Vec<IsisAddr>,
     pub mac: Option<[u8; 6]>,
     pub enabled: bool,
-    pub dis: bool,
-    pub l2adjs: BTreeMap<IsisSysId, IsisAdj>,
-    pub l2neigh: BTreeMap<IsisNeighborId, IsisAdj>,
-    pub hello: Option<IsisHello>,
+    pub l2dis: bool,
+    pub l2neigh: BTreeMap<IsisSysId, IsisAdj>,
+    pub l2adj: Option<IsisLspId>,
+    pub l2hello: Option<IsisHello>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub timer: LinkTimer,
@@ -50,10 +51,10 @@ impl IsisLink {
             addr: Vec::new(),
             mac: link.mac,
             enabled: false,
-            dis: false,
-            l2adjs: BTreeMap::new(),
+            l2dis: false,
             l2neigh: BTreeMap::new(),
-            hello: None,
+            l2adj: None,
+            l2hello: None,
             timer: LinkTimer::default(),
             tx,
             ptx,
@@ -99,7 +100,7 @@ impl IsisLink {
                 .into(),
             );
         }
-        self.hello = Some(hello);
+        self.l2hello = Some(hello);
 
         // Start timer.
         self.timer.hello = Some(isis_link_timer(self));
@@ -118,7 +119,7 @@ impl Isis {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        let Some(hello) = &link.hello else {
+        let Some(hello) = &link.l2hello else {
             return;
         };
 
@@ -146,10 +147,7 @@ impl Isis {
     }
 
     pub fn lsp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
-        println!("LSP PDU {}", packet);
-
         let Some(link) = self.links.get_mut(&ifindex) else {
-            println!("Link not found {}", ifindex);
             return;
         };
 
@@ -160,13 +158,9 @@ impl Isis {
 
         // DIS
         if pdu.lsp_id.pseudo_id() != 0 {
-            for tlv in &pdu.tlvs {
-                if let IsisTlv::ExtIsReach(tlv) = tlv {
-                    for entry in &tlv.entries {
-                        //
-                    }
-                }
-            }
+            println!("DIS recv");
+            link.l2adj = Some(pdu.lsp_id.clone());
+            link.tx.send(Message::LspUpdate(Level::L2)).unwrap();
         }
 
         // println!("LSP PDU {}", pdu);
@@ -195,7 +189,7 @@ impl Isis {
         };
 
         // Update adj.
-        match link.l2adjs.get(&pdu.source_id) {
+        match link.l2neigh.get(&pdu.source_id) {
             Some(adj) => {
                 println!("Update Adj {}", pdu.source_id);
                 // If adj state is Init and my is exists in Hello, migrate to
@@ -209,7 +203,7 @@ impl Isis {
                 let source_id = pdu.source_id.clone();
                 let mut adj = IsisAdj::new(pdu.clone(), ifindex, 2, mac, link.tx.clone());
                 adj.state = AdjState::Init;
-                link.l2adjs.insert(source_id, adj);
+                link.l2neigh.insert(source_id, adj);
 
                 // If neighbor is on shared link, add it to hello pdu.
                 if let Some(mac) = mac {
@@ -217,7 +211,7 @@ impl Isis {
                 }
             }
         };
-        let adj = link.l2adjs.get_mut(&pdu.source_id).unwrap();
+        let adj = link.l2neigh.get_mut(&pdu.source_id).unwrap();
 
         if adj.state == AdjState::Init {
             // Take a look into self.
@@ -251,7 +245,7 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
 }
 
 pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
-    let Some(ref mut hello) = link.hello else {
+    let Some(ref mut hello) = link.l2hello else {
         return;
     };
     hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());

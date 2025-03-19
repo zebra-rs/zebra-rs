@@ -109,7 +109,7 @@ impl Isis {
         let Some(net) = &self.net else {
             return;
         };
-        // LSP ID with no pseudo id and no frangmentation.
+        // LSP ID with no pseudo id and no fragmentation.
         let lsp_id = IsisLspId::new(net.sys_id(), 0, 0);
 
         // Generate own LSP for L2.
@@ -174,6 +174,12 @@ impl Isis {
         lsp.tlvs.push(te_router_id.into());
 
         // IS Reachability.
+        for (_, link) in &self.links {
+            let Some(adj) = &link.l2adj else {
+                continue;
+            };
+            println!("XXX adj {:?}", adj);
+        }
 
         // IPv4 Reachability.
 
@@ -217,7 +223,7 @@ impl Isis {
         link.addr.push(addr.clone());
 
         // Add to link hello.
-        if let Some(hello) = &mut link.hello {
+        if let Some(hello) = &mut link.l2hello {
             hello.tlvs.push(
                 IsisTlvIpv4IfAddr {
                     addr: addr.prefix.addr(),
@@ -251,9 +257,6 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::LinkTimer(ifindex) => {
-                self.hello_send(ifindex);
-            }
             Message::Recv(packet, ifindex, mac) => match packet.pdu_type {
                 IsisType::L1Hello | IsisType::L2Hello => {
                     self.hello_recv(packet, ifindex, mac);
@@ -268,6 +271,19 @@ impl Isis {
                     //
                 }
             },
+            Message::LspUpdate(level) => {
+                match level {
+                    Level::L1 => {
+                        //
+                    }
+                    Level::L2 => {
+                        self.l2lsp_gen();
+                    }
+                }
+            }
+            Message::LinkTimer(ifindex) => {
+                self.hello_send(ifindex);
+            }
             Message::Ifsm(ifindex, ev) => {
                 println!("ifindex {}  ev {:?}", ifindex, ev);
                 let Some(link) = self.links.get_mut(&ifindex) else {
@@ -327,6 +343,7 @@ pub enum IfsmEvent {
 pub enum Message {
     Recv(IsisPacket, u32, Option<[u8; 6]>),
     Send(IsisPacket, u32),
+    LspUpdate(Level),
     LinkTimer(u32),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, IsisSysId, NfsmEvent),
