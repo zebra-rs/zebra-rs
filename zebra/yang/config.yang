@@ -97,6 +97,59 @@ module config {
         leaf net {
           type isis:net;
         }
+
+        leaf is-type {
+          type enumeration {
+            enum level-1;
+            enum level-1-2;
+            enum level-2-only;
+          }
+        }
+
+        leaf segment-routing {
+          type enumeration {
+            enum mpls;
+            enum srv6;
+          }
+        }
+
+        leaf te-router-id {
+          type inet:ipv4-address;
+        }
+
+        list interface {
+          key "name";
+          leaf name {
+            type string;
+          }
+
+          leaf circuit-type {
+            type enumeration {
+              enum level-1;
+              enum level-1-2;
+              enum level-2-only;
+            }
+          }
+
+          container ipv4 {
+            leaf enable {
+              type boolean;
+            }
+            container prefix-sid {
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
+            }
+          }
+          container ipv6 {
+            leaf enable {
+              type boolean;
+            }
+          }
+        }
       }
       container ldp {
         leaf router-id {
