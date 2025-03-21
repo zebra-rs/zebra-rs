@@ -144,10 +144,10 @@ impl Match {
             self.pos = p;
             self.matched_type = m;
             self.matched_entry = entry.clone();
+            self.last_match = Some(comp.name.clone());
         } else if m == self.matched_type {
             self.count += 1;
         }
-        self.last_match = Some(comp.name.clone());
         self.comps.push(comp);
     }
 
