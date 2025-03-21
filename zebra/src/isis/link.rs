@@ -177,6 +177,20 @@ impl Isis {
         };
     }
 
+    pub fn psnp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            println!("Link not found {}", ifindex);
+            return;
+        };
+    }
+
+    pub fn unknown_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            println!("Link not found {}", ifindex);
+            return;
+        };
+    }
+
     pub fn hello_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             println!("Link not found {}", ifindex);

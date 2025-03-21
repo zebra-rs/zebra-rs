@@ -1,11 +1,12 @@
 use sysctl::Sysctl;
 
-const CTLNAMES: &[&str] = &[
-    "net.ipv4.ip_forward",
-    "net.ipv6.conf.all.forwarding",
-    "net.ipv6.conf.all.seg6_enabled",
-    "net.ipv6.conf.default.seg6_enabled",
-    "net.vrf.strict_mode",
+const CTLNAMES: &[(&str, &str)] = &[
+    ("net.ipv4.ip_forward", "1"),
+    ("net.ipv6.conf.all.forwarding", "1"),
+    ("net.ipv6.conf.all.seg6_enabled", "1"),
+    ("net.ipv6.conf.default.seg6_enabled", "1"),
+    ("net.vrf.strict_mode", "1"),
+    ("net.mpls.platform_labels", "1048575"),
 ];
 
 // TODO: We need to have per interface config.
@@ -13,13 +14,11 @@ const CTLNAMES: &[&str] = &[
 // net.mpls.conf.enp0s6.input=1
 // net.mpls.conf.enp0s7.input=1
 // net.mpls.conf.dum0.input=1
-//
-// net.mpls.platform_labels=1024
 
 pub fn sysctl_enable() -> anyhow::Result<()> {
-    for ctlname in CTLNAMES.iter() {
+    for (ctlname, value) in CTLNAMES.iter() {
         let ctl = sysctl::Ctl::new(ctlname)?;
-        let _ = ctl.set_value_string("1")?;
+        let _ = ctl.set_value_string(value)?;
     }
     Ok(())
 }

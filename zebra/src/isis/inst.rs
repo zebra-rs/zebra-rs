@@ -258,17 +258,20 @@ impl Isis {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Recv(packet, ifindex, mac) => match packet.pdu_type {
-                IsisType::L1Hello | IsisType::L2Hello => {
+                IsisType::L1Hello | IsisType::L2Hello | IsisType::P2PHello => {
                     self.hello_recv(packet, ifindex, mac);
                 }
-                IsisType::L2Lsp => {
+                IsisType::L1Lsp | IsisType::L2Lsp => {
                     self.lsp_recv(packet, ifindex, mac);
                 }
                 IsisType::Csnp => {
                     self.csnp_recv(packet, ifindex, mac);
                 }
-                _ => {
-                    //
+                IsisType::Psnp => {
+                    self.psnp_recv(packet, ifindex, mac);
+                }
+                IsisType::Unknown(_) => {
+                    self.unknown_recv(packet, ifindex, mac);
                 }
             },
             Message::LspUpdate(level) => {
