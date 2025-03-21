@@ -182,7 +182,7 @@ impl Nanomsg {
             network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
-            adjacency_sid: Some(PrefixSid { index: 1 }),
+            adjacency_sid: Some(PrefixSid { index: 100 }),
         };
         MsgEnum::IsisIf(msg)
     }
