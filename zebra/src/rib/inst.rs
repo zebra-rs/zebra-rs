@@ -6,6 +6,7 @@ use super::{Link, LspConfig, NexthopMap, RibTxChannel, StaticConfig};
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::fib::fib_dump;
+use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
 use crate::rib::RibEntries;
 use ipnet::{IpNet, Ipv4Net};
@@ -172,6 +173,9 @@ impl Rib {
     }
 
     pub async fn event_loop(&mut self) {
+        // Before get into FIB interaction, we enable sysctl.
+        sysctl_enable();
+
         if let Err(_err) = fib_dump(self).await {
             // warn!("FIB dump error {}", err);
         }
