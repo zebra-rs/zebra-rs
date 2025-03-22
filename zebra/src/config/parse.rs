@@ -484,6 +484,11 @@ pub fn parse(
             mandatory.push(entry.name.clone());
         }
     }
+    let sort_priority = entry
+        .extension
+        .get("ext:sort")
+        .map_or_else(|| 0, |v| v.parse::<i32>().unwrap_or(0));
+
     let path = if ymatch_complete(s.ymatch) {
         let sub = if let Some(sub) = matched_enumeration(&mx) {
             sub
@@ -495,6 +500,7 @@ pub fn parse(
             ymatch: s.ymatch.into(),
             key: mx.matched_entry.name.to_owned(),
             mandatory,
+            sort_priority,
         }
     } else {
         CommandPath {
@@ -502,6 +508,7 @@ pub fn parse(
             ymatch: s.ymatch.into(),
             key: "".to_string(),
             mandatory,
+            sort_priority,
         }
     };
 

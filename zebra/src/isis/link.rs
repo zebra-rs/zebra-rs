@@ -156,7 +156,7 @@ impl Isis {
             _ => return,
         };
 
-        println!("LSP PDU {}", pdu);
+        // println!("LSP PDU {}", pdu);
 
         // DIS
         if pdu.lsp_id.pseudo_id() != 0 {

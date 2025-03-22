@@ -101,6 +101,7 @@ pub struct Config {
     pub presence: bool,
     pub parent: Option<Rc<Config>>,
     pub mandatory: Vec<String>,
+    pub sort_priority: RefCell<i32>,
 }
 
 impl Config {
@@ -408,6 +409,7 @@ pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> 
         list: conf.list.clone(),
         presence: conf.presence,
         mandatory: conf.mandatory.clone(),
+        sort_priority: conf.sort_priority.clone(),
         parent,
         ..Default::default()
     });
@@ -422,6 +424,12 @@ pub fn carbon_copy(conf: &Rc<Config>, parent: Option<Rc<Config>>) -> Rc<Config> 
     p
 }
 
+fn compare_configs(a: &Rc<Config>, b: &Rc<Config>) -> std::cmp::Ordering {
+    b.sort_priority
+        .cmp(&a.sort_priority)
+        .then_with(|| alphanumeric_sort::compare_str(&a.name, &b.name))
+}
+
 // Config set.
 fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
     let find = config.lookup(&cpath.name);
@@ -433,19 +441,21 @@ fn config_set_dir(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 parent: Some(config.clone()),
                 presence: (ymatch_enum(cpath.ymatch) == YangMatch::DirMatched),
                 mandatory: cpath.mandatory.clone(),
+                sort_priority: cpath.sort_priority.into(),
                 ..Default::default()
             });
             config.configs.borrow_mut().push(n.clone());
-            config
-                .configs
-                .borrow_mut()
-                .sort_by(|a, b| a.name.cmp(&b.name));
+            config.configs.borrow_mut().sort_by(compare_configs);
+
             n.clone()
         }
     }
 }
 
 fn config_set_key(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
+    if cpath.sort_priority != 0 {
+        config.sort_priority.replace(cpath.sort_priority);
+    }
     let find = config.lookup_key(&cpath.name);
     match find {
         Some(find) => find,
@@ -455,19 +465,20 @@ fn config_set_key(config: &Rc<Config>, cpath: &CommandPath) -> Rc<Config> {
                 parent: Some(config.clone()),
                 prefix: cpath.key.clone(),
                 mandatory: cpath.mandatory.clone(),
+                sort_priority: cpath.sort_priority.into(),
                 ..Default::default()
             });
             config.keys.borrow_mut().push(n.clone());
-            config
-                .keys
-                .borrow_mut()
-                .sort_by(|a, b| alphanumeric_sort::compare_str(&a.name, &b.name));
+            config.keys.borrow_mut().sort_by(compare_configs);
             n.clone()
         }
     }
 }
 
 fn config_set_value(config: &Rc<Config>, cpath: &CommandPath) {
+    if cpath.sort_priority != 0 {
+        config.sort_priority.replace(cpath.sort_priority);
+    }
     config.value.replace(cpath.name.to_owned());
 }
 
