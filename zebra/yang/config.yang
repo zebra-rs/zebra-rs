@@ -93,8 +93,8 @@ module config {
       }
       container isis {
         presence "Enables configuration of IS-IS";
-
         leaf net {
+          ext:sort "1";
           type isis:net;
         }
 
@@ -118,6 +118,7 @@ module config {
         }
 
         list interface {
+          ext:sort "-1";
           key "name";
           leaf name {
             type string;

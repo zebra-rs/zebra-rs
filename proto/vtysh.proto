@@ -163,6 +163,7 @@ message CommandPath {
   string key = 2;
   YangMatch ymatch = 3;
   repeated string mandatory = 4;
+  int32 sort_priority = 5;
 }
 
 // Show service.

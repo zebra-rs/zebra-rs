@@ -8,4 +8,9 @@ module extension {
     description "help";
     argument "help";
   }
+
+  extension sort {
+    description "sort";
+    argument "sort";
+  }
 }
