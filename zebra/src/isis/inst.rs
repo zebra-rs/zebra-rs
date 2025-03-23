@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::net::Ipv4Addr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
@@ -24,6 +26,7 @@ use crate::{
     rib::RibRxChannel,
 };
 
+use super::isis_hello_recv;
 use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
 use super::nfsm::NfsmEvent;
@@ -47,11 +50,51 @@ pub struct Isis {
     pub net: Option<Nsap>,
     pub l2lsdb: BTreeMap<IsisLspId, IsisLsp>,
     pub l2lsp: Option<IsisLsp>,
+    pub is_type: IsType,
 }
 
+#[derive(Debug)]
 pub enum Level {
     L1,
     L2,
+}
+
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Level::L1 => write!(f, "L1"),
+            Level::L2 => write!(f, "L2"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum IsType {
+    L1,
+    L2,
+    L1L2,
+}
+
+#[derive(Debug)]
+pub struct ParseIsTypeError;
+
+impl fmt::Display for ParseIsTypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid input for IsType")
+    }
+}
+
+impl FromStr for IsType {
+    type Err = ParseIsTypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "level-1" => Ok(IsType::L1),
+            "level-2-only" => Ok(IsType::L2),
+            "level-1-2" => Ok(IsType::L1L2),
+            _ => Err(ParseIsTypeError),
+        }
+    }
 }
 
 impl Isis {
@@ -88,6 +131,7 @@ impl Isis {
             net: None,
             l2lsdb: BTreeMap::new(),
             l2lsp: None,
+            is_type: IsType::L1,
         };
         isis.callback_build();
         isis.show_build();
@@ -259,7 +303,7 @@ impl Isis {
         match msg {
             Message::Recv(packet, ifindex, mac) => match packet.pdu_type {
                 IsisType::L1Hello | IsisType::L2Hello | IsisType::P2PHello => {
-                    self.hello_recv(packet, ifindex, mac);
+                    isis_hello_recv(self, packet, ifindex, mac);
                 }
                 IsisType::L1Lsp | IsisType::L2Lsp => {
                     self.lsp_recv(packet, ifindex, mac);
@@ -295,6 +339,10 @@ impl Isis {
                 match ev {
                     IfsmEvent::LspSend => {
                         self.lsp_send(ifindex);
+                    }
+                    IfsmEvent::HelloUpdate => {
+                        link.hello_update();
+                        self.hello_send(ifindex);
                     }
                     _ => {
                         //
@@ -340,6 +388,8 @@ pub fn serve(mut isis: Isis) {
 pub enum IfsmEvent {
     InterfaceUp,
     InterfaceDown,
+    HelloUpdate,
+    DisSelection,
     LspSend,
 }
 
