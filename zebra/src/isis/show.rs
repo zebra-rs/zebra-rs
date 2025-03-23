@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use isis_packet::{nlpid_str, IsisHello, IsisLspId, IsisProto, IsisTlv, IsisTlvProtoSupported};
 
-use super::{adj::IsisAdj, inst::ShowCallback, Isis};
+use super::{adj::Neighbor, inst::ShowCallback, Isis};
 
 use crate::config::Args;
 
@@ -107,11 +107,6 @@ fn circuit_type_str(circuit_type: u8) -> &'static str {
     }
 }
 
-// Local struct for showing neighbor.
-struct Neighbor {
-    pub protos: Vec<IsisProto>,
-}
-
 fn proto(pdu: &IsisHello) -> Option<&IsisTlvProtoSupported> {
     for tlv in &pdu.tlvs {
         if let IsisTlv::ProtoSupported(proto) = tlv {
@@ -121,7 +116,7 @@ fn proto(pdu: &IsisHello) -> Option<&IsisTlvProtoSupported> {
     None
 }
 
-fn show_isis_neighbor_entry(buf: &mut String, isis: &Isis, adj: &IsisAdj) {
+fn show_isis_neighbor_entry(buf: &mut String, isis: &Isis, adj: &Neighbor) {
     writeln!(buf, " {}", adj.pdu.source_id).unwrap();
 
     // Interface: enp0s6, Level: 2, State: Up, Expires in 29s

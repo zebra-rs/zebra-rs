@@ -12,10 +12,11 @@ use isis_packet::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::isis::inst::Level;
+use crate::isis::nfsm::NfsmState;
 use crate::rib::Link;
 
 use super::addr::IsisAddr;
-use super::adj::{AdjState, IsisAdj};
+use super::adj::Neighbor;
 use super::Isis;
 
 #[derive(Debug, Default)]
@@ -34,7 +35,7 @@ pub struct IsisLink {
     pub mac: Option<[u8; 6]>,
     pub enabled: bool,
     pub l2dis: bool,
-    pub l2neigh: BTreeMap<IsisSysId, IsisAdj>,
+    pub l2neigh: BTreeMap<IsisSysId, Neighbor>,
     pub l2adj: Option<IsisLspId>,
     pub l2hello: Option<IsisHello>,
     pub tx: UnboundedSender<Message>,
@@ -61,17 +62,8 @@ impl IsisLink {
         }
     }
 
-    // Enable IS-IS on this link.
-    pub fn enable(&mut self) {
-        if self.enabled {
-            return;
-        }
-
-        if self.name != "enp0s6" {
-            return;
-        }
-        self.enabled = true;
-
+    pub fn hello_update(&mut self) {
+        println!("Hello update");
         let mut hello = IsisHello {
             circuit_type: 3,
             source_id: IsisSysId {
@@ -100,7 +92,30 @@ impl IsisLink {
                 .into(),
             );
         }
+
+        for (_, nbr) in &self.l2neigh {
+            if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
+                if let Some(addr) = nbr.mac {
+                    hello.tlvs.push(IsisTlvIsNeighbor { addr }.into());
+                }
+            }
+        }
+
         self.l2hello = Some(hello);
+    }
+
+    // Enable IS-IS on this link.
+    pub fn enable(&mut self) {
+        if self.enabled {
+            return;
+        }
+
+        if self.name != "enp0s6" {
+            return;
+        }
+        self.enabled = true;
+
+        self.hello_update();
 
         // Start timer.
         self.timer.hello = Some(isis_link_timer(self));
@@ -190,63 +205,6 @@ impl Isis {
             return;
         };
     }
-
-    pub fn hello_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            println!("Link not found {}", ifindex);
-            return;
-        };
-
-        // Extract Hello PDU.
-        let pdu = match (packet.pdu_type, packet.pdu) {
-            (IsisType::L1Hello, IsisPdu::L1Hello(pdu))
-            | (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => pdu,
-            _ => return,
-        };
-
-        // Update adj.
-        match link.l2neigh.get(&pdu.source_id) {
-            Some(adj) => {
-                println!("Update Adj {}", pdu.source_id);
-                // If adj state is Init and my is exists in Hello, migrate to
-                // Up.
-            }
-            None => {
-                // Need to check Level.
-                println!("New Adj {} MAC: {:?}", pdu.source_id, mac);
-
-                // Create a new adjacency.
-                let source_id = pdu.source_id.clone();
-                let mut adj = IsisAdj::new(pdu.clone(), ifindex, 2, mac, link.tx.clone());
-                adj.state = AdjState::Init;
-                link.l2neigh.insert(source_id, adj);
-
-                // If neighbor is on shared link, add it to hello pdu.
-                if let Some(mac) = mac {
-                    isis_link_add_neighbor(link, &mac);
-                }
-            }
-        };
-        let adj = link.l2neigh.get_mut(&pdu.source_id).unwrap();
-
-        if adj.state == AdjState::Init {
-            // Take a look into self.
-            if let Some(mac) = link.mac {
-                for tlv in pdu.tlvs {
-                    if let IsisTlv::IsNeighbor(nei) = tlv {
-                        if mac == nei.addr {
-                            adj.state = AdjState::Up;
-
-                            self.tx
-                                .send(Message::Ifsm(ifindex, IfsmEvent::LspSend))
-                                .unwrap();
-                        }
-                    }
-                }
-            }
-        }
-        adj.hold_timer = Some(isis_hold_timer(&adj));
-    }
 }
 
 pub fn isis_link_timer(link: &IsisLink) -> Timer {
@@ -267,7 +225,7 @@ pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
     hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());
 }
 
-pub fn isis_hold_timer(adj: &IsisAdj) -> Timer {
+pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
     let tx = adj.tx.clone();
     let sysid = adj.pdu.source_id.clone();
     let ifindex = adj.ifindex;

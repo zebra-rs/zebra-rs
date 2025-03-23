@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{Isis, Message};
+pub use inst::{IsType, Isis, Level, Message};
 
 pub mod link;
 
@@ -20,3 +20,6 @@ pub mod nfsm;
 pub mod config;
 
 pub mod neigh;
+
+pub mod packet;
+pub use packet::*;
