@@ -2,6 +2,7 @@ pub mod inst;
 pub use inst::{IsType, Isis, Level, Message};
 
 pub mod link;
+pub use link::IsisLink;
 
 pub mod addr;
 
@@ -16,6 +17,10 @@ pub mod adj;
 pub mod task;
 
 pub mod nfsm;
+pub use nfsm::{NfsmEvent, NfsmState};
+
+pub mod ifsm;
+pub use ifsm::IfsmEvent;
 
 pub mod config;
 

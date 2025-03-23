@@ -74,12 +74,12 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
-        println!(
-            "IPv4 route add: {} {} metric {}",
-            entry.rtype.abbrev(),
-            prefix,
-            entry.metric
-        );
+        // println!(
+        //     "IPv4 route add: {} {} metric {}",
+        //     entry.rtype.abbrev(),
+        //     prefix,
+        //     entry.metric
+        // );
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
@@ -99,12 +99,12 @@ impl Rib {
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry) {
-        println!(
-            "IPv4 route del: {} {} metric {}",
-            entry.rtype.abbrev(),
-            prefix,
-            entry.metric
-        );
+        // println!(
+        //     "IPv4 route del: {} {} metric {}",
+        //     entry.rtype.abbrev(),
+        //     prefix,
+        //     entry.metric
+        // );
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             self.rib_selection(prefix, replace.pop()).await;

@@ -49,7 +49,7 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
 
     buf.push_str("System Id           Interface   L  State         Holdtime SNPA\n");
     for (_, link) in &isis.links {
-        for (_, adj) in &link.l2neigh {
+        for (_, adj) in &link.l2nbrs {
             let remaining = if let Some(timer) = &adj.hold_timer {
                 timer.remaining_seconds()
             } else {
@@ -163,7 +163,7 @@ fn show_isis_neighbor_detail(isis: &Isis, args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, link) in &isis.links {
-        for (_, adj) in &link.l2neigh {
+        for (_, adj) in &link.l2nbrs {
             show_isis_neighbor_entry(&mut buf, isis, adj);
         }
     }

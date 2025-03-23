@@ -4,11 +4,11 @@ use isis_packet::{IsisHello, IsisTlv};
 
 use crate::isis::link::isis_link_add_neighbor;
 
+use super::{IfsmEvent, Message};
+
 use super::{
     adj::Neighbor,
-    inst::IfsmEvent,
     task::{Timer, TimerType},
-    Message,
 };
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]

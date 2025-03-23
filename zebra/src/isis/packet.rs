@@ -6,8 +6,7 @@ use crate::isis::Isis;
 use crate::isis::Message;
 
 use super::nfsm::{isis_nfsm, NfsmEvent};
-use super::Level;
-use super::{inst::IfsmEvent, nfsm::NfsmState};
+use super::{IfsmEvent, Level, NfsmState};
 
 pub fn isis_hello_recv(top: &mut Isis, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
@@ -15,27 +14,19 @@ pub fn isis_hello_recv(top: &mut Isis, packet: IsisPacket, ifindex: u32, mac: Op
         return;
     };
 
-    // Interface enabled?
-    // if !link.is_enabled() {
-    //     return;
-    // }
-
-    // Check circuit type.
-
-    // Extract Hello PDU.
-    let pdu = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L1Hello, IsisPdu::L1Hello(pdu)) | (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => {
-            pdu
-        }
-        _ => return,
-    };
-
     if packet.pdu_type != IsisType::L2Hello {
+        println!("Skip non L2Hello");
         return;
     }
 
+    // Extract Hello PDU.
+    let pdu = match (packet.pdu_type, packet.pdu) {
+        (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => pdu,
+        _ => return,
+    };
+
     let nbr = link
-        .l2neigh
+        .l2nbrs
         .entry(pdu.source_id.clone())
         .or_insert(Neighbor::new(
             Level::L2,
@@ -44,6 +35,8 @@ pub fn isis_hello_recv(top: &mut Isis, packet: IsisPacket, ifindex: u32, mac: Op
             mac,
             link.tx.clone(),
         ));
+
+    nbr.pdu = pdu;
 
     isis_nfsm(nbr, NfsmEvent::HelloReceived, &link.mac);
 }

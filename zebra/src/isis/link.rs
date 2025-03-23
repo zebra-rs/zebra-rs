@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
-use super::inst::IfsmEvent;
-use super::nfsm::NfsmEvent;
 use super::task::{Task, Timer, TimerType};
-use super::Message;
+use super::{IfsmEvent, Message, NfsmEvent};
 
 use isis_packet::{
     IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlv,
@@ -28,16 +26,17 @@ pub struct Graph {}
 
 #[derive(Debug)]
 pub struct IsisLink {
-    pub index: u32,
+    pub ifindex: u32,
     pub name: String,
     pub mtu: u32,
     pub addr: Vec<IsisAddr>,
     pub mac: Option<[u8; 6]>,
     pub enabled: bool,
-    pub l2dis: bool,
-    pub l2neigh: BTreeMap<IsisSysId, Neighbor>,
+    pub l2nbrs: BTreeMap<IsisSysId, Neighbor>,
     pub l2adj: Option<IsisLspId>,
+    pub l2dis: Option<IsisSysId>,
     pub l2hello: Option<IsisHello>,
+    pub l2priority: u8,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub timer: LinkTimer,
@@ -46,16 +45,17 @@ pub struct IsisLink {
 impl IsisLink {
     pub fn from(link: Link, tx: UnboundedSender<Message>, ptx: UnboundedSender<Message>) -> Self {
         Self {
-            index: link.index,
+            ifindex: link.index,
             name: link.name.to_owned(),
             mtu: link.mtu,
             addr: Vec::new(),
             mac: link.mac,
             enabled: false,
-            l2dis: false,
-            l2neigh: BTreeMap::new(),
+            l2nbrs: BTreeMap::new(),
             l2adj: None,
+            l2dis: None,
             l2hello: None,
+            l2priority: 63,
             timer: LinkTimer::default(),
             tx,
             ptx,
@@ -71,7 +71,7 @@ impl IsisLink {
             },
             hold_timer: 30,
             pdu_len: 0,
-            priority: 63,
+            priority: self.l2priority,
             lan_id: [0u8; 7],
             tlvs: Vec::new(),
         };
@@ -93,7 +93,7 @@ impl IsisLink {
             );
         }
 
-        for (_, nbr) in &self.l2neigh {
+        for (_, nbr) in &self.l2nbrs {
             if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
                 if let Some(addr) = nbr.mac {
                     hello.tlvs.push(IsisTlvIsNeighbor { addr }.into());
@@ -151,7 +151,11 @@ impl Isis {
         println!("Send LSP");
 
         if self.l2lsp.is_none() {
-            self.l2lsp_gen();
+            self.l2lsp = self.l2lsp_gen();
+        }
+        if let Some(lsp) = &self.l2lsp {
+            let packet = IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone()));
+            link.ptx.send(Message::Send(packet, ifindex)).unwrap();
         }
     }
 
@@ -171,13 +175,22 @@ impl Isis {
             _ => return,
         };
 
-        // println!("LSP PDU {}", pdu);
-
         // DIS
         if pdu.lsp_id.pseudo_id() != 0 {
             println!("DIS recv");
-            link.l2adj = Some(pdu.lsp_id.clone());
-            link.tx.send(Message::LspUpdate(Level::L2)).unwrap();
+
+            if let Some(dis) = &link.l2dis {
+                if link.l2adj.is_none() {
+                    if pdu.lsp_id.sys_id() == *dis {
+                        link.l2adj = Some(pdu.lsp_id.clone());
+                        link.tx
+                            .send(Message::LspUpdate(Level::L2, link.ifindex))
+                            .unwrap();
+                    }
+                }
+            } else {
+                println!("DIS sysid is not set");
+            }
         }
 
         // println!("LSP PDU {}", pdu);
@@ -209,7 +222,7 @@ impl Isis {
 
 pub fn isis_link_timer(link: &IsisLink) -> Timer {
     let tx = link.tx.clone();
-    let index = link.index;
+    let index = link.ifindex;
     Timer::new(Timer::second(1), TimerType::Infinite, move || {
         let tx = tx.clone();
         async move {
