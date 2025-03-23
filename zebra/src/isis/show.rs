@@ -17,6 +17,7 @@ impl Isis {
         self.show_add("/show/isis/interface", show_isis_interface);
         self.show_add("/show/isis/neighbor", show_isis_neighbor);
         self.show_add("/show/isis/neighbor/detail", show_isis_neighbor_detail);
+        self.show_add("/show/isis/adjacency", show_isis_adjacency);
         self.show_add("/show/isis/database", show_isis_database);
         self.show_add("/show/isis/database/detail", show_isis_database_detail);
     }
@@ -101,7 +102,13 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
 }
 
 fn show_isis_database_detail(isis: &Isis, args: Args, _json: bool) -> String {
-    String::from("show isis database")
+    let mut buf = String::new();
+
+    for (lsp_id, lsp) in &isis.l2lsdb {
+        writeln!(buf, "{}\n{}\n", isis_lsp_id_str(lsp_id), lsp).unwrap();
+    }
+
+    buf
 }
 
 fn circuit_type_str(circuit_type: u8) -> &'static str {
@@ -168,5 +175,22 @@ fn show_isis_neighbor_detail(isis: &Isis, args: Args, _json: bool) -> String {
         }
     }
 
+    buf
+}
+
+fn show_isis_adjacency(isis: &Isis, args: Args, _json: bool) -> String {
+    let mut buf = String::new();
+
+    for (_, link) in &isis.links {
+        if let Some(adj) = &link.l2adj {
+            writeln!(
+                buf,
+                "Interface: {}, Adj: {:?}",
+                isis.ifname(link.ifindex),
+                adj,
+            )
+            .unwrap();
+        }
+    }
     buf
 }

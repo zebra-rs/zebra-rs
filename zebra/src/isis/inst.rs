@@ -22,7 +22,7 @@ use crate::isis::ifsm::isis_ifsm_dis_selection;
 use crate::isis::nfsm::isis_nfsm;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
-use crate::rib::Link;
+use crate::rib::{self, Link};
 use crate::{
     config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
     context::Context,
@@ -50,7 +50,7 @@ pub struct Isis {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub net: Option<Nsap>,
+    pub net: Nsap,
     pub l2lsdb: BTreeMap<IsisLspId, IsisLsp>,
     pub l2lsp: Option<IsisLsp>,
     pub is_type: IsType,
@@ -118,9 +118,9 @@ impl Isis {
 }
 
 impl Isis {
-    pub fn new(ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
+    pub fn new(ctx: Context, rib_tx: UnboundedSender<rib::Message>) -> Self {
         let chan = RibRxChannel::new();
-        let msg = crate::rib::Message::Subscribe {
+        let msg = rib::Message::Subscribe {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
@@ -140,7 +140,7 @@ impl Isis {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             sock,
-            net: None,
+            net: Nsap::default(),
             l2lsdb: BTreeMap::new(),
             l2lsp: None,
             is_type: IsType::L1,
@@ -162,11 +162,8 @@ impl Isis {
     }
 
     pub fn l2lsp_gen(&self) -> Option<IsisLsp> {
-        let Some(net) = &self.net else {
-            return None;
-        };
         // LSP ID with no pseudo id and no fragmentation.
-        let lsp_id = IsisLspId::new(net.sys_id(), 0, 0);
+        let lsp_id = IsisLspId::new(self.net.sys_id(), 0, 0);
 
         // Generate own LSP for L2.
         let mut lsp = IsisLsp {
@@ -176,10 +173,8 @@ impl Isis {
             ..Default::default()
         };
 
-        println!("XXX LSP Gen");
-
         // Area address.
-        let area_addr = net.area_id.clone();
+        let area_addr = self.net.area_id.clone();
         lsp.tlvs.push(IsisTlvAreaAddr { area_addr }.into());
 
         // Supported protocol
