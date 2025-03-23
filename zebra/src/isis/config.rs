@@ -19,7 +19,7 @@ fn config_isis_net(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
     let nsap = net.parse::<Nsap>().unwrap();
 
     println!("NET {}", nsap);
-    isis.net = Some(nsap);
+    isis.net = nsap;
 
     Some(())
 }

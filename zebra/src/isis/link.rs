@@ -129,6 +129,19 @@ impl IsisLink {
     }
 }
 
+pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool {
+    for tlv in &lsp.tlvs {
+        if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
+            for entry in &ext_is_reach.entries {
+                if entry.neighbor_id == *neighbor_id {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 impl Isis {
     pub fn hello_send(&self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
@@ -175,6 +188,8 @@ impl Isis {
             _ => return,
         };
 
+        // println!("{}", pdu);
+
         // DIS
         if pdu.lsp_id.pseudo_id() != 0 {
             println!("DIS recv");
@@ -182,10 +197,14 @@ impl Isis {
             if let Some(dis) = &link.l2dis {
                 if link.l2adj.is_none() {
                     if pdu.lsp_id.sys_id() == *dis {
-                        link.l2adj = Some(pdu.lsp_id.clone());
-                        link.tx
-                            .send(Message::LspUpdate(Level::L2, link.ifindex))
-                            .unwrap();
+                        // IS Neighbor include my LSP ID.
+                        if lsp_has_neighbor_id(&pdu, &self.net.neighbor_id()) {
+                            println!("Adjacency!");
+                            link.l2adj = Some(pdu.lsp_id.clone());
+                            link.tx
+                                .send(Message::LspUpdate(Level::L2, link.ifindex))
+                                .unwrap();
+                        }
                     }
                 }
             } else {
