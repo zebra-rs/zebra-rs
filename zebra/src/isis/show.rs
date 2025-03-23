@@ -50,14 +50,20 @@ fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
     buf.push_str("System Id           Interface   L  State         Holdtime SNPA\n");
     for (_, link) in &isis.links {
         for (_, adj) in &link.l2neigh {
+            let remaining = if let Some(timer) = &adj.hold_timer {
+                timer.remaining_seconds()
+            } else {
+                0
+            };
+
             writeln!(
                 buf,
-                "{:<20}{:<12}{:<1}  {:<14}{:<9}{}",
+                "{:<20}{:<12}{:<3}{:<14}{:<9}{}",
                 adj.pdu.source_id.to_string(),
                 isis.ifname(adj.ifindex),
-                adj.level,
+                adj.level.digit(),
                 adj.state.to_string(),
-                adj.pdu.hold_timer,
+                remaining,
                 show_mac(adj.mac),
             )
             .unwrap();

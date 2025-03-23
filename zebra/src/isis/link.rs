@@ -225,24 +225,6 @@ pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
     hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());
 }
 
-pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
-    let tx = adj.tx.clone();
-    let sysid = adj.pdu.source_id.clone();
-    let ifindex = adj.ifindex;
-    Timer::new(
-        Timer::second(adj.pdu.hold_timer as u64),
-        TimerType::Once,
-        move || {
-            let tx = tx.clone();
-            let sysid = sysid.clone();
-            async move {
-                tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::HoldTimerExpire))
-                    .unwrap();
-            }
-        },
-    )
-}
-
 // pub fn isis_spf(graph: Graph, tx: UnboundedSender<Message>) -> Task<()> {
 //     let tx = tx.clone();
 //     Task::spawn(async move {
@@ -250,3 +232,7 @@ pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
 //         spf(graph, tx).await;
 //     })
 // }
+
+// top.tx
+// .send(Message::Ifsm(ifindex, IfsmEvent::LspSend))
+// .unwrap();
