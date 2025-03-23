@@ -1,13 +1,15 @@
-// IS-IS does not have explicit neighbor state machine though it is easy to
-// understand adjacency state transition.
-
 use std::fmt::{Display, Formatter, Result};
 
 use isis_packet::{IsisHello, IsisTlv};
 
 use crate::isis::link::isis_link_add_neighbor;
 
-use super::{adj::Neighbor, inst::IfsmEvent, Message};
+use super::{
+    adj::Neighbor,
+    inst::IfsmEvent,
+    task::{Timer, TimerType},
+    Message,
+};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -73,6 +75,24 @@ fn isis_hello_has_mac(pdu: &IsisHello, mac: &Option<[u8; 6]>) -> bool {
     false
 }
 
+pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
+    let tx = adj.tx.clone();
+    let sysid = adj.pdu.source_id.clone();
+    let ifindex = adj.ifindex;
+    Timer::new(
+        Timer::second(adj.pdu.hold_timer as u64),
+        TimerType::Once,
+        move || {
+            let tx = tx.clone();
+            let sysid = sysid.clone();
+            async move {
+                tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::HoldTimerExpire))
+                    .unwrap();
+            }
+        },
+    )
+}
+
 pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Option<NfsmState> {
     use IfsmEvent::*;
 
@@ -95,6 +115,8 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Op
         }
     }
 
+    nbr.hold_timer = Some(isis_hold_timer(nbr));
+
     if state != nbr.state {
         return Some(state);
     }
@@ -103,26 +125,20 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Op
 }
 
 pub fn isis_nfsm_hold_timer_expire(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Option<NfsmState> {
-    None
+    use IfsmEvent::*;
+
+    nbr.hold_timer = None;
+
+    if nbr.state == NfsmState::Up {
+        nbr.event(Message::Ifsm(nbr.ifindex, HelloUpdate));
+        nbr.event(Message::Ifsm(nbr.ifindex, DisSelection));
+    }
+    if nbr.state == NfsmState::Init {
+        nbr.event(Message::Ifsm(nbr.ifindex, HelloUpdate));
+    }
+
+    Some(NfsmState::Down)
 }
-
-// if nbr.state == NfsmState::Init {
-//     // Take a look into self.
-//     if let Some(mac) = link.mac {
-//         for tlv in pdu.tlvs {
-//             if let IsisTlv::IsNeighbor(nei) = tlv {
-//                 if mac == nei.addr {
-//                     nbr.state = NfsmState::Up;
-
-//                     top.tx
-//                         .send(Message::Ifsm(ifindex, IfsmEvent::LspSend))
-//                         .unwrap();
-//                 }
-//             }
-//         }
-//     }
-// }
-// nbr.hold_timer = Some(isis_hold_timer(&nbr));
 
 pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<[u8; 6]>) {
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event);

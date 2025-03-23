@@ -17,6 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
+use crate::isis::nfsm::isis_nfsm;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::Link;
@@ -57,6 +58,15 @@ pub struct Isis {
 pub enum Level {
     L1,
     L2,
+}
+
+impl Level {
+    pub fn digit(&self) -> u8 {
+        match self {
+            Level::L1 => 1,
+            Level::L2 => 2,
+        }
+    }
 }
 
 impl fmt::Display for Level {
@@ -351,6 +361,13 @@ impl Isis {
             }
             Message::Nfsm(ifindex, sysid, ev) => {
                 println!("ifindex {} sysid {:?} ev {:?}", ifindex, sysid, ev);
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
+                let Some(nbr) = link.l2neigh.get_mut(&sysid) else {
+                    return;
+                };
+                isis_nfsm(nbr, ev, &None);
             }
             _ => {
                 //

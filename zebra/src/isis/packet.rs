@@ -7,7 +7,7 @@ use crate::isis::Message;
 
 use super::nfsm::{isis_nfsm, NfsmEvent};
 use super::Level;
-use super::{inst::IfsmEvent, link::isis_hold_timer, nfsm::NfsmState};
+use super::{inst::IfsmEvent, nfsm::NfsmState};
 
 pub fn isis_hello_recv(top: &mut Isis, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
