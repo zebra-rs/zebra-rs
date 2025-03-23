@@ -20,6 +20,7 @@ pub struct Neighbor {
     pub addr6: Vec<Ipv6Addr>,
     pub mac: Option<[u8; 6]>,
     pub hold_timer: Option<Timer>,
+    pub is_dis: bool,
 }
 
 impl Neighbor {
@@ -40,6 +41,7 @@ impl Neighbor {
             addr6: Vec::new(),
             mac,
             hold_timer: None,
+            is_dis: false,
         }
     }
 

@@ -7,8 +7,9 @@ use std::sync::Arc;
 use ipnet::IpNet;
 use isis_packet::cap::{SegmentRoutingCapFlags, SidLabel};
 use isis_packet::{
-    IsisLsp, IsisLspId, IsisPacket, IsisProto, IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap,
-    IsisSubSegmentRoutingLB, IsisSysId, IsisTlvAreaAddr, IsisTlvHostname, IsisTlvIpv4IfAddr,
+    IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisProto, IsisSubSegmentRoutingAlgo,
+    IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSysId, IsisTlvAreaAddr,
+    IsisTlvExtIsReach, IsisTlvExtIsReachEntry, IsisTlvHostname, IsisTlvIpv4IfAddr,
     IsisTlvProtoSupported, IsisTlvRouterCap, IsisTlvTeRouterId, IsisType, Nsap,
 };
 use socket2::Socket;
@@ -17,6 +18,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
+use crate::isis::ifsm::isis_ifsm_dis_selection;
 use crate::isis::nfsm::isis_nfsm;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -30,8 +32,8 @@ use crate::{
 use super::isis_hello_recv;
 use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
-use super::nfsm::NfsmEvent;
 use super::socket::isis_socket;
+use super::{IfsmEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
@@ -159,9 +161,9 @@ impl Isis {
         isis
     }
 
-    pub fn l2lsp_gen(&self) {
+    pub fn l2lsp_gen(&self) -> Option<IsisLsp> {
         let Some(net) = &self.net else {
-            return;
+            return None;
         };
         // LSP ID with no pseudo id and no fragmentation.
         let lsp_id = IsisLspId::new(net.sys_id(), 0, 0);
@@ -232,7 +234,15 @@ impl Isis {
             let Some(adj) = &link.l2adj else {
                 continue;
             };
-            println!("XXX adj {:?}", adj);
+            // Ext IS Reach.
+            let mut ext_is_reach = IsisTlvExtIsReach::default();
+            let mut is_reach = IsisTlvExtIsReachEntry {
+                neighbor_id: adj.neighbor_id(),
+                metric: 10,
+                subs: Vec::new(),
+            };
+            ext_is_reach.entries.push(is_reach);
+            lsp.tlvs.push(ext_is_reach.into());
         }
 
         // IPv4 Reachability.
@@ -240,6 +250,7 @@ impl Isis {
         // IPv6 Reachability.
 
         // Update LSDB.
+        Some(lsp)
     }
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -255,13 +266,13 @@ impl Isis {
     }
 
     fn link_add(&mut self, link: Link) {
-        println!("ISIS: LinkAdd {} {}", link.name, link.index);
+        // println!("ISIS: LinkAdd {} {}", link.name, link.index);
         if let Some(link) = self.links.get_mut(&link.index) {
             //
         } else {
             let mut link = IsisLink::from(link, self.tx.clone(), self.ptx.clone());
             link.enable();
-            self.links.insert(link.index, link);
+            self.links.insert(link.ifindex, link);
         }
     }
 
@@ -312,7 +323,7 @@ impl Isis {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Recv(packet, ifindex, mac) => match packet.pdu_type {
-                IsisType::L1Hello | IsisType::L2Hello | IsisType::P2PHello => {
+                IsisType::L2Hello => {
                     isis_hello_recv(self, packet, ifindex, mac);
                 }
                 IsisType::L1Lsp | IsisType::L2Lsp => {
@@ -327,14 +338,18 @@ impl Isis {
                 IsisType::Unknown(_) => {
                     self.unknown_recv(packet, ifindex, mac);
                 }
+                _ => {
+                    //
+                }
             },
-            Message::LspUpdate(level) => {
+            Message::LspUpdate(level, ifindex) => {
                 match level {
                     Level::L1 => {
                         //
                     }
                     Level::L2 => {
-                        self.l2lsp_gen();
+                        self.l2lsp = self.l2lsp_gen();
+                        self.lsp_send(ifindex);
                     }
                 }
             }
@@ -354,6 +369,9 @@ impl Isis {
                         link.hello_update();
                         self.hello_send(ifindex);
                     }
+                    IfsmEvent::DisSelection => {
+                        isis_ifsm_dis_selection(link);
+                    }
                     _ => {
                         //
                     }
@@ -364,7 +382,7 @@ impl Isis {
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
-                let Some(nbr) = link.l2neigh.get_mut(&sysid) else {
+                let Some(nbr) = link.l2nbrs.get_mut(&sysid) else {
                     return;
                 };
                 isis_nfsm(nbr, ev, &None);
@@ -401,19 +419,10 @@ pub fn serve(mut isis: Isis) {
     });
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum IfsmEvent {
-    InterfaceUp,
-    InterfaceDown,
-    HelloUpdate,
-    DisSelection,
-    LspSend,
-}
-
 pub enum Message {
     Recv(IsisPacket, u32, Option<[u8; 6]>),
     Send(IsisPacket, u32),
-    LspUpdate(Level),
+    LspUpdate(Level, u32),
     LinkTimer(u32),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, IsisSysId, NfsmEvent),
