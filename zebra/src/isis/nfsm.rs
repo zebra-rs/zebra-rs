@@ -175,9 +175,9 @@ pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<[u8; 6]>) {
             nbr.state = new_state;
         }
     } else {
-        println!(
-            "NFSM State Transition on {:?} -> {:?}",
-            nbr.state, nbr.state
-        );
+        // println!(
+        //     "NFSM State Transition on {:?} -> {:?}",
+        //     nbr.state, nbr.state
+        // );
     }
 }
