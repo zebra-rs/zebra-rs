@@ -4,8 +4,9 @@ use super::task::{Task, Timer, TimerType};
 use super::{IfsmEvent, Message, NfsmEvent};
 
 use isis_packet::{
-    IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlv,
-    IsisTlvAreaAddr, IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
+    IsisCsnp, IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp,
+    IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvLspEntries,
+    IsisTlvProtoSupported, IsisType,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -172,6 +173,14 @@ impl Isis {
         }
     }
 
+    pub fn psnp_send(&mut self, ifindex: u32, pdu: IsisPsnp) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let packet = IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone()));
+        link.ptx.send(Message::Send(packet, ifindex)).unwrap();
+    }
+
     pub fn dis_send(&self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
@@ -222,6 +231,53 @@ impl Isis {
             println!("Link not found {}", ifindex);
             return;
         };
+
+        println!("CSNP recv");
+
+        let pdu = match (packet.pdu_type, packet.pdu) {
+            (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => pdu,
+            _ => return,
+        };
+
+        // Need to check CSNP came from Adjacency neighbor or Adjacency
+        // candidate neighbor?
+        let Some(dis) = &link.l2dis else {
+            println!("DIS was yet not selected");
+            return;
+        };
+
+        if pdu.source_id != *dis {
+            println!("DIS came from non DIS neighbor");
+            return;
+        }
+
+        let mut req = IsisTlvLspEntries::default();
+        for tlv in &pdu.tlvs {
+            if let IsisTlv::LspEntries(lsps) = tlv {
+                for lsp in &lsps.entries {
+                    if !self.l2lsdb.contains_key(&lsp.lsp_id) {
+                        println!("LSP REQ: {}", lsp.lsp_id);
+                        let mut psnp = lsp.clone();
+                        psnp.seq_number = 0;
+                        req.entries.push(psnp);
+                    }
+                }
+            }
+        }
+        if !req.entries.is_empty() {
+            // Send PSNP.
+            let mut psnp = IsisPsnp {
+                pdu_len: 0,
+                source_id: self.net.sys_id(),
+                source_id_curcuit: 1,
+                tlvs: Vec::new(),
+            };
+            psnp.tlvs.push(req.into());
+            println!("Going to send PSNP");
+
+            //
+            self.psnp_send(ifindex, psnp);
+        }
     }
 
     pub fn psnp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {

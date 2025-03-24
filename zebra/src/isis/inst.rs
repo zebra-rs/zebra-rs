@@ -326,10 +326,10 @@ impl Isis {
                 IsisType::L1Lsp | IsisType::L2Lsp => {
                     self.lsp_recv(packet, ifindex, mac);
                 }
-                IsisType::Csnp => {
+                IsisType::L1Csnp | IsisType::L2Csnp => {
                     self.csnp_recv(packet, ifindex, mac);
                 }
-                IsisType::Psnp => {
+                IsisType::L1Psnp | IsisType::L2Psnp => {
                     self.psnp_recv(packet, ifindex, mac);
                 }
                 IsisType::Unknown(_) => {
