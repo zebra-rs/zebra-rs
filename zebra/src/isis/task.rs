@@ -106,7 +106,7 @@ impl Timer {
     }
 
     /// Get the remaining seconds until the next tick
-    pub fn remaining_seconds(&self) -> u64 {
+    pub fn rem_sec(&self) -> u64 {
         let elapsed = self.last_reset.lock().unwrap().elapsed();
         if elapsed >= self.duration {
             0

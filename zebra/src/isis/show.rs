@@ -1,6 +1,7 @@
 use std::fmt::Write;
 
 use isis_packet::{nlpid_str, IsisHello, IsisLspId, IsisProto, IsisTlv, IsisTlvProtoSupported};
+use serde::Serialize;
 
 use super::{adj::Neighbor, inst::ShowCallback, Isis};
 
@@ -45,42 +46,49 @@ fn show_mac(mac: Option<[u8; 6]>) -> String {
     .unwrap_or_else(|| "N/A".to_string())
 }
 
-fn show_isis_neighbor(isis: &Isis, args: Args, _json: bool) -> String {
-    let mut buf = String::new();
+#[derive(Serialize)]
+struct NeighborBrief {
+    system_id: String,
+    interface: String,
+    level: u8,
+    state: String,
+    hold_time: u64,
+    snpa: String,
+}
 
-    buf.push_str("System Id           Interface   L  State         Holdtime SNPA\n");
-    for (_, link) in &isis.links {
-        for (_, adj) in &link.l2nbrs {
-            let remaining = if let Some(timer) = &adj.hold_timer {
-                timer.remaining_seconds()
-            } else {
-                0
-            };
+fn show_isis_neighbor(top: &Isis, args: Args, json: bool) -> String {
+    let mut nbrs: Vec<NeighborBrief> = vec![];
 
-            writeln!(
-                buf,
-                "{:<20}{:<12}{:<3}{:<14}{:<9}{}",
-                adj.pdu.source_id.to_string(),
-                isis.ifname(adj.ifindex),
-                adj.level.digit(),
-                adj.state.to_string(),
-                remaining,
-                show_mac(adj.mac),
-            )
-            .unwrap();
+    for (_, link) in &top.links {
+        for (_, nbr) in &link.l2nbrs {
+            let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+            nbrs.push(NeighborBrief {
+                system_id: nbr.pdu.source_id.to_string(),
+                interface: top.ifname(nbr.ifindex),
+                level: nbr.level.digit(),
+                state: nbr.state.to_string(),
+                hold_time: rem,
+                snpa: show_mac(nbr.mac),
+            });
         }
     }
 
-    buf
-}
+    if json {
+        return serde_json::to_string(&nbrs).unwrap();
+    }
 
-fn isis_lsp_id_str(lsp_id: &IsisLspId) -> String {
-    format!(
-        "{}.{:02x}-{:02x}",
-        lsp_id.sys_id(),
-        lsp_id.pseudo_id(),
-        lsp_id.fragment_id()
-    )
+    let mut buf = String::new();
+    buf.push_str("System Id           Interface   L  State         Holdtime SNPA\n");
+    for nbr in &nbrs {
+        writeln!(
+            buf,
+            "{:<20}{:<12}{:<3}{:<14}{:<9}{}",
+            nbr.system_id, nbr.interface, nbr.level, nbr.state, nbr.hold_time, nbr.snpa,
+        )
+        .unwrap();
+    }
+
+    buf
 }
 
 fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
@@ -90,7 +98,7 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
         writeln!(
             buf,
             "{:25} {:>4} 0x{:08x} 0x{:04x}",
-            isis_lsp_id_str(lsp_id),
+            lsp_id.to_string(),
             lsp.pdu_len,
             lsp.seq_number,
             lsp.checksum
@@ -105,7 +113,7 @@ fn show_isis_database_detail(isis: &Isis, args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (lsp_id, lsp) in &isis.l2lsdb {
-        writeln!(buf, "{}\n{}\n", isis_lsp_id_str(lsp_id), lsp).unwrap();
+        writeln!(buf, "{}\n{}\n", lsp_id, lsp).unwrap();
     }
 
     buf
@@ -129,64 +137,92 @@ fn proto(pdu: &IsisHello) -> Option<&IsisTlvProtoSupported> {
     None
 }
 
-fn show_isis_neighbor_entry(buf: &mut String, isis: &Isis, adj: &Neighbor) {
-    writeln!(buf, " {}", adj.pdu.source_id).unwrap();
-
-    // Interface: enp0s6, Level: 2, State: Up, Expires in 29s
-    // Adjacency flaps: 1, Last: 13m44s ago
-    // Circuit type: L1L2, Speaks: IPv4
-    // SNPA: 001c.4245.b235, LAN id: 0000.0000.0000.00
-    // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 13m44s ago
-    // Area Address(es):
-    //   49.0001
-    // IPv4 Address(es):
-    // 11.0.0.2
+fn show_isis_neighbor_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
+    writeln!(buf, " {}", nbr.pdu.source_id).unwrap();
 
     writeln!(
         buf,
         "    Interface: {}, Level: {}, State: {}",
-        isis.ifname(adj.ifindex),
-        adj.level,
-        adj.state.to_string(),
+        top.ifname(nbr.ifindex),
+        nbr.level,
+        nbr.state.to_string(),
     )
     .unwrap();
 
     write!(
         buf,
         "    Circuit type: {}, Speaks:",
-        circuit_type_str(adj.pdu.circuit_type)
+        circuit_type_str(nbr.pdu.circuit_type)
     )
     .unwrap();
 
-    if let Some(proto) = proto(&adj.pdu) {
-        for nlpid in &proto.nlpids {
-            write!(buf, " {}", nlpid_str(*nlpid)).unwrap();
+    if let Some(proto) = proto(&nbr.pdu) {
+        for (i, nlpid) in proto.nlpids.iter().enumerate() {
+            if i != 0 {
+                write!(buf, ", {}", nlpid_str(*nlpid)).unwrap();
+            } else {
+                write!(buf, " {}", nlpid_str(*nlpid)).unwrap();
+            }
+        }
+        if !proto.nlpids.is_empty() {
+            writeln!(buf, "").unwrap();
         }
     }
+
+    writeln!(
+        buf,
+        "    SNPA: {}, LAN id: {}",
+        show_mac(nbr.mac),
+        nbr.pdu.lan_id
+    )
+    .unwrap();
+
+    // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 4m1s ago
+    writeln!(buf, "    LAN Priority: {}", nbr.pdu.priority).unwrap();
+
+    if !nbr.addr4.is_empty() {
+        writeln!(buf, "    IP Prefixes").unwrap();
+    }
+    for addr in &nbr.addr4 {
+        writeln!(buf, "      {}", addr).unwrap();
+    }
+    if !nbr.laddr6.is_empty() {
+        writeln!(buf, "    IPv6 Link-Locals").unwrap();
+    }
+    for addr in &nbr.laddr6 {
+        writeln!(buf, "      {}", addr).unwrap();
+    }
+    if !nbr.addr6.is_empty() {
+        writeln!(buf, "    IPv6 Prefixes").unwrap();
+    }
+    for addr in &nbr.addr6 {
+        writeln!(buf, "      {}", addr).unwrap();
+    }
+
     writeln!(buf, "").unwrap();
 }
 
-fn show_isis_neighbor_detail(isis: &Isis, args: Args, _json: bool) -> String {
+fn show_isis_neighbor_detail(top: &Isis, args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (_, link) in &isis.links {
+    for (_, link) in &top.links {
         for (_, adj) in &link.l2nbrs {
-            show_isis_neighbor_entry(&mut buf, isis, adj);
+            show_isis_neighbor_entry(&mut buf, top, adj);
         }
     }
 
     buf
 }
 
-fn show_isis_adjacency(isis: &Isis, args: Args, _json: bool) -> String {
+fn show_isis_adjacency(top: &Isis, args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (_, link) in &isis.links {
+    for (_, link) in &top.links {
         if let Some(adj) = &link.l2adj {
             writeln!(
                 buf,
                 "Interface: {}, Adj: {:?}",
-                isis.ifname(link.ifindex),
+                top.ifname(link.ifindex),
                 adj,
             )
             .unwrap();
