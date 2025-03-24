@@ -72,7 +72,7 @@ impl IsisLink {
             hold_timer: 30,
             pdu_len: 0,
             priority: self.l2priority,
-            lan_id: [0u8; 7],
+            lan_id: IsisNeighborId { id: [0u8; 7] },
             tlvs: Vec::new(),
         };
         hello
@@ -256,15 +256,3 @@ pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
     };
     hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());
 }
-
-// pub fn isis_spf(graph: Graph, tx: UnboundedSender<Message>) -> Task<()> {
-//     let tx = tx.clone();
-//     Task::spawn(async move {
-//         let tx = tx.clone();
-//         spf(graph, tx).await;
-//     })
-// }
-
-// top.tx
-// .send(Message::Ifsm(ifindex, IfsmEvent::LspSend))
-// .unwrap();

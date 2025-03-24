@@ -53,6 +53,7 @@ pub struct Isis {
     pub net: Nsap,
     pub l2lsdb: BTreeMap<IsisLspId, IsisLsp>,
     pub l2lsp: Option<IsisLsp>,
+    pub l2seqnum: u32,
     pub is_type: IsType,
 }
 
@@ -143,6 +144,7 @@ impl Isis {
             net: Nsap::default(),
             l2lsdb: BTreeMap::new(),
             l2lsp: None,
+            l2seqnum: 1,
             is_type: IsType::L1,
         };
         isis.callback_build();
@@ -169,7 +171,7 @@ impl Isis {
         let mut lsp = IsisLsp {
             lifetime: 360,
             lsp_id,
-            seq_number: 1,
+            seq_number: self.l2seqnum,
             ..Default::default()
         };
 
@@ -345,6 +347,7 @@ impl Isis {
                     Level::L2 => {
                         self.l2lsp = self.l2lsp_gen();
                         self.lsp_send(ifindex);
+                        self.l2seqnum += 1
                     }
                 }
             }

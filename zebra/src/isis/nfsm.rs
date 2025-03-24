@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 
-use isis_packet::{IsisHello, IsisTlv};
+use isis_packet::{IsisHello, IsisTlv, IsisTlvIpv4IfAddr};
 
 use crate::isis::link::isis_link_add_neighbor;
 
@@ -93,6 +93,25 @@ pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
     )
 }
 
+fn nbr_ifaddr_update(nbr: &mut Neighbor) {
+    let mut addr4 = vec![];
+    let mut addr6 = vec![];
+    let mut laddr6 = vec![];
+
+    for tlv in &nbr.pdu.tlvs {
+        match tlv {
+            IsisTlv::Ipv4IfAddr(ifaddr) => addr4.push(ifaddr.addr),
+            IsisTlv::Ipv6GlobalIfAddr(ifaddr) => addr6.push(ifaddr.addr),
+            IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
+            _ => {}
+        }
+    }
+
+    nbr.addr4 = addr4;
+    nbr.addr6 = addr6;
+    nbr.laddr6 = laddr6;
+}
+
 pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Option<NfsmState> {
     use IfsmEvent::*;
 
@@ -114,6 +133,8 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Op
             state = NfsmState::Init;
         }
     }
+
+    nbr_ifaddr_update(nbr);
 
     nbr.hold_timer = Some(isis_hold_timer(nbr));
 
