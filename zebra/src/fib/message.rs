@@ -1,7 +1,7 @@
 use ipnet::IpNet;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::rib::{entry::RibEntry, link::IFF_UP};
+use crate::rib::{entry::RibEntry, link::IFF_UP, MacAddr};
 
 use super::{LinkFlags, LinkType};
 
@@ -25,7 +25,7 @@ pub struct FibLink {
     pub flags: LinkFlags,
     pub link_type: LinkType,
     pub mtu: u32,
-    pub mac: Option<[u8; 6]>,
+    pub mac: Option<MacAddr>,
 }
 
 impl FibLink {

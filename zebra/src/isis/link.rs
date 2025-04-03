@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::isis::inst::Level;
 use crate::isis::nfsm::NfsmState;
-use crate::rib::Link;
+use crate::rib::{Link, MacAddr};
 
 use super::addr::IsisAddr;
 use super::adj::Neighbor;
@@ -31,7 +31,7 @@ pub struct IsisLink {
     pub name: String,
     pub mtu: u32,
     pub addr: Vec<IsisAddr>,
-    pub mac: Option<[u8; 6]>,
+    pub mac: Option<MacAddr>,
     pub enabled: bool,
     pub l2nbrs: BTreeMap<IsisSysId, Neighbor>,
     pub l2adj: Option<IsisLspId>,
@@ -96,8 +96,8 @@ impl IsisLink {
 
         for (_, nbr) in &self.l2nbrs {
             if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
-                if let Some(addr) = nbr.mac {
-                    hello.tlvs.push(IsisTlvIsNeighbor { addr }.into());
+                if let Some(octets) = nbr.mac {
+                    hello.tlvs.push(IsisTlvIsNeighbor { octets }.into());
                 }
             }
         }
@@ -134,7 +134,9 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
             for entry in &ext_is_reach.entries {
+                println!("Neighbor {} <-> {}", entry.neighbor_id, neighbor_id);
                 if entry.neighbor_id == *neighbor_id {
+                    println!("Neighbor found");
                     return true;
                 }
             }
@@ -205,6 +207,7 @@ impl Isis {
 
             if let Some(dis) = &link.l2dis {
                 if link.l2adj.is_none() {
+                    println!("DIS SIS ID {} <-> {}", pdu.lsp_id.sys_id(), dis);
                     if pdu.lsp_id.sys_id() == *dis {
                         // IS Neighbor include my LSP ID.
                         if lsp_has_neighbor_id(&pdu, &self.net.neighbor_id()) {
@@ -306,9 +309,9 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
     })
 }
 
-pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
-    let Some(ref mut hello) = link.l2hello else {
-        return;
-    };
-    hello.tlvs.push(IsisTlvIsNeighbor { addr: *mac }.into());
-}
+// pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
+//     let Some(ref mut hello) = link.l2hello else {
+//         return;
+//     };
+//     hello.tlvs.push(IsisTlvIsNeighbor { octets: *mac }.into());
+// }

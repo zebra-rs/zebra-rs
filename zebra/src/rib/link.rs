@@ -2,7 +2,7 @@ use crate::config::Args;
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 
-use super::{Message, Rib};
+use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
 use std::fmt::{self, Write};
 
@@ -15,7 +15,7 @@ pub struct Link {
     pub flags: LinkFlags,
     pub link_type: LinkType,
     pub label: bool,
-    pub mac: Option<[u8; 6]>,
+    pub mac: Option<MacAddr>,
     pub addr4: Vec<LinkAddr>,
     pub addrv4: Vec<LinkAddr4>,
     pub addr6: Vec<LinkAddr>,

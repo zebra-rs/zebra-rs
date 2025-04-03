@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter, Result};
 
 use isis_packet::{IsisHello, IsisTlv, IsisTlvIpv4IfAddr};
 
-use crate::isis::link::isis_link_add_neighbor;
+use crate::rib::MacAddr;
 
 use super::{IfsmEvent, Message};
 
@@ -35,7 +35,7 @@ pub enum NfsmEvent {
     HoldTimerExpire,
 }
 
-pub type NfsmFunc = fn(&mut Neighbor, &Option<[u8; 6]>) -> Option<NfsmState>;
+pub type NfsmFunc = fn(&mut Neighbor, &Option<MacAddr>) -> Option<NfsmState>;
 
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent) -> (NfsmFunc, Option<Self>) {
@@ -59,14 +59,14 @@ impl NfsmState {
     }
 }
 
-fn isis_hello_has_mac(pdu: &IsisHello, mac: &Option<[u8; 6]>) -> bool {
+fn isis_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
     let Some(addr) = mac else {
         return false;
     };
 
     for tlv in &pdu.tlvs {
         if let IsisTlv::IsNeighbor(neigh) = tlv {
-            if *addr == neigh.addr {
+            if addr.octets() == neigh.octets() {
                 return true;
             }
         }
@@ -112,7 +112,7 @@ fn nbr_ifaddr_update(nbr: &mut Neighbor) {
     nbr.laddr6 = laddr6;
 }
 
-pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Option<NfsmState> {
+pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Option<NfsmState> {
     use IfsmEvent::*;
 
     let mut state = nbr.state;
@@ -145,7 +145,7 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Op
     None
 }
 
-pub fn isis_nfsm_hold_timer_expire(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) -> Option<NfsmState> {
+pub fn isis_nfsm_hold_timer_expire(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Option<NfsmState> {
     use IfsmEvent::*;
 
     nbr.hold_timer = None;
@@ -161,7 +161,7 @@ pub fn isis_nfsm_hold_timer_expire(nbr: &mut Neighbor, mac: &Option<[u8; 6]>) ->
     Some(NfsmState::Down)
 }
 
-pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<[u8; 6]>) {
+pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<MacAddr>) {
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event);
 
     let next_state = fsm_func(nbr, mac).or(fsm_next_state);

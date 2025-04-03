@@ -78,6 +78,12 @@ struct RouterId {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct AddressFamily {
+    #[serde(rename = "ti-lfa")]
+    ti_lfa: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct IsisInstance {
     #[serde(rename = "instance-tag")]
     instance_tag: String,
@@ -92,6 +98,8 @@ struct IsisInstance {
     segment_routing: String,
     #[serde(rename = "mpls-traffic-eng")]
     mpls_traffic_eng: RouterId,
+    #[serde(rename = "ipv4 unicast")]
+    ipv4_unicast: AddressFamily,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -170,6 +178,7 @@ impl Nanomsg {
             mpls_traffic_eng: RouterId {
                 router_id: "2.2.2.3".into(),
             },
+            ipv4_unicast: AddressFamily { ti_lfa: true },
         };
         MsgEnum::IsisInstance(msg)
     }
@@ -195,7 +204,7 @@ impl Nanomsg {
             network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
-            adjacency_sid: None,
+            adjacency_sid: Some(PrefixSid { index: 200 }),
         };
         MsgEnum::IsisIf(msg)
     }
@@ -286,12 +295,6 @@ impl Nanomsg {
                         data: self.segment_routing_update(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
-
-                    // let msg = MsgSend {
-                    //     method: String::from("isis-if:add"),
-                    //     data: self.isis_if_add_lo_no_sid(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);
