@@ -1,6 +1,6 @@
 use isis_packet::{IsisPacket, IsisPdu, IsisTlv, IsisType};
 
-use crate::isis::{adj::Neighbor, link::isis_link_add_neighbor};
+use crate::isis::adj::Neighbor;
 
 use crate::isis::Isis;
 use crate::isis::Message;

@@ -30,7 +30,7 @@ use crate::context::vrf::Vrf;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::{link, Group, GroupTrait, Nexthop, NexthopMulti, NexthopUni, RibType};
+use crate::rib::{link, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
@@ -463,12 +463,13 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
                 link.mtu = mtu;
             }
             LinkAttribute::Address(addr) => {
-                if addr.len() == 6 {
-                    let slice = addr.as_slice();
-                    let mut mac = [0u8; 6];
-                    mac.copy_from_slice(slice);
-                    link.mac = Some(mac);
-                }
+                link.mac = MacAddr::from_vec(addr);
+                // if addr.len() == 6 {
+                //     let slice = addr.as_slice();
+                //     let mut mac = [0u8; 6];
+                //     mac.copy_from_slice(slice);
+                //     link.mac = Some(mac);
+                // }
             }
             _ => {}
         }

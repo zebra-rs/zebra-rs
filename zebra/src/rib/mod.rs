@@ -38,3 +38,6 @@ pub use intf::*;
 pub mod nanomsg;
 
 pub mod router_id;
+
+pub mod mac_addr;
+pub use mac_addr::*;
