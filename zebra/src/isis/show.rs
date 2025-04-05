@@ -109,14 +109,44 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
     buf
 }
 
-fn show_isis_database_detail(isis: &Isis, args: Args, _json: bool) -> String {
+pub fn show_isis_database_detail_orig(isis: &Isis, args: Args, json: bool) -> String {
     let mut buf = String::new();
+    let mut first = true;
 
+    if json {
+        write!(buf, "[").unwrap();
+    }
     for (lsp_id, lsp) in &isis.l2lsdb {
-        writeln!(buf, "{}\n{}\n", lsp_id, lsp).unwrap();
+        if json {
+            if first {
+                first = false;
+            } else {
+                writeln!(buf, ",").unwrap();
+            }
+            writeln!(buf, "{}", serde_json::to_string(&lsp).unwrap()).unwrap();
+        } else {
+            writeln!(buf, "{}\n{}\n", lsp_id, lsp).unwrap();
+        }
+    }
+    if json {
+        write!(buf, "]").unwrap();
     }
 
     buf
+}
+
+fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
+    if json {
+        // Use serde to serialize the entire database directly
+        serde_json::to_string(&isis.l2lsdb.values().collect::<Vec<_>>()).unwrap()
+    } else {
+        // Generate a nicely formatted string for human-readable format
+        isis.l2lsdb
+            .iter()
+            .map(|(lsp_id, lsp)| format!("{}\n{}\n", lsp_id, lsp))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 fn circuit_type_str(circuit_type: u8) -> &'static str {
