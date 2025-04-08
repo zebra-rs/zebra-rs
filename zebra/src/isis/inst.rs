@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use isis_packet::cap::{SegmentRoutingCapFlags, SidLabel};
+use isis_packet::cap::{SegmentRoutingCapFlags, SidLabelTlv};
 use isis_packet::{
     IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisProto, IsisSubSegmentRoutingAlgo,
     IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSysId, IsisTlvAreaAddr,
@@ -200,11 +200,11 @@ impl Isis {
         let mut flags = SegmentRoutingCapFlags::default();
         flags.set_i_flag(true);
         flags.set_v_flag(true);
-        let sid = SidLabel::Label(16000);
+        let sid_label = SidLabelTlv::Label(16000);
         let sr_cap = IsisSubSegmentRoutingCap {
             flags,
             range: 8000,
-            sid,
+            sid_label,
         };
         cap.subs.push(sr_cap.into());
 
@@ -213,11 +213,11 @@ impl Isis {
         cap.subs.push(algo.into());
 
         // Sub: SR Local Block
-        let sid = SidLabel::Label(15000);
+        let sid_label = SidLabelTlv::Label(15000);
         let lb = IsisSubSegmentRoutingLB {
             flags: 0,
             range: 3000,
-            sid,
+            sid_label,
         };
         cap.subs.push(lb.into());
         lsp.tlvs.push(cap.into());
