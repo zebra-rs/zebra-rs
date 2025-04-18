@@ -211,7 +211,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
                 for entry in entry.dir.borrow().iter() {
                     if &entry.name == key {
                         comps_as_leaf(comps, entry);
-                        if entry.name == "interface" {
+                        if entry.name == "if-name" {
                             for link in s.links.iter() {
                                 comps.push(Completion::new_name(link));
                             }

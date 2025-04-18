@@ -116,7 +116,7 @@ impl Rib {
     }
 
     pub fn show_build(&mut self) {
-        self.show_add("/show/interfaces", link_show);
+        self.show_add("/show/interface", link_show);
         self.show_add("/show/ip/route", rib_show);
         self.show_add("/show/nexthop", nexthop_show);
     }

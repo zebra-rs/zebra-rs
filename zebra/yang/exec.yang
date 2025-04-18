@@ -36,10 +36,10 @@ module exec {
       ext:help "Show community-list";
       type empty;
     }
-    list interfaces {
+    list interface {
       ext:help "Show interface commands";
-      key "interface";
-      leaf interface {
+      key "if-name";
+      leaf if-name {
         type string;
       }
       leaf detail {

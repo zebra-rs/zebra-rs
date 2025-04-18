@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ipnet::IpNet;
 use isis_packet::cap::{SegmentRoutingCapFlags, SidLabelTlv};
 use isis_packet::{
-    IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisProto, IsisSubSegmentRoutingAlgo,
+    Algo, IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisProto, IsisSubSegmentRoutingAlgo,
     IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSysId, IsisTlvAreaAddr,
     IsisTlvExtIsReach, IsisTlvExtIsReachEntry, IsisTlvHostname, IsisTlvIpv4IfAddr,
     IsisTlvProtoSupported, IsisTlvRouterCap, IsisTlvTeRouterId, IsisType, Nsap,
@@ -33,6 +33,7 @@ use super::isis_hello_recv;
 use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
+use super::task::{Timer, TimerType};
 use super::{IfsmEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -55,12 +56,19 @@ pub struct Isis {
     pub l2lsp: Option<IsisLsp>,
     pub l2seqnum: u32,
     pub is_type: IsType,
+    pub ticker: Option<Timer>,
+    pub l2lspgen: Option<Timer>,
 }
 
 #[derive(Debug)]
 pub enum Level {
     L1,
     L2,
+}
+
+pub struct Levels<T> {
+    pub l1: T,
+    pub l2: T,
 }
 
 impl Level {
@@ -146,6 +154,8 @@ impl Isis {
             l2lsp: None,
             l2seqnum: 1,
             is_type: IsType::L1,
+            ticker: None,
+            l2lspgen: None,
         };
         isis.callback_build();
         isis.show_build();
@@ -159,17 +169,25 @@ impl Isis {
         tokio::spawn(async move {
             write_packet(sock, prx).await;
         });
+        let tx = isis.tx.clone();
+        let ticker = Timer::new(Timer::second(1), TimerType::Infinite, move || {
+            let tx = tx.clone();
+            async move {
+                tx.send(Message::Ticker).unwrap();
+            }
+        });
+        isis.ticker = Some(ticker);
 
         isis
     }
 
-    pub fn l2lsp_gen(&self) -> Option<IsisLsp> {
+    pub fn l2lsp_gen(&mut self) -> Option<(IsisLsp, Timer)> {
         // LSP ID with no pseudo id and no fragmentation.
         let lsp_id = IsisLspId::new(self.net.sys_id(), 0, 0);
 
         // Generate own LSP for L2.
         let mut lsp = IsisLsp {
-            lifetime: 360,
+            lifetime: 1200,
             lsp_id,
             seq_number: self.l2seqnum,
             ..Default::default()
@@ -193,7 +211,7 @@ impl Isis {
         let router_id: Ipv4Addr = "1.2.3.4".parse().unwrap();
         let mut cap = IsisTlvRouterCap {
             router_id,
-            flags: 0,
+            flags: 0.into(),
             subs: Vec::new(),
         };
         // Sub: SR Capability
@@ -209,7 +227,9 @@ impl Isis {
         cap.subs.push(sr_cap.into());
 
         // Sub: SR Algorithms
-        let algo = IsisSubSegmentRoutingAlgo { algo: vec![0] };
+        let algo = IsisSubSegmentRoutingAlgo {
+            algo: vec![Algo::Spf],
+        };
         cap.subs.push(algo.into());
 
         // Sub: SR Local Block
@@ -246,8 +266,17 @@ impl Isis {
 
         // IPv6 Reachability.
 
+        // Start timer.
+        let tx = self.tx.clone();
+        let timer = Timer::new(Timer::second(3), TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                tx.send(Message::LspGen).unwrap();
+            }
+        });
+
         // Update LSDB.
-        Some(lsp)
+        Some((lsp, timer))
     }
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -319,6 +348,17 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
+            Message::Ticker => {
+                tick(&mut self.l2lsdb);
+            }
+            Message::LspGen => {
+                if let Some((lsp, timer)) = self.l2lsp_gen() {
+                    let lsp_id = lsp.lsp_id.clone();
+                    self.l2lsdb.insert(lsp_id, lsp.clone());
+                    self.l2lsp = Some(lsp);
+                    self.l2lspgen = Some(timer);
+                }
+            }
             Message::Recv(packet, ifindex, mac) => match packet.pdu_type {
                 IsisType::L2Hello => {
                     isis_hello_recv(self, packet, ifindex, mac);
@@ -345,7 +385,10 @@ impl Isis {
                         //
                     }
                     Level::L2 => {
-                        self.l2lsp = self.l2lsp_gen();
+                        if let Some((lsp, timer)) = self.l2lsp_gen() {
+                            self.l2lsp = Some(lsp);
+                            self.l2lspgen = Some(timer);
+                        }
                         self.lsp_send(ifindex);
                         self.l2seqnum += 1
                     }
@@ -418,10 +461,23 @@ pub fn serve(mut isis: Isis) {
 }
 
 pub enum Message {
+    Ticker,
+    LspGen,
     Recv(IsisPacket, u32, Option<[u8; 6]>),
     Send(IsisPacket, u32),
     LspUpdate(Level, u32),
     LinkTimer(u32),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, IsisSysId, NfsmEvent),
+}
+
+pub fn tick(lsdb: &mut BTreeMap<IsisLspId, IsisLsp>) {
+    for (_, lsp) in lsdb {
+        if lsp.lifetime > 0 {
+            lsp.lifetime = lsp.lifetime - 1;
+        }
+        if lsp.lifetime == 0 {
+            println!("Removing LSP {}", lsp.lsp_id);
+        }
+    }
 }

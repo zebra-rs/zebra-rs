@@ -97,39 +97,14 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
     for (lsp_id, lsp) in &isis.l2lsdb {
         writeln!(
             buf,
-            "{:25} {:>4} 0x{:08x} 0x{:04x}",
+            "{:25} {:>4} 0x{:08x} 0x{:04x} {:9}",
             lsp_id.to_string(),
             lsp.pdu_len,
             lsp.seq_number,
-            lsp.checksum
+            lsp.checksum,
+            lsp.lifetime
         )
         .unwrap();
-    }
-
-    buf
-}
-
-pub fn show_isis_database_detail_orig(isis: &Isis, args: Args, json: bool) -> String {
-    let mut buf = String::new();
-    let mut first = true;
-
-    if json {
-        write!(buf, "[").unwrap();
-    }
-    for (lsp_id, lsp) in &isis.l2lsdb {
-        if json {
-            if first {
-                first = false;
-            } else {
-                writeln!(buf, ",").unwrap();
-            }
-            writeln!(buf, "{}", serde_json::to_string(&lsp).unwrap()).unwrap();
-        } else {
-            writeln!(buf, "{}\n{}\n", lsp_id, lsp).unwrap();
-        }
-    }
-    if json {
-        write!(buf, "]").unwrap();
     }
 
     buf
@@ -143,7 +118,18 @@ fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
         // Generate a nicely formatted string for human-readable format
         isis.l2lsdb
             .iter()
-            .map(|(lsp_id, lsp)| format!("{}\n{}\n", lsp_id, lsp))
+            .map(|(lsp_id, lsp)| {
+                format!(
+                    "{}\n{:25} {:>4} 0x{:08x}   0x{:04x} {:9}{}\n",
+                    "LSP ID                  PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL",
+                    lsp_id.to_string(),
+                    lsp.pdu_len,
+                    lsp.seq_number,
+                    lsp.checksum,
+                    lsp.lifetime,
+                    lsp
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
