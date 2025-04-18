@@ -119,8 +119,8 @@ module config {
 
         list interface {
           ext:sort "-1";
-          key "name";
-          leaf name {
+          key "if-name";
+          leaf if-name {
             type string;
           }
 

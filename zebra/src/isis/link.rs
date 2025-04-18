@@ -160,15 +160,18 @@ impl Isis {
     }
 
     pub fn lsp_send(&mut self, ifindex: u32) {
+        println!("Send LSP");
+
+        if self.l2lsp.is_none() {
+            if let Some((lsp, timer)) = self.l2lsp_gen() {
+                self.l2lsp = Some(lsp);
+                self.l2lspgen = Some(timer);
+            }
+        }
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
 
-        println!("Send LSP");
-
-        if self.l2lsp.is_none() {
-            self.l2lsp = self.l2lsp_gen();
-        }
         if let Some(lsp) = &self.l2lsp {
             let packet = IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone()));
             link.ptx.send(Message::Send(packet, ifindex)).unwrap();
@@ -235,7 +238,7 @@ impl Isis {
             return;
         };
 
-        println!("CSNP recv");
+        // println!("CSNP recv");
 
         let pdu = match (packet.pdu_type, packet.pdu) {
             (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => pdu,

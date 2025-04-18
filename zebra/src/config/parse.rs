@@ -296,7 +296,7 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
         }
     }
 
-    if entry.name == "interface" {
+    if entry.name == "if-name" {
         for link in s.links.iter() {
             m.match_keyword(entry, input, link);
         }
