@@ -2,7 +2,7 @@ use isis_packet::Nsap;
 
 use crate::{
     config::{Args, ConfigOp},
-    isis::IsType,
+    isis::IsLevel,
 };
 
 use super::Isis;
@@ -27,7 +27,7 @@ fn config_isis_net(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
 fn config_isis_is_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let is_type_str = args.string()?;
 
-    let is_type = is_type_str.parse::<IsType>().ok()?;
+    let is_type = is_type_str.parse::<IsLevel>().ok()?;
     println!("IS-TYPE {:?}", is_type);
 
     Some(())
