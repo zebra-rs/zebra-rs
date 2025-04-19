@@ -4,6 +4,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use isis_packet::{IsisHello, IsisSysId};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::rib::MacAddr;
+
 use super::nfsm::NfsmState;
 use super::task::Timer;
 use super::{Level, Message};
@@ -19,7 +21,7 @@ pub struct Neighbor {
     pub addr4: Vec<Ipv4Addr>,
     pub addr6: Vec<Ipv6Addr>,
     pub laddr6: Vec<Ipv6Addr>,
-    pub mac: Option<[u8; 6]>,
+    pub mac: Option<MacAddr>,
     pub hold_timer: Option<Timer>,
     pub is_dis: bool,
 }
@@ -29,7 +31,7 @@ impl Neighbor {
         level: Level,
         pdu: IsisHello,
         ifindex: u32,
-        mac: Option<[u8; 6]>,
+        mac: Option<MacAddr>,
         tx: UnboundedSender<Message>,
     ) -> Self {
         Self {

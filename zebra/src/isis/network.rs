@@ -9,6 +9,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::rib::MacAddr;
+
 use super::socket::link_addr;
 use super::Message;
 
@@ -37,7 +39,8 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
-            let mac = addr.addr();
+            let mac = addr.addr().map(MacAddr::from);
+            // let mac: Option<MacAddr> = oct.map(MacAddr::from);
 
             tx.send(Message::Recv(packet.1, addr.ifindex() as u32, mac))
                 .unwrap();
