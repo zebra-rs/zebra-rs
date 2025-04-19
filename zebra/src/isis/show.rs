@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::{adj::Neighbor, inst::ShowCallback, Isis};
 
-use crate::config::Args;
+use crate::{config::Args, rib::MacAddr};
 
 impl Isis {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -36,8 +36,9 @@ fn show_isis_interface(isis: &Isis, args: Args, _json: bool) -> String {
     String::from("show isis interface")
 }
 
-fn show_mac(mac: Option<[u8; 6]>) -> String {
+fn show_mac(mac: Option<MacAddr>) -> String {
     mac.map(|mac| {
+        let mac = mac.octets();
         format!(
             "{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -94,7 +95,7 @@ fn show_isis_neighbor(top: &Isis, args: Args, json: bool) -> String {
 fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (lsp_id, lsp) in &isis.l2lsdb {
+    for (lsp_id, lsp) in &isis.lsdb.l2 {
         writeln!(
             buf,
             "{:25} {:>4} 0x{:08x} 0x{:04x} {:9}",
@@ -113,10 +114,11 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
 fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
     if json {
         // Use serde to serialize the entire database directly
-        serde_json::to_string(&isis.l2lsdb.values().collect::<Vec<_>>()).unwrap()
+        serde_json::to_string(&isis.lsdb.l2.values().collect::<Vec<_>>()).unwrap()
     } else {
         // Generate a nicely formatted string for human-readable format
-        isis.l2lsdb
+        isis.lsdb
+            .l2
             .iter()
             .map(|(lsp_id, lsp)| {
                 format!(

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::{default, fmt};
 
 use ipnet::IpNet;
 use isis_packet::cap::{SegmentRoutingCapFlags, SidLabelTlv};
@@ -22,7 +22,7 @@ use crate::isis::ifsm::isis_ifsm_dis_selection;
 use crate::isis::nfsm::isis_nfsm;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
-use crate::rib::{self, Link};
+use crate::rib::{self, Link, MacAddr};
 use crate::{
     config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
     context::Context,
@@ -33,11 +33,13 @@ use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
-use super::{isis_hello_recv, IsLevel, Level};
+use super::{isis_hello_recv, process_packet, IsLevel, Level, Levels};
 use super::{IfsmEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
+
+pub type Lsdb = BTreeMap<IsisLspId, IsisLsp>;
 
 pub struct Isis {
     ctx: Context,
@@ -52,12 +54,25 @@ pub struct Isis {
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub net: Nsap,
-    pub l2lsdb: BTreeMap<IsisLspId, IsisLsp>,
+    pub lsdb: Levels<Lsdb>,
     pub l2lsp: Option<IsisLsp>,
     pub l2seqnum: u32,
     pub is_type: IsLevel,
     pub ticker: Option<Timer>,
     pub l2lspgen: Option<Timer>,
+}
+
+pub struct IsisTop<'a> {
+    pub links: &'a mut BTreeMap<u32, IsisLink>,
+}
+
+impl Isis {
+    pub fn top(&mut self) -> IsisTop {
+        let top = IsisTop {
+            links: &mut self.links,
+        };
+        top
+    }
 }
 
 #[derive(Debug)]
@@ -114,7 +129,7 @@ impl Isis {
             show_cb: HashMap::new(),
             sock,
             net: Nsap::default(),
-            l2lsdb: BTreeMap::new(),
+            lsdb: Levels::<Lsdb>::default(),
             l2lsp: None,
             l2seqnum: 1,
             is_type: IsLevel::L1,
@@ -313,52 +328,55 @@ impl Isis {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Ticker => {
-                tick(&mut self.l2lsdb);
+                // tick(&mut self.lsdb);
             }
             Message::LspGen => {
                 if let Some((lsp, timer)) = self.l2lsp_gen() {
                     let lsp_id = lsp.lsp_id.clone();
-                    self.l2lsdb.insert(lsp_id, lsp.clone());
+                    self.lsdb.l2.insert(lsp_id, lsp.clone());
                     self.l2lsp = Some(lsp);
                     self.l2lspgen = Some(timer);
                 }
             }
             Message::Recv(packet, ifindex, mac) => {
-                let link = self.links.get_mut(&ifindex).unwrap();
-                match packet.pdu_type {
-                    IsisType::L1Hello => link.state.stats.l1.hello.rx += 1,
-                    IsisType::L2Hello => link.state.stats.l2.hello.rx += 1,
-                    IsisType::L1Lsp => link.state.stats.l1.lsp.rx += 1,
-                    IsisType::L2Lsp => link.state.stats.l2.lsp.rx += 1,
-                    IsisType::L1Psnp => link.state.stats.l1.psnp.rx += 1,
-                    IsisType::L2Psnp => link.state.stats.l2.psnp.rx += 1,
-                    IsisType::L1Csnp => link.state.stats.l1.csnp.rx += 1,
-                    IsisType::L2Csnp => link.state.stats.l2.csnp.rx += 1,
-                    _ => {
-                        //
-                    }
-                }
+                let mut top = self.top();
+                process_packet(&mut top, packet, ifindex, mac);
 
-                match packet.pdu_type {
-                    IsisType::L2Hello => {
-                        isis_hello_recv(self, packet, ifindex, mac);
-                    }
-                    IsisType::L1Lsp | IsisType::L2Lsp => {
-                        self.lsp_recv(packet, ifindex, mac);
-                    }
-                    IsisType::L1Csnp | IsisType::L2Csnp => {
-                        self.csnp_recv(packet, ifindex, mac);
-                    }
-                    IsisType::L1Psnp | IsisType::L2Psnp => {
-                        self.psnp_recv(packet, ifindex, mac);
-                    }
-                    IsisType::Unknown(_) => {
-                        self.unknown_recv(packet, ifindex, mac);
-                    }
-                    _ => {
-                        //
-                    }
-                }
+                // let link = self.links.get_mut(&ifindex).unwrap();
+                // match packet.pdu_type {
+                //     IsisType::L1Hello => link.state.stats.l1.hello.rx += 1,
+                //     IsisType::L2Hello => link.state.stats.l2.hello.rx += 1,
+                //     IsisType::L1Lsp => link.state.stats.l1.lsp.rx += 1,
+                //     IsisType::L2Lsp => link.state.stats.l2.lsp.rx += 1,
+                //     IsisType::L1Psnp => link.state.stats.l1.psnp.rx += 1,
+                //     IsisType::L2Psnp => link.state.stats.l2.psnp.rx += 1,
+                //     IsisType::L1Csnp => link.state.stats.l1.csnp.rx += 1,
+                //     IsisType::L2Csnp => link.state.stats.l2.csnp.rx += 1,
+                //     _ => {
+                //         //
+                //     }
+                // }
+
+                // match packet.pdu_type {
+                //     IsisType::L2Hello => {
+                //         isis_hello_recv(self, packet, ifindex, mac);
+                //     }
+                //     IsisType::L1Lsp | IsisType::L2Lsp => {
+                //         self.lsp_recv(packet, ifindex, mac);
+                //     }
+                //     IsisType::L1Csnp | IsisType::L2Csnp => {
+                //         self.csnp_recv(packet, ifindex, mac);
+                //     }
+                //     IsisType::L1Psnp | IsisType::L2Psnp => {
+                //         self.psnp_recv(packet, ifindex, mac);
+                //     }
+                //     IsisType::Unknown(_) => {
+                //         self.unknown_recv(packet, ifindex, mac);
+                //     }
+                //     _ => {
+                //         //
+                //     }
+                // }
             }
             Message::LspUpdate(level, ifindex) => {
                 match level {
@@ -435,10 +453,6 @@ impl Isis {
     }
 }
 
-// pub struct IsisTop<'a> {
-//     //
-// }
-
 pub fn serve(mut isis: Isis) {
     tokio::spawn(async move {
         isis.event_loop().await;
@@ -448,7 +462,7 @@ pub fn serve(mut isis: Isis) {
 pub enum Message {
     Ticker,
     LspGen,
-    Recv(IsisPacket, u32, Option<[u8; 6]>),
+    Recv(IsisPacket, u32, Option<MacAddr>),
     Send(IsisPacket, u32),
     LspUpdate(Level, u32),
     LinkTimer(u32),

@@ -15,3 +15,9 @@ impl MacAddr {
         self.octets
     }
 }
+
+impl From<[u8; 6]> for MacAddr {
+    fn from(octets: [u8; 6]) -> Self {
+        Self { octets }
+    }
+}

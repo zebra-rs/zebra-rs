@@ -54,7 +54,8 @@ pub struct LinkConfig {
 // Mutable data during operation.
 #[derive(Default, Debug)]
 pub struct LinkState {
-    pub stats: Levels<LinkStats>,
+    pub packets: Direction<LinkStats>,
+    pub unknown_rx: u64,
 }
 
 #[derive(Default, Debug)]
@@ -65,10 +66,11 @@ pub struct Direction<T> {
 
 #[derive(Default, Debug)]
 pub struct LinkStats {
-    pub hello: Direction<u64>,
-    pub lsp: Direction<u64>,
-    pub psnp: Direction<u64>,
-    pub csnp: Direction<u64>,
+    pub p2p_hello: u64,
+    pub hello: Levels<u64>,
+    pub lsp: Levels<u64>,
+    pub psnp: Levels<u64>,
+    pub csnp: Levels<u64>,
 }
 
 impl IsisLink {
@@ -125,8 +127,13 @@ impl IsisLink {
 
         for (_, nbr) in &self.l2nbrs {
             if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
-                if let Some(octets) = nbr.mac {
-                    hello.tlvs.push(IsisTlvIsNeighbor { octets }.into());
+                if let Some(mac) = nbr.mac {
+                    hello.tlvs.push(
+                        IsisTlvIsNeighbor {
+                            octets: mac.octets(),
+                        }
+                        .into(),
+                    );
                 }
             }
         }
@@ -258,7 +265,7 @@ impl Isis {
 
         // println!("LSP PDU {}", pdu);
         let lsp_id = pdu.lsp_id.clone();
-        self.l2lsdb.insert(lsp_id, pdu);
+        self.lsdb.l2.insert(lsp_id, pdu);
     }
 
     pub fn csnp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
@@ -290,7 +297,7 @@ impl Isis {
         for tlv in &pdu.tlvs {
             if let IsisTlv::LspEntries(lsps) = tlv {
                 for lsp in &lsps.entries {
-                    if !self.l2lsdb.contains_key(&lsp.lsp_id) {
+                    if !self.lsdb.l2.contains_key(&lsp.lsp_id) {
                         println!("LSP REQ: {}", lsp.lsp_id);
                         let mut psnp = lsp.clone();
                         psnp.seq_number = 0;
@@ -340,10 +347,3 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
         }
     })
 }
-
-// pub fn isis_link_add_neighbor(link: &mut IsisLink, mac: &[u8; 6]) {
-//     let Some(ref mut hello) = link.l2hello else {
-//         return;
-//     };
-//     hello.tlvs.push(IsisTlvIsNeighbor { octets: *mac }.into());
-// }
