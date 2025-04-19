@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{IsType, Isis, Level, Message};
+pub use inst::{Isis, Message};
 
 pub mod link;
 pub use link::IsisLink;
@@ -30,3 +30,6 @@ pub mod packet;
 pub use packet::*;
 
 pub mod graph;
+
+pub mod level;
+pub use level::*;

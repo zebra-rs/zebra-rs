@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
+use super::addr::IsisAddr;
+use super::adj::Neighbor;
 use super::task::{Task, Timer, TimerType};
-use super::{IfsmEvent, Message, NfsmEvent};
+use super::Isis;
+use super::{IfsmEvent, Level, Levels, Message, NfsmEvent};
 
 use isis_packet::{
     IsisCsnp, IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp,
@@ -10,13 +13,8 @@ use isis_packet::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::isis::inst::Level;
 use crate::isis::nfsm::NfsmState;
 use crate::rib::{Link, MacAddr};
-
-use super::addr::IsisAddr;
-use super::adj::Neighbor;
-use super::Isis;
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
@@ -41,6 +39,36 @@ pub struct IsisLink {
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub timer: LinkTimer,
+    pub state: LinkState,
+}
+
+// Window for reference IsisLink from worker.
+pub struct LinkWindow {
+    //
+}
+
+pub struct LinkConfig {
+    //
+}
+
+// Mutable data during operation.
+#[derive(Default, Debug)]
+pub struct LinkState {
+    pub stats: Levels<LinkStats>,
+}
+
+#[derive(Default, Debug)]
+pub struct Direction<T> {
+    pub tx: T,
+    pub rx: T,
+}
+
+#[derive(Default, Debug)]
+pub struct LinkStats {
+    pub hello: Direction<u64>,
+    pub lsp: Direction<u64>,
+    pub psnp: Direction<u64>,
+    pub csnp: Direction<u64>,
 }
 
 impl IsisLink {
@@ -60,6 +88,7 @@ impl IsisLink {
             timer: LinkTimer::default(),
             tx,
             ptx,
+            state: LinkState::default(),
         }
     }
 

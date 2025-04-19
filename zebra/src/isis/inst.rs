@@ -29,11 +29,11 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::isis_hello_recv;
 use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
+use super::{isis_hello_recv, IsLevel, Level};
 use super::{IfsmEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -55,45 +55,9 @@ pub struct Isis {
     pub l2lsdb: BTreeMap<IsisLspId, IsisLsp>,
     pub l2lsp: Option<IsisLsp>,
     pub l2seqnum: u32,
-    pub is_type: IsType,
+    pub is_type: IsLevel,
     pub ticker: Option<Timer>,
     pub l2lspgen: Option<Timer>,
-}
-
-#[derive(Debug)]
-pub enum Level {
-    L1,
-    L2,
-}
-
-pub struct Levels<T> {
-    pub l1: T,
-    pub l2: T,
-}
-
-impl Level {
-    pub fn digit(&self) -> u8 {
-        match self {
-            Level::L1 => 1,
-            Level::L2 => 2,
-        }
-    }
-}
-
-impl fmt::Display for Level {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Level::L1 => write!(f, "L1"),
-            Level::L2 => write!(f, "L2"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum IsType {
-    L1,
-    L2,
-    L1L2,
 }
 
 #[derive(Debug)]
@@ -105,14 +69,14 @@ impl fmt::Display for ParseIsTypeError {
     }
 }
 
-impl FromStr for IsType {
+impl FromStr for IsLevel {
     type Err = ParseIsTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "level-1" => Ok(IsType::L1),
-            "level-2-only" => Ok(IsType::L2),
-            "level-1-2" => Ok(IsType::L1L2),
+            "level-1" => Ok(IsLevel::L1),
+            "level-2-only" => Ok(IsLevel::L2),
+            "level-1-2" => Ok(IsLevel::L1L2),
             _ => Err(ParseIsTypeError),
         }
     }
@@ -153,7 +117,7 @@ impl Isis {
             l2lsdb: BTreeMap::new(),
             l2lsp: None,
             l2seqnum: 1,
-            is_type: IsType::L1,
+            is_type: IsLevel::L1,
             ticker: None,
             l2lspgen: None,
         };
@@ -359,26 +323,43 @@ impl Isis {
                     self.l2lspgen = Some(timer);
                 }
             }
-            Message::Recv(packet, ifindex, mac) => match packet.pdu_type {
-                IsisType::L2Hello => {
-                    isis_hello_recv(self, packet, ifindex, mac);
+            Message::Recv(packet, ifindex, mac) => {
+                let link = self.links.get_mut(&ifindex).unwrap();
+                match packet.pdu_type {
+                    IsisType::L1Hello => link.state.stats.l1.hello.rx += 1,
+                    IsisType::L2Hello => link.state.stats.l2.hello.rx += 1,
+                    IsisType::L1Lsp => link.state.stats.l1.lsp.rx += 1,
+                    IsisType::L2Lsp => link.state.stats.l2.lsp.rx += 1,
+                    IsisType::L1Psnp => link.state.stats.l1.psnp.rx += 1,
+                    IsisType::L2Psnp => link.state.stats.l2.psnp.rx += 1,
+                    IsisType::L1Csnp => link.state.stats.l1.csnp.rx += 1,
+                    IsisType::L2Csnp => link.state.stats.l2.csnp.rx += 1,
+                    _ => {
+                        //
+                    }
                 }
-                IsisType::L1Lsp | IsisType::L2Lsp => {
-                    self.lsp_recv(packet, ifindex, mac);
+
+                match packet.pdu_type {
+                    IsisType::L2Hello => {
+                        isis_hello_recv(self, packet, ifindex, mac);
+                    }
+                    IsisType::L1Lsp | IsisType::L2Lsp => {
+                        self.lsp_recv(packet, ifindex, mac);
+                    }
+                    IsisType::L1Csnp | IsisType::L2Csnp => {
+                        self.csnp_recv(packet, ifindex, mac);
+                    }
+                    IsisType::L1Psnp | IsisType::L2Psnp => {
+                        self.psnp_recv(packet, ifindex, mac);
+                    }
+                    IsisType::Unknown(_) => {
+                        self.unknown_recv(packet, ifindex, mac);
+                    }
+                    _ => {
+                        //
+                    }
                 }
-                IsisType::L1Csnp | IsisType::L2Csnp => {
-                    self.csnp_recv(packet, ifindex, mac);
-                }
-                IsisType::L1Psnp | IsisType::L2Psnp => {
-                    self.psnp_recv(packet, ifindex, mac);
-                }
-                IsisType::Unknown(_) => {
-                    self.unknown_recv(packet, ifindex, mac);
-                }
-                _ => {
-                    //
-                }
-            },
+            }
             Message::LspUpdate(level, ifindex) => {
                 match level {
                     Level::L1 => {
@@ -453,6 +434,10 @@ impl Isis {
         }
     }
 }
+
+// pub struct IsisTop<'a> {
+//     //
+// }
 
 pub fn serve(mut isis: Isis) {
     tokio::spawn(async move {
