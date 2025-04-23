@@ -53,23 +53,32 @@ pub struct Isis {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub net: Nsap,
-    pub lsdb: Levels<Lsdb>,
     pub l2lsp: Option<IsisLsp>,
     pub l2seqnum: u32,
     pub is_type: IsLevel,
     pub ticker: Option<Timer>,
     pub l2lspgen: Option<Timer>,
+    pub config: IsisConfig,
+    pub lsdb: Levels<Lsdb>,
+}
+
+#[derive(Default)]
+pub struct IsisConfig {
+    pub net: Nsap,
 }
 
 pub struct IsisTop<'a> {
     pub links: &'a mut BTreeMap<u32, IsisLink>,
+    pub lsdb: &'a mut Levels<Lsdb>,
+    pub config: &'a IsisConfig,
 }
 
 impl Isis {
     pub fn top(&mut self) -> IsisTop {
         let top = IsisTop {
             links: &mut self.links,
+            lsdb: &mut self.lsdb,
+            config: &self.config,
         };
         top
     }
@@ -128,7 +137,7 @@ impl Isis {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             sock,
-            net: Nsap::default(),
+            config: IsisConfig::default(),
             lsdb: Levels::<Lsdb>::default(),
             l2lsp: None,
             l2seqnum: 1,
@@ -162,7 +171,7 @@ impl Isis {
 
     pub fn l2lsp_gen(&mut self) -> Option<(IsisLsp, Timer)> {
         // LSP ID with no pseudo id and no fragmentation.
-        let lsp_id = IsisLspId::new(self.net.sys_id(), 0, 0);
+        let lsp_id = IsisLspId::new(self.config.net.sys_id(), 0, 0);
 
         // Generate own LSP for L2.
         let mut lsp = IsisLsp {
@@ -173,7 +182,7 @@ impl Isis {
         };
 
         // Area address.
-        let area_addr = self.net.area_id.clone();
+        let area_addr = self.config.net.area_id.clone();
         lsp.tlvs.push(IsisTlvAreaAddr { area_addr }.into());
 
         // Supported protocol
@@ -341,42 +350,6 @@ impl Isis {
             Message::Recv(packet, ifindex, mac) => {
                 let mut top = self.top();
                 process_packet(&mut top, packet, ifindex, mac);
-
-                // let link = self.links.get_mut(&ifindex).unwrap();
-                // match packet.pdu_type {
-                //     IsisType::L1Hello => link.state.stats.l1.hello.rx += 1,
-                //     IsisType::L2Hello => link.state.stats.l2.hello.rx += 1,
-                //     IsisType::L1Lsp => link.state.stats.l1.lsp.rx += 1,
-                //     IsisType::L2Lsp => link.state.stats.l2.lsp.rx += 1,
-                //     IsisType::L1Psnp => link.state.stats.l1.psnp.rx += 1,
-                //     IsisType::L2Psnp => link.state.stats.l2.psnp.rx += 1,
-                //     IsisType::L1Csnp => link.state.stats.l1.csnp.rx += 1,
-                //     IsisType::L2Csnp => link.state.stats.l2.csnp.rx += 1,
-                //     _ => {
-                //         //
-                //     }
-                // }
-
-                // match packet.pdu_type {
-                //     IsisType::L2Hello => {
-                //         isis_hello_recv(self, packet, ifindex, mac);
-                //     }
-                //     IsisType::L1Lsp | IsisType::L2Lsp => {
-                //         self.lsp_recv(packet, ifindex, mac);
-                //     }
-                //     IsisType::L1Csnp | IsisType::L2Csnp => {
-                //         self.csnp_recv(packet, ifindex, mac);
-                //     }
-                //     IsisType::L1Psnp | IsisType::L2Psnp => {
-                //         self.psnp_recv(packet, ifindex, mac);
-                //     }
-                //     IsisType::Unknown(_) => {
-                //         self.unknown_recv(packet, ifindex, mac);
-                //     }
-                //     _ => {
-                //         //
-                //     }
-                // }
             }
             Message::LspUpdate(level, ifindex) => {
                 match level {
