@@ -95,15 +95,15 @@ fn show_isis_neighbor(top: &Isis, args: Args, json: bool) -> String {
 fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (lsp_id, lsp) in &isis.lsdb.l2 {
+    for (lsp_id, lsa) in isis.lsdb.l2.iter() {
         writeln!(
             buf,
             "{:25} {:>4} 0x{:08x} 0x{:04x} {:9}",
             lsp_id.to_string(),
-            lsp.pdu_len,
-            lsp.seq_number,
-            lsp.checksum,
-            lsp.lifetime
+            lsa.lsp.pdu_len,
+            lsa.lsp.seq_number,
+            lsa.lsp.checksum,
+            lsa.lsp.lifetime
         )
         .unwrap();
     }
@@ -114,22 +114,22 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
 fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
     if json {
         // Use serde to serialize the entire database directly
-        serde_json::to_string(&isis.lsdb.l2.values().collect::<Vec<_>>()).unwrap()
+        serde_json::to_string(&isis.lsdb.l2.values().map(|x| &x.lsp).collect::<Vec<_>>()).unwrap()
     } else {
         // Generate a nicely formatted string for human-readable format
         isis.lsdb
             .l2
             .iter()
-            .map(|(lsp_id, lsp)| {
+            .map(|(lsp_id, lsa)| {
                 format!(
                     "{}\n{:25} {:>4} 0x{:08x}   0x{:04x} {:9}{}\n",
                     "LSP ID                  PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL",
                     lsp_id.to_string(),
-                    lsp.pdu_len,
-                    lsp.seq_number,
-                    lsp.checksum,
-                    lsp.lifetime,
-                    lsp
+                    lsa.lsp.pdu_len,
+                    lsa.lsp.seq_number,
+                    lsa.lsp.checksum,
+                    lsa.lsp.lifetime,
+                    lsa.lsp
                 )
             })
             .collect::<Vec<_>>()

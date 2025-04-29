@@ -33,13 +33,11 @@ use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
-use super::{isis_hello_recv, process_packet, IsLevel, Level, Levels};
+use super::{isis_hello_recv, process_packet, IsLevel, Level, Levels, Lsdb};
 use super::{IfsmEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
-
-pub type Lsdb = BTreeMap<IsisLspId, IsisLsp>;
 
 pub struct Isis {
     ctx: Context,
