@@ -265,6 +265,11 @@ impl Nanomsg {
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "isis-instance:request" {
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
                     // isis-instance:add
                     let msg = MsgSend {
                         method: String::from("isis-instance:add"),
@@ -287,12 +292,6 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
                         data: self.isis_if_add_enp0s7(),
-                    };
-                    self.socket.write_all(to_string(&msg)?.as_bytes());
-
-                    let msg = MsgSend {
-                        method: String::from("segment-routing:update"),
-                        data: self.segment_routing_update(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
