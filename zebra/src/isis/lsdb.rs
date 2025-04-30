@@ -5,7 +5,10 @@ use std::collections::{
 
 use isis_packet::{IsisLsp, IsisLspId};
 
-use super::task::Timer;
+use super::{
+    task::{Timer, TimerType},
+    Level,
+};
 
 #[derive(Default)]
 pub struct Lsdb {
@@ -30,7 +33,28 @@ impl Lsa {
 
 impl Lsdb {
     pub fn insert(&mut self, key: IsisLspId, value: IsisLsp) -> Option<Lsa> {
-        self.map.insert(key, Lsa::new(value))
+        let mut lsa = Lsa::new(value);
+
+        self.map.insert(key, lsa)
+    }
+
+    pub fn insert_self_originate(
+        &mut self,
+        key: IsisLspId,
+        value: IsisLsp,
+        level: Level,
+        refresh_timer: u64,
+    ) -> Option<Lsa> {
+        let mut lsa = Lsa::new(value);
+        let refresh_timer = Timer::new(
+            Timer::second(refresh_timer),
+            TimerType::Once,
+            || async move {
+                println!("Refresh timer expire");
+            },
+        );
+        lsa.refresh_timer = Some(refresh_timer);
+        self.map.insert(key, lsa)
     }
 
     pub fn values(&self) -> Values<'_, IsisLspId, Lsa> {
