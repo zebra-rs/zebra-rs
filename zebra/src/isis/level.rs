@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Level {
     L1,
     L2,
@@ -28,6 +28,22 @@ impl fmt::Display for Level {
 pub struct Levels<T> {
     pub l1: T,
     pub l2: T,
+}
+
+impl<T> Levels<T> {
+    pub fn get(&self, level: &Level) -> &T {
+        match level {
+            Level::L1 => &self.l1,
+            Level::L2 => &self.l2,
+        }
+    }
+
+    pub fn get_mut(&mut self, level: &Level) -> &mut T {
+        match level {
+            Level::L1 => &mut self.l1,
+            Level::L2 => &mut self.l2,
+        }
+    }
 }
 
 #[derive(Debug)]

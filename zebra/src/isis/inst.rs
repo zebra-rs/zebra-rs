@@ -63,12 +63,23 @@ pub struct Isis {
 #[derive(Default)]
 pub struct IsisConfig {
     pub net: Nsap,
+    pub refresh_time: Option<u64>,
+}
+
+// Default refresh time: 15 min.
+const DEFAULT_REFRESH_TIME: u64 = (15 * 60);
+
+impl IsisConfig {
+    pub fn refresh_time(&self) -> u64 {
+        self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
+    }
 }
 
 pub struct IsisTop<'a> {
     pub links: &'a mut BTreeMap<u32, IsisLink>,
     pub lsdb: &'a mut Levels<Lsdb>,
     pub config: &'a IsisConfig,
+    pub tx: &'a UnboundedSender<Message>,
 }
 
 impl Isis {
@@ -77,7 +88,9 @@ impl Isis {
             links: &mut self.links,
             lsdb: &mut self.lsdb,
             config: &self.config,
+            tx: &self.tx,
         };
+
         top
     }
 }
@@ -156,7 +169,7 @@ impl Isis {
             write_packet(sock, prx).await;
         });
         let tx = isis.tx.clone();
-        let ticker = Timer::new(Timer::second(1), TimerType::Infinite, move || {
+        let ticker = Timer::new(1, TimerType::Infinite, move || {
             let tx = tx.clone();
             async move {
                 tx.send(Message::Ticker).unwrap();
@@ -173,7 +186,7 @@ impl Isis {
 
         // Generate own LSP for L2.
         let mut lsp = IsisLsp {
-            lifetime: 1200,
+            hold_time: 1200,
             lsp_id,
             seq_number: self.l2seqnum,
             ..Default::default()
@@ -254,7 +267,7 @@ impl Isis {
 
         // Start timer.
         let tx = self.tx.clone();
-        let timer = Timer::new(Timer::second(3), TimerType::Once, move || {
+        let timer = Timer::new(3, TimerType::Once, move || {
             let tx = tx.clone();
             async move {
                 tx.send(Message::LspGen).unwrap();
@@ -439,14 +452,16 @@ pub enum Message {
     LinkTimer(u32),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, IsisSysId, NfsmEvent),
+    Refresh(Level, IsisLspId),
+    HoldTimeExpire(Level, IsisLspId),
 }
 
 pub fn tick(lsdb: &mut BTreeMap<IsisLspId, IsisLsp>) {
     for (_, lsp) in lsdb {
-        if lsp.lifetime > 0 {
-            lsp.lifetime = lsp.lifetime - 1;
+        if lsp.hold_time > 0 {
+            lsp.hold_time = lsp.hold_time - 1;
         }
-        if lsp.lifetime == 0 {
+        if lsp.hold_time == 0 {
             println!("Removing LSP {}", lsp.lsp_id);
         }
     }

@@ -101,7 +101,7 @@ impl IsisLink {
             source_id: IsisSysId {
                 id: [0, 0, 0, 0, 0, 2],
             },
-            hold_timer: 30,
+            hold_time: 30,
             pdu_len: 0,
             priority: self.l2priority,
             lan_id: IsisNeighborId { id: [0u8; 7] },
@@ -223,7 +223,7 @@ impl Isis {
 pub fn isis_link_timer(link: &IsisLink) -> Timer {
     let tx = link.tx.clone();
     let index = link.ifindex;
-    Timer::new(Timer::second(1), TimerType::Infinite, move || {
+    Timer::new(1, TimerType::Infinite, move || {
         let tx = tx.clone();
         async move {
             tx.send(Message::LinkTimer(index));

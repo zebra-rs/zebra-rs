@@ -103,7 +103,7 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
             lsa.lsp.pdu_len,
             lsa.lsp.seq_number,
             lsa.lsp.checksum,
-            lsa.lsp.lifetime
+            lsa.lsp.hold_time,
         )
         .unwrap();
     }
@@ -128,7 +128,7 @@ fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
                     lsa.lsp.pdu_len,
                     lsa.lsp.seq_number,
                     lsa.lsp.checksum,
-                    lsa.lsp.lifetime,
+                    lsa.lsp.hold_time,
                     lsa.lsp
                 )
             })
