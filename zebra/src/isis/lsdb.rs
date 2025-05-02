@@ -38,10 +38,15 @@ impl Lsdb {
     pub fn get(&self, key: &IsisLspId) -> Option<&Lsa> {
         self.map.get(key)
     }
+
     pub fn insert(&mut self, key: IsisLspId, value: IsisLsp) -> Option<Lsa> {
         let mut lsa = Lsa::new(value);
 
         self.map.insert(key, lsa)
+    }
+
+    pub fn remove(&mut self, key: &IsisLspId) -> Option<Lsa> {
+        self.map.remove(key)
     }
 
     pub fn values(&self) -> Values<'_, IsisLspId, Lsa> {
@@ -57,14 +62,16 @@ impl Lsdb {
     }
 }
 
-pub fn lsp_fan_out(top: &mut IsisTop, level: &Level, lsp: &IsisLsp) {
-    //
+pub fn lsp_fan_out(top: &mut IsisTop, level: Level, lsp: &IsisLsp) {
+    for link in top.links.iter() {
+        // link.fan_out(level, lsp);
+    }
 }
 
 pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     if let Some(lsa) = top.lsdb.get(&level).get(&key) {
         let lsp = lsa.lsp.clone_with_seqno_inc();
-        // Fanout.
+        lsp_fan_out(top, level, &lsp);
         insert_self_originate(top, level, key, lsp);
     }
 }
@@ -99,7 +106,9 @@ pub fn lsp_self_originate(top: &mut IsisTop, level: Level) {
     // LSP generate for the level.
 
     // Fanout.
+    // lsp_fan_out(top)
 
+    // Insert LSP.
     //insert_self_originate(top, level, key, lsp);
 }
 
@@ -110,15 +119,13 @@ pub fn insert_self_originate(
     lsp: IsisLsp,
 ) -> Option<Lsa> {
     let mut lsa = Lsa::new(lsp);
-    let refresh_timer = refresh_timer(top, level, &key);
-    lsa.refresh_timer = Some(refresh_timer);
+    lsa.refresh_timer = Some(refresh_timer(top, level, &key));
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
 pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp) -> Option<Lsa> {
     let hold_time = lsp.hold_time as u64;
     let mut lsa = Lsa::new(lsp);
-    let hold_timer = hold_timer(top, level, &key, hold_time);
-    lsa.hold_timer = Some(hold_timer);
+    lsa.hold_timer = Some(hold_timer(top, level, &key, hold_time));
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
