@@ -55,11 +55,13 @@ pub enum TimerType {
 }
 
 impl Timer {
-    pub fn new<F, Fut>(duration: Duration, typ: TimerType, mut cb: F) -> Timer
+    pub fn new<F, Fut>(sec: u64, typ: TimerType, mut cb: F) -> Timer
     where
         F: FnMut() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send,
     {
+        let duration = Duration::new(sec, 0);
+
         let (tx, mut rx) = mpsc::unbounded_channel();
         let last_reset = Arc::new(Mutex::new(Instant::now()));
 
@@ -94,6 +96,14 @@ impl Timer {
             duration,
             last_reset,
         }
+    }
+
+    pub fn once<F, Fut>(sec: u64, mut cb: F) -> Timer
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
+        Self::new(sec, TimerType::Once, cb)
     }
 
     /// Refresh the timer (resets the timer countdown)

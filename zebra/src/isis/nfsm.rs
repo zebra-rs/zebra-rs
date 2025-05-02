@@ -79,18 +79,14 @@ pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
     let tx = adj.tx.clone();
     let sysid = adj.pdu.source_id.clone();
     let ifindex = adj.ifindex;
-    Timer::new(
-        Timer::second(adj.pdu.hold_timer as u64),
-        TimerType::Once,
-        move || {
-            let tx = tx.clone();
-            let sysid = sysid.clone();
-            async move {
-                tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::HoldTimerExpire))
-                    .unwrap();
-            }
-        },
-    )
+    Timer::new(adj.pdu.hold_time as u64, TimerType::Once, move || {
+        let tx = tx.clone();
+        let sysid = sysid.clone();
+        async move {
+            tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::HoldTimerExpire))
+                .unwrap();
+        }
+    })
 }
 
 fn nbr_ifaddr_update(nbr: &mut Neighbor) {

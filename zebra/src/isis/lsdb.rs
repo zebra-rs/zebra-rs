@@ -5,7 +5,10 @@ use std::collections::{
 
 use isis_packet::{IsisLsp, IsisLspId};
 
+use crate::isis::Message;
+
 use super::{
+    inst::IsisTop,
     task::{Timer, TimerType},
     Level,
 };
@@ -32,28 +35,12 @@ impl Lsa {
 }
 
 impl Lsdb {
+    pub fn get(&self, key: &IsisLspId) -> Option<&Lsa> {
+        self.map.get(key)
+    }
     pub fn insert(&mut self, key: IsisLspId, value: IsisLsp) -> Option<Lsa> {
         let mut lsa = Lsa::new(value);
 
-        self.map.insert(key, lsa)
-    }
-
-    pub fn insert_self_originate(
-        &mut self,
-        key: IsisLspId,
-        value: IsisLsp,
-        level: Level,
-        refresh_timer: u64,
-    ) -> Option<Lsa> {
-        let mut lsa = Lsa::new(value);
-        let refresh_timer = Timer::new(
-            Timer::second(refresh_timer),
-            TimerType::Once,
-            || async move {
-                println!("Refresh timer expire");
-            },
-        );
-        lsa.refresh_timer = Some(refresh_timer);
         self.map.insert(key, lsa)
     }
 
@@ -68,4 +55,70 @@ impl Lsdb {
     pub fn iter(&self) -> Iter<'_, IsisLspId, Lsa> {
         self.map.iter()
     }
+}
+
+pub fn lsp_fan_out(top: &mut IsisTop, level: &Level, lsp: &IsisLsp) {
+    //
+}
+
+pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
+    if let Some(lsa) = top.lsdb.get(&level).get(&key) {
+        let lsp = lsa.lsp.clone_with_seqno_inc();
+        // Fanout.
+        insert_self_originate(top, level, key, lsp);
+    }
+}
+
+pub fn refresh_timer(top: &mut IsisTop, level: Level, key: &IsisLspId) -> Timer {
+    let tx = top.tx.clone();
+    let key = key.clone();
+    Timer::once(top.config.refresh_time(), move || {
+        let tx = tx.clone();
+        let key = key.clone();
+        async move {
+            let msg = Message::Refresh(level, key.clone());
+            tx.send(msg).unwrap();
+        }
+    })
+}
+
+pub fn hold_timer(top: &mut IsisTop, level: Level, key: &IsisLspId, hold_time: u64) -> Timer {
+    let tx = top.tx.clone();
+    let key = key.clone();
+    Timer::once(hold_time, move || {
+        let tx = tx.clone();
+        let key = key.clone();
+        async move {
+            let msg = Message::HoldTimeExpire(level, key.clone());
+            tx.send(msg).unwrap();
+        }
+    })
+}
+
+pub fn lsp_self_originate(top: &mut IsisTop, level: Level) {
+    // LSP generate for the level.
+
+    // Fanout.
+
+    //insert_self_originate(top, level, key, lsp);
+}
+
+pub fn insert_self_originate(
+    top: &mut IsisTop,
+    level: Level,
+    key: IsisLspId,
+    lsp: IsisLsp,
+) -> Option<Lsa> {
+    let mut lsa = Lsa::new(lsp);
+    let refresh_timer = refresh_timer(top, level, &key);
+    lsa.refresh_timer = Some(refresh_timer);
+    top.lsdb.get_mut(&level).map.insert(key, lsa)
+}
+
+pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp) -> Option<Lsa> {
+    let hold_time = lsp.hold_time as u64;
+    let mut lsa = Lsa::new(lsp);
+    let hold_timer = hold_timer(top, level, &key, hold_time);
+    lsa.hold_timer = Some(hold_timer);
+    top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
