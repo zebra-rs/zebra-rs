@@ -354,7 +354,7 @@ impl Nanomsg {
 }
 
 pub fn serve() {
-    let mut nanomsg = Nanomsg::new();
+    let nanomsg = Nanomsg::new();
     if let Ok(mut nanomsg) = nanomsg {
         tokio::spawn(async move {
             nanomsg.event_loop().await;

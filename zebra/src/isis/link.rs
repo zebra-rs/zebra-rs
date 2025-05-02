@@ -2,14 +2,12 @@ use std::collections::BTreeMap;
 
 use super::addr::IsisAddr;
 use super::adj::Neighbor;
-use super::task::{Task, Timer, TimerType};
-use super::Isis;
-use super::{IfsmEvent, Level, Levels, Message, NfsmEvent};
+use super::task::{Timer, TimerType};
+use super::{Isis, Levels, Message};
 
 use isis_packet::{
-    IsisCsnp, IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp,
-    IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvLspEntries,
-    IsisTlvProtoSupported, IsisType,
+    IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
+    IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -43,7 +41,7 @@ pub struct IsisLink {
 }
 
 // Window for reference IsisLink from worker.
-pub struct LinkWindow {
+pub struct LinkTop {
     //
 }
 
@@ -97,7 +95,7 @@ impl IsisLink {
     pub fn hello_update(&mut self) {
         println!("Hello update");
         let mut hello = IsisHello {
-            circuit_type: 3,
+            circuit_type: IsLevel::L1L2,
             source_id: IsisSysId {
                 id: [0, 0, 0, 0, 0, 2],
             },
@@ -200,20 +198,20 @@ impl Isis {
     }
 
     pub fn dis_send(&self, ifindex: u32) {
-        let Some(link) = self.links.get(&ifindex) else {
+        let Some(_link) = self.links.get(&ifindex) else {
             return;
         };
     }
 
-    pub fn psnp_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
-        let Some(link) = self.links.get_mut(&ifindex) else {
+    pub fn psnp_recv(&mut self, _packet: IsisPacket, ifindex: u32, _mac: Option<[u8; 6]>) {
+        let Some(_link) = self.links.get_mut(&ifindex) else {
             println!("Link not found {}", ifindex);
             return;
         };
     }
 
-    pub fn unknown_recv(&mut self, packet: IsisPacket, ifindex: u32, mac: Option<[u8; 6]>) {
-        let Some(link) = self.links.get_mut(&ifindex) else {
+    pub fn unknown_recv(&mut self, _packet: IsisPacket, ifindex: u32, _mac: Option<[u8; 6]>) {
+        let Some(_link) = self.links.get_mut(&ifindex) else {
             println!("Link not found {}", ifindex);
             return;
         };
@@ -226,7 +224,7 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
     Timer::new(1, TimerType::Infinite, move || {
         let tx = tx.clone();
         async move {
-            tx.send(Message::LinkTimer(index));
+            tx.send(Message::LinkTimer(index)).unwrap();
         }
     })
 }

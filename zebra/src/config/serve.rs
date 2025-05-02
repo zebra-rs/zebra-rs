@@ -264,7 +264,7 @@ pub fn serve(cli: Cli) {
     let exec_service = ExecService { tx: cli.tx.clone() };
     let exec_server = ExecServer::new(exec_service);
 
-    let mut show_service = ShowService { tx: cli.tx.clone() };
+    let show_service = ShowService { tx: cli.tx.clone() };
     let show_server = ShowServer::new(show_service);
 
     let apply_service = ApplyService { tx: cli.tx.clone() };

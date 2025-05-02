@@ -1,7 +1,6 @@
-use std::fmt::{Display, Formatter, Result};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsisHello, IsisSysId};
+use isis_packet::IsisHello;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::MacAddr;

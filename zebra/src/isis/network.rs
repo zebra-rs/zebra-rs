@@ -66,16 +66,17 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
         let iov = [IoSlice::new(&LLC_HDR), IoSlice::new(&buf)];
         let l2iss = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x15];
 
-        let mut sockaddr = link_addr((LLC_HDR.len() + buf.len()) as u16, ifindex, Some(l2iss));
+        let sockaddr = link_addr((LLC_HDR.len() + buf.len()) as u16, ifindex, Some(l2iss));
 
         sock.async_io(Interest::WRITABLE, |sock| {
-            let msg = socket::sendmsg(
+            socket::sendmsg(
                 sock.as_raw_fd(),
                 &iov,
                 &[],
                 socket::MsgFlags::empty(),
                 Some(&sockaddr),
-            );
+            )
+            .unwrap();
             Ok(())
         })
         .await;

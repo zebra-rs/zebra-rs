@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use isis_packet::{nlpid_str, IsisHello, IsisLspId, IsisProto, IsisTlv, IsisTlvProtoSupported};
+use isis_packet::{nlpid_str, IsisHello, IsisTlv, IsisTlvProtoSupported};
 use serde::Serialize;
 
 use super::{adj::Neighbor, inst::ShowCallback, Isis};
@@ -24,15 +24,15 @@ impl Isis {
     }
 }
 
-fn show_isis(isis: &Isis, args: Args, _json: bool) -> String {
+fn show_isis(_isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis")
 }
 
-fn show_isis_summary(isis: &Isis, args: Args, _json: bool) -> String {
+fn show_isis_summary(_isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis summary")
 }
 
-fn show_isis_interface(isis: &Isis, args: Args, _json: bool) -> String {
+fn show_isis_interface(_isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis interface")
 }
 
@@ -57,7 +57,7 @@ struct NeighborBrief {
     snpa: String,
 }
 
-fn show_isis_neighbor(top: &Isis, args: Args, json: bool) -> String {
+fn show_isis_neighbor(top: &Isis, _args: Args, json: bool) -> String {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
     for (_, link) in &top.links {
@@ -92,10 +92,11 @@ fn show_isis_neighbor(top: &Isis, args: Args, json: bool) -> String {
     buf
 }
 
-fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
+fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (lsp_id, lsa) in isis.lsdb.l2.iter() {
+        let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
         writeln!(
             buf,
             "{:25} {:>4} 0x{:08x} 0x{:04x} {:9}",
@@ -103,7 +104,7 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
             lsa.lsp.pdu_len,
             lsa.lsp.seq_number,
             lsa.lsp.checksum,
-            lsa.lsp.hold_time,
+            rem,
         )
         .unwrap();
     }
@@ -111,7 +112,7 @@ fn show_isis_database(isis: &Isis, args: Args, _json: bool) -> String {
     buf
 }
 
-fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
+fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
     if json {
         // Use serde to serialize the entire database directly
         serde_json::to_string(&isis.lsdb.l2.values().map(|x| &x.lsp).collect::<Vec<_>>()).unwrap()
@@ -121,6 +122,7 @@ fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
             .l2
             .iter()
             .map(|(lsp_id, lsa)| {
+                let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
                 format!(
                     "{}\n{:25} {:>4} 0x{:08x}   0x{:04x} {:9}{}\n",
                     "LSP ID                  PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL",
@@ -128,21 +130,12 @@ fn show_isis_database_detail(isis: &Isis, args: Args, json: bool) -> String {
                     lsa.lsp.pdu_len,
                     lsa.lsp.seq_number,
                     lsa.lsp.checksum,
-                    lsa.lsp.hold_time,
+                    rem,
                     lsa.lsp
                 )
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-}
-
-fn circuit_type_str(circuit_type: u8) -> &'static str {
-    match circuit_type {
-        1 => "L1",
-        2 => "L2",
-        3 => "L1L2",
-        _ => "?",
     }
 }
 
@@ -167,12 +160,7 @@ fn show_isis_neighbor_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
     )
     .unwrap();
 
-    write!(
-        buf,
-        "    Circuit type: {}, Speaks:",
-        circuit_type_str(nbr.pdu.circuit_type)
-    )
-    .unwrap();
+    write!(buf, "    Circuit type: {}, Speaks:", nbr.pdu.circuit_type,).unwrap();
 
     if let Some(proto) = proto(&nbr.pdu) {
         for (i, nlpid) in proto.nlpids.iter().enumerate() {
@@ -220,7 +208,7 @@ fn show_isis_neighbor_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
     writeln!(buf, "").unwrap();
 }
 
-fn show_isis_neighbor_detail(top: &Isis, args: Args, _json: bool) -> String {
+fn show_isis_neighbor_detail(top: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, link) in &top.links {
@@ -232,7 +220,7 @@ fn show_isis_neighbor_detail(top: &Isis, args: Args, _json: bool) -> String {
     buf
 }
 
-fn show_isis_adjacency(top: &Isis, args: Args, _json: bool) -> String {
+fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, link) in &top.links {

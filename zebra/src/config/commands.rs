@@ -146,7 +146,7 @@ fn commit(config: &ConfigManager) -> (ExecCode, String) {
 
 fn diff(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();
-    let diff = config.diff_config(&mut output);
+    let _diff = config.diff_config(&mut output);
     // config.store.candidate.borrow().list(&mut output);
     (ExecCode::Show, output)
 }

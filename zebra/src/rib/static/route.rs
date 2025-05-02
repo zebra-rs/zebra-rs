@@ -32,7 +32,7 @@ impl StaticRoute {
 
         if self.nexthops.len() == 1 {
             let (p, n) = self.nexthops.iter().next()?;
-            let mut nhop = NexthopUni {
+            let nhop = NexthopUni {
                 addr: *p,
                 metric: n.metric.unwrap_or(metric),
                 weight: n.weight.unwrap_or(1),
@@ -59,7 +59,7 @@ impl StaticRoute {
                 ..Default::default()
             };
             for (p, n) in set.iter() {
-                let mut nhop = NexthopUni {
+                let nhop = NexthopUni {
                     addr: *p,
                     metric: n.metric.unwrap_or(metric),
                     weight: n.weight.unwrap_or(1),
@@ -75,7 +75,7 @@ impl StaticRoute {
                     entry.metric = *metric;
                 }
                 let (p, n) = set.first()?;
-                let mut nhop = NexthopUni {
+                let nhop = NexthopUni {
                     addr: *p,
                     metric: *metric,
                     weight: n.weight.unwrap_or(1),

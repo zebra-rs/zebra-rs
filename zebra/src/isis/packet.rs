@@ -4,13 +4,13 @@ use isis_packet::{IsisPacket, IsisPdu, IsisTlv, IsisType};
 
 use crate::isis::adj::Neighbor;
 
-use crate::isis::Isis;
 use crate::isis::Message;
 use crate::rib::MacAddr;
 
 use super::inst::IsisTop;
+use super::lsdb::insert_lsp;
 use super::nfsm::{isis_nfsm, NfsmEvent};
-use super::{IfsmEvent, Level, NfsmState};
+use super::Level;
 
 pub fn isis_hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
@@ -60,12 +60,12 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     false
 }
 
-pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
+pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
     };
 
-    let pdu = match (packet.pdu_type, packet.pdu) {
+    let lsp = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) | (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => pdu,
         _ => return,
     };
@@ -73,17 +73,17 @@ pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: O
     // println!("{}", pdu);
 
     // DIS
-    if pdu.lsp_id.pseudo_id() != 0 {
+    if lsp.lsp_id.pseudo_id() != 0 {
         println!("DIS recv");
 
         if let Some(dis) = &link.l2dis {
             if link.l2adj.is_none() {
-                println!("DIS SIS ID {} <-> {}", pdu.lsp_id.sys_id(), dis);
-                if pdu.lsp_id.sys_id() == *dis {
+                println!("DIS SIS ID {} <-> {}", lsp.lsp_id.sys_id(), dis);
+                if lsp.lsp_id.sys_id() == *dis {
                     // IS Neighbor include my LSP ID.
-                    if lsp_has_neighbor_id(&pdu, &top.config.net.neighbor_id()) {
+                    if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
                         println!("Adjacency!");
-                        link.l2adj = Some(pdu.lsp_id.clone());
+                        link.l2adj = Some(lsp.lsp_id.clone());
                         link.tx
                             .send(Message::LspUpdate(Level::L2, link.ifindex))
                             .unwrap();
@@ -95,12 +95,15 @@ pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: O
         }
     }
 
-    // println!("LSP PDU {}", pdu);
-    let lsp_id = pdu.lsp_id.clone();
-    top.lsdb.l2.insert(lsp_id, pdu);
+    let lsp_id = lsp.lsp_id.clone();
+    if lsp.hold_time != 0 {
+        insert_lsp(top, Level::L2, lsp_id, lsp);
+    } else {
+        //
+    }
 }
 
-pub fn isis_csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
+pub fn isis_csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         println!("Link not found {}", ifindex);
         return;

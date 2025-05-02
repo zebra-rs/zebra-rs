@@ -41,7 +41,6 @@ pub fn nexthop_show(rib: &Rib, _args: Args, _json: bool) -> String {
                     }
                 }
             }
-            _ => {}
         }
     }
     buf

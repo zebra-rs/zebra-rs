@@ -1,6 +1,5 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::intf::config::InterfaceConfig;
 use super::{Link, LspConfig, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
