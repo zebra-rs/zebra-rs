@@ -4,7 +4,7 @@ use rand::Rng;
 
 use crate::ospf::packet::ospf_db_desc_send;
 
-use super::{Identity, IfsmEvent, Message, Neighbor, OspfLink, Timer, TimerType};
+use super::{Identity, IfsmEvent, Message, Neighbor, Timer, TimerType};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -244,12 +244,12 @@ pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {
 }
 
 impl Neighbor {
-    pub fn nfsm_ignore(&mut self, oident: &Identity) -> Option<NfsmState> {
+    pub fn nfsm_ignore(&mut self, _oident: &Identity) -> Option<NfsmState> {
         None
     }
 }
 
-pub fn ospf_nfsm_ignore(_on: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_ignore(_on: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     println!("ospf_nfsm_ignore is called");
     None
 }
@@ -268,7 +268,7 @@ pub fn ospf_inactivity_timer(nbr: &Neighbor) -> Timer {
     })
 }
 
-pub fn ospf_nfsm_hello_received(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_hello_received(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     println!("ospf_nfsm_hello_received");
 
     // Start or Restart Inactivity Timer.
@@ -277,7 +277,7 @@ pub fn ospf_nfsm_hello_received(nbr: &mut Neighbor, oident: &Identity) -> Option
     None
 }
 
-pub fn ospf_nfsm_start(_nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_start(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     println!("XXX ospf_nfsm_start");
     None
 }
@@ -302,15 +302,15 @@ pub fn ospf_nfsm_twoway_received(nbr: &mut Neighbor, oident: &Identity) -> Optio
     Some(next_state)
 }
 
-pub fn ospf_nfsm_negotiation_done(_nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_negotiation_done(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_exchange_done(_nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_exchange_done(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_bad_ls_req(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_bad_ls_req(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     ospf_nfsm_reset_nbr(nbr);
     None
 }
@@ -341,12 +341,12 @@ pub fn ospf_nfsm_adj_ok(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmSta
     Some(next_state)
 }
 
-pub fn ospf_nfsm_seq_number_mismatch(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_seq_number_mismatch(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     ospf_nfsm_reset_nbr(nbr);
     None
 }
 
-pub fn ospf_nfsm_oneway_received(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_oneway_received(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
     println!("ospf_nfsm_oneway_received");
     ospf_nfsm_reset_nbr(nbr);
     None

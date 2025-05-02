@@ -98,7 +98,7 @@ impl Timer {
         }
     }
 
-    pub fn once<F, Fut>(sec: u64, mut cb: F) -> Timer
+    pub fn once<F, Fut>(sec: u64, cb: F) -> Timer
     where
         F: FnMut() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send,

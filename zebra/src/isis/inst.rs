@@ -1,16 +1,14 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
-use std::str::FromStr;
 use std::sync::Arc;
-use std::{default, fmt};
 
 use ipnet::IpNet;
 use isis_packet::cap::{SegmentRoutingCapFlags, SidLabelTlv};
 use isis_packet::{
-    Algo, IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisProto, IsisSubSegmentRoutingAlgo,
+    Algo, IsLevel, IsisLsp, IsisLspId, IsisPacket, IsisProto, IsisSubSegmentRoutingAlgo,
     IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSysId, IsisTlvAreaAddr,
     IsisTlvExtIsReach, IsisTlvExtIsReachEntry, IsisTlvHostname, IsisTlvIpv4IfAddr,
-    IsisTlvProtoSupported, IsisTlvRouterCap, IsisTlvTeRouterId, IsisType, Nsap,
+    IsisTlvProtoSupported, IsisTlvRouterCap, IsisTlvTeRouterId,
 };
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -18,7 +16,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
-use crate::isis::ifsm::isis_ifsm_dis_selection;
+use crate::isis::ifsm;
 use crate::isis::nfsm::isis_nfsm;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -29,11 +27,12 @@ use crate::{
     rib::RibRxChannel,
 };
 
+use super::config::IsisConfig;
 use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
-use super::{isis_hello_recv, process_packet, IsLevel, Level, Levels, Lsdb};
+use super::{process_packet, Level, Levels, Lsdb};
 use super::{IfsmEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -54,25 +53,9 @@ pub struct Isis {
     pub l2lsp: Option<IsisLsp>,
     pub l2seqnum: u32,
     pub is_type: IsLevel,
-    pub ticker: Option<Timer>,
     pub l2lspgen: Option<Timer>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
-}
-
-#[derive(Default)]
-pub struct IsisConfig {
-    pub net: Nsap,
-    pub refresh_time: Option<u64>,
-}
-
-// Default refresh time: 15 min.
-const DEFAULT_REFRESH_TIME: u64 = (15 * 60);
-
-impl IsisConfig {
-    pub fn refresh_time(&self) -> u64 {
-        self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
-    }
 }
 
 pub struct IsisTop<'a> {
@@ -80,49 +63,6 @@ pub struct IsisTop<'a> {
     pub lsdb: &'a mut Levels<Lsdb>,
     pub config: &'a IsisConfig,
     pub tx: &'a UnboundedSender<Message>,
-}
-
-impl Isis {
-    pub fn top(&mut self) -> IsisTop {
-        let top = IsisTop {
-            links: &mut self.links,
-            lsdb: &mut self.lsdb,
-            config: &self.config,
-            tx: &self.tx,
-        };
-
-        top
-    }
-}
-
-#[derive(Debug)]
-pub struct ParseIsTypeError;
-
-impl fmt::Display for ParseIsTypeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid input for IsType")
-    }
-}
-
-impl FromStr for IsLevel {
-    type Err = ParseIsTypeError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "level-1" => Ok(IsLevel::L1),
-            "level-2-only" => Ok(IsLevel::L2),
-            "level-1-2" => Ok(IsLevel::L1L2),
-            _ => Err(ParseIsTypeError),
-        }
-    }
-}
-
-impl Isis {
-    pub fn ifname(&self, ifindex: u32) -> String {
-        self.links
-            .get(&ifindex)
-            .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
-    }
 }
 
 impl Isis {
@@ -153,7 +93,6 @@ impl Isis {
             l2lsp: None,
             l2seqnum: 1,
             is_type: IsLevel::L1,
-            ticker: None,
             l2lspgen: None,
         };
         isis.callback_build();
@@ -168,15 +107,6 @@ impl Isis {
         tokio::spawn(async move {
             write_packet(sock, prx).await;
         });
-        let tx = isis.tx.clone();
-        let ticker = Timer::new(1, TimerType::Infinite, move || {
-            let tx = tx.clone();
-            async move {
-                tx.send(Message::Ticker).unwrap();
-            }
-        });
-        isis.ticker = Some(ticker);
-
         isis
     }
 
@@ -252,7 +182,7 @@ impl Isis {
             };
             // Ext IS Reach.
             let mut ext_is_reach = IsisTlvExtIsReach::default();
-            let mut is_reach = IsisTlvExtIsReachEntry {
+            let is_reach = IsisTlvExtIsReachEntry {
                 neighbor_id: adj.neighbor_id(),
                 metric: 10,
                 subs: Vec::new(),
@@ -292,7 +222,7 @@ impl Isis {
 
     fn link_add(&mut self, link: Link) {
         // println!("ISIS: LinkAdd {} {}", link.name, link.index);
-        if let Some(link) = self.links.get_mut(&link.index) {
+        if let Some(_link) = self.links.get_mut(&link.index) {
             //
         } else {
             let mut link = IsisLink::from(link, self.tx.clone(), self.ptx.clone());
@@ -347,9 +277,6 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Ticker => {
-                // tick(&mut self.lsdb);
-            }
             Message::LspGen => {
                 if let Some((lsp, timer)) = self.l2lsp_gen() {
                     let lsp_id = lsp.lsp_id.clone();
@@ -394,7 +321,7 @@ impl Isis {
                         self.hello_send(ifindex);
                     }
                     IfsmEvent::DisSelection => {
-                        isis_ifsm_dis_selection(link);
+                        ifsm::dis_selection(link);
                     }
                     _ => {
                         //
@@ -435,6 +362,22 @@ impl Isis {
             }
         }
     }
+    pub fn top(&mut self) -> IsisTop {
+        let top = IsisTop {
+            links: &mut self.links,
+            lsdb: &mut self.lsdb,
+            config: &self.config,
+            tx: &self.tx,
+        };
+
+        top
+    }
+
+    pub fn ifname(&self, ifindex: u32) -> String {
+        self.links
+            .get(&ifindex)
+            .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
+    }
 }
 
 pub fn serve(mut isis: Isis) {
@@ -444,7 +387,6 @@ pub fn serve(mut isis: Isis) {
 }
 
 pub enum Message {
-    Ticker,
     LspGen,
     Recv(IsisPacket, u32, Option<MacAddr>),
     Send(IsisPacket, u32),
@@ -454,15 +396,4 @@ pub enum Message {
     Nfsm(u32, IsisSysId, NfsmEvent),
     Refresh(Level, IsisLspId),
     HoldTimeExpire(Level, IsisLspId),
-}
-
-pub fn tick(lsdb: &mut BTreeMap<IsisLspId, IsisLsp>) {
-    for (_, lsp) in lsdb {
-        if lsp.hold_time > 0 {
-            lsp.hold_time = lsp.hold_time - 1;
-        }
-        if lsp.hold_time == 0 {
-            println!("Removing LSP {}", lsp.lsp_id);
-        }
-    }
 }

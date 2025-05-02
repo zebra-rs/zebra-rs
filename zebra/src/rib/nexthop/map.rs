@@ -102,7 +102,7 @@ impl NexthopMap {
         self.get_mut(gid)
     }
 
-    pub fn fetch_mpls(&mut self, addr: &Ipv4Addr, label: Vec<u32>) -> Option<&mut Group> {
+    pub fn fetch_mpls(&mut self, _addr: &Ipv4Addr, _label: Vec<u32>) -> Option<&mut Group> {
         None
     }
 

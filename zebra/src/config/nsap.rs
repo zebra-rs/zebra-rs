@@ -1,5 +1,3 @@
-use std::iter::{self, from_fn};
-
 use super::parse::MatchType;
 
 pub fn match_nsap_addr(src: &str) -> (MatchType, usize) {
@@ -7,7 +5,7 @@ pub fn match_nsap_addr(src: &str) -> (MatchType, usize) {
     let mut index = 0;
     let mut id = String::new();
 
-    let mut chars = src.chars().peekable();
+    let mut _chars = src.chars().peekable();
     while pos < src.len() {
         let c = src.as_bytes()[pos];
         match c {

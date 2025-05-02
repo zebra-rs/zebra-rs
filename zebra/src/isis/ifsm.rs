@@ -11,7 +11,7 @@ pub enum IfsmEvent {
     LspSend,
 }
 
-pub fn isis_ifsm_dis_selection(link: &mut IsisLink) {
+pub fn dis_selection(link: &mut IsisLink) {
     let mut dis: Option<IsisSysId> = None;
     let mut priority = link.l2priority;
     for (_, nbr) in &link.l2nbrs {

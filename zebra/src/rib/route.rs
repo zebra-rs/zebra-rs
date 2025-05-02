@@ -1,5 +1,4 @@
 use ipnet::{IpNet, Ipv4Net};
-use netlink_packet_route::nexthop;
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,10 +49,10 @@ impl Rib {
                                 self.tx.send(msg).unwrap();
                             }
                         }
-                        Nexthop::List(list) => {
+                        Nexthop::List(_list) => {
                             //
                         }
-                        Nexthop::Multi(multi) => {
+                        Nexthop::Multi(_multi) => {
                             //
                         }
                     }
@@ -207,7 +206,7 @@ fn entry_update(entry: &mut RibEntry) {
             entry.metric = uni.metric;
         }
         Nexthop::Multi(multi) => {
-            for uni in multi.nexthops.iter() {
+            for _uni in multi.nexthops.iter() {
                 //
             }
         }
@@ -313,11 +312,11 @@ fn rib_resolve_nexthop(
         resolve_nexthop_multi(multi, nmap, multi_valid);
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
-        let mut pro_valid = false;
+        let mut _pro_valid = false;
         for uni in pro.nexthops.iter_mut() {
             let valid = resolve_nexthop_uni(uni, nmap, table);
             if valid {
-                pro_valid = true;
+                _pro_valid = true;
             }
         }
     }
@@ -413,7 +412,7 @@ fn rib_replace_system(
             }
             false
         }
-        Nexthop::Link(ifindex) => true,
+        Nexthop::Link(_ifindex) => true,
     };
     println!("replace {}", replace);
     if replace {

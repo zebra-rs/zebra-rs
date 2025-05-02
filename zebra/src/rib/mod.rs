@@ -33,7 +33,6 @@ pub use mpls::*;
 pub mod resolve;
 
 pub mod intf;
-pub use intf::*;
 
 pub mod nanomsg;
 

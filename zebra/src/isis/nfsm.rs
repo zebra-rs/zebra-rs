@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 
-use isis_packet::{IsisHello, IsisTlv, IsisTlvIpv4IfAddr};
+use isis_packet::{IsisHello, IsisTlv};
 
 use crate::rib::MacAddr;
 
@@ -141,7 +141,10 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Op
     None
 }
 
-pub fn isis_nfsm_hold_timer_expire(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Option<NfsmState> {
+pub fn isis_nfsm_hold_timer_expire(
+    nbr: &mut Neighbor,
+    _mac: &Option<MacAddr>,
+) -> Option<NfsmState> {
     use IfsmEvent::*;
 
     nbr.hold_timer = None;

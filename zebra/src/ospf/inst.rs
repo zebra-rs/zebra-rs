@@ -117,7 +117,7 @@ impl Ospf {
 
     fn link_add(&mut self, link: Link) {
         println!("OSPF: LinkAdd {} {}", link.name, link.index);
-        if let Some(link) = self.links.get_mut(&link.index) {
+        if let Some(_link) = self.links.get_mut(&link.index) {
             //
         } else {
             let link = OspfLink::from(
@@ -163,8 +163,7 @@ impl Ospf {
 
     async fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Recv(packet, src, from, index, _dest) => {
-                // println!("Packet: {}", packet);
+            Message::Recv(packet, src, _from, index, _dest) => {
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
@@ -260,7 +259,7 @@ impl Ospf {
     }
 }
 
-pub fn ospf_interface_enable(oi: &mut OspfLink, laddr: &LinkAddr) {
+pub fn ospf_interface_enable(oi: &mut OspfLink, _laddr: &LinkAddr) {
     oi.enabled = true;
     // oi.ident.addr = laddr.addr;
 }

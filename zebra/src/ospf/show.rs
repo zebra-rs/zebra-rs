@@ -27,7 +27,7 @@ fn render_link(out: &mut String, oi: &OspfLink) {
     .unwrap();
 }
 
-fn show_ospf_interface(ospf: &Ospf, args: Args, _json: bool) -> String {
+fn show_ospf_interface(ospf: &Ospf, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, oi) in ospf.links.iter() {
@@ -38,7 +38,7 @@ fn show_ospf_interface(ospf: &Ospf, args: Args, _json: bool) -> String {
     buf
 }
 
-fn show_ospf(ospf: &Ospf, args: Args, _json: bool) -> String {
+fn show_ospf(_ospf: &Ospf, _args: Args, _json: bool) -> String {
     String::from("show ospf")
 }
 
@@ -56,7 +56,7 @@ fn render_nbr(out: &mut String, router_id: &Ipv4Addr, nbr: &Neighbor) {
     .unwrap();
 }
 
-fn show_ospf_neighbor(ospf: &Ospf, args: Args, _json: bool) -> String {
+fn show_ospf_neighbor(ospf: &Ospf, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, oi) in ospf.links.iter() {
@@ -69,6 +69,6 @@ fn show_ospf_neighbor(ospf: &Ospf, args: Args, _json: bool) -> String {
     buf
 }
 
-fn show_ospf_database(ospf: &Ospf, args: Args, _json: bool) -> String {
+fn show_ospf_database(_ospf: &Ospf, _args: Args, _json: bool) -> String {
     String::from("show ospf database")
 }

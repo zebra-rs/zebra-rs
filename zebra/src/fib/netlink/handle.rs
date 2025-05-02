@@ -229,9 +229,6 @@ impl FibHandle {
                 let attr = NexthopAttribute::Group(vec);
                 msg.attributes.push(attr);
             }
-            _ => {
-                return;
-            }
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
@@ -607,7 +604,7 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
                 builder = builder.oif(ifindex);
             }
             RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
-                let mut uni = NexthopUni {
+                let uni = NexthopUni {
                     addr: n,
                     ..Default::default()
                 };
@@ -618,7 +615,7 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
                 for nhop in e.iter() {
                     for attr in nhop.attributes.iter() {
                         if let RouteAttribute::Gateway(RouteAddress::Inet(n)) = attr {
-                            let mut uni = NexthopUni {
+                            let uni = NexthopUni {
                                 addr: *n,
                                 ..Default::default()
                             };

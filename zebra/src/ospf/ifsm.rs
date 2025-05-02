@@ -122,20 +122,20 @@ impl IfsmState {
 
 fn ospf_ifsm_state(oi: &OspfLink) -> IfsmState {
     use IfsmState::*;
-    if (oi.ident.is_declared_dr()) {
+    if oi.ident.is_declared_dr() {
         DR
-    } else if (oi.ident.is_declared_bdr()) {
+    } else if oi.ident.is_declared_bdr() {
         Backup
     } else {
         DROther
     }
 }
 
-pub fn ospf_ifsm_ignore(oi: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_ifsm_ignore(_oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
-pub fn ospf_ifsm_loop_ind(oi: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_ifsm_loop_ind(_oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
@@ -189,7 +189,7 @@ pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
     }
 }
 
-pub fn ospf_ifsm_interface_down(oi: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_ifsm_interface_down(_oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
@@ -222,7 +222,7 @@ pub fn ospf_dr_election_dr(
     bdr: Option<Identity>,
     v: Vec<Identity>,
 ) -> Option<Identity> {
-    let dr_candidates: Vec<_> = v
+    let _dr_candidates: Vec<_> = v
         .clone()
         .into_iter()
         .filter(|ident| ident.is_declared_dr())
@@ -318,8 +318,8 @@ fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
     }
 
     if oi.is_multicast_if() {
-        if ((prev_state != IfsmState::DR && prev_state != IfsmState::Backup)
-            && (new_state == IfsmState::DR || new_state == IfsmState::Backup))
+        if (prev_state != IfsmState::DR && prev_state != IfsmState::Backup)
+            && (new_state == IfsmState::DR || new_state == IfsmState::Backup)
         {
             ospf_join_alldrouters(&oi.sock, oi.index);
         } else if (prev_state == IfsmState::DR || prev_state == IfsmState::Backup)

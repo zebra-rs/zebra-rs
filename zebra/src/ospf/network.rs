@@ -94,13 +94,14 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
         let cmsg = [socket::ControlMessage::Ipv4PacketInfo(&pktinfo)];
 
         sock.async_io(Interest::WRITABLE, |sock| {
-            let msg = socket::sendmsg(
+            socket::sendmsg(
                 sock.as_raw_fd(),
                 &iov,
                 &cmsg,
                 socket::MsgFlags::empty(),
                 Some(&sockaddr),
-            );
+            )
+            .unwrap();
             Ok(())
         })
         .await;

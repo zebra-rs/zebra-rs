@@ -36,7 +36,7 @@ fn netmask_to_plen(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
 }
 
-fn ospf_hello_twoway_check(router_id: &Ipv4Addr, nbr: &Neighbor, hello: &OspfHello) -> bool {
+fn ospf_hello_twoway_check(router_id: &Ipv4Addr, _nbr: &Neighbor, hello: &OspfHello) -> bool {
     hello.neighbors.iter().any(|neighbor| router_id == neighbor)
 }
 
@@ -277,6 +277,11 @@ pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet
     }
 }
 
-pub fn ospf_ls_req_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
+pub fn ospf_ls_req_recv(
+    _top: &OspfTop,
+    _oi: &mut OspfLink,
+    packet: &Ospfv2Packet,
+    _src: &Ipv4Addr,
+) {
     println!("LS REQ: {}", packet);
 }

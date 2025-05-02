@@ -7,11 +7,7 @@ use isis_packet::{IsisLsp, IsisLspId};
 
 use crate::isis::Message;
 
-use super::{
-    inst::IsisTop,
-    task::{Timer, TimerType},
-    Level,
-};
+use super::{inst::IsisTop, task::Timer, Level};
 
 #[derive(Default)]
 pub struct Lsdb {
@@ -40,7 +36,7 @@ impl Lsdb {
     }
 
     pub fn insert(&mut self, key: IsisLspId, value: IsisLsp) -> Option<Lsa> {
-        let mut lsa = Lsa::new(value);
+        let lsa = Lsa::new(value);
 
         self.map.insert(key, lsa)
     }
@@ -62,8 +58,8 @@ impl Lsdb {
     }
 }
 
-pub fn lsp_fan_out(top: &mut IsisTop, level: Level, lsp: &IsisLsp) {
-    for link in top.links.iter() {
+pub fn lsp_fan_out(top: &mut IsisTop, _level: Level, _lsp: &IsisLsp) {
+    for _link in top.links.iter() {
         // link.fan_out(level, lsp);
     }
 }
@@ -102,7 +98,17 @@ pub fn hold_timer(top: &mut IsisTop, level: Level, key: &IsisLspId, hold_time: u
     })
 }
 
-pub fn lsp_self_originate(top: &mut IsisTop, level: Level) {
+pub fn lsp_self_originate(_top: &mut IsisTop, _level: Level) {
+    // LSP generate for the level.
+
+    // Fanout.
+    // lsp_fan_out(top)
+
+    // Insert LSP.
+    //insert_self_originate(top, level, key, lsp);
+}
+
+pub fn lsp_self_originate_stop(_top: &mut IsisTop, _level: Level) {
     // LSP generate for the level.
 
     // Fanout.

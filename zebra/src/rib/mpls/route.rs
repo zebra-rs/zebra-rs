@@ -34,7 +34,7 @@ impl LspRoute {
 
         if self.nexthops.len() == 1 {
             let (p, n) = self.nexthops.iter().next()?;
-            let mut nhop = NexthopUni {
+            let nhop = NexthopUni {
                 addr: *p,
                 metric: n.metric.unwrap_or(metric),
                 ..Default::default()
@@ -60,7 +60,7 @@ impl LspRoute {
                 ..Default::default()
             };
             for (p, n) in set.iter() {
-                let mut nhop = NexthopUni {
+                let nhop = NexthopUni {
                     addr: *p,
                     metric: n.metric.unwrap_or(metric),
                     ..Default::default()
@@ -74,8 +74,8 @@ impl LspRoute {
                 if index == 0 {
                     entry.metric = *metric;
                 }
-                let (p, n) = set.first()?;
-                let mut nhop = NexthopUni {
+                let (p, _n) = set.first()?;
+                let nhop = NexthopUni {
                     addr: *p,
                     metric: *metric,
                     ..Default::default()
