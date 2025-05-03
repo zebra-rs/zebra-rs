@@ -16,8 +16,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
-use crate::isis::ifsm;
 use crate::isis::nfsm::isis_nfsm;
+use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, MacAddr};
@@ -32,14 +32,14 @@ use super::link::IsisLink;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
-use super::{process_packet, Level, Levels, Lsdb};
-use super::{IfsmEvent, NfsmEvent};
+use super::{process_packet, Level, Levels};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
 
 pub struct Isis {
-    ctx: Context,
+    pub ctx: Context,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub ptx: UnboundedSender<Message>,
@@ -50,18 +50,20 @@ pub struct Isis {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
+    pub is_type: IsLevel,
     pub l2lsp: Option<IsisLsp>,
     pub l2seqnum: u32,
-    pub is_type: IsLevel,
     pub l2lspgen: Option<Timer>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
+    pub hostname: Levels<Hostname>,
 }
 
 pub struct IsisTop<'a> {
     pub links: &'a mut BTreeMap<u32, IsisLink>,
-    pub lsdb: &'a mut Levels<Lsdb>,
     pub config: &'a IsisConfig,
+    pub lsdb: &'a mut Levels<Lsdb>,
+    pub hostname: &'a mut Levels<Hostname>,
     pub tx: &'a UnboundedSender<Message>,
 }
 
@@ -90,6 +92,7 @@ impl Isis {
             sock,
             config: IsisConfig::default(),
             lsdb: Levels::<Lsdb>::default(),
+            hostname: Levels::<Hostname>::default(),
             l2lsp: None,
             l2seqnum: 1,
             is_type: IsLevel::L1,
@@ -338,6 +341,18 @@ impl Isis {
                 };
                 isis_nfsm(nbr, ev, &None);
             }
+            Message::Lsdb(ev, level, key) => {
+                use LsdbEvent::*;
+                let mut top = self.top();
+                match ev {
+                    RefreshTimerExpire => {
+                        lsdb::refresh_lsp(&mut top, level, key);
+                    }
+                    HoldTimerExpire => {
+                        lsdb::remove_lsp(&mut top, level, key);
+                    }
+                }
+            }
             _ => {
                 //
             }
@@ -366,6 +381,7 @@ impl Isis {
         let top = IsisTop {
             links: &mut self.links,
             lsdb: &mut self.lsdb,
+            hostname: &mut self.hostname,
             config: &self.config,
             tx: &self.tx,
         };
@@ -394,6 +410,5 @@ pub enum Message {
     LinkTimer(u32),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, IsisSysId, NfsmEvent),
-    Refresh(Level, IsisLspId),
-    HoldTimeExpire(Level, IsisLspId),
+    Lsdb(LsdbEvent, Level, IsisLspId),
 }
