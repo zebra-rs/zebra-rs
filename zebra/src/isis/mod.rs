@@ -37,4 +37,7 @@ pub use level::*;
 pub mod srmpls;
 
 pub mod lsdb;
-pub use lsdb::Lsdb;
+pub use lsdb::{Lsdb, LsdbEvent};
+
+pub mod hostname;
+pub use hostname::Hostname;

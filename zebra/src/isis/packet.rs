@@ -8,7 +8,7 @@ use crate::isis::Message;
 use crate::rib::MacAddr;
 
 use super::inst::IsisTop;
-use super::lsdb::insert_lsp;
+use super::lsdb;
 use super::nfsm::{isis_nfsm, NfsmEvent};
 use super::Level;
 
@@ -65,7 +65,7 @@ pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: 
         return;
     };
 
-    let lsp = match (packet.pdu_type, packet.pdu) {
+    let mut lsp = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) | (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => pdu,
         _ => return,
     };
@@ -95,11 +95,10 @@ pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: 
         }
     }
 
-    let lsp_id = lsp.lsp_id.clone();
-    if lsp.hold_time != 0 {
-        insert_lsp(top, Level::L2, lsp_id, lsp);
+    if lsp.hold_time == 0 {
+        lsdb::remove_lsp(top, Level::L2, lsp.lsp_id);
     } else {
-        //
+        lsdb::insert_lsp(top, Level::L2, lsp.lsp_id, lsp);
     }
 }
 

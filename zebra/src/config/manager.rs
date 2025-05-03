@@ -290,8 +290,12 @@ impl ConfigManager {
             delete(paths, self.store.candidate.borrow().clone());
             (ExecCode::Show, String::from(""), state.paths)
         } else if state.show && state.paths.len() > 1 {
-            let paths = path_trim("run", state.paths.clone());
-            (ExecCode::RedirectShow, input.to_string(), paths)
+            if code != ExecCode::Success {
+                (code, String::from(""), state.paths)
+            } else {
+                let paths = path_trim("run", state.paths.clone());
+                (ExecCode::RedirectShow, input.to_string(), paths)
+            }
         } else {
             let path = paths_str(&state.paths);
             if let Some(f) = mode.fmap.get(&path) {

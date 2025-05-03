@@ -60,6 +60,7 @@ impl Timer {
         F: FnMut() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send,
     {
+        // println!("Timer create: duration {}", sec);
         let duration = Duration::new(sec, 0);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -72,6 +73,7 @@ impl Timer {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
+                        // println!("Timer expired {}", sec);
                         (cb)().await;
                         if typ == TimerType::Once {
                             break;
