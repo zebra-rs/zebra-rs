@@ -13,7 +13,7 @@ pub fn paths_str(paths: &[CommandPath]) -> String {
     s
 }
 
-pub fn path_trim(name: &str, mut paths: Vec<CommandPath>) -> Vec<CommandPath> {
+pub fn path_try_trim(name: &str, mut paths: Vec<CommandPath>) -> Vec<CommandPath> {
     if !paths.is_empty() && paths[0].name == name {
         paths.remove(0);
     }
