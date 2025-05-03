@@ -132,6 +132,10 @@ pub fn insert_self_originate(
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
+pub fn update_pseudo() {
+    //
+}
+
 pub fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     if let Some(tlv) = lsp.hostname_tlv() {
         top.hostname
@@ -143,8 +147,11 @@ pub fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp
 }
 
 pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp) -> Option<Lsa> {
-    update_lsp(top, level, key, &lsp);
-
+    if key.is_pseudo() {
+        update_pseudo();
+    } else {
+        update_lsp(top, level, key, &lsp);
+    }
     let hold_time = lsp.hold_time as u64;
     let mut lsa = Lsa::new(lsp);
     lsa.hold_timer = Some(hold_timer(top, level, key, hold_time));

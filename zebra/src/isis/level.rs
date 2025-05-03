@@ -45,20 +45,3 @@ impl<T> Levels<T> {
         }
     }
 }
-
-// #[derive(Debug)]
-// pub enum IsLevel {
-//     L1,
-//     L2,
-//     L1L2,
-// }
-
-// impl fmt::Display for IsLevel {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         match self {
-//             IsLevel::L1 => write!(f, "L1"),
-//             IsLevel::L2 => write!(f, "L2"),
-//             IsLevel::L1L2 => write!(f, "L1L2"),
-//         }
-//     }
-// }
