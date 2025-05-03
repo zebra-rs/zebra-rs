@@ -115,6 +115,10 @@ module exec {
           type empty;
         }
       }
+      leaf hostname {
+        ext:help "IS-IS hostname";
+        type empty;
+      }
       container database {
         ext:help "IS-IS database";
         presence "IS-IS database";

@@ -3,7 +3,7 @@ use std::fmt::Write;
 use isis_packet::{nlpid_str, IsisHello, IsisTlv, IsisTlvProtoSupported};
 use serde::Serialize;
 
-use super::{adj::Neighbor, inst::ShowCallback, Isis};
+use super::{adj::Neighbor, hostname, inst::ShowCallback, Isis};
 
 use crate::{config::Args, rib::MacAddr};
 
@@ -21,7 +21,7 @@ impl Isis {
         self.show_add("/show/isis/adjacency", show_isis_adjacency);
         self.show_add("/show/isis/database", show_isis_database);
         self.show_add("/show/isis/database/detail", show_isis_database_detail);
-        // self.show_add("/show/isis/hostname", hostname::show);
+        self.show_add("/show/isis/hostname", hostname::show);
     }
 }
 
