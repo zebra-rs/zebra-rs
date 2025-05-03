@@ -10,7 +10,7 @@ use super::json::json_read;
 use super::ospf::spawn_ospf;
 use super::parse::parse;
 use super::parse::State;
-use super::paths::{path_trim, paths_str};
+use super::paths::{path_try_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
 use super::{Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
@@ -272,38 +272,43 @@ impl ConfigManager {
 
     pub fn execute(&self, mode: &Mode, input: &str) -> (ExecCode, String, Vec<CommandPath>) {
         let state = State::new();
-        let (code, _comps, state) = parse(
-            input,
-            mode.entry.clone(),
-            Some(self.store.candidate.borrow().clone()),
-            state,
-        );
+
+        let candidate = self.store.candidate.borrow().clone();
+        let (code, _comps, state) =
+            parse(input, mode.entry.clone(), Some(candidate.clone()), state);
+
+        if code != ExecCode::Success {
+            return (code, String::new(), state.paths);
+        }
+
+        // Handle "set"
         if state.set {
-            if code != ExecCode::Success {
-                return (code, String::from(""), state.paths);
-            }
-            let paths = path_trim("set", state.paths.clone());
-            set(paths, self.store.candidate.borrow().clone());
-            (ExecCode::Show, String::from(""), state.paths)
-        } else if state.delete {
-            let paths = path_trim("delete", state.paths.clone());
-            delete(paths, self.store.candidate.borrow().clone());
-            (ExecCode::Show, String::from(""), state.paths)
-        } else if state.show && state.paths.len() > 1 {
-            if code != ExecCode::Success {
-                (code, String::from(""), state.paths)
-            } else {
-                let paths = path_trim("run", state.paths.clone());
-                (ExecCode::RedirectShow, input.to_string(), paths)
-            }
-        } else {
-            let path = paths_str(&state.paths);
-            if let Some(f) = mode.fmap.get(&path) {
+            let paths = path_try_trim("set", state.paths.clone());
+            set(paths, candidate);
+            return (ExecCode::Show, String::new(), state.paths);
+        }
+
+        // Handle "delete"
+        if state.delete {
+            let paths = path_try_trim("delete", state.paths.clone());
+            delete(paths, candidate);
+            return (ExecCode::Show, String::new(), state.paths);
+        }
+
+        // Handle "show"
+        if state.show {
+            let paths = path_try_trim("run", state.paths.clone());
+            return (ExecCode::RedirectShow, input.to_string(), paths);
+        }
+
+        // Default case: function dispatch or direct return
+        let path = paths_str(&state.paths);
+        match mode.fmap.get(&path) {
+            Some(f) => {
                 let (code, input) = f(self);
                 (code, input, state.paths)
-            } else {
-                (code, "".to_string(), state.paths)
             }
+            None => (code, String::new(), state.paths),
         }
     }
 
