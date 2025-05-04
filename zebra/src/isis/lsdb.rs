@@ -69,15 +69,7 @@ pub fn lsp_fan_out(top: &mut IsisTop, _level: Level, _lsp: &IsisLsp) {
     }
 }
 
-pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
-    if let Some(lsa) = top.lsdb.get(&level).get(&key) {
-        let lsp = lsa.lsp.clone_with_seqno_inc();
-        lsp_fan_out(top, level, &lsp);
-        insert_self_originate(top, level, key, lsp);
-    }
-}
-
-pub fn refresh_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
+fn refresh_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
     let tx = top.tx.clone();
     Timer::once(top.config.refresh_time(), move || {
         let tx = tx.clone();
@@ -89,7 +81,7 @@ pub fn refresh_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
     })
 }
 
-pub fn hold_timer(top: &mut IsisTop, level: Level, key: IsisLspId, hold_time: u64) -> Timer {
+fn hold_timer(top: &mut IsisTop, level: Level, key: IsisLspId, hold_time: u64) -> Timer {
     let tx = top.tx.clone();
     Timer::once(hold_time, move || {
         let tx = tx.clone();
@@ -121,22 +113,11 @@ pub fn lsp_self_originate_stop(_top: &mut IsisTop, _level: Level) {
     //insert_self_originate(top, level, key, lsp);
 }
 
-pub fn insert_self_originate(
-    top: &mut IsisTop,
-    level: Level,
-    key: IsisLspId,
-    lsp: IsisLsp,
-) -> Option<Lsa> {
-    let mut lsa = Lsa::new(lsp);
-    lsa.refresh_timer = Some(refresh_timer(top, level, key));
-    top.lsdb.get_mut(&level).map.insert(key, lsa)
-}
-
-pub fn update_pseudo() {
+fn update_pseudo() {
     //
 }
 
-pub fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
+fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     if let Some(tlv) = lsp.hostname_tlv() {
         top.hostname
             .get_mut(&level)
@@ -163,10 +144,29 @@ pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp)
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
+pub fn insert_self_originate(
+    top: &mut IsisTop,
+    level: Level,
+    key: IsisLspId,
+    lsp: IsisLsp,
+) -> Option<Lsa> {
+    let mut lsa = Lsa::new(lsp);
+    lsa.refresh_timer = Some(refresh_timer(top, level, key));
+    top.lsdb.get_mut(&level).map.insert(key, lsa)
+}
+
 pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key) {
         if let Some(tlv) = lsa.lsp.hostname_tlv() {
             top.hostname.get_mut(&level).remove(&key.sys_id());
         }
+    }
+}
+
+pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
+    if let Some(lsa) = top.lsdb.get(&level).get(&key) {
+        let lsp = lsa.lsp.clone_with_seqno_inc();
+        lsp_fan_out(top, level, &lsp);
+        insert_self_originate(top, level, key, lsp);
     }
 }
