@@ -117,6 +117,10 @@ module config {
           type inet:ipv4-address;
         }
 
+        leaf hostname {
+          type string;
+        }
+
         list interface {
           ext:sort "-1";
           key "if-name";

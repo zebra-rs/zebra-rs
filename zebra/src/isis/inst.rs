@@ -114,6 +114,8 @@ impl Isis {
     }
 
     pub fn l2lsp_gen(&mut self) -> Option<(IsisLsp, Timer)> {
+        let level = Level::L2;
+
         // LSP ID with no pseudo id and no fragmentation.
         let lsp_id = IsisLspId::new(self.config.net.sys_id(), 0, 0);
 
@@ -134,11 +136,11 @@ impl Isis {
         lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
 
         // Hostname.
-        let hostname = "zebra".to_string();
-        lsp.tlvs.push(IsisTlvHostname { hostname }.into());
+        let hostname = self.config.hostname();
         self.hostname
-            .get_mut(&Level::L2)
-            .insert_originate(self.config.net.sys_id(), "zebra".to_string());
+            .get_mut(&level)
+            .insert_originate(self.config.net.sys_id(), hostname.clone());
+        lsp.tlvs.push(IsisTlvHostname { hostname }.into());
 
         // Router capability. When TE-Router ID is configured, use the value. If
         // not when Router ID is configured, use the value. Otherwise system
