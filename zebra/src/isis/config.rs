@@ -7,10 +7,14 @@ use super::Isis;
 
 impl Isis {
     pub fn callback_build(&mut self) {
-        self.callback_add("/routing/isis/net", config_isis_net);
-        self.callback_add("/routing/isis/is-type", config_isis_is_type);
-        self.callback_add("/routing/isis/hostname", config_isis_hostname);
+        self.callback_add("/routing/isis/net", config_net);
+        self.callback_add("/routing/isis/is-type", config_is_type);
+        self.callback_add("/routing/isis/hostname", config_hostname);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
+        self.callback_add(
+            "/routing/isis/interface/circuit-type",
+            link::config_circuit_type,
+        );
     }
 }
 
@@ -18,6 +22,7 @@ impl Isis {
 pub struct IsisConfig {
     pub net: Nsap,
     pub hostname: Option<String>,
+    pub is_level: Option<IsLevel>,
     pub refresh_time: Option<u64>,
 }
 
@@ -25,35 +30,35 @@ pub struct IsisConfig {
 const DEFAULT_REFRESH_TIME: u64 = 15 * 60;
 
 impl IsisConfig {
-    pub fn refresh_time(&self) -> u64 {
-        self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
+    pub fn is_level(&self) -> IsLevel {
+        self.is_level.unwrap_or(IsLevel::L1L2)
     }
 
     pub fn hostname(&self) -> String {
         self.hostname.clone().unwrap_or("default".into())
     }
+
+    pub fn refresh_time(&self) -> u64 {
+        self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
+    }
 }
 
-fn config_isis_net(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
-    let net = args.string()?;
-    let nsap = net.parse::<Nsap>().unwrap();
+fn config_net(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
+    let nsap = args.string()?.parse::<Nsap>().unwrap();
 
-    println!("NET {}", nsap);
     isis.config.net = nsap;
 
     Some(())
 }
 
-fn config_isis_is_type(_isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
-    let is_type_str = args.string()?;
-
-    let is_type = is_type_str.parse::<IsLevel>().ok()?;
-    println!("IS-TYPE {:?}", is_type);
+fn config_is_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
+    let is_level = args.string()?.parse::<IsLevel>().ok()?;
+    isis.config.is_level = Some(is_level);
 
     Some(())
 }
 
-fn config_isis_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let hostname = args.string()?;
 
     if op == ConfigOp::Set {
