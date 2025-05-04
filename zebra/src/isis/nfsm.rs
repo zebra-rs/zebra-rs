@@ -83,7 +83,8 @@ pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
         let tx = tx.clone();
         let sysid = sysid.clone();
         async move {
-            tx.send(Message::Nfsm(ifindex, sysid, NfsmEvent::HoldTimerExpire))
+            use NfsmEvent::*;
+            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid))
                 .unwrap();
         }
     })
@@ -114,18 +115,18 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Op
     let mut state = nbr.state;
 
     if state == NfsmState::Down {
-        nbr.event(Message::Ifsm(nbr.ifindex, HelloUpdate));
+        nbr.event(Message::Ifsm(HelloUpdate, nbr.ifindex));
         state = NfsmState::Init;
     }
 
     if state == NfsmState::Init {
         if isis_hello_has_mac(&nbr.pdu, mac) {
-            nbr.event(Message::Ifsm(nbr.ifindex, DisSelection));
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex));
             state = NfsmState::Up;
         }
     } else {
         if !isis_hello_has_mac(&nbr.pdu, mac) {
-            nbr.event(Message::Ifsm(nbr.ifindex, DisSelection));
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex));
             state = NfsmState::Init;
         }
     }
@@ -150,11 +151,11 @@ pub fn isis_nfsm_hold_timer_expire(
     nbr.hold_timer = None;
 
     if nbr.state == NfsmState::Up {
-        nbr.event(Message::Ifsm(nbr.ifindex, HelloUpdate));
-        nbr.event(Message::Ifsm(nbr.ifindex, DisSelection));
+        nbr.event(Message::Ifsm(HelloUpdate, nbr.ifindex));
+        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex));
     }
     if nbr.state == NfsmState::Init {
-        nbr.event(Message::Ifsm(nbr.ifindex, HelloUpdate));
+        nbr.event(Message::Ifsm(HelloUpdate, nbr.ifindex));
     }
 
     Some(NfsmState::Down)

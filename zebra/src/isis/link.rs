@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::default;
 
 use super::addr::IsisAddr;
 use super::adj::Neighbor;
@@ -11,6 +12,7 @@ use isis_packet::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::config::{Args, ConfigOp};
 use crate::isis::nfsm::NfsmState;
 use crate::rib::{Link, MacAddr};
 
@@ -20,6 +22,12 @@ pub struct LinkTimer {
 }
 
 pub struct Graph {}
+
+#[derive(Default, Debug)]
+pub struct Afis<T> {
+    pub v4: T,
+    pub v6: T,
+}
 
 #[derive(Debug)]
 pub struct IsisLink {
@@ -33,11 +41,12 @@ pub struct IsisLink {
     pub l2adj: Option<IsisLspId>,
     pub l2dis: Option<IsisSysId>,
     pub l2hello: Option<IsisHello>,
-    pub l2priority: u8,
+    // pub l2priority: u8,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub timer: LinkTimer,
     pub state: LinkState,
+    pub config: LinkConfig,
 }
 
 // Window for reference IsisLink from worker.
@@ -45,8 +54,19 @@ pub struct LinkTop {
     //
 }
 
+#[derive(Default, Debug)]
 pub struct LinkConfig {
-    //
+    pub enable: Afis<bool>,
+    pub priority: Option<u8>,
+}
+
+// Default priority is 64.
+const DEFAULT_PRIORITY: u8 = 64;
+
+impl LinkConfig {
+    pub fn priority(&self) -> u8 {
+        self.priority.unwrap_or(DEFAULT_PRIORITY)
+    }
 }
 
 // Mutable data during operation.
@@ -84,11 +104,12 @@ impl IsisLink {
             l2adj: None,
             l2dis: None,
             l2hello: None,
-            l2priority: 63,
+            // l2priority: 63,
             timer: LinkTimer::default(),
             tx,
             ptx,
             state: LinkState::default(),
+            config: LinkConfig::default(),
         }
     }
 
@@ -101,7 +122,7 @@ impl IsisLink {
             },
             hold_time: 30,
             pdu_len: 0,
-            priority: self.l2priority,
+            priority: self.config.priority(),
             lan_id: IsisNeighborId { id: [0u8; 7] },
             tlvs: Vec::new(),
         };
@@ -227,4 +248,10 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
             tx.send(Message::LinkTimer(index)).unwrap();
         }
     })
+}
+
+pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ifname = args.string()?;
+    let priority = args.u8()?;
+    Some(())
 }

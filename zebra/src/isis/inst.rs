@@ -222,7 +222,7 @@ impl Isis {
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        // println!("XX path {} args {:?}", path, args);
+        println!("XX path {} args {:?}", path, args);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
@@ -315,7 +315,7 @@ impl Isis {
             Message::LinkTimer(ifindex) => {
                 self.hello_send(ifindex);
             }
-            Message::Ifsm(ifindex, ev) => {
+            Message::Ifsm(ev, ifindex) => {
                 println!("ifindex {}  ev {:?}", ifindex, ev);
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
@@ -336,7 +336,7 @@ impl Isis {
                     }
                 }
             }
-            Message::Nfsm(ifindex, sysid, ev) => {
+            Message::Nfsm(ev, ifindex, sysid) => {
                 println!("ifindex {} sysid {:?} ev {:?}", ifindex, sysid, ev);
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
@@ -413,7 +413,7 @@ pub enum Message {
     Send(IsisPacket, u32),
     LspUpdate(Level, u32),
     LinkTimer(u32),
-    Ifsm(u32, IfsmEvent),
-    Nfsm(u32, IsisSysId, NfsmEvent),
+    Ifsm(IfsmEvent, u32),
+    Nfsm(NfsmEvent, u32, IsisSysId),
     Lsdb(LsdbEvent, Level, IsisLspId),
 }
