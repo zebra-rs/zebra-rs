@@ -28,7 +28,7 @@ use crate::{
 };
 
 use super::config::IsisConfig;
-use super::link::IsisLink;
+use super::link::{IsisLink, IsisLinks};
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
@@ -46,7 +46,8 @@ pub struct Isis {
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
     pub rib_rx: UnboundedReceiver<RibRx>,
-    pub links: BTreeMap<u32, IsisLink>,
+    // pub links: BTreeMap<u32, IsisLink>,
+    pub links: IsisLinks,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
@@ -60,11 +61,11 @@ pub struct Isis {
 }
 
 pub struct IsisTop<'a> {
-    pub links: &'a mut BTreeMap<u32, IsisLink>,
+    pub tx: &'a UnboundedSender<Message>,
+    pub links: &'a mut IsisLinks,
     pub config: &'a IsisConfig,
     pub lsdb: &'a mut Levels<Lsdb>,
     pub hostname: &'a mut Levels<Hostname>,
-    pub tx: &'a UnboundedSender<Message>,
 }
 
 impl Isis {
@@ -86,7 +87,7 @@ impl Isis {
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
-            links: BTreeMap::new(),
+            links: IsisLinks::default(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             sock,
@@ -184,7 +185,7 @@ impl Isis {
         lsp.tlvs.push(te_router_id.into());
 
         // IS Reachability.
-        for (_, link) in &self.links {
+        for (_, link) in self.links.iter() {
             let Some(adj) = &link.l2adj else {
                 continue;
             };
