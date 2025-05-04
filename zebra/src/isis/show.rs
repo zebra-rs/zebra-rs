@@ -61,7 +61,7 @@ struct NeighborBrief {
 fn show_isis_neighbor(top: &Isis, _args: Args, json: bool) -> String {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
-    for (_, link) in &top.links {
+    for (_, link) in top.links.iter() {
         for (_, nbr) in &link.l2nbrs {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             nbrs.push(NeighborBrief {
@@ -212,7 +212,7 @@ fn show_isis_neighbor_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
 fn show_isis_neighbor_detail(top: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (_, link) in &top.links {
+    for (_, link) in top.links.iter() {
         for (_, adj) in &link.l2nbrs {
             show_isis_neighbor_entry(&mut buf, top, adj);
         }
@@ -224,7 +224,7 @@ fn show_isis_neighbor_detail(top: &Isis, _args: Args, _json: bool) -> String {
 fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (_, link) in &top.links {
+    for (_, link) in top.links.iter() {
         if let Some(dis) = &link.l2dis {
             writeln!(buf, "Interface: {}", top.ifname(link.ifindex)).unwrap();
             writeln!(buf, "  DIS: {}", dis);

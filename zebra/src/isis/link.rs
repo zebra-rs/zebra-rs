@@ -1,3 +1,4 @@
+use std::collections::btree_map::Iter;
 use std::collections::BTreeMap;
 use std::default;
 
@@ -29,6 +30,29 @@ pub struct Afis<T> {
     pub v6: T,
 }
 
+#[derive(Debug, Default)]
+pub struct IsisLinks {
+    pub map: BTreeMap<u32, IsisLink>,
+}
+
+impl IsisLinks {
+    pub fn get(&self, key: &u32) -> Option<&IsisLink> {
+        self.map.get(&key)
+    }
+
+    pub fn get_mut(&mut self, key: &u32) -> Option<&mut IsisLink> {
+        self.map.get_mut(key)
+    }
+
+    pub fn insert(&mut self, key: u32, value: IsisLink) -> Option<IsisLink> {
+        self.map.insert(key, value)
+    }
+
+    pub fn iter(&self) -> Iter<'_, u32, IsisLink> {
+        self.map.iter()
+    }
+}
+
 #[derive(Debug)]
 pub struct IsisLink {
     pub ifindex: u32,
@@ -41,7 +65,6 @@ pub struct IsisLink {
     pub l2adj: Option<IsisLspId>,
     pub l2dis: Option<IsisSysId>,
     pub l2hello: Option<IsisHello>,
-    // pub l2priority: u8,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub timer: LinkTimer,
@@ -50,9 +73,9 @@ pub struct IsisLink {
 }
 
 // Window for reference IsisLink from worker.
-pub struct LinkTop {
-    //
-}
+// pub struct LinkTop {
+//     //
+// }
 
 #[derive(Default, Debug)]
 pub struct LinkConfig {
@@ -253,5 +276,6 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
 pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ifname = args.string()?;
     let priority = args.u8()?;
+
     Some(())
 }
