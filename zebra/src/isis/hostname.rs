@@ -10,7 +10,7 @@ use crate::isis::{Isis, Level};
 #[derive(Default, Serialize)]
 pub struct Hostname {
     // (String, bool) where String=hostname, bool=originate
-    pub map: BTreeMap<IsisSysId, (String, bool)>,
+    map: BTreeMap<IsisSysId, (String, bool)>,
 }
 
 impl Hostname {

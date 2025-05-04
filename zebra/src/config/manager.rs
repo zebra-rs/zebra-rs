@@ -296,7 +296,7 @@ impl ConfigManager {
         }
 
         // Handle "show"
-        if state.show {
+        if state.show && state.paths.len() > 1 {
             let paths = path_try_trim("run", state.paths.clone());
             return (ExecCode::RedirectShow, input.to_string(), paths);
         }
