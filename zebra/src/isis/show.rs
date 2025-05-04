@@ -140,15 +140,6 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
     }
 }
 
-fn proto(pdu: &IsisHello) -> Option<&IsisTlvProtoSupported> {
-    for tlv in &pdu.tlvs {
-        if let IsisTlv::ProtoSupported(proto) = tlv {
-            return Some(proto);
-        }
-    }
-    None
-}
-
 fn show_isis_neighbor_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
     writeln!(buf, " {}", nbr.pdu.source_id).unwrap();
 
@@ -163,7 +154,7 @@ fn show_isis_neighbor_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
 
     write!(buf, "    Circuit type: {}, Speaks:", nbr.pdu.circuit_type,).unwrap();
 
-    if let Some(proto) = proto(&nbr.pdu) {
+    if let Some(proto) = &nbr.pdu.proto_tlv() {
         for (i, nlpid) in proto.nlpids.iter().enumerate() {
             if i != 0 {
                 write!(buf, ", {}", nlpid_str(*nlpid)).unwrap();
