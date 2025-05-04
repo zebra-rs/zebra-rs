@@ -223,7 +223,7 @@ impl Isis {
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        println!("XX path {} args {:?}", path, args);
+        //println!("XX path {} args {:?}", path, args);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
@@ -366,6 +366,13 @@ impl Isis {
     }
 
     pub async fn event_loop(&mut self) {
+        loop {
+            match self.rib_rx.recv().await {
+                Some(RibRx::EoR) => break,
+                Some(msg) => self.process_rib_msg(msg),
+                None => break,
+            }
+        }
         loop {
             tokio::select! {
                 Some(msg) = self.rib_rx.recv() => {

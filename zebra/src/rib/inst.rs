@@ -73,13 +73,14 @@ impl Rib {
         // Link dump.
         for (_, link) in self.links.iter() {
             let msg = RibRx::LinkAdd(link.clone());
-            let _ = tx.send(msg);
+            tx.send(msg).unwrap();
             for addr in link.addr4.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
-                let _ = tx.send(msg);
+                tx.send(msg).unwrap();
             }
         }
-        self.redists.push(tx);
+        self.redists.push(tx.clone());
+        tx.send(RibRx::EoR).unwrap();
     }
 
     async fn process_msg(&mut self, msg: Message) {

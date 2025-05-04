@@ -6,7 +6,7 @@ use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
 use std::fmt::{self, Write};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Link {
     pub index: u32,
     pub name: String,
@@ -59,14 +59,14 @@ impl Link {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkAddr {
     pub addr: IpNet,
     pub ifindex: u32,
     pub secondary: bool,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkAddr4 {
     pub ifaddr: Ipv4Net,
     pub ifindex: u32,
@@ -108,7 +108,7 @@ impl fmt::Display for LinkType {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkFlags(pub u32);
 
 pub const IFF_UP: u32 = 1 << 0;
