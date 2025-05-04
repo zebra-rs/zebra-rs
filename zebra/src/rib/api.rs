@@ -44,11 +44,13 @@ impl RibRxChannel {
 }
 
 // Message from rib to protocol module.
+#[derive(PartialEq)]
 pub enum RibRx {
     LinkAdd(Link),
     LinkDel(Link),
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
+    EoR,
 }
 
 impl Rib {

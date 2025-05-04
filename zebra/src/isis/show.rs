@@ -3,8 +3,9 @@ use std::fmt::Write;
 use isis_packet::{nlpid_str, IsisHello, IsisTlv, IsisTlvProtoSupported};
 use serde::Serialize;
 
-use super::{adj::Neighbor, hostname, inst::ShowCallback, Isis};
+use super::{adj::Neighbor, inst::ShowCallback, Isis};
 
+use crate::isis::{hostname, link};
 use crate::{config::Args, rib::MacAddr};
 
 impl Isis {
@@ -15,7 +16,8 @@ impl Isis {
     pub fn show_build(&mut self) {
         self.show_add("/show/isis", show_isis);
         self.show_add("/show/isis/summary", show_isis_summary);
-        self.show_add("/show/isis/interface", show_isis_interface);
+        self.show_add("/show/isis/interface", link::show);
+        self.show_add("/show/isis/interface/detail", link::show_detail);
         self.show_add("/show/isis/neighbor", show_isis_neighbor);
         self.show_add("/show/isis/neighbor/detail", show_isis_neighbor_detail);
         self.show_add("/show/isis/adjacency", show_isis_adjacency);
@@ -31,10 +33,6 @@ fn show_isis(_isis: &Isis, _args: Args, _json: bool) -> String {
 
 fn show_isis_summary(_isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis summary")
-}
-
-fn show_isis_interface(_isis: &Isis, _args: Args, _json: bool) -> String {
-    String::from("show isis interface")
 }
 
 fn show_mac(mac: Option<MacAddr>) -> String {

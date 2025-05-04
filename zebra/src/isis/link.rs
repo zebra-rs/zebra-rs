@@ -44,6 +44,14 @@ impl IsisLinks {
         self.map.get_mut(key)
     }
 
+    pub fn get_by_name(&self, name: &str) -> Option<&IsisLink> {
+        self.map.values().find(|link| link.name == name)
+    }
+
+    pub fn get_mut_by_name(&mut self, name: &str) -> Option<&mut IsisLink> {
+        self.map.values_mut().find(|link| link.name == name)
+    }
+
     pub fn insert(&mut self, key: u32, value: IsisLink) -> Option<IsisLink> {
         self.map.insert(key, value)
     }
@@ -71,11 +79,6 @@ pub struct IsisLink {
     pub state: LinkState,
     pub config: LinkConfig,
 }
-
-// Window for reference IsisLink from worker.
-// pub struct LinkTop {
-//     //
-// }
 
 #[derive(Default, Debug)]
 pub struct LinkConfig {
@@ -137,7 +140,6 @@ impl IsisLink {
     }
 
     pub fn hello_update(&mut self) {
-        println!("Hello update");
         let mut hello = IsisHello {
             circuit_type: IsLevel::L1L2,
             source_id: IsisSysId {
@@ -274,8 +276,19 @@ pub fn isis_link_timer(link: &IsisLink) -> Timer {
 }
 
 pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let ifname = args.string()?;
+    let name = args.string()?;
     let priority = args.u8()?;
 
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.priority = Some(priority);
+
     Some(())
+}
+
+pub fn show(_isis: &Isis, _args: Args, _json: bool) -> String {
+    String::from("show isis interface")
+}
+
+pub fn show_detail(_isis: &Isis, _args: Args, _json: bool) -> String {
+    String::from("show isis interface detail")
 }

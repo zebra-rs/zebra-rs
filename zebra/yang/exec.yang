@@ -99,6 +99,14 @@ module exec {
         ext:help "IS-IS summary";
         type empty;
       }
+      container interface {
+        ext:help "IS-IS interface";
+        presence "IS-IS interface";
+        leaf detail {
+          ext:help "IS-IS interface detail";
+          type empty;
+        }
+      }
       container adjacency {
         ext:help "IS-IS adjacency";
         presence "IS-IS adjacency";
