@@ -18,13 +18,8 @@ impl Hostname {
         self.map.insert(key, (hostname, false))
     }
 
-    pub fn insert_originate(
-        &mut self,
-        key: IsisSysId,
-        hostname: String,
-        originate: bool,
-    ) -> Option<(String, bool)> {
-        self.map.insert(key, (hostname, originate))
+    pub fn insert_originate(&mut self, key: IsisSysId, hostname: String) -> Option<(String, bool)> {
+        self.map.insert(key, (hostname, true))
     }
 
     pub fn remove(&mut self, key: &IsisSysId) -> Option<(String, bool)> {

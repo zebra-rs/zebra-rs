@@ -136,6 +136,9 @@ impl Isis {
         // Hostname.
         let hostname = "zebra".to_string();
         lsp.tlvs.push(IsisTlvHostname { hostname }.into());
+        self.hostname
+            .get_mut(&Level::L2)
+            .insert_originate(self.config.net.sys_id(), "zebra".to_string());
 
         // Router capability. When TE-Router ID is configured, use the value. If
         // not when Router ID is configured, use the value. Otherwise system
