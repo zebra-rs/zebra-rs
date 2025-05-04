@@ -1,6 +1,7 @@
 use std::collections::btree_map::Iter;
 use std::collections::BTreeMap;
 use std::default;
+use std::fmt::Write;
 
 use super::addr::IsisAddr;
 use super::adj::Neighbor;
@@ -83,6 +84,7 @@ pub struct IsisLink {
 #[derive(Default, Debug)]
 pub struct LinkConfig {
     pub enable: Afis<bool>,
+    pub is_level: Option<IsLevel>,
     pub priority: Option<u8>,
 }
 
@@ -90,6 +92,10 @@ pub struct LinkConfig {
 const DEFAULT_PRIORITY: u8 = 64;
 
 impl LinkConfig {
+    pub fn is_level(&self) -> IsLevel {
+        self.is_level.unwrap_or(IsLevel::L1L2)
+    }
+
     pub fn priority(&self) -> u8 {
         self.priority.unwrap_or(DEFAULT_PRIORITY)
     }
@@ -130,7 +136,6 @@ impl IsisLink {
             l2adj: None,
             l2dis: None,
             l2hello: None,
-            // l2priority: 63,
             timer: LinkTimer::default(),
             tx,
             ptx,
@@ -285,10 +290,26 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
+pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let is_level = args.string()?.parse::<IsLevel>().ok()?;
+
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.is_level = Some(is_level);
+
+    Some(())
+}
+
 pub fn show(_isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis interface")
 }
 
-pub fn show_detail(_isis: &Isis, _args: Args, _json: bool) -> String {
-    String::from("show isis interface detail")
+pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
+    let mut buf = String::new();
+    for (ifindex, link) in isis.links.iter() {
+        // if link.is_enabled() {
+        //     writeln!(buf, "{} priority {}", link.name, link.config.priority()).unwrap();
+        // }
+    }
+    buf
 }

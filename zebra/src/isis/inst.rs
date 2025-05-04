@@ -46,12 +46,10 @@ pub struct Isis {
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
     pub rib_rx: UnboundedReceiver<RibRx>,
-    // pub links: BTreeMap<u32, IsisLink>,
     pub links: IsisLinks,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub is_type: IsLevel,
     pub l2lsp: Option<IsisLsp>,
     pub l2seqnum: u32,
     pub l2lspgen: Option<Timer>,
@@ -96,7 +94,6 @@ impl Isis {
             hostname: Levels::<Hostname>::default(),
             l2lsp: None,
             l2seqnum: 1,
-            is_type: IsLevel::L1,
             l2lspgen: None,
         };
         isis.callback_build();
