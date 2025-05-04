@@ -84,7 +84,7 @@ pub struct IsisLink {
 #[derive(Default, Debug)]
 pub struct LinkConfig {
     pub enable: Afis<bool>,
-    pub is_level: Option<IsLevel>,
+    pub circuit_type: Option<IsLevel>,
     pub priority: Option<u8>,
 }
 
@@ -92,8 +92,8 @@ pub struct LinkConfig {
 const DEFAULT_PRIORITY: u8 = 64;
 
 impl LinkConfig {
-    pub fn is_level(&self) -> IsLevel {
-        self.is_level.unwrap_or(IsLevel::L1L2)
+    pub fn circuit_type(&self) -> IsLevel {
+        self.circuit_type.unwrap_or(IsLevel::L1L2)
     }
 
     pub fn priority(&self) -> u8 {
@@ -104,6 +104,7 @@ impl LinkConfig {
 // Mutable data during operation.
 #[derive(Default, Debug)]
 pub struct LinkState {
+    pub is_level: IsLevel,
     pub packets: Direction<LinkStats>,
     pub unknown_rx: u64,
 }
@@ -290,12 +291,46 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
-pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let is_level = args.string()?.parse::<IsLevel>().ok()?;
+    let enable = args.boolean()?;
 
     let link = isis.links.get_mut_by_name(&name)?;
-    link.config.is_level = Some(is_level);
+
+    if op.is_set() {
+        //
+    }
+
+    Some(())
+}
+
+pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let enable = args.boolean()?;
+
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    Some(())
+}
+
+pub fn is_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
+    use IsLevel::*;
+    match inst {
+        L1L2 => link,
+        L1 => L1,
+        L2 => L2,
+    }
+}
+
+pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let circuit_type = args.string()?.parse::<IsLevel>().ok()?;
+
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.circuit_type = Some(circuit_type);
+
+    let is_level = is_level_common(isis.config.is_type(), link.config.circuit_type());
+    link.state.is_level = is_level;
 
     Some(())
 }
@@ -307,6 +342,7 @@ pub fn show(_isis: &Isis, _args: Args, _json: bool) -> String {
 pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
     for (ifindex, link) in isis.links.iter() {
+        writeln!(buf, "{} priority {}", link.name, link.state.is_level).unwrap();
         // if link.is_enabled() {
         //     writeln!(buf, "{} priority {}", link.name, link.config.priority()).unwrap();
         // }

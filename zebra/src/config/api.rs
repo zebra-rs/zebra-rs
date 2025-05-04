@@ -18,6 +18,12 @@ pub enum ConfigOp {
     Completion,
 }
 
+impl ConfigOp {
+    pub fn is_set(&self) -> bool {
+        *self == ConfigOp::Set
+    }
+}
+
 #[derive(Debug)]
 pub struct ConfigRequest {
     pub paths: Vec<CommandPath>,
