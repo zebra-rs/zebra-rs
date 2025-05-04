@@ -136,6 +136,10 @@ module config {
             }
           }
 
+          leaf priority {
+            type uint8;
+          }
+
           container ipv4 {
             leaf enable {
               type boolean;

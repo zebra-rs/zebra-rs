@@ -13,7 +13,7 @@ pub enum IfsmEvent {
 
 pub fn dis_selection(link: &mut IsisLink) {
     let mut dis: Option<IsisSysId> = None;
-    let mut priority = link.l2priority;
+    let mut priority = link.config.priority();
     for (_, nbr) in &link.l2nbrs {
         if nbr.state != NfsmState::Up {
             continue;

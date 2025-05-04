@@ -2,6 +2,7 @@ use isis_packet::{IsLevel, Nsap};
 
 use crate::config::{Args, ConfigOp};
 
+use super::link;
 use super::Isis;
 
 impl Isis {
@@ -9,6 +10,7 @@ impl Isis {
         self.callback_add("/routing/isis/net", config_isis_net);
         self.callback_add("/routing/isis/is-type", config_isis_is_type);
         self.callback_add("/routing/isis/hostname", config_isis_hostname);
+        self.callback_add("/routing/isis/interface/priority", link::config_priority);
     }
 }
 
