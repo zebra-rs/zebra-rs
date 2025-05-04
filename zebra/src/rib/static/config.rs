@@ -140,11 +140,11 @@ fn config_builder() -> ConfigBuilder {
 
     ConfigBuilder::default()
         .path("/routing/static/ipv4/route")
-        .set(|config, cache, prefix, _| {
+        .set(|config, cache, prefix, _args| {
             let _ = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
             Ok(())
         })
-        .del(|config, cache, prefix, _| {
+        .del(|config, cache, prefix, _args| {
             if let Some(st) = cache.get_mut(prefix) {
                 st.delete = true;
             } else {
@@ -160,7 +160,7 @@ fn config_builder() -> ConfigBuilder {
             s.metric = Some(args.u32().context(METRIC_ERR)?);
             Ok(())
         })
-        .del(|config, cache, prefix, _| {
+        .del(|config, cache, prefix, _args| {
             let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             s.metric = None;
             Ok(())
@@ -171,7 +171,7 @@ fn config_builder() -> ConfigBuilder {
             s.distance = Some(args.u8().context(DISTANCE_ERR)?);
             Ok(())
         })
-        .del(|config, cache, prefix, _| {
+        .del(|config, cache, prefix, _args| {
             let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
             s.distance = None;
             Ok(())

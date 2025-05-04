@@ -15,6 +15,14 @@ impl Isis {
             "/routing/isis/interface/circuit-type",
             link::config_circuit_type,
         );
+        self.callback_add(
+            "/routing/isis/interface/ipv4/enable",
+            link::config_ipv4_enable,
+        );
+        self.callback_add(
+            "/routing/isis/interface/ipv6/enable",
+            link::config_ipv6_enable,
+        );
     }
 }
 
@@ -22,7 +30,7 @@ impl Isis {
 pub struct IsisConfig {
     pub net: Nsap,
     pub hostname: Option<String>,
-    pub is_level: Option<IsLevel>,
+    pub is_type: Option<IsLevel>,
     pub refresh_time: Option<u64>,
 }
 
@@ -30,8 +38,8 @@ pub struct IsisConfig {
 const DEFAULT_REFRESH_TIME: u64 = 15 * 60;
 
 impl IsisConfig {
-    pub fn is_level(&self) -> IsLevel {
-        self.is_level.unwrap_or(IsLevel::L1L2)
+    pub fn is_type(&self) -> IsLevel {
+        self.is_type.unwrap_or(IsLevel::L1L2)
     }
 
     pub fn hostname(&self) -> String {
@@ -51,10 +59,17 @@ fn config_net(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-fn config_is_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
-    let is_level = args.string()?.parse::<IsLevel>().ok()?;
-    isis.config.is_level = Some(is_level);
-
+fn config_is_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let prev = isis.config.is_type();
+    if op.is_set() {
+        let is_type = args.string()?.parse::<IsLevel>().ok()?;
+        isis.config.is_type = Some(is_type);
+    } else {
+        isis.config.is_type = None;
+    }
+    if prev != isis.config.is_type() {
+        // TODO
+    }
     Some(())
 }
 
