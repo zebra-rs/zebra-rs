@@ -89,10 +89,8 @@ impl IsisLinks {
 pub struct IsisLink {
     pub mtu: u32,
     pub mac: Option<MacAddr>,
-    // pub l2nbrs: BTreeMap<IsisSysId, Neighbor>,
     pub l2adj: Option<IsisLspId>,
     pub l2dis: Option<IsisSysId>,
-    pub l2hello: Option<IsisHello>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub config: LinkConfig,
@@ -177,10 +175,9 @@ impl IsisLink {
         let mut is_link = Self {
             mtu: link.mtu,
             mac: link.mac,
-            // l2nbrs: BTreeMap::new(),
             l2adj: None,
             l2dis: None,
-            l2hello: None,
+            // l2hello: None,
             tx,
             ptx,
             config: LinkConfig::default(),
@@ -254,17 +251,20 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
 
     let link = isis.links.get_mut_by_name(&name)?;
 
+    // Currently IS-IS is enabled on this interface.
     let enabled = link.config.enabled();
 
     if op.is_set() && enable {
         // Set Enable.
         if !*link.config.enable.get(&afi) {
             *link.config.enable.get_mut(&afi) = true;
+            *isis.config.enable.get_mut(&afi) += 1;
         }
     } else {
         // Set Disable.
         if *link.config.enable.get(&afi) {
             *link.config.enable.get_mut(&afi) = false;
+            *isis.config.enable.get_mut(&afi) -= 1;
         }
     }
 

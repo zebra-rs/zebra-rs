@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use isis_packet::{
-    IsLevel, IsisHello, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
-    IsisTlvIpv4IfAddr, IsisTlvProtoSupported, IsisType,
+    IsLevel, IsisHello, IsisNeighborId, IsisPacket, IsisPdu, IsisProto, IsisSysId, IsisTlvAreaAddr,
+    IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
 };
 
-use crate::isis::Level;
-
-use super::{link::LinkTop, task::Timer, IsisLink, Message, NfsmState};
+use super::link::{Afis, LinkTop};
+use super::task::Timer;
+use super::{IsisLink, Level, Message, NfsmState};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum IfsmEvent {
@@ -20,7 +20,18 @@ pub enum IfsmEvent {
     LspSend,
 }
 
-pub fn hello_gen(top: &LinkTop, level: Level) -> IsisHello {
+pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
+    let mut nlpids = vec![];
+    if enable.v4 > 0 {
+        nlpids.push(IsisProto::Ipv4.into());
+    }
+    if enable.v6 > 0 {
+        nlpids.push(IsisProto::Ipv6.into());
+    }
+    IsisTlvProtoSupported { nlpids }
+}
+
+pub fn hello_generate(top: &LinkTop, level: Level) -> IsisHello {
     let source_id = top.up_config.net.sys_id();
     let mut hello = IsisHello {
         circuit_type: top.state.level,
@@ -28,11 +39,12 @@ pub fn hello_gen(top: &LinkTop, level: Level) -> IsisHello {
         hold_time: top.config.hold_time(),
         pdu_len: 0,
         priority: top.config.priority(),
-        lan_id: IsisNeighborId { id: [0u8; 7] },
+        lan_id: IsisNeighborId::default(),
         tlvs: Vec::new(),
     };
-    let tlv = IsisTlvProtoSupported { nlpids: vec![0xcc] };
+    let tlv = proto_supported(&top.up_config.enable);
     hello.tlvs.push(tlv.into());
+
     let area_addr = vec![0x49, 0, 1];
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
@@ -45,18 +57,18 @@ pub fn hello_gen(top: &LinkTop, level: Level) -> IsisHello {
         );
     }
 
-    // for (_, nbr) in &self.l2nbrs {
-    //     if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
-    //         if let Some(mac) = nbr.mac {
-    //             hello.tlvs.push(
-    //                 IsisTlvIsNeighbor {
-    //                     octets: mac.octets(),
-    //                 }
-    //                 .into(),
-    //             );
-    //         }
-    //     }
-    // }
+    for (_, nbr) in &top.state.nbrs.l2 {
+        if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
+            if let Some(mac) = nbr.mac {
+                hello.tlvs.push(
+                    IsisTlvIsNeighbor {
+                        octets: mac.octets(),
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
     hello
 }
 
@@ -91,20 +103,26 @@ fn has_level(is_level: IsLevel, level: Level) -> bool {
     }
 }
 
+pub fn hello_originate(top: &mut LinkTop, level: Level) {
+    let hello = hello_generate(top, level);
+    *top.state.hello.get_mut(&level) = Some(hello);
+    hello_send(top, level);
+    *top.timer.hello.get_mut(&level) = Some(hello_timer(top, level));
+}
+
 pub fn start(top: &mut LinkTop) {
     for level in [Level::L1, Level::L2] {
         if has_level(top.state.level, level) {
-            println!("XX start {}", level);
-            let hello = hello_gen(top, level);
-            *top.state.hello.get_mut(&level) = Some(hello);
-            hello_send(top, level);
-            *top.timer.hello.get_mut(&level) = Some(hello_timer(top, level));
+            hello_originate(top, level);
         }
     }
 }
 
-pub fn stop(link: &mut IsisLink) {
-    //
+pub fn stop(top: &mut LinkTop) {
+    for level in [Level::L1, Level::L2] {
+        *top.state.hello.get_mut(&level) = None;
+        *top.timer.hello.get_mut(&level) = None;
+    }
 }
 
 pub fn dis_selection(link: &mut IsisLink) {

@@ -2,6 +2,7 @@ use std::fmt::{Display, Formatter, Result};
 
 use isis_packet::{IsisHello, IsisTlv};
 
+use crate::isis::Level;
 use crate::rib::MacAddr;
 
 use super::{IfsmEvent, Message};
@@ -115,7 +116,7 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Op
     let mut state = nbr.state;
 
     if state == NfsmState::Down {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, None));
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(Level::L2)));
         state = NfsmState::Init;
     }
 
@@ -151,11 +152,11 @@ pub fn isis_nfsm_hold_timer_expire(
     nbr.hold_timer = None;
 
     if nbr.state == NfsmState::Up {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, None));
-        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, None));
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(Level::L2)));
+        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(Level::L2)));
     }
     if nbr.state == NfsmState::Init {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, None));
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(Level::L2)));
     }
 
     Some(NfsmState::Down)

@@ -3,6 +3,7 @@ use isis_packet::{IsLevel, Nsap};
 use crate::config::{Args, ConfigOp};
 
 use super::link;
+use super::link::Afis;
 use super::Isis;
 
 impl Isis {
@@ -32,6 +33,7 @@ pub struct IsisConfig {
     pub hostname: Option<String>,
     pub is_type: Option<IsLevel>,
     pub refresh_time: Option<u64>,
+    pub enable: Afis<usize>,
 }
 
 // Default refresh time: 15 min.
