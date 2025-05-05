@@ -4,6 +4,8 @@ use super::{IsisLink, NfsmState};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum IfsmEvent {
+    Start,
+    Stop,
     InterfaceUp,
     InterfaceDown,
     HelloUpdate,
