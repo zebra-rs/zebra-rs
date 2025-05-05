@@ -220,7 +220,7 @@ impl Isis {
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        println!("XX path {} args {:?}", path, args);
+        // println!("XX path {} args {:?}", path, args);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
@@ -247,15 +247,10 @@ impl Isis {
         let addr = IsisAddr::from(&addr, prefix);
         link.state.addr.push(addr.clone());
 
-        // Add to link hello.
-        if let Some(hello) = &mut link.l2hello {
-            hello.tlvs.push(
-                IsisTlvIpv4IfAddr {
-                    addr: addr.prefix.addr(),
-                }
-                .into(),
-            );
-        }
+        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, Some(Level::L1));
+        self.tx.send(msg).unwrap();
+        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, Some(Level::L2));
+        self.tx.send(msg).unwrap();
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
@@ -326,14 +321,16 @@ impl Isis {
                         ifsm::start(&mut top);
                     }
                     IfsmEvent::Stop => {
-                        ifsm::stop(link);
+                        ifsm::stop(&mut top);
                     }
                     IfsmEvent::LspSend => {
                         self.lsp_send(ifindex);
                     }
+                    IfsmEvent::HelloTimerExpire => {
+                        ifsm::hello_send(&mut top, level.unwrap());
+                    }
                     IfsmEvent::HelloOriginate => {
-                        // link.hello_update();
-                        // self.hello_send(ifindex);
+                        ifsm::hello_originate(&mut top, level.unwrap());
                     }
                     IfsmEvent::DisSelection => {
                         ifsm::dis_selection(link);
