@@ -173,15 +173,15 @@ pub fn process_packet(
     let link = top.links.get_mut(&ifindex).context("Interface not found")?;
 
     match packet.pdu_type {
-        IsisType::P2PHello => link.state.packets.rx.p2p_hello += 1,
-        IsisType::L1Hello => link.state.packets.rx.hello.l1 += 1,
-        IsisType::L2Hello => link.state.packets.rx.hello.l2 += 1,
-        IsisType::L1Lsp => link.state.packets.rx.lsp.l1 += 1,
-        IsisType::L2Lsp => link.state.packets.rx.lsp.l2 += 1,
-        IsisType::L1Psnp => link.state.packets.rx.psnp.l1 += 1,
-        IsisType::L2Psnp => link.state.packets.rx.psnp.l2 += 1,
-        IsisType::L1Csnp => link.state.packets.rx.csnp.l1 += 1,
-        IsisType::L2Csnp => link.state.packets.rx.csnp.l2 += 1,
+        IsisType::P2PHello => link.state.stats.rx.p2p_hello += 1,
+        IsisType::L1Hello => link.state.stats.rx.hello.l1 += 1,
+        IsisType::L2Hello => link.state.stats.rx.hello.l2 += 1,
+        IsisType::L1Lsp => link.state.stats.rx.lsp.l1 += 1,
+        IsisType::L2Lsp => link.state.stats.rx.lsp.l2 += 1,
+        IsisType::L1Psnp => link.state.stats.rx.psnp.l1 += 1,
+        IsisType::L2Psnp => link.state.stats.rx.psnp.l2 += 1,
+        IsisType::L1Csnp => link.state.stats.rx.csnp.l1 += 1,
+        IsisType::L2Csnp => link.state.stats.rx.csnp.l2 += 1,
         _ => link.state.unknown_rx += 1,
     }
 
