@@ -232,7 +232,7 @@ impl Isis {
             //
         } else {
             let mut link = IsisLink::from(link, self.tx.clone(), self.ptx.clone());
-            self.links.insert(link.ifindex, link);
+            self.links.insert(link.state.ifindex, link);
         }
     }
 
@@ -412,7 +412,7 @@ impl Isis {
     pub fn ifname(&self, ifindex: u32) -> String {
         self.links
             .get(&ifindex)
-            .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
+            .map_or_else(|| "unknown".to_string(), |link| link.state.name.clone())
     }
 }
 
