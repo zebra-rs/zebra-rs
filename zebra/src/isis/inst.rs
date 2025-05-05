@@ -28,7 +28,7 @@ use crate::{
 };
 
 use super::config::IsisConfig;
-use super::link::{IsisLink, IsisLinks};
+use super::link::{IsisLink, IsisLinks, LinkTop};
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
@@ -232,7 +232,6 @@ impl Isis {
             //
         } else {
             let mut link = IsisLink::from(link, self.tx.clone(), self.ptx.clone());
-            link.enable();
             self.links.insert(link.ifindex, link);
         }
     }
@@ -313,12 +312,24 @@ impl Isis {
             Message::LinkTimer(ifindex) => {
                 self.hello_send(ifindex);
             }
-            Message::Ifsm(ev, ifindex) => {
-                println!("ifindex {}  ev {:?}", ifindex, ev);
+            Message::Ifsm(ev, ifindex, level) => {
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
+                let mut top = LinkTop {
+                    tx: &self.tx,
+                    up_config: &self.config,
+                    config: &mut link.config,
+                    state: &mut link.state,
+                    timer: &mut link.timer,
+                };
                 match ev {
+                    IfsmEvent::Start => {
+                        ifsm::start(&mut top);
+                    }
+                    IfsmEvent::Stop => {
+                        ifsm::stop(link);
+                    }
                     IfsmEvent::LspSend => {
                         self.lsp_send(ifindex);
                     }
@@ -395,7 +406,6 @@ impl Isis {
             config: &self.config,
             tx: &self.tx,
         };
-
         top
     }
 
@@ -418,7 +428,7 @@ pub enum Message {
     Send(IsisPacket, u32),
     LspUpdate(Level, u32),
     LinkTimer(u32),
-    Ifsm(IfsmEvent, u32),
+    Ifsm(IfsmEvent, u32, Option<Level>),
     Nfsm(NfsmEvent, u32, IsisSysId),
     Lsdb(LsdbEvent, Level, IsisLspId),
 }

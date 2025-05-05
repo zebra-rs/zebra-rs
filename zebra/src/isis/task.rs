@@ -108,6 +108,14 @@ impl Timer {
         Self::new(sec, TimerType::Once, cb)
     }
 
+    pub fn repeat<F, Fut>(sec: u64, cb: F) -> Timer
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
+        Self::new(sec, TimerType::Infinite, cb)
+    }
+
     /// Refresh the timer (resets the timer countdown)
     pub fn refresh(&self) {
         let _ = self.tx.send(TimerMessage::Refresh);

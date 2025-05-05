@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use super::addr::IsisAddr;
 use super::adj::Neighbor;
+use super::config::IsisConfig;
 use super::task::{Timer, TimerType};
 use super::{IfsmEvent, Isis, Levels, Message};
 
@@ -20,7 +21,7 @@ use crate::rib::{Link, MacAddr};
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
-    pub hello: Option<Timer>,
+    pub hello: Levels<Option<Timer>>,
 }
 
 pub struct Graph {}
@@ -91,27 +92,37 @@ pub struct IsisLink {
     pub mtu: u32,
     pub addr: Vec<IsisAddr>,
     pub mac: Option<MacAddr>,
-    pub enabled: bool,
     pub l2nbrs: BTreeMap<IsisSysId, Neighbor>,
     pub l2adj: Option<IsisLspId>,
     pub l2dis: Option<IsisSysId>,
     pub l2hello: Option<IsisHello>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
-    pub timer: LinkTimer,
-    pub state: LinkState,
     pub config: LinkConfig,
+    pub state: LinkState,
+    pub timer: LinkTimer,
+}
+
+pub struct LinkTop<'a> {
+    pub tx: &'a UnboundedSender<Message>,
+    pub up_config: &'a IsisConfig,
+    pub config: &'a LinkConfig,
+    pub state: &'a mut LinkState,
+    pub timer: &'a mut LinkTimer,
 }
 
 #[derive(Default, Debug)]
 pub struct LinkConfig {
+    pub sys_id: IsisSysId,
     pub enable: Afis<bool>,
     pub circuit_type: Option<IsLevel>,
     pub priority: Option<u8>,
+    pub hold_time: Option<u16>,
 }
 
 // Default priority is 64.
 const DEFAULT_PRIORITY: u8 = 64;
+const DEFAULT_HOLD_TIME: u16 = 30;
 
 impl LinkConfig {
     pub fn circuit_type(&self) -> IsLevel {
@@ -122,6 +133,14 @@ impl LinkConfig {
         self.priority.unwrap_or(DEFAULT_PRIORITY)
     }
 
+    pub fn hold_time(&self) -> u16 {
+        self.hold_time.unwrap_or(DEFAULT_HOLD_TIME)
+    }
+
+    pub fn hello_interval(&self) -> u64 {
+        1
+    }
+
     pub fn enabled(&self) -> bool {
         self.enable.v4 || self.enable.v6
     }
@@ -130,9 +149,10 @@ impl LinkConfig {
 // Mutable data during operation.
 #[derive(Default, Debug)]
 pub struct LinkState {
-    pub is_level: IsLevel,
-    pub packets: Direction<LinkStats>,
+    pub level: IsLevel,
+    pub stats: Direction<LinkStats>,
     pub unknown_rx: u64,
+    pub hello: Levels<Option<IsisHello>>,
 }
 
 #[derive(Default, Debug)]
@@ -158,16 +178,15 @@ impl IsisLink {
             mtu: link.mtu,
             addr: Vec::new(),
             mac: link.mac,
-            enabled: false,
             l2nbrs: BTreeMap::new(),
             l2adj: None,
             l2dis: None,
             l2hello: None,
-            timer: LinkTimer::default(),
             tx,
             ptx,
-            state: LinkState::default(),
             config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
         }
     }
 
@@ -217,28 +236,8 @@ impl IsisLink {
         self.l2hello = Some(hello);
     }
 
-    // Enable IS-IS on this link.
-    pub fn enable(&mut self) {
-        if self.enabled {
-            return;
-        }
-
-        if self.name != "enp0s6" {
-            return;
-        }
-        self.enabled = true;
-
-        self.hello_update();
-
-        // Start timer.
-        self.timer.hello = Some(isis_link_timer(self));
-    }
-
     pub fn disable(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        self.enabled = false;
+        //
     }
 }
 
@@ -296,17 +295,6 @@ impl Isis {
     }
 }
 
-pub fn isis_link_timer(link: &IsisLink) -> Timer {
-    let tx = link.tx.clone();
-    let index = link.ifindex;
-    Timer::new(1, TimerType::Infinite, move || {
-        let tx = tx.clone();
-        async move {
-            tx.send(Message::LinkTimer(index)).unwrap();
-        }
-    })
-}
-
 pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let priority = args.u8()?;
@@ -340,13 +328,13 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     if !enabled {
         if link.config.enabled() {
             // Disable -> Enable.
-            let msg = Message::Ifsm(IfsmEvent::Start, link.ifindex);
+            let msg = Message::Ifsm(IfsmEvent::Start, link.ifindex, None);
             isis.tx.send(msg).unwrap();
         }
     } else {
         if !link.config.enabled() {
             // Enable -> Disable.
-            let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex);
+            let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex, None);
             isis.tx.send(msg).unwrap();
         }
     }
@@ -379,7 +367,7 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     link.config.circuit_type = Some(circuit_type);
 
     let is_level = level_common(isis.config.is_type(), link.config.circuit_type());
-    link.state.is_level = is_level;
+    link.state.level = is_level;
 
     Some(())
 }
