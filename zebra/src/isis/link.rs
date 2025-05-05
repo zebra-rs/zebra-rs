@@ -87,10 +87,7 @@ impl IsisLinks {
 
 #[derive(Debug)]
 pub struct IsisLink {
-    // pub ifindex: u32,
-    // pub name: String,
     pub mtu: u32,
-    pub addr: Vec<IsisAddr>,
     pub mac: Option<MacAddr>,
     pub l2nbrs: BTreeMap<IsisSysId, Neighbor>,
     pub l2adj: Option<IsisLspId>,
@@ -105,6 +102,7 @@ pub struct IsisLink {
 
 pub struct LinkTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
+    pub ptx: &'a UnboundedSender<Message>,
     pub up_config: &'a IsisConfig,
     pub config: &'a LinkConfig,
     pub state: &'a mut LinkState,
@@ -151,6 +149,7 @@ impl LinkConfig {
 pub struct LinkState {
     pub ifindex: u32,
     pub name: String,
+    pub addr: Vec<IsisAddr>,
     pub level: IsLevel,
     pub stats: Direction<LinkStats>,
     pub unknown_rx: u64,
@@ -175,10 +174,7 @@ pub struct LinkStats {
 impl IsisLink {
     pub fn from(link: Link, tx: UnboundedSender<Message>, ptx: UnboundedSender<Message>) -> Self {
         let mut is_link = Self {
-            // ifindex: link.index,
-            // name: link.name.to_owned(),
             mtu: link.mtu,
-            addr: Vec::new(),
             mac: link.mac,
             l2nbrs: BTreeMap::new(),
             l2adj: None,
@@ -195,71 +191,12 @@ impl IsisLink {
         is_link
     }
 
-    pub fn hello_update(&mut self) {
-        let mut hello = IsisHello {
-            circuit_type: IsLevel::L1L2,
-            source_id: IsisSysId {
-                id: [0, 0, 0, 0, 0, 2],
-            },
-            hold_time: 30,
-            pdu_len: 0,
-            priority: self.config.priority(),
-            lan_id: IsisNeighborId { id: [0u8; 7] },
-            tlvs: Vec::new(),
-        };
-        hello
-            .tlvs
-            .push(IsisTlvProtoSupported { nlpids: vec![0xcc] }.into());
-        hello.tlvs.push(
-            IsisTlvAreaAddr {
-                area_addr: vec![0x49, 0, 1],
-            }
-            .into(),
-        );
-        for addr in &self.addr {
-            hello.tlvs.push(
-                IsisTlvIpv4IfAddr {
-                    addr: addr.prefix.addr(),
-                }
-                .into(),
-            );
-        }
-
-        for (_, nbr) in &self.l2nbrs {
-            if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
-                if let Some(mac) = nbr.mac {
-                    hello.tlvs.push(
-                        IsisTlvIsNeighbor {
-                            octets: mac.octets(),
-                        }
-                        .into(),
-                    );
-                }
-            }
-        }
-
-        self.l2hello = Some(hello);
-    }
-
     pub fn disable(&mut self) {
         //
     }
 }
 
 impl Isis {
-    pub fn hello_send(&self, ifindex: u32) {
-        let Some(link) = self.links.get(&ifindex) else {
-            return;
-        };
-        let Some(hello) = &link.l2hello else {
-            return;
-        };
-
-        let packet = IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone()));
-
-        link.ptx.send(Message::Send(packet, ifindex)).unwrap();
-    }
-
     pub fn lsp_send(&mut self, ifindex: u32) {
         println!("Send LSP");
 

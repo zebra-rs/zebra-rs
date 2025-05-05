@@ -245,7 +245,7 @@ impl Isis {
             return;
         };
         let addr = IsisAddr::from(&addr, prefix);
-        link.addr.push(addr.clone());
+        link.state.addr.push(addr.clone());
 
         // Add to link hello.
         if let Some(hello) = &mut link.l2hello {
@@ -309,15 +309,13 @@ impl Isis {
                     }
                 }
             }
-            Message::LinkTimer(ifindex) => {
-                self.hello_send(ifindex);
-            }
             Message::Ifsm(ev, ifindex, level) => {
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
                 let mut top = LinkTop {
                     tx: &self.tx,
+                    ptx: &self.ptx,
                     up_config: &self.config,
                     config: &mut link.config,
                     state: &mut link.state,
@@ -333,9 +331,9 @@ impl Isis {
                     IfsmEvent::LspSend => {
                         self.lsp_send(ifindex);
                     }
-                    IfsmEvent::HelloUpdate => {
-                        link.hello_update();
-                        self.hello_send(ifindex);
+                    IfsmEvent::HelloOriginate => {
+                        // link.hello_update();
+                        // self.hello_send(ifindex);
                     }
                     IfsmEvent::DisSelection => {
                         ifsm::dis_selection(link);
@@ -424,10 +422,9 @@ pub fn serve(mut isis: Isis) {
 
 pub enum Message {
     LspGen,
+    LspUpdate(Level, u32),
     Recv(IsisPacket, u32, Option<MacAddr>),
     Send(IsisPacket, u32),
-    LspUpdate(Level, u32),
-    LinkTimer(u32),
     Ifsm(IfsmEvent, u32, Option<Level>),
     Nfsm(NfsmEvent, u32, IsisSysId),
     Lsdb(LsdbEvent, Level, IsisLspId),
