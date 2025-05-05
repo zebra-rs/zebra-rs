@@ -348,7 +348,7 @@ impl Isis {
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
-                let Some(nbr) = link.l2nbrs.get_mut(&sysid) else {
+                let Some(nbr) = link.state.nbrs.l2.get_mut(&sysid) else {
                     return;
                 };
                 isis_nfsm(nbr, ev, &None);

@@ -30,7 +30,9 @@ pub fn isis_hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac:
     };
 
     let nbr = link
-        .l2nbrs
+        .state
+        .nbrs
+        .l2
         .entry(pdu.source_id.clone())
         .or_insert(Neighbor::new(
             Level::L2,

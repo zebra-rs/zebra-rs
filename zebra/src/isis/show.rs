@@ -60,7 +60,7 @@ fn show_isis_neighbor(top: &Isis, _args: Args, json: bool) -> String {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
     for (_, link) in top.links.iter() {
-        for (_, nbr) in &link.l2nbrs {
+        for (_, nbr) in &link.state.nbrs.l2 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             nbrs.push(NeighborBrief {
                 system_id: nbr.pdu.source_id.to_string(),
@@ -202,7 +202,7 @@ fn show_isis_neighbor_detail(top: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, link) in top.links.iter() {
-        for (_, adj) in &link.l2nbrs {
+        for (_, adj) in &link.state.nbrs.l2 {
             show_isis_neighbor_entry(&mut buf, top, adj);
         }
     }
