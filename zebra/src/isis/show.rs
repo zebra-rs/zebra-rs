@@ -215,7 +215,7 @@ fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
 
     for (_, link) in top.links.iter() {
         if let Some(dis) = &link.l2dis {
-            writeln!(buf, "Interface: {}", top.ifname(link.ifindex)).unwrap();
+            writeln!(buf, "Interface: {}", top.ifname(link.state.ifindex)).unwrap();
             writeln!(buf, "  DIS: {}", dis);
             if let Some(adj) = &link.l2adj {
                 writeln!(buf, "  Adj: {}", adj).unwrap();

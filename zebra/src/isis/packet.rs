@@ -85,7 +85,7 @@ pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: 
                         println!("Adjacency!");
                         link.l2adj = Some(lsp.lsp_id.clone());
                         link.tx
-                            .send(Message::LspUpdate(Level::L2, link.ifindex))
+                            .send(Message::LspUpdate(Level::L2, link.state.ifindex))
                             .unwrap();
                     }
                 }
