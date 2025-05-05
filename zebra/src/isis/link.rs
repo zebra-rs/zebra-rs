@@ -89,7 +89,7 @@ impl IsisLinks {
 pub struct IsisLink {
     pub mtu: u32,
     pub mac: Option<MacAddr>,
-    pub l2nbrs: BTreeMap<IsisSysId, Neighbor>,
+    // pub l2nbrs: BTreeMap<IsisSysId, Neighbor>,
     pub l2adj: Option<IsisLspId>,
     pub l2dis: Option<IsisSysId>,
     pub l2hello: Option<IsisHello>,
@@ -151,6 +151,7 @@ pub struct LinkState {
     pub name: String,
     pub addr: Vec<IsisAddr>,
     pub level: IsLevel,
+    pub nbrs: Levels<BTreeMap<IsisSysId, Neighbor>>,
     pub stats: Direction<LinkStats>,
     pub unknown_rx: u64,
     pub hello: Levels<Option<IsisHello>>,
@@ -176,7 +177,7 @@ impl IsisLink {
         let mut is_link = Self {
             mtu: link.mtu,
             mac: link.mac,
-            l2nbrs: BTreeMap::new(),
+            // l2nbrs: BTreeMap::new(),
             l2adj: None,
             l2dis: None,
             l2hello: None,

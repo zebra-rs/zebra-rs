@@ -110,7 +110,7 @@ pub fn stop(link: &mut IsisLink) {
 pub fn dis_selection(link: &mut IsisLink) {
     let mut dis: Option<IsisSysId> = None;
     let mut priority = link.config.priority();
-    for (_, nbr) in &link.l2nbrs {
+    for (_, nbr) in &link.state.nbrs.l2 {
         if nbr.state != NfsmState::Up {
             continue;
         }
