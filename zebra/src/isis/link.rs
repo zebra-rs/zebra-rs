@@ -326,12 +326,12 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     let enabled = link.config.enabled();
 
     if op.is_set() && enable {
-        // Enable
+        // Set Enable.
         if !*link.config.enable.get(&afi) {
             *link.config.enable.get_mut(&afi) = true;
         }
     } else {
-        // Disable
+        // Set Disable.
         if *link.config.enable.get(&afi) {
             *link.config.enable.get_mut(&afi) = false;
         }
@@ -339,13 +339,13 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
 
     if !enabled {
         if link.config.enabled() {
-            // Disable -> Enable
+            // Disable -> Enable.
             let msg = Message::Ifsm(IfsmEvent::Start, link.ifindex);
             isis.tx.send(msg).unwrap();
         }
     } else {
         if !link.config.enabled() {
-            // Enable -> Disable
+            // Enable -> Disable.
             let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex);
             isis.tx.send(msg).unwrap();
         }
