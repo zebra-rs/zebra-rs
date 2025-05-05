@@ -6,7 +6,7 @@ use std::fmt::Write;
 use super::addr::IsisAddr;
 use super::adj::Neighbor;
 use super::task::{Timer, TimerType};
-use super::{Isis, Levels, Message};
+use super::{IfsmEvent, Isis, Levels, Message};
 
 use isis_packet::{
     IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
@@ -29,6 +29,28 @@ pub struct Graph {}
 pub struct Afis<T> {
     pub v4: T,
     pub v6: T,
+}
+
+#[derive(Debug)]
+pub enum Afi {
+    Ip,
+    Ip6,
+}
+
+impl<T> Afis<T> {
+    pub fn get(&self, afi: &Afi) -> &T {
+        match afi {
+            Afi::Ip => &self.v4,
+            Afi::Ip6 => &self.v6,
+        }
+    }
+
+    pub fn get_mut(&mut self, afi: &Afi) -> &mut T {
+        match afi {
+            Afi::Ip => &mut self.v4,
+            Afi::Ip6 => &mut self.v6,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -98,6 +120,10 @@ impl LinkConfig {
 
     pub fn priority(&self) -> u8 {
         self.priority.unwrap_or(DEFAULT_PRIORITY)
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enable.v4 || self.enable.v6
     }
 }
 
@@ -291,29 +317,52 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
-pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) -> Option<()> {
     let name = args.string()?;
     let enable = args.boolean()?;
 
     let link = isis.links.get_mut_by_name(&name)?;
 
-    if op.is_set() {
-        //
+    let enabled = link.config.enabled();
+
+    if op.is_set() && enable {
+        // Enable
+        if !*link.config.enable.get(&afi) {
+            *link.config.enable.get_mut(&afi) = true;
+        }
+    } else {
+        // Disable
+        if *link.config.enable.get(&afi) {
+            *link.config.enable.get_mut(&afi) = false;
+        }
+    }
+
+    if !enabled {
+        if link.config.enabled() {
+            // Disable -> Enable
+            let msg = Message::Ifsm(IfsmEvent::Start, link.ifindex);
+            isis.tx.send(msg).unwrap();
+        }
+    } else {
+        if !link.config.enabled() {
+            // Enable -> Disable
+            let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex);
+            isis.tx.send(msg).unwrap();
+        }
     }
 
     Some(())
 }
 
-pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
-    let enable = args.boolean()?;
-
-    let link = isis.links.get_mut_by_name(&name)?;
-
-    Some(())
+pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    config_afi_enable(isis, args, op, Afi::Ip)
 }
 
-pub fn is_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
+pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    config_afi_enable(isis, args, op, Afi::Ip6)
+}
+
+fn level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
     use IsLevel::*;
     match inst {
         L1L2 => link,
@@ -329,7 +378,7 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.circuit_type = Some(circuit_type);
 
-    let is_level = is_level_common(isis.config.is_type(), link.config.circuit_type());
+    let is_level = level_common(isis.config.is_type(), link.config.circuit_type());
     link.state.is_level = is_level;
 
     Some(())
@@ -342,10 +391,9 @@ pub fn show(_isis: &Isis, _args: Args, _json: bool) -> String {
 pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
     for (ifindex, link) in isis.links.iter() {
-        writeln!(buf, "{} priority {}", link.name, link.state.is_level).unwrap();
-        // if link.is_enabled() {
-        //     writeln!(buf, "{} priority {}", link.name, link.config.priority()).unwrap();
-        // }
+        if link.config.enabled() {
+            writeln!(buf, "{} priority {}", link.name, link.config.priority()).unwrap();
+        }
     }
     buf
 }
