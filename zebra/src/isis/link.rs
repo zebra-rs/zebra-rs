@@ -117,8 +117,8 @@ pub struct LinkTop<'a> {
 pub enum HelloPaddingPolicy {
     #[default]
     Always,
+    DuringAdjacencyOnly,
     Disable,
-    DuringAdjacency,
 }
 
 #[derive(Default, Debug)]
@@ -262,8 +262,10 @@ impl Isis {
         let addr = IsisAddr::from(&addr, prefix);
         link.state.addr.push(addr.clone());
 
-        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
-        self.tx.send(msg).unwrap();
+        if link.config.enabled() {
+            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
+            self.tx.send(msg).unwrap();
+        }
     }
 
     pub fn lsp_send(&mut self, ifindex: u32) {

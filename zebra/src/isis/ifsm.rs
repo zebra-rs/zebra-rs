@@ -105,6 +105,7 @@ fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(top: &mut LinkTop, level: Level) {
     if has_level(top.state.level(), level) {
+        println!("Hello generate {}", level);
         let hello = hello_generate(top, level);
         *top.state.hello.get_mut(&level) = Some(hello);
         hello_send(top, level);

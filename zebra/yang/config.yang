@@ -140,6 +140,16 @@ module config {
             type uint8;
           }
 
+          container hello {
+            leaf padding {
+              type enumeration {
+                enum always;
+                enum during-adjacency-only;
+                enum disable;
+              }
+            }
+          }
+
           container ipv4 {
             leaf enable {
               type boolean;
