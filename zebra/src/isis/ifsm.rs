@@ -34,7 +34,7 @@ pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
 pub fn hello_generate(top: &LinkTop, level: Level) -> IsisHello {
     let source_id = top.up_config.net.sys_id();
     let mut hello = IsisHello {
-        circuit_type: top.state.level,
+        circuit_type: top.state.level(),
         source_id,
         hold_time: top.config.hold_time(),
         pdu_len: 0,
@@ -104,7 +104,7 @@ fn has_level(is_level: IsLevel, level: Level) -> bool {
 }
 
 pub fn hello_originate(top: &mut LinkTop, level: Level) {
-    if has_level(top.state.level, level) {
+    if has_level(top.state.level(), level) {
         let hello = hello_generate(top, level);
         *top.state.hello.get_mut(&level) = Some(hello);
         hello_send(top, level);

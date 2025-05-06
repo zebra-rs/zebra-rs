@@ -69,8 +69,12 @@ fn config_is_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     } else {
         isis.config.is_type = None;
     }
-    if prev != isis.config.is_type() {
-        // TODO
+    let curr = isis.config.is_type();
+    if prev != curr {
+        for (_, link) in isis.links.iter_mut() {
+            let is_level = link::config_level_common(curr, link.config.circuit_type());
+            link.state.set_level(is_level);
+        }
     }
     Some(())
 }
