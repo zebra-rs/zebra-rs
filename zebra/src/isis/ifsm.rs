@@ -104,17 +104,17 @@ fn has_level(is_level: IsLevel, level: Level) -> bool {
 }
 
 pub fn hello_originate(top: &mut LinkTop, level: Level) {
-    let hello = hello_generate(top, level);
-    *top.state.hello.get_mut(&level) = Some(hello);
-    hello_send(top, level);
-    *top.timer.hello.get_mut(&level) = Some(hello_timer(top, level));
+    if has_level(top.state.level, level) {
+        let hello = hello_generate(top, level);
+        *top.state.hello.get_mut(&level) = Some(hello);
+        hello_send(top, level);
+        *top.timer.hello.get_mut(&level) = Some(hello_timer(top, level));
+    }
 }
 
 pub fn start(top: &mut LinkTop) {
     for level in [Level::L1, Level::L2] {
-        if has_level(top.state.level, level) {
-            hello_originate(top, level);
-        }
+        hello_originate(top, level);
     }
 }
 
