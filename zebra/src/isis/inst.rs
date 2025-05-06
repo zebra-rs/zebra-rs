@@ -247,9 +247,7 @@ impl Isis {
         let addr = IsisAddr::from(&addr, prefix);
         link.state.addr.push(addr.clone());
 
-        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, Some(Level::L1));
-        self.tx.send(msg).unwrap();
-        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, Some(Level::L2));
+        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
         self.tx.send(msg).unwrap();
     }
 
@@ -329,9 +327,14 @@ impl Isis {
                     IfsmEvent::HelloTimerExpire => {
                         ifsm::hello_send(&mut top, level.unwrap());
                     }
-                    IfsmEvent::HelloOriginate => {
-                        ifsm::hello_originate(&mut top, level.unwrap());
-                    }
+                    IfsmEvent::HelloOriginate => match level {
+                        // In case of level is None, originate both L1/L2 Hello.
+                        Some(level) => ifsm::hello_originate(&mut top, level),
+                        None => {
+                            ifsm::hello_originate(&mut top, Level::L1);
+                            ifsm::hello_originate(&mut top, Level::L2);
+                        }
+                    },
                     IfsmEvent::DisSelection => {
                         ifsm::dis_selection(link);
                     }
