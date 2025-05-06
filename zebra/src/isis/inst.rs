@@ -226,31 +226,6 @@ impl Isis {
         }
     }
 
-    fn link_add(&mut self, link: Link) {
-        // println!("ISIS: LinkAdd {} {}", link.name, link.index);
-        if let Some(_link) = self.links.get_mut(&link.index) {
-            //
-        } else {
-            let mut link = IsisLink::from(link, self.tx.clone(), self.ptx.clone());
-            self.links.insert(link.state.ifindex, link);
-        }
-    }
-
-    fn addr_add(&mut self, addr: LinkAddr) {
-        // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
-        let Some(link) = self.links.get_mut(&addr.ifindex) else {
-            return;
-        };
-        let IpNet::V4(prefix) = &addr.addr else {
-            return;
-        };
-        let addr = IsisAddr::from(&addr, prefix);
-        link.state.addr.push(addr.clone());
-
-        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
-        self.tx.send(msg).unwrap();
-    }
-
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::LinkAdd(link) => {
@@ -405,12 +380,6 @@ impl Isis {
             tx: &self.tx,
         };
         top
-    }
-
-    pub fn ifname(&self, ifindex: u32) -> String {
-        self.links
-            .get(&ifindex)
-            .map_or_else(|| "unknown".to_string(), |link| link.state.name.clone())
     }
 }
 

@@ -3,12 +3,7 @@ use std::collections::BTreeMap;
 use std::default;
 use std::fmt::Write;
 
-use super::addr::IsisAddr;
-use super::adj::Neighbor;
-use super::config::IsisConfig;
-use super::task::{Timer, TimerType};
-use super::{IfsmEvent, Isis, Levels, Message};
-
+use ipnet::IpNet;
 use isis_packet::{
     IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
     IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
@@ -17,7 +12,14 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
 use crate::isis::nfsm::NfsmState;
+use crate::rib::link::LinkAddr;
 use crate::rib::{Link, MacAddr};
+
+use super::addr::IsisAddr;
+use super::adj::Neighbor;
+use super::config::IsisConfig;
+use super::task::{Timer, TimerType};
+use super::{IfsmEvent, Isis, Levels, Message};
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
@@ -195,6 +197,32 @@ impl IsisLink {
 }
 
 impl Isis {
+    //
+    pub fn link_add(&mut self, link: Link) {
+        // println!("ISIS: LinkAdd {} {}", link.name, link.index);
+        if let Some(_link) = self.links.get_mut(&link.index) {
+            //
+        } else {
+            let mut link = IsisLink::from(link, self.tx.clone(), self.ptx.clone());
+            self.links.insert(link.state.ifindex, link);
+        }
+    }
+
+    pub fn addr_add(&mut self, addr: LinkAddr) {
+        // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+        let IpNet::V4(prefix) = &addr.addr else {
+            return;
+        };
+        let addr = IsisAddr::from(&addr, prefix);
+        link.state.addr.push(addr.clone());
+
+        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
+        self.tx.send(msg).unwrap();
+    }
+
     pub fn lsp_send(&mut self, ifindex: u32) {
         println!("Send LSP");
 
@@ -293,7 +321,7 @@ pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
     config_afi_enable(isis, args, op, Afi::Ip6)
 }
 
-fn level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
+fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
     use IsLevel::*;
     match inst {
         L1L2 => link,
@@ -309,7 +337,7 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.circuit_type = Some(circuit_type);
 
-    let is_level = level_common(isis.config.is_type(), link.config.circuit_type());
+    let is_level = config_level_common(isis.config.is_type(), link.config.circuit_type());
     link.state.level = is_level;
 
     Some(())
