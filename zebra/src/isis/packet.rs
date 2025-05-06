@@ -184,7 +184,7 @@ pub fn process_packet(
         IsisType::L2Psnp => link.state.stats.rx.psnp.l2 += 1,
         IsisType::L1Csnp => link.state.stats.rx.csnp.l1 += 1,
         IsisType::L2Csnp => link.state.stats.rx.csnp.l2 += 1,
-        _ => link.state.unknown_rx += 1,
+        _ => link.state.stats_unknown += 1,
     }
 
     match packet.pdu_type {

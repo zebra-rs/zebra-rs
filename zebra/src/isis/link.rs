@@ -1,4 +1,4 @@
-use std::collections::btree_map::Iter;
+use std::collections::btree_map::{Iter, IterMut};
 use std::collections::BTreeMap;
 use std::default;
 use std::fmt::Write;
@@ -85,6 +85,10 @@ impl IsisLinks {
     pub fn iter(&self) -> Iter<'_, u32, IsisLink> {
         self.map.iter()
     }
+
+    pub fn iter_mut(&mut self) -> IterMut<'_, u32, IsisLink> {
+        self.map.iter_mut()
+    }
 }
 
 #[derive(Debug)]
@@ -110,17 +114,41 @@ pub struct LinkTop<'a> {
 }
 
 #[derive(Default, Debug)]
+pub enum HelloPaddingPolicy {
+    #[default]
+    Always,
+    Disable,
+    DuringAdjacency,
+}
+
+#[derive(Default, Debug)]
 pub struct LinkConfig {
-    pub sys_id: IsisSysId,
     pub enable: Afis<bool>,
     pub circuit_type: Option<IsLevel>,
     pub priority: Option<u8>,
     pub hold_time: Option<u16>,
+    pub hello_interval: Option<u16>,
+    pub hello_padding: HelloPaddingPolicy,
+}
+
+pub enum LinkType {
+    Lan,
+    P2p,
+}
+
+impl std::fmt::Display for LinkType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkType::Lan => write!(f, "lan"),
+            LinkType::P2p => write!(f, "p2p"),
+        }
+    }
 }
 
 // Default priority is 64.
 const DEFAULT_PRIORITY: u8 = 64;
 const DEFAULT_HOLD_TIME: u16 = 30;
+const DEFAULT_HELLO_INTERVAL: u16 = 3;
 
 impl LinkConfig {
     pub fn circuit_type(&self) -> IsLevel {
@@ -136,7 +164,7 @@ impl LinkConfig {
     }
 
     pub fn hello_interval(&self) -> u64 {
-        1
+        self.hello_interval.unwrap_or(DEFAULT_HELLO_INTERVAL) as u64
     }
 
     pub fn enabled(&self) -> bool {
@@ -150,11 +178,31 @@ pub struct LinkState {
     pub ifindex: u32,
     pub name: String,
     pub addr: Vec<IsisAddr>,
-    pub level: IsLevel,
+    level: IsLevel,
     pub nbrs: Levels<BTreeMap<IsisSysId, Neighbor>>,
     pub stats: Direction<LinkStats>,
-    pub unknown_rx: u64,
+    pub stats_unknown: u64,
     pub hello: Levels<Option<IsisHello>>,
+}
+
+impl LinkState {
+    pub fn link_type(&self) -> LinkType {
+        LinkType::Lan
+    }
+
+    pub fn is_up(&self) -> bool {
+        true
+    }
+
+    pub fn level(&self) -> IsLevel {
+        self.level
+    }
+
+    pub fn set_level(&mut self, level: IsLevel) {
+        if self.level != level {
+            self.level = level;
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -190,14 +238,9 @@ impl IsisLink {
         is_link.state.name = link.name.to_owned();
         is_link
     }
-
-    pub fn disable(&mut self) {
-        //
-    }
 }
 
 impl Isis {
-    //
     pub fn link_add(&mut self, link: Link) {
         // println!("ISIS: LinkAdd {} {}", link.name, link.index);
         if let Some(_link) = self.links.get_mut(&link.index) {
@@ -321,7 +364,7 @@ pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
     config_afi_enable(isis, args, op, Afi::Ip6)
 }
 
-fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
+pub fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
     use IsLevel::*;
     match inst {
         L1L2 => link,
@@ -343,8 +386,23 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
-pub fn show(_isis: &Isis, _args: Args, _json: bool) -> String {
-    String::from("show isis interface")
+pub fn show(isis: &Isis, _args: Args, _json: bool) -> String {
+    let mut buf = String::new();
+    for (ifindex, link) in isis.links.iter() {
+        if link.config.enabled() {
+            writeln!(
+                buf,
+                "{:<14} 0x{:02X} {} {} {}",
+                link.state.name,
+                link.state.ifindex,
+                link.state.is_up(),
+                link.state.link_type(),
+                link.state.level
+            )
+            .unwrap();
+        }
+    }
+    buf
 }
 
 pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
