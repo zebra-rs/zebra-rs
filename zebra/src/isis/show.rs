@@ -56,6 +56,12 @@ struct NeighborBrief {
     snpa: String,
 }
 
+fn show_ifname(top: &Isis, ifindex: u32) -> String {
+    top.links
+        .get(&ifindex)
+        .map_or_else(|| "unknown".to_string(), |link| link.state.name.clone())
+}
+
 fn show_isis_neighbor(top: &Isis, _args: Args, json: bool) -> String {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
@@ -64,7 +70,7 @@ fn show_isis_neighbor(top: &Isis, _args: Args, json: bool) -> String {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             nbrs.push(NeighborBrief {
                 system_id: nbr.pdu.source_id.to_string(),
-                interface: top.ifname(nbr.ifindex),
+                interface: show_ifname(top, nbr.ifindex),
                 level: nbr.level.digit(),
                 state: nbr.state.to_string(),
                 hold_time: rem,
@@ -144,7 +150,7 @@ fn show_isis_neighbor_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
     writeln!(
         buf,
         "    Interface: {}, Level: {}, State: {}",
-        top.ifname(nbr.ifindex),
+        show_ifname(top, nbr.ifindex),
         nbr.level,
         nbr.state.to_string(),
     )
@@ -215,7 +221,7 @@ fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
 
     for (_, link) in top.links.iter() {
         if let Some(dis) = &link.l2dis {
-            writeln!(buf, "Interface: {}", top.ifname(link.state.ifindex)).unwrap();
+            writeln!(buf, "Interface: {}", show_ifname(top, link.state.ifindex)).unwrap();
             writeln!(buf, "  DIS: {}", dis);
             if let Some(adj) = &link.l2adj {
                 writeln!(buf, "  Adj: {}", adj).unwrap();
