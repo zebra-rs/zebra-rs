@@ -21,3 +21,18 @@ impl From<[u8; 6]> for MacAddr {
         Self { octets }
     }
 }
+
+impl std::fmt::Display for MacAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            self.octets[0],
+            self.octets[1],
+            self.octets[2],
+            self.octets[3],
+            self.octets[4],
+            self.octets[5],
+        )
+    }
+}
