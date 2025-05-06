@@ -156,13 +156,18 @@ impl ConfigManager {
 
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
 
-        for (_, tx) in self.cm_clients.borrow().iter() {
-            tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
-                .unwrap();
-        }
-        // Protocol swpan.
         let mut ospf = false;
         let mut isis = false;
+        for (proto, tx) in self.cm_clients.borrow().iter() {
+            tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
+                .unwrap();
+            if proto == "ospf" {
+                ospf = true;
+            }
+            if proto == "isis" {
+                isis = true;
+            }
+        }
         for line in diff.lines() {
             let first_char = line.chars().next().unwrap();
             let op = match first_char {
