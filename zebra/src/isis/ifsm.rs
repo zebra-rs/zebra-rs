@@ -17,7 +17,6 @@ pub enum IfsmEvent {
     HelloTimerExpire,
     HelloOriginate,
     DisSelection,
-    // LspSend,
 }
 
 pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
@@ -69,6 +68,7 @@ pub fn hello_generate(top: &LinkTop, level: Level) -> IsisHello {
             }
         }
     }
+    hello.padding(top.state.mtu as usize);
     hello
 }
 

@@ -182,6 +182,7 @@ impl LinkConfig {
 pub struct LinkState {
     pub ifindex: u32,
     pub name: String,
+    pub mtu: u32,
     pub addr: Vec<IsisAddr>,
 
     // Link level. This value is the final level value from IS-IS instance's
@@ -236,8 +237,6 @@ impl IsisLink {
             mtu: link.mtu,
             mac: link.mac,
             l2adj: None,
-            // l2dis: None,
-            // l2hello: None,
             tx,
             ptx,
             config: LinkConfig::default(),
@@ -246,6 +245,7 @@ impl IsisLink {
         };
         is_link.state.ifindex = link.index;
         is_link.state.name = link.name.to_owned();
+        is_link.state.mtu = link.mtu;
         is_link
     }
 }
