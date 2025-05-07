@@ -17,7 +17,7 @@ pub enum IfsmEvent {
     HelloTimerExpire,
     HelloOriginate,
     DisSelection,
-    LspSend,
+    // LspSend,
 }
 
 pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
@@ -57,7 +57,7 @@ pub fn hello_generate(top: &LinkTop, level: Level) -> IsisHello {
         );
     }
 
-    for (_, nbr) in &top.state.nbrs.l2 {
+    for (_, nbr) in top.state.nbrs.get(&level).iter() {
         if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
             if let Some(mac) = nbr.mac {
                 hello.tlvs.push(
@@ -126,10 +126,10 @@ pub fn stop(top: &mut LinkTop) {
     }
 }
 
-pub fn dis_selection(link: &mut IsisLink) {
+pub fn dis_selection(top: &mut LinkTop, level: Level) {
     let mut dis: Option<IsisSysId> = None;
-    let mut priority = link.config.priority();
-    for (_, nbr) in &link.state.nbrs.l2 {
+    let mut priority = top.config.priority();
+    for (_, nbr) in top.state.nbrs.get(&level).iter() {
         if nbr.state != NfsmState::Up {
             continue;
         }
@@ -146,6 +146,6 @@ pub fn dis_selection(link: &mut IsisLink) {
 
     if let Some(dis) = dis {
         println!("DIS is selected {}", dis);
-        link.l2dis = Some(dis);
+        *top.state.dis.get_mut(&level) = Some(dis);
     }
 }

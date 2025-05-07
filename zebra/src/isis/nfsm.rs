@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 
-use isis_packet::{IsisHello, IsisTlv};
+use isis_packet::{IsLevel, IsisHello, IsisTlv};
 
 use crate::isis::Level;
 use crate::rib::MacAddr;
@@ -36,25 +36,25 @@ pub enum NfsmEvent {
     HoldTimerExpire,
 }
 
-pub type NfsmFunc = fn(&mut Neighbor, &Option<MacAddr>) -> Option<NfsmState>;
+pub type NfsmFunc = fn(&mut Neighbor, &Option<MacAddr>, Level) -> Option<NfsmState>;
 
 impl NfsmState {
-    pub fn fsm(&self, ev: NfsmEvent) -> (NfsmFunc, Option<Self>) {
+    pub fn fsm(&self, ev: NfsmEvent, level: Level) -> (NfsmFunc, Option<Self>) {
         use NfsmEvent::*;
         use NfsmState::*;
 
         match self {
             Down => match ev {
-                HelloReceived => (isis_nfsm_hello_received, None),
-                HoldTimerExpire => (isis_nfsm_hold_timer_expire, None),
+                HelloReceived => (nfsm_hello_received, None),
+                HoldTimerExpire => (nfsm_hold_timer_expire, None),
             },
             Init => match ev {
-                HelloReceived => (isis_nfsm_hello_received, None),
-                HoldTimerExpire => (isis_nfsm_hold_timer_expire, None),
+                HelloReceived => (nfsm_hello_received, None),
+                HoldTimerExpire => (nfsm_hold_timer_expire, None),
             },
             Up => match ev {
-                HelloReceived => (isis_nfsm_hello_received, None),
-                HoldTimerExpire => (isis_nfsm_hold_timer_expire, None),
+                HelloReceived => (nfsm_hello_received, None),
+                HoldTimerExpire => (nfsm_hold_timer_expire, None),
             },
         }
     }
@@ -76,7 +76,7 @@ fn isis_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
     false
 }
 
-pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
+pub fn isis_hold_timer(adj: &Neighbor, level: Level) -> Timer {
     let tx = adj.tx.clone();
     let sysid = adj.pdu.source_id.clone();
     let ifindex = adj.ifindex;
@@ -85,7 +85,7 @@ pub fn isis_hold_timer(adj: &Neighbor) -> Timer {
         let sysid = sysid.clone();
         async move {
             use NfsmEvent::*;
-            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid))
+            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level))
                 .unwrap();
         }
     })
@@ -110,31 +110,35 @@ fn nbr_ifaddr_update(nbr: &mut Neighbor) {
     nbr.laddr6 = laddr6;
 }
 
-pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Option<NfsmState> {
+pub fn nfsm_hello_received(
+    nbr: &mut Neighbor,
+    mac: &Option<MacAddr>,
+    level: Level,
+) -> Option<NfsmState> {
     use IfsmEvent::*;
 
     let mut state = nbr.state;
 
     if state == NfsmState::Down {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(Level::L2)));
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         state = NfsmState::Init;
     }
 
     if state == NfsmState::Init {
         if isis_hello_has_mac(&nbr.pdu, mac) {
-            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, None));
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Up;
         }
     } else {
         if !isis_hello_has_mac(&nbr.pdu, mac) {
-            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, None));
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Init;
         }
     }
 
     nbr_ifaddr_update(nbr);
 
-    nbr.hold_timer = Some(isis_hold_timer(nbr));
+    nbr.hold_timer = Some(isis_hold_timer(nbr, level));
 
     if state != nbr.state {
         return Some(state);
@@ -143,29 +147,30 @@ pub fn isis_nfsm_hello_received(nbr: &mut Neighbor, mac: &Option<MacAddr>) -> Op
     None
 }
 
-pub fn isis_nfsm_hold_timer_expire(
+pub fn nfsm_hold_timer_expire(
     nbr: &mut Neighbor,
     _mac: &Option<MacAddr>,
+    level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
 
     nbr.hold_timer = None;
 
     if nbr.state == NfsmState::Up {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(Level::L2)));
-        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(Level::L2)));
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
     }
     if nbr.state == NfsmState::Init {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(Level::L2)));
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
     Some(NfsmState::Down)
 }
 
-pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<MacAddr>) {
-    let (fsm_func, fsm_next_state) = nbr.state.fsm(event);
+pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<MacAddr>, level: Level) {
+    let (fsm_func, fsm_next_state) = nbr.state.fsm(event, level);
 
-    let next_state = fsm_func(nbr, mac).or(fsm_next_state);
+    let next_state = fsm_func(nbr, mac, level).or(fsm_next_state);
 
     if let Some(new_state) = next_state {
         println!(
@@ -175,10 +180,5 @@ pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<MacAddr>) {
         if new_state != nbr.state {
             nbr.state = new_state;
         }
-    } else {
-        // println!(
-        //     "NFSM State Transition on {:?} -> {:?}",
-        //     nbr.state, nbr.state
-        // );
     }
 }
