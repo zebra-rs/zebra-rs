@@ -96,7 +96,7 @@ pub struct IsisLink {
     pub mtu: u32,
     pub mac: Option<MacAddr>,
     pub l2adj: Option<IsisLspId>,
-    pub l2dis: Option<IsisSysId>,
+    // pub l2dis: Option<IsisSysId>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub config: LinkConfig,
@@ -124,6 +124,11 @@ pub enum HelloPaddingPolicy {
 #[derive(Default, Debug)]
 pub struct LinkConfig {
     pub enable: Afis<bool>,
+
+    // Configured circuit type. When it conflict with IS-IS instance's is-type
+    // configuration, we respect IS-IS instance's is-type value. For example,
+    // is-type is level-2-only and circuit-type is level-1, link is configured
+    // as level-2-only.
     pub circuit_type: Option<IsLevel>,
     pub priority: Option<u8>,
     pub hold_time: Option<u16>,
@@ -178,8 +183,13 @@ pub struct LinkState {
     pub ifindex: u32,
     pub name: String,
     pub addr: Vec<IsisAddr>,
+
+    // Link level. This value is the final level value from IS-IS instance's
+    // is-type and link's circuit-type. Please use LinkState::level() method for
+    // get link level value.
     level: IsLevel,
     pub nbrs: Levels<BTreeMap<IsisSysId, Neighbor>>,
+    pub dis: Levels<Option<IsisSysId>>,
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
     pub hello: Levels<Option<IsisHello>>,
@@ -226,7 +236,7 @@ impl IsisLink {
             mtu: link.mtu,
             mac: link.mac,
             l2adj: None,
-            l2dis: None,
+            // l2dis: None,
             // l2hello: None,
             tx,
             ptx,
@@ -289,20 +299,6 @@ impl Isis {
 
     pub fn dis_send(&self, ifindex: u32) {
         let Some(_link) = self.links.get(&ifindex) else {
-            return;
-        };
-    }
-
-    pub fn psnp_recv(&mut self, _packet: IsisPacket, ifindex: u32, _mac: Option<[u8; 6]>) {
-        let Some(_link) = self.links.get_mut(&ifindex) else {
-            println!("Link not found {}", ifindex);
-            return;
-        };
-    }
-
-    pub fn unknown_recv(&mut self, _packet: IsisPacket, ifindex: u32, _mac: Option<[u8; 6]>) {
-        let Some(_link) = self.links.get_mut(&ifindex) else {
-            println!("Link not found {}", ifindex);
             return;
         };
     }
@@ -388,7 +384,33 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
-pub fn show(isis: &Isis, _args: Args, _json: bool) -> String {
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct LinkInfo {
+    name: String,
+    ifindex: u32,
+    is_up: bool,
+    link_type: String,
+    level: String,
+}
+
+pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
+    if json {
+        let mut links = Vec::new();
+        for (ifindex, link) in isis.links.iter() {
+            if link.config.enabled() {
+                links.push(LinkInfo {
+                    name: link.state.name.clone(),
+                    ifindex: link.state.ifindex,
+                    is_up: link.state.is_up(),
+                    link_type: link.state.link_type().to_string(),
+                    level: link.state.level.to_string(),
+                });
+            }
+        }
+        return serde_json::to_string_pretty(&links).unwrap();
+    }
     let mut buf = String::new();
     for (ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
@@ -413,11 +435,13 @@ pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
         if link.config.enabled() {
             writeln!(
                 buf,
-                "{} priority {}",
+                "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
                 link.state.name,
-                link.config.priority()
+                link.state.is_up(),
+                link.state.ifindex
             )
             .unwrap();
+            writeln!(buf, "  LAN prirority: {}", link.config.priority()).unwrap();
         }
     }
     buf

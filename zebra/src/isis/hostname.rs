@@ -44,7 +44,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
     if json {
         let l1 = map_to_string_map(&isis.hostname.l1.map);
         let l2 = map_to_string_map(&isis.hostname.l2.map);
-        return serde_json::to_string(&serde_json::json!({
+        return serde_json::to_string_pretty(&serde_json::json!({
             "l1": l1,
             "l2": l2
         }))

@@ -12,30 +12,30 @@ use super::lsdb;
 use super::nfsm::{isis_nfsm, NfsmEvent};
 use super::Level;
 
-pub fn isis_hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
+pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
-        println!("Link not found {}", ifindex);
         return;
     };
 
-    if packet.pdu_type != IsisType::L2Hello {
-        println!("Skip non L2Hello");
+    // Check link capability for the PDU type.
+    if !link.state.level().capable(packet.pdu_type) {
         return;
     }
 
-    // Extract Hello PDU.
-    let pdu = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => pdu,
+    // Extract Hello PDU and level.
+    let (pdu, level) = match (packet.pdu_type, packet.pdu) {
+        (IsisType::L1Hello, IsisPdu::L1Hello(pdu)) => (pdu, Level::L1),
+        (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => (pdu, Level::L2),
         _ => return,
     };
 
     let nbr = link
         .state
         .nbrs
-        .l2
+        .get_mut(&level)
         .entry(pdu.source_id.clone())
         .or_insert(Neighbor::new(
-            Level::L2,
+            level,
             pdu.clone(),
             ifindex,
             mac,
@@ -44,8 +44,10 @@ pub fn isis_hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac:
 
     nbr.pdu = pdu;
 
-    isis_nfsm(nbr, NfsmEvent::HelloReceived, &link.mac);
+    isis_nfsm(nbr, NfsmEvent::HelloReceived, &link.mac, level);
 }
+
+pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {}
 
 pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool {
     for tlv in &lsp.tlvs {
@@ -62,7 +64,7 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     false
 }
 
-pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
+pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
     };
@@ -78,7 +80,7 @@ pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: 
     if lsp.lsp_id.pseudo_id() != 0 {
         println!("DIS recv");
 
-        if let Some(dis) = &link.l2dis {
+        if let Some(dis) = &link.state.dis.l2 {
             if link.l2adj.is_none() {
                 println!("DIS SIS ID {} <-> {}", lsp.lsp_id.sys_id(), dis);
                 if lsp.lsp_id.sys_id() == *dis {
@@ -104,7 +106,7 @@ pub fn isis_lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: 
     }
 }
 
-pub fn isis_csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
+pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         println!("Link not found {}", ifindex);
         return;
@@ -119,7 +121,7 @@ pub fn isis_csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac:
 
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
-    let Some(dis) = &link.l2dis else {
+    let Some(dis) = &link.state.dis.l2 else {
         println!("DIS was yet not selected");
         return;
     };
@@ -158,6 +160,20 @@ pub fn isis_csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac:
     }
 }
 
+pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
+    let Some(_link) = top.links.get_mut(&ifindex) else {
+        println!("Link not found {}", ifindex);
+        return;
+    };
+}
+
+pub fn unknown_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
+    let Some(_link) = top.links.get_mut(&ifindex) else {
+        println!("Link not found {}", ifindex);
+        return;
+    };
+}
+
 pub fn isis_psnp_send(top: &mut IsisTop, ifindex: u32, pdu: IsisPsnp) {
     let Some(link) = top.links.get(&ifindex) else {
         return;
@@ -189,22 +205,22 @@ pub fn process_packet(
 
     match packet.pdu_type {
         IsisType::L1Hello | IsisType::L2Hello => {
-            isis_hello_recv(top, packet, ifindex, mac);
+            hello_recv(top, packet, ifindex, mac);
+        }
+        IsisType::P2PHello => {
+            hello_p2p_recv(top, packet, ifindex, mac);
         }
         IsisType::L1Lsp | IsisType::L2Lsp => {
-            isis_lsp_recv(top, packet, ifindex, mac);
+            lsp_recv(top, packet, ifindex, mac);
         }
         IsisType::L1Csnp | IsisType::L2Csnp => {
-            isis_csnp_recv(top, packet, ifindex, mac);
+            csnp_recv(top, packet, ifindex, mac);
         }
         IsisType::L1Psnp | IsisType::L2Psnp => {
-            //self.psnp_recv(packet, ifindex, mac);
+            psnp_recv(top, packet, ifindex, mac);
         }
         IsisType::Unknown(_) => {
-            //self.unknown_recv(packet, ifindex, mac);
-        }
-        _ => {
-            //
+            unknown_recv(top, packet, ifindex, mac);
         }
     }
 

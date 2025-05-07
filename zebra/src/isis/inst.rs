@@ -51,7 +51,7 @@ pub struct Isis {
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub l2lsp: Option<IsisLsp>,
-    pub l2seqnum: u32,
+    // pub l2seqnum: u32,
     pub l2lspgen: Option<Timer>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
@@ -93,7 +93,7 @@ impl Isis {
             lsdb: Levels::<Lsdb>::default(),
             hostname: Levels::<Hostname>::default(),
             l2lsp: None,
-            l2seqnum: 1,
+            //l2seqnum: 1,
             l2lspgen: None,
         };
         isis.callback_build();
@@ -121,7 +121,7 @@ impl Isis {
         let mut lsp = IsisLsp {
             hold_time: 1200,
             lsp_id,
-            seq_number: self.l2seqnum,
+            seq_number: 1,
             ..Default::default()
         };
 
@@ -273,7 +273,7 @@ impl Isis {
                             self.l2lspgen = Some(timer);
                         }
                         self.lsp_send(ifindex);
-                        self.l2seqnum += 1
+                        // self.l2seqnum += 1
                     }
                 }
             }
@@ -296,37 +296,40 @@ impl Isis {
                     IfsmEvent::Stop => {
                         ifsm::stop(&mut top);
                     }
-                    IfsmEvent::LspSend => {
-                        self.lsp_send(ifindex);
-                    }
+                    // IfsmEvent::LspSend => {
+                    //     self.lsp_send(ifindex);
+                    // }
                     IfsmEvent::HelloTimerExpire => {
                         ifsm::hello_send(&mut top, level.unwrap());
                     }
                     IfsmEvent::HelloOriginate => match level {
-                        // In case of level is None, originate both L1/L2 Hello.
                         Some(level) => ifsm::hello_originate(&mut top, level),
                         None => {
+                            // In case of level is None, originate both L1/L2 Hello.
                             ifsm::hello_originate(&mut top, Level::L1);
                             ifsm::hello_originate(&mut top, Level::L2);
                         }
                     },
                     IfsmEvent::DisSelection => {
-                        ifsm::dis_selection(link);
+                        ifsm::dis_selection(&mut top, level.unwrap());
                     }
                     _ => {
                         //
                     }
                 }
             }
-            Message::Nfsm(ev, ifindex, sysid) => {
-                println!("ifindex {} sysid {:?} ev {:?}", ifindex, sysid, ev);
+            Message::Nfsm(ev, ifindex, sysid, level) => {
+                println!(
+                    "ifindex {} sysid {:?} ev {:?} level {}",
+                    ifindex, sysid, ev, level
+                );
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
-                let Some(nbr) = link.state.nbrs.l2.get_mut(&sysid) else {
+                let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sysid) else {
                     return;
                 };
-                isis_nfsm(nbr, ev, &None);
+                isis_nfsm(nbr, ev, &None, level);
             }
             Message::Lsdb(ev, level, key) => {
                 use LsdbEvent::*;
@@ -395,6 +398,6 @@ pub enum Message {
     Recv(IsisPacket, u32, Option<MacAddr>),
     Send(IsisPacket, u32),
     Ifsm(IfsmEvent, u32, Option<Level>),
-    Nfsm(NfsmEvent, u32, IsisSysId),
+    Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
 }
