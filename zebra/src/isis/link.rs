@@ -19,7 +19,7 @@ use super::addr::IsisAddr;
 use super::adj::Neighbor;
 use super::config::IsisConfig;
 use super::task::{Timer, TimerType};
-use super::{IfsmEvent, Isis, Levels, Message};
+use super::{IfsmEvent, Isis, Level, Levels, Message};
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
@@ -96,7 +96,6 @@ pub struct IsisLink {
     pub mtu: u32,
     pub mac: Option<MacAddr>,
     pub l2adj: Option<IsisLspId>,
-    // pub l2dis: Option<IsisSysId>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub config: LinkConfig,
@@ -114,14 +113,6 @@ pub struct LinkTop<'a> {
 }
 
 #[derive(Default, Debug)]
-pub enum HelloPaddingPolicy {
-    #[default]
-    Always,
-    DuringAdjacencyOnly,
-    Disable,
-}
-
-#[derive(Default, Debug)]
 pub struct LinkConfig {
     pub enable: Afis<bool>,
 
@@ -133,7 +124,7 @@ pub struct LinkConfig {
     pub priority: Option<u8>,
     pub hold_time: Option<u16>,
     pub hello_interval: Option<u16>,
-    pub hello_padding: HelloPaddingPolicy,
+    pub hello_padding: Option<HelloPaddingPolicy>,
 }
 
 pub enum LinkType {
@@ -170,6 +161,10 @@ impl LinkConfig {
 
     pub fn hello_interval(&self) -> u64 {
         self.hello_interval.unwrap_or(DEFAULT_HELLO_INTERVAL) as u64
+    }
+
+    pub fn hello_padding(&self) -> HelloPaddingPolicy {
+        self.hello_padding.unwrap_or(HelloPaddingPolicy::Always)
     }
 
     pub fn enabled(&self) -> bool {
@@ -274,7 +269,7 @@ impl Isis {
 
         if link.config.enabled() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
-            self.tx.send(msg).unwrap();
+            self.tx.send(msg);
         }
     }
 
@@ -293,7 +288,7 @@ impl Isis {
 
         if let Some(lsp) = &self.l2lsp {
             let packet = IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone()));
-            link.ptx.send(Message::Send(packet, ifindex)).unwrap();
+            link.ptx.send(Message::Send(packet, ifindex));
         }
     }
 
@@ -341,13 +336,13 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
         if link.config.enabled() {
             // Disable -> Enable.
             let msg = Message::Ifsm(IfsmEvent::Start, link.state.ifindex, None);
-            isis.tx.send(msg).unwrap();
+            isis.tx.send(msg);
         }
     } else {
         if !link.config.enabled() {
             // Enable -> Disable.
             let msg = Message::Ifsm(IfsmEvent::Stop, link.state.ifindex, None);
-            isis.tx.send(msg).unwrap();
+            isis.tx.send(msg);
         }
     }
 
@@ -380,6 +375,37 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
 
     let is_level = config_level_common(isis.config.is_type(), link.config.circuit_type());
     link.state.level = is_level;
+
+    Some(())
+}
+
+pub fn config_hello_padding(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let hello_padding = args.string()?.parse::<HelloPaddingPolicy>().ok()?;
+
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if link.config.hello_padding != Some(hello_padding.clone()) {
+        link.config.hello_padding = Some(hello_padding);
+
+        // Update Hello.
+        if link.state.hello.l1.is_some() {
+            let msg = Message::Ifsm(
+                IfsmEvent::HelloOriginate,
+                link.state.ifindex,
+                Some(Level::L1),
+            );
+            isis.tx.send(msg);
+        }
+        if link.state.hello.l2.is_some() {
+            let msg = Message::Ifsm(
+                IfsmEvent::HelloOriginate,
+                link.state.ifindex,
+                Some(Level::L2),
+            );
+            isis.tx.send(msg);
+        }
+    }
 
     Some(())
 }
@@ -445,4 +471,35 @@ pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
         }
     }
     buf
+}
+
+use std::fmt::{Display, Formatter, Result};
+use std::str::FromStr;
+
+#[derive(Default, Debug, PartialEq, Clone, Copy)]
+pub enum HelloPaddingPolicy {
+    #[default]
+    Always,
+    Disable,
+}
+
+#[derive(Debug)]
+pub struct ParseHelloPaddingPolicyError;
+
+impl Display for ParseHelloPaddingPolicyError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "invalid input for Hello Padding Policy")
+    }
+}
+
+impl FromStr for HelloPaddingPolicy {
+    type Err = ParseHelloPaddingPolicyError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "always" => Ok(HelloPaddingPolicy::Always),
+            "disable" => Ok(HelloPaddingPolicy::Disable),
+            _ => Err(ParseHelloPaddingPolicyError),
+        }
+    }
 }

@@ -206,7 +206,7 @@ impl Isis {
         let timer = Timer::new(3, TimerType::Once, move || {
             let tx = tx.clone();
             async move {
-                tx.send(Message::LspGen).unwrap();
+                tx.send(Message::LspGen);
             }
         });
 
@@ -244,7 +244,7 @@ impl Isis {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
             let output = f(self, args, msg.json);
-            msg.resp.send(output).await.unwrap();
+            msg.resp.send(output).await;
         }
     }
 

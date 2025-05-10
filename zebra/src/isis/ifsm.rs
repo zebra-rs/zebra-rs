@@ -4,7 +4,7 @@ use isis_packet::{
     IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
 };
 
-use super::link::{Afis, LinkTop};
+use super::link::{Afis, HelloPaddingPolicy, LinkTop};
 use super::task::Timer;
 use super::{IsisLink, Level, Message, NfsmState};
 
@@ -68,7 +68,9 @@ pub fn hello_generate(top: &LinkTop, level: Level) -> IsisHello {
             }
         }
     }
-    hello.padding(top.state.mtu as usize);
+    if top.config.hello_padding() == HelloPaddingPolicy::Always {
+        hello.padding(top.state.mtu as usize);
+    }
     hello
 }
 
@@ -80,7 +82,7 @@ fn hello_timer(top: &LinkTop, level: Level) -> Timer {
         async move {
             use IfsmEvent::*;
             let msg = Message::Ifsm(HelloTimerExpire, ifindex, Some(level));
-            tx.send(msg).unwrap();
+            tx.send(msg);
         }
     })
 }
@@ -92,7 +94,7 @@ pub fn hello_send(top: &mut LinkTop, level: Level) -> Result<()> {
         Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
     };
     let ifindex = top.state.ifindex;
-    top.ptx.send(Message::Send(packet, ifindex)).unwrap();
+    top.ptx.send(Message::Send(packet, ifindex));
     Ok(())
 }
 
@@ -105,7 +107,6 @@ fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(top: &mut LinkTop, level: Level) {
     if has_level(top.state.level(), level) {
-        println!("Hello generate {}", level);
         let hello = hello_generate(top, level);
         *top.state.hello.get_mut(&level) = Some(hello);
         hello_send(top, level);

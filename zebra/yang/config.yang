@@ -144,7 +144,7 @@ module config {
             leaf padding {
               type enumeration {
                 enum always;
-                enum during-adjacency-only;
+                /* enum during-adjacency-only; */
                 enum disable;
               }
             }
