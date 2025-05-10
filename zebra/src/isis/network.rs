@@ -2,6 +2,7 @@ use std::io::{ErrorKind, IoSlice, IoSliceMut};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
+use anyhow::Context;
 use bytes::BytesMut;
 use nix::sys::socket::{self, LinkAddr};
 use socket2::Socket;
@@ -40,11 +41,8 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
             };
 
             let mac = addr.addr().map(MacAddr::from);
-            // let mac: Option<MacAddr> = oct.map(MacAddr::from);
 
-            tx.send(Message::Recv(packet.1, addr.ifindex() as u32, mac))
-                .unwrap();
-
+            let _ = tx.send(Message::Recv(packet.1, addr.ifindex() as u32, mac));
             Ok(())
         })
         .await;
@@ -68,17 +66,17 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
 
         let sockaddr = link_addr((LLC_HDR.len() + buf.len()) as u16, ifindex, Some(l2iss));
 
-        sock.async_io(Interest::WRITABLE, |sock| {
-            socket::sendmsg(
-                sock.as_raw_fd(),
-                &iov,
-                &[],
-                socket::MsgFlags::empty(),
-                Some(&sockaddr),
-            )
-            .unwrap();
-            Ok(())
-        })
-        .await;
+        let res = sock
+            .async_io(Interest::WRITABLE, |sock| {
+                socket::sendmsg(
+                    sock.as_raw_fd(),
+                    &iov,
+                    &[],
+                    socket::MsgFlags::empty(),
+                    Some(&sockaddr),
+                )
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+            })
+            .await;
     }
 }

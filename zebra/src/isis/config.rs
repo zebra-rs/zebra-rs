@@ -17,6 +17,10 @@ impl Isis {
             link::config_circuit_type,
         );
         self.callback_add(
+            "/routing/isis/interface/hello/padding",
+            link::config_hello_padding,
+        );
+        self.callback_add(
             "/routing/isis/interface/ipv4/enable",
             link::config_ipv4_enable,
         );
