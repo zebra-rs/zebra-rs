@@ -128,6 +128,14 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor) {
     nbr.laddr6 = laddr6;
 }
 
+fn nfsm_hello_log(nbr: &Neighbor) {
+    if nbr.pdu.lan_id.is_empty() {
+        println!("NFSM Hello: LAN id is empty");
+    } else {
+        println!("NFSM Hello: LAN id {}", nbr.pdu.lan_id);
+    }
+}
+
 pub fn nfsm_hello_received(
     nbr: &mut Neighbor,
     mac: &Option<MacAddr>,
@@ -154,6 +162,7 @@ pub fn nfsm_hello_received(
         }
     }
 
+    nfsm_hello_log(nbr);
     nfsm_ifaddr_update(nbr);
 
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
