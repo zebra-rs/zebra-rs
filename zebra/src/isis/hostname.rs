@@ -14,6 +14,10 @@ pub struct Hostname {
 }
 
 impl Hostname {
+    pub fn get(&self, key: &IsisSysId) -> Option<&(String, bool)> {
+        self.map.get(key)
+    }
+
     pub fn insert(&mut self, key: IsisSysId, hostname: String) -> Option<(String, bool)> {
         self.map.insert(key, (hostname, false))
     }

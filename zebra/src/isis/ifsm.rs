@@ -5,6 +5,7 @@ use isis_packet::{
 };
 
 use super::link::{Afis, HelloPaddingPolicy, LinkTop};
+use super::neigh::Neighbor;
 use super::task::Timer;
 use super::{IsisLink, Level, Message, NfsmState};
 
@@ -127,26 +128,47 @@ pub fn stop(top: &mut LinkTop) {
     }
 }
 
-pub fn dis_selection(top: &mut LinkTop, level: Level) {
-    let mut dis: Option<IsisSysId> = None;
-    let mut priority = top.config.priority();
-    for (_, nbr) in top.state.nbrs.get(&level).iter() {
+pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
+    // When curr is None, current candidate DIS is myself.
+    let mut curr: Option<&Neighbor> = None;
+    let mut curr_priority = ltop.config.priority();
+    let mut curr_mac = ltop.state.mac.clone();
+
+    // We will check at least Up state neighbor exists.
+    let mut up_count = 0;
+
+    for (_, nbr) in ltop.state.nbrs.get(&level).iter() {
         if nbr.state != NfsmState::Up {
             continue;
+        } else {
+            up_count += 1;
         }
 
-        if priority < nbr.pdu.priority {
-            dis = Some(nbr.pdu.source_id.clone());
-            priority = nbr.pdu.priority;
-        } else if priority > nbr.pdu.priority {
-            //
-        } else {
-            // Compare MAC Address.
+        if nbr.pdu.priority > curr_priority {
+            curr_priority = nbr.pdu.priority;
+            curr_mac = nbr.mac.clone();
+            curr = Some(&nbr);
+        } else if nbr.pdu.priority == curr_priority {
+            if match (nbr.mac, curr_mac) {
+                (Some(n_mac), Some(c_mac)) => n_mac > c_mac,
+                _ => false,
+            } {
+                curr_priority = nbr.pdu.priority;
+                curr_mac = nbr.mac.clone();
+                curr = Some(&nbr);
+            }
         }
     }
 
-    if let Some(dis) = dis {
-        println!("DIS is selected {}", dis);
-        *top.state.dis.get_mut(&level) = Some(dis);
+    if up_count == 0 {
+        println!("No Up neighbors");
+        return;
+    }
+
+    if let Some(nbr) = curr {
+        println!("DIS is selected {}", nbr.sys_id);
+        *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
+    } else {
+        println!("DIS is selected: self");
     }
 }
