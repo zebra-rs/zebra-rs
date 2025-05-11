@@ -16,8 +16,8 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{Link, MacAddr};
 
 use super::addr::IsisAddr;
-use super::adj::Neighbor;
 use super::config::IsisConfig;
+use super::neigh::Neighbor;
 use super::task::{Timer, TimerType};
 use super::{IfsmEvent, Isis, Level, Levels, Message};
 

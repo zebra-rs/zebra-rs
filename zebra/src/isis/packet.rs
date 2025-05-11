@@ -1,9 +1,9 @@
 use anyhow::{Context, Error};
-use isis_packet::{IsisLsp, IsisNeighborId, IsisPsnp, IsisTlvLspEntries};
-use isis_packet::{IsisPacket, IsisPdu, IsisTlv, IsisType};
+use isis_packet::{
+    IsisLsp, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv, IsisTlvLspEntries, IsisType,
+};
 
-use crate::isis::adj::Neighbor;
-
+use crate::isis::neigh::Neighbor;
 use crate::isis::Message;
 use crate::rib::MacAddr;
 

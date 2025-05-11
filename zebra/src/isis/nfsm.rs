@@ -8,7 +8,7 @@ use crate::rib::MacAddr;
 use super::link::LinkTop;
 use super::{IfsmEvent, IsisLink, Message};
 
-use super::{adj::Neighbor, task::Timer};
+use super::{neigh::Neighbor, task::Timer};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
