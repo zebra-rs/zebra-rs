@@ -3,7 +3,7 @@ use std::fmt::Write;
 use isis_packet::{nlpid_str, IsisHello, IsisTlv, IsisTlvProtoSupported};
 use serde::Serialize;
 
-use super::{adj::Neighbor, inst::ShowCallback, Isis};
+use super::{inst::ShowCallback, neigh::Neighbor, Isis};
 
 use crate::isis::{hostname, link};
 use crate::{config::Args, rib::MacAddr};
