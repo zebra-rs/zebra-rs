@@ -51,7 +51,6 @@ pub struct Isis {
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub l2lsp: Option<IsisLsp>,
-    // pub l2seqnum: u32,
     pub l2lspgen: Option<Timer>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
@@ -109,109 +108,6 @@ impl Isis {
             write_packet(sock, prx).await;
         });
         isis
-    }
-
-    pub fn l2lsp_gen(&mut self) -> Option<(IsisLsp, Timer)> {
-        let level = Level::L2;
-
-        // LSP ID with no pseudo id and no fragmentation.
-        let lsp_id = IsisLspId::new(self.config.net.sys_id(), 0, 0);
-
-        // Generate own LSP for L2.
-        let mut lsp = IsisLsp {
-            hold_time: 1200,
-            lsp_id,
-            seq_number: 1,
-            ..Default::default()
-        };
-
-        // Area address.
-        let area_addr = self.config.net.area_id.clone();
-        lsp.tlvs.push(IsisTlvAreaAddr { area_addr }.into());
-
-        // Supported protocol
-        let nlpids = vec![IsisProto::Ipv4.into()];
-        lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
-
-        // Hostname.
-        let hostname = self.config.hostname();
-        self.hostname
-            .get_mut(&level)
-            .insert_originate(self.config.net.sys_id(), hostname.clone());
-        lsp.tlvs.push(IsisTlvHostname { hostname }.into());
-
-        // Router capability. When TE-Router ID is configured, use the value. If
-        // not when Router ID is configured, use the value. Otherwise system
-        // default Router ID will be used.
-        let router_id: Ipv4Addr = "1.2.3.4".parse().unwrap();
-        let mut cap = IsisTlvRouterCap {
-            router_id,
-            flags: 0.into(),
-            subs: Vec::new(),
-        };
-        // Sub: SR Capability
-        let mut flags = SegmentRoutingCapFlags::default();
-        flags.set_i_flag(true);
-        flags.set_v_flag(true);
-        let sid_label = SidLabelTlv::Label(16000);
-        let sr_cap = IsisSubSegmentRoutingCap {
-            flags,
-            range: 8000,
-            sid_label,
-        };
-        cap.subs.push(sr_cap.into());
-
-        // Sub: SR Algorithms
-        let algo = IsisSubSegmentRoutingAlgo {
-            algo: vec![Algo::Spf],
-        };
-        cap.subs.push(algo.into());
-
-        // Sub: SR Local Block
-        let sid_label = SidLabelTlv::Label(15000);
-        let lb = IsisSubSegmentRoutingLB {
-            flags: 0,
-            range: 3000,
-            sid_label,
-        };
-        cap.subs.push(lb.into());
-        lsp.tlvs.push(cap.into());
-
-        // TE Router ID.
-        let te_router_id = IsisTlvTeRouterId { router_id };
-        lsp.tlvs.push(te_router_id.into());
-
-        // IS Reachability.
-        for (_, link) in self.links.iter() {
-            let Some(adj) = &link.l2adj else {
-                continue;
-            };
-            // Ext IS Reach.
-            let mut ext_is_reach = IsisTlvExtIsReach::default();
-            let is_reach = IsisTlvExtIsReachEntry {
-                neighbor_id: adj.neighbor_id(),
-                metric: 10,
-                subs: Vec::new(),
-            };
-            ext_is_reach.entries.push(is_reach);
-            lsp.tlvs.push(ext_is_reach.into());
-        }
-
-        // IPv4 Reachability.
-
-        // IPv6 Reachability.
-
-        // Start timer.
-        let tx = self.tx.clone();
-        let timer = Timer::new(3, TimerType::Once, move || {
-            let tx = tx.clone();
-            async move {
-                tx.send(Message::LspGen);
-            }
-        });
-
-        // Update LSDB.
-        Some((lsp, timer))
     }
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
@@ -387,6 +283,115 @@ impl Isis {
             state: &mut link.state,
             timer: &mut link.timer,
         })
+    }
+
+    pub fn l2lsp_gen(&mut self) -> Option<(IsisLsp, Timer)> {
+        let level = Level::L2;
+
+        // LSP ID with no pseudo id and no fragmentation.
+        let lsp_id = IsisLspId::new(self.config.net.sys_id(), 0, 0);
+
+        // Generate own LSP for L2.
+        let mut lsp = IsisLsp {
+            hold_time: 1200,
+            lsp_id,
+            seq_number: 1,
+            ..Default::default()
+        };
+
+        // Area address.
+        let area_addr = self.config.net.area_id.clone();
+        lsp.tlvs.push(IsisTlvAreaAddr { area_addr }.into());
+
+        // Supported protocol
+        let nlpids = vec![IsisProto::Ipv4.into()];
+        lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
+
+        // Hostname.
+        let hostname = self.config.hostname();
+        self.hostname
+            .get_mut(&level)
+            .insert_originate(self.config.net.sys_id(), hostname.clone());
+        lsp.tlvs.push(IsisTlvHostname { hostname }.into());
+
+        // Router capability. When TE-Router ID is configured, use the value. If
+        // not when Router ID is configured, use the value. Otherwise system
+        // default Router ID will be used.
+        let router_id: Ipv4Addr = "1.2.3.4".parse().unwrap();
+        let mut cap = IsisTlvRouterCap {
+            router_id,
+            flags: 0.into(),
+            subs: Vec::new(),
+        };
+        // Sub: SR Capability
+        let mut flags = SegmentRoutingCapFlags::default();
+        flags.set_i_flag(true);
+        flags.set_v_flag(true);
+        let sid_label = SidLabelTlv::Label(16000);
+        let sr_cap = IsisSubSegmentRoutingCap {
+            flags,
+            range: 8000,
+            sid_label,
+        };
+        cap.subs.push(sr_cap.into());
+
+        // Sub: SR Algorithms
+        let algo = IsisSubSegmentRoutingAlgo {
+            algo: vec![Algo::Spf],
+        };
+        cap.subs.push(algo.into());
+
+        // Sub: SR Local Block
+        let sid_label = SidLabelTlv::Label(15000);
+        let lb = IsisSubSegmentRoutingLB {
+            flags: 0,
+            range: 3000,
+            sid_label,
+        };
+        cap.subs.push(lb.into());
+        lsp.tlvs.push(cap.into());
+
+        // TE Router ID.
+        let te_router_id = IsisTlvTeRouterId { router_id };
+        lsp.tlvs.push(te_router_id.into());
+
+        // IS Reachability.
+        for (_, link) in self.links.iter() {
+            let Some(adj) = &link.l2adj else {
+                continue;
+            };
+            // Ext IS Reach.
+            let mut ext_is_reach = IsisTlvExtIsReach::default();
+            let is_reach = IsisTlvExtIsReachEntry {
+                neighbor_id: adj.neighbor_id(),
+                metric: 10,
+                subs: Vec::new(),
+            };
+            ext_is_reach.entries.push(is_reach);
+            lsp.tlvs.push(ext_is_reach.into());
+        }
+
+        // IPv4 Reachability.
+
+        // IPv6 Reachability.
+
+        // Start timer.
+        let tx = self.tx.clone();
+        let timer = Timer::new(3, TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                tx.send(Message::LspGen);
+            }
+        });
+
+        // Update LSDB.
+        Some((lsp, timer))
+    }
+
+    pub fn ifname(&self, ifindex: u32) -> String {
+        self.links
+            .get(&ifindex)
+            .map_or_else(|| "unknown".to_string(), |link| link.state.name.clone())
     }
 }
 
