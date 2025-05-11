@@ -32,7 +32,7 @@ use super::link::{IsisLink, IsisLinks, LinkTop};
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
-use super::{process_packet, Level, Levels};
+use super::{process_packet, Level, Levels, NfsmState};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -278,27 +278,22 @@ impl Isis {
                 }
             }
             Message::Ifsm(ev, ifindex, level) => {
-                let Some(link) = self.links.get_mut(&ifindex) else {
+                let Some(mut top) = self.link_top(ifindex) else {
                     return;
                 };
-                let mut top = LinkTop {
-                    tx: &self.tx,
-                    ptx: &self.ptx,
-                    up_config: &self.config,
-                    config: &mut link.config,
-                    state: &mut link.state,
-                    timer: &mut link.timer,
-                };
                 match ev {
+                    IfsmEvent::InterfaceUp => {
+                        //
+                    }
+                    IfsmEvent::InterfaceDown => {
+                        //
+                    }
                     IfsmEvent::Start => {
                         ifsm::start(&mut top);
                     }
                     IfsmEvent::Stop => {
                         ifsm::stop(&mut top);
                     }
-                    // IfsmEvent::LspSend => {
-                    //     self.lsp_send(ifindex);
-                    // }
                     IfsmEvent::HelloTimerExpire => {
                         ifsm::hello_send(&mut top, level.unwrap());
                     }
@@ -313,16 +308,9 @@ impl Isis {
                     IfsmEvent::DisSelection => {
                         ifsm::dis_selection(&mut top, level.unwrap());
                     }
-                    _ => {
-                        //
-                    }
                 }
             }
             Message::Nfsm(ev, ifindex, sysid, level) => {
-                println!(
-                    "ifindex {} sysid {:?} ev {:?} level {}",
-                    ifindex, sysid, ev, level
-                );
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
@@ -330,6 +318,11 @@ impl Isis {
                     return;
                 };
                 isis_nfsm(nbr, ev, &None, level);
+
+                if nbr.state == NfsmState::Down {
+                    link.state.nbrs.get_mut(&level).remove(&sysid);
+                    // TODO.  Schedule SPF calculation.
+                }
             }
             Message::Lsdb(ev, level, key) => {
                 use LsdbEvent::*;
@@ -383,6 +376,17 @@ impl Isis {
             tx: &self.tx,
         };
         top
+    }
+
+    pub fn link_top<'a>(&'a mut self, ifindex: u32) -> Option<LinkTop<'a>> {
+        self.links.get_mut(&ifindex).map(|link| LinkTop {
+            tx: &self.tx,
+            ptx: &self.ptx,
+            up_config: &self.config,
+            config: &mut link.config,
+            state: &mut link.state,
+            timer: &mut link.timer,
+        })
     }
 }
 

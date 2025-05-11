@@ -8,6 +8,7 @@ use crate::isis::Message;
 use crate::rib::MacAddr;
 
 use super::inst::IsisTop;
+use super::link::LinkTop;
 use super::lsdb;
 use super::nfsm::{isis_nfsm, NfsmEvent};
 use super::Level;
@@ -36,6 +37,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         .entry(pdu.source_id.clone())
         .or_insert(Neighbor::new(
             level,
+            pdu.source_id.clone(),
             pdu.clone(),
             ifindex,
             mac,
