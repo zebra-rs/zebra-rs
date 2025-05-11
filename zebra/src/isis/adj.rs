@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::IsisHello;
+use isis_packet::{IsisHello, IsisSysId};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::MacAddr;
@@ -13,6 +13,7 @@ use super::{Level, Message};
 #[derive(Debug)]
 pub struct Neighbor {
     pub tx: UnboundedSender<Message>,
+    pub sys_id: IsisSysId,
     pub pdu: IsisHello,
     pub ifindex: u32,
     pub state: NfsmState,
@@ -28,6 +29,7 @@ pub struct Neighbor {
 impl Neighbor {
     pub fn new(
         level: Level,
+        sys_id: IsisSysId,
         pdu: IsisHello,
         ifindex: u32,
         mac: Option<MacAddr>,
@@ -35,6 +37,7 @@ impl Neighbor {
     ) -> Self {
         Self {
             tx,
+            sys_id,
             pdu,
             ifindex,
             state: NfsmState::Down,

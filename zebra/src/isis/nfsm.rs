@@ -5,12 +5,10 @@ use isis_packet::{IsLevel, IsisHello, IsisTlv};
 use crate::isis::Level;
 use crate::rib::MacAddr;
 
-use super::{IfsmEvent, Message};
+use super::link::LinkTop;
+use super::{IfsmEvent, IsisLink, Message};
 
-use super::{
-    adj::Neighbor,
-    task::{Timer, TimerType},
-};
+use super::{adj::Neighbor, task::Timer};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -19,14 +17,19 @@ pub enum NfsmState {
     Up,
 }
 
-impl Display for NfsmState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        let adj_state = match self {
+impl NfsmState {
+    fn as_str(&self) -> &'static str {
+        match self {
             NfsmState::Down => "Down",
             NfsmState::Init => "Init",
             NfsmState::Up => "Up",
-        };
-        write!(f, "{}", adj_state)
+        }
+    }
+}
+
+impl Display for NfsmState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -34,6 +37,21 @@ impl Display for NfsmState {
 pub enum NfsmEvent {
     HelloReceived,
     HoldTimerExpire,
+}
+
+impl NfsmEvent {
+    fn as_str(&self) -> &'static str {
+        match self {
+            NfsmEvent::HelloReceived => "HelloReceived",
+            NfsmEvent::HoldTimerExpire => "HoldTimerExpire",
+        }
+    }
+}
+
+impl Display for NfsmEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.write_str(self.as_str())
+    }
 }
 
 pub type NfsmFunc = fn(&mut Neighbor, &Option<MacAddr>, Level) -> Option<NfsmState>;
@@ -60,7 +78,7 @@ impl NfsmState {
     }
 }
 
-fn isis_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
+fn nfsm_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
     let Some(addr) = mac else {
         return false;
     };
@@ -76,11 +94,11 @@ fn isis_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
     false
 }
 
-pub fn isis_hold_timer(adj: &Neighbor, level: Level) -> Timer {
+pub fn nfsm_hold_timer(adj: &Neighbor, level: Level) -> Timer {
     let tx = adj.tx.clone();
     let sysid = adj.pdu.source_id.clone();
     let ifindex = adj.ifindex;
-    Timer::new(adj.pdu.hold_time as u64, TimerType::Once, move || {
+    Timer::once(adj.pdu.hold_time as u64, move || {
         let tx = tx.clone();
         let sysid = sysid.clone();
         async move {
@@ -91,7 +109,7 @@ pub fn isis_hold_timer(adj: &Neighbor, level: Level) -> Timer {
     })
 }
 
-fn nbr_ifaddr_update(nbr: &mut Neighbor) {
+fn nfsm_ifaddr_update(nbr: &mut Neighbor) {
     let mut addr4 = vec![];
     let mut addr6 = vec![];
     let mut laddr6 = vec![];
@@ -125,26 +143,26 @@ pub fn nfsm_hello_received(
     }
 
     if state == NfsmState::Init {
-        if isis_hello_has_mac(&nbr.pdu, mac) {
+        if nfsm_hello_has_mac(&nbr.pdu, mac) {
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Up;
         }
     } else {
-        if !isis_hello_has_mac(&nbr.pdu, mac) {
+        if !nfsm_hello_has_mac(&nbr.pdu, mac) {
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Init;
         }
     }
 
-    nbr_ifaddr_update(nbr);
+    nfsm_ifaddr_update(nbr);
 
-    nbr.hold_timer = Some(isis_hold_timer(nbr, level));
+    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
     if state != nbr.state {
-        return Some(state);
+        Some(state)
+    } else {
+        None
     }
-
-    None
 }
 
 pub fn nfsm_hold_timer_expire(
@@ -168,6 +186,10 @@ pub fn nfsm_hold_timer_expire(
 }
 
 pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<MacAddr>, level: Level) {
+    println!(
+        "NFSM Neighbor ID: {} Level: {} Event: {}",
+        nbr.sys_id, level, event
+    );
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event, level);
 
     let next_state = fsm_func(nbr, mac, level).or(fsm_next_state);
@@ -180,5 +202,8 @@ pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<MacAddr>, le
         if new_state != nbr.state {
             nbr.state = new_state;
         }
+    }
+    if nbr.state == NfsmState::Down {
+        //
     }
 }
