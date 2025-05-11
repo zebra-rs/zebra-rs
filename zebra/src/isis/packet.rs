@@ -46,7 +46,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
 
     nbr.pdu = pdu;
 
-    isis_nfsm(nbr, NfsmEvent::HelloReceived, &link.mac, level);
+    isis_nfsm(nbr, NfsmEvent::HelloReceived, &link.state.mac, level);
 }
 
 pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {}

@@ -94,7 +94,7 @@ impl IsisLinks {
 #[derive(Debug)]
 pub struct IsisLink {
     pub mtu: u32,
-    pub mac: Option<MacAddr>,
+    // pub mac: Option<MacAddr>,
     pub l2adj: Option<IsisLspId>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
@@ -178,6 +178,7 @@ pub struct LinkState {
     pub ifindex: u32,
     pub name: String,
     pub mtu: u32,
+    pub mac: Option<MacAddr>,
     pub addr: Vec<IsisAddr>,
 
     // Link level. This value is the final level value from IS-IS instance's
@@ -230,7 +231,7 @@ impl IsisLink {
     pub fn from(link: Link, tx: UnboundedSender<Message>, ptx: UnboundedSender<Message>) -> Self {
         let mut is_link = Self {
             mtu: link.mtu,
-            mac: link.mac,
+            // mac: link.mac,
             l2adj: None,
             tx,
             ptx,
@@ -241,6 +242,7 @@ impl IsisLink {
         is_link.state.ifindex = link.index;
         is_link.state.name = link.name.to_owned();
         is_link.state.mtu = link.mtu;
+        is_link.state.mac = link.mac;
         is_link
     }
 }

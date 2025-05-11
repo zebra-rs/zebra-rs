@@ -26,7 +26,7 @@ pub struct Neighbor {
     pub laddr6: Vec<Ipv6Addr>,
     pub mac: Option<MacAddr>,
     pub hold_timer: Option<Timer>,
-    pub is_dis: bool,
+    pub dis: bool,
 }
 
 impl Neighbor {
@@ -50,8 +50,12 @@ impl Neighbor {
             laddr6: Vec::new(),
             mac,
             hold_timer: None,
-            is_dis: false,
+            dis: false,
         }
+    }
+
+    pub fn is_dis(&self) -> bool {
+        self.dis
     }
 
     pub fn event(&self, message: Message) {
@@ -86,8 +90,14 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
     for (_, link) in top.links.iter() {
         for (_, nbr) in &link.state.nbrs.l2 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+            let system_id =
+                if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.pdu.source_id) {
+                    hostname.clone()
+                } else {
+                    nbr.pdu.source_id.to_string()
+                };
             nbrs.push(NeighborBrief {
-                system_id: nbr.pdu.source_id.to_string(),
+                system_id,
                 interface: top.ifname(nbr.ifindex),
                 level: nbr.level.digit(),
                 state: nbr.state.to_string(),
@@ -116,7 +126,13 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
 }
 
 fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
-    writeln!(buf, " {}", nbr.pdu.source_id).unwrap();
+    let system_id =
+        if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.pdu.source_id) {
+            hostname.clone()
+        } else {
+            nbr.pdu.source_id.to_string()
+        };
+    writeln!(buf, " {}", system_id).unwrap();
 
     writeln!(
         buf,
@@ -150,8 +166,10 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
     )
     .unwrap();
 
+    let dis = if nbr.is_dis() { "is DIS" } else { "is not DIS" };
+
     // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 4m1s ago
-    writeln!(buf, "    LAN Priority: {}", nbr.pdu.priority).unwrap();
+    writeln!(buf, "    LAN Priority: {}, {}", nbr.pdu.priority, dis).unwrap();
 
     if !nbr.addr4.is_empty() {
         writeln!(buf, "    IP Prefixes").unwrap();
