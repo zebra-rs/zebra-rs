@@ -7,7 +7,7 @@ use crate::isis::neigh::Neighbor;
 use crate::isis::Message;
 use crate::rib::MacAddr;
 
-use super::inst::IsisTop;
+use super::inst::{IsisTop, NeighborTop};
 use super::link::LinkTop;
 use super::lsdb;
 use super::nfsm::{isis_nfsm, NfsmEvent};
@@ -46,7 +46,18 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
 
     nbr.pdu = pdu;
 
-    isis_nfsm(nbr, NfsmEvent::HelloReceived, &link.state.mac, level);
+    let mut ntop = NeighborTop {
+        dis: &mut link.state.dis,
+        lan_id: &mut link.state.lan_id,
+    };
+
+    isis_nfsm(
+        &mut ntop,
+        nbr,
+        NfsmEvent::HelloReceived,
+        &link.state.mac,
+        level,
+    );
 }
 
 pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {}

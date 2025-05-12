@@ -60,6 +60,9 @@ impl Timer {
         F: FnMut() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send,
     {
+        // Make it sure sec is not zero.
+        let sec = if sec == 0 { 1 } else { sec };
+
         // println!("Timer create: duration {}", sec);
         let duration = Duration::new(sec, 0);
 

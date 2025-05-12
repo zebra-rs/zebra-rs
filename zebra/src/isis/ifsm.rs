@@ -35,13 +35,19 @@ pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
 
 pub fn hello_generate(top: &LinkTop, level: Level) -> IsisHello {
     let source_id = top.up_config.net.sys_id();
+    let lan_id = top
+        .state
+        .lan_id
+        .get(&level)
+        .clone()
+        .unwrap_or(IsisNeighborId::default());
     let mut hello = IsisHello {
         circuit_type: top.state.level(),
         source_id,
         hold_time: top.config.hold_time(),
         pdu_len: 0,
         priority: top.config.priority(),
-        lan_id: IsisNeighborId::default(),
+        lan_id,
         tlvs: Vec::new(),
     };
     let tlv = proto_supported(&top.up_config.enable);
@@ -110,6 +116,7 @@ fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(top: &mut LinkTop, level: Level) {
     if has_level(top.state.level(), level) {
+        println!("IFSM Hello originate {}", level);
         let hello = hello_generate(top, level);
         *top.state.hello.get_mut(&level) = Some(hello);
         hello_send(top, level);
@@ -148,7 +155,8 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     // We will check at least Up state neighbor exists.
     let mut up_count = 0;
 
-    for (_, nbr) in ltop.state.nbrs.get(&level).iter() {
+    for (_, nbr) in ltop.state.nbrs.get_mut(&level).iter_mut() {
+        nbr.dis = false;
         if nbr.state != NfsmState::Up {
             continue;
         }
@@ -161,13 +169,21 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     }
 
     if up_count == 0 {
-        println!("No Up neighbors");
+        println!("DIS no up neighbors");
         return;
     }
 
     if let Some(nbr) = best {
         println!("DIS is selected {}", nbr.sys_id);
         *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
+        if ltop.state.lan_id.get(&level).is_none() {
+            if !nbr.pdu.lan_id.is_empty() {
+                println!("DIS we already get lan_id");
+                *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
+            } else {
+                println!("DIS waiting lan_id");
+            }
+        }
     } else {
         println!("DIS is selected: self");
     }
