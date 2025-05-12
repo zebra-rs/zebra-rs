@@ -192,7 +192,7 @@ pub fn isis_psnp_send(top: &mut IsisTop, ifindex: u32, pdu: IsisPsnp) {
         return;
     };
     let packet = IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone()));
-    link.ptx.send(Message::Send(packet, ifindex));
+    link.ptx.send(Message::Send(packet, ifindex, Level::L2));
 }
 
 pub fn process_packet(

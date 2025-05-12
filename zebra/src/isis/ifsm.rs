@@ -103,7 +103,7 @@ pub fn hello_send(top: &mut LinkTop, level: Level) -> Result<()> {
         Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
     };
     let ifindex = top.state.ifindex;
-    top.ptx.send(Message::Send(packet, ifindex));
+    top.ptx.send(Message::Send(packet, ifindex, level));
     Ok(())
 }
 
@@ -148,14 +148,14 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     }
 
     // When curr is None, current candidate DIS is myself.
-    let mut best: Option<&Neighbor> = None;
+    let mut best_key: Option<IsisSysId> = None;
     let mut best_priority = ltop.config.priority();
     let mut best_mac = ltop.state.mac.clone();
 
     // We will check at least Up state neighbor exists.
     let mut up_count = 0;
 
-    for (_, nbr) in ltop.state.nbrs.get_mut(&level).iter_mut() {
+    for (key, nbr) in ltop.state.nbrs.get_mut(&level).iter_mut() {
         nbr.dis = false;
         if nbr.state != NfsmState::Up {
             continue;
@@ -163,7 +163,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         if is_better(nbr, best_priority, &best_mac) {
             best_priority = nbr.pdu.priority;
             best_mac = nbr.mac.clone();
-            best = Some(nbr);
+            best_key = Some(key.clone());
         }
         up_count += 1;
     }
@@ -173,15 +173,19 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         return;
     }
 
-    if let Some(nbr) = best {
-        println!("DIS is selected {}", nbr.sys_id);
-        *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
-        if ltop.state.lan_id.get(&level).is_none() {
-            if !nbr.pdu.lan_id.is_empty() {
-                println!("DIS we already get lan_id");
-                *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
-            } else {
-                println!("DIS waiting lan_id");
+    if let Some(ref key) = best_key {
+        if let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(key) {
+            nbr.dis = true;
+            println!("DIS is selected {}", nbr.sys_id);
+            *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
+            if ltop.state.lan_id.get(&level).is_none() {
+                if !nbr.pdu.lan_id.is_empty() {
+                    println!("DIS we already get lan_id");
+                    *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
+                    //
+                } else {
+                    println!("DIS waiting lan_id");
+                }
             }
         }
     } else {

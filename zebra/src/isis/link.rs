@@ -291,7 +291,7 @@ impl Isis {
 
         if let Some(lsp) = &self.l2lsp {
             let packet = IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone()));
-            link.ptx.send(Message::Send(packet, ifindex));
+            link.ptx.send(Message::Send(packet, ifindex, Level::L2));
         }
     }
 
