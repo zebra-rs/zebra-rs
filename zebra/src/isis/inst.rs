@@ -415,7 +415,7 @@ pub enum Message {
     LspGen,
     LspUpdate(Level, u32),
     Recv(IsisPacket, u32, Option<MacAddr>),
-    Send(IsisPacket, u32),
+    Send(IsisPacket, u32, Level),
     Ifsm(IfsmEvent, u32, Option<Level>),
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
