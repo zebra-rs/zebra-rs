@@ -187,6 +187,7 @@ pub struct LinkState {
     level: IsLevel,
     pub nbrs: Levels<BTreeMap<IsisSysId, Neighbor>>,
     pub dis: Levels<Option<IsisSysId>>,
+    pub lan_id: Levels<Option<IsisNeighborId>>,
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
     pub hello: Levels<Option<IsisHello>>,

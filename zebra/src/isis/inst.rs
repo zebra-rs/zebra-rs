@@ -5,9 +5,9 @@ use std::sync::Arc;
 use ipnet::IpNet;
 use isis_packet::cap::{SegmentRoutingCapFlags, SidLabelTlv};
 use isis_packet::{
-    Algo, IsLevel, IsisLsp, IsisLspId, IsisPacket, IsisProto, IsisSubSegmentRoutingAlgo,
-    IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSysId, IsisTlvAreaAddr,
-    IsisTlvExtIsReach, IsisTlvExtIsReachEntry, IsisTlvHostname, IsisTlvIpv4IfAddr,
+    Algo, IsLevel, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisProto,
+    IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSysId,
+    IsisTlvAreaAddr, IsisTlvExtIsReach, IsisTlvExtIsReachEntry, IsisTlvHostname, IsisTlvIpv4IfAddr,
     IsisTlvProtoSupported, IsisTlvRouterCap, IsisTlvTeRouterId,
 };
 use socket2::Socket;
@@ -65,6 +65,11 @@ pub struct IsisTop<'a> {
     pub hostname: &'a mut Levels<Hostname>,
 }
 
+pub struct NeighborTop<'a> {
+    pub dis: &'a mut Levels<Option<IsisSysId>>,
+    pub lan_id: &'a mut Levels<Option<IsisNeighborId>>,
+}
+
 impl Isis {
     pub fn new(ctx: Context, rib_tx: UnboundedSender<rib::Message>) -> Self {
         let chan = RibRxChannel::new();
@@ -92,7 +97,6 @@ impl Isis {
             lsdb: Levels::<Lsdb>::default(),
             hostname: Levels::<Hostname>::default(),
             l2lsp: None,
-            //l2seqnum: 1,
             l2lspgen: None,
         };
         isis.callback_build();
@@ -207,16 +211,22 @@ impl Isis {
                 }
             }
             Message::Nfsm(ev, ifindex, sysid, level) => {
-                let Some(link) = self.links.get_mut(&ifindex) else {
+                let ltop = self.link_top(ifindex);
+                let Some(mut ltop) = ltop else {
                     return;
                 };
-                let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sysid) else {
+                let mut ntop = NeighborTop {
+                    dis: &mut ltop.state.dis,
+                    lan_id: &mut ltop.state.lan_id,
+                };
+                let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
                     return;
                 };
-                isis_nfsm(nbr, ev, &None, level);
+
+                isis_nfsm(&mut ntop, nbr, ev, &None, level);
 
                 if nbr.state == NfsmState::Down {
-                    link.state.nbrs.get_mut(&level).remove(&sysid);
+                    ltop.state.nbrs.get_mut(&level).remove(&sysid);
                     // TODO.  Schedule SPF calculation.
                 }
             }

@@ -5,6 +5,7 @@ use isis_packet::{IsLevel, IsisHello, IsisTlv};
 use crate::isis::Level;
 use crate::rib::MacAddr;
 
+use super::inst::NeighborTop;
 use super::link::LinkTop;
 use super::{IfsmEvent, IsisLink, Message};
 
@@ -54,7 +55,8 @@ impl Display for NfsmEvent {
     }
 }
 
-pub type NfsmFunc = fn(&mut Neighbor, &Option<MacAddr>, Level) -> Option<NfsmState>;
+pub type NfsmFunc =
+    fn(&mut NeighborTop, &mut Neighbor, &Option<MacAddr>, Level) -> Option<NfsmState>;
 
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent, level: Level) -> (NfsmFunc, Option<Self>) {
@@ -137,6 +139,7 @@ fn nfsm_hello_log(nbr: &Neighbor) {
 }
 
 pub fn nfsm_hello_received(
+    ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
     mac: &Option<MacAddr>,
     level: Level,
@@ -162,6 +165,16 @@ pub fn nfsm_hello_received(
         }
     }
 
+    if state == NfsmState::Up
+        && !nbr.pdu.lan_id.is_empty()
+        && ntop.dis.get(&level).is_some()
+        && ntop.lan_id.get(&level).is_none()
+    {
+        *ntop.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
+        println!("DIS is set LAN ID is empty -> set");
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+    }
+
     nfsm_hello_log(nbr);
     nfsm_ifaddr_update(nbr);
 
@@ -175,6 +188,7 @@ pub fn nfsm_hello_received(
 }
 
 pub fn nfsm_hold_timer_expire(
+    ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
     _mac: &Option<MacAddr>,
     level: Level,
@@ -194,14 +208,20 @@ pub fn nfsm_hold_timer_expire(
     Some(NfsmState::Down)
 }
 
-pub fn isis_nfsm(nbr: &mut Neighbor, event: NfsmEvent, mac: &Option<MacAddr>, level: Level) {
+pub fn isis_nfsm(
+    ntop: &mut NeighborTop,
+    nbr: &mut Neighbor,
+    event: NfsmEvent,
+    mac: &Option<MacAddr>,
+    level: Level,
+) {
     println!(
         "NFSM Neighbor ID: {} Level: {} Event: {}",
         nbr.sys_id, level, event
     );
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event, level);
 
-    let next_state = fsm_func(nbr, mac, level).or(fsm_next_state);
+    let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
 
     if let Some(new_state) = next_state {
         println!(
