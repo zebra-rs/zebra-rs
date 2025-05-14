@@ -166,6 +166,7 @@ pub fn nfsm_hello_received(
     }
 
     if state == NfsmState::Up
+        && nbr.is_dis()
         && !nbr.pdu.lan_id.is_empty()
         && ntop.dis.get(&level).is_some()
         && ntop.lan_id.get(&level).is_none()

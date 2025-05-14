@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::{inst::ShowCallback, neigh::Neighbor, Isis};
 
-use crate::isis::{hostname, link, neigh};
+use crate::isis::{hostname, link, neigh, Level};
 use crate::{config::Args, rib::MacAddr};
 
 impl Isis {
@@ -89,7 +89,7 @@ fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
         if let Some(dis) = &link.state.dis.l2 {
             writeln!(buf, "Interface: {}", top.ifname(link.state.ifindex)).unwrap();
             writeln!(buf, "  DIS: {}", dis);
-            if let Some(adj) = &link.l2adj {
+            if let Some(adj) = &link.state.adj.get(&Level::L2) {
                 writeln!(buf, "  Adj: {}", adj).unwrap();
             } else {
                 writeln!(buf, "  Adj: N/A").unwrap();
