@@ -120,12 +120,16 @@ pub struct LinkConfig {
     /// as level-2-only.
     pub circuit_type: Option<IsLevel>,
 
+    /// Link type one of LAN or Point-to-point.
+    pub link_type: Option<LinkType>,
+
     pub priority: Option<u8>,
     pub hold_time: Option<u16>,
     pub hello_interval: Option<u16>,
     pub hello_padding: Option<HelloPaddingPolicy>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum LinkType {
     Lan,
     P2p,
@@ -140,6 +144,27 @@ impl std::fmt::Display for LinkType {
     }
 }
 
+#[derive(Debug)]
+pub struct ParseLinkTypeError;
+
+impl Display for ParseLinkTypeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "invalid link type")
+    }
+}
+
+impl FromStr for LinkType {
+    type Err = ParseLinkTypeError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "lan" => Ok(LinkType::Lan),
+            "point-to-point" => Ok(LinkType::P2p),
+            _ => Err(ParseLinkTypeError),
+        }
+    }
+}
+
 // Default priority is 64.
 const DEFAULT_PRIORITY: u8 = 64;
 const DEFAULT_HOLD_TIME: u16 = 30;
@@ -148,6 +173,10 @@ const DEFAULT_HELLO_INTERVAL: u16 = 3;
 impl LinkConfig {
     pub fn circuit_type(&self) -> IsLevel {
         self.circuit_type.unwrap_or(IsLevel::L1L2)
+    }
+
+    pub fn link_type(&self) -> LinkType {
+        self.link_type.unwrap_or(LinkType::Lan)
     }
 
     pub fn priority(&self) -> u8 {
@@ -204,10 +233,6 @@ pub struct LinkState {
 }
 
 impl LinkState {
-    pub fn link_type(&self) -> LinkType {
-        LinkType::Lan
-    }
-
     pub fn is_up(&self) -> bool {
         true
     }
@@ -390,6 +415,18 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
+pub fn config_link_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link_type = args.string()?.parse::<LinkType>().ok()?;
+
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.link_type = Some(link_type);
+
+    // TODO: need to reset link.
+
+    Some(())
+}
+
 pub fn config_hello_padding(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let hello_padding = args.string()?.parse::<HelloPaddingPolicy>().ok()?;
@@ -441,7 +478,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
                     name: link.state.name.clone(),
                     ifindex: link.state.ifindex,
                     is_up: link.state.is_up(),
-                    link_type: link.state.link_type().to_string(),
+                    link_type: link.config.link_type().to_string(),
                     level: link.state.level.to_string(),
                 });
             }
@@ -457,7 +494,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
                 link.state.name,
                 link.state.ifindex,
                 link.state.is_up(),
-                link.state.link_type(),
+                link.config.link_type(),
                 link.state.level
             )
             .unwrap();
