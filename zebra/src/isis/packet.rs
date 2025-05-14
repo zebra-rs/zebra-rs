@@ -82,27 +82,26 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
         return;
     };
 
-    let mut lsp = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) | (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => pdu,
+    let (lsp, level) = match (packet.pdu_type, packet.pdu) {
+        (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) => (pdu, Level::L1),
+        (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => (pdu, Level::L2),
         _ => return,
     };
-
-    // println!("{}", pdu);
 
     // DIS
     if lsp.lsp_id.pseudo_id() != 0 {
         println!("DIS recv");
 
-        if let Some(dis) = &link.state.dis.l2 {
-            if link.l2adj.is_none() {
+        if let Some(dis) = &link.state.dis.get(&level) {
+            if link.state.adj.get(&level).is_none() {
                 println!("DIS SIS ID {} <-> {}", lsp.lsp_id.sys_id(), dis);
                 if lsp.lsp_id.sys_id() == *dis {
                     // IS Neighbor include my LSP ID.
                     if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
                         println!("Adjacency!");
-                        link.l2adj = Some(lsp.lsp_id.clone());
+                        *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
                         link.tx
-                            .send(Message::LspUpdate(Level::L2, link.state.ifindex))
+                            .send(Message::LspOriginate(level, link.state.ifindex))
                             .unwrap();
                     }
                 }
@@ -113,9 +112,9 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
     }
 
     if lsp.hold_time == 0 {
-        lsdb::remove_lsp(top, Level::L2, lsp.lsp_id);
+        lsdb::remove_lsp(top, level, lsp.lsp_id);
     } else {
-        lsdb::insert_lsp(top, Level::L2, lsp.lsp_id, lsp);
+        lsdb::insert_lsp(top, level, lsp.lsp_id, lsp);
     }
 }
 

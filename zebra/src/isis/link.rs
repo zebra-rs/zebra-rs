@@ -93,9 +93,7 @@ impl IsisLinks {
 
 #[derive(Debug)]
 pub struct IsisLink {
-    pub mtu: u32,
-    // pub mac: Option<MacAddr>,
-    pub l2adj: Option<IsisLspId>,
+    // pub l2adj: Option<IsisLspId>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub config: LinkConfig,
@@ -116,11 +114,12 @@ pub struct LinkTop<'a> {
 pub struct LinkConfig {
     pub enable: Afis<bool>,
 
-    // Configured circuit type. When it conflict with IS-IS instance's is-type
-    // configuration, we respect IS-IS instance's is-type value. For example,
-    // is-type is level-2-only and circuit-type is level-1, link is configured
-    // as level-2-only.
+    /// Configured circuit type. When it conflict with IS-IS instance's is-type
+    /// configuration, we respect IS-IS instance's is-type value. For example,
+    /// is-type is level-2-only and circuit-type is level-1, link is configured
+    /// as level-2-only.
     pub circuit_type: Option<IsLevel>,
+
     pub priority: Option<u8>,
     pub hold_time: Option<u16>,
     pub hello_interval: Option<u16>,
@@ -186,8 +185,19 @@ pub struct LinkState {
     // get link level value.
     level: IsLevel,
     pub nbrs: Levels<BTreeMap<IsisSysId, Neighbor>>,
+
+    // DIS on LAN interface. This value is set when DIS selection has been
+    // completed. After DIS selection, we may have 2 events. One is lan_id value
+    // in DIS's hello packet.  Another one is DIS generated pseudo node LSP.
     pub dis: Levels<Option<IsisSysId>>,
+
+    // DIS's Helllo PDU's lan_id. This will be DIS generated pseudo node LSP.
     pub lan_id: Levels<Option<IsisNeighborId>>,
+
+    // DIS in pseudo node LSP. When LSP has been received and my own system ID
+    // exists in
+    pub adj: Levels<Option<IsisNeighborId>>,
+
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
     pub hello: Levels<Option<IsisHello>>,
@@ -231,9 +241,7 @@ pub struct LinkStats {
 impl IsisLink {
     pub fn from(link: Link, tx: UnboundedSender<Message>, ptx: UnboundedSender<Message>) -> Self {
         let mut is_link = Self {
-            mtu: link.mtu,
-            // mac: link.mac,
-            l2adj: None,
+            // l2adj: None,
             tx,
             ptx,
             config: LinkConfig::default(),
@@ -280,9 +288,9 @@ impl Isis {
         println!("Send LSP");
 
         if self.l2lsp.is_none() {
-            if let Some((lsp, timer)) = self.l2lsp_gen() {
+            if let Some(lsp) = self.l2lsp_gen() {
                 self.l2lsp = Some(lsp);
-                self.l2lspgen = Some(timer);
+                // self.l2lspgen = Some(timer);
             }
         }
         let Some(link) = self.links.get(&ifindex) else {

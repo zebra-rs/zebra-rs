@@ -51,7 +51,7 @@ pub struct Isis {
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub l2lsp: Option<IsisLsp>,
-    pub l2lspgen: Option<Timer>,
+    // pub l2lspgen: Option<Timer>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
     pub hostname: Levels<Hostname>,
@@ -97,7 +97,6 @@ impl Isis {
             lsdb: Levels::<Lsdb>::default(),
             hostname: Levels::<Hostname>::default(),
             l2lsp: None,
-            l2lspgen: None,
         };
         isis.callback_build();
         isis.show_build();
@@ -150,27 +149,19 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::LspGen => {
-                if let Some((lsp, timer)) = self.l2lsp_gen() {
-                    let lsp_id = lsp.lsp_id.clone();
-                    self.lsdb.l2.insert(lsp_id, lsp.clone());
-                    self.l2lsp = Some(lsp);
-                    self.l2lspgen = Some(timer);
-                }
-            }
             Message::Recv(packet, ifindex, mac) => {
                 let mut top = self.top();
                 process_packet(&mut top, packet, ifindex, mac);
             }
-            Message::LspUpdate(level, ifindex) => {
+            Message::LspOriginate(level, ifindex) => {
                 match level {
                     Level::L1 => {
                         //
                     }
                     Level::L2 => {
-                        if let Some((lsp, timer)) = self.l2lsp_gen() {
+                        if let Some(lsp) = self.l2lsp_gen() {
                             self.l2lsp = Some(lsp);
-                            self.l2lspgen = Some(timer);
+                            // self.l2lspgen = Some(timer);
                         }
                         self.lsp_send(ifindex);
                         // self.l2seqnum += 1
@@ -295,7 +286,7 @@ impl Isis {
         })
     }
 
-    pub fn l2lsp_gen(&mut self) -> Option<(IsisLsp, Timer)> {
+    pub fn l2lsp_gen(&mut self) -> Option<IsisLsp> {
         let level = Level::L2;
 
         // LSP ID with no pseudo id and no fragmentation.
@@ -367,13 +358,13 @@ impl Isis {
 
         // IS Reachability.
         for (_, link) in self.links.iter() {
-            let Some(adj) = &link.l2adj else {
+            let Some(adj) = &link.state.adj.get(&level) else {
                 continue;
             };
             // Ext IS Reach.
             let mut ext_is_reach = IsisTlvExtIsReach::default();
             let is_reach = IsisTlvExtIsReachEntry {
-                neighbor_id: adj.neighbor_id(),
+                neighbor_id: adj.clone(),
                 metric: 10,
                 subs: Vec::new(),
             };
@@ -385,17 +376,8 @@ impl Isis {
 
         // IPv6 Reachability.
 
-        // Start timer.
-        let tx = self.tx.clone();
-        let timer = Timer::new(3, TimerType::Once, move || {
-            let tx = tx.clone();
-            async move {
-                tx.send(Message::LspGen);
-            }
-        });
-
         // Update LSDB.
-        Some((lsp, timer))
+        Some(lsp)
     }
 
     pub fn ifname(&self, ifindex: u32) -> String {
@@ -412,11 +394,10 @@ pub fn serve(mut isis: Isis) {
 }
 
 pub enum Message {
-    LspGen,
-    LspUpdate(Level, u32),
     Recv(IsisPacket, u32, Option<MacAddr>),
     Send(IsisPacket, u32, Level),
     Ifsm(IfsmEvent, u32, Option<Level>),
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
+    LspOriginate(Level, u32),
 }
