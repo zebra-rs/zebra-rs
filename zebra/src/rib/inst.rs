@@ -78,6 +78,10 @@ impl Rib {
                 let msg = RibRx::AddrAdd(addr.clone());
                 tx.send(msg).unwrap();
             }
+            for addr in link.addr6.iter() {
+                let msg = RibRx::AddrAdd(addr.clone());
+                tx.send(msg).unwrap();
+            }
         }
         self.redists.push(tx.clone());
         tx.send(RibRx::EoR).unwrap();
