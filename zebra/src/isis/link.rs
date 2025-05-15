@@ -93,7 +93,6 @@ impl IsisLinks {
 
 #[derive(Debug)]
 pub struct IsisLink {
-    // pub l2adj: Option<IsisLspId>,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<Message>,
     pub config: LinkConfig,
@@ -123,10 +122,17 @@ pub struct LinkConfig {
     /// Link type one of LAN or Point-to-point.
     pub link_type: Option<LinkType>,
 
+    // Metric of this Link.
+    pub metric: Option<u32>,
+
     pub priority: Option<u8>,
     pub hold_time: Option<u16>,
     pub hello_interval: Option<u16>,
     pub hello_padding: Option<HelloPaddingPolicy>,
+    pub holddown_count: Option<u32>,
+
+    pub psnp_interval: Option<u32>,
+    pub csnp_interval: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +175,10 @@ impl FromStr for LinkType {
 const DEFAULT_PRIORITY: u8 = 64;
 const DEFAULT_HOLD_TIME: u16 = 30;
 const DEFAULT_HELLO_INTERVAL: u16 = 3;
+const DEFAULT_METRIC: u32 = 10;
+const DEFAULT_HOLDDOWN_COUNT: u32 = 10;
+const DEFAULT_PSNP_INTERVAL: u32 = 2;
+const DEFAULT_CSNP_INTERVAL: u32 = 10;
 
 impl LinkConfig {
     pub fn circuit_type(&self) -> IsLevel {
@@ -177,6 +187,10 @@ impl LinkConfig {
 
     pub fn link_type(&self) -> LinkType {
         self.link_type.unwrap_or(LinkType::Lan)
+    }
+
+    pub fn metric(&self) -> u32 {
+        self.metric.unwrap_or(DEFAULT_METRIC)
     }
 
     pub fn priority(&self) -> u8 {
@@ -194,10 +208,29 @@ impl LinkConfig {
     pub fn hello_padding(&self) -> HelloPaddingPolicy {
         self.hello_padding.unwrap_or(HelloPaddingPolicy::Always)
     }
+    pub fn holddown_count(&self) -> u32 {
+        self.holddown_count.unwrap_or(DEFAULT_HOLDDOWN_COUNT) as u32
+    }
+
+    pub fn psnp_interval(&self) -> u32 {
+        self.psnp_interval.unwrap_or(DEFAULT_PSNP_INTERVAL) as u32
+    }
+
+    pub fn csnp_interval(&self) -> u32 {
+        self.csnp_interval.unwrap_or(DEFAULT_CSNP_INTERVAL) as u32
+    }
 
     pub fn enabled(&self) -> bool {
         self.enable.v4 || self.enable.v6
     }
+}
+
+#[derive(Default, Debug)]
+pub enum DisStatus {
+    #[default]
+    NotSelected,
+    Myself,
+    Other,
 }
 
 // Mutable data during operation.
@@ -213,7 +246,15 @@ pub struct LinkState {
     // is-type and link's circuit-type. Please use LinkState::level() method for
     // get link level value.
     level: IsLevel,
+
+    // Neighbors.
     pub nbrs: Levels<BTreeMap<IsisSysId, Neighbor>>,
+
+    // Up neighbors.
+    pub nbrs_up: Levels<u32>,
+
+    // DIS status.
+    pub dis_status: Levels<DisStatus>,
 
     // DIS on LAN interface. This value is set when DIS selection has been
     // completed. After DIS selection, we may have 2 events. One is lan_id value
@@ -504,19 +545,79 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
     buf
 }
 
+pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) {
+    writeln!(
+        buf,
+        "    Metric: {}, Active neighbors: {}",
+        link.config.metric(),
+        link.state.nbrs_up.get(&level)
+    )
+    .unwrap();
+    let padding = if link.config.hello_padding() == HelloPaddingPolicy::Always {
+        "yes"
+    } else {
+        "no"
+    };
+    writeln!(
+        buf,
+        "    Hello interval: {}, Holddown count: {}, Padding: {}",
+        link.config.hello_interval(),
+        link.config.holddown_count(),
+        padding,
+    );
+    writeln!(
+        buf,
+        "    CNSP interval: {}, PSNP interval: {}",
+        link.config.csnp_interval(),
+        link.config.psnp_interval()
+    );
+
+    // DIS status.
+    let dis_status = match link.state.dis_status.get(&level) {
+        DisStatus::NotSelected => "no DIS is selected",
+        DisStatus::Other => "is not DIS",
+        DisStatus::Myself => "is DIS",
+    };
+    writeln!(
+        buf,
+        "    LAN prirority: {}, {}",
+        link.config.priority(),
+        dis_status
+    )
+    .unwrap();
+}
+
 pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
     for (ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
+            let link_state = if link.state.is_up() { "Up" } else { "Down" };
             writeln!(
                 buf,
                 "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
-                link.state.name,
-                link.state.is_up(),
-                link.state.ifindex
+                link.state.name, link_state, link.state.ifindex
             )
             .unwrap();
-            writeln!(buf, "  LAN prirority: {}", link.config.priority()).unwrap();
+            writeln!(
+                buf,
+                "  Type: {}, Level: {}, SNPA: {}",
+                link.config.link_type(),
+                link.state.level(),
+                link.state.mac.unwrap(),
+            )
+            .unwrap();
+            if link.state.level().has_l1() {
+                writeln!(buf, "  Level-1 Information:").unwrap();
+                show_detail_entry(&mut buf, link, Level::L1);
+            }
+            if link.state.level().has_l2() {
+                writeln!(buf, "  Level-2 Information:").unwrap();
+                show_detail_entry(&mut buf, link, Level::L2);
+            }
+            // IPv4 Address.
+            // if link.state.
+
+            writeln!(buf, "").unwrap();
         }
     }
     buf

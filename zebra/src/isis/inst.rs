@@ -3,13 +3,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use isis_packet::cap::{SegmentRoutingCapFlags, SidLabelTlv};
-use isis_packet::{
-    Algo, IsLevel, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisProto,
-    IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSysId,
-    IsisTlvAreaAddr, IsisTlvExtIsReach, IsisTlvExtIsReachEntry, IsisTlvHostname, IsisTlvIpv4IfAddr,
-    IsisTlvProtoSupported, IsisTlvRouterCap, IsisTlvTeRouterId,
-};
+use isis_packet::*;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -51,7 +45,6 @@ pub struct Isis {
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub l2lsp: Option<IsisLsp>,
-    // pub l2lspgen: Option<Timer>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
     pub hostname: Levels<Hostname>,
