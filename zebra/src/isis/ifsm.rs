@@ -57,10 +57,10 @@ pub fn hello_generate(top: &LinkTop, level: Level) -> IsisHello {
     let area_addr = vec![0x49, 0, 1];
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
-    for addr in &top.state.addr {
+    for prefix in &top.state.v4addr {
         hello.tlvs.push(
             IsisTlvIpv4IfAddr {
-                addr: addr.prefix.addr(),
+                addr: prefix.addr(),
             }
             .into(),
         );
