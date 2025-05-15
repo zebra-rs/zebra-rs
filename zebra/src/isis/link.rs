@@ -485,16 +485,17 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
         }
         return serde_json::to_string_pretty(&links).unwrap();
     }
-    let mut buf = String::new();
+    let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
     for (ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
+            let link_state = if link.state.is_up() { "Up" } else { "Down" };
             writeln!(
                 buf,
-                "{:<14} 0x{:02X} {} {} {}",
+                "  {:<11} 0x{:02X}     {:<8} {:<8} {}",
                 link.state.name,
                 link.state.ifindex,
-                link.state.is_up(),
-                link.config.link_type(),
+                link_state,
+                link.config.link_type().to_string(),
                 link.state.level
             )
             .unwrap();
