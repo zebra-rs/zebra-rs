@@ -4,6 +4,7 @@ use isis_packet::{
     IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
 };
 
+use crate::isis::link::DisStatus;
 use crate::rib::MacAddr;
 
 use super::link::{Afis, HelloPaddingPolicy, LinkTop};
@@ -153,7 +154,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     let mut best_mac = ltop.state.mac.clone();
 
     // We will check at least Up state neighbor exists.
-    let mut up_count = 0;
+    let mut nbrs_up = 0;
 
     for (key, nbr) in ltop.state.nbrs.get_mut(&level).iter_mut() {
         nbr.dis = false;
@@ -165,11 +166,13 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             best_mac = nbr.mac.clone();
             best_key = Some(key.clone());
         }
-        up_count += 1;
+        nbrs_up += 1;
     }
+    *ltop.state.nbrs_up.get_mut(&level) = nbrs_up;
 
-    if up_count == 0 {
+    if nbrs_up == 0 {
         println!("DIS no up neighbors");
+        *ltop.state.dis_status.get_mut(&level) = DisStatus::NotSelected;
         return;
     }
 
@@ -177,10 +180,11 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         if let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(key) {
             nbr.dis = true;
             println!("DIS is selected {}", nbr.sys_id);
+            *ltop.state.dis_status.get_mut(&level) = DisStatus::Other;
             *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
             if ltop.state.lan_id.get(&level).is_none() {
                 if !nbr.pdu.lan_id.is_empty() {
-                    println!("DIS we already get lan_id");
+                    println!("DIS lan_id is in Hello packet");
                     *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
                     //
                 } else {
@@ -190,5 +194,6 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         }
     } else {
         println!("DIS is selected: self");
+        *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
     }
 }
