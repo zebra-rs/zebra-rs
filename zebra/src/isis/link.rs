@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::default;
 use std::fmt::Write;
 
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::{
     IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
     IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
@@ -240,7 +240,11 @@ pub struct LinkState {
     pub name: String,
     pub mtu: u32,
     pub mac: Option<MacAddr>,
-    pub addr: Vec<IsisAddr>,
+
+    // IP addresses.
+    pub v4addr: Vec<Ipv4Net>,
+    pub v6addr: Vec<Ipv6Net>,
+    pub v6laddr: Vec<Ipv6Net>,
 
     // Link level. This value is the final level value from IS-IS instance's
     // is-type and link's circuit-type. Please use LinkState::level() method for
@@ -338,11 +342,19 @@ impl Isis {
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
-        let IpNet::V4(prefix) = &addr.addr else {
-            return;
-        };
-        let addr = IsisAddr::from(&addr, prefix);
-        link.state.addr.push(addr.clone());
+
+        match addr.addr {
+            IpNet::V4(prefix) => {
+                link.state.v4addr.push(prefix);
+            }
+            IpNet::V6(prefix) => {
+                if prefix.addr().is_unicast_link_local() {
+                    link.state.v6laddr.push(prefix);
+                } else {
+                    link.state.v6addr.push(prefix);
+                }
+            }
+        }
 
         if link.config.enabled() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
@@ -615,8 +627,24 @@ pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
                 show_detail_entry(&mut buf, link, Level::L2);
             }
             // IPv4 Address.
-            // if link.state.
-
+            if !link.state.v4addr.is_empty() {
+                writeln!(buf, "  IP Prefix(es):").unwrap();
+                for prefix in link.state.v4addr.iter() {
+                    writeln!(buf, "    {}", prefix).unwrap();
+                }
+            }
+            if !link.state.v6laddr.is_empty() {
+                writeln!(buf, "  IPv6 Link-Locals:").unwrap();
+                for prefix in link.state.v6laddr.iter() {
+                    writeln!(buf, "    {}", prefix).unwrap();
+                }
+            }
+            if !link.state.v6addr.is_empty() {
+                writeln!(buf, "  IPv6 Prefix(es):").unwrap();
+                for prefix in link.state.v6addr.iter() {
+                    writeln!(buf, "    {}", prefix).unwrap();
+                }
+            }
             writeln!(buf, "").unwrap();
         }
     }
