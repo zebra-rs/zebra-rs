@@ -19,7 +19,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
     };
 
     // Check link capability for the PDU type.
-    if !link.state.level().capable(packet.pdu_type) {
+    if !link.state.level().capable(&packet.pdu_type) {
         return;
     }
 
@@ -100,9 +100,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
                     if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
                         println!("Adjacency!");
                         *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
-                        link.tx
-                            .send(Message::LspOriginate(level, link.state.ifindex))
-                            .unwrap();
+                        link.tx.send(Message::LspOriginate(level)).unwrap();
                     }
                 }
             }

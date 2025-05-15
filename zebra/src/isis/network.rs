@@ -40,6 +40,12 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
+            if packet.1.pdu_type.is_lsp() {
+                if !isis_packet::is_valid_checksum(&input[3..]) {
+                    return Err(ErrorKind::UnexpectedEof.into());
+                }
+            }
+
             let mac = addr.addr().map(MacAddr::from);
 
             let _ = tx.send(Message::Recv(packet.1, addr.ifindex() as u32, mac));
