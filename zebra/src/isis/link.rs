@@ -225,7 +225,7 @@ impl LinkConfig {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq)]
 pub enum DisStatus {
     #[default]
     NotSelected,
@@ -359,25 +359,6 @@ impl Isis {
         if link.config.enabled() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
             self.tx.send(msg);
-        }
-    }
-
-    pub fn lsp_send(&mut self, ifindex: u32) {
-        println!("Send LSP");
-
-        if self.l2lsp.is_none() {
-            if let Some(lsp) = self.l2lsp_gen() {
-                self.l2lsp = Some(lsp);
-                // self.l2lspgen = Some(timer);
-            }
-        }
-        let Some(link) = self.links.get(&ifindex) else {
-            return;
-        };
-
-        if let Some(lsp) = &self.l2lsp {
-            let packet = IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone()));
-            link.ptx.send(Message::Send(packet, ifindex, Level::L2));
         }
     }
 
