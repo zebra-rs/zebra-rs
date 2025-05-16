@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use isis_packet::{IsLevel, Nsap};
 
 use crate::config::{Args, ConfigOp};
@@ -11,6 +13,8 @@ impl Isis {
         self.callback_add("/routing/isis/net", config_net);
         self.callback_add("/routing/isis/is-type", config_is_type);
         self.callback_add("/routing/isis/hostname", config_hostname);
+        self.callback_add("/routing/isis/timers/hold-time", config_hold_time);
+        self.callback_add("/routing/isis/te-router-id", config_te_router_id);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.callback_add(
             "/routing/isis/interface/circuit-type",
@@ -38,11 +42,14 @@ pub struct IsisConfig {
     pub hostname: Option<String>,
     pub is_type: Option<IsLevel>,
     pub refresh_time: Option<u64>,
+    pub hold_time: Option<u16>,
+    pub te_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
 }
 
 // Default refresh time: 15 min.
 const DEFAULT_REFRESH_TIME: u64 = 15 * 60;
+const DEFAULT_HOLD_TIME: u16 = 1200;
 
 impl IsisConfig {
     pub fn is_type(&self) -> IsLevel {
@@ -55,6 +62,10 @@ impl IsisConfig {
 
     pub fn refresh_time(&self) -> u64 {
         self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
+    }
+
+    pub fn hold_time(&self) -> u16 {
+        self.hold_time.unwrap_or(DEFAULT_HOLD_TIME)
     }
 }
 
@@ -94,5 +105,27 @@ fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
     }
     // TODO: Re-originate LSP for L1/L2.  That will update hostname map.
 
+    Some(())
+}
+
+fn config_hold_time(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let hold_time = args.u16()?;
+
+    if op == ConfigOp::Set {
+        isis.config.hold_time = Some(hold_time);
+    } else {
+        isis.config.hold_time = None;
+    }
+    Some(())
+}
+
+fn config_te_router_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let te_router_id = args.v4addr()?;
+
+    if op == ConfigOp::Set {
+        isis.config.te_router_id = Some(te_router_id);
+    } else {
+        isis.config.te_router_id = None;
+    }
     Some(())
 }
