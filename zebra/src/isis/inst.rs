@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use ipnet::IpNet;
 use isis_packet::*;
 use socket2::Socket;
@@ -24,6 +25,7 @@ use crate::{
 
 use super::config::IsisConfig;
 use super::link::{IsisLink, IsisLinks, LinkTop};
+use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
@@ -149,8 +151,10 @@ impl Isis {
             }
             Message::LspOriginate(level) => {
                 let mut top = self.top();
-                let lsp = lsp_generate(&mut top, level);
-                lsp_send(&mut top, lsp, level);
+                let mut lsp = lsp_generate(&mut top, level);
+                let buf = lsp_emit(&mut lsp, level);
+                lsp_flood(&mut top, level, &buf);
+                insert_self_originate(&mut top, level, lsp);
             }
             Message::Ifsm(ev, ifindex, level) => {
                 let Some(mut top) = self.link_top(ifindex) else {
@@ -370,28 +374,53 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         lsp.tlvs.push(ext_is_reach.into());
     }
 
-    // IPv4 Reachability.
+    // TODO: IPv4 Reachability.
 
-    // IPv6 Reachability.
+    // TODO: IPv6 Reachability.
 
-    // Update LSDB.
+    // TODO: keep generated packet.
     lsp
 }
 
-pub fn lsp_send(top: &mut IsisTop, lsp: IsisLsp, level: Level) {
-    println!("Send LSP");
-
+pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone())),
     };
 
+    let mut buf = BytesMut::new();
+    packet.emit(&mut buf);
+
+    // Fetch pdu_len and checksum.
+    let pdu_len = u16::from_be_bytes([buf[8], buf[9]]);
+    let checksum = u16::from_be_bytes([buf[24], buf[25]]);
+
+    // Set pdu_len and checksum.
+    lsp.pdu_len = pdu_len;
+    lsp.checksum = checksum;
+
+    buf
+}
+
+pub enum Packet {
+    Packet(IsisPacket),
+    Bytes(BytesMut),
+}
+
+pub fn lsp_flood(top: &mut IsisTop, level: Level, buf: &BytesMut) {
+    let pdu_type = match level {
+        Level::L1 => IsisType::L1Lsp,
+        Level::L2 => IsisType::L2Lsp,
+    };
+
     for (_, link) in top.links.iter() {
-        if link.state.level().capable(&packet.pdu_type) {
+        if link.state.level().capable(&pdu_type) {
             if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
-                println!("Sending {}", link.state.ifindex);
-                link.ptx
-                    .send(Message::Send(packet.clone(), link.state.ifindex, level));
+                link.ptx.send(Message::Send(
+                    Packet::Bytes(buf.clone()),
+                    link.state.ifindex,
+                    level,
+                ));
             }
         }
     }
@@ -405,7 +434,7 @@ pub fn serve(mut isis: Isis) {
 
 pub enum Message {
     Recv(IsisPacket, u32, Option<MacAddr>),
-    Send(IsisPacket, u32, Level),
+    Send(Packet, u32, Level),
     Ifsm(IfsmEvent, u32, Option<Level>),
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),

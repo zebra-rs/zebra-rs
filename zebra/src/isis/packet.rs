@@ -7,7 +7,7 @@ use crate::isis::neigh::Neighbor;
 use crate::isis::Message;
 use crate::rib::MacAddr;
 
-use super::inst::{IsisTop, NeighborTop};
+use super::inst::{IsisTop, NeighborTop, Packet};
 use super::link::LinkTop;
 use super::lsdb;
 use super::nfsm::{isis_nfsm, NfsmEvent};
@@ -189,7 +189,8 @@ pub fn isis_psnp_send(top: &mut IsisTop, ifindex: u32, pdu: IsisPsnp) {
         return;
     };
     let packet = IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone()));
-    link.ptx.send(Message::Send(packet, ifindex, Level::L2));
+    link.ptx
+        .send(Message::Send(Packet::Packet(packet), ifindex, Level::L2));
 }
 
 pub fn process_packet(
