@@ -47,7 +47,6 @@ pub struct Isis {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub l2lsp: Option<IsisLsp>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
     pub hostname: Levels<Hostname>,
@@ -92,7 +91,6 @@ impl Isis {
             config: IsisConfig::default(),
             lsdb: Levels::<Lsdb>::default(),
             hostname: Levels::<Hostname>::default(),
-            l2lsp: None,
         };
         isis.callback_build();
         isis.show_build();
@@ -293,9 +291,9 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .map(|x| x.lsp.seq_number)
         .unwrap_or(1);
 
-    // Generate own LSP for L2.
+    // Generate self originated LSP.
     let mut lsp = IsisLsp {
-        hold_time: 1200,
+        hold_time: top.config.hold_time(),
         lsp_id,
         seq_number,
         ..Default::default()
@@ -305,9 +303,17 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     let area_addr = top.config.net.area_id.clone();
     lsp.tlvs.push(IsisTlvAreaAddr { area_addr }.into());
 
-    // Supported protocol
-    let nlpids = vec![IsisProto::Ipv4.into()];
-    lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
+    // Supported protocol.
+    let mut nlpids = vec![];
+    if top.config.enable.v4 > 0 {
+        nlpids.push(IsisProto::Ipv4.into());
+    }
+    if top.config.enable.v6 > 0 {
+        nlpids.push(IsisProto::Ipv6.into());
+    }
+    if !nlpids.is_empty() {
+        lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
+    }
 
     // Hostname.
     let hostname = top.config.hostname();
@@ -316,7 +322,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .insert_originate(top.config.net.sys_id(), hostname.clone());
     lsp.tlvs.push(IsisTlvHostname { hostname }.into());
 
-    // Router capability. When TE-Router ID is configured, use the value. If
+    // TODO: Router capability. When TE-Router ID is configured, use the value. If
     // not when Router ID is configured, use the value. Otherwise system
     // default Router ID will be used.
     let router_id: Ipv4Addr = "1.2.3.4".parse().unwrap();
@@ -325,7 +331,8 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         flags: 0.into(),
         subs: Vec::new(),
     };
-    // Sub: SR Capability
+
+    // TODO: SR Capability must be obtain from configuration.
     let mut flags = SegmentRoutingCapFlags::default();
     flags.set_i_flag(true);
     flags.set_v_flag(true);
@@ -354,8 +361,10 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     lsp.tlvs.push(cap.into());
 
     // TE Router ID.
-    let te_router_id = IsisTlvTeRouterId { router_id };
-    lsp.tlvs.push(te_router_id.into());
+    if let Some(router_id) = top.config.te_router_id {
+        let te_router_id = IsisTlvTeRouterId { router_id };
+        lsp.tlvs.push(te_router_id.into());
+    }
 
     // IS Reachability.
     for (_, link) in top.links.iter() {
@@ -389,13 +398,13 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
     let mut buf = BytesMut::new();
     packet.emit(&mut buf);
 
-    // Fetch pdu_len and checksum.
-    let pdu_len = u16::from_be_bytes([buf[8], buf[9]]);
-    let checksum = u16::from_be_bytes([buf[24], buf[25]]);
+    // Offset for pdu_len and checksum.
+    const PDU_LEN_OFFSET: usize = 8;
+    const CKSUM_OFFSET: usize = 24;
 
     // Set pdu_len and checksum.
-    lsp.pdu_len = pdu_len;
-    lsp.checksum = checksum;
+    lsp.pdu_len = u16::from_be_bytes(buf[PDU_LEN_OFFSET..PDU_LEN_OFFSET + 2].try_into().unwrap());
+    lsp.checksum = u16::from_be_bytes(buf[CKSUM_OFFSET..CKSUM_OFFSET + 2].try_into().unwrap());
 
     buf
 }

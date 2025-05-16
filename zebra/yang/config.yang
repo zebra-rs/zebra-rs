@@ -121,6 +121,12 @@ module config {
           type string;
         }
 
+        container timers {
+          leaf hold_time {
+            type uint16;
+          }
+        }
+
         list interface {
           ext:sort "-1";
           key "if-name";

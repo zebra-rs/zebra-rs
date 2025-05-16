@@ -74,12 +74,6 @@ impl Lsdb {
     }
 }
 
-pub fn lsp_fan_out(top: &mut IsisTop, _level: Level, _lsp: &IsisLsp) {
-    for _link in top.links.iter() {
-        // link.fan_out(level, lsp);
-    }
-}
-
 fn refresh_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
     let tx = top.tx.clone();
     Timer::once(3, move || {
@@ -104,28 +98,8 @@ fn hold_timer(top: &mut IsisTop, level: Level, key: IsisLspId, hold_time: u64) -
     })
 }
 
-pub fn lsp_self_originate(_top: &mut IsisTop, _level: Level) {
-    // LSP generate for the level.
-
-    // Fanout.
-    // lsp_fan_out(top)
-
-    // Insert LSP.
-    //insert_self_originate(top, level, key, lsp);
-}
-
-pub fn lsp_self_originate_stop(_top: &mut IsisTop, _level: Level) {
-    // LSP generate for the level.
-
-    // Fanout.
-    // lsp_fan_out(top)
-
-    // Insert LSP.
-    //insert_self_originate(top, level, key, lsp);
-}
-
 fn update_pseudo() {
-    //
+    // TODO.
 }
 
 fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
@@ -160,7 +134,7 @@ pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> O
     let mut lsa = Lsa::new(lsp);
     lsa.originated = true;
     lsa.refresh_timer = Some(refresh_timer(top, level, key));
-    lsa.hold_timer = Some(hold_timer(top, level, key, 1200));
+    lsa.hold_timer = Some(hold_timer(top, level, key, top.config.hold_time() as u64));
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
