@@ -292,7 +292,6 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .get(&lsp_id)
         .map(|x| x.lsp.seq_number)
         .unwrap_or(1);
-    println!("XXX seqnum {}", seq_number);
 
     // Generate own LSP for L2.
     let mut lsp = IsisLsp {
@@ -378,7 +377,6 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
 
     // TODO: IPv6 Reachability.
 
-    // TODO: keep generated packet.
     lsp
 }
 

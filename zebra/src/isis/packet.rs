@@ -109,6 +109,25 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
         }
     }
 
+    // Self originated LSP came from DIS.
+    if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
+        // TODO: need to check the LSP come from DIS or not.
+        let need_refresh = top
+            .lsdb
+            .get(&level)
+            .get(&lsp.lsp_id)
+            .map_or(false, |originated| {
+                lsp.seq_number > originated.lsp.seq_number
+            });
+
+        if need_refresh {
+            lsdb::insert_self_originate(top, level, lsp.clone());
+            // TODO: flood to without incoming interface.
+            top.tx.send(Message::LspOriginate(level)).unwrap();
+        }
+        return;
+    }
+
     if lsp.hold_time == 0 {
         lsdb::remove_lsp(top, level, lsp.lsp_id);
     } else {
