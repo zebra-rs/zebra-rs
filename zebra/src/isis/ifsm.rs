@@ -7,6 +7,7 @@ use isis_packet::{
 use crate::isis::link::DisStatus;
 use crate::rib::MacAddr;
 
+use super::inst::Packet;
 use super::link::{Afis, HelloPaddingPolicy, LinkTop};
 use super::neigh::Neighbor;
 use super::task::Timer;
@@ -104,7 +105,8 @@ pub fn hello_send(top: &mut LinkTop, level: Level) -> Result<()> {
         Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
     };
     let ifindex = top.state.ifindex;
-    top.ptx.send(Message::Send(packet, ifindex, level));
+    top.ptx
+        .send(Message::Send(Packet::Packet(packet), ifindex, level));
     Ok(())
 }
 

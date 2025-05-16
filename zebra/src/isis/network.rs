@@ -12,6 +12,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::rib::MacAddr;
 
+use super::inst::Packet;
 use super::socket::link_addr;
 use super::{Level, Message};
 
@@ -66,8 +67,14 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
             continue;
         };
 
-        let mut buf = BytesMut::new();
-        packet.emit(&mut buf);
+        let buf = match packet {
+            Packet::Packet(packet) => {
+                let mut buf = BytesMut::new();
+                packet.emit(&mut buf);
+                buf
+            }
+            Packet::Bytes(buf) => buf,
+        };
 
         let iov = [IoSlice::new(&LLC_HDR), IoSlice::new(&buf)];
 

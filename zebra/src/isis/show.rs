@@ -40,11 +40,13 @@ fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
 
     for (lsp_id, lsa) in isis.lsdb.l2.iter() {
         let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+        let originated = if lsa.originated { "*" } else { " " };
         writeln!(
             buf,
-            "{:25} {:>4} 0x{:08x} 0x{:04x} {:9}",
+            "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}",
             lsp_id.to_string(),
-            lsa.lsp.pdu_len,
+            originated,
+            lsa.lsp.pdu_len.to_string(),
             lsa.lsp.seq_number,
             lsa.lsp.checksum,
             rem,
@@ -66,11 +68,14 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
             .iter()
             .map(|(lsp_id, lsa)| {
                 let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+                let originated = if lsa.originated { "*" } else { " " };
+
                 format!(
-                    "{}\n{:25} {:>4} 0x{:08x}   0x{:04x} {:9}{}\n",
-                    "LSP ID                  PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL",
+                    "{}\n{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}{}\n",
+                    "LSP ID                        PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL",
                     lsp_id.to_string(),
-                    lsa.lsp.pdu_len,
+                    originated,
+                    lsa.lsp.pdu_len.to_string(),
                     lsa.lsp.seq_number,
                     lsa.lsp.checksum,
                     rem,
