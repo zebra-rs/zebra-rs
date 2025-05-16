@@ -6,7 +6,7 @@ use std::fmt::Write;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::{
     IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
-    IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
+    IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType, SidLabelValue,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -133,6 +133,8 @@ pub struct LinkConfig {
 
     pub psnp_interval: Option<u32>,
     pub csnp_interval: Option<u32>,
+
+    pub prefix_sid: Option<SidLabelValue>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -425,6 +427,21 @@ pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
 
 pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     config_afi_enable(isis, args, op, Afi::Ip6)
+}
+
+pub fn config_ipv4_prefix_sid_index(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let index = args.u32()?;
+
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if op.is_set() {
+        link.config.prefix_sid = Some(SidLabelValue::Index(index));
+    } else {
+        link.config.prefix_sid = None;
+    }
+
+    Some(())
 }
 
 pub fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {

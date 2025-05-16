@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use ipnet::IpNet;
-use isis_packet::prefix::{Ipv4ControlInfo, Ipv6ControlInfo};
+use isis_packet::prefix::{Ipv4ControlInfo, Ipv6ControlInfo, IsisSubTlv};
 use isis_packet::*;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -393,17 +393,29 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         if link.config.enable.v4 && level_matches(&link.state.level(), level) {
             for v4addr in link.state.v4addr.iter() {
                 if !v4addr.addr().is_loopback() {
-                    let sub_tlv = false;
+                    let sub_tlv = if let Some(sid) = &link.config.prefix_sid {
+                        let prefix_sid = IsisSubPrefixSid {
+                            flags: 0.into(),
+                            algo: Algo::Spf,
+                            sid: sid.clone(),
+                        };
+                        Some(IsisSubTlv::PrefixSid(prefix_sid))
+                    } else {
+                        None
+                    };
                     let flags = Ipv4ControlInfo::new()
                         .with_prefixlen(v4addr.prefix_len() as usize)
-                        .with_sub_tlv(sub_tlv)
+                        .with_sub_tlv(sub_tlv.is_some())
                         .with_distribution(false);
-                    let entry = IsisTlvExtIpReachEntry {
+                    let mut entry = IsisTlvExtIpReachEntry {
                         metric: 10,
                         flags,
                         prefix: v4addr.clone(),
                         subs: Vec::new(),
                     };
+                    if let Some(sub_tlv) = sub_tlv {
+                        entry.subs.push(sub_tlv);
+                    }
                     ext_ip_reach.entries.push(entry);
                 }
             }
