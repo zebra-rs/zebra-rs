@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use ipnet::IpNet;
+use isis_packet::prefix::{Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -279,6 +280,10 @@ impl Isis {
     }
 }
 
+fn level_matches(state_level: &IsLevel, level: Level) -> bool {
+    (level == Level::L1 && state_level.has_l1()) || (level == Level::L2 && state_level.has_l2())
+}
+
 pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     // LSP ID with no pseudo id and no fragmentation.
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
@@ -382,10 +387,54 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         lsp.tlvs.push(ext_is_reach.into());
     }
 
-    // TODO: IPv4 Reachability.
+    // IPv4 Reachability.
+    let mut ext_ip_reach = IsisTlvExtIpReach::default();
+    for (_, link) in top.links.iter() {
+        if link.config.enable.v4 && level_matches(&link.state.level(), level) {
+            for v4addr in link.state.v4addr.iter() {
+                if !v4addr.addr().is_loopback() {
+                    let sub_tlv = false;
+                    let flags = Ipv4ControlInfo::new()
+                        .with_prefixlen(v4addr.prefix_len() as usize)
+                        .with_sub_tlv(sub_tlv)
+                        .with_distribution(false);
+                    let entry = IsisTlvExtIpReachEntry {
+                        metric: 10,
+                        flags,
+                        prefix: v4addr.clone(),
+                        subs: Vec::new(),
+                    };
+                    ext_ip_reach.entries.push(entry);
+                }
+            }
+        }
+    }
+    if !ext_ip_reach.entries.is_empty() {
+        lsp.tlvs.push(ext_ip_reach.into());
+    }
 
-    // TODO: IPv6 Reachability.
-
+    // IPv6 Reachability.
+    let mut ipv6_reach = IsisTlvIpv6Reach::default();
+    for (_, link) in top.links.iter() {
+        if link.config.enable.v6 && level_matches(&link.state.level(), level) {
+            for v6addr in link.state.v6addr.iter() {
+                if !v6addr.addr().is_loopback() {
+                    let sub_tlv = false;
+                    let flags = Ipv6ControlInfo::new().with_sub_tlv(sub_tlv);
+                    let entry = IsisTlvIpv6ReachEntry {
+                        metric: 10,
+                        flags,
+                        prefix: v6addr.clone(),
+                        subs: Vec::new(),
+                    };
+                    ipv6_reach.entries.push(entry);
+                }
+            }
+        }
+    }
+    if !ipv6_reach.entries.is_empty() {
+        lsp.tlvs.push(ipv6_reach.into());
+    }
     lsp
 }
 
