@@ -11,7 +11,7 @@ use isis_packet::{IsisLsp, IsisLspId};
 use crate::isis::Message;
 
 use super::{
-    inst::{lsp_emit, lsp_flood, IsisTop},
+    inst::{lsp_emit, lsp_flood, spf_schedule, IsisTop},
     task::Timer,
     Level,
 };
@@ -122,6 +122,7 @@ pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp)
         update_pseudo();
     } else {
         update_lsp(top, level, key, &lsp);
+        spf_schedule(top, level);
     }
     let hold_time = lsp.hold_time as u64;
     let mut lsa = Lsa::new(lsp);

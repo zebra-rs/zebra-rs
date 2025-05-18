@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod config;
+mod spf;
 use config::{Cli, ConfigManager};
 use std::path::PathBuf;
 mod bgp;

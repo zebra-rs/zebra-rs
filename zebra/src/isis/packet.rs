@@ -88,9 +88,19 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
         _ => return,
     };
 
+    // if let Some(nbr) = link.state.nbrs.get(&level).get(&lsp.lsp_id.sys_id()) {
+    //     if nbr.pdu.lan_id.is_empty() {
+    //         println!(
+    //             "XXX LSP from non adjacency neighbor {}",
+    //             lsp.lsp_id.sys_id()
+    //         );
+    //         return;
+    //     }
+    // }
+
     // DIS
     if lsp.lsp_id.pseudo_id() != 0 {
-        println!("DIS recv");
+        println!("DIS recv {}", lsp.lsp_id.sys_id());
 
         if let Some(dis) = &link.state.dis.get(&level) {
             if link.state.adj.get(&level).is_none() {
@@ -108,6 +118,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
             println!("DIS sysid is not set");
         }
     }
+    println!("LSP recv {}", lsp.lsp_id.sys_id());
 
     // Self originated LSP came from DIS.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {

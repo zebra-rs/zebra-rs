@@ -18,6 +18,7 @@ use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, MacAddr};
+use crate::spf;
 use crate::{
     config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
     context::Context,
@@ -51,6 +52,7 @@ pub struct Isis {
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
     pub hostname: Levels<Hostname>,
+    pub spf: Levels<Option<Timer>>,
 }
 
 pub struct IsisTop<'a> {
@@ -59,6 +61,7 @@ pub struct IsisTop<'a> {
     pub config: &'a IsisConfig,
     pub lsdb: &'a mut Levels<Lsdb>,
     pub hostname: &'a mut Levels<Hostname>,
+    pub spf: &'a mut Levels<Option<Timer>>,
 }
 
 pub struct NeighborTop<'a> {
@@ -92,6 +95,7 @@ impl Isis {
             config: IsisConfig::default(),
             lsdb: Levels::<Lsdb>::default(),
             hostname: Levels::<Hostname>::default(),
+            spf: Levels::<Option<Timer>>::default(),
         };
         isis.callback_build();
         isis.show_build();
@@ -144,9 +148,29 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
+            Message::Spf(level) => {
+                let mut top = self.top();
+                *top.spf.get_mut(&level) = None;
+                let (graph, s) = spf(&mut top, level);
+
+                if let Some(s) = s {
+                    // Call SPF.
+                    let opt = spf::SpfOpt {
+                        full_path: false,
+                        path_max: 0,
+                        srmpls: false,
+                        srv6: false,
+                    };
+                    let spf = spf::spf(&graph, s, &opt);
+                    spf::disp(&spf, false);
+                }
+            }
             Message::Recv(packet, ifindex, mac) => {
                 let mut top = self.top();
                 process_packet(&mut top, packet, ifindex, mac);
+            }
+            Message::Send(_, _, _) => {
+                // Not handled here.
             }
             Message::LspOriginate(level) => {
                 let mut top = self.top();
@@ -220,9 +244,6 @@ impl Isis {
                     }
                 }
             }
-            _ => {
-                //
-            }
         }
     }
 
@@ -253,11 +274,12 @@ impl Isis {
     }
     pub fn top(&mut self) -> IsisTop {
         let top = IsisTop {
+            tx: &self.tx,
             links: &mut self.links,
+            config: &self.config,
             lsdb: &mut self.lsdb,
             hostname: &mut self.hostname,
-            config: &self.config,
-            tx: &self.tx,
+            spf: &mut self.spf,
         };
         top
     }
@@ -507,4 +529,95 @@ pub enum Message {
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
+    Spf(Level),
+}
+
+pub fn spf_timer(top: &mut IsisTop, level: Level) -> Timer {
+    let tx = top.tx.clone();
+    Timer::once(1, move || {
+        let tx = tx.clone();
+        async move {
+            let msg = Message::Spf(level);
+            tx.send(msg).unwrap();
+        }
+    })
+}
+
+pub fn spf_schedule(top: &mut IsisTop, level: Level) {
+    if top.spf.get(&level).is_none() {
+        *top.spf.get_mut(&level) = Some(spf_timer(top, level));
+    }
+}
+
+#[derive(Default)]
+pub struct LspMap {
+    map: BTreeMap<IsisSysId, usize>,
+    val: Vec<IsisSysId>,
+}
+
+impl LspMap {
+    pub fn get(&mut self, sys_id: &IsisSysId) -> usize {
+        if let Some(index) = self.map.get(&sys_id) {
+            return *index;
+        } else {
+            let index = self.val.len();
+            self.map.insert(sys_id.clone(), index);
+            self.val.push(sys_id.clone());
+            return index;
+        }
+    }
+}
+
+pub fn spf(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
+    let mut lsp_map = LspMap::default();
+    let mut s: Option<usize> = None;
+    let mut graph = spf::Graph::new();
+
+    for (key, lsa) in top.lsdb.get(&level).iter() {
+        if !lsa.lsp.lsp_id.is_pseudo() {
+            let sys_id = lsa.lsp.lsp_id.sys_id().clone();
+            let id = lsp_map.get(&sys_id);
+            if lsa.originated {
+                s = Some(id);
+            }
+
+            let mut node = spf::Node {
+                id,
+                name: sys_id.to_string(),
+                olinks: vec![],
+                ilinks: vec![],
+                is_disabled: false,
+                is_srv6: false,
+                is_srmpls: true,
+            };
+
+            for tlv in lsa.lsp.tlvs.iter() {
+                if let IsisTlv::ExtIsReach(tlv) = tlv {
+                    for entry in tlv.entries.iter() {
+                        let lsp_id: IsisLspId = entry.neighbor_id.clone().into();
+                        let lsa = top.lsdb.get(&level).get(&lsp_id);
+                        if let Some(lsa) = lsa {
+                            for tlv in lsa.lsp.tlvs.iter() {
+                                if let IsisTlv::ExtIsReach(tlv) = tlv {
+                                    for e in tlv.entries.iter() {
+                                        if e.neighbor_id.sys_id() != sys_id {
+                                            let to = lsp_map.get(&e.neighbor_id.sys_id());
+                                            let link = spf::Link {
+                                                from: id,
+                                                to,
+                                                cost: e.metric + entry.metric,
+                                            };
+                                            node.olinks.push(link);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            graph.insert(id, node);
+        }
+    }
+    (graph, s)
 }
