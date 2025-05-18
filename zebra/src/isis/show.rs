@@ -41,6 +41,10 @@ fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
     for (lsp_id, lsa) in isis.lsdb.l2.iter() {
         let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
         let originated = if lsa.originated { "*" } else { " " };
+        let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
+        let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
+        let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
+        let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
         let system_id =
             if let Some((hostname, _)) = isis.hostname.get(&Level::L2).get(&lsp_id.sys_id()) {
                 format!(
@@ -54,13 +58,14 @@ fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
             };
         writeln!(
             buf,
-            "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}",
+            "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}",
             system_id.to_string(),
             originated,
             lsa.lsp.pdu_len.to_string(),
             lsa.lsp.seq_number,
             lsa.lsp.checksum,
             rem,
+            types,
         )
         .unwrap();
     }
@@ -80,6 +85,10 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
             .map(|(lsp_id, lsa)| {
                 let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
                 let originated = if lsa.originated { "*" } else { " " };
+                let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
+                let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
+                let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
+                let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
                 let (system_id, _lsp_id) = if let Some((hostname, _)) =
                     isis.hostname.get(&Level::L2).get(&lsp_id.sys_id())
                 {
@@ -97,7 +106,7 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
                 };
 
                 format!(
-                    "{}\n{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}{}\n",
+                    "{}\n{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}{}\n",
                     "LSP ID                        PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL",
                     system_id,
                     originated,
@@ -105,6 +114,7 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
                     lsa.lsp.seq_number,
                     lsa.lsp.checksum,
                     rem,
+                    types,
                     lsa.lsp
                 )
             })
