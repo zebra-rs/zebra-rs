@@ -176,7 +176,7 @@ pub fn nfsm_hello_received(
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
-    nfsm_hello_log(nbr);
+    // nfsm_hello_log(nbr);
     nfsm_ifaddr_update(nbr);
 
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
@@ -216,10 +216,7 @@ pub fn isis_nfsm(
     mac: &Option<MacAddr>,
     level: Level,
 ) {
-    println!(
-        "NFSM Neighbor ID: {} Level: {} Event: {}",
-        nbr.sys_id, level, event
-    );
+    // println!("NFSM {}, {}, {}", nbr.sys_id, level, event);
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event, level);
 
     let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
