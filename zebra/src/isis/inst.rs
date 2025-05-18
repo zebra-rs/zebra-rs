@@ -19,7 +19,7 @@ use crate::isis::nfsm::isis_nfsm;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
-use crate::rib::{self, Link, MacAddr};
+use crate::rib::{self, Link, MacAddr, RibType};
 use crate::spf;
 use crate::{
     config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
@@ -46,6 +46,7 @@ pub struct Isis {
     pub ptx: UnboundedSender<PacketMessage>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
+    pub rib_tx: UnboundedSender<rib::Message>,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: IsisLinks,
     pub show: ShowChannel,
@@ -68,6 +69,7 @@ pub struct IsisTop<'a> {
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
+    pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf: &'a mut Levels<Option<Timer>>,
 }
@@ -96,6 +98,7 @@ impl Isis {
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
+            rib_tx,
             links: IsisLinks::default(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -234,7 +237,9 @@ impl Isis {
                     }
 
                     // Update diff to rib. then replace current SpfRoute with new one.
-                    diff(top.rib.get(&level), &rib);
+                    let diff = diff(top.rib.get(&level), &rib);
+                    println!("RES: {:?}", diff);
+                    diff_apply(top.rib_tx.clone(), &diff);
                     *top.rib.get_mut(&level) = rib;
                 }
             }
@@ -351,6 +356,7 @@ impl Isis {
             lsp_map: &mut self.lsp_map,
             reach_map: &mut self.reach_map,
             rib: &mut self.rib,
+            rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
             spf: &mut self.spf,
         };
@@ -723,19 +729,99 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
     (graph, s)
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct SpfRoute {
     pub prefix: Ipv4Net,
     pub metric: u32,
     pub nhops: Vec<SpfNexthop>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpfNexthop {
     pub nhop: Ipv4Addr,
     pub ifindex: u32,
 }
 
-pub fn diff(curr: &PrefixMap<Ipv4Net, SpfRoute>, next: &PrefixMap<Ipv4Net, SpfRoute>) {
-    //
+/// The result of the diff.
+///
+/// ─ `only_curr`  : prefix appears only in *curr*
+/// ─ `only_next`  : prefix appears only in *next*
+/// ─ `different`  : same prefix in both, but the SpfRoute differs
+/// ─ `identical`  : same prefix in both, and the SpfRoute is byte-for-byte equal
+#[derive(Debug)]
+pub struct DiffResult<'a> {
+    pub only_curr: Vec<(&'a Ipv4Net, &'a SpfRoute)>,
+    pub only_next: Vec<(&'a Ipv4Net, &'a SpfRoute)>,
+    pub different: Vec<(&'a Ipv4Net, &'a SpfRoute, &'a SpfRoute)>,
+    pub identical: Vec<(&'a Ipv4Net, &'a SpfRoute)>,
+}
+
+pub fn diff<'a>(
+    curr: &'a PrefixMap<Ipv4Net, SpfRoute>,
+    next: &'a PrefixMap<Ipv4Net, SpfRoute>,
+) -> DiffResult<'a> {
+    let mut res = DiffResult {
+        only_curr: Vec::new(),
+        only_next: Vec::new(),
+        different: Vec::new(),
+        identical: Vec::new(),
+    };
+
+    // Walk everything in *curr* and decide its fate.
+    for (prefix, curr_route) in curr.iter() {
+        match next.get(prefix) {
+            None => {
+                // Missing from *next*.
+                res.only_curr.push((prefix, curr_route));
+            }
+            Some(next_route) if curr_route == next_route => {
+                // Present in both and identical.
+                res.identical.push((prefix, curr_route));
+            }
+            Some(next_route) => {
+                // Present in both but the route body changed.
+                res.different.push((prefix, curr_route, next_route));
+            }
+        }
+    }
+
+    // Anything that exists only in *next*.
+    for (prefix, next_route) in next.iter() {
+        if !curr.contains_key(prefix) {
+            res.only_next.push((prefix, next_route));
+        }
+    }
+
+    res
+}
+
+pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
+    // Delete.
+    for (&prefix, route) in diff.only_curr.iter() {}
+    // Add.
+    for (&prefix, _, route) in diff.different.iter() {
+        //
+    }
+    // Add.
+    for (&prefix, route) in diff.only_next.iter() {
+        let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+        rib.distance = 115;
+        rib.metric = route.metric;
+        if route.nhops.len() == 1 {
+            let nhop = &route.nhops[0];
+            let uni = rib::NexthopUni {
+                addr: nhop.nhop,
+                metric: route.metric,
+                weight: 1,
+                ifindex: nhop.ifindex,
+                ..Default::default()
+            };
+            rib.nexthop = rib::Nexthop::Uni(uni);
+        }
+        let msg = rib::Message::Ipv4Add {
+            prefix: prefix.clone(),
+            rib,
+        };
+        rib_tx.send(msg).unwrap();
+    }
 }

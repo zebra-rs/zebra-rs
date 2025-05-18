@@ -11,8 +11,8 @@ pub type RibEntries = Vec<RibEntry>;
 pub struct RibEntry {
     pub rtype: RibType,
     pub rsubtype: RibSubType,
-    selected: bool,
-    fib: bool,
+    pub selected: bool,
+    pub fib: bool,
     pub valid: bool,
     pub distance: u8,
     pub metric: u32,
