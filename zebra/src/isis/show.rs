@@ -76,7 +76,8 @@ fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
 fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
     if json {
         // Use serde to serialize the entire database directly
-        serde_json::to_string(&isis.lsdb.l2.values().map(|x| &x.lsp).collect::<Vec<_>>()).unwrap()
+        serde_json::to_string_pretty(&isis.lsdb.l2.values().map(|x| &x.lsp).collect::<Vec<_>>())
+            .unwrap()
     } else {
         // Generate a nicely formatted string for human-readable format
         isis.lsdb
