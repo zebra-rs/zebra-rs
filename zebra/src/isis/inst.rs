@@ -51,6 +51,7 @@ pub struct Isis {
     pub sock: Arc<AsyncFd<Socket>>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
+    pub lsp_map: Levels<LspMap>,
     pub hostname: Levels<Hostname>,
     pub spf: Levels<Option<Timer>>,
 }
@@ -60,6 +61,7 @@ pub struct IsisTop<'a> {
     pub links: &'a mut IsisLinks,
     pub config: &'a IsisConfig,
     pub lsdb: &'a mut Levels<Lsdb>,
+    pub lsp_map: &'a mut Levels<LspMap>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf: &'a mut Levels<Option<Timer>>,
 }
@@ -94,6 +96,7 @@ impl Isis {
             sock,
             config: IsisConfig::default(),
             lsdb: Levels::<Lsdb>::default(),
+            lsp_map: Levels::<LspMap>::default(),
             hostname: Levels::<Hostname>::default(),
             spf: Levels::<Option<Timer>>::default(),
         };
@@ -151,7 +154,7 @@ impl Isis {
             Message::Spf(level) => {
                 let mut top = self.top();
                 *top.spf.get_mut(&level) = None;
-                let (graph, s) = spf(&mut top, level);
+                let (graph, s) = graph(&mut top, level);
 
                 if let Some(s) = s {
                     // Call SPF.
@@ -278,6 +281,7 @@ impl Isis {
             links: &mut self.links,
             config: &self.config,
             lsdb: &mut self.lsdb,
+            lsp_map: &mut self.lsp_map,
             hostname: &mut self.hostname,
             spf: &mut self.spf,
         };
@@ -566,17 +570,20 @@ impl LspMap {
             return index;
         }
     }
+
+    pub fn resolve(&self, id: usize) -> Option<&IsisSysId> {
+        self.val.get(id)
+    }
 }
 
-pub fn spf(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
-    let mut lsp_map = LspMap::default();
+pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
     let mut s: Option<usize> = None;
     let mut graph = spf::Graph::new();
 
     for (key, lsa) in top.lsdb.get(&level).iter() {
         if !lsa.lsp.lsp_id.is_pseudo() {
             let sys_id = lsa.lsp.lsp_id.sys_id().clone();
-            let id = lsp_map.get(&sys_id);
+            let id = top.lsp_map.get_mut(&level).get(&sys_id);
             if lsa.originated {
                 s = Some(id);
             }
@@ -601,7 +608,10 @@ pub fn spf(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
                                 if let IsisTlv::ExtIsReach(tlv) = tlv {
                                     for e in tlv.entries.iter() {
                                         if e.neighbor_id.sys_id() != sys_id {
-                                            let to = lsp_map.get(&e.neighbor_id.sys_id());
+                                            let to = top
+                                                .lsp_map
+                                                .get_mut(&level)
+                                                .get(&e.neighbor_id.sys_id());
                                             let link = spf::Link {
                                                 from: id,
                                                 to,
