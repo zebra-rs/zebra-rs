@@ -797,10 +797,48 @@ pub fn diff<'a>(
 
 pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     // Delete.
-    for (&prefix, route) in diff.only_curr.iter() {}
+    for (&prefix, route) in diff.only_curr.iter() {
+        let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+        rib.distance = 115;
+        rib.metric = route.metric;
+        if route.nhops.len() == 1 {
+            let nhop = &route.nhops[0];
+            let uni = rib::NexthopUni {
+                addr: nhop.nhop,
+                metric: route.metric,
+                weight: 1,
+                ifindex: nhop.ifindex,
+                ..Default::default()
+            };
+            rib.nexthop = rib::Nexthop::Uni(uni);
+        }
+        let msg = rib::Message::Ipv4Del {
+            prefix: prefix.clone(),
+            rib,
+        };
+        rib_tx.send(msg).unwrap();
+    }
     // Add.
     for (&prefix, _, route) in diff.different.iter() {
-        //
+        let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+        rib.distance = 115;
+        rib.metric = route.metric;
+        if route.nhops.len() == 1 {
+            let nhop = &route.nhops[0];
+            let uni = rib::NexthopUni {
+                addr: nhop.nhop,
+                metric: route.metric,
+                weight: 1,
+                ifindex: nhop.ifindex,
+                ..Default::default()
+            };
+            rib.nexthop = rib::Nexthop::Uni(uni);
+        }
+        let msg = rib::Message::Ipv4Add {
+            prefix: prefix.clone(),
+            rib,
+        };
+        rib_tx.send(msg).unwrap();
     }
     // Add.
     for (&prefix, route) in diff.only_next.iter() {
