@@ -17,6 +17,7 @@ use crate::rib::{Link, MacAddr};
 
 use super::addr::IsisAddr;
 use super::config::IsisConfig;
+use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::task::{Timer, TimerType};
 use super::{IfsmEvent, Isis, Level, Levels, Message};
@@ -94,7 +95,7 @@ impl IsisLinks {
 #[derive(Debug)]
 pub struct IsisLink {
     pub tx: UnboundedSender<Message>,
-    pub ptx: UnboundedSender<Message>,
+    pub ptx: UnboundedSender<PacketMessage>,
     pub config: LinkConfig,
     pub state: LinkState,
     pub timer: LinkTimer,
@@ -102,7 +103,7 @@ pub struct IsisLink {
 
 pub struct LinkTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
-    pub ptx: &'a UnboundedSender<Message>,
+    pub ptx: &'a UnboundedSender<PacketMessage>,
     pub up_config: &'a IsisConfig,
     pub config: &'a LinkConfig,
     pub state: &'a mut LinkState,
@@ -311,9 +312,12 @@ pub struct LinkStats {
 }
 
 impl IsisLink {
-    pub fn from(link: Link, tx: UnboundedSender<Message>, ptx: UnboundedSender<Message>) -> Self {
+    pub fn from(
+        link: Link,
+        tx: UnboundedSender<Message>,
+        ptx: UnboundedSender<PacketMessage>,
+    ) -> Self {
         let mut is_link = Self {
-            // l2adj: None,
             tx,
             ptx,
             config: LinkConfig::default(),

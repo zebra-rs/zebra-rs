@@ -41,7 +41,7 @@ pub struct Isis {
     pub ctx: Context,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    pub ptx: UnboundedSender<Message>,
+    pub ptx: UnboundedSender<PacketMessage>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
     pub rib_rx: UnboundedReceiver<RibRx>,
@@ -164,9 +164,6 @@ impl Isis {
             Message::Recv(packet, ifindex, mac) => {
                 let mut top = self.top();
                 process_packet(&mut top, packet, ifindex, mac);
-            }
-            Message::Send(_, _, _) => {
-                // Not handled here.
             }
             Message::LspOriginate(level) => {
                 let mut top = self.top();
@@ -489,6 +486,10 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
     buf
 }
 
+pub enum PacketMessage {
+    Send(Packet, u32, Level),
+}
+
 pub enum Packet {
     Packet(IsisPacket),
     Bytes(BytesMut),
@@ -503,7 +504,7 @@ pub fn lsp_flood(top: &mut IsisTop, level: Level, buf: &BytesMut) {
     for (_, link) in top.links.iter() {
         if link.state.level().capable(&pdu_type) {
             if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
-                link.ptx.send(Message::Send(
+                link.ptx.send(PacketMessage::Send(
                     Packet::Bytes(buf.clone()),
                     link.state.ifindex,
                     level,
@@ -521,7 +522,6 @@ pub fn serve(mut isis: Isis) {
 
 pub enum Message {
     Recv(IsisPacket, u32, Option<MacAddr>),
-    Send(Packet, u32, Level),
     Ifsm(IfsmEvent, u32, Option<Level>),
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
