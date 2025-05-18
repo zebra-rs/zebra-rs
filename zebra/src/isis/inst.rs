@@ -182,7 +182,7 @@ impl Isis {
                         if let Some(sys_id) = top.lsp_map.get(&level).resolve(node) {
                             // Fetch prefix from the node.
                             // Fetch nexthop first.
-                            let mut spf_nhops = Vec::new();
+                            let mut spf_nhops = BTreeMap::new();
                             for p in &nhops.nexthops {
                                 if p.len() > 1 {
                                     if let Some(nhop) = top.lsp_map.get(&level).resolve(p[1]) {
@@ -194,10 +194,10 @@ impl Isis {
                                                     for tlv in nbr.pdu.tlvs.iter() {
                                                         if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                                                             let nhop = SpfNexthop {
-                                                                nhop: ifaddr.addr.clone(),
+                                                                // nhop: ifaddr.addr.clone(),
                                                                 ifindex: *ifindex,
                                                             };
-                                                            spf_nhops.push(nhop);
+                                                            spf_nhops.insert(ifaddr.addr, nhop);
                                                         }
                                                     }
                                                 }
@@ -227,10 +227,10 @@ impl Isis {
                         }
                     }
                     for (prefix, route) in rib.iter() {
-                        for nhop in route.nhops.iter() {
+                        for (addr, nhop) in route.nhops.iter() {
                             println!(
                                 "{} [{}] -> {} ifindex {}",
-                                prefix, route.metric, nhop.nhop, nhop.ifindex
+                                prefix, route.metric, addr, nhop.ifindex
                             );
                         }
                     }
@@ -731,12 +731,11 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
 #[derive(Debug, PartialEq)]
 pub struct SpfRoute {
     pub metric: u32,
-    pub nhops: Vec<SpfNexthop>,
+    pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpfNexthop {
-    pub nhop: Ipv4Addr,
     pub ifindex: u32,
 }
 
@@ -800,15 +799,16 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         rib.distance = 115;
         rib.metric = route.metric;
         if route.nhops.len() == 1 {
-            let nhop = &route.nhops[0];
-            let uni = rib::NexthopUni {
-                addr: nhop.nhop,
-                metric: route.metric,
-                weight: 1,
-                ifindex: nhop.ifindex,
-                ..Default::default()
-            };
-            rib.nexthop = rib::Nexthop::Uni(uni);
+            if let Some((key, value)) = route.nhops.iter().next() {
+                let uni = rib::NexthopUni {
+                    addr: key.clone(),
+                    metric: route.metric,
+                    weight: 1,
+                    ifindex: value.ifindex,
+                    ..Default::default()
+                };
+                rib.nexthop = rib::Nexthop::Uni(uni);
+            }
         }
         let msg = rib::Message::Ipv4Del {
             prefix: prefix.clone(),
@@ -822,15 +822,16 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         rib.distance = 115;
         rib.metric = route.metric;
         if route.nhops.len() == 1 {
-            let nhop = &route.nhops[0];
-            let uni = rib::NexthopUni {
-                addr: nhop.nhop,
-                metric: route.metric,
-                weight: 1,
-                ifindex: nhop.ifindex,
-                ..Default::default()
-            };
-            rib.nexthop = rib::Nexthop::Uni(uni);
+            if let Some((key, value)) = route.nhops.iter().next() {
+                let uni = rib::NexthopUni {
+                    addr: key.clone(),
+                    metric: route.metric,
+                    weight: 1,
+                    ifindex: value.ifindex,
+                    ..Default::default()
+                };
+                rib.nexthop = rib::Nexthop::Uni(uni);
+            }
         }
         let msg = rib::Message::Ipv4Add {
             prefix: prefix.clone(),
@@ -844,15 +845,16 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         rib.distance = 115;
         rib.metric = route.metric;
         if route.nhops.len() == 1 {
-            let nhop = &route.nhops[0];
-            let uni = rib::NexthopUni {
-                addr: nhop.nhop,
-                metric: route.metric,
-                weight: 1,
-                ifindex: nhop.ifindex,
-                ..Default::default()
-            };
-            rib.nexthop = rib::Nexthop::Uni(uni);
+            if let Some((key, value)) = route.nhops.iter().next() {
+                let uni = rib::NexthopUni {
+                    addr: key.clone(),
+                    metric: route.metric,
+                    weight: 1,
+                    ifindex: value.ifindex,
+                    ..Default::default()
+                };
+                rib.nexthop = rib::Nexthop::Uni(uni);
+            }
         }
         let msg = rib::Message::Ipv4Add {
             prefix: prefix.clone(),
