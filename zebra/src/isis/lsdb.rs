@@ -6,12 +6,13 @@ use std::{
     default,
 };
 
-use isis_packet::{IsisLsp, IsisLspId};
+use isis_packet::{IsisLsp, IsisLspId, IsisTlv};
 
 use crate::isis::Message;
 
 use super::{
     inst::{lsp_emit, lsp_flood, spf_schedule, IsisTop},
+    link::Afi,
     task::Timer,
     Level,
 };
@@ -103,12 +104,23 @@ fn update_pseudo() {
 }
 
 fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
+    // Update hostname.
     if let Some(tlv) = lsp.hostname_tlv() {
         top.hostname
             .get_mut(&level)
             .insert(key.sys_id(), tlv.hostname.clone());
     } else {
         top.hostname.get_mut(&level).remove(&key.sys_id());
+    }
+
+    // Update IP reachability.
+    for tlv in lsp.tlvs.iter() {
+        if let IsisTlv::ExtIpReach(tlv) = tlv {
+            top.reach_map
+                .get_mut(&level)
+                .get_mut(&Afi::Ip)
+                .insert(key.sys_id(), tlv.entries.clone());
+        }
     }
 }
 
