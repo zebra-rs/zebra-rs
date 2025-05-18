@@ -157,14 +157,7 @@ impl Isis {
                 let (graph, s) = graph(&mut top, level);
 
                 if let Some(s) = s {
-                    // Call SPF.
-                    let opt = spf::SpfOpt {
-                        full_path: false,
-                        path_max: 0,
-                        srmpls: false,
-                        srv6: false,
-                    };
-                    let spf = spf::spf(&graph, s, &opt);
+                    let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
                     spf::disp(&spf, false);
                 }
             }
