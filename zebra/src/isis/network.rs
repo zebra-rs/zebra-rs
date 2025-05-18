@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::rib::MacAddr;
 
-use super::inst::Packet;
+use super::inst::{Packet, PacketMessage};
 use super::socket::link_addr;
 use super::{Level, Message};
 
@@ -60,12 +60,10 @@ pub const LLC_HDR: [u8; 3] = [0xFE, 0xFE, 0x03];
 pub const L1_ISS: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x14];
 pub const L2_ISS: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x15];
 
-pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<Message>) {
+pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<PacketMessage>) {
     loop {
         let msg = rx.recv().await;
-        let Message::Send(packet, ifindex, level) = msg.unwrap() else {
-            continue;
-        };
+        let PacketMessage::Send(packet, ifindex, level) = msg.unwrap();
 
         let buf = match packet {
             Packet::Packet(packet) => {
