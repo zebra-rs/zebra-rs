@@ -1,18 +1,20 @@
 use std::collections::{BTreeMap, HashMap};
+use std::default;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net};
 use isis_packet::prefix::{Ipv4ControlInfo, Ipv6ControlInfo, IsisSubTlv};
 use isis_packet::*;
+use prefix_trie::PrefixMap;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
-use crate::isis::link::DisStatus;
+use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
@@ -26,7 +28,7 @@ use crate::{
 };
 
 use super::config::IsisConfig;
-use super::link::{IsisLink, IsisLinks, LinkTop};
+use super::link::{Afis, IsisLink, IsisLinks, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
@@ -52,6 +54,8 @@ pub struct Isis {
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
+    pub reach_map: Levels<Afis<ReachMap>>,
+    pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub hostname: Levels<Hostname>,
     pub spf: Levels<Option<Timer>>,
 }
@@ -62,6 +66,8 @@ pub struct IsisTop<'a> {
     pub config: &'a IsisConfig,
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
+    pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf: &'a mut Levels<Option<Timer>>,
 }
@@ -97,6 +103,8 @@ impl Isis {
             config: IsisConfig::default(),
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
+            reach_map: Levels::<Afis<ReachMap>>::default(),
+            rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf: Levels::<Option<Timer>>::default(),
         };
@@ -158,6 +166,7 @@ impl Isis {
 
                 if let Some(s) = s {
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
+                    let mut rib = Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default();
 
                     // Graph -> SPF.
                     for (node, nhops) in spf {
@@ -167,18 +176,60 @@ impl Isis {
                         }
 
                         // Resolve node.
-                        if let some(sys_id) = top.lsp_map.get(&level).resolve(node) {
-                            // fetch prefix from the node.
-
-                            println!("node: {} nexthops: {}", sys_id, nhops.nexthops.len());
+                        if let Some(sys_id) = top.lsp_map.get(&level).resolve(node) {
+                            // Fetch prefix from the node.
+                            // Fetch nexthop first.
+                            let mut spf_nhops = Vec::new();
                             for p in &nhops.nexthops {
                                 if p.len() > 1 {
                                     if let Some(nhop) = top.lsp_map.get(&level).resolve(p[1]) {
                                         // Fetch nexthop from the node.
-                                        println!("  metric {} nhop {}", nhops.cost, nhop);
+                                        // Find nhop from links.
+                                        for (ifindex, link) in top.links.iter() {
+                                            for (_, nbr) in link.state.nbrs.get(&level).iter() {
+                                                if nbr.sys_id == *nhop {
+                                                    for tlv in nbr.pdu.tlvs.iter() {
+                                                        if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
+                                                            let nhop = SpfNexthop {
+                                                                nhop: ifaddr.addr.clone(),
+                                                                ifindex: *ifindex,
+                                                            };
+                                                            spf_nhops.push(nhop);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
+
+                            if let Some(entries) =
+                                top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id)
+                            {
+                                for entry in entries.iter() {
+                                    let route = SpfRoute {
+                                        prefix: entry.prefix.clone(),
+                                        metric: nhops.cost,
+                                        nhops: spf_nhops.clone(),
+                                    };
+                                    if let Some(curr) = rib.get(&level).get(&entry.prefix) {
+                                        if curr.metric >= route.metric {
+                                            rib.get_mut(&level).insert(entry.prefix, route);
+                                        }
+                                    } else {
+                                        rib.get_mut(&level).insert(entry.prefix, route);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (prefix, route) in rib.get(&level).iter() {
+                        for nhop in route.nhops.iter() {
+                            println!(
+                                "{} [{}] -> {} ifindex {}",
+                                prefix, route.metric, nhop.nhop, nhop.ifindex
+                            );
                         }
                     }
                 }
@@ -294,6 +345,8 @@ impl Isis {
             config: &self.config,
             lsdb: &mut self.lsdb,
             lsp_map: &mut self.lsp_map,
+            reach_map: &mut self.reach_map,
+            rib: &mut self.rib,
             hostname: &mut self.hostname,
             spf: &mut self.spf,
         };
@@ -569,6 +622,25 @@ pub fn spf_schedule(top: &mut IsisTop, level: Level) {
 }
 
 #[derive(Default)]
+pub struct ReachMap {
+    map: BTreeMap<IsisSysId, Vec<IsisTlvExtIpReachEntry>>,
+}
+
+impl ReachMap {
+    pub fn get(&self, key: &IsisSysId) -> Option<&Vec<IsisTlvExtIpReachEntry>> {
+        self.map.get(key)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: IsisSysId,
+        value: Vec<IsisTlvExtIpReachEntry>,
+    ) -> Option<Vec<IsisTlvExtIpReachEntry>> {
+        self.map.insert(key, value)
+    }
+}
+
+#[derive(Default)]
 pub struct LspMap {
     map: BTreeMap<IsisSysId, usize>,
     val: Vec<IsisSysId>,
@@ -645,4 +717,16 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
         }
     }
     (graph, s)
+}
+
+pub struct SpfRoute {
+    pub prefix: Ipv4Net,
+    pub metric: u32,
+    pub nhops: Vec<SpfNexthop>,
+}
+
+#[derive(Clone)]
+pub struct SpfNexthop {
+    pub nhop: Ipv4Addr,
+    pub ifindex: u32,
 }
