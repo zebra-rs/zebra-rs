@@ -158,7 +158,29 @@ impl Isis {
 
                 if let Some(s) = s {
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
-                    spf::disp(&spf, false);
+
+                    // Graph -> SPF.
+                    for (node, nhops) in spf {
+                        // Skip self node.
+                        if node == s {
+                            continue;
+                        }
+
+                        // Resolve node.
+                        if let some(sys_id) = top.lsp_map.get(&level).resolve(node) {
+                            // fetch prefix from the node.
+
+                            println!("node: {} nexthops: {}", sys_id, nhops.nexthops.len());
+                            for p in &nhops.nexthops {
+                                if p.len() > 1 {
+                                    if let Some(nhop) = top.lsp_map.get(&level).resolve(p[1]) {
+                                        // Fetch nexthop from the node.
+                                        println!("  metric {} nhop {}", nhops.cost, nhop);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Message::Recv(packet, ifindex, mac) => {
