@@ -237,7 +237,6 @@ impl Isis {
 
                     // Update diff to rib. then replace current SpfRoute with new one.
                     let diff = diff(top.rib.get(&level), &rib);
-                    println!("RES: {:?}", diff);
                     diff_apply(top.rib_tx.clone(), &diff);
                     *top.rib.get_mut(&level) = rib;
                 }
@@ -397,10 +396,12 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .unwrap_or(1);
 
     // Generate self originated LSP.
+    let types = IsisLspTypes::from(level.digit());
     let mut lsp = IsisLsp {
         hold_time: top.config.hold_time(),
         lsp_id,
         seq_number,
+        types,
         ..Default::default()
     };
 
