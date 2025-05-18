@@ -212,7 +212,6 @@ impl Isis {
                             {
                                 for entry in entries.iter() {
                                     let route = SpfRoute {
-                                        prefix: entry.prefix.clone(),
                                         metric: nhops.cost,
                                         nhops: spf_nhops.clone(),
                                     };
@@ -731,7 +730,6 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
 
 #[derive(Debug, PartialEq)]
 pub struct SpfRoute {
-    pub prefix: Ipv4Net,
     pub metric: u32,
     pub nhops: Vec<SpfNexthop>,
 }
