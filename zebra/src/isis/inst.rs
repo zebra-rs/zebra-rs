@@ -166,7 +166,7 @@ impl Isis {
 
                 if let Some(s) = s {
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
-                    let mut rib = Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default();
+                    let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
                     // Graph -> SPF.
                     for (node, nhops) in spf {
@@ -213,18 +213,18 @@ impl Isis {
                                         metric: nhops.cost,
                                         nhops: spf_nhops.clone(),
                                     };
-                                    if let Some(curr) = rib.get(&level).get(&entry.prefix) {
+                                    if let Some(curr) = rib.get(&entry.prefix) {
                                         if curr.metric >= route.metric {
-                                            rib.get_mut(&level).insert(entry.prefix, route);
+                                            rib.insert(entry.prefix, route);
                                         }
                                     } else {
-                                        rib.get_mut(&level).insert(entry.prefix, route);
+                                        rib.insert(entry.prefix, route);
                                     }
                                 }
                             }
                         }
                     }
-                    for (prefix, route) in rib.get(&level).iter() {
+                    for (prefix, route) in rib.iter() {
                         for nhop in route.nhops.iter() {
                             println!(
                                 "{} [{}] -> {} ifindex {}",
@@ -232,6 +232,10 @@ impl Isis {
                             );
                         }
                     }
+
+                    // Update diff to rib. then replace current SpfRoute with new one.
+                    diff(top.rib.get(&level), &rib);
+                    *top.rib.get_mut(&level) = rib;
                 }
             }
             Message::Recv(packet, ifindex, mac) => {
@@ -719,14 +723,19 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
     (graph, s)
 }
 
+#[derive(PartialEq)]
 pub struct SpfRoute {
     pub prefix: Ipv4Net,
     pub metric: u32,
     pub nhops: Vec<SpfNexthop>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SpfNexthop {
     pub nhop: Ipv4Addr,
     pub ifindex: u32,
+}
+
+pub fn diff(curr: &PrefixMap<Ipv4Net, SpfRoute>, next: &PrefixMap<Ipv4Net, SpfRoute>) {
+    //
 }
