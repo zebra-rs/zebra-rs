@@ -56,7 +56,8 @@ module exec {
       ext:help "Show IP commands";
       leaf route {
         ext:help "IP route prefix";
-        type inet:ipv4-prefix;
+        // type inet:ipv4-prefix;
+        type empty;
       }
       container bgp {
         ext:help "BGP commands";
