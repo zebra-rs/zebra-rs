@@ -26,6 +26,10 @@ impl NfsmState {
             NfsmState::Up => "Up",
         }
     }
+
+    pub fn is_up(&self) -> bool {
+        *self == NfsmState::Up
+    }
 }
 
 impl Display for NfsmState {
