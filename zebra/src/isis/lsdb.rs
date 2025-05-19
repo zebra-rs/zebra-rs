@@ -34,6 +34,8 @@ pub struct Lsa {
     pub from: Option<u32>,
     pub hold_timer: Option<Timer>,
     pub refresh_timer: Option<Timer>,
+    pub csnp_timer: Option<Timer>,
+    pub ifindex: u32,
 }
 
 impl Lsa {
@@ -44,6 +46,8 @@ impl Lsa {
             from: None,
             hold_timer: None,
             refresh_timer: None,
+            csnp_timer: None,
+            ifindex: 0,
         }
     }
 }
@@ -77,7 +81,8 @@ impl Lsdb {
 
 fn refresh_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
     let tx = top.tx.clone();
-    Timer::once(3, move || {
+    let refresh_time = top.config.refresh_time();
+    Timer::once(refresh_time, move || {
         let tx = tx.clone();
         async move {
             use LsdbEvent::*;
@@ -94,6 +99,18 @@ fn hold_timer(top: &mut IsisTop, level: Level, key: IsisLspId, hold_time: u64) -
         async move {
             use LsdbEvent::*;
             let msg = Message::Lsdb(HoldTimerExpire, level, key.clone());
+            tx.send(msg).unwrap();
+        }
+    })
+}
+
+fn csnp_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
+    let tx = top.tx.clone();
+    Timer::once(3, move || {
+        let tx = tx.clone();
+        async move {
+            use LsdbEvent::*;
+            let msg = Message::Lsdb(RefreshTimerExpire, level, key.clone());
             tx.send(msg).unwrap();
         }
     })

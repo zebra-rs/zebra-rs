@@ -162,7 +162,7 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Spf(level) => {
+            Message::SpfCalc(level) => {
                 let mut top = self.top();
                 *top.spf.get_mut(&level) = None;
                 let (graph, s) = graph(&mut top, level);
@@ -248,6 +248,13 @@ impl Isis {
             Message::LspOriginate(level) => {
                 let mut top = self.top();
                 let mut lsp = lsp_generate(&mut top, level);
+                let buf = lsp_emit(&mut lsp, level);
+                lsp_flood(&mut top, level, &buf);
+                insert_self_originate(&mut top, level, lsp);
+            }
+            Message::DisOriginate(level, ifindex) => {
+                let mut top = self.top();
+                let mut lsp = dis_generate(&mut top, level, ifindex);
                 let buf = lsp_emit(&mut lsp, level);
                 lsp_flood(&mut top, level, &buf);
                 insert_self_originate(&mut top, level, lsp);
@@ -381,6 +388,63 @@ impl Isis {
 
 fn level_matches(state_level: &IsLevel, level: Level) -> bool {
     (level == Level::L1 && state_level.has_l1()) || (level == Level::L2 && state_level.has_l2())
+}
+
+pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32) -> IsisLsp {
+    let neighbor_id = if let Some(link) = top.links.get(&ifindex) {
+        if let Some(adj) = link.state.adj.get(&level) {
+            adj.clone()
+        } else {
+            IsisNeighborId::default()
+        }
+    } else {
+        IsisNeighborId::default()
+    };
+
+    let lsp_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
+
+    // Fetch current sequence number if LSP exists.
+    let seq_number = top
+        .lsdb
+        .get(&level)
+        .get(&lsp_id)
+        .map(|x| x.lsp.seq_number)
+        .unwrap_or(1);
+    let types = IsisLspTypes::from(level.digit());
+    let mut lsp = IsisLsp {
+        hold_time: top.config.hold_time(),
+        lsp_id,
+        seq_number,
+        types,
+        ..Default::default()
+    };
+
+    let mut is_reach = IsisTlvExtIsReach::default();
+    let entry = IsisTlvExtIsReachEntry {
+        neighbor_id: IsisNeighborId::from_sys_id(&top.config.net.sys_id(), 0),
+        metric: 0,
+        subs: vec![],
+    };
+    is_reach.entries.push(entry);
+
+    if let Some(link) = top.links.get(&ifindex) {
+        for (sys_id, nbr) in link.state.nbrs.get(&level).iter() {
+            if nbr.state.is_up() {
+                let neighbor_id = IsisNeighborId::from_sys_id(&sys_id, 0);
+                let entry = IsisTlvExtIsReachEntry {
+                    neighbor_id,
+                    metric: 0,
+                    subs: vec![],
+                };
+                is_reach.entries.push(entry);
+            }
+        }
+    }
+    if !is_reach.entries.is_empty() {
+        lsp.tlvs.push(IsisTlv::ExtIsReach(is_reach));
+    }
+
+    lsp
 }
 
 pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
@@ -605,21 +669,12 @@ pub fn serve(mut isis: Isis) {
     });
 }
 
-pub enum Message {
-    Recv(IsisPacket, u32, Option<MacAddr>),
-    Ifsm(IfsmEvent, u32, Option<Level>),
-    Nfsm(NfsmEvent, u32, IsisSysId, Level),
-    Lsdb(LsdbEvent, Level, IsisLspId),
-    LspOriginate(Level),
-    Spf(Level),
-}
-
 pub fn spf_timer(top: &mut IsisTop, level: Level) -> Timer {
     let tx = top.tx.clone();
     Timer::once(1, move || {
         let tx = tx.clone();
         async move {
-            let msg = Message::Spf(level);
+            let msg = Message::SpfCalc(level);
             tx.send(msg).unwrap();
         }
     })
@@ -863,4 +918,14 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         };
         rib_tx.send(msg).unwrap();
     }
+}
+
+pub enum Message {
+    Recv(IsisPacket, u32, Option<MacAddr>),
+    Ifsm(IfsmEvent, u32, Option<Level>),
+    Nfsm(NfsmEvent, u32, IsisSysId, Level),
+    Lsdb(LsdbEvent, Level, IsisLspId),
+    LspOriginate(Level),
+    DisOriginate(Level, u32),
+    SpfCalc(Level),
 }
