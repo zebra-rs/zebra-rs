@@ -100,6 +100,10 @@ module exec {
         ext:help "IS-IS summary";
         type empty;
       }
+      leaf route {
+        ext:help "IS-IS route";
+        type empty;
+      }
       container interface {
         ext:help "IS-IS interface";
         presence "IS-IS interface";

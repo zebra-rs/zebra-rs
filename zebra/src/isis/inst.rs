@@ -169,6 +169,10 @@ impl Isis {
 
                 if let Some(s) = s {
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
+
+                    //
+                    spf::disp(&spf, false);
+
                     let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
                     // Graph -> SPF.
@@ -193,10 +197,8 @@ impl Isis {
                                                 if nbr.sys_id == *nhop {
                                                     for tlv in nbr.pdu.tlvs.iter() {
                                                         if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                                                            let nhop = SpfNexthop {
-                                                                // nhop: ifaddr.addr.clone(),
-                                                                ifindex: *ifindex,
-                                                            };
+                                                            let nhop =
+                                                                SpfNexthop { ifindex: *ifindex };
                                                             spf_nhops.insert(ifaddr.addr, nhop);
                                                         }
                                                     }
@@ -227,11 +229,23 @@ impl Isis {
                         }
                     }
                     for (prefix, route) in rib.iter() {
+                        let mut shown = false;
                         for (addr, nhop) in route.nhops.iter() {
-                            println!(
-                                "{} [{}] -> {} ifindex {}",
-                                prefix, route.metric, addr, nhop.ifindex
-                            );
+                            if !shown {
+                                println!(
+                                    "{:<20} [{}] -> {} ifindex {}",
+                                    prefix.to_string(),
+                                    route.metric,
+                                    addr,
+                                    nhop.ifindex
+                                );
+                                shown = true;
+                            } else {
+                                println!(
+                                    "                     [{}] -> {} ifindex {}",
+                                    route.metric, addr, nhop.ifindex
+                                );
+                            }
                         }
                     }
 
@@ -862,6 +876,16 @@ pub fn diff<'a>(
     res
 }
 
+fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
+    rib::NexthopUni {
+        addr: key.clone(),
+        metric: route.metric,
+        weight: 1,
+        ifindex: value.ifindex,
+        ..Default::default()
+    }
+}
+
 pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     // Delete.
     for (&prefix, route) in diff.only_curr.iter() {
@@ -870,15 +894,17 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         rib.metric = route.metric;
         if route.nhops.len() == 1 {
             if let Some((key, value)) = route.nhops.iter().next() {
-                let uni = rib::NexthopUni {
-                    addr: key.clone(),
-                    metric: route.metric,
-                    weight: 1,
-                    ifindex: value.ifindex,
-                    ..Default::default()
-                };
+                let uni = nhop_to_nexthop_uni(&key, &route, &value);
                 rib.nexthop = rib::Nexthop::Uni(uni);
             }
+        } else {
+            let mut multi = rib::NexthopMulti::default();
+            multi.metric = route.metric;
+            for (key, value) in route.nhops.iter() {
+                let uni = nhop_to_nexthop_uni(&key, &route, &value);
+                multi.nexthops.push(uni);
+            }
+            rib.nexthop = rib::Nexthop::Multi(multi);
         }
         let msg = rib::Message::Ipv4Del {
             prefix: prefix.clone(),
@@ -893,15 +919,17 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         rib.metric = route.metric;
         if route.nhops.len() == 1 {
             if let Some((key, value)) = route.nhops.iter().next() {
-                let uni = rib::NexthopUni {
-                    addr: key.clone(),
-                    metric: route.metric,
-                    weight: 1,
-                    ifindex: value.ifindex,
-                    ..Default::default()
-                };
+                let uni = nhop_to_nexthop_uni(&key, &route, &value);
                 rib.nexthop = rib::Nexthop::Uni(uni);
             }
+        } else {
+            let mut multi = rib::NexthopMulti::default();
+            multi.metric = route.metric;
+            for (key, value) in route.nhops.iter() {
+                let uni = nhop_to_nexthop_uni(&key, &route, &value);
+                multi.nexthops.push(uni);
+            }
+            rib.nexthop = rib::Nexthop::Multi(multi);
         }
         let msg = rib::Message::Ipv4Add {
             prefix: prefix.clone(),
@@ -916,15 +944,17 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         rib.metric = route.metric;
         if route.nhops.len() == 1 {
             if let Some((key, value)) = route.nhops.iter().next() {
-                let uni = rib::NexthopUni {
-                    addr: key.clone(),
-                    metric: route.metric,
-                    weight: 1,
-                    ifindex: value.ifindex,
-                    ..Default::default()
-                };
+                let uni = nhop_to_nexthop_uni(&key, &route, &value);
                 rib.nexthop = rib::Nexthop::Uni(uni);
             }
+        } else {
+            let mut multi = rib::NexthopMulti::default();
+            multi.metric = route.metric;
+            for (key, value) in route.nhops.iter() {
+                let uni = nhop_to_nexthop_uni(&key, &route, &value);
+                multi.nexthops.push(uni);
+            }
+            rib.nexthop = rib::Nexthop::Multi(multi);
         }
         let msg = rib::Message::Ipv4Add {
             prefix: prefix.clone(),
