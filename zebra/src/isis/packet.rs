@@ -26,6 +26,10 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         return;
     };
 
+    if !link.config.enabled() {
+        return;
+    }
+
     // Extract Hello PDU and level.
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Hello, IsisPdu::L1Hello(pdu)) => (pdu, Level::L1),
@@ -90,6 +94,10 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
         return;
     };
 
+    if !link.config.enabled() {
+        return;
+    }
+
     let (lsp, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) => (pdu, Level::L1),
         (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => (pdu, Level::L2),
@@ -153,6 +161,10 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         println!("Link not found {}", ifindex);
         return;
     };
+
+    if !link.config.enabled() {
+        return;
+    }
 
     println!("CSNP recv");
 
@@ -245,6 +257,10 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         println!("Link not found {}", ifindex);
         return;
     };
+
+    if !link.config.enabled() {
+        return;
+    }
 
     println!("PSNP recv");
 

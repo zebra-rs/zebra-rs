@@ -170,9 +170,6 @@ impl Isis {
                 if let Some(s) = s {
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
 
-                    //
-                    spf::disp(&spf, false);
-
                     let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
                     // Graph -> SPF.
@@ -228,27 +225,6 @@ impl Isis {
                             }
                         }
                     }
-                    for (prefix, route) in rib.iter() {
-                        let mut shown = false;
-                        for (addr, nhop) in route.nhops.iter() {
-                            if !shown {
-                                println!(
-                                    "{:<20} [{}] -> {} ifindex {}",
-                                    prefix.to_string(),
-                                    route.metric,
-                                    addr,
-                                    nhop.ifindex
-                                );
-                                shown = true;
-                            } else {
-                                println!(
-                                    "                     [{}] -> {} ifindex {}",
-                                    route.metric, addr, nhop.ifindex
-                                );
-                            }
-                        }
-                    }
-
                     // Update diff to rib. then replace current SpfRoute with new one.
                     let diff = diff(top.rib.get(&level), &rib);
                     diff_apply(top.rib_tx.clone(), &diff);
