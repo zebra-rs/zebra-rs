@@ -96,23 +96,12 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
         _ => return,
     };
 
-    // Check link capability for the PDU type.
     if !link_level_capable(&link.state.level(), &level) {
         return;
     }
 
-    // if let Some(nbr) = link.state.nbrs.get(&level).get(&lsp.lsp_id.sys_id()) {
-    //     if nbr.pdu.lan_id.is_empty() {
-    //         println!(
-    //             "XXX LSP from non adjacency neighbor {}",
-    //             lsp.lsp_id.sys_id()
-    //         );
-    //         return;
-    //     }
-    // }
-
     // DIS
-    if lsp.lsp_id.pseudo_id() != 0 {
+    if lsp.lsp_id.is_pseudo() {
         println!("DIS recv {}", lsp.lsp_id.sys_id());
 
         if let Some(dis) = &link.state.dis.get(&level) {
