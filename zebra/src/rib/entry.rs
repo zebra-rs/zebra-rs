@@ -56,7 +56,7 @@ impl RibEntry {
     pub fn is_protocol(&self) -> bool {
         matches!(
             self.rtype,
-            RibType::Static | RibType::Rip | RibType::Ospf | RibType::Isis | RibType::Bgp
+            RibType::Static | RibType::Ospf | RibType::Isis | RibType::Bgp
         )
     }
 
