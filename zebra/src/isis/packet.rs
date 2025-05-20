@@ -152,7 +152,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     };
 
-    // println!("CSNP recv");
+    println!("CSNP recv");
 
     let pdu = match (packet.pdu_type, packet.pdu) {
         (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => pdu,
@@ -205,6 +205,8 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         println!("Link not found {}", ifindex);
         return;
     };
+
+    println!("PSNP recv");
 }
 
 pub fn unknown_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {

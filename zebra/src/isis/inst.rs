@@ -277,7 +277,14 @@ impl Isis {
                         ifsm::stop(&mut top);
                     }
                     IfsmEvent::HelloTimerExpire => {
-                        ifsm::hello_send(&mut top, level.unwrap());
+                        if let Some(level) = level {
+                            ifsm::hello_send(&mut top, level);
+                        }
+                    }
+                    IfsmEvent::CsnpTimerExpire => {
+                        if let Some(level) = level {
+                            ifsm::csnp_send(&mut top, level);
+                        }
                     }
                     IfsmEvent::HelloOriginate => match level {
                         Some(level) => ifsm::hello_originate(&mut top, level),
@@ -379,6 +386,7 @@ impl Isis {
             tx: &self.tx,
             ptx: &self.ptx,
             up_config: &self.config,
+            lsdb: &self.lsdb,
             config: &mut link.config,
             state: &mut link.state,
             timer: &mut link.timer,
