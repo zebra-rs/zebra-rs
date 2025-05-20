@@ -20,11 +20,12 @@ use super::config::IsisConfig;
 use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::task::{Timer, TimerType};
-use super::{IfsmEvent, Isis, Level, Levels, Message};
+use super::{IfsmEvent, Isis, Level, Levels, Lsdb, Message};
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
     pub hello: Levels<Option<Timer>>,
+    pub csnp: Levels<Option<Timer>>,
 }
 
 pub struct Graph {}
@@ -104,6 +105,7 @@ pub struct IsisLink {
 pub struct LinkTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub ptx: &'a UnboundedSender<PacketMessage>,
+    pub lsdb: &'a Levels<Lsdb>,
     pub up_config: &'a IsisConfig,
     pub config: &'a LinkConfig,
     pub state: &'a mut LinkState,
@@ -215,12 +217,12 @@ impl LinkConfig {
         self.holddown_count.unwrap_or(DEFAULT_HOLDDOWN_COUNT) as u32
     }
 
-    pub fn psnp_interval(&self) -> u32 {
-        self.psnp_interval.unwrap_or(DEFAULT_PSNP_INTERVAL) as u32
+    pub fn psnp_interval(&self) -> u64 {
+        self.psnp_interval.unwrap_or(DEFAULT_PSNP_INTERVAL) as u64
     }
 
-    pub fn csnp_interval(&self) -> u32 {
-        self.csnp_interval.unwrap_or(DEFAULT_CSNP_INTERVAL) as u32
+    pub fn csnp_interval(&self) -> u64 {
+        self.csnp_interval.unwrap_or(DEFAULT_CSNP_INTERVAL) as u64
     }
 
     pub fn enabled(&self) -> bool {

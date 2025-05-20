@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use isis_packet::{
-    IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisProto, IsisSysId,
-    IsisTlvAreaAddr, IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType,
+    IsLevel, IsisCsnp, IsisHello, IsisLspEntry, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu,
+    IsisProto, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvIpv4IfAddr, IsisTlvIsNeighbor,
+    IsisTlvLspEntries, IsisTlvProtoSupported, IsisType,
 };
 
 use crate::isis::link::DisStatus;
@@ -20,6 +21,7 @@ pub enum IfsmEvent {
     InterfaceUp,
     InterfaceDown,
     HelloTimerExpire,
+    CsnpTimerExpire,
     HelloOriginate,
     DisSelection,
 }
@@ -103,6 +105,39 @@ pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
+    };
+    let ifindex = ltop.state.ifindex;
+    ltop.ptx
+        .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
+    Ok(())
+}
+
+pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
+    println!("XXX CSNP Send");
+
+    let mut lsp_entries = IsisTlvLspEntries::default();
+    for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
+        let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+        let entry = IsisLspEntry {
+            hold_time,
+            lsp_id: lsp_id.clone(),
+            seq_number: lsa.lsp.seq_number,
+            checksum: lsa.lsp.checksum,
+        };
+        lsp_entries.entries.push(entry);
+    }
+    let mut csnp = IsisCsnp {
+        pdu_len: 0,
+        source_id: ltop.up_config.net.sys_id().clone(),
+        source_id_circuit: 0,
+        start: IsisLspId::start(),
+        end: IsisLspId::end(),
+        tlvs: vec![],
+    };
+    csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
+    let packet = match level {
+        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(csnp.clone())),
+        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(csnp.clone())),
     };
     let ifindex = ltop.state.ifindex;
     ltop.ptx
@@ -202,6 +237,19 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     }
 }
 
+fn csnp_timer(ltop: &LinkTop, level: Level) -> Timer {
+    let tx = ltop.tx.clone();
+    let ifindex = ltop.state.ifindex;
+    Timer::repeat(ltop.config.csnp_interval(), move || {
+        let tx = tx.clone();
+        async move {
+            use IfsmEvent::*;
+            let msg = Message::Ifsm(CsnpTimerExpire, ifindex, Some(level));
+            tx.send(msg);
+        }
+    })
+}
+
 pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Generate DIS pseudo node id.
     let pseudo_id: u8 = ltop.state.ifindex as u8;
@@ -225,4 +273,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     ltop.tx
         .send(Message::DisOriginate(level, ltop.state.ifindex))
         .unwrap();
+
+    // Schedule CSNP.
+    *ltop.timer.csnp.get_mut(&level) = Some(csnp_timer(ltop, level));
 }
