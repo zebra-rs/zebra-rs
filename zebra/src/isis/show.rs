@@ -39,51 +39,38 @@ fn show_isis_summary(_isis: &Isis, _args: Args, _json: bool) -> String {
 fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (prefix, route) in isis.rib.get(&Level::L1).iter() {
-        let mut shown = false;
-        for (addr, nhop) in route.nhops.iter() {
-            if !shown {
-                writeln!(
-                    buf,
-                    "{:<20} [{}] via {} ifindex {}",
-                    prefix.to_string(),
-                    route.metric,
-                    addr,
-                    nhop.ifindex
-                );
-                shown = true;
-            } else {
-                writeln!(
-                    buf,
-                    "                     [{}] via {} ifindex {}",
-                    route.metric, addr, nhop.ifindex
-                );
+    // Helper closure to format and write out routes for a given level
+    let mut write_routes = |level: &Level| {
+        for (prefix, route) in isis.rib.get(level).iter() {
+            let mut shown = false;
+            for (addr, nhop) in route.nhops.iter() {
+                if !shown {
+                    writeln!(
+                        buf,
+                        "{:<20} [{}] via {}, {}",
+                        prefix.to_string(),
+                        route.metric,
+                        addr,
+                        isis.ifname(nhop.ifindex)
+                    )
+                    .unwrap();
+                    shown = true;
+                } else {
+                    writeln!(
+                        buf,
+                        "                     [{}] via {}, {}",
+                        route.metric,
+                        addr,
+                        isis.ifname(nhop.ifindex)
+                    )
+                    .unwrap();
+                }
             }
         }
-    }
+    };
 
-    for (prefix, route) in isis.rib.get(&Level::L2).iter() {
-        let mut shown = false;
-        for (addr, nhop) in route.nhops.iter() {
-            if !shown {
-                writeln!(
-                    buf,
-                    "{:<20} [{}] via {} ifindex {}",
-                    prefix.to_string(),
-                    route.metric,
-                    addr,
-                    nhop.ifindex
-                );
-                shown = true;
-            } else {
-                writeln!(
-                    buf,
-                    "                     [{}] via {} ifindex {}",
-                    route.metric, addr, nhop.ifindex
-                );
-            }
-        }
-    }
+    write_routes(&Level::L1);
+    write_routes(&Level::L2);
 
     buf
 }
