@@ -886,76 +886,51 @@ fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> 
     }
 }
 
+fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
+    let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+    rib.distance = 115;
+    rib.metric = route.metric;
+
+    rib.nexthop = if route.nhops.len() == 1 {
+        if let Some((key, value)) = route.nhops.iter().next() {
+            rib::Nexthop::Uni(nhop_to_nexthop_uni(key, route, value))
+        } else {
+            rib::Nexthop::default()
+        }
+    } else {
+        let mut multi = rib::NexthopMulti::default();
+        multi.metric = route.metric;
+        for (key, value) in route.nhops.iter() {
+            multi.nexthops.push(nhop_to_nexthop_uni(key, route, value));
+        }
+        rib::Nexthop::Multi(multi)
+    };
+
+    rib
+}
+
 pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     // Delete.
     for (&prefix, route) in diff.only_curr.iter() {
-        let mut rib = rib::entry::RibEntry::new(RibType::Isis);
-        rib.distance = 115;
-        rib.metric = route.metric;
-        if route.nhops.len() == 1 {
-            if let Some((key, value)) = route.nhops.iter().next() {
-                let uni = nhop_to_nexthop_uni(&key, &route, &value);
-                rib.nexthop = rib::Nexthop::Uni(uni);
-            }
-        } else {
-            let mut multi = rib::NexthopMulti::default();
-            multi.metric = route.metric;
-            for (key, value) in route.nhops.iter() {
-                let uni = nhop_to_nexthop_uni(&key, &route, &value);
-                multi.nexthops.push(uni);
-            }
-            rib.nexthop = rib::Nexthop::Multi(multi);
-        }
+        let rib = make_rib_entry(route);
         let msg = rib::Message::Ipv4Del {
             prefix: prefix.clone(),
             rib,
         };
         rib_tx.send(msg).unwrap();
     }
-    // Add.
+    // Add (changed).
     for (&prefix, _, route) in diff.different.iter() {
-        let mut rib = rib::entry::RibEntry::new(RibType::Isis);
-        rib.distance = 115;
-        rib.metric = route.metric;
-        if route.nhops.len() == 1 {
-            if let Some((key, value)) = route.nhops.iter().next() {
-                let uni = nhop_to_nexthop_uni(&key, &route, &value);
-                rib.nexthop = rib::Nexthop::Uni(uni);
-            }
-        } else {
-            let mut multi = rib::NexthopMulti::default();
-            multi.metric = route.metric;
-            for (key, value) in route.nhops.iter() {
-                let uni = nhop_to_nexthop_uni(&key, &route, &value);
-                multi.nexthops.push(uni);
-            }
-            rib.nexthop = rib::Nexthop::Multi(multi);
-        }
+        let rib = make_rib_entry(route);
         let msg = rib::Message::Ipv4Add {
             prefix: prefix.clone(),
             rib,
         };
         rib_tx.send(msg).unwrap();
     }
-    // Add.
+    // Add (new).
     for (&prefix, route) in diff.only_next.iter() {
-        let mut rib = rib::entry::RibEntry::new(RibType::Isis);
-        rib.distance = 115;
-        rib.metric = route.metric;
-        if route.nhops.len() == 1 {
-            if let Some((key, value)) = route.nhops.iter().next() {
-                let uni = nhop_to_nexthop_uni(&key, &route, &value);
-                rib.nexthop = rib::Nexthop::Uni(uni);
-            }
-        } else {
-            let mut multi = rib::NexthopMulti::default();
-            multi.metric = route.metric;
-            for (key, value) in route.nhops.iter() {
-                let uni = nhop_to_nexthop_uni(&key, &route, &value);
-                multi.nexthops.push(uni);
-            }
-            rib.nexthop = rib::Nexthop::Multi(multi);
-        }
+        let rib = make_rib_entry(route);
         let msg = rib::Message::Ipv4Add {
             prefix: prefix.clone(),
             rib,
