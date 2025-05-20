@@ -39,8 +39,7 @@ pub fn isis_socket() -> Result<Socket, std::io::Error> {
 
     socket.set_nonblocking(true);
 
-    let ifindex: u32 = 3;
-    let sockaddr = link_addr(libc::ETH_P_ALL as u16, ifindex, None);
+    let sockaddr = link_addr(libc::ETH_P_ALL as u16, 0, None);
 
     socket::bind(socket.as_raw_fd(), &sockaddr)?;
 

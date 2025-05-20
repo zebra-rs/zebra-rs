@@ -137,7 +137,13 @@ impl FibHandle {
         msg.header.destination_prefix_length = prefix.prefix_len();
 
         msg.header.table = RouteHeader::RT_TABLE_MAIN;
-        msg.header.protocol = RouteProtocol::Static;
+        msg.header.protocol = match entry.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
 

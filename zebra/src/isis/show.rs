@@ -16,6 +16,7 @@ impl Isis {
     pub fn show_build(&mut self) {
         self.show_add("/show/isis", show_isis);
         self.show_add("/show/isis/summary", show_isis_summary);
+        self.show_add("/show/isis/route", show_isis_route);
         self.show_add("/show/isis/interface", link::show);
         self.show_add("/show/isis/interface/detail", link::show_detail);
         self.show_add("/show/isis/neighbor", neigh::show);
@@ -33,6 +34,20 @@ fn show_isis(_isis: &Isis, _args: Args, _json: bool) -> String {
 
 fn show_isis_summary(_isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis summary")
+}
+
+fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
+    let mut buf = String::new();
+
+    for (prefix, rib) in isis.rib.get(&Level::L1).iter() {
+        writeln!(buf, "{}", prefix);
+    }
+
+    for (prefix, rib) in isis.rib.get(&Level::L2).iter() {
+        writeln!(buf, "{}", prefix);
+    }
+
+    buf
 }
 
 fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
