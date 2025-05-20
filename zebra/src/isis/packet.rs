@@ -1,6 +1,7 @@
 use anyhow::{Context, Error};
 use isis_packet::{
-    IsisLsp, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv, IsisTlvLspEntries, IsisType,
+    IsLevel, IsisLsp, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv, IsisTlvLspEntries,
+    IsisType,
 };
 
 use crate::isis::neigh::Neighbor;
@@ -13,15 +14,17 @@ use super::lsdb;
 use super::nfsm::{isis_nfsm, NfsmEvent};
 use super::Level;
 
+fn link_level_capable(is_level: &IsLevel, level: &Level) -> bool {
+    match level {
+        Level::L1 => *is_level == IsLevel::L1 || *is_level == IsLevel::L1L2,
+        Level::L2 => *is_level == IsLevel::L2 || *is_level == IsLevel::L1L2,
+    }
+}
+
 pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
     };
-
-    // Check link capability for the PDU type.
-    if !link.state.level().capable(&packet.pdu_type) {
-        return;
-    }
 
     // Extract Hello PDU and level.
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
@@ -29,6 +32,11 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => (pdu, Level::L2),
         _ => return,
     };
+
+    // Check link capability for the PDU type.
+    if !link_level_capable(&link.state.level(), &level) {
+        return;
+    }
 
     let nbr = link
         .state
@@ -87,6 +95,11 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
         (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => (pdu, Level::L2),
         _ => return,
     };
+
+    // Check link capability for the PDU type.
+    if !link_level_capable(&link.state.level(), &level) {
+        return;
+    }
 
     // if let Some(nbr) = link.state.nbrs.get(&level).get(&lsp.lsp_id.sys_id()) {
     //     if nbr.pdu.lan_id.is_empty() {
@@ -154,10 +167,16 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
 
     println!("CSNP recv");
 
-    let pdu = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => pdu,
+    let (pdu, level) = match (packet.pdu_type, packet.pdu) {
+        (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => (pdu, Level::L1),
+        (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => (pdu, Level::L2),
         _ => return,
     };
+
+    // Check link capability for the PDU type.
+    if !link_level_capable(&link.state.level(), &level) {
+        return;
+    }
 
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
@@ -175,11 +194,45 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
             for lsp in &lsps.entries {
-                if !top.lsdb.l2.contains_key(&lsp.lsp_id) {
-                    println!("LSP REQ: {}", lsp.lsp_id);
-                    let mut psnp = lsp.clone();
-                    psnp.seq_number = 0;
-                    req.entries.push(psnp);
+                // If LSP_ID is my own.
+                if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
+                    if lsp.lsp_id.is_pseudo() {
+                        println!("LSP myown DIS hold_time {}", lsp.hold_time);
+                    } else {
+                        println!("LSP myown hold_time {}", lsp.hold_time);
+                    }
+                    continue;
+                }
+
+                // Need to check sequence number.
+                match top.lsdb.get(&level).get(&lsp.lsp_id) {
+                    None => {
+                        // set_ssn();
+                        if lsp.hold_time != 0 {
+                            println!("LSP REQ New: {}", lsp.lsp_id);
+                            let mut psnp = lsp.clone();
+                            psnp.seq_number = 0;
+                            req.entries.push(psnp);
+                        } else {
+                            println!("LSP REQ New(Purged): {}", lsp.lsp_id);
+                        }
+                    }
+                    Some(local) if local.lsp.seq_number < lsp.seq_number => {
+                        // set_ssn();
+                        println!("LSP REQ Update: {}", lsp.lsp_id);
+                        let mut psnp = lsp.clone();
+                        psnp.seq_number = 0;
+                        req.entries.push(psnp);
+                    }
+                    Some(local) if local.lsp.seq_number > lsp.seq_number => {
+                        // set_srm();
+                    }
+                    Some(local) if local.lsp.hold_time != 0 && lsp.hold_time == 0 => {
+                        // purge_local() set srm();
+                    }
+                    _ => {
+                        // Identical, nothing to do.
+                    }
                 }
             }
         }
@@ -194,19 +247,28 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         };
         psnp.tlvs.push(req.into());
         println!("Going to send PSNP");
-
-        //
         isis_psnp_send(top, ifindex, psnp);
     }
 }
 
 pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
-    let Some(_link) = top.links.get_mut(&ifindex) else {
+    let Some(link) = top.links.get_mut(&ifindex) else {
         println!("Link not found {}", ifindex);
         return;
     };
 
     println!("PSNP recv");
+
+    let (pdu, level) = match (packet.pdu_type, packet.pdu) {
+        (IsisType::L1Psnp, IsisPdu::L1Psnp(pdu)) => (pdu, Level::L1),
+        (IsisType::L2Psnp, IsisPdu::L2Psnp(pdu)) => (pdu, Level::L2),
+        _ => return,
+    };
+
+    // Check link capability for the PDU type.
+    if !link_level_capable(&link.state.level(), &level) {
+        return;
+    }
 }
 
 pub fn unknown_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
