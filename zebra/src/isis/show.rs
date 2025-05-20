@@ -39,12 +39,50 @@ fn show_isis_summary(_isis: &Isis, _args: Args, _json: bool) -> String {
 fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
-    for (prefix, rib) in isis.rib.get(&Level::L1).iter() {
-        writeln!(buf, "{}", prefix);
+    for (prefix, route) in isis.rib.get(&Level::L1).iter() {
+        let mut shown = false;
+        for (addr, nhop) in route.nhops.iter() {
+            if !shown {
+                writeln!(
+                    buf,
+                    "{:<20} [{}] via {} ifindex {}",
+                    prefix.to_string(),
+                    route.metric,
+                    addr,
+                    nhop.ifindex
+                );
+                shown = true;
+            } else {
+                writeln!(
+                    buf,
+                    "                     [{}] via {} ifindex {}",
+                    route.metric, addr, nhop.ifindex
+                );
+            }
+        }
     }
 
-    for (prefix, rib) in isis.rib.get(&Level::L2).iter() {
-        writeln!(buf, "{}", prefix);
+    for (prefix, route) in isis.rib.get(&Level::L2).iter() {
+        let mut shown = false;
+        for (addr, nhop) in route.nhops.iter() {
+            if !shown {
+                writeln!(
+                    buf,
+                    "{:<20} [{}] via {} ifindex {}",
+                    prefix.to_string(),
+                    route.metric,
+                    addr,
+                    nhop.ifindex
+                );
+                shown = true;
+            } else {
+                writeln!(
+                    buf,
+                    "                     [{}] via {} ifindex {}",
+                    route.metric, addr, nhop.ifindex
+                );
+            }
+        }
     }
 
     buf
