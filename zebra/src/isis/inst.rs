@@ -287,9 +287,15 @@ impl Isis {
                             ifsm::hello_originate(&mut top, Level::L2);
                         }
                     },
-                    IfsmEvent::DisSelection => {
-                        ifsm::dis_selection(&mut top, level.unwrap());
-                    }
+                    IfsmEvent::DisSelection => match level {
+                        Some(level) => {
+                            ifsm::dis_selection(&mut top, level);
+                        }
+                        None => {
+                            ifsm::dis_selection(&mut top, Level::L1);
+                            ifsm::dis_selection(&mut top, Level::L2);
+                        }
+                    },
                 }
             }
             Message::Nfsm(ev, ifindex, sysid, level) => {

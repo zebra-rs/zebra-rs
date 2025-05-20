@@ -382,6 +382,9 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.priority = Some(priority);
 
+    let msg = Message::Ifsm(IfsmEvent::DisSelection, link.state.ifindex, None);
+    isis.tx.send(msg);
+
     Some(())
 }
 
