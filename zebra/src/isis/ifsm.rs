@@ -277,3 +277,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Schedule CSNP.
     *ltop.timer.csnp.get_mut(&level) = Some(csnp_timer(ltop, level));
 }
+
+pub fn drop_dis(ltop: &mut LinkTop, level: Level) {
+    //
+}
