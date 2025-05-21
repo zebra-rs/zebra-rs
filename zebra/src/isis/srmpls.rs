@@ -30,6 +30,10 @@ pub struct LabelMap {
 }
 
 impl LabelMap {
+    pub fn get(&self, key: &IsisSysId) -> Option<&LabelConfig> {
+        self.map.get(key)
+    }
+
     pub fn insert(&mut self, key: IsisSysId, value: LabelConfig) -> Option<LabelConfig> {
         self.map.insert(key, value)
     }

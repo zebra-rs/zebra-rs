@@ -217,9 +217,26 @@ impl Isis {
                                 top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id)
                             {
                                 for entry in entries.iter() {
+                                    let sid = if let Some(prefix_sid) = entry.prefix_sid() {
+                                        match prefix_sid.sid {
+                                            SidLabelValue::Index(index) => {
+                                                if let Some(block) =
+                                                    top.label_map.get(&level).get(&sys_id)
+                                                {
+                                                    Some(block.global.start + (index as usize))
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                            SidLabelValue::Label(label) => Some(label as usize),
+                                        }
+                                    } else {
+                                        None
+                                    };
                                     let route = SpfRoute {
                                         metric: nhops.cost,
                                         nhops: spf_nhops.clone(),
+                                        sid,
                                     };
                                     if let Some(curr) = rib.get(&entry.prefix) {
                                         if curr.metric >= route.metric {
@@ -800,6 +817,7 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
 pub struct SpfRoute {
     pub metric: u32,
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
+    pub sid: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
