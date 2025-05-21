@@ -178,6 +178,11 @@ pub fn lsp_cap_view<'a>(tlv: &'a IsisTlvRouterCap) -> LspCapView<'a> {
     view
 }
 
+enum MplsLabel {
+    ImplicitNull(u32),
+    Label(u32),
+}
+
 #[derive(Default)]
 pub struct LspCapView<'a> {
     pub cap: Option<&'a IsisSubSegmentRoutingCap>,

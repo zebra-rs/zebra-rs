@@ -110,7 +110,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
 
     // DIS
     if lsp.lsp_id.is_pseudo() {
-        println!("DIS recv {}", lsp.lsp_id.sys_id());
+        // println!("DIS recv {}", lsp.lsp_id.sys_id());
 
         if let Some(dis) = &link.state.dis.get(&level) {
             if link.state.adj.get(&level).is_none() {
@@ -128,7 +128,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
             println!("DIS sysid is not set");
         }
     }
-    println!("LSP recv {}", lsp.lsp_id.sys_id());
+    // println!("LSP recv {}", lsp.lsp_id.sys_id());
 
     // Self originated LSP came from DIS.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
@@ -166,7 +166,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
-    println!("CSNP recv");
+    // println!("CSNP recv");
 
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => (pdu, Level::L1),
@@ -198,14 +198,14 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 // If LSP_ID is my own.
                 if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
                     if lsp.lsp_id.is_pseudo() {
-                        println!("LSP myown DIS hold_time {}", lsp.hold_time);
+                        // println!("LSP myown DIS hold_time {}", lsp.hold_time);
                     } else {
-                        println!(
-                            "LSP own seq num {:x} hold_time {}",
-                            lsp.seq_number, lsp.hold_time
-                        );
+                        // println!(
+                        //     "LSP own seq num {:x} hold_time {}",
+                        //     lsp.seq_number, lsp.hold_time
+                        // );
                         if let Some(local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
-                            println!("LSP prev seq num {:x}", local.lsp.seq_number);
+                            // println!("LSP prev seq num {:x}", local.lsp.seq_number);
                         }
                     }
                     continue;
@@ -216,17 +216,17 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                     None => {
                         // set_ssn();
                         if lsp.hold_time != 0 {
-                            println!("LSP REQ New: {}", lsp.lsp_id);
+                            // println!("LSP REQ New: {}", lsp.lsp_id);
                             let mut psnp = lsp.clone();
                             psnp.seq_number = 0;
                             req.entries.push(psnp);
                         } else {
-                            println!("LSP REQ New(Purged): {}", lsp.lsp_id);
+                            // println!("LSP REQ New(Purged): {}", lsp.lsp_id);
                         }
                     }
                     Some(local) if local.lsp.seq_number < lsp.seq_number => {
                         // set_ssn();
-                        println!("LSP REQ Update: {}", lsp.lsp_id);
+                        // println!("LSP REQ Update: {}", lsp.lsp_id);
                         let mut psnp = lsp.clone();
                         psnp.seq_number = 0;
                         req.entries.push(psnp);
@@ -268,7 +268,7 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
-    println!("PSNP recv");
+    // println!("PSNP recv");
 
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Psnp, IsisPdu::L1Psnp(pdu)) => (pdu, Level::L1),
