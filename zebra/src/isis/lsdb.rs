@@ -214,13 +214,12 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
             if let SidLabelTlv::Label(start) = cap.sid_label {
                 println!("Global block start: {}, end: {}", start, start + cap.range);
                 let mut label_config = LabelConfig {
-                    global: LabelBlock::new(start as usize, cap.range as usize),
+                    global: LabelBlock::new(start, cap.range),
                     local: None,
                 };
                 if let Some(lb) = cap_view.lb {
                     if let SidLabelTlv::Label(start) = lb.sid_label {
-                        label_config.local =
-                            Some(LabelBlock::new(start as usize, lb.range as usize));
+                        label_config.local = Some(LabelBlock::new(start, lb.range));
                     }
                 }
                 top.label_map

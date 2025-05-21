@@ -223,12 +223,12 @@ impl Isis {
                                                 if let Some(block) =
                                                     top.label_map.get(&level).get(&sys_id)
                                                 {
-                                                    Some(block.global.start + (index as usize))
+                                                    Some(block.global.start + index)
                                                 } else {
                                                     None
                                                 }
                                             }
-                                            SidLabelValue::Label(label) => Some(label as usize),
+                                            SidLabelValue::Label(label) => Some(label),
                                         }
                                     } else {
                                         None
@@ -817,7 +817,7 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
 pub struct SpfRoute {
     pub metric: u32,
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
-    pub sid: Option<usize>,
+    pub sid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

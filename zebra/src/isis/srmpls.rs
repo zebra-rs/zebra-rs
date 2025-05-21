@@ -5,12 +5,12 @@ use isis_packet::IsisSysId;
 
 #[derive(Debug, Default)]
 pub struct LabelBlock {
-    pub start: usize,
-    pub end: usize,
+    pub start: u32,
+    pub end: u32,
 }
 
 impl LabelBlock {
-    pub fn new(start: usize, range: usize) -> Self {
+    pub fn new(start: u32, range: u32) -> Self {
         Self {
             start,
             end: start + range,
