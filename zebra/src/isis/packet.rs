@@ -200,7 +200,13 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                     if lsp.lsp_id.is_pseudo() {
                         println!("LSP myown DIS hold_time {}", lsp.hold_time);
                     } else {
-                        println!("LSP myown hold_time {}", lsp.hold_time);
+                        println!(
+                            "LSP own seq num {:x} hold_time {}",
+                            lsp.seq_number, lsp.hold_time
+                        );
+                        if let Some(local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
+                            println!("LSP prev seq num {:x}", local.lsp.seq_number);
+                        }
                     }
                     continue;
                 }
