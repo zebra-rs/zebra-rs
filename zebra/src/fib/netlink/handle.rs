@@ -179,21 +179,17 @@ impl FibHandle {
         if !entry.is_protocol() {
             return;
         }
+
         match &entry.nexthop {
-            Nexthop::Uni(_) => {
+            Nexthop::Link(_) => {}
+            Nexthop::Uni(_) | Nexthop::Multi(_) => {
                 self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
             }
-            Nexthop::Multi(_) => {
-                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
-            }
-            Nexthop::List(pro) => {
-                for uni in pro.nexthops.iter() {
+            Nexthop::List(list) => {
+                for uni in &list.nexthops {
                     self.route_ipv4_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
                         .await;
                 }
-            }
-            _ => {
-                //
             }
         }
     }

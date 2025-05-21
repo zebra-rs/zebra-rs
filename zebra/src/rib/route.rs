@@ -82,6 +82,12 @@ impl Rib {
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
+            if !replace.is_empty() {
+                println!("have replace");
+                if let Some(tmp) = replace.get(0) {
+                    println!("tmp")
+                }
+            }
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap);
             rib_add(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
@@ -135,8 +141,10 @@ async fn ipv4_entry_selection(
     fib: &FibHandle,
 ) {
     if let Some(mut replace) = replace {
-        if replace.is_protocol() && replace.is_fib() {
-            fib.route_ipv4_del(prefix, &replace).await;
+        if replace.is_protocol() {
+            if replace.is_fib() {
+                fib.route_ipv4_del(prefix, &replace).await;
+            }
             replace.nexthop_unsync(nmap, fib).await;
         }
     }
@@ -251,6 +259,7 @@ fn resolve_nexthop_uni(
 ) -> bool {
     // Only GroupUni is handled.
     let Some(Group::Uni(group)) = nmap.fetch_uni(&uni.addr) else {
+        println!(" XXX fetch failed");
         return false;
     };
     // When this is first time allocation, resolve the nexthop group.
@@ -258,6 +267,12 @@ fn resolve_nexthop_uni(
         group.resolve(table);
     }
     // Reference counter increment.
+    println!(
+        " uni {} refcnt {} -> {}",
+        uni.addr,
+        group.refcnt(),
+        group.refcnt() + 1
+    );
     group.refcnt_inc();
 
     // Set the nexthop group id to the nexthop.
@@ -282,6 +297,7 @@ fn resolve_nexthop_multi(multi: &mut NexthopMulti, nmap: &mut NexthopMap, multi_
     group.set_valid(multi_valid);
 
     // Reference counter increment.
+    println!(" multi refcnt {} -> {}", group.refcnt(), group.refcnt() + 1);
     group.refcnt_inc();
 
     // Set the nexthop group id to the nexthop.
@@ -298,6 +314,7 @@ fn rib_resolve_nexthop(
     if !entry.is_protocol() {
         return;
     }
+    println!("rib_resolve_nexthop");
     if let Nexthop::Uni(uni) = &mut entry.nexthop {
         let _ = resolve_nexthop_uni(uni, nmap, table);
     }
