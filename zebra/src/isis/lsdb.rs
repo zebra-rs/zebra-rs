@@ -188,6 +188,13 @@ pub struct LspCapView<'a> {
 }
 
 fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
+    if let Some(prev) = top.lsdb.get(&level).get(&key) {
+        if prev.lsp.tlvs == lsp.tlvs {
+            println!("LSP is same as prev one");
+            return;
+        }
+    }
+
     let lsp = lsp_view(lsp);
 
     // Update hostname.
@@ -197,13 +204,6 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
             .insert(key.sys_id(), tlv.hostname.clone());
     } else {
         top.hostname.get_mut(&level).remove(&key.sys_id());
-    }
-
-    if let Some(tlv) = lsp.ip_reach {
-        top.reach_map
-            .get_mut(&level)
-            .get_mut(&Afi::Ip)
-            .insert(key.sys_id(), tlv.entries.clone());
     }
 
     if let Some(tlv) = lsp.cap {
@@ -230,6 +230,13 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
         }
     } else {
         // No cap.
+    }
+
+    if let Some(tlv) = lsp.ip_reach {
+        top.reach_map
+            .get_mut(&level)
+            .get_mut(&Afi::Ip)
+            .insert(key.sys_id(), tlv.entries.clone());
     }
 }
 
