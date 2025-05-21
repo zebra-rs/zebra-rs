@@ -5,15 +5,15 @@ use isis_packet::IsisSysId;
 
 #[derive(Debug, Default)]
 pub struct LabelBlock {
-    begin: usize,
-    end: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl LabelBlock {
-    pub fn new(begin: usize, range: usize) -> Self {
+    pub fn new(start: usize, range: usize) -> Self {
         Self {
-            begin,
-            end: begin + range,
+            start,
+            end: start + range,
         }
     }
 }
@@ -21,12 +21,18 @@ impl LabelBlock {
 #[derive(Debug, Default)]
 pub struct LabelConfig {
     pub global: LabelBlock,
-    pub local: LabelBlock,
+    pub local: Option<LabelBlock>,
 }
 
 #[derive(Debug, Default)]
 pub struct LabelMap {
     map: BTreeMap<IsisSysId, LabelConfig>,
+}
+
+impl LabelMap {
+    pub fn insert(&mut self, key: IsisSysId, value: LabelConfig) -> Option<LabelConfig> {
+        self.map.insert(key, value)
+    }
 }
 
 #[derive(Debug, Default)]
