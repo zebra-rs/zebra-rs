@@ -1,5 +1,35 @@
-use bit_vec::BitVec;
+use std::collections::BTreeMap;
 
+use bit_vec::BitVec;
+use isis_packet::IsisSysId;
+
+#[derive(Debug, Default)]
+pub struct LabelBlock {
+    begin: usize,
+    end: usize,
+}
+
+impl LabelBlock {
+    pub fn new(begin: usize, range: usize) -> Self {
+        Self {
+            begin,
+            end: begin + range,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LabelConfig {
+    pub global: LabelBlock,
+    pub local: LabelBlock,
+}
+
+#[derive(Debug, Default)]
+pub struct LabelMap {
+    map: BTreeMap<IsisSysId, LabelConfig>,
+}
+
+#[derive(Debug, Default)]
 pub struct LabelPool {
     begin: usize,
     end: Option<usize>,

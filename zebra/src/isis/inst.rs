@@ -32,6 +32,7 @@ use super::link::{Afis, IsisLink, IsisLinks, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
+use super::srmpls::LabelMap;
 use super::task::{Timer, TimerType};
 use super::{process_packet, Level, Levels, NfsmState};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
@@ -56,6 +57,7 @@ pub struct Isis {
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
     pub reach_map: Levels<Afis<ReachMap>>,
+    pub label_map: Levels<LabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub hostname: Levels<Hostname>,
     pub spf: Levels<Option<Timer>>,
@@ -68,6 +70,7 @@ pub struct IsisTop<'a> {
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub label_map: &'a mut Levels<LabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
@@ -107,6 +110,7 @@ impl Isis {
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
             reach_map: Levels::<Afis<ReachMap>>::default(),
+            label_map: Levels::<LabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf: Levels::<Option<Timer>>::default(),
@@ -363,6 +367,7 @@ impl Isis {
             lsdb: &mut self.lsdb,
             lsp_map: &mut self.lsp_map,
             reach_map: &mut self.reach_map,
+            label_map: &mut self.label_map,
             rib: &mut self.rib,
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
