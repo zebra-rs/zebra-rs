@@ -804,12 +804,6 @@ pub struct SpfNexthop {
     pub ifindex: u32,
 }
 
-/// The result of the diff.
-///
-/// ─ `only_curr`  : prefix appears only in *curr*
-/// ─ `only_next`  : prefix appears only in *next*
-/// ─ `different`  : same prefix in both, but the SpfRoute differs
-/// ─ `identical`  : same prefix in both, and the SpfRoute is byte-for-byte equal
 #[derive(Debug)]
 pub struct DiffResult<'a> {
     pub only_curr: Vec<(&'a Ipv4Net, &'a SpfRoute)>,

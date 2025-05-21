@@ -6,9 +6,12 @@ use std::{
     default,
 };
 
-use isis_packet::{IsisLsp, IsisLspId, IsisTlv};
+use isis_packet::*;
 
-use crate::isis::Message;
+use crate::isis::{
+    srmpls::{LabelBlock, LabelConfig},
+    Message,
+};
 
 use super::{
     inst::{lsp_emit, lsp_flood, spf_schedule, IsisTop},
@@ -120,9 +123,75 @@ fn update_pseudo() {
     // TODO.
 }
 
+#[derive(Default)]
+pub struct LspView<'a> {
+    pub cap: Option<&'a IsisTlvRouterCap>,
+    pub hostname: Option<&'a IsisTlvHostname>,
+    pub ip_reach: Option<&'a IsisTlvExtIpReach>,
+}
+
+pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
+    let mut view = LspView::default();
+    for tlv in &lsp.tlvs {
+        match &tlv {
+            IsisTlv::RouterCap(cap) => {
+                view.cap = Some(cap);
+            }
+            IsisTlv::Hostname(hostname) => {
+                view.hostname = Some(hostname);
+            }
+            IsisTlv::ExtIpReach(ip_reach) => {
+                view.ip_reach = Some(ip_reach);
+            }
+            _ => {
+                //
+            }
+        }
+    }
+    view
+}
+
+pub fn lsp_cap_view<'a>(tlv: &'a IsisTlvRouterCap) -> LspCapView<'a> {
+    let mut view = LspCapView::default();
+    for sub in &tlv.subs {
+        match &sub {
+            cap::IsisSubTlv::SegmentRoutingCap(cap) => {
+                view.cap = Some(cap);
+            }
+            cap::IsisSubTlv::SegmentRoutingAlgo(algo) => {
+                view.algo = Some(algo);
+            }
+            cap::IsisSubTlv::SegmentRoutingLB(lb) => {
+                view.lb = Some(lb);
+            }
+            cap::IsisSubTlv::NodeMaxSidDepth(sid_depth) => {
+                view.sid_depth = Some(sid_depth);
+            }
+            cap::IsisSubTlv::Srv6(srv6) => {
+                view.srv6 = Some(srv6);
+            }
+            cap::IsisSubTlv::Unknown(_) => {
+                // Simpply ignore unknown sub tlv.
+            }
+        }
+    }
+    view
+}
+
+#[derive(Default)]
+pub struct LspCapView<'a> {
+    pub cap: Option<&'a IsisSubSegmentRoutingCap>,
+    pub algo: Option<&'a IsisSubSegmentRoutingAlgo>,
+    pub lb: Option<&'a IsisSubSegmentRoutingLB>,
+    pub sid_depth: Option<&'a IsisSubNodeMaxSidDepth>,
+    pub srv6: Option<&'a IsisSubSrv6>,
+}
+
 fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
+    let lsp = lsp_view(lsp);
+
     // Update hostname.
-    if let Some(tlv) = lsp.hostname_tlv() {
+    if let Some(tlv) = lsp.hostname {
         top.hostname
             .get_mut(&level)
             .insert(key.sys_id(), tlv.hostname.clone());
@@ -130,14 +199,37 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
         top.hostname.get_mut(&level).remove(&key.sys_id());
     }
 
-    // Update IP reachability.
-    for tlv in lsp.tlvs.iter() {
-        if let IsisTlv::ExtIpReach(tlv) = tlv {
-            top.reach_map
-                .get_mut(&level)
-                .get_mut(&Afi::Ip)
-                .insert(key.sys_id(), tlv.entries.clone());
+    if let Some(tlv) = lsp.ip_reach {
+        top.reach_map
+            .get_mut(&level)
+            .get_mut(&Afi::Ip)
+            .insert(key.sys_id(), tlv.entries.clone());
+    }
+
+    if let Some(tlv) = lsp.cap {
+        let cap_view = lsp_cap_view(tlv);
+
+        if let Some(cap) = cap_view.cap {
+            // Register global block.
+            if let SidLabelTlv::Label(start) = cap.sid_label {
+                println!("Global block start: {}, end: {}", start, start + cap.range);
+                let mut label_config = LabelConfig {
+                    global: LabelBlock::new(start as usize, cap.range as usize),
+                    local: None,
+                };
+                if let Some(lb) = cap_view.lb {
+                    if let SidLabelTlv::Label(start) = lb.sid_label {
+                        label_config.local =
+                            Some(LabelBlock::new(start as usize, lb.range as usize));
+                    }
+                }
+                top.label_map
+                    .get_mut(&level)
+                    .insert(key.sys_id(), label_config);
+            }
         }
+    } else {
+        // No cap.
     }
 }
 
