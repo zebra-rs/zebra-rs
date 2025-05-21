@@ -189,17 +189,20 @@ impl Isis {
                             // Fetch nexthop first.
                             let mut spf_nhops = BTreeMap::new();
                             for p in &nhops.nexthops {
+                                // p.len() == 1 means myself.
                                 if p.len() > 1 {
-                                    if let Some(nhop) = top.lsp_map.get(&level).resolve(p[1]) {
+                                    if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[1]) {
                                         // Fetch nexthop from the node.
                                         // Find nhop from links.
                                         for (ifindex, link) in top.links.iter() {
                                             for (_, nbr) in link.state.nbrs.get(&level).iter() {
-                                                if nbr.sys_id == *nhop {
+                                                if nbr.sys_id == *nhop_id {
                                                     for tlv in nbr.pdu.tlvs.iter() {
                                                         if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                                                            let nhop =
-                                                                SpfNexthop { ifindex: *ifindex };
+                                                            let nhop = SpfNexthop {
+                                                                ifindex: *ifindex,
+                                                                direct: p[1] == node,
+                                                            };
                                                             spf_nhops.insert(ifaddr.addr, nhop);
                                                         }
                                                     }
@@ -802,6 +805,7 @@ pub struct SpfRoute {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpfNexthop {
     pub ifindex: u32,
+    pub direct: bool,
 }
 
 #[derive(Debug)]

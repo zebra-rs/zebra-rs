@@ -44,24 +44,27 @@ fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
         for (prefix, route) in isis.rib.get(level).iter() {
             let mut shown = false;
             for (addr, nhop) in route.nhops.iter() {
+                let direct = if nhop.direct { ", direct" } else { "" };
                 if !shown {
                     writeln!(
                         buf,
-                        "{:<20} [{}] via {}, {}",
+                        "{:<20} [{}] via {}, {}{}",
                         prefix.to_string(),
                         route.metric,
                         addr,
-                        isis.ifname(nhop.ifindex)
+                        isis.ifname(nhop.ifindex),
+                        direct
                     )
                     .unwrap();
                     shown = true;
                 } else {
                     writeln!(
                         buf,
-                        "                     [{}] via {}, {}",
+                        "                     [{}] via {}, {}{}",
                         route.metric,
                         addr,
-                        isis.ifname(nhop.ifindex)
+                        isis.ifname(nhop.ifindex),
+                        direct
                     )
                     .unwrap();
                 }
