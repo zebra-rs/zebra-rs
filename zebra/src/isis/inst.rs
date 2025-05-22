@@ -28,7 +28,7 @@ use crate::{
 };
 
 use super::config::IsisConfig;
-use super::link::{Afis, IsisLink, IsisLinks, LinkTop};
+use super::link::{Afis, IsisLink, IsisLinks, LinkState, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
@@ -78,8 +78,10 @@ pub struct IsisTop<'a> {
 }
 
 pub struct NeighborTop<'a> {
+    pub tx: &'a UnboundedSender<Message>,
     pub dis: &'a mut Levels<Option<IsisSysId>>,
     pub lan_id: &'a mut Levels<Option<IsisNeighborId>>,
+    pub adj: &'a mut Levels<Option<IsisNeighborId>>,
 }
 
 impl Isis {
@@ -173,6 +175,9 @@ impl Isis {
 
                 if let Some(s) = s {
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
+                    // println!("----");
+                    // spf::disp(&spf, false);
+                    // println!("----");
 
                     let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
@@ -325,8 +330,10 @@ impl Isis {
                     return;
                 };
                 let mut ntop = NeighborTop {
+                    tx: &ltop.tx,
                     dis: &mut ltop.state.dis,
                     lan_id: &mut ltop.state.lan_id,
+                    adj: &mut ltop.state.adj,
                 };
                 let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
                     return;
@@ -336,7 +343,8 @@ impl Isis {
 
                 if nbr.state == NfsmState::Down {
                     ltop.state.nbrs.get_mut(&level).remove(&sysid);
-                    // TODO.  Schedule SPF calculation.
+                    let msg = Message::SpfCalc(level);
+                    ltop.tx.send(msg).unwrap();
                 }
             }
             Message::Lsdb(ev, level, key) => {
@@ -909,30 +917,36 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
 pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     // Delete.
     for (&prefix, route) in diff.only_curr.iter() {
-        let rib = make_rib_entry(route);
-        let msg = rib::Message::Ipv4Del {
-            prefix: prefix.clone(),
-            rib,
-        };
-        rib_tx.send(msg).unwrap();
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry(route);
+            let msg = rib::Message::Ipv4Del {
+                prefix: prefix.clone(),
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
     }
     // Add (changed).
     for (&prefix, _, route) in diff.different.iter() {
-        let rib = make_rib_entry(route);
-        let msg = rib::Message::Ipv4Add {
-            prefix: prefix.clone(),
-            rib,
-        };
-        rib_tx.send(msg).unwrap();
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry(route);
+            let msg = rib::Message::Ipv4Add {
+                prefix: prefix.clone(),
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
     }
     // Add (new).
     for (&prefix, route) in diff.only_next.iter() {
-        let rib = make_rib_entry(route);
-        let msg = rib::Message::Ipv4Add {
-            prefix: prefix.clone(),
-            rib,
-        };
-        rib_tx.send(msg).unwrap();
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry(route);
+            let msg = rib::Message::Ipv4Add {
+                prefix: prefix.clone(),
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
     }
 }
 

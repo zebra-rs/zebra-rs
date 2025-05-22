@@ -231,10 +231,19 @@ pub fn isis_nfsm(
             nbr.state, new_state
         );
         if new_state != nbr.state {
+            nbr.prev = nbr.state;
             nbr.state = new_state;
+
+            // Up -> Down/Init
+            if nbr.prev == NfsmState::Up {
+                if let Some(adj) = ntop.adj.get(&level) {
+                    if adj.sys_id() == nbr.sys_id {
+                        *ntop.adj.get_mut(&level) = None;
+                        let msg = Message::LspOriginate(level);
+                        ntop.tx.send(msg).unwrap();
+                    }
+                }
+            }
         }
-    }
-    if nbr.state == NfsmState::Down {
-        //
     }
 }

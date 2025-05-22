@@ -74,20 +74,31 @@ impl Rib {
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
         // println!(
-        //     "IPv4 route add: {} {} metric {}",
+        //     "IPv4 route add: {} {} metric {} nexthop {:?}",
         //     entry.rtype.abbrev(),
         //     prefix,
-        //     entry.metric
+        //     entry.metric,
+        //     entry.nexthop
         // );
+
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
-            if !replace.is_empty() {
-                println!("have replace");
-                if let Some(tmp) = replace.get(0) {
-                    println!("tmp")
-                }
-            }
+            // if !replace.is_empty() {
+            //     if let Some(tmp) = replace.get(0) {
+            //         match &tmp.nexthop {
+            //             Nexthop::Uni(uni) => {
+            //                 println!(" uni {}", uni.addr);
+            //             }
+            //             Nexthop::Multi(multi) => {
+            //                 println!(" multi");
+            //             }
+            //             _ => {
+            //                 //
+            //             }
+            //         }
+            //     }
+            // }
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap);
             rib_add(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
@@ -267,12 +278,12 @@ fn resolve_nexthop_uni(
         group.resolve(table);
     }
     // Reference counter increment.
-    println!(
-        " uni {} refcnt {} -> {}",
-        uni.addr,
-        group.refcnt(),
-        group.refcnt() + 1
-    );
+    // println!(
+    //     " uni {} refcnt {} -> {}",
+    //     uni.addr,
+    //     group.refcnt(),
+    //     group.refcnt() + 1
+    // );
     group.refcnt_inc();
 
     // Set the nexthop group id to the nexthop.
@@ -297,7 +308,6 @@ fn resolve_nexthop_multi(multi: &mut NexthopMulti, nmap: &mut NexthopMap, multi_
     group.set_valid(multi_valid);
 
     // Reference counter increment.
-    println!(" multi refcnt {} -> {}", group.refcnt(), group.refcnt() + 1);
     group.refcnt_inc();
 
     // Set the nexthop group id to the nexthop.
@@ -314,7 +324,6 @@ fn rib_resolve_nexthop(
     if !entry.is_protocol() {
         return;
     }
-    println!("rib_resolve_nexthop");
     if let Nexthop::Uni(uni) = &mut entry.nexthop {
         let _ = resolve_nexthop_uni(uni, nmap, table);
     }
@@ -409,13 +418,13 @@ fn rib_replace_system(
     prefix: &Ipv4Net,
     entry: RibEntry,
 ) -> Vec<RibEntry> {
-    println!("rib_replace_system {}", prefix);
+    // println!("rib_replace_system {}", prefix);
     let entries = table.entry(*prefix).or_default();
     let index = rib_rtype(entries, entry.rtype);
     let Some(index) = index else {
         return vec![];
     };
-    println!("index {}", index);
+    // println!("index {}", index);
     let e = entries.get_mut(index).unwrap();
     let replace = match &mut e.nexthop {
         Nexthop::Uni(uni) => uni.metric == entry.metric,
@@ -431,7 +440,7 @@ fn rib_replace_system(
         }
         Nexthop::Link(_ifindex) => true,
     };
-    println!("replace {}", replace);
+    // println!("replace {}", replace);
     if replace {
         return rib_replace(table, prefix, entry.rtype);
     }
@@ -479,7 +488,7 @@ async fn ipv4_nexthop_sync(
 ) {
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            println!("before: {:?}", uni);
+            // println!("before: {:?}", uni);
             // Resolve the next hop
             let resolve = rib_resolve(table, uni.addr, &ResolveOpt::default());
 
@@ -497,7 +506,7 @@ async fn ipv4_nexthop_sync(
                     fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
             }
-            println!("after: {:?}", uni);
+            // println!("after: {:?}", uni);
         }
     }
 }

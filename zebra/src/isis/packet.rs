@@ -59,8 +59,10 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
     nbr.pdu = pdu;
 
     let mut ntop = NeighborTop {
+        tx: &mut link.tx,
         dis: &mut link.state.dis,
         lan_id: &mut link.state.lan_id,
+        adj: &mut link.state.adj,
     };
 
     isis_nfsm(
