@@ -847,10 +847,10 @@ pub fn diff<'a>(
     next: &'a PrefixMap<Ipv4Net, SpfRoute>,
 ) -> DiffResult<'a> {
     let mut res = DiffResult {
-        only_curr: Vec::new(),
-        only_next: Vec::new(),
-        different: Vec::new(),
-        identical: Vec::new(),
+        only_curr: vec![],
+        only_next: vec![],
+        different: vec![],
+        identical: vec![],
     };
 
     let mut curr_iter = curr.iter().peekable();
