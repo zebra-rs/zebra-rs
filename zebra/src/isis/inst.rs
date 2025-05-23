@@ -882,13 +882,15 @@ pub fn diff<'a>(
 }
 
 fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
-    rib::NexthopUni {
-        addr: key.clone(),
-        metric: route.metric,
-        weight: 1,
-        ifindex: value.ifindex,
-        ..Default::default()
+    let mut mpls = vec![];
+    if let Some(sid) = route.sid {
+        mpls.push(if value.direct {
+            rib::Label::Implicit(sid)
+        } else {
+            rib::Label::Explicit(sid)
+        });
     }
+    rib::NexthopUni::from(*key, route.metric, mpls)
 }
 
 fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {

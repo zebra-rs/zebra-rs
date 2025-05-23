@@ -14,7 +14,8 @@ use netlink_packet_route::link::{
 };
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
-    RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType,
+    MplsLabel, RouteAddress, RouteAttribute, RouteHeader, RouteLwEnCapType, RouteLwTunnelEncap,
+    RouteMessage, RouteMplsIpTunnel, RouteProtocol, RouteScope, RouteType,
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
@@ -216,6 +217,25 @@ impl FibHandle {
                 // Outgoing if.
                 let attr = NexthopAttribute::Oif(uni.ifindex);
                 msg.attributes.push(attr);
+
+                // MPLS.
+                if !uni.labels.is_empty() {
+                    let attr = NexthopAttribute::EncapType(RouteLwEnCapType::Mpls.into());
+                    msg.attributes.push(attr);
+
+                    if let Some(&label) = uni.labels.get(0) {
+                        let label = MplsLabel {
+                            label,
+                            traffic_class: 0,
+                            bottom_of_stack: true,
+                            ttl: 0,
+                        };
+                        let mpls = RouteMplsIpTunnel::Destination(vec![label]);
+                        let encap = RouteLwTunnelEncap::Mpls(mpls);
+                        let attr = NexthopAttribute::Encap(vec![encap]);
+                        msg.attributes.push(attr);
+                    }
+                }
             }
             Group::Multi(multi) => {
                 // Unspec.
