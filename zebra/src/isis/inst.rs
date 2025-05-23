@@ -206,7 +206,7 @@ impl Isis {
                                                         if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                                                             let nhop = SpfNexthop {
                                                                 ifindex: *ifindex,
-                                                                direct: p[1] == node,
+                                                                adjacency: p[1] == node,
                                                             };
                                                             spf_nhops.insert(ifaddr.addr, nhop);
                                                         }
@@ -831,7 +831,7 @@ pub struct SpfRoute {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpfNexthop {
     pub ifindex: u32,
-    pub direct: bool,
+    pub adjacency: bool,
 }
 
 #[derive(Debug)]
@@ -884,7 +884,7 @@ pub fn diff<'a>(
 fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
     let mut mpls = vec![];
     if let Some(sid) = route.sid {
-        mpls.push(if value.direct {
+        mpls.push(if value.adjacency {
             rib::Label::Implicit(sid)
         } else {
             rib::Label::Explicit(sid)

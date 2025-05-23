@@ -45,7 +45,7 @@ fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
             let mut shown = false;
             for (addr, nhop) in route.nhops.iter() {
                 let sid = if let Some(sid) = route.sid {
-                    if nhop.direct {
+                    if nhop.adjacency {
                         format!(", label {} implicit null", sid)
                     } else {
                         format!(", label {}", sid)
