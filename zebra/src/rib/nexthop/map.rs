@@ -3,15 +3,23 @@ use std::{
     net::Ipv4Addr,
 };
 
+use netlink_packet_route::route::MplsLabel;
+
 use crate::fib::FibHandle;
 
-use super::{Group, GroupMulti, GroupTrait, GroupUni};
+use super::{Group, GroupMulti, GroupTrait, GroupUni, NexthopUni};
 
 pub struct NexthopMap {
     map: BTreeMap<Ipv4Addr, usize>,
     set: BTreeMap<BTreeSet<(usize, u8)>, usize>,
     mpls: BTreeMap<(Ipv4Addr, Vec<u32>), usize>,
     pub groups: Vec<Option<Group>>,
+}
+
+impl Group {
+    pub fn from_nexthop_uni(uni: &NexthopUni, gid: usize) -> Self {
+        Group::Uni(GroupUni::new(gid, &uni))
+    }
 }
 
 impl Default for NexthopMap {
@@ -61,23 +69,48 @@ impl NexthopMap {
         self.groups.len()
     }
 
-    pub fn fetch_uni(&mut self, addr: &Ipv4Addr) -> Option<&mut Group> {
-        let gid = if let Some(&gid) = self.map.get(addr) {
-            let update = self.groups.get_mut(gid)?;
-            if update.is_none() {
-                *update = Some(Group::Uni(GroupUni::new(gid, addr)));
+    pub fn fetch_uni(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+        if let Some(&gid) = self.map.get(&uni.addr) {
+            let entry = self.groups.get_mut(gid)?;
+            if entry.is_none() {
+                *entry = Some(Group::from_nexthop_uni(uni, gid));
             }
-            gid
-        } else {
-            let gid = self.new_gid();
-            let group = Group::Uni(GroupUni::new(gid, addr));
+            return self.get_mut(gid);
+        }
 
-            self.map.insert(*addr, gid);
-            self.groups.push(Some(group));
+        let gid = self.new_gid();
+        let group = Group::from_nexthop_uni(uni, gid);
 
-            gid
-        };
+        self.map.insert(uni.addr, gid);
+        self.groups.push(Some(group));
+
         self.get_mut(gid)
+    }
+
+    pub fn fetch_mpls(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+        if let Some(&gid) = self.mpls.get(&(uni.addr, uni.mpls_label.clone())) {
+            let entry = self.groups.get_mut(gid)?;
+            if entry.is_none() {
+                *entry = Some(Group::from_nexthop_uni(uni, gid));
+            }
+            return self.get_mut(gid);
+        }
+
+        let gid = self.new_gid();
+        let group = Group::from_nexthop_uni(uni, gid);
+
+        self.mpls.insert((uni.addr, uni.mpls_label.clone()), gid);
+        self.groups.push(Some(group));
+
+        self.get_mut(gid)
+    }
+
+    pub fn fetch(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+        if uni.mpls_label.is_empty() {
+            self.fetch_uni(uni)
+        } else {
+            self.fetch_mpls(uni)
+        }
     }
 
     pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
@@ -100,10 +133,6 @@ impl NexthopMap {
             gid
         };
         self.get_mut(gid)
-    }
-
-    pub fn fetch_mpls(&mut self, _addr: &Ipv4Addr, _label: Vec<u32>) -> Option<&mut Group> {
-        None
     }
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {

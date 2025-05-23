@@ -268,25 +268,14 @@ fn resolve_nexthop_uni(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
 ) -> bool {
-    // Only GroupUni is handled.
-    let Some(Group::Uni(group)) = nmap.fetch_uni(&uni.addr) else {
-        println!(" XXX fetch failed");
+    let Some(Group::Uni(group)) = nmap.fetch(&uni) else {
         return false;
     };
-    // When this is first time allocation, resolve the nexthop group.
     if group.refcnt() == 0 {
         group.resolve(table);
     }
-    // Reference counter increment.
-    // println!(
-    //     " uni {} refcnt {} -> {}",
-    //     uni.addr,
-    //     group.refcnt(),
-    //     group.refcnt() + 1
-    // );
     group.refcnt_inc();
 
-    // Set the nexthop group id to the nexthop.
     uni.gid = group.gid();
     uni.ifindex = group.ifindex;
 

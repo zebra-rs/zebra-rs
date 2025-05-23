@@ -8,19 +8,21 @@ use Group::*;
 use crate::rib::entry::RibEntries;
 use crate::rib::resolve::{rib_resolve, Resolve, ResolveOpt};
 
+use super::NexthopUni;
+
 #[derive(Debug)]
 pub enum Group {
     Uni(GroupUni),
     Multi(GroupMulti),
 }
 
-impl Group {
-    pub fn new_uni(addr: &Ipv4Addr, ifindex: u32, gid: usize) -> Self {
-        let mut uni: GroupUni = GroupUni::new(gid, addr);
-        uni.ifindex = ifindex;
-        Group::Uni(uni)
-    }
-}
+// impl Group {
+//     pub fn new_uni(addr: &Ipv4Addr, ifindex: u32, gid: usize) -> Self {
+//         let mut uni: GroupUni = GroupUni::new(gid, addr);
+//         uni.ifindex = ifindex;
+//         Group::Uni(uni)
+//     }
+// }
 
 #[derive(Default, Debug, Clone)]
 pub struct GroupCommon {
@@ -44,14 +46,16 @@ pub struct GroupUni {
     common: GroupCommon,
     pub addr: Ipv4Addr,
     pub ifindex: u32,
+    pub labels: Vec<u32>,
 }
 
 impl GroupUni {
-    pub fn new(gid: usize, addr: &Ipv4Addr) -> Self {
+    pub fn new(gid: usize, uni: &NexthopUni) -> Self {
         Self {
             common: GroupCommon::new(gid),
-            addr: *addr,
+            addr: uni.addr,
             ifindex: 0,
+            labels: uni.mpls_label.clone(),
         }
     }
 
