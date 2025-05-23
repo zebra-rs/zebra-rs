@@ -853,29 +853,44 @@ pub fn diff<'a>(
         identical: Vec::new(),
     };
 
-    // Walk everything in *curr* and decide its fate.
-    for (prefix, curr_route) in curr.iter() {
-        match next.get(prefix) {
-            None => {
-                // Missing from *next*.
-                res.only_curr.push((prefix, curr_route));
+    let mut curr_iter = curr.iter().peekable();
+    let mut next_iter = next.iter().peekable();
+
+    while let (Some(&(curr_prefix, curr_route)), Some(&(next_prefix, next_route))) =
+        (curr_iter.peek(), next_iter.peek())
+    {
+        match curr_prefix.cmp(next_prefix) {
+            std::cmp::Ordering::Less => {
+                // curr_prefix is only in curr
+                res.only_curr.push((curr_prefix, curr_route));
+                curr_iter.next();
             }
-            Some(next_route) if curr_route == next_route => {
-                // Present in both and identical.
-                res.identical.push((prefix, curr_route));
+            std::cmp::Ordering::Greater => {
+                // next_prefix is only in next
+                res.only_next.push((next_prefix, next_route));
+                next_iter.next();
             }
-            Some(next_route) => {
-                // Present in both but the route body changed.
-                res.different.push((prefix, curr_route, next_route));
+            std::cmp::Ordering::Equal => {
+                // keys are equal; compare values
+                if curr_route == next_route {
+                    res.identical.push((curr_prefix, curr_route));
+                } else {
+                    res.different.push((curr_prefix, curr_route, next_route));
+                }
+                curr_iter.next();
+                next_iter.next();
             }
         }
     }
 
-    // Anything that exists only in *next*.
-    for (prefix, next_route) in next.iter() {
-        if !curr.contains_key(prefix) {
-            res.only_next.push((prefix, next_route));
-        }
+    // Deal with the rest of curr
+    for (prefix, curr_route) in curr_iter {
+        res.only_curr.push((prefix, curr_route));
+    }
+
+    // Deal with the rest of next
+    for (prefix, next_route) in next_iter {
+        res.only_next.push((prefix, next_route));
     }
 
     res
