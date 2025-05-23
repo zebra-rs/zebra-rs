@@ -1,6 +1,10 @@
 use std::net::Ipv4Addr;
 
-use netlink_packet_route::route::MplsLabel;
+#[derive(Debug, Clone, PartialEq)]
+pub enum Label {
+    Implicit(u32),
+    Explicit(u32),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NexthopUni {
@@ -9,16 +13,29 @@ pub struct NexthopUni {
     pub weight: u8,
     pub ifindex: u32,
     pub valid: bool,
-    pub mpls: Option<Vec<MplsLabel>>,
+    pub mpls: Vec<Label>,
+    pub mpls_label: Vec<u32>,
     pub gid: usize,
 }
 
 impl NexthopUni {
-    pub fn new(addr: Ipv4Addr) -> Self {
-        Self {
+    pub fn new_mpls(addr: Ipv4Addr, mpls: Vec<Label>) -> Self {
+        let mut uni = Self {
             addr,
+            mpls,
             ..Default::default()
+        };
+        for mpls in uni.mpls.iter() {
+            match mpls {
+                Label::Implicit(_) => {
+                    // Implicit null is treated as no label.
+                }
+                Label::Explicit(label) => {
+                    uni.mpls_label.push(label.clone());
+                }
+            }
         }
+        uni
     }
 }
 
@@ -29,7 +46,8 @@ impl Default for NexthopUni {
             ifindex: 0,
             metric: 0,
             weight: 1,
-            mpls: None,
+            mpls: vec![],
+            mpls_label: vec![],
             gid: 0,
             valid: false,
         }
@@ -40,8 +58,8 @@ impl Default for NexthopUni {
 pub enum Nexthop {
     Link(u32),
     Uni(NexthopUni),
-    List(NexthopList),
     Multi(NexthopMulti),
+    List(NexthopList),
 }
 
 impl Default for Nexthop {

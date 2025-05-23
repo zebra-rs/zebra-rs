@@ -195,7 +195,7 @@ pub struct LspCapView<'a> {
 fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     if let Some(prev) = top.lsdb.get(&level).get(&key) {
         if prev.lsp.tlvs == lsp.tlvs {
-            println!("LSP is same as prev one");
+            // println!("LSP is same as prev one");
             return;
         }
     }

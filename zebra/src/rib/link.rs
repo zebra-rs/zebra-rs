@@ -293,6 +293,12 @@ impl Rib {
     }
 
     pub fn addr_add(&mut self, osaddr: FibAddr) {
+        println!("FIB: AddrAdd {:?}", osaddr);
+        if osaddr.addr.prefix_len() == 0 {
+            println!("FIB: zero prefixlen addr!");
+            return;
+        }
+
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             if link_addr_update(link, addr.clone()).is_some() {
