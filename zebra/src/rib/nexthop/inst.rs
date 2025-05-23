@@ -19,10 +19,12 @@ pub struct NexthopUni {
 }
 
 impl NexthopUni {
-    pub fn new_mpls(addr: Ipv4Addr, mpls: Vec<Label>) -> Self {
+    pub fn from(addr: Ipv4Addr, metric: u32, mpls: Vec<Label>) -> Self {
         let mut uni = Self {
             addr,
+            metric,
             mpls,
+            weight: 1,
             ..Default::default()
         };
         for mpls in uni.mpls.iter() {
