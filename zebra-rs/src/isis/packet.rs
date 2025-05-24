@@ -63,6 +63,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         dis: &mut link.state.dis,
         lan_id: &mut link.state.lan_id,
         adj: &mut link.state.adj,
+        local_pool: &mut top.local_pool,
     };
 
     isis_nfsm(

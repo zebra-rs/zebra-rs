@@ -34,7 +34,7 @@ use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::LabelMap;
 use super::task::{Timer, TimerType};
-use super::{process_packet, Level, Levels, NfsmState};
+use super::{process_packet, LabelPool, Level, Levels, NfsmState};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -61,6 +61,8 @@ pub struct Isis {
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub hostname: Levels<Hostname>,
     pub spf: Levels<Option<Timer>>,
+    pub global_pool: Option<LabelPool>,
+    pub local_pool: Option<LabelPool>,
 }
 
 pub struct IsisTop<'a> {
@@ -75,6 +77,7 @@ pub struct IsisTop<'a> {
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf: &'a mut Levels<Option<Timer>>,
+    pub local_pool: &'a mut Option<LabelPool>,
 }
 
 pub struct NeighborTop<'a> {
@@ -82,6 +85,7 @@ pub struct NeighborTop<'a> {
     pub dis: &'a mut Levels<Option<IsisSysId>>,
     pub lan_id: &'a mut Levels<Option<IsisNeighborId>>,
     pub adj: &'a mut Levels<Option<IsisNeighborId>>,
+    pub local_pool: &'a mut Option<LabelPool>,
 }
 
 impl Isis {
@@ -116,6 +120,8 @@ impl Isis {
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf: Levels::<Option<Timer>>::default(),
+            global_pool: None,
+            local_pool: Some(LabelPool::new(15000, Some(16000))),
         };
         isis.callback_build();
         isis.show_build();
@@ -334,6 +340,7 @@ impl Isis {
                     dis: &mut ltop.state.dis,
                     lan_id: &mut ltop.state.lan_id,
                     adj: &mut ltop.state.adj,
+                    local_pool: &mut ltop.local_pool,
                 };
                 let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
                     return;
@@ -400,6 +407,7 @@ impl Isis {
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
             spf: &mut self.spf,
+            local_pool: &mut self.local_pool,
         };
         top
     }
@@ -413,6 +421,7 @@ impl Isis {
             config: &mut link.config,
             state: &mut link.state,
             timer: &mut link.timer,
+            local_pool: &mut self.local_pool,
         })
     }
 

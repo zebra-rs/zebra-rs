@@ -8,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::Args;
 use crate::rib::MacAddr;
 
+use super::link::Afis;
 use super::nfsm::NfsmState;
 use super::task::Timer;
 use super::{Isis, Level, Message};
@@ -28,6 +29,7 @@ pub struct Neighbor {
     pub mac: Option<MacAddr>,
     pub hold_timer: Option<Timer>,
     pub dis: bool,
+    pub adj_sid: Afis<u32>,
 }
 
 impl Neighbor {
@@ -53,6 +55,7 @@ impl Neighbor {
             mac,
             hold_timer: None,
             dis: false,
+            adj_sid: Afis::<u32>::default(),
         }
     }
 
