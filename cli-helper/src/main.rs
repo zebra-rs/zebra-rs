@@ -176,7 +176,7 @@ async fn run(cli: Cli) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
-    if let Ok(val) = env::var("VTYSH_SERVER_URL") {
+    if let Ok(val) = env::var("CLI_SERVER_URL") {
         cli.base = val;
     }
     if let Err(_err) = run(cli).await {

@@ -41,3 +41,6 @@ pub use lsdb::{Lsdb, LsdbEvent};
 
 pub mod hostname;
 pub use hostname::Hostname;
+
+pub mod labelpool;
+pub use labelpool::*;

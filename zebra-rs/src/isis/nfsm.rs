@@ -2,6 +2,7 @@ use std::fmt::{Display, Formatter, Result};
 
 use isis_packet::{IsLevel, IsisHello, IsisTlv};
 
+use crate::isis::link::Afi;
 use crate::isis::Level;
 use crate::rib::MacAddr;
 
@@ -134,14 +135,6 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor) {
     nbr.laddr6 = laddr6;
 }
 
-fn nfsm_hello_log(nbr: &Neighbor) {
-    if nbr.pdu.lan_id.is_empty() {
-        println!("NFSM Hello: LAN id is empty");
-    } else {
-        println!("NFSM Hello: LAN id {}", nbr.pdu.lan_id);
-    }
-}
-
 pub fn nfsm_hello_received(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
@@ -180,7 +173,6 @@ pub fn nfsm_hello_received(
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
-    // nfsm_hello_log(nbr);
     nfsm_ifaddr_update(nbr);
 
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
@@ -241,6 +233,19 @@ pub fn isis_nfsm(
                         *ntop.adj.get_mut(&level) = None;
                         let msg = Message::LspOriginate(level);
                         ntop.tx.send(msg).unwrap();
+                    }
+                }
+
+                // Relese adjacency SID if it has been allocated.
+                //
+            }
+
+            // Neighbor comes up.
+            if nbr.state == NfsmState::Up {
+                // Allocate adjacency SID.
+                if let Some(local_pool) = ntop.local_pool {
+                    if let Some(label) = local_pool.allocate() {
+                        *nbr.adj_sid.get_mut(&Afi::Ip) = label as u32;
                     }
                 }
             }

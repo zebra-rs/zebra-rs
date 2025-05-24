@@ -20,7 +20,7 @@ use super::config::IsisConfig;
 use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::task::{Timer, TimerType};
-use super::{IfsmEvent, Isis, Level, Levels, Lsdb, Message};
+use super::{IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
@@ -110,6 +110,7 @@ pub struct LinkTop<'a> {
     pub config: &'a LinkConfig,
     pub state: &'a mut LinkState,
     pub timer: &'a mut LinkTimer,
+    pub local_pool: &'a mut Option<LabelPool>,
 }
 
 #[derive(Default, Debug)]
