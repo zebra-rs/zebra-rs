@@ -67,7 +67,7 @@
 
 
 /* First part of user prologue.  */
-#line 21 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 21 "./parse.y"
 
 #include "config.h"
 
@@ -537,7 +537,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 338 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 338 "./parse.y"
 
   WORD_DESC *word;		/* the word that we read. */
   int number;			/* the number that we read. */
@@ -1939,7 +1939,7 @@ yyreduce:
   switch (yyn)
     {
   case 2: /* inputunit: simple_list simple_list_terminator  */
-#line 396 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 396 "./parse.y"
                         {
 			  /* Case of regular command.  Discard the error
 			     safety net,and return the command just parsed. */
@@ -1954,7 +1954,7 @@ yyreduce:
     break;
 
   case 3: /* inputunit: comsub  */
-#line 407 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 407 "./parse.y"
                         {
 			  /* This is special; look at the production and how
 			     parse_comsub sets token_to_read */
@@ -1966,7 +1966,7 @@ yyreduce:
     break;
 
   case 4: /* inputunit: '\n'  */
-#line 415 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 415 "./parse.y"
                         {
 			  /* Case of regular command, but not a very
 			     interesting one.  Return a NULL command. */
@@ -1979,7 +1979,7 @@ yyreduce:
     break;
 
   case 5: /* inputunit: error '\n'  */
-#line 424 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 424 "./parse.y"
                         {
 			  /* Error during parsing.  Return NULL command. */
 			  global_command = (COMMAND *)NULL;
@@ -1998,7 +1998,7 @@ yyreduce:
     break;
 
   case 6: /* inputunit: error yacc_EOF  */
-#line 439 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 439 "./parse.y"
                         {
 			  /* EOF after an error.  Do ignoreeof or not.  Really
 			     only interesting in non-interactive shells */
@@ -2019,7 +2019,7 @@ yyreduce:
     break;
 
   case 7: /* inputunit: error $end  */
-#line 456 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 456 "./parse.y"
                         {
 			  global_command = (COMMAND *)NULL;
 			  if (last_command_exit_value == 0)
@@ -2038,7 +2038,7 @@ yyreduce:
     break;
 
   case 8: /* inputunit: yacc_EOF  */
-#line 471 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 471 "./parse.y"
                         {
 			  /* Case of EOF seen by itself.  Do ignoreeof or
 			     not. */
@@ -2050,19 +2050,19 @@ yyreduce:
     break;
 
   case 9: /* word_list: WORD  */
-#line 481 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 481 "./parse.y"
                         { (yyval.word_list) = make_word_list ((yyvsp[0].word), (WORD_LIST *)NULL); }
 #line 2056 "y.tab.c"
     break;
 
   case 10: /* word_list: word_list WORD  */
-#line 483 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 483 "./parse.y"
                         { (yyval.word_list) = make_word_list ((yyvsp[0].word), (yyvsp[-1].word_list)); }
 #line 2062 "y.tab.c"
     break;
 
   case 11: /* redirection: '>' WORD  */
-#line 487 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 487 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.filename = (yyvsp[0].word);
@@ -2072,7 +2072,7 @@ yyreduce:
     break;
 
   case 12: /* redirection: '<' WORD  */
-#line 493 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 493 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.filename = (yyvsp[0].word);
@@ -2082,7 +2082,7 @@ yyreduce:
     break;
 
   case 13: /* redirection: NUMBER '>' WORD  */
-#line 499 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 499 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2092,7 +2092,7 @@ yyreduce:
     break;
 
   case 14: /* redirection: NUMBER '<' WORD  */
-#line 505 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 505 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2102,7 +2102,7 @@ yyreduce:
     break;
 
   case 15: /* redirection: REDIR_WORD '>' WORD  */
-#line 511 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 511 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2112,7 +2112,7 @@ yyreduce:
     break;
 
   case 16: /* redirection: REDIR_WORD '<' WORD  */
-#line 517 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 517 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2122,7 +2122,7 @@ yyreduce:
     break;
 
   case 17: /* redirection: GREATER_GREATER WORD  */
-#line 523 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 523 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.filename = (yyvsp[0].word);
@@ -2132,7 +2132,7 @@ yyreduce:
     break;
 
   case 18: /* redirection: NUMBER GREATER_GREATER WORD  */
-#line 529 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 529 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2142,7 +2142,7 @@ yyreduce:
     break;
 
   case 19: /* redirection: REDIR_WORD GREATER_GREATER WORD  */
-#line 535 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 535 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2152,7 +2152,7 @@ yyreduce:
     break;
 
   case 20: /* redirection: GREATER_BAR WORD  */
-#line 541 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 541 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.filename = (yyvsp[0].word);
@@ -2162,7 +2162,7 @@ yyreduce:
     break;
 
   case 21: /* redirection: NUMBER GREATER_BAR WORD  */
-#line 547 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 547 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2172,7 +2172,7 @@ yyreduce:
     break;
 
   case 22: /* redirection: REDIR_WORD GREATER_BAR WORD  */
-#line 553 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 553 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2182,7 +2182,7 @@ yyreduce:
     break;
 
   case 23: /* redirection: LESS_GREATER WORD  */
-#line 559 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 559 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.filename = (yyvsp[0].word);
@@ -2192,7 +2192,7 @@ yyreduce:
     break;
 
   case 24: /* redirection: NUMBER LESS_GREATER WORD  */
-#line 565 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 565 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2202,7 +2202,7 @@ yyreduce:
     break;
 
   case 25: /* redirection: REDIR_WORD LESS_GREATER WORD  */
-#line 571 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 571 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2212,7 +2212,7 @@ yyreduce:
     break;
 
   case 26: /* redirection: LESS_LESS WORD  */
-#line 577 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 577 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.filename = (yyvsp[0].word);
@@ -2223,7 +2223,7 @@ yyreduce:
     break;
 
   case 27: /* redirection: NUMBER LESS_LESS WORD  */
-#line 584 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 584 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2234,7 +2234,7 @@ yyreduce:
     break;
 
   case 28: /* redirection: REDIR_WORD LESS_LESS WORD  */
-#line 591 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 591 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2245,7 +2245,7 @@ yyreduce:
     break;
 
   case 29: /* redirection: LESS_LESS_MINUS WORD  */
-#line 598 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 598 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.filename = (yyvsp[0].word);
@@ -2256,7 +2256,7 @@ yyreduce:
     break;
 
   case 30: /* redirection: NUMBER LESS_LESS_MINUS WORD  */
-#line 605 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 605 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2267,7 +2267,7 @@ yyreduce:
     break;
 
   case 31: /* redirection: REDIR_WORD LESS_LESS_MINUS WORD  */
-#line 612 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 612 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2278,7 +2278,7 @@ yyreduce:
     break;
 
   case 32: /* redirection: LESS_LESS_LESS WORD  */
-#line 619 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 619 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.filename = (yyvsp[0].word);
@@ -2288,7 +2288,7 @@ yyreduce:
     break;
 
   case 33: /* redirection: NUMBER LESS_LESS_LESS WORD  */
-#line 625 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 625 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2298,7 +2298,7 @@ yyreduce:
     break;
 
   case 34: /* redirection: REDIR_WORD LESS_LESS_LESS WORD  */
-#line 631 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 631 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2308,7 +2308,7 @@ yyreduce:
     break;
 
   case 35: /* redirection: LESS_AND NUMBER  */
-#line 637 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 637 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.dest = (yyvsp[0].number);
@@ -2318,7 +2318,7 @@ yyreduce:
     break;
 
   case 36: /* redirection: NUMBER LESS_AND NUMBER  */
-#line 643 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 643 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.dest = (yyvsp[0].number);
@@ -2328,7 +2328,7 @@ yyreduce:
     break;
 
   case 37: /* redirection: REDIR_WORD LESS_AND NUMBER  */
-#line 649 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 649 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.dest = (yyvsp[0].number);
@@ -2338,7 +2338,7 @@ yyreduce:
     break;
 
   case 38: /* redirection: GREATER_AND NUMBER  */
-#line 655 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 655 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.dest = (yyvsp[0].number);
@@ -2348,7 +2348,7 @@ yyreduce:
     break;
 
   case 39: /* redirection: NUMBER GREATER_AND NUMBER  */
-#line 661 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 661 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.dest = (yyvsp[0].number);
@@ -2358,7 +2358,7 @@ yyreduce:
     break;
 
   case 40: /* redirection: REDIR_WORD GREATER_AND NUMBER  */
-#line 667 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 667 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.dest = (yyvsp[0].number);
@@ -2368,7 +2368,7 @@ yyreduce:
     break;
 
   case 41: /* redirection: LESS_AND WORD  */
-#line 673 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 673 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.filename = (yyvsp[0].word);
@@ -2378,7 +2378,7 @@ yyreduce:
     break;
 
   case 42: /* redirection: NUMBER LESS_AND WORD  */
-#line 679 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 679 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2388,7 +2388,7 @@ yyreduce:
     break;
 
   case 43: /* redirection: REDIR_WORD LESS_AND WORD  */
-#line 685 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 685 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2398,7 +2398,7 @@ yyreduce:
     break;
 
   case 44: /* redirection: GREATER_AND WORD  */
-#line 691 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 691 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.filename = (yyvsp[0].word);
@@ -2408,7 +2408,7 @@ yyreduce:
     break;
 
   case 45: /* redirection: NUMBER GREATER_AND WORD  */
-#line 697 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 697 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.filename = (yyvsp[0].word);
@@ -2418,7 +2418,7 @@ yyreduce:
     break;
 
   case 46: /* redirection: REDIR_WORD GREATER_AND WORD  */
-#line 703 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 703 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.filename = (yyvsp[0].word);
@@ -2428,7 +2428,7 @@ yyreduce:
     break;
 
   case 47: /* redirection: GREATER_AND '-'  */
-#line 709 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 709 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.dest = 0;
@@ -2438,7 +2438,7 @@ yyreduce:
     break;
 
   case 48: /* redirection: NUMBER GREATER_AND '-'  */
-#line 715 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 715 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.dest = 0;
@@ -2448,7 +2448,7 @@ yyreduce:
     break;
 
   case 49: /* redirection: REDIR_WORD GREATER_AND '-'  */
-#line 721 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 721 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.dest = 0;
@@ -2458,7 +2458,7 @@ yyreduce:
     break;
 
   case 50: /* redirection: LESS_AND '-'  */
-#line 727 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 727 "./parse.y"
                         {
 			  source.dest = 0;
 			  redir.dest = 0;
@@ -2468,7 +2468,7 @@ yyreduce:
     break;
 
   case 51: /* redirection: NUMBER LESS_AND '-'  */
-#line 733 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 733 "./parse.y"
                         {
 			  source.dest = (yyvsp[-2].number);
 			  redir.dest = 0;
@@ -2478,7 +2478,7 @@ yyreduce:
     break;
 
   case 52: /* redirection: REDIR_WORD LESS_AND '-'  */
-#line 739 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 739 "./parse.y"
                         {
 			  source.filename = (yyvsp[-2].word);
 			  redir.dest = 0;
@@ -2488,7 +2488,7 @@ yyreduce:
     break;
 
   case 53: /* redirection: AND_GREATER WORD  */
-#line 745 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 745 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.filename = (yyvsp[0].word);
@@ -2498,7 +2498,7 @@ yyreduce:
     break;
 
   case 54: /* redirection: AND_GREATER_GREATER WORD  */
-#line 751 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 751 "./parse.y"
                         {
 			  source.dest = 1;
 			  redir.filename = (yyvsp[0].word);
@@ -2508,25 +2508,25 @@ yyreduce:
     break;
 
   case 55: /* simple_command_element: WORD  */
-#line 759 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 759 "./parse.y"
                         { (yyval.element).word = (yyvsp[0].word); (yyval.element).redirect = 0; }
 #line 2514 "y.tab.c"
     break;
 
   case 56: /* simple_command_element: ASSIGNMENT_WORD  */
-#line 761 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 761 "./parse.y"
                         { (yyval.element).word = (yyvsp[0].word); (yyval.element).redirect = 0; }
 #line 2520 "y.tab.c"
     break;
 
   case 57: /* simple_command_element: redirection  */
-#line 763 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 763 "./parse.y"
                         { (yyval.element).redirect = (yyvsp[0].redirect); (yyval.element).word = 0; }
 #line 2526 "y.tab.c"
     break;
 
   case 58: /* redirection_list: redirection  */
-#line 767 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 767 "./parse.y"
                         {
 			  (yyval.redirect) = (yyvsp[0].redirect);
 			}
@@ -2534,7 +2534,7 @@ yyreduce:
     break;
 
   case 59: /* redirection_list: redirection_list redirection  */
-#line 771 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 771 "./parse.y"
                         {
 			  register REDIRECT *t;
 
@@ -2547,31 +2547,31 @@ yyreduce:
     break;
 
   case 60: /* simple_command: simple_command_element  */
-#line 782 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 782 "./parse.y"
                         { (yyval.command) = make_simple_command ((yyvsp[0].element), (COMMAND *)NULL); }
 #line 2553 "y.tab.c"
     break;
 
   case 61: /* simple_command: simple_command simple_command_element  */
-#line 784 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 784 "./parse.y"
                         { (yyval.command) = make_simple_command ((yyvsp[0].element), (yyvsp[-1].command)); }
 #line 2559 "y.tab.c"
     break;
 
   case 62: /* command: simple_command  */
-#line 788 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 788 "./parse.y"
                         { (yyval.command) = clean_simple_command ((yyvsp[0].command)); }
 #line 2565 "y.tab.c"
     break;
 
   case 63: /* command: shell_command  */
-#line 790 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 790 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2571 "y.tab.c"
     break;
 
   case 64: /* command: shell_command redirection_list  */
-#line 792 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 792 "./parse.y"
                         {
 			  COMMAND *tc;
 
@@ -2591,85 +2591,85 @@ yyreduce:
     break;
 
   case 65: /* command: function_def  */
-#line 808 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 808 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2597 "y.tab.c"
     break;
 
   case 66: /* command: coproc  */
-#line 810 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 810 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2603 "y.tab.c"
     break;
 
   case 67: /* shell_command: for_command  */
-#line 814 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 814 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2609 "y.tab.c"
     break;
 
   case 68: /* shell_command: case_command  */
-#line 816 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 816 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2615 "y.tab.c"
     break;
 
   case 69: /* shell_command: WHILE compound_list DO compound_list DONE  */
-#line 818 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 818 "./parse.y"
                         { (yyval.command) = make_while_command ((yyvsp[-3].command), (yyvsp[-1].command)); }
 #line 2621 "y.tab.c"
     break;
 
   case 70: /* shell_command: UNTIL compound_list DO compound_list DONE  */
-#line 820 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 820 "./parse.y"
                         { (yyval.command) = make_until_command ((yyvsp[-3].command), (yyvsp[-1].command)); }
 #line 2627 "y.tab.c"
     break;
 
   case 71: /* shell_command: select_command  */
-#line 822 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 822 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2633 "y.tab.c"
     break;
 
   case 72: /* shell_command: if_command  */
-#line 824 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 824 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2639 "y.tab.c"
     break;
 
   case 73: /* shell_command: subshell  */
-#line 826 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 826 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2645 "y.tab.c"
     break;
 
   case 74: /* shell_command: group_command  */
-#line 828 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 828 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2651 "y.tab.c"
     break;
 
   case 75: /* shell_command: arith_command  */
-#line 830 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 830 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2657 "y.tab.c"
     break;
 
   case 76: /* shell_command: cond_command  */
-#line 832 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 832 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2663 "y.tab.c"
     break;
 
   case 77: /* shell_command: arith_for_command  */
-#line 834 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 834 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2669 "y.tab.c"
     break;
 
   case 78: /* for_command: FOR WORD newline_list DO compound_list DONE  */
-#line 838 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 838 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-4].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2678,7 +2678,7 @@ yyreduce:
     break;
 
   case 79: /* for_command: FOR WORD newline_list '{' compound_list '}'  */
-#line 843 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 843 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-4].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2687,7 +2687,7 @@ yyreduce:
     break;
 
   case 80: /* for_command: FOR WORD ';' newline_list DO compound_list DONE  */
-#line 848 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 848 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-5].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2696,7 +2696,7 @@ yyreduce:
     break;
 
   case 81: /* for_command: FOR WORD ';' newline_list '{' compound_list '}'  */
-#line 853 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 853 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-5].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2705,7 +2705,7 @@ yyreduce:
     break;
 
   case 82: /* for_command: FOR WORD newline_list IN word_list list_terminator newline_list DO compound_list DONE  */
-#line 858 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 858 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-8].word), REVERSE_LIST ((yyvsp[-5].word_list), WORD_LIST *), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2714,7 +2714,7 @@ yyreduce:
     break;
 
   case 83: /* for_command: FOR WORD newline_list IN word_list list_terminator newline_list '{' compound_list '}'  */
-#line 863 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 863 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-8].word), REVERSE_LIST ((yyvsp[-5].word_list), WORD_LIST *), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2723,7 +2723,7 @@ yyreduce:
     break;
 
   case 84: /* for_command: FOR WORD newline_list IN list_terminator newline_list DO compound_list DONE  */
-#line 868 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 868 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-7].word), (WORD_LIST *)NULL, (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2732,7 +2732,7 @@ yyreduce:
     break;
 
   case 85: /* for_command: FOR WORD newline_list IN list_terminator newline_list '{' compound_list '}'  */
-#line 873 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 873 "./parse.y"
                         {
 			  (yyval.command) = make_for_command ((yyvsp[-7].word), (WORD_LIST *)NULL, (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2741,7 +2741,7 @@ yyreduce:
     break;
 
   case 86: /* arith_for_command: FOR ARITH_FOR_EXPRS list_terminator newline_list DO compound_list DONE  */
-#line 880 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 880 "./parse.y"
                                 {
 				  (yyval.command) = make_arith_for_command ((yyvsp[-5].word_list), (yyvsp[-1].command), arith_for_lineno);
 				  if ((yyval.command) == 0) YYERROR;
@@ -2751,7 +2751,7 @@ yyreduce:
     break;
 
   case 87: /* arith_for_command: FOR ARITH_FOR_EXPRS list_terminator newline_list '{' compound_list '}'  */
-#line 886 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 886 "./parse.y"
                                 {
 				  (yyval.command) = make_arith_for_command ((yyvsp[-5].word_list), (yyvsp[-1].command), arith_for_lineno);
 				  if ((yyval.command) == 0) YYERROR;
@@ -2761,7 +2761,7 @@ yyreduce:
     break;
 
   case 88: /* arith_for_command: FOR ARITH_FOR_EXPRS DO compound_list DONE  */
-#line 892 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 892 "./parse.y"
                                 {
 				  (yyval.command) = make_arith_for_command ((yyvsp[-3].word_list), (yyvsp[-1].command), arith_for_lineno);
 				  if ((yyval.command) == 0) YYERROR;
@@ -2771,7 +2771,7 @@ yyreduce:
     break;
 
   case 89: /* arith_for_command: FOR ARITH_FOR_EXPRS '{' compound_list '}'  */
-#line 898 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 898 "./parse.y"
                                 {
 				  (yyval.command) = make_arith_for_command ((yyvsp[-3].word_list), (yyvsp[-1].command), arith_for_lineno);
 				  if ((yyval.command) == 0) YYERROR;
@@ -2781,7 +2781,7 @@ yyreduce:
     break;
 
   case 90: /* select_command: SELECT WORD newline_list DO compound_list DONE  */
-#line 906 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 906 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-4].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2790,7 +2790,7 @@ yyreduce:
     break;
 
   case 91: /* select_command: SELECT WORD newline_list '{' compound_list '}'  */
-#line 911 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 911 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-4].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2799,7 +2799,7 @@ yyreduce:
     break;
 
   case 92: /* select_command: SELECT WORD ';' newline_list DO compound_list DONE  */
-#line 916 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 916 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-5].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2808,7 +2808,7 @@ yyreduce:
     break;
 
   case 93: /* select_command: SELECT WORD ';' newline_list '{' compound_list '}'  */
-#line 921 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 921 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-5].word), add_string_to_list ("\"$@\"", (WORD_LIST *)NULL), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2817,7 +2817,7 @@ yyreduce:
     break;
 
   case 94: /* select_command: SELECT WORD newline_list IN word_list list_terminator newline_list DO compound_list DONE  */
-#line 926 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 926 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-8].word), REVERSE_LIST ((yyvsp[-5].word_list), WORD_LIST *), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2826,7 +2826,7 @@ yyreduce:
     break;
 
   case 95: /* select_command: SELECT WORD newline_list IN word_list list_terminator newline_list '{' compound_list '}'  */
-#line 931 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 931 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-8].word), REVERSE_LIST ((yyvsp[-5].word_list), WORD_LIST *), (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2835,7 +2835,7 @@ yyreduce:
     break;
 
   case 96: /* select_command: SELECT WORD newline_list IN list_terminator newline_list DO compound_list DONE  */
-#line 936 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 936 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-7].word), (WORD_LIST *)NULL, (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2844,7 +2844,7 @@ yyreduce:
     break;
 
   case 97: /* select_command: SELECT WORD newline_list IN list_terminator newline_list '{' compound_list '}'  */
-#line 941 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 941 "./parse.y"
                         {
 			  (yyval.command) = make_select_command ((yyvsp[-7].word), (WORD_LIST *)NULL, (yyvsp[-1].command), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2853,7 +2853,7 @@ yyreduce:
     break;
 
   case 98: /* case_command: CASE WORD newline_list IN newline_list ESAC  */
-#line 948 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 948 "./parse.y"
                         {
 			  (yyval.command) = make_case_command ((yyvsp[-4].word), (PATTERN_LIST *)NULL, word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2862,7 +2862,7 @@ yyreduce:
     break;
 
   case 99: /* case_command: CASE WORD newline_list IN case_clause_sequence newline_list ESAC  */
-#line 953 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 953 "./parse.y"
                         {
 			  (yyval.command) = make_case_command ((yyvsp[-5].word), (yyvsp[-2].pattern), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2871,7 +2871,7 @@ yyreduce:
     break;
 
   case 100: /* case_command: CASE WORD newline_list IN case_clause ESAC  */
-#line 958 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 958 "./parse.y"
                         {
 			  (yyval.command) = make_case_command ((yyvsp[-4].word), (yyvsp[-1].pattern), word_lineno[word_top]);
 			  if (word_top > 0) word_top--;
@@ -2880,37 +2880,37 @@ yyreduce:
     break;
 
   case 101: /* function_def: WORD '(' ')' newline_list function_body  */
-#line 965 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 965 "./parse.y"
                         { (yyval.command) = make_function_def ((yyvsp[-4].word), (yyvsp[0].command), function_dstart, function_bstart); }
 #line 2886 "y.tab.c"
     break;
 
   case 102: /* function_def: FUNCTION WORD '(' ')' newline_list function_body  */
-#line 967 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 967 "./parse.y"
                         { (yyval.command) = make_function_def ((yyvsp[-4].word), (yyvsp[0].command), function_dstart, function_bstart); }
 #line 2892 "y.tab.c"
     break;
 
   case 103: /* function_def: FUNCTION WORD function_body  */
-#line 969 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 969 "./parse.y"
                         { (yyval.command) = make_function_def ((yyvsp[-1].word), (yyvsp[0].command), function_dstart, function_bstart); }
 #line 2898 "y.tab.c"
     break;
 
   case 104: /* function_def: FUNCTION WORD '\n' newline_list function_body  */
-#line 971 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 971 "./parse.y"
                         { (yyval.command) = make_function_def ((yyvsp[-3].word), (yyvsp[0].command), function_dstart, function_bstart); }
 #line 2904 "y.tab.c"
     break;
 
   case 105: /* function_body: shell_command  */
-#line 975 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 975 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 2910 "y.tab.c"
     break;
 
   case 106: /* function_body: shell_command redirection_list  */
-#line 977 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 977 "./parse.y"
                         {
 			  COMMAND *tc;
 
@@ -2943,7 +2943,7 @@ yyreduce:
     break;
 
   case 107: /* subshell: '(' compound_list ')'  */
-#line 1008 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1008 "./parse.y"
                         {
 			  (yyval.command) = make_subshell_command ((yyvsp[-1].command));
 			  (yyval.command)->flags |= CMD_WANT_SUBSHELL;
@@ -2952,7 +2952,7 @@ yyreduce:
     break;
 
   case 108: /* comsub: DOLPAREN compound_list ')'  */
-#line 1015 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1015 "./parse.y"
                         {
 			  (yyval.command) = (yyvsp[-1].command);
 			}
@@ -2960,7 +2960,7 @@ yyreduce:
     break;
 
   case 109: /* comsub: DOLPAREN newline_list ')'  */
-#line 1019 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1019 "./parse.y"
                         {
 			  (yyval.command) = (COMMAND *)NULL;
 			}
@@ -2968,7 +2968,7 @@ yyreduce:
     break;
 
   case 110: /* coproc: COPROC shell_command  */
-#line 1025 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1025 "./parse.y"
                         {
 			  (yyval.command) = make_coproc_command ("COPROC", (yyvsp[0].command));
 			  (yyval.command)->flags |= CMD_WANT_SUBSHELL|CMD_COPROC_SUBSHELL;
@@ -2977,7 +2977,7 @@ yyreduce:
     break;
 
   case 111: /* coproc: COPROC shell_command redirection_list  */
-#line 1030 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1030 "./parse.y"
                         {
 			  COMMAND *tc;
 
@@ -2998,7 +2998,7 @@ yyreduce:
     break;
 
   case 112: /* coproc: COPROC WORD shell_command  */
-#line 1047 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1047 "./parse.y"
                         {
 			  (yyval.command) = make_coproc_command ((yyvsp[-1].word)->word, (yyvsp[0].command));
 			  (yyval.command)->flags |= CMD_WANT_SUBSHELL|CMD_COPROC_SUBSHELL;
@@ -3007,7 +3007,7 @@ yyreduce:
     break;
 
   case 113: /* coproc: COPROC WORD shell_command redirection_list  */
-#line 1052 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1052 "./parse.y"
                         {
 			  COMMAND *tc;
 
@@ -3028,7 +3028,7 @@ yyreduce:
     break;
 
   case 114: /* coproc: COPROC simple_command  */
-#line 1069 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1069 "./parse.y"
                         {
 			  (yyval.command) = make_coproc_command ("COPROC", clean_simple_command ((yyvsp[0].command)));
 			  (yyval.command)->flags |= CMD_WANT_SUBSHELL|CMD_COPROC_SUBSHELL;
@@ -3037,139 +3037,139 @@ yyreduce:
     break;
 
   case 115: /* if_command: IF compound_list THEN compound_list FI  */
-#line 1076 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1076 "./parse.y"
                         { (yyval.command) = make_if_command ((yyvsp[-3].command), (yyvsp[-1].command), (COMMAND *)NULL); }
 #line 3043 "y.tab.c"
     break;
 
   case 116: /* if_command: IF compound_list THEN compound_list ELSE compound_list FI  */
-#line 1078 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1078 "./parse.y"
                         { (yyval.command) = make_if_command ((yyvsp[-5].command), (yyvsp[-3].command), (yyvsp[-1].command)); }
 #line 3049 "y.tab.c"
     break;
 
   case 117: /* if_command: IF compound_list THEN compound_list elif_clause FI  */
-#line 1080 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1080 "./parse.y"
                         { (yyval.command) = make_if_command ((yyvsp[-4].command), (yyvsp[-2].command), (yyvsp[-1].command)); }
 #line 3055 "y.tab.c"
     break;
 
   case 118: /* group_command: '{' compound_list '}'  */
-#line 1085 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1085 "./parse.y"
                         { (yyval.command) = make_group_command ((yyvsp[-1].command)); }
 #line 3061 "y.tab.c"
     break;
 
   case 119: /* arith_command: ARITH_CMD  */
-#line 1089 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1089 "./parse.y"
                         { (yyval.command) = make_arith_command ((yyvsp[0].word_list)); }
 #line 3067 "y.tab.c"
     break;
 
   case 120: /* cond_command: COND_START COND_CMD COND_END  */
-#line 1093 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1093 "./parse.y"
                         { (yyval.command) = (yyvsp[-1].command); }
 #line 3073 "y.tab.c"
     break;
 
   case 121: /* elif_clause: ELIF compound_list THEN compound_list  */
-#line 1097 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1097 "./parse.y"
                         { (yyval.command) = make_if_command ((yyvsp[-2].command), (yyvsp[0].command), (COMMAND *)NULL); }
 #line 3079 "y.tab.c"
     break;
 
   case 122: /* elif_clause: ELIF compound_list THEN compound_list ELSE compound_list  */
-#line 1099 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1099 "./parse.y"
                         { (yyval.command) = make_if_command ((yyvsp[-4].command), (yyvsp[-2].command), (yyvsp[0].command)); }
 #line 3085 "y.tab.c"
     break;
 
   case 123: /* elif_clause: ELIF compound_list THEN compound_list elif_clause  */
-#line 1101 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1101 "./parse.y"
                         { (yyval.command) = make_if_command ((yyvsp[-3].command), (yyvsp[-1].command), (yyvsp[0].command)); }
 #line 3091 "y.tab.c"
     break;
 
   case 125: /* case_clause: case_clause_sequence pattern_list  */
-#line 1106 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1106 "./parse.y"
                         { (yyvsp[0].pattern)->next = (yyvsp[-1].pattern); (yyval.pattern) = (yyvsp[0].pattern); }
 #line 3097 "y.tab.c"
     break;
 
   case 126: /* pattern_list: newline_list pattern ')' compound_list  */
-#line 1110 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1110 "./parse.y"
                         { (yyval.pattern) = make_pattern_list ((yyvsp[-2].word_list), (yyvsp[0].command)); }
 #line 3103 "y.tab.c"
     break;
 
   case 127: /* pattern_list: newline_list pattern ')' newline_list  */
-#line 1112 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1112 "./parse.y"
                         { (yyval.pattern) = make_pattern_list ((yyvsp[-2].word_list), (COMMAND *)NULL); }
 #line 3109 "y.tab.c"
     break;
 
   case 128: /* pattern_list: newline_list '(' pattern ')' compound_list  */
-#line 1114 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1114 "./parse.y"
                         { (yyval.pattern) = make_pattern_list ((yyvsp[-2].word_list), (yyvsp[0].command)); }
 #line 3115 "y.tab.c"
     break;
 
   case 129: /* pattern_list: newline_list '(' pattern ')' newline_list  */
-#line 1116 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1116 "./parse.y"
                         { (yyval.pattern) = make_pattern_list ((yyvsp[-2].word_list), (COMMAND *)NULL); }
 #line 3121 "y.tab.c"
     break;
 
   case 130: /* case_clause_sequence: pattern_list SEMI_SEMI  */
-#line 1120 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1120 "./parse.y"
                         { (yyval.pattern) = (yyvsp[-1].pattern); }
 #line 3127 "y.tab.c"
     break;
 
   case 131: /* case_clause_sequence: case_clause_sequence pattern_list SEMI_SEMI  */
-#line 1122 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1122 "./parse.y"
                         { (yyvsp[-1].pattern)->next = (yyvsp[-2].pattern); (yyval.pattern) = (yyvsp[-1].pattern); }
 #line 3133 "y.tab.c"
     break;
 
   case 132: /* case_clause_sequence: pattern_list SEMI_AND  */
-#line 1124 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1124 "./parse.y"
                         { (yyvsp[-1].pattern)->flags |= CASEPAT_FALLTHROUGH; (yyval.pattern) = (yyvsp[-1].pattern); }
 #line 3139 "y.tab.c"
     break;
 
   case 133: /* case_clause_sequence: case_clause_sequence pattern_list SEMI_AND  */
-#line 1126 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1126 "./parse.y"
                         { (yyvsp[-1].pattern)->flags |= CASEPAT_FALLTHROUGH; (yyvsp[-1].pattern)->next = (yyvsp[-2].pattern); (yyval.pattern) = (yyvsp[-1].pattern); }
 #line 3145 "y.tab.c"
     break;
 
   case 134: /* case_clause_sequence: pattern_list SEMI_SEMI_AND  */
-#line 1128 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1128 "./parse.y"
                         { (yyvsp[-1].pattern)->flags |= CASEPAT_TESTNEXT; (yyval.pattern) = (yyvsp[-1].pattern); }
 #line 3151 "y.tab.c"
     break;
 
   case 135: /* case_clause_sequence: case_clause_sequence pattern_list SEMI_SEMI_AND  */
-#line 1130 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1130 "./parse.y"
                         { (yyvsp[-1].pattern)->flags |= CASEPAT_TESTNEXT; (yyvsp[-1].pattern)->next = (yyvsp[-2].pattern); (yyval.pattern) = (yyvsp[-1].pattern); }
 #line 3157 "y.tab.c"
     break;
 
   case 136: /* pattern: WORD  */
-#line 1134 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1134 "./parse.y"
                         { (yyval.word_list) = make_word_list ((yyvsp[0].word), (WORD_LIST *)NULL); }
 #line 3163 "y.tab.c"
     break;
 
   case 137: /* pattern: pattern '|' WORD  */
-#line 1136 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1136 "./parse.y"
                         { (yyval.word_list) = make_word_list ((yyvsp[0].word), (yyvsp[-2].word_list)); }
 #line 3169 "y.tab.c"
     break;
 
   case 138: /* compound_list: newline_list list0  */
-#line 1145 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1145 "./parse.y"
                         {
 			  (yyval.command) = (yyvsp[0].command);
 			  if (need_here_doc && last_read_token == '\n')
@@ -3179,7 +3179,7 @@ yyreduce:
     break;
 
   case 139: /* compound_list: newline_list list1  */
-#line 1151 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1151 "./parse.y"
                         {
 			  (yyval.command) = (yyvsp[0].command);
 			}
@@ -3187,7 +3187,7 @@ yyreduce:
     break;
 
   case 141: /* list0: list1 '&' newline_list  */
-#line 1158 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1158 "./parse.y"
                         {
 			  if ((yyvsp[-2].command)->type == cm_connection)
 			    (yyval.command) = connect_async_list ((yyvsp[-2].command), (COMMAND *)NULL, '&');
@@ -3198,19 +3198,19 @@ yyreduce:
     break;
 
   case 143: /* list1: list1 AND_AND newline_list list1  */
-#line 1169 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1169 "./parse.y"
                         { (yyval.command) = command_connect ((yyvsp[-3].command), (yyvsp[0].command), AND_AND); }
 #line 3204 "y.tab.c"
     break;
 
   case 144: /* list1: list1 OR_OR newline_list list1  */
-#line 1171 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1171 "./parse.y"
                         { (yyval.command) = command_connect ((yyvsp[-3].command), (yyvsp[0].command), OR_OR); }
 #line 3210 "y.tab.c"
     break;
 
   case 145: /* list1: list1 '&' newline_list list1  */
-#line 1173 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1173 "./parse.y"
                         {
 			  if ((yyvsp[-3].command)->type == cm_connection)
 			    (yyval.command) = connect_async_list ((yyvsp[-3].command), (yyvsp[0].command), '&');
@@ -3221,13 +3221,13 @@ yyreduce:
     break;
 
   case 146: /* list1: list1 ';' newline_list list1  */
-#line 1180 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1180 "./parse.y"
                         { (yyval.command) = command_connect ((yyvsp[-3].command), (yyvsp[0].command), ';'); }
 #line 3227 "y.tab.c"
     break;
 
   case 147: /* list1: list1 '\n' newline_list list1  */
-#line 1182 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1182 "./parse.y"
                         {
 			  if (parser_state & PST_CMDSUBST)
 			    (yyval.command) = command_connect ((yyvsp[-3].command), (yyvsp[0].command), '\n');
@@ -3238,31 +3238,31 @@ yyreduce:
     break;
 
   case 148: /* list1: pipeline_command  */
-#line 1189 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1189 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 3244 "y.tab.c"
     break;
 
   case 151: /* list_terminator: '\n'  */
-#line 1197 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1197 "./parse.y"
                 { (yyval.number) = '\n'; }
 #line 3250 "y.tab.c"
     break;
 
   case 152: /* list_terminator: ';'  */
-#line 1199 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1199 "./parse.y"
                 { (yyval.number) = ';'; }
 #line 3256 "y.tab.c"
     break;
 
   case 153: /* list_terminator: yacc_EOF  */
-#line 1201 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1201 "./parse.y"
                 { (yyval.number) = yacc_EOF; }
 #line 3262 "y.tab.c"
     break;
 
   case 156: /* simple_list: simple_list1  */
-#line 1215 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1215 "./parse.y"
                         {
 			  (yyval.command) = (yyvsp[0].command);
 			  if (need_here_doc)
@@ -3281,7 +3281,7 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 -> simple_li
     break;
 
   case 157: /* simple_list: simple_list1 '&'  */
-#line 1230 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1230 "./parse.y"
                         {
 			  if ((yyvsp[-1].command)->type == cm_connection)
 			    (yyval.command) = connect_async_list ((yyvsp[-1].command), (COMMAND *)NULL, '&');
@@ -3303,7 +3303,7 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 '&' -> simpl
     break;
 
   case 158: /* simple_list: simple_list1 ';'  */
-#line 1248 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1248 "./parse.y"
                         {
 			  (yyval.command) = (yyvsp[-1].command);
 			  if (need_here_doc)
@@ -3322,19 +3322,19 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 ';' -> simpl
     break;
 
   case 159: /* simple_list1: simple_list1 AND_AND newline_list simple_list1  */
-#line 1265 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1265 "./parse.y"
                         { (yyval.command) = command_connect ((yyvsp[-3].command), (yyvsp[0].command), AND_AND); }
 #line 3328 "y.tab.c"
     break;
 
   case 160: /* simple_list1: simple_list1 OR_OR newline_list simple_list1  */
-#line 1267 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1267 "./parse.y"
                         { (yyval.command) = command_connect ((yyvsp[-3].command), (yyvsp[0].command), OR_OR); }
 #line 3334 "y.tab.c"
     break;
 
   case 161: /* simple_list1: simple_list1 '&' simple_list1  */
-#line 1269 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1269 "./parse.y"
                         {
 			  if ((yyvsp[-2].command)->type == cm_connection)
 			    (yyval.command) = connect_async_list ((yyvsp[-2].command), (yyvsp[0].command), '&');
@@ -3345,25 +3345,25 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 ';' -> simpl
     break;
 
   case 162: /* simple_list1: simple_list1 ';' simple_list1  */
-#line 1276 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1276 "./parse.y"
                         { (yyval.command) = command_connect ((yyvsp[-2].command), (yyvsp[0].command), ';'); }
 #line 3351 "y.tab.c"
     break;
 
   case 163: /* simple_list1: pipeline_command  */
-#line 1279 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1279 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 3357 "y.tab.c"
     break;
 
   case 164: /* pipeline_command: pipeline  */
-#line 1283 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1283 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 3363 "y.tab.c"
     break;
 
   case 165: /* pipeline_command: BANG pipeline_command  */
-#line 1285 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1285 "./parse.y"
                         {
 			  if ((yyvsp[0].command))
 			    (yyvsp[0].command)->flags ^= CMD_INVERT_RETURN;	/* toggle */
@@ -3373,7 +3373,7 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 ';' -> simpl
     break;
 
   case 166: /* pipeline_command: timespec pipeline_command  */
-#line 1291 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1291 "./parse.y"
                         {
 			  if ((yyvsp[0].command))
 			    (yyvsp[0].command)->flags |= (yyvsp[-1].number);
@@ -3383,7 +3383,7 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 ';' -> simpl
     break;
 
   case 167: /* pipeline_command: timespec list_terminator  */
-#line 1297 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1297 "./parse.y"
                         {
 			  ELEMENT x;
 
@@ -3407,7 +3407,7 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 ';' -> simpl
     break;
 
   case 168: /* pipeline_command: BANG list_terminator  */
-#line 1317 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1317 "./parse.y"
                         {
 			  ELEMENT x;
 
@@ -3432,13 +3432,13 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 ';' -> simpl
     break;
 
   case 169: /* pipeline: pipeline '|' newline_list pipeline  */
-#line 1340 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1340 "./parse.y"
                         { (yyval.command) = command_connect ((yyvsp[-3].command), (yyvsp[0].command), '|'); }
 #line 3438 "y.tab.c"
     break;
 
   case 170: /* pipeline: pipeline BAR_AND newline_list pipeline  */
-#line 1342 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1342 "./parse.y"
                         {
 			  /* Make cmd1 |& cmd2 equivalent to cmd1 2>&1 | cmd2 */
 			  COMMAND *tc;
@@ -3465,31 +3465,31 @@ INTERNAL_DEBUG (("LEGACY: parser: command substitution simple_list1 ';' -> simpl
     break;
 
   case 171: /* pipeline: command  */
-#line 1365 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1365 "./parse.y"
                         { (yyval.command) = (yyvsp[0].command); }
 #line 3471 "y.tab.c"
     break;
 
   case 172: /* timespec: TIME  */
-#line 1369 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1369 "./parse.y"
                         { (yyval.number) = CMD_TIME_PIPELINE; }
 #line 3477 "y.tab.c"
     break;
 
   case 173: /* timespec: TIME TIMEOPT  */
-#line 1371 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1371 "./parse.y"
                         { (yyval.number) = CMD_TIME_PIPELINE|CMD_TIME_POSIX; }
 #line 3483 "y.tab.c"
     break;
 
   case 174: /* timespec: TIME TIMEIGN  */
-#line 1373 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1373 "./parse.y"
                         { (yyval.number) = CMD_TIME_PIPELINE|CMD_TIME_POSIX; }
 #line 3489 "y.tab.c"
     break;
 
   case 175: /* timespec: TIME TIMEOPT TIMEIGN  */
-#line 1375 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1375 "./parse.y"
                         { (yyval.number) = CMD_TIME_PIPELINE|CMD_TIME_POSIX; }
 #line 3495 "y.tab.c"
     break;
@@ -3688,7 +3688,7 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 1377 "/usr/local/src/chet/src/bash/src/parse.y"
+#line 1377 "./parse.y"
 
 
 /* Initial size to allocate for tokens, and the
