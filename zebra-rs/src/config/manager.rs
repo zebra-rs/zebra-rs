@@ -67,9 +67,9 @@ pub struct ConfigManager {
 impl ConfigManager {
     pub fn new(
         mut system_path: PathBuf,
+        yang_path: String,
         rib_tx: UnboundedSender<crate::rib::Message>,
     ) -> anyhow::Result<Self> {
-        let yang_path = system_path.to_string_lossy().to_string();
         system_path.pop();
         system_path.push("zebra.conf");
 

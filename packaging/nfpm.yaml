@@ -7,50 +7,34 @@
 # vim: set ts=2 sw=2 tw=0 fo=cnqoj
 
 name: "zebra-rs"
-arch: "amd64"
+arch: "arm64"
 platform: "linux"
 version: "0.5.0"
 section: "default"
 priority: "extra"
 replaces:
-  - foobar
+  - zebra-rs
 provides:
   - zebra-rs
-depends:
-  - foo
-  - bar
-recommends:
-  - whatever
-suggests:
-  - something-else
-conflicts:
-  - not-foo
-  - not-bar
 maintainer: "Kunihiro Ishiguro <kunihiro@zebra.dev>"
 description: |
   FooBar is the great foo and bar software.
     And this can be in multiple lines!
-vendor: "FooBarCorp"
-homepage: "http://example.com"
+homepage: "https://zebra.dev"
 license: "MIT"
 changelog: "changelog.yaml"
 contents:
-  - src: ./foo
-    dst: /usr/bin/foo
-  - src: ./bar
-    dst: /usr/bin/bar
-  - src: ./foobar.conf
-    dst: /etc/foobar.conf
-    type: config
-  - src: /usr/bin/foo
-    dst: /sbin/foo
-    type: symlink
+  - src: ../target/release/zebra-rs
+    dst: /usr/sbin/zebra-rs
+  - src: ../target/release/zebra-ctl
+    dst: /usr/sbin/zebra-ctl
+  - src: ../cli/cli
+    dst: /usr/bin/cli
+  - src: ../target/release/cli-helper
+    dst: /usr/bin/cli-helper
+  - src: ../zebra-rs/yang
+    dst: /etc/zebra-rs/yang
 overrides:
-  rpm:
-    scripts:
-      preinstall: ./scripts/preinstall.sh
-      postremove: ./scripts/postremove.sh
   deb:
     scripts:
       postinstall: ./scripts/postinstall.sh
-      preremove: ./scripts/preremove.sh
