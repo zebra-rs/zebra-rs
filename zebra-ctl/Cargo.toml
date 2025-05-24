@@ -1,7 +1,7 @@
 [package]
-name = "vtyctl"
+name = "zebra-ctl"
 version = "0.6.3"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 anyhow = "1.0.82"

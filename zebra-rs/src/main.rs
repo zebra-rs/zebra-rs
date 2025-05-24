@@ -25,19 +25,47 @@ struct Arg {
     yang_path: String,
 }
 
+// 1. Option Yang path
+// 2. HomeDir ~/.zebra/yang
+// 3. System /etc/zebra-rs/yang
+
+use std::path::Path;
+
+fn yang_path(arg: &Arg) -> Option<String> {
+    if !arg.yang_path.is_empty() {
+        let path = Path::new(&arg.yang_path);
+        if path.exists() {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+    if let Some(mut home_dir) = dirs::home_dir() {
+        home_dir.push(".zebra-rs");
+        home_dir.push("yang");
+        if home_dir.exists() {
+            return Some(home_dir.to_string_lossy().to_string());
+        }
+    }
+    let path = Path::new("/etc/zebra-rs/yang");
+    if path.exists() {
+        return Some(path.to_string_lossy().to_string());
+    } else {
+        return None;
+    }
+}
+
 fn system_path(arg: &Arg) -> PathBuf {
     if !arg.yang_path.is_empty() {
         PathBuf::from(&arg.yang_path)
     } else {
         let mut home = dirs::home_dir().unwrap();
-        home.push(".zebra");
+        home.push(".zebra-rs");
         home.push("yang");
         if home.is_dir() {
             home
         } else {
             let mut path = PathBuf::new();
             path.push("etc");
-            path.push("zebra");
+            path.push("zebra-rs");
             home.push("yang");
             if path.is_dir() {
                 path
@@ -58,6 +86,14 @@ fn tracing_set() {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arg = Arg::parse();
+
+    let yang_path = yang_path(&arg);
+    if yang_path.is_none() {
+        println!("Can't find YANG load path");
+        std::process::exit(1);
+    }
+    let yang_path = yang_path.unwrap();
+
     let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());
@@ -65,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
     let policy = Policy::new();
 
-    let config = ConfigManager::new(system_path(&arg), rib.tx.clone())?;
+    let config = ConfigManager::new(system_path(&arg), yang_path, rib.tx.clone())?;
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());

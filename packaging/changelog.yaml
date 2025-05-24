@@ -1,3 +1,31 @@
-2024-04-16  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+# changelog.yaml – keep newest entry first
+# All timestamps must be in full ISO-8601 format.
+# Fields “distribution” and “urgency” are optional per-entry; if you omit
+# them, the defaults from .chglog.yml (or chglog config) are used.
+# Remove the comments (# …) in real files.
 
-	* Initial debian package.
+- semver: 1.2.3                    # Debian version string (no leading “v”)
+  date: 2025-05-23T18:00:00+08:00  # Upload date (your local TZ or UTC)
+  distribution: unstable           # e.g. unstable | testing | stable
+  urgency: medium                  # low | medium | high | critical
+  packager: Kunihiro Ishiguro <you@example.com>
+  changes:
+    - note: |
+        ### Added
+        * First public release with SCTP “Come Back Later” congestion control
+        * Golang OpenTelemetry hooks for AMF
+
+    - note: |
+        ### Fixed
+        * Memory leak in AMF N2 handler (closes #124)
+
+# ──────────────────────────────────────────────────────────────
+# Copy-and-paste the block above and adjust for every version.
+# ──────────────────────────────────────────────────────────────
+
+- semver: 1.2.2
+  date: 2025-04-15T15:30:00+08:00
+  packager: Kunihiro Ishiguro <you@example.com>
+  changes:
+    - note: |
+        * Maintenance release – bumped dependencies only

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "zebra",
-  "vtysh-helper",
-  "vtyctl",
+  "zebra-rs",
+  "zebra-ctl",
+  "cli-helper",
 ]
