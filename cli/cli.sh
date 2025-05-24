@@ -1,4 +1,4 @@
-# Copyright (C) 2024 Zebra Project.
+# Copyright (C) 2025 zebra-rs project.
 #
 # This software is free software: you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
@@ -28,13 +28,13 @@ _cli_interactive_setup ()
 _cli_interactive_setup
 
 if [[ $interactive ]]; then
-  if [ ! `basename "/$0"` = "vtysh" ];then
+  if [ ! `basename "/$0"` = "cli" ];then
    return 0
   fi
 fi
 
 # CLI command tool name.
-cli_command=vtysh-helper
+cli_command=cli-helper
 
 declare -x CLI_MODE="exec"
 declare -x CLI_MODE_STR="Exec"
