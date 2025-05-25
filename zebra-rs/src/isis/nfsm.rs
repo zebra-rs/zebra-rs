@@ -277,12 +277,10 @@ pub fn isis_nfsm(
                 if let Some(adj) = ntop.adj.get(&level) {
                     if adj.sys_id() == nbr.sys_id {
                         *ntop.adj.get_mut(&level) = None;
-                        let msg = Message::LspOriginate(level);
-                        ntop.tx.send(msg).unwrap();
                     }
                 }
 
-                // Relese adjacency SID if it has been allocated.
+                // Release adjacency SID if it has been allocated.
                 for (key, value) in nbr.naddr4.iter_mut() {
                     if let Some(label) = value.label {
                         if let Some(local_pool) = ntop.local_pool {
@@ -306,6 +304,8 @@ pub fn isis_nfsm(
                     }
                 }
             }
+            let msg = Message::LspOriginate(level);
+            ntop.tx.send(msg).unwrap();
         }
     }
 }
