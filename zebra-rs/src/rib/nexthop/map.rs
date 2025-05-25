@@ -152,5 +152,13 @@ impl NexthopMap {
                 }
             }
         }
+        for (_, id) in self.mpls.iter() {
+            let entry = self.get(*id);
+            if let Some(grp) = entry {
+                if grp.is_installed() {
+                    fib.nexthop_del(grp).await;
+                }
+            }
+        }
     }
 }
