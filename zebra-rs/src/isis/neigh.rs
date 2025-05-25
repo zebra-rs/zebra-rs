@@ -24,14 +24,13 @@ pub struct Neighbor {
     pub prev: NfsmState,
     pub state: NfsmState,
     pub level: Level,
-    pub addr4: Vec<Ipv4Addr>,
+    // pub addr4: Vec<Ipv4Addr>,
     pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
     pub laddr6: Vec<Ipv6Addr>,
     pub mac: Option<MacAddr>,
     pub hold_timer: Option<Timer>,
     pub dis: bool,
-    pub adj_sid: Afis<u32>,
 }
 
 impl Neighbor {
@@ -51,14 +50,13 @@ impl Neighbor {
             prev: NfsmState::Down,
             state: NfsmState::Down,
             level,
-            addr4: Vec::new(),
+            // addr4: Vec::new(),
             naddr4: BTreeMap::new(),
             addr6: Vec::new(),
             laddr6: Vec::new(),
             mac,
             hold_timer: None,
             dis: false,
-            adj_sid: Afis::<u32>::default(),
         }
     }
 
@@ -179,11 +177,15 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
     // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 4m1s ago
     writeln!(buf, "    LAN Priority: {}, {}", nbr.pdu.priority, dis).unwrap();
 
-    if !nbr.addr4.is_empty() {
+    if !nbr.naddr4.is_empty() {
         writeln!(buf, "    IP Prefixes").unwrap();
     }
-    for addr in &nbr.addr4 {
-        writeln!(buf, "      {}", addr).unwrap();
+    for (key, value) in &nbr.naddr4 {
+        write!(buf, "      {}", value.addr).unwrap();
+        if let Some(label) = value.label {
+            write!(buf, " ({})", label);
+        }
+        writeln!(buf, "");
     }
     if !nbr.laddr6.is_empty() {
         writeln!(buf, "    IPv6 Link-Locals").unwrap();

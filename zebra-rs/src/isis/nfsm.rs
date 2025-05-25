@@ -120,8 +120,8 @@ pub fn nfsm_hold_timer(adj: &Neighbor, level: Level) -> Timer {
 
 #[derive(Debug)]
 pub struct NeighborAddr4 {
-    addr: Ipv4Addr,
-    label: Option<u32>,
+    pub addr: Ipv4Addr,
+    pub label: Option<u32>,
 }
 
 impl NeighborAddr4 {
@@ -172,7 +172,11 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
         }
     });
 
-    nbr.naddr4 = naddr4;
+    for (&key, _) in naddr4.iter() {
+        if !nbr.naddr4.contains_key(&key) {
+            nbr.naddr4.insert(key, NeighborAddr4::new(key));
+        }
+    }
     nbr.addr6 = addr6;
     nbr.laddr6 = laddr6;
 }
@@ -279,15 +283,26 @@ pub fn isis_nfsm(
                 }
 
                 // Relese adjacency SID if it has been allocated.
-                //
+                for (key, value) in nbr.naddr4.iter_mut() {
+                    if let Some(label) = value.label {
+                        if let Some(local_pool) = ntop.local_pool {
+                            local_pool.release(label as usize);
+                        }
+                        value.label = None;
+                    }
+                }
             }
 
             // Neighbor comes up.
             if nbr.state == NfsmState::Up {
-                // Allocate adjacency SID.
                 if let Some(local_pool) = ntop.local_pool {
-                    if let Some(label) = local_pool.allocate() {
-                        *nbr.adj_sid.get_mut(&Afi::Ip) = label as u32;
+                    // Allocate adjacency SID when it is not yet.
+                    for (key, value) in nbr.naddr4.iter_mut() {
+                        if value.label.is_none() {
+                            if let Some(label) = local_pool.allocate() {
+                                value.label = Some(label as u32);
+                            }
+                        }
                     }
                 }
             }
