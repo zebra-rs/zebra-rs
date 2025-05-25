@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -9,7 +10,7 @@ use crate::config::Args;
 use crate::rib::MacAddr;
 
 use super::link::Afis;
-use super::nfsm::NfsmState;
+use super::nfsm::{NeighborAddr4, NfsmState};
 use super::task::Timer;
 use super::{Isis, Level, Message};
 
@@ -24,6 +25,7 @@ pub struct Neighbor {
     pub state: NfsmState,
     pub level: Level,
     pub addr4: Vec<Ipv4Addr>,
+    pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
     pub laddr6: Vec<Ipv6Addr>,
     pub mac: Option<MacAddr>,
@@ -50,6 +52,7 @@ impl Neighbor {
             state: NfsmState::Down,
             level,
             addr4: Vec::new(),
+            naddr4: BTreeMap::new(),
             addr6: Vec::new(),
             laddr6: Vec::new(),
             mac,
