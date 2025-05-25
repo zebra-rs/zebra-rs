@@ -176,9 +176,12 @@ impl Isis {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::SpfCalc(level) => {
+                // SPF calc.
                 let mut top = self.top();
                 *top.spf.get_mut(&level) = None;
                 let (graph, s) = graph(&mut top, level);
+
+                let mut ilm: BTreeMap<u32, SpfIlm> = BTreeMap::new();
 
                 if let Some(s) = s {
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
@@ -204,19 +207,18 @@ impl Isis {
                                 // p.len() == 1 means myself.
                                 if p.len() > 1 {
                                     if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[1]) {
-                                        // Fetch nexthop from the node.
                                         // Find nhop from links.
                                         for (ifindex, link) in top.links.iter() {
-                                            for (_, nbr) in link.state.nbrs.get(&level).iter() {
-                                                if nbr.sys_id == *nhop_id {
-                                                    for tlv in nbr.pdu.tlvs.iter() {
-                                                        if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                                                            let nhop = SpfNexthop {
-                                                                ifindex: *ifindex,
-                                                                adjacency: p[1] == node,
-                                                            };
-                                                            spf_nhops.insert(ifaddr.addr, nhop);
-                                                        }
+                                            if let Some(nbr) =
+                                                link.state.nbrs.get(&level).get(nhop_id)
+                                            {
+                                                for tlv in nbr.pdu.tlvs.iter() {
+                                                    if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
+                                                        let nhop = SpfNexthop {
+                                                            ifindex: *ifindex,
+                                                            adjacency: p[1] == node,
+                                                        };
+                                                        spf_nhops.insert(ifaddr.addr, nhop);
                                                     }
                                                 }
                                             }
@@ -261,6 +263,8 @@ impl Isis {
                             }
                         }
                     }
+                    mpls_route(&rib);
+
                     // Update diff to rib. then replace current SpfRoute with new one.
                     let diff = diff(top.rib.get(&level), &rib);
                     diff_apply(top.rib_tx.clone(), &diff);
@@ -1000,4 +1004,34 @@ pub enum Message {
     LspOriginate(Level),
     DisOriginate(Level, u32),
     SpfCalc(Level),
+}
+
+pub struct SpfIlm {
+    pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
+}
+
+pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>) {
+    let mut ilm: BTreeMap<u32, SpfIlm> = BTreeMap::new();
+
+    for (prefix, route) in rib.iter() {
+        if let Some(sid) = route.sid {
+            let spf_ilm = SpfIlm {
+                nhops: route.nhops.clone(),
+            };
+            ilm.insert(sid, spf_ilm);
+        }
+    }
+
+    println!("-- ILM start --");
+    for (label, ilm) in ilm.iter() {
+        for (addr, nhop) in ilm.nhops.iter() {
+            let olabel = if nhop.adjacency {
+                String::from("implicit null")
+            } else {
+                format!("{}", label)
+            };
+            println!("{} -> {} {} {}", label, addr, nhop.ifindex, olabel);
+        }
+    }
+    println!("-- ILM end --");
 }
