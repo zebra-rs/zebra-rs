@@ -60,6 +60,7 @@ pub struct Isis {
     pub reach_map: Levels<Afis<ReachMap>>,
     pub label_map: Levels<LabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
+    pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
     pub spf: Levels<Option<Timer>>,
     pub global_pool: Option<LabelPool>,
@@ -75,6 +76,7 @@ pub struct IsisTop<'a> {
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub label_map: &'a mut Levels<LabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
+    pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf: &'a mut Levels<Option<Timer>>,
@@ -119,6 +121,7 @@ impl Isis {
             reach_map: Levels::<Afis<ReachMap>>::default(),
             label_map: Levels::<LabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
+            ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf: Levels::<Option<Timer>>::default(),
             global_pool: None,
@@ -179,11 +182,32 @@ impl Isis {
                 // SPF calc.
                 let mut top = self.top();
                 *top.spf.get_mut(&level) = None;
-                let (graph, s) = graph(&mut top, level);
+                let (graph, s, sids) = graph(&mut top, level);
 
                 let mut ilm: BTreeMap<u32, SpfIlm> = BTreeMap::new();
 
                 if let Some(s) = s {
+                    // Before SPF calclation, resolve S's adjacency label.
+                    for (&label, nhop_id) in sids.iter() {
+                        let mut nhops = BTreeMap::new();
+
+                        for (ifindex, link) in top.links.iter() {
+                            if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
+                                for tlv in nbr.pdu.tlvs.iter() {
+                                    if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
+                                        let nhop = SpfNexthop {
+                                            ifindex: *ifindex,
+                                            adjacency: true,
+                                        };
+                                        nhops.insert(ifaddr.addr, nhop);
+                                    }
+                                }
+                            }
+                        }
+                        let spf_ilm = SpfIlm { nhops: nhops };
+                        ilm.insert(label, spf_ilm);
+                    }
+
                     let spf = spf::spf(&graph, s, &spf::SpfOpt::default());
                     // println!("----");
                     // spf::disp(&spf, false);
@@ -263,7 +287,12 @@ impl Isis {
                             }
                         }
                     }
-                    mpls_route(&rib);
+                    mpls_route(&rib, &mut ilm);
+
+                    // Update MPLS.
+                    let ilm_diff = diff_ilm(top.ilm.get(&level), &ilm);
+                    diff_ilm_apply(top.rib_tx.clone(), &ilm_diff);
+                    *top.ilm.get_mut(&level) = ilm;
 
                     // Update diff to rib. then replace current SpfRoute with new one.
                     let diff = diff(top.rib.get(&level), &rib);
@@ -409,6 +438,7 @@ impl Isis {
             reach_map: &mut self.reach_map,
             label_map: &mut self.label_map,
             rib: &mut self.rib,
+            ilm: &mut self.ilm,
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
             spf: &mut self.spf,
@@ -794,9 +824,13 @@ impl LspMap {
     }
 }
 
-pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
+pub fn graph(
+    top: &mut IsisTop,
+    level: Level,
+) -> (spf::Graph, Option<usize>, BTreeMap<u32, IsisSysId>) {
     let mut s: Option<usize> = None;
     let mut graph = spf::Graph::new();
+    let mut sids: BTreeMap<u32, IsisSysId> = BTreeMap::new();
 
     for (key, lsa) in top.lsdb.get(&level).iter() {
         if !lsa.lsp.lsp_id.is_pseudo() {
@@ -804,6 +838,19 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
             let id = top.lsp_map.get_mut(&level).get(&sys_id);
             if lsa.originated {
                 s = Some(id);
+                for tlv in lsa.lsp.tlvs.iter() {
+                    if let IsisTlv::ExtIsReach(tlv) = tlv {
+                        for ent in tlv.entries.iter() {
+                            for sub in ent.subs.iter() {
+                                if let neigh::IsisSubTlv::LanAdjSid(sid) = sub {
+                                    if let SidLabelValue::Label(label) = sid.sid {
+                                        sids.insert(label, sid.system_id.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             let mut node = spf::Node {
@@ -847,7 +894,7 @@ pub fn graph(top: &mut IsisTop, level: Level) -> (spf::Graph, Option<usize>) {
             graph.insert(id, node);
         }
     }
-    (graph, s)
+    (graph, s, sids)
 }
 
 #[derive(Debug, PartialEq)]
@@ -876,6 +923,68 @@ pub fn diff<'a>(
     next: &'a PrefixMap<Ipv4Net, SpfRoute>,
 ) -> DiffResult<'a> {
     let mut res = DiffResult {
+        only_curr: vec![],
+        only_next: vec![],
+        different: vec![],
+        identical: vec![],
+    };
+
+    let mut curr_iter = curr.iter().peekable();
+    let mut next_iter = next.iter().peekable();
+
+    while let (Some(&(curr_prefix, curr_route)), Some(&(next_prefix, next_route))) =
+        (curr_iter.peek(), next_iter.peek())
+    {
+        match curr_prefix.cmp(next_prefix) {
+            std::cmp::Ordering::Less => {
+                // curr_prefix is only in curr
+                res.only_curr.push((curr_prefix, curr_route));
+                curr_iter.next();
+            }
+            std::cmp::Ordering::Greater => {
+                // next_prefix is only in next
+                res.only_next.push((next_prefix, next_route));
+                next_iter.next();
+            }
+            std::cmp::Ordering::Equal => {
+                // keys are equal; compare values
+                if curr_route == next_route {
+                    res.identical.push((curr_prefix, curr_route));
+                } else {
+                    res.different.push((curr_prefix, curr_route, next_route));
+                }
+                curr_iter.next();
+                next_iter.next();
+            }
+        }
+    }
+
+    // Deal with the rest of curr
+    for (prefix, curr_route) in curr_iter {
+        res.only_curr.push((prefix, curr_route));
+    }
+
+    // Deal with the rest of next
+    for (prefix, next_route) in next_iter {
+        res.only_next.push((prefix, next_route));
+    }
+
+    res
+}
+
+#[derive(Debug)]
+pub struct DiffIlmResult<'a> {
+    pub only_curr: Vec<(&'a u32, &'a SpfIlm)>,
+    pub only_next: Vec<(&'a u32, &'a SpfIlm)>,
+    pub different: Vec<(&'a u32, &'a SpfIlm, &'a SpfIlm)>,
+    pub identical: Vec<(&'a u32, &'a SpfIlm)>,
+}
+
+pub fn diff_ilm<'a>(
+    curr: &'a BTreeMap<u32, SpfIlm>,
+    next: &'a BTreeMap<u32, SpfIlm>,
+) -> DiffIlmResult<'a> {
+    let mut res = DiffIlmResult {
         only_curr: vec![],
         only_next: vec![],
         different: vec![],
@@ -996,6 +1105,42 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     }
 }
 
+pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResult) {
+    // Delete.
+    // for (&prefix, route) in diff.only_curr.iter() {
+    //     if !route.nhops.is_empty() {
+    //         let rib = make_rib_entry(route);
+    //         let msg = rib::Message::Ipv4Del {
+    //             prefix: prefix.clone(),
+    //             rib,
+    //         };
+    //         rib_tx.send(msg).unwrap();
+    //     }
+    // }
+    // // Add (changed).
+    // for (&prefix, _, route) in diff.different.iter() {
+    //     if !route.nhops.is_empty() {
+    //         let rib = make_rib_entry(route);
+    //         let msg = rib::Message::Ipv4Add {
+    //             prefix: prefix.clone(),
+    //             rib,
+    //         };
+    //         rib_tx.send(msg).unwrap();
+    //     }
+    // }
+    // // Add (new).
+    // for (&prefix, route) in diff.only_next.iter() {
+    //     if !route.nhops.is_empty() {
+    //         let rib = make_rib_entry(route);
+    //         let msg = rib::Message::Ipv4Add {
+    //             prefix: prefix.clone(),
+    //             rib,
+    //         };
+    //         rib_tx.send(msg).unwrap();
+    //     }
+    // }
+}
+
 pub enum Message {
     Recv(IsisPacket, u32, Option<MacAddr>),
     Ifsm(IfsmEvent, u32, Option<Level>),
@@ -1006,13 +1151,12 @@ pub enum Message {
     SpfCalc(Level),
 }
 
+#[derive(Debug, PartialEq)]
 pub struct SpfIlm {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
 }
 
-pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>) {
-    let mut ilm: BTreeMap<u32, SpfIlm> = BTreeMap::new();
-
+pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, SpfIlm>) {
     for (prefix, route) in rib.iter() {
         if let Some(sid) = route.sid {
             let spf_ilm = SpfIlm {
