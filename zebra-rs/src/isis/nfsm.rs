@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use isis_packet::{IsLevel, IsisHello, IsisTlv};
 
@@ -8,7 +10,7 @@ use crate::rib::MacAddr;
 
 use super::inst::NeighborTop;
 use super::link::LinkTop;
-use super::{IfsmEvent, IsisLink, Message};
+use super::{IfsmEvent, IsisLink, LabelPool, Message};
 
 use super::{neigh::Neighbor, task::Timer};
 
@@ -116,21 +118,61 @@ pub fn nfsm_hold_timer(adj: &Neighbor, level: Level) -> Timer {
     })
 }
 
-fn nfsm_ifaddr_update(nbr: &mut Neighbor) {
-    let mut addr4 = vec![];
+#[derive(Debug)]
+pub struct NeighborAddr4 {
+    addr: Ipv4Addr,
+    label: Option<u32>,
+}
+
+impl NeighborAddr4 {
+    pub fn new(addr: Ipv4Addr) -> Self {
+        Self { addr, label: None }
+    }
+}
+
+pub struct NeighborAddr6 {
+    addr: Ipv6Addr,
+    label: Option<u32>,
+}
+
+impl NeighborAddr6 {
+    pub fn new(addr: Ipv6Addr) -> Self {
+        Self { addr, label: None }
+    }
+}
+
+fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
+    let mut naddr4 = BTreeMap::new();
     let mut addr6 = vec![];
     let mut laddr6 = vec![];
 
     for tlv in &nbr.pdu.tlvs {
         match tlv {
-            IsisTlv::Ipv4IfAddr(ifaddr) => addr4.push(ifaddr.addr),
+            IsisTlv::Ipv4IfAddr(ifaddr) => {
+                naddr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
+            }
             IsisTlv::Ipv6GlobalIfAddr(ifaddr) => addr6.push(ifaddr.addr),
             IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
             _ => {}
         }
     }
 
-    nbr.addr4 = addr4;
+    // Release removed address's label.
+    nbr.naddr4.retain(|key, value| {
+        if !naddr4.contains_key(key) {
+            // Release the label before removing
+            if let Some(label) = value.label {
+                if let Some(local_pool) = local_pool {
+                    local_pool.release(label as usize);
+                }
+            }
+            false // Remove this entry
+        } else {
+            true // Keep this entry
+        }
+    });
+
+    nbr.naddr4 = naddr4;
     nbr.addr6 = addr6;
     nbr.laddr6 = laddr6;
 }
@@ -173,7 +215,7 @@ pub fn nfsm_hello_received(
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
-    nfsm_ifaddr_update(nbr);
+    nfsm_ifaddr_update(nbr, ntop.local_pool);
 
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
