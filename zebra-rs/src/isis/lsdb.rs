@@ -85,7 +85,7 @@ impl Lsdb {
 fn refresh_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
     let tx = top.tx.clone();
     let refresh_time = top.config.refresh_time();
-    Timer::once(refresh_time, move || {
+    Timer::once(5, move || {
         let tx = tx.clone();
         async move {
             use LsdbEvent::*;
