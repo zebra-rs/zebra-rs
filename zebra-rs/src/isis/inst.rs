@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use ipnet::{IpNet, Ipv4Net};
-use isis_packet::prefix::{Ipv4ControlInfo, Ipv6ControlInfo, IsisSubTlv};
+use isis_packet::neigh::{self};
+use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo, IsisSub2SidStructure};
 use isis_packet::*;
 use prefix_trie::PrefixMap;
 use socket2::Socket;
@@ -589,11 +590,26 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         };
         // Ext IS Reach.
         let mut ext_is_reach = IsisTlvExtIsReach::default();
-        let is_reach = IsisTlvExtIsReachEntry {
+        let mut is_reach = IsisTlvExtIsReachEntry {
             neighbor_id: adj.clone(),
-            metric: 10,
+            metric: 10, // TODO: need to get metric from link config.
             subs: Vec::new(),
         };
+        // Neighbor
+        for (_, nbr) in link.state.nbrs.get(&level).iter() {
+            for (key, value) in nbr.naddr4.iter() {
+                if let Some(label) = value.label {
+                    let sub = IsisSubLanAdjSid {
+                        flags: AdjSidFlags::lan_adj_flag_ipv4(),
+                        weight: 0,
+                        system_id: nbr.sys_id.clone(),
+                        sid: SidLabelValue::Label(label),
+                    };
+                    is_reach.subs.push(neigh::IsisSubTlv::LanAdjSid(sub));
+                }
+            }
+        }
+
         ext_is_reach.entries.push(is_reach);
         lsp.tlvs.push(ext_is_reach.into());
     }
@@ -610,7 +626,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                             algo: Algo::Spf,
                             sid: sid.clone(),
                         };
-                        Some(IsisSubTlv::PrefixSid(prefix_sid))
+                        Some(prefix::IsisSubTlv::PrefixSid(prefix_sid))
                     } else {
                         None
                     };
