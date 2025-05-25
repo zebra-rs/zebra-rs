@@ -354,7 +354,9 @@ impl Isis {
 
         match addr.addr {
             IpNet::V4(prefix) => {
-                link.state.v4addr.push(prefix);
+                if !prefix.addr().is_loopback() {
+                    link.state.v4addr.push(prefix);
+                }
             }
             IpNet::V6(prefix) => {
                 if prefix.addr().is_unicast_link_local() {
