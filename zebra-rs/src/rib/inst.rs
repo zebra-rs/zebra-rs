@@ -1,6 +1,6 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::{Link, LspConfig, NexthopMap, RibTxChannel, StaticConfig};
+use super::{Link, MplsConfig, NexthopMap, RibTxChannel, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -39,7 +39,7 @@ pub struct Rib {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
-    pub lsp_config: LspConfig,
+    pub lsp_config: MplsConfig,
     // pub interface_config: InterfaceConfig,
     pub nmap: NexthopMap,
 }
@@ -62,7 +62,7 @@ impl Rib {
             tx,
             rx,
             static_config: StaticConfig::new(),
-            lsp_config: LspConfig::new(),
+            lsp_config: MplsConfig::new(),
             nmap: NexthopMap::default(),
         };
         rib.show_build();
