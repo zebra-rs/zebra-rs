@@ -4,6 +4,7 @@ use std::net::Ipv4Addr;
 use netlink_packet_route::route::MplsLabel;
 
 use crate::rib::entry::RibEntry;
+use crate::rib::inst::IlmEntry;
 use crate::rib::nexthop::NexthopUni;
 use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType};
 
@@ -19,66 +20,38 @@ pub struct MplsRoute {
 }
 
 impl MplsRoute {
-    pub fn to_entry(&self) -> Option<RibEntry> {
+    pub fn to_ilm(&self) -> Option<IlmEntry> {
         if self.nexthops.is_empty() {
             return None;
         }
 
-        // let mut entry = RibEntry::new(RibType::Static);
+        let mut ilm = IlmEntry::new(RibType::Static);
 
-        // if self.nexthops.len() == 1 {
-        //     let (p, n) = self.nexthops.iter().next()?;
-        //     let nhop = NexthopUni {
-        //         addr: *p,
-        //         metric: n.metric.unwrap_or(metric),
-        //         ..Default::default()
-        //     };
-        //     entry.nexthop = Nexthop::Uni(nhop);
-        //     entry.metric = metric;
-        //     return Some(entry);
-        // }
+        if self.nexthops.len() == 1 {
+            let (&addr, n) = self.nexthops.iter().next()?;
+            let mut nhop = NexthopUni {
+                addr,
+                ..Default::default()
+            };
+            if let Some(out_label) = n.out_label {
+                nhop.mpls_label.push(out_label);
+            }
+            ilm.nexthop = Nexthop::Uni(nhop);
+            return Some(ilm);
+        }
 
-        // let mut map: BTreeMap<u32, Vec<(Ipv4Addr, MplsNexthop)>> = BTreeMap::new();
-        // for (p, n) in self.nexthops.clone().iter() {
-        //     let metric = n.metric.unwrap_or(metric);
-        //     let e = map.entry(metric).or_default();
-        //     e.push((*p, n.clone()));
-        // }
-
-        // // ECMP/UCMP case.
-        // if map.len() == 1 {
-        //     let (metric, set) = map.pop_first()?;
-        //     entry.metric = metric;
-        //     let mut multi = NexthopMulti {
-        //         metric,
-        //         ..Default::default()
-        //     };
-        //     for (p, n) in set.iter() {
-        //         let nhop = NexthopUni {
-        //             addr: *p,
-        //             metric: n.metric.unwrap_or(metric),
-        //             ..Default::default()
-        //         };
-        //         multi.nexthops.push(nhop);
-        //     }
-        //     entry.nexthop = Nexthop::Multi(multi);
-        // } else {
-        //     let mut pro = NexthopList::default();
-        //     for (index, (metric, set)) in map.iter_mut().enumerate() {
-        //         if index == 0 {
-        //             entry.metric = *metric;
-        //         }
-        //         let (p, _n) = set.first()?;
-        //         let nhop = NexthopUni {
-        //             addr: *p,
-        //             metric: *metric,
-        //             ..Default::default()
-        //         };
-        //         pro.nexthops.push(nhop);
-        //     }
-        //     entry.nexthop = Nexthop::List(pro);
-        // }
-        // Some(entry)
-        None
+        let mut multi = NexthopMulti::default();
+        for (&addr, n) in self.nexthops.iter() {
+            let mut nhop = NexthopUni {
+                addr,
+                ..Default::default()
+            };
+            if let Some(out_label) = n.out_label {
+                nhop.mpls_label.push(out_label);
+            }
+            multi.nexthops.push(nhop);
+        }
+        ilm.nexthop = Nexthop::Multi(multi);
+        return Some(ilm);
     }
 }

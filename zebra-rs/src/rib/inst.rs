@@ -1,6 +1,6 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::{Link, MplsConfig, NexthopMap, RibTxChannel, StaticConfig};
+use super::{Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig};
 
 use crate::config::{path_from_command, Args};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -11,6 +11,7 @@ use crate::rib::RibEntries;
 use ipnet::{IpNet, Ipv4Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -19,11 +20,28 @@ pub type ShowCallback = fn(&Rib, Args, bool) -> String;
 pub enum Message {
     LinkUp { ifindex: u32 },
     LinkDown { ifindex: u32 },
-    Ipv4Del { prefix: Ipv4Net, rib: RibEntry },
     Ipv4Add { prefix: Ipv4Net, rib: RibEntry },
+    Ipv4Del { prefix: Ipv4Net, rib: RibEntry },
+    IlmAdd { label: u32, ilm: IlmEntry },
+    IlmDel { label: u32, ilm: IlmEntry },
     Shutdown { tx: oneshot::Sender<()> },
     Resolve,
     Subscribe { tx: UnboundedSender<RibRx> },
+}
+
+#[derive(Debug)]
+pub struct IlmEntry {
+    pub rtype: RibType,
+    pub nexthop: Nexthop,
+}
+
+impl IlmEntry {
+    pub fn new(rtype: RibType) -> Self {
+        Self {
+            rtype,
+            nexthop: Nexthop::default(),
+        }
+    }
 }
 
 pub struct Rib {
@@ -36,10 +54,11 @@ pub struct Rib {
     pub redists: Vec<UnboundedSender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
+    pub ilm: BTreeMap<u32, IlmEntry>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
-    pub lsp_config: MplsConfig,
+    pub mpls_config: MplsConfig,
     // pub interface_config: InterfaceConfig,
     pub nmap: NexthopMap,
 }
@@ -59,10 +78,11 @@ impl Rib {
             redists: Vec::new(),
             links: BTreeMap::new(),
             table: PrefixMap::new(),
+            ilm: BTreeMap::new(),
             tx,
             rx,
             static_config: StaticConfig::new(),
-            lsp_config: MplsConfig::new(),
+            mpls_config: MplsConfig::new(),
             nmap: NexthopMap::default(),
         };
         rib.show_build();
@@ -94,6 +114,13 @@ impl Rib {
             }
             Message::Ipv4Del { prefix, rib } => {
                 self.ipv4_route_del(&prefix, rib).await;
+            }
+            Message::IlmAdd { label, ilm } => {
+                println!("IlmAdd {} {:?}", label, ilm);
+                self.ilm_add(label, ilm).await;
+            }
+            Message::IlmDel { label, ilm } => {
+                self.ilm_del(label, ilm).await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
@@ -153,14 +180,15 @@ impl Rib {
                 let (path, args) = path_from_command(&msg.paths);
                 if path.as_str().starts_with("/routing/static/ipv4/route") {
                     let _ = self.static_config.exec(path, args, msg.op);
-                } else if path.as_str().starts_with("/routing/static/ipv4/lsp") {
-                    let _ = self.lsp_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/routing/static/mpls/label") {
+                    let _ = self.mpls_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/interface") {
                     // let _ = self.interface_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
                 self.static_config.commit(self.tx.clone());
+                self.mpls_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();

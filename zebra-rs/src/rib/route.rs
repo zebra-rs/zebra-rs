@@ -8,7 +8,7 @@ use crate::rib::util::IpNetExt;
 use crate::rib::Nexthop;
 
 use super::entry::RibEntry;
-use super::inst::Rib;
+use super::inst::{IlmEntry, Rib};
 use super::nexthop::NexthopUni;
 use super::{
     Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMulti, RibEntries, RibType,
@@ -73,37 +73,13 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
-        // println!(
-        //     "IPv4 route add: {} {} metric {} nexthop {:?}",
-        //     entry.rtype.abbrev(),
-        //     prefix,
-        //     entry.metric,
-        //     entry.nexthop
-        // );
-
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
-            // if !replace.is_empty() {
-            //     if let Some(tmp) = replace.get(0) {
-            //         match &tmp.nexthop {
-            //             Nexthop::Uni(uni) => {
-            //                 println!(" uni {}", uni.addr);
-            //             }
-            //             Nexthop::Multi(multi) => {
-            //                 println!(" multi");
-            //             }
-            //             _ => {
-            //                 //
-            //             }
-            //         }
-            //     }
-            // }
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap);
             rib_add(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         } else {
-            // println!("System add");
             rib_add_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, None).await;
         }
@@ -115,12 +91,6 @@ impl Rib {
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry) {
-        // println!(
-        //     "IPv4 route del: {} {} metric {}",
-        //     entry.rtype.abbrev(),
-        //     prefix,
-        //     entry.metric
-        // );
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             self.rib_selection(prefix, replace.pop()).await;
@@ -129,6 +99,15 @@ impl Rib {
             let mut replace = rib_replace_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         }
+    }
+
+    pub async fn ilm_add(&mut self, label: u32, ilm: IlmEntry) {
+        //
+        println!("ilm_add");
+    }
+
+    pub async fn ilm_del(&mut self, label: u32, ilm: IlmEntry) {
+        //
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
