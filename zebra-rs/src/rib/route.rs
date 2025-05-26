@@ -102,8 +102,7 @@ impl Rib {
     }
 
     pub async fn ilm_add(&mut self, label: u32, ilm: IlmEntry) {
-        //
-        println!("ilm_add");
+        self.fib_handle.ilm_add(label, &ilm).await;
     }
 
     pub async fn ilm_del(&mut self, label: u32, ilm: IlmEntry) {

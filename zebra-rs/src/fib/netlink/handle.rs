@@ -15,7 +15,7 @@ use netlink_packet_route::link::{
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
     MplsLabel, RouteAddress, RouteAttribute, RouteHeader, RouteLwEnCapType, RouteLwTunnelEncap,
-    RouteMessage, RouteMplsIpTunnel, RouteProtocol, RouteScope, RouteType,
+    RouteMessage, RouteMplsIpTunnel, RouteProtocol, RouteScope, RouteType, RouteVia,
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
@@ -31,6 +31,7 @@ use crate::context::vrf::Vrf;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
+use crate::rib::inst::IlmEntry;
 use crate::rib::{link, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
 
 pub struct FibHandle {
@@ -444,12 +445,13 @@ impl FibHandle {
         }
     }
 
-    pub async fn ilm_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+    pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Mpls;
+        msg.header.destination_prefix_length = 20;
 
         msg.header.table = RouteHeader::RT_TABLE_MAIN;
-        msg.header.protocol = match entry.rtype {
+        msg.header.protocol = match ilm.rtype {
             RibType::Static => RouteProtocol::Static,
             RibType::Bgp => RouteProtocol::Bgp,
             RibType::Ospf => RouteProtocol::Ospf,
@@ -460,10 +462,23 @@ impl FibHandle {
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
 
-        let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel::from(100)));
+        let Nexthop::Uni(ref uni) = ilm.nexthop else {
+            return;
+        };
+
+        let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
         msg.attributes.push(attr);
 
-        // Gateway.
+        let attr = RouteAttribute::Oif(4);
+        msg.attributes.push(attr);
+
+        let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel {
+            label,
+            traffic_class: 0,
+            bottom_of_stack: true,
+            ttl: 0,
+        }));
+        msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
