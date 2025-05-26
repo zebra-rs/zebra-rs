@@ -443,6 +443,38 @@ impl FibHandle {
             }
         }
     }
+
+    pub async fn ilm_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Mpls;
+
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = match entry.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
+
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+
+        let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel::from(100)));
+        msg.attributes.push(attr);
+
+        // Gateway.
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewRoute error: {}", e);
+            }
+        }
+    }
 }
 
 fn flags_u32(f: &LinkFlags) -> u32 {

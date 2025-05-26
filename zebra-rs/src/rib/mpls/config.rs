@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
 use crate::rib::entry::RibEntry;
+use crate::rib::inst::IlmEntry;
 use crate::rib::{Message, RibType};
 
 use super::MplsRoute;
@@ -40,22 +41,22 @@ impl MplsConfig {
     }
 
     pub fn commit(&mut self, tx: UnboundedSender<Message>) {
-        while let Some((p, s)) = self.cache.pop_first() {
+        while let Some((l, s)) = self.cache.pop_first() {
             {
                 if s.delete {
-                    // self.config.remove(&p);
-                    // let msg = Message::Ipv4Del {
-                    //     prefix: p,
-                    //     rib: RibEntry::new(RibType::Static),
-                    // };
-                    // let _ = tx.send(msg);
+                    self.config.remove(&l);
+                    let msg = Message::IlmDel {
+                        label: l,
+                        ilm: IlmEntry::new(RibType::Static),
+                    };
+                    let _ = tx.send(msg);
                 } else {
-                    // let entry = s.to_entry();
-                    // self.config.insert(p, s);
-                    // if let Some(rib) = entry {
-                    //     let msg = Message::Ipv4Add { prefix: p, rib };
-                    //     let _ = tx.send(msg);
-                    // }
+                    let ilm = s.to_ilm();
+                    self.config.insert(l, s);
+                    if let Some(ilm) = ilm {
+                        let msg = Message::IlmAdd { label: l, ilm };
+                        let _ = tx.send(msg);
+                    }
                 }
             }
         }
@@ -136,9 +137,7 @@ fn cache_lookup<'a>(
 fn config_builder() -> ConfigBuilder {
     const CONFIG_ERR: &str = "missing config";
     const NEXTHOP_ERR: &str = "missing nexthop address";
-    const METRIC_ERR: &str = "missing metric arg";
-    const DISTANCE_ERR: &str = "missing distance arg";
-    const WEIGHT_ERR: &str = "missing weight arg";
+    const OUT_LABEL_ERR: &str = "missing outgoing label arg";
 
     ConfigBuilder::default()
         .path("/routing/static/mpls/label")
@@ -174,12 +173,15 @@ fn config_builder() -> ConfigBuilder {
             let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
+            let olabel = args.u32().context(OUT_LABEL_ERR)?;
+            n.out_label = Some(olabel);
             Ok(())
         })
         .del(|config, cache, label, args| {
             let s = cache_lookup(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
+            n.out_label = None;
             Ok(())
         })
 }
