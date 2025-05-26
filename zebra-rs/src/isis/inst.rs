@@ -19,8 +19,9 @@ use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
+use crate::rib::inst::IlmEntry;
 use crate::rib::link::LinkAddr;
-use crate::rib::{self, Link, MacAddr, RibType};
+use crate::rib::{self, Link, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
 use crate::spf;
 use crate::{
     config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
@@ -1105,40 +1106,60 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     }
 }
 
+fn make_ilm_entry(ilm: &SpfIlm) -> IlmEntry {
+    if ilm.nhops.len() == 1 {
+        if let Some((&addr, nhop)) = ilm.nhops.iter().next() {
+            let uni = NexthopUni {
+                addr,
+                ifindex: nhop.ifindex,
+                ..Default::default()
+            };
+            return IlmEntry {
+                rtype: RibType::Isis,
+                nexthop: Nexthop::Uni(uni),
+            };
+        }
+    }
+    let mut multi = NexthopMulti::default();
+    for ((&addr, nhop)) in ilm.nhops.iter() {
+        let uni = NexthopUni {
+            addr,
+            ifindex: nhop.ifindex,
+            ..Default::default()
+        };
+        multi.nexthops.push(uni);
+    }
+    IlmEntry {
+        rtype: RibType::Isis,
+        nexthop: Nexthop::Multi(multi),
+    }
+}
+
 pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResult) {
     // Delete.
-    // for (&prefix, route) in diff.only_curr.iter() {
-    //     if !route.nhops.is_empty() {
-    //         let rib = make_rib_entry(route);
-    //         let msg = rib::Message::Ipv4Del {
-    //             prefix: prefix.clone(),
-    //             rib,
-    //         };
-    //         rib_tx.send(msg).unwrap();
-    //     }
-    // }
-    // // Add (changed).
-    // for (&prefix, _, route) in diff.different.iter() {
-    //     if !route.nhops.is_empty() {
-    //         let rib = make_rib_entry(route);
-    //         let msg = rib::Message::Ipv4Add {
-    //             prefix: prefix.clone(),
-    //             rib,
-    //         };
-    //         rib_tx.send(msg).unwrap();
-    //     }
-    // }
-    // // Add (new).
-    // for (&prefix, route) in diff.only_next.iter() {
-    //     if !route.nhops.is_empty() {
-    //         let rib = make_rib_entry(route);
-    //         let msg = rib::Message::Ipv4Add {
-    //             prefix: prefix.clone(),
-    //             rib,
-    //         };
-    //         rib_tx.send(msg).unwrap();
-    //     }
-    // }
+    for (&label, &ref ilm) in diff.only_curr.iter() {
+        if !ilm.nhops.is_empty() {
+            let ilm = make_ilm_entry(ilm);
+            let msg = rib::Message::IlmDel { label, ilm };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    // Add (changed).
+    for (&label, _, &ref ilm) in diff.different.iter() {
+        if !ilm.nhops.is_empty() {
+            let ilm = make_ilm_entry(ilm);
+            let msg = rib::Message::IlmAdd { label, ilm };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    // Add (new).
+    for (&label, &ref ilm) in diff.only_next.iter() {
+        if !ilm.nhops.is_empty() {
+            let ilm = make_ilm_entry(ilm);
+            let msg = rib::Message::IlmAdd { label, ilm };
+            rib_tx.send(msg).unwrap();
+        }
+    }
 }
 
 pub enum Message {
