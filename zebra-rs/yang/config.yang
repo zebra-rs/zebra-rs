@@ -202,6 +202,25 @@ module config {
       }
       container static {
         ext:help "Static route configuration";
+        container mpls {
+          list label {
+            key "value";
+            leaf value {
+              type uint32;
+            }
+            list nexthop {
+              key "address";
+              leaf "address" {
+                type inet:ipv4-address;
+                description "Nexthop of the route";
+              }
+              leaf "outgoing-label" {
+                type uint32;
+              }
+            }
+          }
+        }
+
         container ipv4 {
           ext:help "IPv4 configuration";
           list route {
