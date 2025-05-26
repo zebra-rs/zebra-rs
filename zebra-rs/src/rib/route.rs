@@ -106,7 +106,7 @@ impl Rib {
     }
 
     pub async fn ilm_del(&mut self, label: u32, ilm: IlmEntry) {
-        //
+        self.fib_handle.ilm_del(label, &ilm).await;
     }
 
     pub async fn ipv4_route_resolve(&mut self) {

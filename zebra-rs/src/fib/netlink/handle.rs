@@ -469,8 +469,8 @@ impl FibHandle {
         let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
         msg.attributes.push(attr);
 
-        let attr = RouteAttribute::Oif(4);
-        msg.attributes.push(attr);
+        // let attr = RouteAttribute::Oif(4);
+        // msg.attributes.push(attr);
 
         let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel {
             label,
@@ -481,6 +481,42 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewRoute error: {}", e);
+            }
+        }
+    }
+
+    pub async fn ilm_del(&self, label: u32, ilm: &IlmEntry) {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Mpls;
+        msg.header.destination_prefix_length = 20;
+
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = match ilm.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
+
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+
+        let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel {
+            label,
+            traffic_class: 0,
+            bottom_of_stack: true,
+            ttl: 0,
+        }));
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
         let mut response = self.handle.clone().request(req).unwrap();
