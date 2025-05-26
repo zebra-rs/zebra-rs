@@ -469,8 +469,10 @@ impl FibHandle {
         let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
         msg.attributes.push(attr);
 
-        // let attr = RouteAttribute::Oif(4);
-        // msg.attributes.push(attr);
+        if uni.ifindex != 0 {
+            let attr = RouteAttribute::Oif(uni.ifindex);
+            msg.attributes.push(attr);
+        }
 
         let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel {
             label,
