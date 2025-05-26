@@ -8,15 +8,15 @@ use crate::config::{Args, ConfigOp};
 use crate::rib::entry::RibEntry;
 use crate::rib::{Message, RibType};
 
-use super::LspRoute;
+use super::MplsRoute;
 
-pub struct LspConfig {
-    pub config: BTreeMap<Ipv4Net, LspRoute>,
-    pub cache: BTreeMap<Ipv4Net, LspRoute>,
+pub struct MplsConfig {
+    pub config: MplsConfigMap,
+    pub cache: MplsConfigMap,
     builder: ConfigBuilder,
 }
 
-impl LspConfig {
+impl MplsConfig {
     pub fn new() -> Self {
         Self {
             config: BTreeMap::new(),
@@ -34,28 +34,28 @@ impl LspConfig {
             .map
             .get(&(path.to_string(), op))
             .context(CONFIG_ERR)?;
-        let prefix: Ipv4Net = args.v4net().context(PREFIX_ERR)?;
+        let label: u32 = args.u32().context(PREFIX_ERR)?;
 
-        func(&mut self.config, &mut self.cache, &prefix, &mut args)
+        func(&mut self.config, &mut self.cache, label, &mut args)
     }
 
     pub fn commit(&mut self, tx: UnboundedSender<Message>) {
         while let Some((p, s)) = self.cache.pop_first() {
             {
                 if s.delete {
-                    self.config.remove(&p);
-                    let msg = Message::Ipv4Del {
-                        prefix: p,
-                        rib: RibEntry::new(RibType::Static),
-                    };
-                    let _ = tx.send(msg);
+                    // self.config.remove(&p);
+                    // let msg = Message::Ipv4Del {
+                    //     prefix: p,
+                    //     rib: RibEntry::new(RibType::Static),
+                    // };
+                    // let _ = tx.send(msg);
                 } else {
-                    let entry = s.to_entry();
-                    self.config.insert(p, s);
-                    if let Some(rib) = entry {
-                        let msg = Message::Ipv4Add { prefix: p, rib };
-                        let _ = tx.send(msg);
-                    }
+                    // let entry = s.to_entry();
+                    // self.config.insert(p, s);
+                    // if let Some(rib) = entry {
+                    //     let msg = Message::Ipv4Add { prefix: p, rib };
+                    //     let _ = tx.send(msg);
+                    // }
                 }
             }
         }
@@ -68,10 +68,12 @@ struct ConfigBuilder {
     pub map: BTreeMap<(String, ConfigOp), Handler>,
 }
 
+type MplsConfigMap = BTreeMap<u32, MplsRoute>;
+
 type Handler = fn(
-    config: &mut BTreeMap<Ipv4Net, LspRoute>,
-    cache: &mut BTreeMap<Ipv4Net, LspRoute>,
-    prefix: &Ipv4Net,
+    config: &mut MplsConfigMap,
+    cache: &mut MplsConfigMap,
+    label: u32,
     args: &mut Args,
 ) -> Result<()>;
 
@@ -92,38 +94,38 @@ impl ConfigBuilder {
     }
 }
 
-fn config_get(config: &BTreeMap<Ipv4Net, LspRoute>, prefix: &Ipv4Net) -> LspRoute {
-    let Some(entry) = config.get(prefix) else {
-        return LspRoute::default();
+fn config_get(config: &MplsConfigMap, label: u32) -> MplsRoute {
+    let Some(entry) = config.get(&label) else {
+        return MplsRoute::default();
     };
     entry.clone()
 }
 
-fn config_lookup(config: &BTreeMap<Ipv4Net, LspRoute>, prefix: &Ipv4Net) -> Option<LspRoute> {
-    let entry = config.get(prefix)?;
+fn config_lookup(config: &MplsConfigMap, label: u32) -> Option<MplsRoute> {
+    let entry = config.get(&label)?;
     Some(entry.clone())
 }
 
 fn cache_get<'a>(
-    config: &'a BTreeMap<Ipv4Net, LspRoute>,
-    cache: &'a mut BTreeMap<Ipv4Net, LspRoute>,
-    prefix: &'a Ipv4Net,
-) -> Option<&'a mut LspRoute> {
-    if cache.get(prefix).is_none() {
-        cache.insert(*prefix, config_get(config, prefix));
+    config: &'a MplsConfigMap,
+    cache: &'a mut MplsConfigMap,
+    label: &'a u32,
+) -> Option<&'a mut MplsRoute> {
+    if cache.get(label).is_none() {
+        cache.insert(*label, config_get(config, *label));
     }
-    cache.get_mut(prefix)
+    cache.get_mut(label)
 }
 
 fn cache_lookup<'a>(
-    config: &'a BTreeMap<Ipv4Net, LspRoute>,
-    cache: &'a mut BTreeMap<Ipv4Net, LspRoute>,
-    prefix: &'a Ipv4Net,
-) -> Option<&'a mut LspRoute> {
-    if cache.get(prefix).is_none() {
-        cache.insert(*prefix, config_lookup(config, prefix)?);
+    config: &'a MplsConfigMap,
+    cache: &'a mut MplsConfigMap,
+    label: &'a u32,
+) -> Option<&'a mut MplsRoute> {
+    if cache.get(label).is_none() {
+        cache.insert(*label, config_lookup(config, *label)?);
     }
-    let cache = cache.get_mut(prefix)?;
+    let cache = cache.get_mut(label)?;
     if cache.delete {
         None
     } else {
@@ -139,69 +141,45 @@ fn config_builder() -> ConfigBuilder {
     const WEIGHT_ERR: &str = "missing weight arg";
 
     ConfigBuilder::default()
-        .path("/routing/static/ipv4/lsp")
-        .set(|config, cache, prefix, _| {
-            let _ = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
+        .path("/routing/static/mpls/label")
+        .set(|config, cache, label, _| {
+            let _ = cache_get(config, cache, &label).context(CONFIG_ERR)?;
             Ok(())
         })
-        .del(|config, cache, prefix, _| {
-            if let Some(st) = cache.get_mut(prefix) {
+        .del(|config, cache, label, _| {
+            if let Some(st) = cache.get_mut(&label) {
                 st.delete = true;
             } else {
-                let mut st = config_lookup(config, prefix).context(CONFIG_ERR)?;
+                let mut st = config_lookup(config, label).context(CONFIG_ERR)?;
                 st.delete = true;
-                cache.insert(*prefix, st);
+                cache.insert(label, st);
             }
             Ok(())
         })
-        .path("/routing/static/ipv4/lsp/metric")
-        .set(|config, cache, prefix, args| {
-            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
-            s.metric = Some(args.u32().context(METRIC_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, prefix, _| {
-            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
-            s.metric = None;
-            Ok(())
-        })
-        .path("/routing/static/ipv4/lsp/distance")
-        .set(|config, cache, prefix, args| {
-            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
-            s.distance = Some(args.u8().context(DISTANCE_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, prefix, _| {
-            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
-            s.distance = None;
-            Ok(())
-        })
-        .path("/routing/static/ipv4/lsp/nexthop")
-        .set(|config, cache, prefix, args| {
-            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
+        .path("/routing/static/mpls/label/nexthop")
+        .set(|config, cache, label, args| {
+            let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let _ = s.nexthops.entry(naddr).or_default();
             Ok(())
         })
-        .del(|config, cache, prefix, args| {
-            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, label, args| {
+            let s = cache_lookup(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
             Ok(())
         })
-        .path("/routing/static/ipv4/lsp/nexthop/metric")
-        .set(|config, cache, prefix, args| {
-            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
+        .path("/routing/static/mpls/label/nexthop/outgoing-label")
+        .set(|config, cache, label, args| {
+            let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.entry(naddr).or_default();
-            n.metric = Some(args.u32().context(METRIC_ERR)?);
             Ok(())
         })
-        .del(|config, cache, prefix, args| {
-            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
+        .del(|config, cache, label, args| {
+            let s = cache_lookup(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
-            n.metric = None;
             Ok(())
         })
 }
