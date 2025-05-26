@@ -517,12 +517,12 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute error: {}", e);
+                println!("DelRoute error: {}", e);
             }
         }
     }
