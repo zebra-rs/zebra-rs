@@ -15,7 +15,7 @@ use netlink_packet_route::link::{
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
     MplsLabel, RouteAddress, RouteAttribute, RouteHeader, RouteLwEnCapType, RouteLwTunnelEncap,
-    RouteMessage, RouteMplsIpTunnel, RouteProtocol, RouteScope, RouteType, RouteVia,
+    RouteMessage, RouteMplsIpTunnel, RouteNextHop, RouteProtocol, RouteScope, RouteType, RouteVia,
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
@@ -445,7 +445,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry) {
+    pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry, replace: bool) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Mpls;
         msg.header.destination_prefix_length = 20;
@@ -484,8 +484,33 @@ impl FibHandle {
                 }
             }
             Nexthop::Multi(ref multi) => {
-                //let attr = RouteAttribute::
-                return;
+                let mut mpath = vec![];
+                for uni in multi.nexthops.iter() {
+                    let mut nhop = RouteNextHop::default();
+
+                    let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
+                    nhop.attributes.push(attr);
+
+                    if uni.ifindex != 0 {
+                        let attr = RouteAttribute::Oif(uni.ifindex);
+                        nhop.attributes.push(attr);
+                    }
+
+                    for &label in uni.mpls_label.iter() {
+                        let label = MplsLabel {
+                            label,
+                            traffic_class: 0,
+                            bottom_of_stack: true,
+                            ttl: 0,
+                        };
+                        let attr = RouteAttribute::NewDestination(vec![label]);
+                        nhop.attributes.push(attr);
+                    }
+
+                    mpath.push(nhop);
+                }
+                let attr = RouteAttribute::MultiPath(mpath);
+                msg.attributes.push(attr);
             }
             _ => {
                 // no supoort.
@@ -502,7 +527,17 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        let flag = if replace {
+            NLM_F_CREATE | NLM_F_REPLACE
+        } else {
+            NLM_F_CREATE
+        };
+        if replace {
+            println!("Repace!");
+        } else {
+            println!("Create!");
+        }
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | flag;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
