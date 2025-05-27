@@ -110,6 +110,15 @@ pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
     buf
 }
 
+pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
+    let mut buf = String::new();
+
+    for (label, ilm) in rib.ilm.iter() {
+        writeln!(buf, "{} {}", label, ilm.nexthop).unwrap();
+    }
+    buf
+}
+
 impl Rib {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -119,5 +128,6 @@ impl Rib {
         self.show_add("/show/interface", link_show);
         self.show_add("/show/ip/route", rib_show);
         self.show_add("/show/nexthop", nexthop_show);
+        self.show_add("/show/mpls/ilm", ilm_show);
     }
 }

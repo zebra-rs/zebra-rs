@@ -28,6 +28,11 @@ module exec {
       ext:help "Show version";
       type empty;
     }
+    container mpls {
+      leaf ilm {
+        type empty;
+      }
+    }
     leaf nexthop {
       ext:help "Show nexthop group";
       type empty;

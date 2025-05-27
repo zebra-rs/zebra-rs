@@ -29,7 +29,7 @@ pub enum Message {
     Subscribe { tx: UnboundedSender<RibRx> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IlmEntry {
     pub rtype: RibType,
     pub nexthop: Nexthop,
@@ -124,6 +124,11 @@ impl Rib {
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
+                let ilms = self.ilm.clone();
+
+                for ((&label, ilm)) in ilms.iter() {
+                    self.ilm_del(label, ilm.clone()).await;
+                }
                 let _ = tx.send(());
             }
             Message::LinkUp { ifindex } => {
