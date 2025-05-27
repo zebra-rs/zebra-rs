@@ -577,7 +577,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     // TODO: Router capability. When TE-Router ID is configured, use the value. If
     // not when Router ID is configured, use the value. Otherwise system
     // default Router ID will be used.
-    let router_id: Ipv4Addr = "1.2.3.4".parse().unwrap();
+    let router_id: Ipv4Addr = "4.4.4.4".parse().unwrap();
     let mut cap = IsisTlvRouterCap {
         router_id,
         flags: 0.into(),
@@ -1106,14 +1106,17 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     }
 }
 
-fn make_ilm_entry(ilm: &SpfIlm) -> IlmEntry {
+fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     if ilm.nhops.len() == 1 {
         if let Some((&addr, nhop)) = ilm.nhops.iter().next() {
-            let uni = NexthopUni {
+            let mut uni = NexthopUni {
                 addr,
                 ifindex: nhop.ifindex,
                 ..Default::default()
             };
+            if !nhop.adjacency {
+                uni.mpls_label.push(label);
+            }
             return IlmEntry {
                 rtype: RibType::Isis,
                 nexthop: Nexthop::Uni(uni),
@@ -1122,11 +1125,14 @@ fn make_ilm_entry(ilm: &SpfIlm) -> IlmEntry {
     }
     let mut multi = NexthopMulti::default();
     for ((&addr, nhop)) in ilm.nhops.iter() {
-        let uni = NexthopUni {
+        let mut uni = NexthopUni {
             addr,
             ifindex: nhop.ifindex,
             ..Default::default()
         };
+        if !nhop.adjacency {
+            uni.mpls_label.push(label);
+        }
         multi.nexthops.push(uni);
     }
     IlmEntry {
@@ -1139,7 +1145,7 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
     // Delete.
     for (&label, &ref ilm) in diff.only_curr.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm = make_ilm_entry(ilm);
+            let ilm = make_ilm_entry(label, ilm);
             let msg = rib::Message::IlmDel { label, ilm };
             rib_tx.send(msg).unwrap();
         }
@@ -1147,7 +1153,7 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
     // Add (changed).
     for (&label, _, &ref ilm) in diff.different.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm = make_ilm_entry(ilm);
+            let ilm = make_ilm_entry(label, ilm);
             let msg = rib::Message::IlmAdd { label, ilm };
             rib_tx.send(msg).unwrap();
         }
@@ -1155,7 +1161,7 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
     // Add (new).
     for (&label, &ref ilm) in diff.only_next.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm = make_ilm_entry(ilm);
+            let ilm = make_ilm_entry(label, ilm);
             let msg = rib::Message::IlmAdd { label, ilm };
             rib_tx.send(msg).unwrap();
         }
