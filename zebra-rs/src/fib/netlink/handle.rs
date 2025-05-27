@@ -462,16 +462,35 @@ impl FibHandle {
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
 
-        let Nexthop::Uni(ref uni) = ilm.nexthop else {
-            return;
-        };
+        match ilm.nexthop {
+            Nexthop::Uni(ref uni) => {
+                let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
+                msg.attributes.push(attr);
 
-        let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
-        msg.attributes.push(attr);
+                if uni.ifindex != 0 {
+                    let attr = RouteAttribute::Oif(uni.ifindex);
+                    msg.attributes.push(attr);
+                }
 
-        if uni.ifindex != 0 {
-            let attr = RouteAttribute::Oif(uni.ifindex);
-            msg.attributes.push(attr);
+                for &label in uni.mpls_label.iter() {
+                    let label = MplsLabel {
+                        label,
+                        traffic_class: 0,
+                        bottom_of_stack: true,
+                        ttl: 0,
+                    };
+                    let attr = RouteAttribute::NewDestination(vec![label]);
+                    msg.attributes.push(attr);
+                }
+            }
+            Nexthop::Multi(ref multi) => {
+                //let attr = RouteAttribute::
+                return;
+            }
+            _ => {
+                // no supoort.
+                return;
+            }
         }
 
         let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel {

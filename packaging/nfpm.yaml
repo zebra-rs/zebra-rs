@@ -34,6 +34,8 @@ contents:
     dst: /usr/bin/cli-helper
   - src: ../zebra-rs/yang
     dst: /etc/zebra-rs/yang
+  - src: ./modules-load.d/zebra-rs.conf
+    dst: /etc/modules-load.d/zebra-rs.conf
 overrides:
   deb:
     scripts:
