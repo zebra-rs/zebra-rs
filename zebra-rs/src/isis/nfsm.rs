@@ -301,8 +301,6 @@ pub fn isis_nfsm(
                     }
                 }
             }
-            let msg = Message::LspOriginate(level);
-            ntop.tx.send(msg).unwrap();
         }
     }
 }

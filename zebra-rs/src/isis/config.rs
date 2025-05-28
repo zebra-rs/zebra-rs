@@ -4,9 +4,9 @@ use isis_packet::{IsLevel, Nsap};
 
 use crate::config::{Args, ConfigOp};
 
-use super::link;
 use super::link::Afis;
 use super::Isis;
+use super::{link, Level};
 
 impl Isis {
     pub fn callback_build(&mut self) {
@@ -73,10 +73,16 @@ impl IsisConfig {
     }
 }
 
-fn config_net(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
+fn config_net(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let nsap = args.string()?.parse::<Nsap>().unwrap();
 
-    isis.config.net = nsap;
+    if op.is_set() {
+        isis.lsp_map.get_mut(&Level::L1).get(&nsap.sys_id());
+        isis.lsp_map.get_mut(&Level::L2).get(&nsap.sys_id());
+        isis.config.net = nsap;
+    } else {
+        isis.config.net = Nsap::default();
+    }
 
     Some(())
 }

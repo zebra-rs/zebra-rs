@@ -187,7 +187,11 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
     // Check if DIS selection is dampened
     if ltop.state.dis_stats.get(&level).is_dampened() {
-        tracing::debug!("DIS selection dampened on {} level {}", ltop.state.name, level);
+        tracing::debug!(
+            "DIS selection dampened on {} level {}",
+            ltop.state.name,
+            level
+        );
         return;
     }
 
@@ -200,7 +204,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     let mut best_priority = ltop.config.priority();
     let mut best_mac = ltop.state.mac.clone();
 
-    // We will check at least Up state neighbor exists.
+    // We will check at least one Up state neighbor exists.
     let mut nbrs_up = 0;
 
     for (key, nbr) in ltop.state.nbrs.get_mut(&level).iter_mut() {
@@ -226,15 +230,22 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             nbr.dis = true;
             let status = DisStatus::Other;
             let sys_id = Some(nbr.sys_id.clone());
-            let reason = format!("Neighbor {} elected (priority: {}, mac: {:?})", 
-                               nbr.sys_id, nbr.pdu.priority, nbr.mac);
-            
-            tracing::info!("DIS selection: {} on {} (priority: {}, neighbors: {})", 
-                          nbr.sys_id, ltop.state.name, nbr.pdu.priority, nbrs_up);
-            
+            let reason = format!(
+                "Neighbor {} elected (priority: {}, mac: {:?})",
+                nbr.sys_id, nbr.pdu.priority, nbr.mac
+            );
+
+            tracing::info!(
+                "DIS selection: {} on {} (priority: {}, neighbors: {})",
+                nbr.sys_id,
+                ltop.state.name,
+                nbr.pdu.priority,
+                nbrs_up
+            );
+
             *ltop.state.dis_status.get_mut(&level) = status.clone();
             *ltop.state.dis.get_mut(&level) = sys_id.clone();
-            
+
             if ltop.state.lan_id.get(&level).is_none() {
                 if !nbr.pdu.lan_id.is_empty() {
                     tracing::info!("DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
@@ -250,24 +261,28 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     } else {
         let status = DisStatus::Myself;
         let sys_id = Some(ltop.up_config.net.sys_id());
-        let reason = format!("Self elected (priority: {}, neighbors: {})", 
-                            ltop.config.priority(), nbrs_up);
-        
-        tracing::info!("DIS selection: self on {} (priority: {}, neighbors: {})", 
-                      ltop.state.name, ltop.config.priority(), nbrs_up);
+        let reason = format!(
+            "Self elected (priority: {}, neighbors: {})",
+            ltop.config.priority(),
+            nbrs_up
+        );
+
+        tracing::info!(
+            "DIS selection: self on {} (priority: {}, neighbors: {})",
+            ltop.state.name,
+            ltop.config.priority(),
+            nbrs_up
+        );
         become_dis(ltop, level);
         (status, sys_id, reason)
     };
 
     // Record DIS change if status actually changed
     if old_status != new_status || old_sys_id != new_sys_id {
-        ltop.state.dis_stats.get_mut(&level).record_change(
-            old_status,
-            new_status,
-            old_sys_id,
-            new_sys_id,
-            reason,
-        );
+        ltop.state
+            .dis_stats
+            .get_mut(&level)
+            .record_change(old_status, new_status, old_sys_id, new_sys_id, reason);
     }
 }
 
@@ -288,7 +303,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Generate DIS pseudo node id.
     let pseudo_id: u8 = ltop.state.ifindex as u8;
     let lsp_id = IsisLspId::new(ltop.up_config.net.sys_id(), pseudo_id, 0);
-    println!("LSP_ID: {}", lsp_id);
+    tracing::info!("Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
 
     // Set myself as DIS.
     *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
@@ -301,6 +316,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     hello_originate(ltop, level);
 
     // Generate LSP.
+    tracing::info!("XXX LspOriginate in become_dis");
     ltop.tx.send(Message::LspOriginate(level)).unwrap();
 
     // Generate DIS.

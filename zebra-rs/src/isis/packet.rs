@@ -98,6 +98,7 @@ pub fn lsp_self_purged(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
             if lsp.seq_number > originated.lsp.seq_number {
                 insert_self_originate(top, level, lsp);
             }
+            tracing::info!("XXX LspOriginate from lsp_self_purged");
             top.tx.send(Message::LspOriginate(level));
         }
         None => {
@@ -120,6 +121,7 @@ pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
                 }
                 std::cmp::Ordering::Equal => {
                     if lsp.checksum != originated.lsp.checksum {
+                        tracing::info!("XXX LspOriginate from lsp_self_update");
                         top.tx.send(Message::LspOriginate(level));
                     }
                 }
@@ -164,6 +166,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
                     if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
                         tracing::info!("Adjacency with DIS {}", dis);
                         *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
+                        tracing::info!("XXX LspOriginate from lsp_recv");
                         link.tx.send(Message::LspOriginate(level)).unwrap();
                     }
                 }

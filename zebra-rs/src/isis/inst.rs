@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::default;
+use std::fmt::Display;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
@@ -179,6 +180,7 @@ impl Isis {
     }
 
     pub fn process_msg(&mut self, msg: Message) {
+        tracing::info!("{}", msg);
         match msg {
             Message::SpfCalc(level) => {
                 // SPF calc.
@@ -1177,6 +1179,26 @@ pub enum Message {
     LspOriginate(Level),
     DisOriginate(Level, u32),
     SpfCalc(Level),
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Message::Recv(isis_packet, _, mac_addr) => {
+                write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
+            }
+            Message::Ifsm(ifsm_event, _, level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
+            Message::Nfsm(nfsm_event, _, isis_sys_id, level) => {
+                write!(f, "[Message::Nfsm({:?})]", nfsm_event)
+            }
+            Message::Lsdb(lsdb_event, level, isis_lsp_id) => {
+                write!(f, "[Message::Lsdb({:?})]", lsdb_event)
+            }
+            Message::LspOriginate(level) => write!(f, "[Message::LspOriginate({})]", level),
+            Message::DisOriginate(level, _) => write!(f, "[Message::DisOriginate({})]", level),
+            Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
