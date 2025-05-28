@@ -273,16 +273,16 @@ impl DisStatistics {
         reason: String,
     ) {
         let now = std::time::SystemTime::now();
-        
+
         // Update flap count
         self.flap_count += 1;
         self.last_change = Some(now);
-        
+
         // If becoming DIS, update uptime
         if matches!(to_status, DisStatus::Myself) {
             self.uptime = Some(now);
         }
-        
+
         // Add to history
         let change = DisChange {
             timestamp: now,
@@ -292,19 +292,23 @@ impl DisStatistics {
             to_sys_id,
             reason,
         };
-        
+
         self.history.push(change);
         if self.history.len() > Self::MAX_HISTORY {
             self.history.remove(0);
         }
-        
+
         // Check for flapping and apply dampening
         if self.flap_count >= Self::FLAP_THRESHOLD {
-            self.dampening_until = Some(now + std::time::Duration::from_secs(Self::DAMPENING_PERIOD_SECS));
-            tracing::warn!("DIS flapping detected, applying dampening for {} seconds", Self::DAMPENING_PERIOD_SECS);
+            self.dampening_until =
+                Some(now + std::time::Duration::from_secs(Self::DAMPENING_PERIOD_SECS));
+            tracing::warn!(
+                "DIS flapping detected, applying dampening for {} seconds",
+                Self::DAMPENING_PERIOD_SECS
+            );
         }
     }
-    
+
     pub fn is_dampened(&self) -> bool {
         if let Some(until) = self.dampening_until {
             std::time::SystemTime::now() < until
@@ -312,7 +316,7 @@ impl DisStatistics {
             false
         }
     }
-    
+
     pub fn clear_dampening(&mut self) {
         self.dampening_until = None;
         self.flap_count = 0;
@@ -896,7 +900,8 @@ pub fn show_dis_statistics(isis: &Isis, mut args: Args, json: bool) -> String {
                         if dis_stats.is_dampened() { "Yes" } else { "No" },
                         uptime,
                         last_change
-                    ).unwrap();
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -931,7 +936,7 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
                         continue;
                     }
                 }
-                
+
                 for level in [Level::L1, Level::L2] {
                     if super::ifsm::has_level(link.state.level(), level) {
                         let dis_stats = link.state.dis_stats.get(&level);
@@ -956,8 +961,16 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
 
     let mut buf = String::new();
     writeln!(buf, "DIS Change History:").unwrap();
-    writeln!(buf, "Interface        Level  Time                From        To          Reason").unwrap();
-    writeln!(buf, "---------------- ------ ------------------- ----------- ----------- ------").unwrap();
+    writeln!(
+        buf,
+        "Interface        Level  Time                From        To          Reason"
+    )
+    .unwrap();
+    writeln!(
+        buf,
+        "---------------- ------ ------------------- ----------- ----------- ------"
+    )
+    .unwrap();
 
     for (_, link) in isis.links.iter() {
         if link.config.enabled() {
@@ -966,7 +979,7 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
                     continue;
                 }
             }
-            
+
             for level in [Level::L1, Level::L2] {
                 if super::ifsm::has_level(link.state.level(), level) {
                     let dis_stats = link.state.dis_stats.get(&level);
@@ -978,7 +991,7 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
                         };
                         let to_status = match change.to_status {
                             DisStatus::Myself => "Myself",
-                            DisStatus::Other => "Other", 
+                            DisStatus::Other => "Other",
                             DisStatus::NotSelected => "None",
                         };
 
@@ -991,7 +1004,8 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
                             from_status,
                             to_status,
                             change.reason
-                        ).unwrap();
+                        )
+                        .unwrap();
                     }
                 }
             }
