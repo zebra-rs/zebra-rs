@@ -93,6 +93,43 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     false
 }
 
+pub fn lsp_self_purged(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
+    match top.lsdb.get(&level).get(&lsp.lsp_id) {
+        Some(originated) => {
+            if lsp.seq_number > originated.lsp.seq_number {
+                insert_self_originate(top, level, lsp);
+            }
+            top.tx.send(Message::LspOriginate(level));
+        }
+        None => {
+            // Self LSP does not exists in LSDB, accept the purge
+        }
+    }
+}
+
+pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
+    match top.lsdb.get(&level).get(&lsp.lsp_id) {
+        Some(originated) => {
+            match lsp.seq_number.cmp(&originated.lsp.seq_number) {
+                std::cmp::Ordering::Greater => {
+                    insert_self_originate(top, level, lsp);
+                }
+                std::cmp::Ordering::Equal => {
+                    if lsp.checksum != originated.lsp.checksum {
+                        top.tx.send(Message::LspOriginate(level));
+                    }
+                }
+                std::cmp::Ordering::Less => {
+                    // TODO: We need flood LSP with SRM flag.
+                }
+            }
+        }
+        None => {
+            println!("Self LSP is not in LSDB");
+        }
+    }
+}
+
 pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
@@ -142,56 +179,10 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
     // Self originated LSP came from DIS.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
         println!("Self LSP handling");
-
         if lsp.hold_time == 0 {
-            // Purged LSP received.
-            println!("Purged LSP received.");
-
-            match top.lsdb.get(&level).get(&lsp.lsp_id) {
-                Some(originated) => {
-                    println!("Self LSP exists in LSDB");
-                    println!(
-                        "Recv seq {:2x} Origin seq {:2x}",
-                        lsp.seq_number, originated.lsp.seq_number,
-                    );
-                    // Accept self originated LSP if received seq_number is
-                    // larger than mine.
-                    if lsp.seq_number > originated.lsp.seq_number {
-                        insert_self_originate(top, level, lsp);
-                    }
-                    // Overwrite LSP with seq number increase.
-                    top.tx.send(Message::LspOriginate(level)).unwrap();
-                }
-                None => {
-                    println!("No Self LSP in LSDB, accept the Purge");
-                }
-            }
+            lsp_self_purged(top, level, lsp);
         } else {
-            match top.lsdb.get(&level).get(&lsp.lsp_id) {
-                Some(originated) => {
-                    println!("Self LSP exists in LSDB");
-                    println!(
-                        "Origin seq {:2x} Recv seq {:2x}",
-                        originated.lsp.seq_number, lsp.seq_number
-                    );
-                    println!(
-                        "Origin seq {:2x} Recv seq {:2x}",
-                        originated.lsp.checksum, lsp.checksum
-                    );
-                    if lsp.seq_number > originated.lsp.seq_number {
-                        println!("Accept the received LSP");
-                        insert_self_originate(top, level, lsp);
-                        //top.tx.send(Message::LspOriginate(level)).unwrap();
-                    } else if originated.lsp.seq_number == lsp.seq_number {
-                        if originated.lsp.checksum == lsp.checksum {
-                            println!("Exactly same LSP received, do nothing ");
-                        }
-                    }
-                }
-                None => {
-                    println!("Self LSP is not in LSDB");
-                }
-            }
+            lsp_self_updated(top, level, lsp);
         }
         return;
     }
