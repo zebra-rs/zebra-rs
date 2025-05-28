@@ -245,7 +245,7 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
 
 pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp) -> Option<Lsa> {
     if top.config.net.sys_id() == key.sys_id() {
-        println!("Self originated LSP?");
+        tracing::info!("Self originated LSP?");
         return None;
     }
 

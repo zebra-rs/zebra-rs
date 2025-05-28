@@ -82,9 +82,7 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
             for entry in &ext_is_reach.entries {
-                println!("Neighbor {} <-> {}", entry.neighbor_id, neighbor_id);
                 if entry.neighbor_id == *neighbor_id {
-                    println!("Neighbor found");
                     return true;
                 }
             }
@@ -94,6 +92,7 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
 }
 
 pub fn lsp_self_purged(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
+    tracing::info!("Self originated LSP is purged");
     match top.lsdb.get(&level).get(&lsp.lsp_id) {
         Some(originated) => {
             if lsp.seq_number > originated.lsp.seq_number {
@@ -108,10 +107,15 @@ pub fn lsp_self_purged(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
 }
 
 pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
+    tracing::info!(
+        "Self originated LSP is updated seq number: 0x{:04x}",
+        lsp.seq_number
+    );
     match top.lsdb.get(&level).get(&lsp.lsp_id) {
         Some(originated) => {
             match lsp.seq_number.cmp(&originated.lsp.seq_number) {
                 std::cmp::Ordering::Greater => {
+                    tracing::info!("Self originated LSP is insert into LSDB");
                     insert_self_originate(top, level, lsp);
                 }
                 std::cmp::Ordering::Equal => {
@@ -155,30 +159,28 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
 
         if let Some(dis) = &link.state.dis.get(&level) {
             if link.state.adj.get(&level).is_none() {
-                println!("DIS SIS ID {} <-> {}", lsp.lsp_id.sys_id(), dis);
                 if lsp.lsp_id.sys_id() == *dis {
                     // IS Neighbor include my LSP ID.
                     if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
-                        println!("Adjacency!");
+                        tracing::info!("Adjacency with DIS {}", dis);
                         *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
                         link.tx.send(Message::LspOriginate(level)).unwrap();
                     }
                 }
             }
         } else {
-            println!("DIS sysid is not set");
+            tracing::info!("DIS sysid is not yet set");
         }
     }
-    println!(
-        "LSP recv {} {} {:02x}",
-        lsp.lsp_id.sys_id(),
-        lsp.hold_time,
-        lsp.seq_number
-    );
+    // println!(
+    //     "LSP recv {} {} {:02x}",
+    //     lsp.lsp_id.sys_id(),
+    //     lsp.hold_time,
+    //     lsp.seq_number
+    // );
 
     // Self originated LSP came from DIS.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
-        println!("Self LSP handling");
         if lsp.hold_time == 0 {
             lsp_self_purged(top, level, lsp);
         } else {
@@ -204,7 +206,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
-    // println!("CSNP recv");
+    tracing::info!("CSNP recv");
 
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => (pdu, Level::L1),
@@ -236,14 +238,16 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 // If LSP_ID is my own.
                 if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
                     if lsp.lsp_id.is_pseudo() {
+                        // tracing::info!("CSNP: Self DIS {}", lsp.lsp_id);
                         // println!("LSP myown DIS hold_time {}", lsp.hold_time);
                     } else {
-                        // println!(
-                        //     "LSP own seq num {:x} hold_time {}",
-                        //     lsp.seq_number, lsp.hold_time
-                        // );
+                        // tracing::info!("CSNP: Self LSP {}", lsp.lsp_id);
                         if let Some(local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
-                            // println!("LSP prev seq num {:x}", local.lsp.seq_number);
+                            // tracing::info!(
+                            //     " Local Seq 0x{:04x} Remote Seq 0x{:04x}",
+                            //     local.lsp.seq_number,
+                            //     lsp.seq_number,
+                            // );
                         }
                     }
                     continue;
@@ -255,6 +259,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         // set_ssn();
                         if lsp.hold_time != 0 {
                             // println!("LSP REQ New: {}", lsp.lsp_id);
+                            tracing::info!("CSNP: New Req {}", lsp.lsp_id);
                             let mut psnp = lsp.clone();
                             psnp.seq_number = 0;
                             req.entries.push(psnp);
@@ -264,7 +269,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                     }
                     Some(local) if local.lsp.seq_number < lsp.seq_number => {
                         // set_ssn();
-                        // println!("LSP REQ Update: {}", lsp.lsp_id);
+                        tracing::info!("CSNP: Update {}", lsp.lsp_id);
                         let mut psnp = lsp.clone();
                         psnp.seq_number = 0;
                         req.entries.push(psnp);
@@ -291,7 +296,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
             tlvs: Vec::new(),
         };
         psnp.tlvs.push(req.into());
-        println!("Going to send PSNP");
+        tracing::info!("Send PSNP");
         isis_psnp_send(top, ifindex, psnp);
     }
 }

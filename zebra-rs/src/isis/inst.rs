@@ -307,7 +307,6 @@ impl Isis {
                 process_packet(&mut top, packet, ifindex, mac);
             }
             Message::LspOriginate(level) => {
-                println!("LSP originate!");
                 let mut top = self.top();
                 let mut lsp = lsp_generate(&mut top, level);
                 let buf = lsp_emit(&mut lsp, level);
@@ -538,6 +537,8 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .get(&lsp_id)
         .map(|x| x.lsp.seq_number + 1)
         .unwrap_or(0x0001);
+
+    tracing::info!("LSP originate seq number: 0x{:04x}", seq_number);
 
     // XXX We need wrap around of seq_number.
 

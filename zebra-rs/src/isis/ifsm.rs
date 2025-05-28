@@ -154,7 +154,7 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
     if has_level(ltop.state.level(), level) {
-        println!("IFSM Hello originate {}", level);
+        tracing::info!("Hello originate {} on {}", level, ltop.state.name);
         let hello = hello_generate(ltop, level);
         *ltop.state.hello.get_mut(&level) = Some(hello);
         hello_send(ltop, level);
@@ -185,8 +185,6 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
                 })
     }
 
-    println!("DIS selection!");
-
     // When curr is None, current candidate DIS is myself.
     let mut best_key: Option<IsisSysId> = None;
     let mut best_priority = ltop.config.priority();
@@ -210,7 +208,6 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     *ltop.state.nbrs_up.get_mut(&level) = nbrs_up;
 
     if nbrs_up == 0 {
-        println!("DIS no up neighbors");
         *ltop.state.dis_status.get_mut(&level) = DisStatus::NotSelected;
         return;
     }
@@ -218,21 +215,20 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     if let Some(ref key) = best_key {
         if let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(key) {
             nbr.dis = true;
-            println!("DIS is selected {}", nbr.sys_id);
+            tracing::info!("DIS selection: {} on {}", nbr.sys_id, ltop.state.name);
             *ltop.state.dis_status.get_mut(&level) = DisStatus::Other;
             *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
             if ltop.state.lan_id.get(&level).is_none() {
                 if !nbr.pdu.lan_id.is_empty() {
-                    println!("DIS lan_id is in Hello packet");
+                    tracing::info!("DIS lan_id is in Hello packet");
                     *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
-                    //
                 } else {
-                    println!("DIS waiting lan_id");
+                    tracing::info!("DIS waiting for LAN Id in Hello packet");
                 }
             }
         }
     } else {
-        println!("XXX DIS is selected: self");
+        tracing::info!("DIS selection: self on {}", ltop.state.name);
         become_dis(ltop, level);
     }
 }
