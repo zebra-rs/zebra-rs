@@ -19,6 +19,8 @@ impl Isis {
         self.show_add("/show/isis/route", show_isis_route);
         self.show_add("/show/isis/interface", link::show);
         self.show_add("/show/isis/interface/detail", link::show_detail);
+        self.show_add("/show/isis/dis/statistics", link::show_dis_statistics);
+        self.show_add("/show/isis/dis/history", link::show_dis_history);
         self.show_add("/show/isis/neighbor", neigh::show);
         self.show_add("/show/isis/neighbor/detail", neigh::show_detail);
         self.show_add("/show/isis/adjacency", show_isis_adjacency);
