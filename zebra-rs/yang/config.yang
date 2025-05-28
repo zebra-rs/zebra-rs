@@ -454,11 +454,14 @@ module config {
         }
       }
     }
-    container interfaces {
-      list interface {
-        key "name";
-        leaf name {
-          type string;
+    list interface {
+      key "if-name";
+      leaf if-name {
+        type string;
+      }
+      container ipv4 {
+        leaf address {
+          type inet:ipv4-prefix;
         }
       }
     }
