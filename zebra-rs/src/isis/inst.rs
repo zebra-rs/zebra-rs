@@ -307,6 +307,7 @@ impl Isis {
                 process_packet(&mut top, packet, ifindex, mac);
             }
             Message::LspOriginate(level) => {
+                println!("LSP originate!");
                 let mut top = self.top();
                 let mut lsp = lsp_generate(&mut top, level);
                 let buf = lsp_emit(&mut lsp, level);
@@ -531,12 +532,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
     // Fetch current sequence number if LSP exists.
-    let seq_number = top
+    let mut seq_number = top
         .lsdb
         .get(&level)
         .get(&lsp_id)
-        .map(|x| x.lsp.seq_number)
-        .unwrap_or(1);
+        .map(|x| x.lsp.seq_number + 1)
+        .unwrap_or(0x0001);
+
+    // XXX We need wrap around of seq_number.
 
     // Generate self originated LSP.
     let types = IsisLspTypes::from(level.digit());
@@ -1190,16 +1193,16 @@ pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, Sp
         }
     }
 
-    println!("-- ILM start --");
-    for (label, ilm) in ilm.iter() {
-        for (addr, nhop) in ilm.nhops.iter() {
-            let olabel = if nhop.adjacency {
-                String::from("implicit null")
-            } else {
-                format!("{}", label)
-            };
-            println!("{} -> {} {} {}", label, addr, nhop.ifindex, olabel);
-        }
-    }
-    println!("-- ILM end --");
+    // println!("-- ILM start --");
+    // for (label, ilm) in ilm.iter() {
+    //     for (addr, nhop) in ilm.nhops.iter() {
+    //         let olabel = if nhop.adjacency {
+    //             String::from("implicit null")
+    //         } else {
+    //             format!("{}", label)
+    //         };
+    //         println!("{} -> {} {} {}", label, addr, nhop.ifindex, olabel);
+    //     }
+    // }
+    // println!("-- ILM end --");
 }

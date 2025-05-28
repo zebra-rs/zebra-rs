@@ -7,6 +7,7 @@ use std::{
 };
 
 use isis_packet::*;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::isis::{
     srmpls::{LabelBlock, LabelConfig},
@@ -82,29 +83,27 @@ impl Lsdb {
     }
 }
 
-fn refresh_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
-    let tx = top.tx.clone();
-    let refresh_time = top.config.refresh_time();
-    Timer::once(5, move || {
+type MsgSender = UnboundedSender<Message>;
+
+fn lsdb_timer(tx: &MsgSender, level: Level, key: IsisLspId, tick: u16, ev: LsdbEvent) -> Timer {
+    let tx = tx.clone();
+    Timer::once(tick.into(), move || {
         let tx = tx.clone();
+        let msg = Message::Lsdb(ev, level, key);
         async move {
-            use LsdbEvent::*;
-            let msg = Message::Lsdb(RefreshTimerExpire, level, key.clone());
-            tx.send(msg).unwrap();
+            tx.send(msg);
         }
     })
 }
 
-fn hold_timer(top: &mut IsisTop, level: Level, key: IsisLspId, hold_time: u64) -> Timer {
-    let tx = top.tx.clone();
-    Timer::once(hold_time, move || {
-        let tx = tx.clone();
-        async move {
-            use LsdbEvent::*;
-            let msg = Message::Lsdb(HoldTimerExpire, level, key.clone());
-            tx.send(msg).unwrap();
-        }
-    })
+fn refresh_timer(tx: &MsgSender, level: Level, key: IsisLspId, refresh_time: u16) -> Timer {
+    let ev = LsdbEvent::RefreshTimerExpire;
+    lsdb_timer(tx, level, key, refresh_time, ev)
+}
+
+fn hold_timer(tx: &MsgSender, level: Level, key: IsisLspId, hold_time: u16) -> Timer {
+    let ev = LsdbEvent::HoldTimerExpire;
+    lsdb_timer(tx, level, key, hold_time, ev)
 }
 
 fn csnp_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
@@ -113,8 +112,8 @@ fn csnp_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
         let tx = tx.clone();
         async move {
             use LsdbEvent::*;
-            let msg = Message::Lsdb(RefreshTimerExpire, level, key.clone());
-            tx.send(msg).unwrap();
+            let msg = Message::Lsdb(RefreshTimerExpire, level, key);
+            tx.send(msg);
         }
     })
 }
@@ -217,7 +216,7 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
         if let Some(cap) = cap_view.cap {
             // Register global block.
             if let SidLabelTlv::Label(start) = cap.sid_label {
-                println!("Global block start: {}, end: {}", start, start + cap.range);
+                // println!("Global block start: {}, end: {}", start, start + cap.range);
                 let mut label_config = LabelConfig {
                     global: LabelBlock::new(start, cap.range),
                     local: None,
@@ -256,9 +255,9 @@ pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp)
         update_lsp(top, level, key, &lsp);
         spf_schedule(top, level);
     }
-    let hold_time = lsp.hold_time as u64;
+    let hold_time = lsp.hold_time;
     let mut lsa = Lsa::new(lsp);
-    lsa.hold_timer = Some(hold_timer(top, level, key, hold_time));
+    lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
@@ -266,8 +265,27 @@ pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> O
     let key = lsp.lsp_id.clone();
     let mut lsa = Lsa::new(lsp);
     lsa.originated = true;
-    lsa.refresh_timer = Some(refresh_timer(top, level, key));
-    lsa.hold_timer = Some(hold_timer(top, level, key, top.config.hold_time() as u64));
+
+    lsa.hold_timer = Some(hold_timer(top.tx, level, key, lsa.lsp.hold_time));
+
+    let mut refresh_time = top.config.refresh_time();
+
+    const ZERO_AGE_LIFETIME: u16 = 60;
+    const MIN_LSP_TRANS_INTERVAL: u16 = 5;
+    const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
+
+    // Remaining lifetime.
+    let rl = lsa.lsp.hold_time;
+    let safety_margin = ZERO_AGE_LIFETIME + MIN_LSP_TRANS_INTERVAL;
+    if rl < DEFAULT_REFRESH_TIME {
+        if rl > safety_margin {
+            refresh_time = rl - safety_margin;
+        } else {
+            refresh_time = 1;
+        }
+    }
+
+    lsa.refresh_timer = Some(refresh_timer(top.tx, level, key, refresh_time));
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 

@@ -24,7 +24,6 @@ pub struct Neighbor {
     pub prev: NfsmState,
     pub state: NfsmState,
     pub level: Level,
-    // pub addr4: Vec<Ipv4Addr>,
     pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
     pub laddr6: Vec<Ipv6Addr>,

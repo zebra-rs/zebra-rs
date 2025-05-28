@@ -293,7 +293,7 @@ impl Rib {
     }
 
     pub fn addr_add(&mut self, osaddr: FibAddr) {
-        println!("FIB: AddrAdd {:?}", osaddr);
+        // println!("FIB: AddrAdd {:?}", osaddr);
         if osaddr.addr.prefix_len() == 0 {
             println!("FIB: zero prefixlen addr!");
             return;

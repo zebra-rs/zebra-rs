@@ -116,7 +116,7 @@ impl Rib {
                 self.ipv4_route_del(&prefix, rib).await;
             }
             Message::IlmAdd { label, ilm } => {
-                println!("IlmAdd {} {:?}", label, ilm);
+                //println!("IlmAdd {} {:?}", label, ilm);
                 self.ilm_add(label, ilm).await;
             }
             Message::IlmDel { label, ilm } => {

@@ -4,6 +4,7 @@ use isis_packet::{
     IsisType,
 };
 
+use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::isis::Message;
 use crate::rib::MacAddr;
@@ -131,23 +132,66 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
             println!("DIS sysid is not set");
         }
     }
-    // println!("LSP recv {}", lsp.lsp_id.sys_id());
+    println!(
+        "LSP recv {} {} {:02x}",
+        lsp.lsp_id.sys_id(),
+        lsp.hold_time,
+        lsp.seq_number
+    );
 
     // Self originated LSP came from DIS.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
-        // TODO: need to check the LSP come from DIS or not.
-        let need_refresh = top
-            .lsdb
-            .get(&level)
-            .get(&lsp.lsp_id)
-            .map_or(false, |originated| {
-                lsp.seq_number > originated.lsp.seq_number
-            });
+        println!("Self LSP handling");
 
-        if need_refresh {
-            lsdb::insert_self_originate(top, level, lsp.clone());
-            // TODO: flood to without incoming interface.
-            top.tx.send(Message::LspOriginate(level)).unwrap();
+        if lsp.hold_time == 0 {
+            // Purged LSP received.
+            println!("Purged LSP received.");
+
+            match top.lsdb.get(&level).get(&lsp.lsp_id) {
+                Some(originated) => {
+                    println!("Self LSP exists in LSDB");
+                    println!(
+                        "Recv seq {:2x} Origin seq {:2x}",
+                        lsp.seq_number, originated.lsp.seq_number,
+                    );
+                    // Accept self originated LSP if received seq_number is
+                    // larger than mine.
+                    if lsp.seq_number > originated.lsp.seq_number {
+                        insert_self_originate(top, level, lsp);
+                    }
+                    // Overwrite LSP with seq number increase.
+                    top.tx.send(Message::LspOriginate(level)).unwrap();
+                }
+                None => {
+                    println!("No Self LSP in LSDB, accept the Purge");
+                }
+            }
+        } else {
+            match top.lsdb.get(&level).get(&lsp.lsp_id) {
+                Some(originated) => {
+                    println!("Self LSP exists in LSDB");
+                    println!(
+                        "Origin seq {:2x} Recv seq {:2x}",
+                        originated.lsp.seq_number, lsp.seq_number
+                    );
+                    println!(
+                        "Origin seq {:2x} Recv seq {:2x}",
+                        originated.lsp.checksum, lsp.checksum
+                    );
+                    if lsp.seq_number > originated.lsp.seq_number {
+                        println!("Accept the received LSP");
+                        insert_self_originate(top, level, lsp);
+                        //top.tx.send(Message::LspOriginate(level)).unwrap();
+                    } else if originated.lsp.seq_number == lsp.seq_number {
+                        if originated.lsp.checksum == lsp.checksum {
+                            println!("Exactly same LSP received, do nothing ");
+                        }
+                    }
+                }
+                None => {
+                    println!("Self LSP is not in LSDB");
+                }
+            }
         }
         return;
     }
