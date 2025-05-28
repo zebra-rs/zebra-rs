@@ -1,6 +1,7 @@
 use crate::config::Args;
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
+use crate::fib::sysctl::sysctl_mpls_enable;
 
 use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
@@ -266,6 +267,7 @@ impl Rib {
             }
         } else {
             let link = Link::from(oslink);
+            sysctl_mpls_enable(&link.name);
             self.api_link_add(&link);
             self.links.insert(link.index, link);
         }

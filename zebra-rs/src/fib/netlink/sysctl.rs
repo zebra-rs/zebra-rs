@@ -9,16 +9,17 @@ const CTLNAMES: &[(&str, &str)] = &[
     ("net.mpls.platform_labels", "1048575"),
 ];
 
-// TODO: We need to have per interface config.
-//
-// net.mpls.conf.enp0s6.input=1
-// net.mpls.conf.enp0s7.input=1
-// net.mpls.conf.dum0.input=1
-
 pub fn sysctl_enable() -> anyhow::Result<()> {
     for (ctlname, value) in CTLNAMES.iter() {
         let ctl = sysctl::Ctl::new(ctlname)?;
         let _ = ctl.set_value_string(value)?;
     }
+    Ok(())
+}
+
+pub fn sysctl_mpls_enable(ifname: &String) -> anyhow::Result<()> {
+    let ctlname = format!("net.mpls.conf.{}.input", ifname);
+    let ctl = sysctl::Ctl::new(ctlname.as_str())?;
+    let _ = ctl.set_value_string("1")?;
     Ok(())
 }
