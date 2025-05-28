@@ -17,6 +17,7 @@ use crate::rib::{Link, MacAddr};
 
 use super::addr::IsisAddr;
 use super::config::IsisConfig;
+use super::ifsm::has_level;
 use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::task::{Timer, TimerType};
@@ -628,11 +629,11 @@ pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
                 link.state.mac.unwrap(),
             )
             .unwrap();
-            if link.state.level().has_l1() {
+            if has_level(link.state.level(), Level::L1) {
                 writeln!(buf, "  Level-1 Information:").unwrap();
                 show_detail_entry(&mut buf, link, Level::L1);
             }
-            if link.state.level().has_l2() {
+            if has_level(link.state.level(), Level::L2) {
                 writeln!(buf, "  Level-2 Information:").unwrap();
                 show_detail_entry(&mut buf, link, Level::L2);
             }

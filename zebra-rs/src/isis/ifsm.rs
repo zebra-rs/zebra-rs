@@ -145,10 +145,10 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     Ok(())
 }
 
-fn has_level(is_level: IsLevel, level: Level) -> bool {
+pub fn has_level(is_level: IsLevel, level: Level) -> bool {
     match level {
-        Level::L1 => is_level.has_l1(),
-        Level::L2 => is_level.has_l2(),
+        Level::L1 => matches!(is_level, IsLevel::L1 | IsLevel::L1L2),
+        Level::L2 => matches!(is_level, IsLevel::L2 | IsLevel::L1L2),
     }
 }
 

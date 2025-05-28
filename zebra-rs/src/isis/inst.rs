@@ -30,6 +30,7 @@ use crate::{
 };
 
 use super::config::IsisConfig;
+use super::ifsm::has_level;
 use super::link::{Afis, IsisLink, IsisLinks, LinkState, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
@@ -468,10 +469,6 @@ impl Isis {
     }
 }
 
-fn level_matches(state_level: &IsLevel, level: Level) -> bool {
-    (level == Level::L1 && state_level.has_l1()) || (level == Level::L2 && state_level.has_l2())
-}
-
 pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32) -> IsisLsp {
     let neighbor_id = if let Some(link) = top.links.get(&ifindex) {
         if let Some(adj) = link.state.adj.get(&level) {
@@ -652,7 +649,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     // IPv4 Reachability.
     let mut ext_ip_reach = IsisTlvExtIpReach::default();
     for (_, link) in top.links.iter() {
-        if link.config.enable.v4 && level_matches(&link.state.level(), level) {
+        if link.config.enable.v4 && has_level(link.state.level(), level) {
             for v4addr in link.state.v4addr.iter() {
                 if !v4addr.addr().is_loopback() {
                     let sub_tlv = if let Some(sid) = &link.config.prefix_sid {
@@ -690,7 +687,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     // IPv6 Reachability.
     let mut ipv6_reach = IsisTlvIpv6Reach::default();
     for (_, link) in top.links.iter() {
-        if link.config.enable.v6 && level_matches(&link.state.level(), level) {
+        if link.config.enable.v6 && has_level(link.state.level(), level) {
             for v6addr in link.state.v6addr.iter() {
                 if !v6addr.addr().is_loopback() {
                     let sub_tlv = false;
