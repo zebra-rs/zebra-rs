@@ -185,6 +185,16 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
                 })
     }
 
+    // Check if DIS selection is dampened
+    if ltop.state.dis_stats.get(&level).is_dampened() {
+        tracing::debug!("DIS selection dampened on {} level {}", ltop.state.name, level);
+        return;
+    }
+
+    // Store current DIS state for tracking
+    let old_status = *ltop.state.dis_status.get(&level);
+    let old_sys_id = ltop.state.dis.get(&level).clone();
+
     // When curr is None, current candidate DIS is myself.
     let mut best_key: Option<IsisSysId> = None;
     let mut best_priority = ltop.config.priority();
@@ -207,29 +217,57 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     }
     *ltop.state.nbrs_up.get_mut(&level) = nbrs_up;
 
-    if nbrs_up == 0 {
-        *ltop.state.dis_status.get_mut(&level) = DisStatus::NotSelected;
-        return;
-    }
-
-    if let Some(ref key) = best_key {
+    let (new_status, new_sys_id, reason) = if nbrs_up == 0 {
+        let status = DisStatus::NotSelected;
+        *ltop.state.dis_status.get_mut(&level) = status.clone();
+        (status, None, "No up neighbors".to_string())
+    } else if let Some(ref key) = best_key {
         if let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(key) {
             nbr.dis = true;
-            tracing::info!("DIS selection: {} on {}", nbr.sys_id, ltop.state.name);
-            *ltop.state.dis_status.get_mut(&level) = DisStatus::Other;
-            *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
+            let status = DisStatus::Other;
+            let sys_id = Some(nbr.sys_id.clone());
+            let reason = format!("Neighbor {} elected (priority: {}, mac: {:?})", 
+                               nbr.sys_id, nbr.pdu.priority, nbr.mac);
+            
+            tracing::info!("DIS selection: {} on {} (priority: {}, neighbors: {})", 
+                          nbr.sys_id, ltop.state.name, nbr.pdu.priority, nbrs_up);
+            
+            *ltop.state.dis_status.get_mut(&level) = status.clone();
+            *ltop.state.dis.get_mut(&level) = sys_id.clone();
+            
             if ltop.state.lan_id.get(&level).is_none() {
                 if !nbr.pdu.lan_id.is_empty() {
-                    tracing::info!("DIS lan_id is in Hello packet");
+                    tracing::info!("DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
                     *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
                 } else {
-                    tracing::info!("DIS waiting for LAN Id in Hello packet");
+                    tracing::debug!("DIS waiting for LAN Id in Hello packet");
                 }
             }
+            (status, sys_id, reason)
+        } else {
+            return; // Shouldn't happen
         }
     } else {
-        tracing::info!("DIS selection: self on {}", ltop.state.name);
+        let status = DisStatus::Myself;
+        let sys_id = Some(ltop.up_config.net.sys_id());
+        let reason = format!("Self elected (priority: {}, neighbors: {})", 
+                            ltop.config.priority(), nbrs_up);
+        
+        tracing::info!("DIS selection: self on {} (priority: {}, neighbors: {})", 
+                      ltop.state.name, ltop.config.priority(), nbrs_up);
         become_dis(ltop, level);
+        (status, sys_id, reason)
+    };
+
+    // Record DIS change if status actually changed
+    if old_status != new_status || old_sys_id != new_sys_id {
+        ltop.state.dis_stats.get_mut(&level).record_change(
+            old_status,
+            new_status,
+            old_sys_id,
+            new_sys_id,
+            reason,
+        );
     }
 }
 

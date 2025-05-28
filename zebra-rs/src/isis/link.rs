@@ -232,12 +232,91 @@ impl LinkConfig {
     }
 }
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone, Copy)]
 pub enum DisStatus {
     #[default]
     NotSelected,
     Myself,
     Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct DisChange {
+    pub timestamp: std::time::SystemTime,
+    pub from_status: DisStatus,
+    pub to_status: DisStatus,
+    pub from_sys_id: Option<IsisSysId>,
+    pub to_sys_id: Option<IsisSysId>,
+    pub reason: String,
+}
+
+#[derive(Debug, Default)]
+pub struct DisStatistics {
+    pub flap_count: u32,
+    pub last_change: Option<std::time::SystemTime>,
+    pub uptime: Option<std::time::SystemTime>,
+    pub history: Vec<DisChange>,
+    pub dampening_until: Option<std::time::SystemTime>,
+}
+
+impl DisStatistics {
+    const MAX_HISTORY: usize = 50;
+    const FLAP_THRESHOLD: u32 = 5;
+    const DAMPENING_PERIOD_SECS: u64 = 30;
+
+    pub fn record_change(
+        &mut self,
+        from_status: DisStatus,
+        to_status: DisStatus,
+        from_sys_id: Option<IsisSysId>,
+        to_sys_id: Option<IsisSysId>,
+        reason: String,
+    ) {
+        let now = std::time::SystemTime::now();
+        
+        // Update flap count
+        self.flap_count += 1;
+        self.last_change = Some(now);
+        
+        // If becoming DIS, update uptime
+        if matches!(to_status, DisStatus::Myself) {
+            self.uptime = Some(now);
+        }
+        
+        // Add to history
+        let change = DisChange {
+            timestamp: now,
+            from_status,
+            to_status,
+            from_sys_id,
+            to_sys_id,
+            reason,
+        };
+        
+        self.history.push(change);
+        if self.history.len() > Self::MAX_HISTORY {
+            self.history.remove(0);
+        }
+        
+        // Check for flapping and apply dampening
+        if self.flap_count >= Self::FLAP_THRESHOLD {
+            self.dampening_until = Some(now + std::time::Duration::from_secs(Self::DAMPENING_PERIOD_SECS));
+            tracing::warn!("DIS flapping detected, applying dampening for {} seconds", Self::DAMPENING_PERIOD_SECS);
+        }
+    }
+    
+    pub fn is_dampened(&self) -> bool {
+        if let Some(until) = self.dampening_until {
+            std::time::SystemTime::now() < until
+        } else {
+            false
+        }
+    }
+    
+    pub fn clear_dampening(&mut self) {
+        self.dampening_until = None;
+        self.flap_count = 0;
+    }
 }
 
 // Mutable data during operation.
@@ -278,6 +357,9 @@ pub struct LinkState {
     // DIS in pseudo node LSP. When LSP has been received and my own system ID
     // exists in
     pub adj: Levels<Option<IsisNeighborId>>,
+
+    // DIS statistics and flap tracking
+    pub dis_stats: Levels<DisStatistics>,
 
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
@@ -691,4 +773,230 @@ impl FromStr for HelloPaddingPolicy {
             _ => Err(ParseHelloPaddingPolicyError),
         }
     }
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m{}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
+fn format_time_ago(timestamp: std::time::SystemTime) -> String {
+    match timestamp.elapsed() {
+        Ok(duration) => format!("{} ago", format_duration(duration)),
+        Err(_) => "in the future".to_string(),
+    }
+}
+
+pub fn show_dis_statistics(isis: &Isis, mut args: Args, json: bool) -> String {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct DisStatisticsInfo {
+        interface: String,
+        level: u8,
+        current_status: String,
+        current_dis: String,
+        flap_count: u32,
+        is_dampened: bool,
+        uptime: Option<String>,
+        last_change: Option<String>,
+        history_count: usize,
+    }
+
+    if json {
+        let mut stats = Vec::new();
+        for (_, link) in isis.links.iter() {
+            if link.config.enabled() {
+                for level in [Level::L1, Level::L2] {
+                    if super::ifsm::has_level(link.state.level(), level) {
+                        let dis_stats = link.state.dis_stats.get(&level);
+                        let current_dis = match link.state.dis_status.get(&level) {
+                            DisStatus::Myself => "Self".to_string(),
+                            DisStatus::Other => {
+                                if let Some(sys_id) = link.state.dis.get(&level) {
+                                    sys_id.to_string()
+                                } else {
+                                    "Unknown".to_string()
+                                }
+                            }
+                            DisStatus::NotSelected => "None".to_string(),
+                        };
+
+                        stats.push(DisStatisticsInfo {
+                            interface: link.state.name.clone(),
+                            level: level.digit(),
+                            current_status: format!("{:?}", link.state.dis_status.get(&level)),
+                            current_dis,
+                            flap_count: dis_stats.flap_count,
+                            is_dampened: dis_stats.is_dampened(),
+                            uptime: dis_stats.uptime.map(|t| format_time_ago(t)),
+                            last_change: dis_stats.last_change.map(|t| format_time_ago(t)),
+                            history_count: dis_stats.history.len(),
+                        });
+                    }
+                }
+            }
+        }
+        return serde_json::to_string_pretty(&stats).unwrap();
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "DIS Statistics:").unwrap();
+    writeln!(buf, "Interface        Level  Status      DIS              Flaps  Dampened  Uptime     Last Change").unwrap();
+    writeln!(buf, "---------------- ------ ----------- ---------------- ------ --------- ---------- -----------").unwrap();
+
+    for (_, link) in isis.links.iter() {
+        if link.config.enabled() {
+            for level in [Level::L1, Level::L2] {
+                if super::ifsm::has_level(link.state.level(), level) {
+                    let dis_stats = link.state.dis_stats.get(&level);
+                    let status = match link.state.dis_status.get(&level) {
+                        DisStatus::Myself => "Myself",
+                        DisStatus::Other => "Other",
+                        DisStatus::NotSelected => "None",
+                    };
+                    let current_dis = match link.state.dis_status.get(&level) {
+                        DisStatus::Myself => "Self".to_string(),
+                        DisStatus::Other => {
+                            if let Some(sys_id) = link.state.dis.get(&level) {
+                                sys_id.to_string()
+                            } else {
+                                "Unknown".to_string()
+                            }
+                        }
+                        DisStatus::NotSelected => "-".to_string(),
+                    };
+
+                    let uptime = if let Some(uptime) = dis_stats.uptime {
+                        format_time_ago(uptime)
+                    } else {
+                        "-".to_string()
+                    };
+
+                    let last_change = if let Some(last) = dis_stats.last_change {
+                        format_time_ago(last)
+                    } else {
+                        "-".to_string()
+                    };
+
+                    writeln!(
+                        buf,
+                        "{:<16} {:<6} {:<11} {:<16} {:<6} {:<9} {:<10} {}",
+                        link.state.name,
+                        level.digit(),
+                        status,
+                        current_dis,
+                        dis_stats.flap_count,
+                        if dis_stats.is_dampened() { "Yes" } else { "No" },
+                        uptime,
+                        last_change
+                    ).unwrap();
+                }
+            }
+        }
+    }
+
+    buf
+}
+
+pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct DisHistoryEntry {
+        interface: String,
+        level: u8,
+        timestamp: String,
+        from_status: String,
+        to_status: String,
+        from_sys_id: Option<String>,
+        to_sys_id: Option<String>,
+        reason: String,
+    }
+
+    let interface_filter = args.string();
+
+    if json {
+        let mut history = Vec::new();
+        for (_, link) in isis.links.iter() {
+            if link.config.enabled() {
+                if let Some(ref filter) = interface_filter {
+                    if link.state.name != *filter {
+                        continue;
+                    }
+                }
+                
+                for level in [Level::L1, Level::L2] {
+                    if super::ifsm::has_level(link.state.level(), level) {
+                        let dis_stats = link.state.dis_stats.get(&level);
+                        for change in &dis_stats.history {
+                            history.push(DisHistoryEntry {
+                                interface: link.state.name.clone(),
+                                level: level.digit(),
+                                timestamp: format_time_ago(change.timestamp),
+                                from_status: format!("{:?}", change.from_status),
+                                to_status: format!("{:?}", change.to_status),
+                                from_sys_id: change.from_sys_id.as_ref().map(|s| s.to_string()),
+                                to_sys_id: change.to_sys_id.as_ref().map(|s| s.to_string()),
+                                reason: change.reason.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        return serde_json::to_string_pretty(&history).unwrap();
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "DIS Change History:").unwrap();
+    writeln!(buf, "Interface        Level  Time                From        To          Reason").unwrap();
+    writeln!(buf, "---------------- ------ ------------------- ----------- ----------- ------").unwrap();
+
+    for (_, link) in isis.links.iter() {
+        if link.config.enabled() {
+            if let Some(ref filter) = interface_filter {
+                if link.state.name != *filter {
+                    continue;
+                }
+            }
+            
+            for level in [Level::L1, Level::L2] {
+                if super::ifsm::has_level(link.state.level(), level) {
+                    let dis_stats = link.state.dis_stats.get(&level);
+                    for change in &dis_stats.history {
+                        let from_status = match change.from_status {
+                            DisStatus::Myself => "Myself",
+                            DisStatus::Other => "Other",
+                            DisStatus::NotSelected => "None",
+                        };
+                        let to_status = match change.to_status {
+                            DisStatus::Myself => "Myself",
+                            DisStatus::Other => "Other", 
+                            DisStatus::NotSelected => "None",
+                        };
+
+                        writeln!(
+                            buf,
+                            "{:<16} {:<6} {:<19} {:<11} {:<11} {}",
+                            link.state.name,
+                            level.digit(),
+                            format_time_ago(change.timestamp),
+                            from_status,
+                            to_status,
+                            change.reason
+                        ).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    buf
 }
