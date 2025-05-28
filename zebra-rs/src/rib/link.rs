@@ -121,6 +121,12 @@ pub const IFF_PROMISC: u32 = 1 << 8;
 pub const IFF_MULTICAST: u32 = 1 << 12;
 pub const IFF_LOWER_UP: u32 = 1 << 16;
 
+impl LinkFlags {
+    pub fn is_loopback(&self) -> bool {
+        (self.0 & IFF_LOOPBACK) == IFF_LOOPBACK
+    }
+}
+
 impl fmt::Display for LinkFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut array = Vec::new();

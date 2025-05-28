@@ -163,6 +163,9 @@ pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
 }
 
 pub fn start(ltop: &mut LinkTop) {
+    if ltop.flags.is_loopback() {
+        return;
+    }
     for level in [Level::L1, Level::L2] {
         hello_originate(ltop, level);
     }

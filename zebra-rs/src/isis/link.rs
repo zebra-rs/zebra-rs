@@ -13,7 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::{Args, ConfigOp};
 use crate::isis::nfsm::NfsmState;
 use crate::rib::link::LinkAddr;
-use crate::rib::{Link, MacAddr};
+use crate::rib::{Link, LinkFlags, MacAddr};
 
 use super::addr::IsisAddr;
 use super::config::IsisConfig;
@@ -98,6 +98,7 @@ impl IsisLinks {
 pub struct IsisLink {
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<PacketMessage>,
+    pub flags: LinkFlags,
     pub config: LinkConfig,
     pub state: LinkState,
     pub timer: LinkTimer,
@@ -107,6 +108,7 @@ pub struct LinkTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub ptx: &'a UnboundedSender<PacketMessage>,
     pub lsdb: &'a Levels<Lsdb>,
+    pub flags: &'a LinkFlags,
     pub up_config: &'a IsisConfig,
     pub config: &'a LinkConfig,
     pub state: &'a mut LinkState,
@@ -410,6 +412,7 @@ impl IsisLink {
         let mut is_link = Self {
             tx,
             ptx,
+            flags: link.flags,
             config: LinkConfig::default(),
             state: LinkState::default(),
             timer: LinkTimer::default(),

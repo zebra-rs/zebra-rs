@@ -457,6 +457,7 @@ impl Isis {
             ptx: &self.ptx,
             up_config: &self.config,
             lsdb: &self.lsdb,
+            flags: &link.flags,
             config: &mut link.config,
             state: &mut link.state,
             timer: &mut link.timer,
