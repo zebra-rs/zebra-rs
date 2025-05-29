@@ -1,0 +1,26 @@
+name: zebra-rs build for arm64
+
+on: [ workflow_dispatch ]
+
+jobs:
+  build:
+    name: Build zebra-rs for arm64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build cli
+        run: |
+          cd cli
+          ./configure
+          make
+          cd ../packaging
+          make
+
+      - name: Upload basefs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zebra-rs
+          path: |
+            ./zebra-rs/
