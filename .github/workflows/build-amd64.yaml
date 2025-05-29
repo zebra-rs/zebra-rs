@@ -1,16 +1,15 @@
-name: Build for arm64
+name: Build for amd64
 
 on: [ workflow_dispatch ]
 
 jobs:
   build:
-    name: Build for arm64
-    runs-on: ubuntu-24.04-arm
+    name: Build for amd64
+    runs-on: ubuntu-24.04-amd
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        platform: linux/arm64
-
+        platform: linux/amd64
       - name: Build cli
         run: |
           sudo apt install -y protobuf-compiler
@@ -21,11 +20,11 @@ jobs:
           sudo apt update
           sudo apt install nfpm
           cd ../packaging
-          make arm64
+          make amd64
 
       - name: Upload basefs artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zebra-rs-arm64
+          name: zebra-rs-amd64
           path: |
             ./packaging/*.deb
