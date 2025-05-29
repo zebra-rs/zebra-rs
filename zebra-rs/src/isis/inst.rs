@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::default;
+use std::fmt::Display;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
@@ -30,6 +31,7 @@ use crate::{
 };
 
 use super::config::IsisConfig;
+use super::ifsm::has_level;
 use super::link::{Afis, IsisLink, IsisLinks, LinkState, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
@@ -178,6 +180,7 @@ impl Isis {
     }
 
     pub fn process_msg(&mut self, msg: Message) {
+        tracing::info!("{}", msg);
         match msg {
             Message::SpfCalc(level) => {
                 // SPF calc.
@@ -454,6 +457,7 @@ impl Isis {
             ptx: &self.ptx,
             up_config: &self.config,
             lsdb: &self.lsdb,
+            flags: &link.flags,
             config: &mut link.config,
             state: &mut link.state,
             timer: &mut link.timer,
@@ -466,10 +470,6 @@ impl Isis {
             .get(&ifindex)
             .map_or_else(|| "unknown".to_string(), |link| link.state.name.clone())
     }
-}
-
-fn level_matches(state_level: &IsLevel, level: Level) -> bool {
-    (level == Level::L1 && state_level.has_l1()) || (level == Level::L2 && state_level.has_l2())
 }
 
 pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32) -> IsisLsp {
@@ -534,12 +534,16 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
     // Fetch current sequence number if LSP exists.
-    let seq_number = top
+    let mut seq_number = top
         .lsdb
         .get(&level)
         .get(&lsp_id)
-        .map(|x| x.lsp.seq_number)
-        .unwrap_or(1);
+        .map(|x| x.lsp.seq_number + 1)
+        .unwrap_or(0x0001);
+
+    tracing::info!("LSP originate seq number: 0x{:04x}", seq_number);
+
+    // XXX We need wrap around of seq_number.
 
     // Generate self originated LSP.
     let types = IsisLspTypes::from(level.digit());
@@ -652,7 +656,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     // IPv4 Reachability.
     let mut ext_ip_reach = IsisTlvExtIpReach::default();
     for (_, link) in top.links.iter() {
-        if link.config.enable.v4 && level_matches(&link.state.level(), level) {
+        if link.config.enable.v4 && has_level(link.state.level(), level) {
             for v4addr in link.state.v4addr.iter() {
                 if !v4addr.addr().is_loopback() {
                     let sub_tlv = if let Some(sid) = &link.config.prefix_sid {
@@ -690,7 +694,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     // IPv6 Reachability.
     let mut ipv6_reach = IsisTlvIpv6Reach::default();
     for (_, link) in top.links.iter() {
-        if link.config.enable.v6 && level_matches(&link.state.level(), level) {
+        if link.config.enable.v6 && has_level(link.state.level(), level) {
             for v6addr in link.state.v6addr.iter() {
                 if !v6addr.addr().is_loopback() {
                     let sub_tlv = false;
@@ -1178,6 +1182,26 @@ pub enum Message {
     SpfCalc(Level),
 }
 
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Message::Recv(isis_packet, _, mac_addr) => {
+                write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
+            }
+            Message::Ifsm(ifsm_event, _, level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
+            Message::Nfsm(nfsm_event, _, isis_sys_id, level) => {
+                write!(f, "[Message::Nfsm({:?})]", nfsm_event)
+            }
+            Message::Lsdb(lsdb_event, level, isis_lsp_id) => {
+                write!(f, "[Message::Lsdb({:?})]", lsdb_event)
+            }
+            Message::LspOriginate(level) => write!(f, "[Message::LspOriginate({})]", level),
+            Message::DisOriginate(level, _) => write!(f, "[Message::DisOriginate({})]", level),
+            Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct SpfIlm {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
@@ -1193,16 +1217,16 @@ pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, Sp
         }
     }
 
-    println!("-- ILM start --");
-    for (label, ilm) in ilm.iter() {
-        for (addr, nhop) in ilm.nhops.iter() {
-            let olabel = if nhop.adjacency {
-                String::from("implicit null")
-            } else {
-                format!("{}", label)
-            };
-            println!("{} -> {} {} {}", label, addr, nhop.ifindex, olabel);
-        }
-    }
-    println!("-- ILM end --");
+    // println!("-- ILM start --");
+    // for (label, ilm) in ilm.iter() {
+    //     for (addr, nhop) in ilm.nhops.iter() {
+    //         let olabel = if nhop.adjacency {
+    //             String::from("implicit null")
+    //         } else {
+    //             format!("{}", label)
+    //         };
+    //         println!("{} -> {} {} {}", label, addr, nhop.ifindex, olabel);
+    //     }
+    // }
+    // println!("-- ILM end --");
 }

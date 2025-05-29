@@ -4,6 +4,8 @@ use isis_packet::{
     IsisType,
 };
 
+use crate::isis::inst::lsp_emit;
+use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::isis::Message;
 use crate::rib::MacAddr;
@@ -81,15 +83,58 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
             for entry in &ext_is_reach.entries {
-                println!("Neighbor {} <-> {}", entry.neighbor_id, neighbor_id);
                 if entry.neighbor_id == *neighbor_id {
-                    println!("Neighbor found");
                     return true;
                 }
             }
         }
     }
     false
+}
+
+pub fn lsp_self_purged(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
+    tracing::info!("Self originated LSP is purged");
+    match top.lsdb.get(&level).get(&lsp.lsp_id) {
+        Some(originated) => {
+            if lsp.seq_number > originated.lsp.seq_number {
+                insert_self_originate(top, level, lsp);
+            }
+            tracing::info!("XXX LspOriginate from lsp_self_purged");
+            top.tx.send(Message::LspOriginate(level));
+        }
+        None => {
+            // Self LSP does not exists in LSDB, accept the purge
+        }
+    }
+}
+
+pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
+    tracing::info!(
+        "Self originated LSP is updated seq number: 0x{:04x}",
+        lsp.seq_number
+    );
+    match top.lsdb.get(&level).get(&lsp.lsp_id) {
+        Some(originated) => {
+            match lsp.seq_number.cmp(&originated.lsp.seq_number) {
+                std::cmp::Ordering::Greater => {
+                    tracing::info!("Self originated LSP is insert into LSDB");
+                    insert_self_originate(top, level, lsp);
+                }
+                std::cmp::Ordering::Equal => {
+                    if lsp.checksum != originated.lsp.checksum {
+                        tracing::info!("XXX LspOriginate from lsp_self_update");
+                        top.tx.send(Message::LspOriginate(level));
+                    }
+                }
+                std::cmp::Ordering::Less => {
+                    // TODO: We need flood LSP with SRM flag.
+                }
+            }
+        }
+        None => {
+            println!("Self LSP is not in LSDB");
+        }
+    }
 }
 
 pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
@@ -117,37 +162,33 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
 
         if let Some(dis) = &link.state.dis.get(&level) {
             if link.state.adj.get(&level).is_none() {
-                println!("DIS SIS ID {} <-> {}", lsp.lsp_id.sys_id(), dis);
                 if lsp.lsp_id.sys_id() == *dis {
                     // IS Neighbor include my LSP ID.
                     if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
-                        println!("Adjacency!");
+                        tracing::info!("Adjacency with DIS {}", dis);
                         *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
+                        tracing::info!("XXX LspOriginate from lsp_recv");
                         link.tx.send(Message::LspOriginate(level)).unwrap();
                     }
                 }
             }
         } else {
-            println!("DIS sysid is not set");
+            tracing::info!("DIS sysid is not yet set");
         }
     }
-    // println!("LSP recv {}", lsp.lsp_id.sys_id());
+    // println!(
+    //     "LSP recv {} {} {:02x}",
+    //     lsp.lsp_id.sys_id(),
+    //     lsp.hold_time,
+    //     lsp.seq_number
+    // );
 
     // Self originated LSP came from DIS.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
-        // TODO: need to check the LSP come from DIS or not.
-        let need_refresh = top
-            .lsdb
-            .get(&level)
-            .get(&lsp.lsp_id)
-            .map_or(false, |originated| {
-                lsp.seq_number > originated.lsp.seq_number
-            });
-
-        if need_refresh {
-            lsdb::insert_self_originate(top, level, lsp.clone());
-            // TODO: flood to without incoming interface.
-            top.tx.send(Message::LspOriginate(level)).unwrap();
+        if lsp.hold_time == 0 {
+            lsp_self_purged(top, level, lsp);
+        } else {
+            lsp_self_updated(top, level, lsp);
         }
         return;
     }
@@ -169,7 +210,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
-    // println!("CSNP recv");
+    tracing::info!("CSNP recv");
 
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => (pdu, Level::L1),
@@ -184,7 +225,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
 
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
-    let Some(dis) = &link.state.dis.l2 else {
+    let Some(dis) = &link.state.dis.get(&level) else {
         println!("DIS was yet not selected");
         return;
     };
@@ -201,14 +242,16 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 // If LSP_ID is my own.
                 if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
                     if lsp.lsp_id.is_pseudo() {
+                        // tracing::info!("CSNP: Self DIS {}", lsp.lsp_id);
                         // println!("LSP myown DIS hold_time {}", lsp.hold_time);
                     } else {
-                        // println!(
-                        //     "LSP own seq num {:x} hold_time {}",
-                        //     lsp.seq_number, lsp.hold_time
-                        // );
+                        // tracing::info!("CSNP: Self LSP {}", lsp.lsp_id);
                         if let Some(local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
-                            // println!("LSP prev seq num {:x}", local.lsp.seq_number);
+                            // tracing::info!(
+                            //     " Local Seq 0x{:04x} Remote Seq 0x{:04x}",
+                            //     local.lsp.seq_number,
+                            //     lsp.seq_number,
+                            // );
                         }
                     }
                     continue;
@@ -220,6 +263,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         // set_ssn();
                         if lsp.hold_time != 0 {
                             // println!("LSP REQ New: {}", lsp.lsp_id);
+                            tracing::info!("CSNP: New Req {}", lsp.lsp_id);
                             let mut psnp = lsp.clone();
                             psnp.seq_number = 0;
                             req.entries.push(psnp);
@@ -229,7 +273,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                     }
                     Some(local) if local.lsp.seq_number < lsp.seq_number => {
                         // set_ssn();
-                        // println!("LSP REQ Update: {}", lsp.lsp_id);
+                        tracing::info!("CSNP: Update {}", lsp.lsp_id);
                         let mut psnp = lsp.clone();
                         psnp.seq_number = 0;
                         req.entries.push(psnp);
@@ -256,8 +300,8 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
             tlvs: Vec::new(),
         };
         psnp.tlvs.push(req.into());
-        println!("Going to send PSNP");
-        isis_psnp_send(top, ifindex, psnp);
+        tracing::info!("Send PSNP");
+        isis_psnp_send(top, ifindex, level, psnp);
     }
 }
 
@@ -271,7 +315,7 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
-    // println!("PSNP recv");
+    tracing::info!("PSNP recv");
 
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Psnp, IsisPdu::L1Psnp(pdu)) => (pdu, Level::L1),
@@ -283,6 +327,33 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     if !link_level_capable(&link.state.level(), &level) {
         return;
     }
+
+    for entry in pdu.tlvs.iter() {
+        if let IsisTlv::LspEntries(tlv) = entry {
+            for entry in tlv.entries.iter() {
+                if let Some(lsa) = top.lsdb.get(&level).get(&entry.lsp_id) {
+                    tracing::info!(
+                        "PSNP REQ 0x{:04x} LSDB 0x{:04x}",
+                        entry.seq_number,
+                        lsa.lsp.seq_number
+                    );
+                    let hold_time =
+                        lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+
+                    let mut lsp = lsa.lsp.clone();
+                    lsp.hold_time = hold_time;
+                    lsp.checksum = 0;
+                    let buf = lsp_emit(&mut lsp, level);
+
+                    link.ptx.send(PacketMessage::Send(
+                        Packet::Bytes(buf),
+                        link.state.ifindex,
+                        level,
+                    ));
+                }
+            }
+        }
+    }
 }
 
 pub fn unknown_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
@@ -292,16 +363,17 @@ pub fn unknown_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: O
     };
 }
 
-pub fn isis_psnp_send(top: &mut IsisTop, ifindex: u32, pdu: IsisPsnp) {
+pub fn isis_psnp_send(top: &mut IsisTop, ifindex: u32, level: Level, pdu: IsisPsnp) {
     let Some(link) = top.links.get(&ifindex) else {
         return;
     };
-    let packet = IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone()));
-    link.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
-        ifindex,
-        Level::L2,
-    ));
+    let packet = match level {
+        Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
+        Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
+    };
+
+    link.ptx
+        .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
 }
 
 pub fn process_packet(

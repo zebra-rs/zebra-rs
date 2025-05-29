@@ -31,7 +31,6 @@ pub fn exec_mode_create(entry: Rc<Entry>) -> Mode {
     let mut mode = Mode::new(entry);
     mode.install_func(String::from("/help"), help);
     mode.install_func(String::from("/show/version"), show_version);
-    mode.install_func(String::from("/show/ip/route"), show_ip_route_prefix);
     mode.install_func(String::from("/configure"), configure);
     mode.install_func(String::from("/cli/format/json"), cli_format_json);
     mode.install_func(String::from("/cli/format/terminal"), cli_format_terminal);

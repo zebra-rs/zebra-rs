@@ -1,5 +1,6 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
+use super::link::LinkConfig;
 use super::{Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig};
 
 use crate::config::{path_from_command, Args};
@@ -59,7 +60,7 @@ pub struct Rib {
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
     pub mpls_config: MplsConfig,
-    // pub interface_config: InterfaceConfig,
+    pub link_config: LinkConfig,
     pub nmap: NexthopMap,
 }
 
@@ -83,6 +84,7 @@ impl Rib {
             rx,
             static_config: StaticConfig::new(),
             mpls_config: MplsConfig::new(),
+            link_config: LinkConfig::new(),
             nmap: NexthopMap::default(),
         };
         rib.show_build();
@@ -116,7 +118,7 @@ impl Rib {
                 self.ipv4_route_del(&prefix, rib).await;
             }
             Message::IlmAdd { label, ilm } => {
-                println!("IlmAdd {} {:?}", label, ilm);
+                //println!("IlmAdd {} {:?}", label, ilm);
                 self.ilm_add(label, ilm).await;
             }
             Message::IlmDel { label, ilm } => {
@@ -188,7 +190,7 @@ impl Rib {
                 } else if path.as_str().starts_with("/routing/static/mpls/label") {
                     let _ = self.mpls_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/interface") {
-                    // let _ = self.interface_config.exec(path, args, msg.op);
+                    let _ = self.link_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {

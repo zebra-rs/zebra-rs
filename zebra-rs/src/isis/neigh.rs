@@ -24,7 +24,6 @@ pub struct Neighbor {
     pub prev: NfsmState,
     pub state: NfsmState,
     pub level: Level,
-    // pub addr4: Vec<Ipv4Addr>,
     pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
     pub laddr6: Vec<Ipv6Addr>,
@@ -94,6 +93,23 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
     for (_, link) in top.links.iter() {
+        for (_, nbr) in &link.state.nbrs.l1 {
+            let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+            let system_id =
+                if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.pdu.source_id) {
+                    hostname.clone()
+                } else {
+                    nbr.pdu.source_id.to_string()
+                };
+            nbrs.push(NeighborBrief {
+                system_id,
+                interface: top.ifname(nbr.ifindex),
+                level: nbr.level.digit(),
+                state: nbr.state.to_string(),
+                hold_time: rem,
+                snpa: show_mac(nbr.mac),
+            });
+        }
         for (_, nbr) in &link.state.nbrs.l2 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id =

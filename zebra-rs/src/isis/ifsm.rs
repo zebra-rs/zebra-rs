@@ -1,9 +1,5 @@
 use anyhow::{Context, Result};
-use isis_packet::{
-    IsLevel, IsisCsnp, IsisHello, IsisLspEntry, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu,
-    IsisProto, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvIpv4IfAddr, IsisTlvIsNeighbor,
-    IsisTlvLspEntries, IsisTlvProtoSupported, IsisType,
-};
+use isis_packet::*;
 
 use crate::isis::link::DisStatus;
 use crate::rib::MacAddr;
@@ -57,7 +53,7 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     let tlv = proto_supported(&ltop.up_config.enable);
     hello.tlvs.push(tlv.into());
 
-    let area_addr = vec![0x49, 0, 1];
+    let area_addr = ltop.up_config.net.area_id();
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
     for prefix in &ltop.state.v4addr {
@@ -113,7 +109,7 @@ pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
 }
 
 pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
-    println!("XXX CSNP Send");
+    tracing::info!("CSNP Send");
 
     let mut lsp_entries = IsisTlvLspEntries::default();
     for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
@@ -145,16 +141,16 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     Ok(())
 }
 
-fn has_level(is_level: IsLevel, level: Level) -> bool {
+pub fn has_level(is_level: IsLevel, level: Level) -> bool {
     match level {
-        Level::L1 => is_level.has_l1(),
-        Level::L2 => is_level.has_l2(),
+        Level::L1 => matches!(is_level, IsLevel::L1 | IsLevel::L1L2),
+        Level::L2 => matches!(is_level, IsLevel::L2 | IsLevel::L1L2),
     }
 }
 
 pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
     if has_level(ltop.state.level(), level) {
-        println!("IFSM Hello originate {}", level);
+        tracing::info!("Hello originate {} on {}", level, ltop.state.name);
         let hello = hello_generate(ltop, level);
         *ltop.state.hello.get_mut(&level) = Some(hello);
         hello_send(ltop, level);
@@ -163,6 +159,9 @@ pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
 }
 
 pub fn start(ltop: &mut LinkTop) {
+    if ltop.flags.is_loopback() {
+        return;
+    }
     for level in [Level::L1, Level::L2] {
         hello_originate(ltop, level);
     }
@@ -185,14 +184,26 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
                 })
     }
 
-    println!("DIS selection!");
+    // Check if DIS selection is dampened
+    if ltop.state.dis_stats.get(&level).is_dampened() {
+        tracing::debug!(
+            "DIS selection dampened on {} level {}",
+            ltop.state.name,
+            level
+        );
+        return;
+    }
+
+    // Store current DIS state for tracking
+    let old_status = *ltop.state.dis_status.get(&level);
+    let old_sys_id = ltop.state.dis.get(&level).clone();
 
     // When curr is None, current candidate DIS is myself.
     let mut best_key: Option<IsisSysId> = None;
     let mut best_priority = ltop.config.priority();
     let mut best_mac = ltop.state.mac.clone();
 
-    // We will check at least Up state neighbor exists.
+    // We will check at least one Up state neighbor exists.
     let mut nbrs_up = 0;
 
     for (key, nbr) in ltop.state.nbrs.get_mut(&level).iter_mut() {
@@ -209,31 +220,68 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     }
     *ltop.state.nbrs_up.get_mut(&level) = nbrs_up;
 
-    if nbrs_up == 0 {
-        println!("DIS no up neighbors");
-        *ltop.state.dis_status.get_mut(&level) = DisStatus::NotSelected;
-        return;
-    }
-
-    if let Some(ref key) = best_key {
+    let (new_status, new_sys_id, reason) = if nbrs_up == 0 {
+        let status = DisStatus::NotSelected;
+        *ltop.state.dis_status.get_mut(&level) = status.clone();
+        (status, None, "No up neighbors".to_string())
+    } else if let Some(ref key) = best_key {
         if let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(key) {
             nbr.dis = true;
-            println!("DIS is selected {}", nbr.sys_id);
-            *ltop.state.dis_status.get_mut(&level) = DisStatus::Other;
-            *ltop.state.dis.get_mut(&level) = Some(nbr.sys_id.clone());
+            let status = DisStatus::Other;
+            let sys_id = Some(nbr.sys_id.clone());
+            let reason = format!(
+                "Neighbor {} elected (priority: {}, mac: {:?})",
+                nbr.sys_id, nbr.pdu.priority, nbr.mac
+            );
+
+            tracing::info!(
+                "DIS selection: {} on {} (priority: {}, neighbors: {})",
+                nbr.sys_id,
+                ltop.state.name,
+                nbr.pdu.priority,
+                nbrs_up
+            );
+
+            *ltop.state.dis_status.get_mut(&level) = status.clone();
+            *ltop.state.dis.get_mut(&level) = sys_id.clone();
+
             if ltop.state.lan_id.get(&level).is_none() {
                 if !nbr.pdu.lan_id.is_empty() {
-                    println!("DIS lan_id is in Hello packet");
+                    tracing::info!("DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
                     *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
-                    //
                 } else {
-                    println!("DIS waiting lan_id");
+                    tracing::debug!("DIS waiting for LAN Id in Hello packet");
                 }
             }
+            (status, sys_id, reason)
+        } else {
+            return; // Shouldn't happen
         }
     } else {
-        println!("XXX DIS is selected: self");
+        let status = DisStatus::Myself;
+        let sys_id = Some(ltop.up_config.net.sys_id());
+        let reason = format!(
+            "Self elected (priority: {}, neighbors: {})",
+            ltop.config.priority(),
+            nbrs_up
+        );
+
+        tracing::info!(
+            "DIS selection: self on {} (priority: {}, neighbors: {})",
+            ltop.state.name,
+            ltop.config.priority(),
+            nbrs_up
+        );
         become_dis(ltop, level);
+        (status, sys_id, reason)
+    };
+
+    // Record DIS change if status actually changed
+    if old_status != new_status || old_sys_id != new_sys_id {
+        ltop.state
+            .dis_stats
+            .get_mut(&level)
+            .record_change(old_status, new_status, old_sys_id, new_sys_id, reason);
     }
 }
 
@@ -254,7 +302,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Generate DIS pseudo node id.
     let pseudo_id: u8 = ltop.state.ifindex as u8;
     let lsp_id = IsisLspId::new(ltop.up_config.net.sys_id(), pseudo_id, 0);
-    println!("LSP_ID: {}", lsp_id);
+    tracing::info!("Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
 
     // Set myself as DIS.
     *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
@@ -267,6 +315,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     hello_originate(ltop, level);
 
     // Generate LSP.
+    tracing::info!("LspOriginate from become_dis");
     ltop.tx.send(Message::LspOriginate(level)).unwrap();
 
     // Generate DIS.

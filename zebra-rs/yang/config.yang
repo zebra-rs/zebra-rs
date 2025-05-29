@@ -183,23 +183,6 @@ module config {
           }
         }
       }
-      container ldp {
-        leaf router-id {
-          type inet:ipv4-address;
-        }
-        leaf target-address {
-          type inet:ipv4-address;
-        }
-        list interface {
-          key "name";
-          leaf name {
-            type string;
-          }
-          leaf enable {
-            type empty;
-          }
-        }
-      }
       container static {
         ext:help "Static route configuration";
         container mpls {
@@ -471,11 +454,14 @@ module config {
         }
       }
     }
-    container interfaces {
-      list interface {
-        key "name";
-        leaf name {
-          type string;
+    list interface {
+      key "if-name";
+      leaf if-name {
+        type string;
+      }
+      container ipv4 {
+        leaf address {
+          type inet:ipv4-prefix;
         }
       }
     }

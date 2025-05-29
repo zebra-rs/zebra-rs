@@ -117,6 +117,14 @@ module exec {
           type empty;
         }
       }
+      container dis {
+        leaf statistics {
+          type empty;
+        }
+        leaf history {
+          type empty;
+        }
+      }
       container adjacency {
         ext:help "IS-IS adjacency";
         presence "IS-IS adjacency";
