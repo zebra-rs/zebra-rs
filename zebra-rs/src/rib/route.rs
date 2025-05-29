@@ -103,11 +103,15 @@ impl Rib {
 
     pub async fn ilm_add(&mut self, label: u32, ilm: IlmEntry) {
         // Need to update ilm table.
+        self.ilm.insert(label, ilm.clone());
+
         self.fib_handle.ilm_del(label, &ilm).await;
         self.fib_handle.ilm_add(label, &ilm).await;
     }
 
     pub async fn ilm_del(&mut self, label: u32, ilm: IlmEntry) {
+        self.ilm.remove(&label);
+
         self.fib_handle.ilm_del(label, &ilm).await;
     }
 
