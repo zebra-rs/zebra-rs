@@ -114,7 +114,17 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
     let mut buf = String::new();
 
     for (label, ilm) in rib.ilm.iter() {
-        writeln!(buf, "{} {}", label, ilm.nexthop).unwrap();
+        match &ilm.nexthop {
+            Nexthop::Uni(uni) => {
+                writeln!(buf, "{:<8} {}", label.to_string(), ilm.nexthop).unwrap();
+            }
+            Nexthop::Multi(multi) => {
+                for uni in multi.nexthops.iter() {
+                    writeln!(buf, "{:<8} {}", label.to_string(), ilm.nexthop).unwrap();
+                }
+            }
+            _ => {}
+        }
     }
     buf
 }
