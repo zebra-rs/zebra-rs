@@ -18,8 +18,7 @@ provides:
   - zebra-rs
 maintainer: "Kunihiro Ishiguro <kunihiro@zebra.dev>"
 description: |
-  FooBar is the great foo and bar software.
-    And this can be in multiple lines!
+  zebra-rs is reincarnation of GNU zebra in Rust.
 homepage: "https://zebra.dev"
 license: "MIT"
 changelog: "changelog.yaml"
