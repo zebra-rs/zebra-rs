@@ -2,6 +2,7 @@
 
 mod config;
 mod spf;
+mod version;
 use config::{Cli, ConfigManager};
 use std::path::PathBuf;
 mod bgp;

@@ -1,6 +1,7 @@
 use super::manager::ConfigManager;
 use super::util::trim_first_line;
 use super::ExecCode;
+use crate::version::VersionInfo;
 use libyang::Entry;
 use similar::TextDiff;
 use std::collections::HashMap;
@@ -63,7 +64,8 @@ cli is based on bash so you can use any shell command in it.
 }
 
 fn show_version(_config: &ConfigManager) -> (ExecCode, String) {
-    (ExecCode::Show, String::from("version 0.1"))
+    let version_info = VersionInfo::current();
+    (ExecCode::Show, version_info.format_version())
 }
 
 fn show_ip_route_prefix(_config: &ConfigManager) -> (ExecCode, String) {
