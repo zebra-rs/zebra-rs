@@ -12,6 +12,8 @@ jobs:
 
       - name: Build cli
         run: |
+          sudo apt update -y
+          sudo apt upgrade -y
           sudo apt install -y protobuf-compiler
           cd cli
           ./configure
