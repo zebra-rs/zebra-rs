@@ -9,7 +9,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        platform: linux/amd64
+
       - name: Build cli
         run: |
           sudo apt install -y protobuf-compiler

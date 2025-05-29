@@ -9,7 +9,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        platform: linux/arm64
 
       - name: Build cli
         run: |
