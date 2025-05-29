@@ -7,7 +7,7 @@
 # vim: set ts=2 sw=2 tw=0 fo=cnqoj
 
 name: "zebra-rs"
-arch: "arm64"
+arch: "amd64"
 platform: "linux"
 version: "0.6.4"
 section: "default"
