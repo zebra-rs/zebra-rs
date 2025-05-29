@@ -12,6 +12,7 @@ jobs:
 
       - name: Build cli
         run: |
+          apt install -y protobuf-compiler
           cd cli
           ./configure
           make
