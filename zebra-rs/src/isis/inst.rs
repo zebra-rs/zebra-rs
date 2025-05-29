@@ -20,7 +20,7 @@ use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
-use crate::rib::inst::IlmEntry;
+use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
 use crate::spf;
@@ -1123,6 +1123,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
             }
             return IlmEntry {
                 rtype: RibType::Isis,
+                ilm_type: IlmType::None,
                 nexthop: Nexthop::Uni(uni),
             };
         }
@@ -1141,6 +1142,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     }
     IlmEntry {
         rtype: RibType::Isis,
+        ilm_type: IlmType::None,
         nexthop: Nexthop::Multi(multi),
     }
 }

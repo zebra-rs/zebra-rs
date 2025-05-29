@@ -30,9 +30,18 @@ pub enum Message {
     Subscribe { tx: UnboundedSender<RibRx> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
+pub enum IlmType {
+    #[default]
+    None,
+    Node(u32),
+    Adjacency(u32),
+}
+
+#[derive(Default, Debug, Clone)]
 pub struct IlmEntry {
     pub rtype: RibType,
+    pub ilm_type: IlmType,
     pub nexthop: Nexthop,
 }
 
@@ -40,6 +49,7 @@ impl IlmEntry {
     pub fn new(rtype: RibType) -> Self {
         Self {
             rtype,
+            ilm_type: IlmType::None,
             nexthop: Nexthop::default(),
         }
     }
