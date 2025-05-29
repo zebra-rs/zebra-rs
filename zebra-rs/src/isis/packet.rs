@@ -225,7 +225,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
 
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
-    let Some(dis) = &link.state.dis.l2 else {
+    let Some(dis) = &link.state.dis.get(&level) else {
         println!("DIS was yet not selected");
         return;
     };
@@ -301,7 +301,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         };
         psnp.tlvs.push(req.into());
         tracing::info!("Send PSNP");
-        isis_psnp_send(top, ifindex, psnp);
+        isis_psnp_send(top, ifindex, level, psnp);
     }
 }
 
@@ -363,16 +363,17 @@ pub fn unknown_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: O
     };
 }
 
-pub fn isis_psnp_send(top: &mut IsisTop, ifindex: u32, pdu: IsisPsnp) {
+pub fn isis_psnp_send(top: &mut IsisTop, ifindex: u32, level: Level, pdu: IsisPsnp) {
     let Some(link) = top.links.get(&ifindex) else {
         return;
     };
-    let packet = IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone()));
-    link.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
-        ifindex,
-        Level::L2,
-    ));
+    let packet = match level {
+        Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
+        Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
+    };
+
+    link.ptx
+        .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
 }
 
 pub fn process_packet(

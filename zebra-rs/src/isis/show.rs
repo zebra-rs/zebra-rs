@@ -91,6 +91,38 @@ fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
 fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
+    for (lsp_id, lsa) in isis.lsdb.l1.iter() {
+        let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+        let originated = if lsa.originated { "*" } else { " " };
+        let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
+        let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
+        let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
+        let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
+        let system_id =
+            if let Some((hostname, _)) = isis.hostname.get(&Level::L2).get(&lsp_id.sys_id()) {
+                format!(
+                    "{}.{:02x}-{:02x}",
+                    hostname.clone(),
+                    lsp_id.pseudo_id(),
+                    lsp_id.fragment_id()
+                )
+            } else {
+                lsp_id.to_string()
+            };
+        writeln!(
+            buf,
+            "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}",
+            system_id.to_string(),
+            originated,
+            lsa.lsp.pdu_len.to_string(),
+            lsa.lsp.seq_number,
+            lsa.lsp.checksum,
+            rem,
+            types,
+        )
+        .unwrap();
+    }
+
     for (lsp_id, lsa) in isis.lsdb.l2.iter() {
         let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
         let originated = if lsa.originated { "*" } else { " " };

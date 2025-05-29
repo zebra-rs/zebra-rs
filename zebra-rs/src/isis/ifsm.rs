@@ -53,7 +53,7 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     let tlv = proto_supported(&ltop.up_config.enable);
     hello.tlvs.push(tlv.into());
 
-    let area_addr = vec![0x49, 0, 1];
+    let area_addr = ltop.up_config.net.area_id();
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
     for prefix in &ltop.state.v4addr {
