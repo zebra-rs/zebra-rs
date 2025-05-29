@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
 
     rib::serve(rib);
 
-    rib::nanomsg::serve();
+    // rib::nanomsg::serve();
 
     tracing_set();
     tracing::info!("zebra-rs started");
