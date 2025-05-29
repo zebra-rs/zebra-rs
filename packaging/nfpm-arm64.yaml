@@ -1,0 +1,41 @@
+# This is an example nfpm configuration file.
+# Make sure to check the documentation at https://nfpm.goreleaser.com
+#
+# The lines below are called `modelines`. See `:help modeline`
+# Feel free to remove those if you don't want/need to use them.
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+name: "zebra-rs"
+arch: "arm64"
+platform: "linux"
+version: "0.6.4"
+section: "default"
+priority: "extra"
+replaces:
+  - zebra-rs
+provides:
+  - zebra-rs
+maintainer: "Kunihiro Ishiguro <kunihiro@zebra.dev>"
+description: |
+  zebra-rs is reincarnation of GNU zebra in Rust.
+homepage: "https://zebra.dev"
+license: "MIT"
+changelog: "changelog.yaml"
+contents:
+  - src: ../target/release/zebra-rs
+    dst: /usr/sbin/zebra-rs
+  - src: ../target/release/zebra-ctl
+    dst: /usr/sbin/zebra-ctl
+  - src: ../cli/cli
+    dst: /usr/bin/cli
+  - src: ../target/release/cli-helper
+    dst: /usr/bin/cli-helper
+  - src: ../zebra-rs/yang
+    dst: /etc/zebra-rs/yang
+  - src: ./modules-load.d/zebra-rs.conf
+    dst: /etc/modules-load.d/zebra-rs.conf
+overrides:
+  deb:
+    scripts:
+      postinstall: ./scripts/postinstall.sh
