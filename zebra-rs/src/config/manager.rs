@@ -300,20 +300,19 @@ impl ConfigManager {
             return (ExecCode::Show, String::new(), state.paths);
         }
 
+        // Lookup command.
+        let path = paths_str(&state.paths);
+        if let Some(f) = mode.fmap.get(&path) {
+            let (code, input) = f(self);
+            return (code, input, state.paths);
+        }
+
         // Handle "show"
         if state.show && state.paths.len() > 1 {
             let paths = path_try_trim("run", state.paths.clone());
-            return (ExecCode::RedirectShow, input.to_string(), paths);
-        }
-
-        // Default case: function dispatch or direct return
-        let path = paths_str(&state.paths);
-        match mode.fmap.get(&path) {
-            Some(f) => {
-                let (code, input) = f(self);
-                (code, input, state.paths)
-            }
-            None => (code, String::new(), state.paths),
+            (ExecCode::RedirectShow, input.to_string(), paths)
+        } else {
+            (code, String::new(), state.paths)
         }
     }
 

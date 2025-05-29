@@ -445,7 +445,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry, replace: bool) {
+    pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Mpls;
         msg.header.destination_prefix_length = 20;
@@ -527,17 +527,7 @@ impl FibHandle {
         msg.attributes.push(attr);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
-        let flag = if replace {
-            NLM_F_CREATE | NLM_F_REPLACE
-        } else {
-            NLM_F_CREATE
-        };
-        if replace {
-            println!("Repace!");
-        } else {
-            println!("Create!");
-        }
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | flag;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {

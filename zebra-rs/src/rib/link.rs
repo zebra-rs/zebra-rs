@@ -1,6 +1,7 @@
-use crate::config::Args;
+use crate::config::{Args, ConfigOp};
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
+use crate::fib::sysctl::sysctl_mpls_enable;
 
 use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
@@ -119,6 +120,12 @@ pub const IFF_RUNNING: u32 = 1 << 6;
 pub const IFF_PROMISC: u32 = 1 << 8;
 pub const IFF_MULTICAST: u32 = 1 << 12;
 pub const IFF_LOWER_UP: u32 = 1 << 16;
+
+impl LinkFlags {
+    pub fn is_loopback(&self) -> bool {
+        (self.0 & IFF_LOOPBACK) == IFF_LOOPBACK
+    }
+}
 
 impl fmt::Display for LinkFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -266,6 +273,7 @@ impl Rib {
             }
         } else {
             let link = Link::from(oslink);
+            sysctl_mpls_enable(&link.name);
             self.api_link_add(&link);
             self.links.insert(link.index, link);
         }
@@ -293,7 +301,7 @@ impl Rib {
     }
 
     pub fn addr_add(&mut self, osaddr: FibAddr) {
-        println!("FIB: AddrAdd {:?}", osaddr);
+        // println!("FIB: AddrAdd {:?}", osaddr);
         if osaddr.addr.prefix_len() == 0 {
             println!("FIB: zero prefixlen addr!");
             return;
@@ -313,5 +321,21 @@ impl Rib {
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             link_addr_del(link, addr);
         }
+    }
+}
+
+pub struct LinkConfig {
+    //
+}
+
+use anyhow::Result;
+
+impl LinkConfig {
+    pub fn new() -> Self {
+        LinkConfig {}
+    }
+
+    pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
+        Ok(())
     }
 }

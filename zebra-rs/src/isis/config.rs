@@ -4,9 +4,9 @@ use isis_packet::{IsLevel, Nsap};
 
 use crate::config::{Args, ConfigOp};
 
-use super::link;
 use super::link::Afis;
 use super::Isis;
+use super::{link, Level};
 
 impl Isis {
     pub fn callback_build(&mut self) {
@@ -45,14 +45,14 @@ pub struct IsisConfig {
     pub net: Nsap,
     pub hostname: Option<String>,
     pub is_type: Option<IsLevel>,
-    pub refresh_time: Option<u64>,
+    pub refresh_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub te_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
 }
 
 // Default refresh time: 15 min.
-const DEFAULT_REFRESH_TIME: u64 = 15 * 60;
+const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
 const DEFAULT_HOLD_TIME: u16 = 1200;
 
 impl IsisConfig {
@@ -64,7 +64,7 @@ impl IsisConfig {
         self.hostname.clone().unwrap_or("default".into())
     }
 
-    pub fn refresh_time(&self) -> u64 {
+    pub fn refresh_time(&self) -> u16 {
         self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
     }
 
@@ -73,10 +73,16 @@ impl IsisConfig {
     }
 }
 
-fn config_net(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
+fn config_net(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let nsap = args.string()?.parse::<Nsap>().unwrap();
 
-    isis.config.net = nsap;
+    if op.is_set() {
+        isis.lsp_map.get_mut(&Level::L1).get(&nsap.sys_id());
+        isis.lsp_map.get_mut(&Level::L2).get(&nsap.sys_id());
+        isis.config.net = nsap;
+    } else {
+        isis.config.net = Nsap::default();
+    }
 
     Some(())
 }

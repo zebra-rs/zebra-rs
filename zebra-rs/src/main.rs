@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
     rib::nanomsg::serve();
 
     tracing_set();
-    tracing::info!("zebra started");
+    tracing::info!("zebra-rs started");
 
     config::event_loop(config).await;
 
