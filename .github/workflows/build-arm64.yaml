@@ -1,10 +1,10 @@
-name: zebra-rs build for arm64
+name: Build for amd64
 
 on: [ workflow_dispatch ]
 
 jobs:
   build:
-    name: Build zebra-rs for arm64
+    name: Build zebra-rs for amd64
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
@@ -27,4 +27,4 @@ jobs:
         with:
           name: zebra-rs
           path: |
-            ./zebra-rs/packaging/*.deb
+            ./packaging/*.deb
