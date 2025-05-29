@@ -34,7 +34,7 @@ pub mod resolve;
 
 pub mod intf;
 
-pub mod nanomsg;
+//pub mod nanomsg;
 
 pub mod router_id;
 
