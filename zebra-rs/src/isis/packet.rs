@@ -4,6 +4,7 @@ use isis_packet::{
     IsisType,
 };
 
+use crate::isis::inst::lsp_emit;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::isis::Message;
@@ -314,7 +315,7 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
-    // println!("PSNP recv");
+    tracing::info!("PSNP recv");
 
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Psnp, IsisPdu::L1Psnp(pdu)) => (pdu, Level::L1),
@@ -325,6 +326,33 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     // Check link capability for the PDU type.
     if !link_level_capable(&link.state.level(), &level) {
         return;
+    }
+
+    for entry in pdu.tlvs.iter() {
+        if let IsisTlv::LspEntries(tlv) = entry {
+            for entry in tlv.entries.iter() {
+                if let Some(lsa) = top.lsdb.get(&level).get(&entry.lsp_id) {
+                    tracing::info!(
+                        "PSNP REQ 0x{:04x} LSDB 0x{:04x}",
+                        entry.seq_number,
+                        lsa.lsp.seq_number
+                    );
+                    let hold_time =
+                        lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+
+                    let mut lsp = lsa.lsp.clone();
+                    lsp.hold_time = hold_time;
+                    lsp.checksum = 0;
+                    let buf = lsp_emit(&mut lsp, level);
+
+                    link.ptx.send(PacketMessage::Send(
+                        Packet::Bytes(buf),
+                        link.state.ifindex,
+                        level,
+                    ));
+                }
+            }
+        }
     }
 }
 

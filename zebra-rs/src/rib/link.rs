@@ -1,4 +1,4 @@
-use crate::config::Args;
+use crate::config::{Args, ConfigOp};
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 use crate::fib::sysctl::sysctl_mpls_enable;
@@ -321,5 +321,21 @@ impl Rib {
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             link_addr_del(link, addr);
         }
+    }
+}
+
+pub struct LinkConfig {
+    //
+}
+
+use anyhow::Result;
+
+impl LinkConfig {
+    pub fn new() -> Self {
+        LinkConfig {}
+    }
+
+    pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
+        Ok(())
     }
 }

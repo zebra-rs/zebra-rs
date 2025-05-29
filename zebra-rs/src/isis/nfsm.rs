@@ -191,6 +191,8 @@ pub fn nfsm_hello_received(
 
     let mut state = nbr.state;
 
+    tracing::info!("NBR Hello received");
+
     if state == NfsmState::Down {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         state = NfsmState::Init;

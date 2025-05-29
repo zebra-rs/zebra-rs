@@ -93,6 +93,23 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
     for (_, link) in top.links.iter() {
+        for (_, nbr) in &link.state.nbrs.l1 {
+            let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+            let system_id =
+                if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.pdu.source_id) {
+                    hostname.clone()
+                } else {
+                    nbr.pdu.source_id.to_string()
+                };
+            nbrs.push(NeighborBrief {
+                system_id,
+                interface: top.ifname(nbr.ifindex),
+                level: nbr.level.digit(),
+                state: nbr.state.to_string(),
+                hold_time: rem,
+                snpa: show_mac(nbr.mac),
+            });
+        }
         for (_, nbr) in &link.state.nbrs.l2 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id =
