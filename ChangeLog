@@ -4,3 +4,4 @@
 	Fix panic of "show" commands when protocol module has not yet been
 	started.
 
+	* version 0.6.5.
