@@ -5,7 +5,7 @@ on: [ workflow_dispatch ]
 jobs:
   build:
     name: Build for amd64
-    runs-on: ubuntu-22.04-amd
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
