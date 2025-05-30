@@ -14,7 +14,7 @@ use super::paths::{path_try_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
 use super::{Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
-use libyang::{merge_entry, to_entry, Entry, YangStore};
+use libyang::{to_entry, Entry, YangStore};
 use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::HashMap;
