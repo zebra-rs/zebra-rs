@@ -405,29 +405,48 @@ impl ConfigManager {
                 req.resp.send(resp).unwrap();
             }
             Message::DisplayTx(req) => {
-                if is_bgp(&req.paths) {
-                    if let Some(tx) = self.show_clients.borrow().get("bgp") {
-                        let reply = DisplayTxResponse { tx: tx.clone() };
-                        req.resp.send(reply).unwrap();
-                    }
+                let tx_option = if is_bgp(&req.paths) {
+                    self.show_clients.borrow().get("bgp").cloned()
                 } else if is_ospf(&req.paths) {
-                    if let Some(tx) = self.show_clients.borrow().get("ospf") {
-                        let reply = DisplayTxResponse { tx: tx.clone() };
-                        req.resp.send(reply).unwrap();
-                    }
+                    self.show_clients.borrow().get("ospf").cloned()
                 } else if is_isis(&req.paths) {
-                    if let Some(tx) = self.show_clients.borrow().get("isis") {
-                        let reply = DisplayTxResponse { tx: tx.clone() };
-                        req.resp.send(reply).unwrap();
-                    }
+                    self.show_clients.borrow().get("isis").cloned()
                 } else if is_policy(&req.paths) {
-                    if let Some(tx) = self.show_clients.borrow().get("policy") {
-                        let reply = DisplayTxResponse { tx: tx.clone() };
-                        req.resp.send(reply).unwrap();
-                    }
-                } else if let Some(tx) = self.show_clients.borrow().get("rib") {
-                    let reply = DisplayTxResponse { tx: tx.clone() };
+                    self.show_clients.borrow().get("policy").cloned()
+                } else {
+                    self.show_clients.borrow().get("rib").cloned()
+                };
+
+                if let Some(tx) = tx_option {
+                    // Protocol is initialized, send the actual handler
+                    let reply = DisplayTxResponse { tx };
                     req.resp.send(reply).unwrap();
+                } else {
+                    // Protocol is not initialized, send a fallback handler that returns an error message
+                    let (fallback_tx, fallback_rx) = mpsc::unbounded_channel();
+                    let reply = DisplayTxResponse { tx: fallback_tx };
+                    req.resp.send(reply).unwrap();
+                    
+                    // Spawn a task to handle the fallback response
+                    let paths = req.paths.clone();
+                    tokio::spawn(async move {
+                        let mut fallback_rx = fallback_rx;
+                        if let Some(display_req) = fallback_rx.recv().await {
+                            let protocol_name = if is_isis(&paths) {
+                                "ISIS"
+                            } else if is_ospf(&paths) {
+                                "OSPF"  
+                            } else if is_bgp(&paths) {
+                                "BGP"
+                            } else if is_policy(&paths) {
+                                "Policy"
+                            } else {
+                                "Unknown protocol"
+                            };
+                            let error_msg = format!("{} is not configured or running", protocol_name);
+                            let _ = display_req.resp.send(error_msg).await;
+                        }
+                    });
                 }
             }
         }
