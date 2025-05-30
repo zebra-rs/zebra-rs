@@ -1,0 +1,6 @@
+2025-05-30  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* zebra-rs/src/config/manager.rs (ConfigManager.process_message):
+	Fix panic of "show" commands when protocol module has not yet been
+	started.
+
