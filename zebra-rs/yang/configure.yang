@@ -46,10 +46,10 @@ module configure {
     type empty;
   }
 
-  leaf show {
-    ext:help "Show candidate system configuration";
-    type empty;
-  }
+  // leaf show {
+  //   ext:help "Show candidate system configuration";
+  //   type empty;
+  // }
 
   leaf running {
     ext:help "Show running system configuration";
