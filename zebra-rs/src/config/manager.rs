@@ -426,7 +426,7 @@ impl ConfigManager {
                     let (fallback_tx, fallback_rx) = mpsc::unbounded_channel();
                     let reply = DisplayTxResponse { tx: fallback_tx };
                     req.resp.send(reply).unwrap();
-                    
+
                     // Spawn a task to handle the fallback response
                     let paths = req.paths.clone();
                     tokio::spawn(async move {
@@ -435,7 +435,7 @@ impl ConfigManager {
                             let protocol_name = if is_isis(&paths) {
                                 "ISIS"
                             } else if is_ospf(&paths) {
-                                "OSPF"  
+                                "OSPF"
                             } else if is_bgp(&paths) {
                                 "BGP"
                             } else if is_policy(&paths) {
@@ -443,7 +443,8 @@ impl ConfigManager {
                             } else {
                                 "Unknown protocol"
                             };
-                            let error_msg = format!("{} is not configured or running", protocol_name);
+                            let error_msg =
+                                format!("{} is not configured or running", protocol_name);
                             let _ = display_req.resp.send(error_msg).await;
                         }
                     });
