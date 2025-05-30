@@ -24,6 +24,7 @@ module exec {
 
   container show {
     ext:help "Show command";
+    presence "Show command";
     leaf version {
       ext:help "Show version";
       type empty;

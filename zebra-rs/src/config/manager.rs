@@ -14,7 +14,7 @@ use super::paths::{path_try_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
 use super::{Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
-use libyang::{to_entry, Entry, YangStore};
+use libyang::{merge_entry, to_entry, Entry, YangStore};
 use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -96,11 +96,14 @@ impl ConfigManager {
 
         let entry = self.load_mode(&mut yang, "exec")?;
         let exec = entry.clone();
-        let exec_mode = exec_mode_create(entry);
+        let exec_mode = exec_mode_create(entry.clone());
         self.modes.insert("exec".to_string(), exec_mode);
 
         let entry = self.load_mode(&mut yang, "configure")?;
-        entry.dir.borrow_mut().push(run_from_exec(exec));
+        entry.dir.borrow_mut().push(run_from_exec(exec.clone()));
+        if let Some(exec_show) = show_from_exec(exec) {
+            entry.dir.borrow_mut().push(exec_show);
+        }
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
 
@@ -456,6 +459,15 @@ fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
         run.dir.borrow_mut().push(dir.clone());
     }
     Rc::new(run)
+}
+
+fn show_from_exec(exec: Rc<Entry>) -> Option<Rc<Entry>> {
+    for dir in exec.dir.borrow().iter() {
+        if dir.name == "show" {
+            return Some(dir.clone());
+        }
+    }
+    None
 }
 
 pub async fn event_loop(mut config: ConfigManager) {
