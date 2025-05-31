@@ -208,6 +208,39 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     cb(&link.name, buf);
 }
 
+pub fn link_brief_show(rib: &Rib, buf: &mut String) {
+    // Write the header just once if there is any link
+    if !rib.links.is_empty() {
+        writeln!(buf, "Interface        Status VRF            Addresses").unwrap();
+        writeln!(buf, "---------        ------ ---            ---------").unwrap();
+    }
+
+    for link in rib.links.values() {
+        let addrs = link.addr4.iter().chain(link.addr6.iter());
+
+        let mut addrs_iter = addrs.peekable();
+        if addrs_iter.peek().is_none() {
+            // No addresses
+            writeln!(buf, "{:<16} {:<6} {:<14}", link.name, "Up", "default").unwrap();
+        } else {
+            let mut first = true;
+            for addr in addrs_iter {
+                if first {
+                    writeln!(
+                        buf,
+                        "{:<16} {:<6} {:<14} {}",
+                        link.name, "Up", "default", addr.addr
+                    )
+                    .unwrap();
+                    first = false;
+                } else {
+                    writeln!(buf, "{:>39}{}", "", addr.addr).unwrap();
+                }
+            }
+        }
+    }
+}
+
 pub fn link_show(rib: &Rib, mut args: Args, _json: bool) -> String {
     let cb = os_traffic_dump();
     let mut buf = String::new();
@@ -218,6 +251,12 @@ pub fn link_show(rib: &Rib, mut args: Args, _json: bool) -> String {
         }
     } else {
         let link_name = args.string().unwrap();
+
+        if link_name == "brief" {
+            link_brief_show(rib, &mut buf);
+            return buf;
+        }
+
         if let Some(link) = rib.link_by_name(&link_name) {
             link_info_show(link, &mut buf, &cb)
         } else {

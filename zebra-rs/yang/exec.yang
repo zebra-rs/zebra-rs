@@ -45,16 +45,16 @@ module exec {
     list interface {
       ext:help "Show interface commands";
       ext:presence "Show presence";
-      key "if-name";
-      leaf if-name {
+      key "if-name-brief";
+      leaf if-name-brief {
         type string;
       }
       leaf detail {
-        type string;
+        type empty;
       }
     }
     leaf hostname {
-      type string;
+      type empty;
       description
         "The name of the host.  This name can be a single domain
         label or the fully qualified domain name of the host.";
