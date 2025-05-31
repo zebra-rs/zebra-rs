@@ -196,7 +196,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
     if lsp.hold_time == 0 {
         lsdb::remove_lsp(top, level, lsp.lsp_id);
     } else {
-        lsdb::insert_lsp(top, level, lsp.lsp_id, lsp);
+        lsdb::insert_lsp(top, level, lsp, packet.bytes);
     }
 }
 

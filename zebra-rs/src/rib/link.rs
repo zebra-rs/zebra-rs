@@ -1,11 +1,15 @@
+use anyhow::{Context, Result};
+
 use crate::config::{Args, ConfigOp};
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 use crate::fib::sysctl::sysctl_mpls_enable;
 
+use super::entry::RibEntry;
 use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
 use std::fmt::{self, Write};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Link {
@@ -328,14 +332,22 @@ pub struct LinkConfig {
     //
 }
 
-use anyhow::Result;
-
 impl LinkConfig {
     pub fn new() -> Self {
         LinkConfig {}
     }
 
     pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
+        const LINK_ERR: &str = "missing interface name";
+
+        let ifname = args.string().context(LINK_ERR)?;
+
+        //let func = self.builder.map.get()
+
         Ok(())
+    }
+
+    pub fn commit(&mut self, tx: UnboundedSender<Message>) {
+        //
     }
 }

@@ -37,7 +37,7 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
-            let Ok(packet) = isis_packet::parse(&input[3..]) else {
+            let Ok(mut packet) = isis_packet::parse(&input[3..]) else {
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
@@ -45,6 +45,8 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 if !isis_packet::is_valid_checksum(&input[3..]) {
                     return Err(ErrorKind::UnexpectedEof.into());
                 }
+                // Store raw packet into packet's bytes.
+                packet.1.bytes = input[3..].to_vec();
             }
 
             let mac = addr.addr().map(MacAddr::from);
