@@ -8,10 +8,11 @@ use crate::fib::sysctl::sysctl_mpls_enable;
 use super::entry::RibEntry;
 use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
+use serde::Serialize;
 use std::fmt::{self, Write};
 use tokio::sync::mpsc::UnboundedSender;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Link {
     pub index: u32,
     pub name: String,
@@ -64,14 +65,14 @@ impl Link {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize)]
 pub struct LinkAddr {
     pub addr: IpNet,
     pub ifindex: u32,
     pub secondary: bool,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize)]
 pub struct LinkAddr4 {
     pub ifaddr: Ipv4Net,
     pub ifindex: u32,
@@ -95,7 +96,7 @@ impl LinkAddr {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize)]
 pub enum LinkType {
     #[default]
     Unknown,
@@ -113,7 +114,7 @@ impl fmt::Display for LinkType {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize)]
 pub struct LinkFlags(pub u32);
 
 pub const IFF_UP: u32 = 1 << 0;
@@ -208,6 +209,14 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     cb(&link.name, buf);
 }
 
+#[derive(Serialize)]
+pub struct InterfaceBrief {
+    pub interface: String,
+    pub status: String,
+    pub vrf: String,
+    pub addresses: Vec<String>,
+}
+
 pub fn link_brief_show(rib: &Rib, buf: &mut String) {
     // Write the header just once if there is any link
     if !rib.links.is_empty() {
@@ -241,7 +250,29 @@ pub fn link_brief_show(rib: &Rib, buf: &mut String) {
     }
 }
 
-pub fn link_show(rib: &Rib, mut args: Args, _json: bool) -> String {
+pub fn link_brief_show_json(rib: &Rib) -> String {
+    let mut interfaces = Vec::new();
+
+    for link in rib.links.values() {
+        let addresses: Vec<String> = link.addr4.iter()
+            .chain(link.addr6.iter())
+            .map(|addr| addr.addr.to_string())
+            .collect();
+
+        let interface_brief = InterfaceBrief {
+            interface: link.name.clone(),
+            status: if link.is_up() { "Up".to_string() } else { "Down".to_string() },
+            vrf: "default".to_string(),
+            addresses,
+        };
+
+        interfaces.push(interface_brief);
+    }
+
+    serde_json::to_string_pretty(&interfaces).unwrap_or_else(|_| "{}".to_string())
+}
+
+pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
     let cb = os_traffic_dump();
     let mut buf = String::new();
 
@@ -253,8 +284,12 @@ pub fn link_show(rib: &Rib, mut args: Args, _json: bool) -> String {
         let link_name = args.string().unwrap();
 
         if link_name == "brief" {
-            link_brief_show(rib, &mut buf);
-            return buf;
+            if json {
+                return link_brief_show_json(rib);
+            } else {
+                link_brief_show(rib, &mut buf);
+                return buf;
+            }
         }
 
         if let Some(link) = rib.link_by_name(&link_name) {

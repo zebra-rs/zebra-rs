@@ -1,4 +1,6 @@
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd)]
+use serde::Serialize;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Serialize)]
 pub struct MacAddr {
     octets: [u8; 6],
 }
