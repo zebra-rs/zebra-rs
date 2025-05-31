@@ -204,6 +204,7 @@ impl Rib {
                 }
             }
             ConfigOp::CommitEnd => {
+                self.link_config.commit(self.tx.clone());
                 self.static_config.commit(self.tx.clone());
                 self.mpls_config.commit(self.tx.clone());
             }

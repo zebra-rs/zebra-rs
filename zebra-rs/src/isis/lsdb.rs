@@ -6,6 +6,7 @@ use std::{
     default,
 };
 
+use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -40,6 +41,7 @@ pub struct Lsa {
     pub refresh_timer: Option<Timer>,
     pub csnp_timer: Option<Timer>,
     pub ifindex: u32,
+    pub bytes: Vec<u8>,
 }
 
 impl Lsa {
@@ -52,6 +54,7 @@ impl Lsa {
             refresh_timer: None,
             csnp_timer: None,
             ifindex: 0,
+            bytes: vec![],
         }
     }
 }
@@ -243,7 +246,9 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     }
 }
 
-pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp) -> Option<Lsa> {
+pub fn insert_lsp(top: &mut IsisTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) -> Option<Lsa> {
+    let key = lsp.lsp_id.clone();
+
     if top.config.net.sys_id() == key.sys_id() {
         tracing::info!("Self originated LSP?");
         return None;
@@ -257,6 +262,7 @@ pub fn insert_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: IsisLsp)
     }
     let hold_time = lsp.hold_time;
     let mut lsa = Lsa::new(lsp);
+    lsa.bytes = bytes;
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
