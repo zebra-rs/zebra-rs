@@ -296,9 +296,12 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
         }
     }
 
-    if entry.name == "if-name" {
+    if entry.name == "if-name" || entry.name == "if-name-brief" {
         for link in s.links.iter() {
             m.match_keyword(entry, input, link);
+        }
+        if entry.name == "if-name-brief" {
+            m.match_keyword(entry, input, "brief");
         }
     }
 }

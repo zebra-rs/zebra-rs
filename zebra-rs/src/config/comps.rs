@@ -211,9 +211,15 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
                 for entry in entry.dir.borrow().iter() {
                     if &entry.name == key {
                         comps_as_leaf(comps, entry);
-                        if entry.name == "if-name" {
+                        if entry.name == "if-name" || entry.name == "if-name-brief" {
                             for link in s.links.iter() {
                                 comps.push(Completion::new_name(link));
+                            }
+                            if entry.name == "if-name-brief" {
+                                comps.push(Completion::new(
+                                    "brief",
+                                    "Interface status and configuration summary",
+                                ));
                             }
                         }
                     }
