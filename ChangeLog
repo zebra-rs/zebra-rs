@@ -1,3 +1,13 @@
+2025-05-31  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* zebra-rs/yang/exec.yang: Temporary set "show ipv6 route" to be empty type.
+
+	* zebra-rs/src/isis/packet.rs (psnp_recv): Use cached LSP for PSNP
+	response.
+
+	* zebra-rs/yang/exec.yang: Add "ext:presence" for "show" command
+	with empty key such as "show interface" support.
+
 2025-05-30  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* zebra-rs/src/config/manager.rs (ConfigManager.process_message):

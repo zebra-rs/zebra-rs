@@ -44,6 +44,7 @@ module exec {
     }
     list interface {
       ext:help "Show interface commands";
+      ext:presence "Show presence";
       key "if-name";
       leaf if-name {
         type string;
@@ -159,7 +160,8 @@ module exec {
       ext:help "Show IPv6 commands";
       leaf route {
         ext:help "IPv6 address";
-        type inet:ipv6-address;
+        // type inet:ipv6-address;
+        type empty;
       }
       leaf prefix {
         ext:help "IPv6 prefix";

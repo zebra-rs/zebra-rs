@@ -386,6 +386,10 @@ fn matched_enumeration(mx: &Match) -> Option<String> {
     None
 }
 
+pub fn is_entry_presence(entry: &Rc<Entry>) -> bool {
+    entry.extension.get("ext:presence").is_some()
+}
+
 pub fn parse(
     input: &str,
     entry: Rc<Entry>,
@@ -454,9 +458,11 @@ pub fn parse(
 
     // Transition to next yang match state.
     let mut next = entry.clone();
+    let mut key_presence = false;
     match s.ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
             next = mx.matched_entry.clone();
+            key_presence = is_entry_presence(&mx.matched_entry);
             s.ymatch = ymatch_next(&mx.matched_entry, s.ymatch);
             if s.ymatch == YangMatch::Key {
                 s.index = 0usize;
@@ -560,6 +566,9 @@ pub fn parse(
     let remain = input.to_string().split_off(mx.pos);
 
     if remain.is_empty() {
+        if key_presence {
+            return (ExecCode::Success, mx.comps, s);
+        }
         if !ymatch_complete(s.ymatch) {
             return (ExecCode::Incomplete, mx.comps, s);
         }
