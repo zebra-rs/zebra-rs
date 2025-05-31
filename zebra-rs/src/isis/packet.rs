@@ -1,4 +1,5 @@
 use anyhow::{Context, Error};
+use bytes::BytesMut;
 use isis_packet::{
     IsLevel, IsisLsp, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv, IsisTlvLspEntries,
     IsisType,
@@ -176,12 +177,6 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
             tracing::info!("DIS sysid is not yet set");
         }
     }
-    // println!(
-    //     "LSP recv {} {} {:02x}",
-    //     lsp.lsp_id.sys_id(),
-    //     lsp.hold_time,
-    //     lsp.seq_number
-    // );
 
     // Self originated LSP came from DIS.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
@@ -340,16 +335,28 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                     let hold_time =
                         lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
 
-                    let mut lsp = lsa.lsp.clone();
-                    lsp.hold_time = hold_time;
-                    lsp.checksum = 0;
-                    let buf = lsp_emit(&mut lsp, level);
+                    if !lsa.bytes.is_empty() {
+                        let mut buf = BytesMut::from(&lsa.bytes[..]);
 
-                    link.ptx.send(PacketMessage::Send(
-                        Packet::Bytes(buf),
-                        link.state.ifindex,
-                        level,
-                    ));
+                        isis_packet::write_hold_time(&mut buf, hold_time);
+
+                        link.ptx.send(PacketMessage::Send(
+                            Packet::Bytes(buf),
+                            link.state.ifindex,
+                            level,
+                        ));
+                    } else {
+                        let mut lsp = lsa.lsp.clone();
+                        lsp.hold_time = hold_time;
+                        lsp.checksum = 0;
+                        let buf = lsp_emit(&mut lsp, level);
+
+                        link.ptx.send(PacketMessage::Send(
+                            Packet::Bytes(buf),
+                            link.state.ifindex,
+                            level,
+                        ));
+                    }
                 }
             }
         }
