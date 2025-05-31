@@ -1,5 +1,9 @@
 2025-05-31  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
+	* version: 0.6.6
+
+	* zebra-rs/src/rib/link.rs: "show interface brief".
+
 	* zebra-rs/yang/exec.yang: Temporary set "show ipv6 route" to be empty type.
 
 	* zebra-rs/src/isis/packet.rs (psnp_recv): Use cached LSP for PSNP
