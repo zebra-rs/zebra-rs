@@ -9,6 +9,7 @@ use super::entry::RibEntry;
 use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fmt::{self, Write};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -254,14 +255,20 @@ pub fn link_brief_show_json(rib: &Rib) -> String {
     let mut interfaces = Vec::new();
 
     for link in rib.links.values() {
-        let addresses: Vec<String> = link.addr4.iter()
+        let addresses: Vec<String> = link
+            .addr4
+            .iter()
             .chain(link.addr6.iter())
             .map(|addr| addr.addr.to_string())
             .collect();
 
         let interface_brief = InterfaceBrief {
             interface: link.name.clone(),
-            status: if link.is_up() { "Up".to_string() } else { "Down".to_string() },
+            status: if link.is_up() {
+                "Up".to_string()
+            } else {
+                "Down".to_string()
+            },
             vrf: "default".to_string(),
             addresses,
         };
@@ -403,20 +410,44 @@ impl Rib {
 }
 
 pub struct LinkConfig {
-    //
+    builder: ConfigBuilder,
 }
+
+#[derive(Default)]
+struct ConfigBuilder {
+    path: String,
+    pub map: BTreeMap<(String, ConfigOp), Handler>,
+}
+
+type Handler = fn(
+    config: &mut BTreeMap<String, String>,
+    cache: &mut BTreeMap<String, String>,
+    ifname: &String,
+    args: &mut Args,
+) -> Result<()>;
 
 impl LinkConfig {
     pub fn new() -> Self {
-        LinkConfig {}
+        LinkConfig {
+            builder: ConfigBuilder::default(),
+        }
     }
 
     pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
         const LINK_ERR: &str = "missing interface name";
+        const IPV4_ADDR_ERR: &str = "missing ipv4 address";
 
         let ifname = args.string().context(LINK_ERR)?;
 
-        //let func = self.builder.map.get()
+        // let func = self.builder.map.get()
+        if path == "/interface/ipv4/address" {
+            let v4addr = args.v4net().context(IPV4_ADDR_ERR)?;
+            println!("XXXX ip address {} {}", ifname, v4addr);
+
+            if op.is_set() {
+                // fib.addr_add_ipv4(index, v4addr, false);
+            }
+        }
 
         Ok(())
     }
@@ -424,4 +455,40 @@ impl LinkConfig {
     pub fn commit(&mut self, tx: UnboundedSender<Message>) {
         //
     }
+}
+
+// Temporary func
+pub async fn link_config_exec(
+    rib: &mut Rib,
+    path: String,
+    mut args: Args,
+    op: ConfigOp,
+) -> Result<()> {
+    const LINK_ERR: &str = "missing interface name";
+    const IPV4_ADDR_ERR: &str = "missing ipv4 address";
+
+    let ifname = args.string().context(LINK_ERR)?;
+
+    // let func = self.builder.map.get()
+    if path == "/interface/ipv4/address" {
+        let v4addr = args.v4net().context(IPV4_ADDR_ERR)?;
+
+        if op.is_set() {
+            if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                rib.fib_handle.addr_add_ipv4(ifindex, &v4addr, false).await;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn link_lookup(rib: &Rib, name: String) -> Option<u32> {
+    for (_, link) in rib.links.iter() {
+        if link.name == name {
+            return Some(link.index);
+        }
+    }
+
+    None
 }

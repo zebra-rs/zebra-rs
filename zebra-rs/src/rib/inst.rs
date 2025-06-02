@@ -1,6 +1,6 @@
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::link::LinkConfig;
+use super::link::{link_config_exec, LinkConfig};
 use super::{Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig};
 
 use crate::config::{path_from_command, Args};
@@ -200,7 +200,8 @@ impl Rib {
                 } else if path.as_str().starts_with("/routing/static/mpls/label") {
                     let _ = self.mpls_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/interface") {
-                    let _ = self.link_config.exec(path, args, msg.op);
+                    // let _ = self.link_config.exec(path, args, msg.op);
+                    link_config_exec(self, path, args, msg.op).await;
                 }
             }
             ConfigOp::CommitEnd => {
