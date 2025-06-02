@@ -110,6 +110,19 @@ pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
     buf
 }
 
+pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
+    let mut buf = String::new();
+
+    buf.push_str(SHOW_IPV4_HEADER);
+
+    for (prefix, entries) in rib.table.iter() {
+        for entry in entries.iter() {
+            write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap()).unwrap();
+        }
+    }
+    buf
+}
+
 pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
     let mut buf = String::new();
 
@@ -137,6 +150,7 @@ impl Rib {
     pub fn show_build(&mut self) {
         self.show_add("/show/interface", link_show);
         self.show_add("/show/ip/route", rib_show);
+        self.show_add("/show/ipv6/route", rib6_show);
         self.show_add("/show/nexthop", nexthop_show);
         self.show_add("/show/mpls/ilm", ilm_show);
     }
