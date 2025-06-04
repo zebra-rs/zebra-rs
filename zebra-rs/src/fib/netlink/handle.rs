@@ -396,7 +396,12 @@ impl FibHandle {
         }
     }
 
-    pub async fn addr_add_ipv4(&self, ifindex: u32, prefix: &Ipv4Net, secondary: bool) {
+    pub async fn addr_add_ipv4(
+        &self,
+        ifindex: u32,
+        prefix: &Ipv4Net,
+        secondary: bool,
+    ) -> anyhow::Result<()> {
         let mut msg = AddressMessage::default();
         msg.header.family = AddressFamily::Inet;
         msg.header.prefix_len = prefix.prefix_len();
@@ -421,8 +426,10 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("NewAddress error: {}", e);
+                return Err(anyhow::anyhow!("NewAddress netlink error: {}", e));
             }
         }
+        Ok(())
     }
 
     pub async fn addr_del_ipv4(&self, ifindex: u32, prefix: &Ipv4Net) {

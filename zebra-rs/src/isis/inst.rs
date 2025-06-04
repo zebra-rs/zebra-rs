@@ -98,6 +98,7 @@ impl Isis {
     pub fn new(ctx: Context, rib_tx: UnboundedSender<rib::Message>) -> Self {
         let chan = RibRxChannel::new();
         let msg = rib::Message::Subscribe {
+            proto: "isis".into(),
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
@@ -158,6 +159,7 @@ impl Isis {
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
+        println!("RIB Message {:?}", msg);
         match msg {
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
@@ -581,7 +583,10 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     // TODO: Router capability. When TE-Router ID is configured, use the value. If
     // not when Router ID is configured, use the value. Otherwise system
     // default Router ID will be used.
-    let router_id: Ipv4Addr = "4.4.4.4".parse().unwrap();
+    let router_id: Ipv4Addr = match &top.config.te_router_id {
+        Some(router_id) => *router_id,
+        None => "0.0.0.0".parse().unwrap(),
+    };
     let mut cap = IsisTlvRouterCap {
         router_id,
         flags: 0.into(),

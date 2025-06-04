@@ -19,15 +19,36 @@ use tokio::sync::oneshot;
 pub type ShowCallback = fn(&Rib, Args, bool) -> String;
 
 pub enum Message {
-    LinkUp { ifindex: u32 },
-    LinkDown { ifindex: u32 },
-    Ipv4Add { prefix: Ipv4Net, rib: RibEntry },
-    Ipv4Del { prefix: Ipv4Net, rib: RibEntry },
-    IlmAdd { label: u32, ilm: IlmEntry },
-    IlmDel { label: u32, ilm: IlmEntry },
-    Shutdown { tx: oneshot::Sender<()> },
+    LinkUp {
+        ifindex: u32,
+    },
+    LinkDown {
+        ifindex: u32,
+    },
+    Ipv4Add {
+        prefix: Ipv4Net,
+        rib: RibEntry,
+    },
+    Ipv4Del {
+        prefix: Ipv4Net,
+        rib: RibEntry,
+    },
+    IlmAdd {
+        label: u32,
+        ilm: IlmEntry,
+    },
+    IlmDel {
+        label: u32,
+        ilm: IlmEntry,
+    },
+    Shutdown {
+        tx: oneshot::Sender<()>,
+    },
     Resolve,
-    Subscribe { tx: UnboundedSender<RibRx> },
+    Subscribe {
+        proto: String,
+        tx: UnboundedSender<RibRx>,
+    },
 }
 
 #[derive(Default, Debug, Clone)]
@@ -101,7 +122,8 @@ impl Rib {
         Ok(rib)
     }
 
-    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>) {
+    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, proto: String) {
+        println!("Proto {}", proto);
         // Link dump.
         for (_, link) in self.links.iter() {
             let msg = RibRx::LinkAdd(link.clone());
@@ -152,11 +174,11 @@ impl Rib {
             Message::Resolve => {
                 self.ipv4_route_resolve().await;
             }
-            Message::Subscribe { tx } => {
+            Message::Subscribe { tx, proto } => {
                 // for (_, link) in self.links.iter() {
                 //     tx.send(RibRx::LinkAdd(link.clone())).unwrap();
                 // }
-                self.subscribe(tx);
+                self.subscribe(tx, proto);
             }
         }
     }

@@ -25,8 +25,8 @@ changelog: "changelog.yaml"
 contents:
   - src: ../target/release/zebra-rs
     dst: /usr/sbin/zebra-rs
-  - src: ../target/release/zebctl
-    dst: /usr/sbin/zebctl
+  - src: ../target/release/zctl
+    dst: /usr/sbin/zctl
   - src: ../cli/cli
     dst: /usr/bin/cli
   - src: ../target/release/cli-helper

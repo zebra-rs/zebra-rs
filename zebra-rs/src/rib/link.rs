@@ -5,6 +5,7 @@ use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 use crate::fib::sysctl::sysctl_mpls_enable;
 
+use super::api::RibRx;
 use super::entry::RibEntry;
 use super::{MacAddr, Message, Rib};
 use ipnet::{IpNet, Ipv4Net};
@@ -475,7 +476,8 @@ pub async fn link_config_exec(
 
         if op.is_set() {
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
-                rib.fib_handle.addr_add_ipv4(ifindex, &v4addr, false).await;
+                let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr, false).await;
+                println!("{:?}", result);
             }
         }
     }

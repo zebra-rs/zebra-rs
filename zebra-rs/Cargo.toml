@@ -35,7 +35,7 @@ bitflags = "2.6.0"
 sysctl = "0.5.5"
 nanomsg = "0.7.2"
 socket2 = "0.5.8"
-nix = { version = "0.29", features = ["fs", "net", "socket", "uio", "user"] }
+nix = { version = "0.29", features = ["fs", "net", "socket", "uio", "user", "process"] }
 libc = "0.2.167"
 #bgp-packet = { path = "../../bgp-packet" }
 bgp-packet = { git = "https://github.com/zebra-rs/bgp-packet", branch = "main" }
