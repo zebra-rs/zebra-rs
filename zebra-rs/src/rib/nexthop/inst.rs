@@ -1,12 +1,12 @@
 use std::net::Ipv4Addr;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Label {
     Implicit(u32),
     Explicit(u32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NexthopUni {
     pub addr: Ipv4Addr,
     pub metric: u32,
@@ -56,7 +56,7 @@ impl Default for NexthopUni {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Nexthop {
     Link(u32),
     Uni(NexthopUni),
@@ -70,7 +70,7 @@ impl Default for Nexthop {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
 pub struct NexthopList {
     pub nexthops: Vec<NexthopUni>,
 }
@@ -84,7 +84,7 @@ impl NexthopList {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
 pub struct NexthopMulti {
     // ECMP or UCMP multipath.  metric will be the same.
     pub metric: u32,

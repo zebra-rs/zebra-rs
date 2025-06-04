@@ -7,7 +7,7 @@ use super::{Nexthop, NexthopMap, NexthopMulti, RibSubType, RibType};
 
 pub type RibEntries = Vec<RibEntry>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RibEntry {
     pub rtype: RibType,
     pub rsubtype: RibSubType,
