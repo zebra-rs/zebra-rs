@@ -168,18 +168,20 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
     } else {
         // Generate a nicely formatted string for human-readable format
         let mut result = String::new();
-        
+
         // Helper closure to format LSPs for a given level
         let format_level = |level: &Level, lsdb: &crate::isis::lsdb::Lsdb| -> String {
             // Check if LSDB has any entries
             if lsdb.iter().count() == 0 {
                 return String::new();
             }
-            
+
             let mut level_output = String::new();
             level_output.push_str(&format!("\n{} Link State Database:\n", level));
-            level_output.push_str("LSP ID                        PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL\n");
-            
+            level_output.push_str(
+                "LSP ID                        PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL\n",
+            );
+
             for (lsp_id, lsa) in lsdb.iter() {
                 let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
                 let originated = if lsa.originated { "*" } else { " " };
@@ -187,21 +189,20 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
                 let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
                 let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
                 let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
-                let system_id = if let Some((hostname, _)) =
-                    isis.hostname.get(level).get(&lsp_id.sys_id())
-                {
-                    format!(
-                        "{}.{:02x}-{:02x}",
-                        hostname.clone(),
-                        lsp_id.pseudo_id(),
-                        lsp_id.fragment_id()
-                    )
-                } else {
-                    lsp_id.to_string()
-                };
+                let system_id =
+                    if let Some((hostname, _)) = isis.hostname.get(level).get(&lsp_id.sys_id()) {
+                        format!(
+                            "{}.{:02x}-{:02x}",
+                            hostname.clone(),
+                            lsp_id.pseudo_id(),
+                            lsp_id.fragment_id()
+                        )
+                    } else {
+                        lsp_id.to_string()
+                    };
 
                 level_output.push_str(&format!(
-                    "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}\n{}\n\n",
+                    "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}{}\n\n",
                     system_id,
                     originated,
                     lsa.lsp.pdu_len.to_string(),
@@ -217,8 +218,8 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
 
         // Add L1 database
         result.push_str(&format_level(&Level::L1, &isis.lsdb.l1));
-        
-        // Add L2 database  
+
+        // Add L2 database
         result.push_str(&format_level(&Level::L2, &isis.lsdb.l2));
 
         result
