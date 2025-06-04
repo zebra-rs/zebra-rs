@@ -12,6 +12,27 @@ use std::{cell::RefCell, rc::Rc};
 
 const INDENT_LEVEL: usize = 2;
 
+/// Format a value for JSON output, preserving boolean and numeric types
+fn format_json_value(value: &str) -> String {
+    // Check if it's a boolean
+    if value == "true" || value == "false" {
+        return value.to_string();
+    }
+
+    // Check if it's an integer (positive or negative)
+    if let Ok(_) = value.parse::<i64>() {
+        return value.to_string();
+    }
+
+    // Check if it's a floating point number
+    if let Ok(_) = value.parse::<f64>() {
+        return value.to_string();
+    }
+
+    // Default case: treat as string and add quotes
+    format!("\"{}\"", value)
+}
+
 #[derive(Clone, Debug)]
 pub struct Args(pub VecDeque<String>);
 
@@ -233,16 +254,20 @@ impl Config {
             out.push_str(&format!("\"{}\": [", self.name));
         } else if self.has_prefix() {
             out.push('{');
-            out.push_str(&format!("\"{}\":\"{}\"", self.prefix, self.name));
+            out.push_str(&format!(
+                "\"{}\":{}",
+                self.prefix,
+                format_json_value(&self.name)
+            ));
         } else {
             let value = self.value.borrow();
             if !value.is_empty() {
-                out.push_str(&format!("\"{}\":\"{}\"", self.name, value));
+                out.push_str(&format!("\"{}\":{}", self.name, format_json_value(&value)));
             } else {
                 let value_list = self.list.borrow();
                 if value_list.len() > 0 {
                     let value_list: Vec<String> =
-                        value_list.iter().map(|x| format!("\"{}\"", x)).collect();
+                        value_list.iter().map(|x| format_json_value(x)).collect();
                     let leaf_list = value_list.join(",");
                     out.push_str(&format!("\"{}\": [{}]", self.name, leaf_list));
                 } else {
