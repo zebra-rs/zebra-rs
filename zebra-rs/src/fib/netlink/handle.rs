@@ -422,10 +422,9 @@ impl FibHandle {
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewAddress(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
-        let mut response = self.handle.clone().request(req).unwrap();
+        let mut response = self.handle.clone().request(req)?;
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewAddress error: {}", e);
                 return Err(anyhow::anyhow!("NewAddress netlink error: {}", e));
             }
         }

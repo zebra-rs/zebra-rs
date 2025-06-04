@@ -17,9 +17,8 @@ mod isis;
 mod ospf;
 
 use clap::Parser;
-use nix::unistd::{fork, ForkResult};
-use std::process;
 use tracing::Level;
+use daemonize::Daemonize;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -98,65 +97,17 @@ fn tracing_set(daemon_mode: bool) {
 }
 
 fn daemonize() -> anyhow::Result<()> {
-    use nix::unistd::{close, dup2};
-    use std::fs::File;
-    use std::os::unix::io::AsRawFd;
+    let daemonize = Daemonize::new()
+        .pid_file("/var/run/zebra-rs.pid") // Every method except `new` and `start`
+        .chown_pid_file(true)              // is optional, see `Daemonize` documentation
+        .working_directory("/")            // for default behaviour.
+        .umask(0o027)                      // Set umask, `0o027` by default.
+        .privileged_action(|| "Executed before drop privileges");
 
-    // Fork and become session leader
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { .. }) => {
-            // Parent exits
-            process::exit(0);
-        }
-        Ok(ForkResult::Child) => {
-            // Child continues
-        }
-        Err(err) => {
-            return Err(anyhow::anyhow!("Failed to fork: {}", err));
-        }
+    match daemonize.start() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("Failed to daemonize: {}", e)),
     }
-
-    // Create new session
-    if let Err(err) = nix::unistd::setsid() {
-        return Err(anyhow::anyhow!("Failed to create new session: {}", err));
-    }
-
-    // Fork again to ensure we can't acquire a controlling terminal
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { .. }) => {
-            // Parent exits
-            process::exit(0);
-        }
-        Ok(ForkResult::Child) => {
-            // Child continues
-        }
-        Err(err) => {
-            return Err(anyhow::anyhow!("Failed to fork second time: {}", err));
-        }
-    }
-
-    // Change working directory to root
-    if let Err(err) = std::env::set_current_dir("/") {
-        return Err(anyhow::anyhow!("Failed to change directory to /: {}", err));
-    }
-
-    // Set file creation mask
-    nix::sys::stat::umask(nix::sys::stat::Mode::empty());
-
-    // Redirect standard file descriptors to /dev/null
-    let dev_null = File::open("/dev/null")?;
-    let dev_null_fd = dev_null.as_raw_fd();
-
-    // Close stdin, stdout, stderr and redirect to /dev/null
-    close(0)?; // stdin
-    close(1)?; // stdout
-    close(2)?; // stderr
-
-    dup2(dev_null_fd, 0)?; // stdin -> /dev/null
-    dup2(dev_null_fd, 1)?; // stdout -> /dev/null
-    dup2(dev_null_fd, 2)?; // stderr -> /dev/null
-
-    Ok(())
 }
 
 #[tokio::main]

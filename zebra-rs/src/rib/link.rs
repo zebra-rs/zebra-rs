@@ -477,11 +477,22 @@ pub async fn link_config_exec(
         if op.is_set() {
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
                 let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr, false).await;
-                println!("{:?}", result);
+                match result {
+                    Ok(_) => {
+                        let addr = FibAddr {
+                            addr: ipnet::IpNet::V4(v4addr),
+                            link_index: ifindex,
+                            secondary: false,
+                        };
+                        rib.addr_add(addr);
+                    }
+                    Err(_) => {
+                        println!("IPaddress add failure");
+                    }
+                }
             }
         }
     }
-
     Ok(())
 }
 
