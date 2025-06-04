@@ -33,6 +33,7 @@ impl Isis {
             "/routing/isis/interface/ipv4/prefix-sid/index",
             link::config_ipv4_prefix_sid_index,
         );
+        self.callback_add("/routing/isis/interface/metric", link::config_metric);
         self.callback_add(
             "/routing/isis/interface/ipv6/enable",
             link::config_ipv6_enable,
