@@ -1,5 +1,8 @@
 2025-06-04  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
+	* zebra-rs/src/isis/inst.rs (lsp_generate): interface metric will
+	be reflect self originate LSP.
+
 	* zebra-rs/src/config/configs.rs (format_json_value): Treat
 	boolean and number value properly.
 

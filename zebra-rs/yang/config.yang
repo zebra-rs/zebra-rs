@@ -163,6 +163,10 @@ module config {
             }
           }
 
+          leaf metric {
+            type uint32;
+          }
+
           container ipv4 {
             leaf enable {
               type boolean;

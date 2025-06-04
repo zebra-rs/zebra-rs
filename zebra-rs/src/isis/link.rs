@@ -555,6 +555,10 @@ pub fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
     }
 }
 
+pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    config_afi_enable(isis, args, op, Afi::Ip)
+}
+
 pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let circuit_type = args.string()?.parse::<IsLevel>().ok()?;

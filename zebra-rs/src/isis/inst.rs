@@ -636,7 +636,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         let mut ext_is_reach = IsisTlvExtIsReach::default();
         let mut is_reach = IsisTlvExtIsReachEntry {
             neighbor_id: adj.clone(),
-            metric: 10, // TODO: need to get metric from link config.
+            metric: link.config.metric(),
             subs: Vec::new(),
         };
         // Neighbor
