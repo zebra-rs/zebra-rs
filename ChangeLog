@@ -1,3 +1,9 @@
+2025-06-02  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* zebra-rs/src/main.rs: Option "-d/--daemon" is added for
+	daemonize the process.
+
+
 2025-06-01  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* zebra-rs/src/rib/link.rs (link_config_exec): IPv4 address

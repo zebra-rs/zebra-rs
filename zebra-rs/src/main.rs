@@ -17,6 +17,8 @@ mod isis;
 mod ospf;
 
 use clap::Parser;
+use nix::unistd::{fork, ForkResult};
+use std::process;
 use tracing::Level;
 
 #[derive(Parser)]
@@ -24,6 +26,9 @@ use tracing::Level;
 struct Arg {
     #[arg(short, long, help = "YANG load path", default_value = "")]
     yang_path: String,
+
+    #[arg(short, long, help = "Run as daemon in background")]
+    daemon: bool,
 }
 
 // 1. Option Yang path
@@ -79,14 +84,89 @@ fn system_path(arg: &Arg) -> PathBuf {
     }
 }
 
-fn tracing_set() {
+fn tracing_set(daemon_mode: bool) {
     // console_subscriber::init();
-    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+    if daemon_mode {
+        // In daemon mode, log to syslog or disable console logging
+        tracing_subscriber::fmt()
+            .with_max_level(Level::INFO)
+            .with_writer(std::io::sink) // Discard output in daemon mode
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+    }
+}
+
+fn daemonize() -> anyhow::Result<()> {
+    use nix::unistd::{close, dup2};
+    use std::fs::File;
+    use std::os::unix::io::AsRawFd;
+
+    // Fork and become session leader
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { .. }) => {
+            // Parent exits
+            process::exit(0);
+        }
+        Ok(ForkResult::Child) => {
+            // Child continues
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!("Failed to fork: {}", err));
+        }
+    }
+
+    // Create new session
+    if let Err(err) = nix::unistd::setsid() {
+        return Err(anyhow::anyhow!("Failed to create new session: {}", err));
+    }
+
+    // Fork again to ensure we can't acquire a controlling terminal
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { .. }) => {
+            // Parent exits
+            process::exit(0);
+        }
+        Ok(ForkResult::Child) => {
+            // Child continues
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!("Failed to fork second time: {}", err));
+        }
+    }
+
+    // Change working directory to root
+    if let Err(err) = std::env::set_current_dir("/") {
+        return Err(anyhow::anyhow!("Failed to change directory to /: {}", err));
+    }
+
+    // Set file creation mask
+    nix::sys::stat::umask(nix::sys::stat::Mode::empty());
+
+    // Redirect standard file descriptors to /dev/null
+    let dev_null = File::open("/dev/null")?;
+    let dev_null_fd = dev_null.as_raw_fd();
+
+    // Close stdin, stdout, stderr and redirect to /dev/null
+    close(0)?; // stdin
+    close(1)?; // stdout
+    close(2)?; // stderr
+
+    dup2(dev_null_fd, 0)?; // stdin -> /dev/null
+    dup2(dev_null_fd, 1)?; // stdout -> /dev/null
+    dup2(dev_null_fd, 2)?; // stderr -> /dev/null
+
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arg = Arg::parse();
+
+    // Daemonize if requested
+    if arg.daemon {
+        daemonize()?;
+    }
 
     let yang_path = yang_path(&arg);
     if yang_path.is_none() {
@@ -98,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
     let mut rib = Rib::new()?;
 
     let bgp = Bgp::new(rib.api.tx.clone());
-    rib.subscribe(bgp.redist.tx.clone());
+    // rib.subscribe(bgp.redist.tx.clone(), "bgp".to_string());
 
     let policy = Policy::new();
 
@@ -121,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
 
     // rib::nanomsg::serve();
 
-    tracing_set();
+    tracing_set(false);
     tracing::info!("zebra-rs started");
 
     config::event_loop(config).await;

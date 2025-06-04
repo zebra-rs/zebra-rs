@@ -66,6 +66,7 @@ impl Ospf {
     pub fn new(ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
         let chan = RibRxChannel::new();
         let msg = crate::rib::Message::Subscribe {
+            proto: "ospf".to_string(),
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);

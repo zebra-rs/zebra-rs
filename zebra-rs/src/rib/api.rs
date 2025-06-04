@@ -44,7 +44,7 @@ impl RibRxChannel {
 }
 
 // Message from rib to protocol module.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum RibRx {
     LinkAdd(Link),
     LinkDel(Link),
