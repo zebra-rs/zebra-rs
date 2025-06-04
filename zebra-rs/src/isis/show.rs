@@ -160,40 +160,48 @@ fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
 
 fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
     if json {
-        // Use serde to serialize the entire database directly
-        serde_json::to_string_pretty(&isis.lsdb.l2.values().map(|x| &x.lsp).collect::<Vec<_>>())
-            .unwrap()
+        // Use serde to serialize both L1 and L2 databases
+        let mut all_lsps = Vec::new();
+        all_lsps.extend(isis.lsdb.l1.values().map(|x| &x.lsp));
+        all_lsps.extend(isis.lsdb.l2.values().map(|x| &x.lsp));
+        serde_json::to_string_pretty(&all_lsps).unwrap()
     } else {
         // Generate a nicely formatted string for human-readable format
-        isis.lsdb
-            .l2
-            .iter()
-            .map(|(lsp_id, lsa)| {
+        let mut result = String::new();
+        
+        // Helper closure to format LSPs for a given level
+        let format_level = |level: &Level, lsdb: &crate::isis::lsdb::Lsdb| -> String {
+            // Check if LSDB has any entries
+            if lsdb.iter().count() == 0 {
+                return String::new();
+            }
+            
+            let mut level_output = String::new();
+            level_output.push_str(&format!("\n{} Link State Database:\n", level));
+            level_output.push_str("LSP ID                        PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL\n");
+            
+            for (lsp_id, lsa) in lsdb.iter() {
                 let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
                 let originated = if lsa.originated { "*" } else { " " };
                 let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
                 let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
                 let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
                 let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
-                let (system_id, _lsp_id) = if let Some((hostname, _)) =
-                    isis.hostname.get(&Level::L2).get(&lsp_id.sys_id())
+                let system_id = if let Some((hostname, _)) =
+                    isis.hostname.get(level).get(&lsp_id.sys_id())
                 {
-                    (
-                        format!(
-                            "{}.{:02x}-{:02x}",
-                            hostname.clone(),
-                            lsp_id.pseudo_id(),
-                            lsp_id.fragment_id()
-                        ),
-                        lsp_id.to_string(),
+                    format!(
+                        "{}.{:02x}-{:02x}",
+                        hostname.clone(),
+                        lsp_id.pseudo_id(),
+                        lsp_id.fragment_id()
                     )
                 } else {
-                    (lsp_id.to_string(), String::from(""))
+                    lsp_id.to_string()
                 };
 
-                format!(
-                    "{}\n{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}{}\n",
-                    "LSP ID                        PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL",
+                level_output.push_str(&format!(
+                    "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}\n{}\n\n",
                     system_id,
                     originated,
                     lsa.lsp.pdu_len.to_string(),
@@ -202,10 +210,18 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
                     rem,
                     types,
                     lsa.lsp
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+                ));
+            }
+            level_output
+        };
+
+        // Add L1 database
+        result.push_str(&format_level(&Level::L1, &isis.lsdb.l1));
+        
+        // Add L2 database  
+        result.push_str(&format_level(&Level::L2, &isis.lsdb.l2));
+
+        result
     }
 }
 
