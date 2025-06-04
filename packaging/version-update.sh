@@ -1,6 +1,6 @@
 #! /bin/bash
 
-for file in ../zebra-rs/Cargo.toml ../zebra-ctl/Cargo.toml ../cli-helper/Cargo.toml
+for file in ../zebra-rs/Cargo.toml ../zctl/Cargo.toml ../cli-helper/Cargo.toml
 do
     sed -i "s/^version = .*/version = \"$(cat ../version)\"/" ${file}
 done
