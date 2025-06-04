@@ -527,6 +527,21 @@ pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
     config_afi_enable(isis, args, op, Afi::Ip)
 }
 
+pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let metric = args.u32()?;
+
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if op.is_set() {
+        link.config.metric = Some(metric);
+    } else {
+        link.config.metric = None;
+    }
+
+    Some(())
+}
+
 pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     config_afi_enable(isis, args, op, Afi::Ip6)
 }
@@ -553,10 +568,6 @@ pub fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
         L1 => L1,
         L2 => L2,
     }
-}
-
-pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    config_afi_enable(isis, args, op, Afi::Ip)
 }
 
 pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
