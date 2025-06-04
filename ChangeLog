@@ -1,5 +1,8 @@
 2025-06-04  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
+	* zebra-rs/src/config/configs.rs (format_json_value): Treat
+	boolean and number value properly.
+
 	* version: 0.6.7
 
 	* zebra-rs/src/rib/link.rs (link_config_exec): Fix bug of self
