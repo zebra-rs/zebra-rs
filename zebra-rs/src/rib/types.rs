@@ -8,7 +8,7 @@ const RIB_ISIS: u8 = 5;
 const RIB_BGP: u8 = 6;
 const RIB_DHCP: u8 = 7;
 
-#[derive(Debug, PartialEq, Eq, Clone, Default, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Default, Copy, serde::Serialize)]
 pub enum RibType {
     Kernel,
     Connected,
@@ -83,7 +83,7 @@ impl RibType {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, serde::Serialize)]
 pub enum RibSubType {
     Default,
     OspfIa,
