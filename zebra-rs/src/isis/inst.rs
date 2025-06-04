@@ -284,10 +284,10 @@ impl Isis {
                                     };
                                     if let Some(curr) = rib.get(&entry.prefix) {
                                         if curr.metric >= route.metric {
-                                            rib.insert(entry.prefix, route);
+                                            rib.insert(entry.prefix.trunc(), route);
                                         }
                                     } else {
-                                        rib.insert(entry.prefix, route);
+                                        rib.insert(entry.prefix.trunc(), route);
                                     }
                                 }
                             }
