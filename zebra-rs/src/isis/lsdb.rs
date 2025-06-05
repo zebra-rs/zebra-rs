@@ -64,11 +64,6 @@ impl Lsdb {
         self.map.get(key)
     }
 
-    pub fn insert(&mut self, key: IsisLspId, value: IsisLsp) -> Option<Lsa> {
-        let lsa = Lsa::new(value);
-        self.map.insert(key, lsa)
-    }
-
     pub fn remove(&mut self, key: &IsisLspId) -> Option<Lsa> {
         self.map.remove(key)
     }
@@ -246,7 +241,13 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     }
 }
 
-pub fn insert_lsp(top: &mut IsisTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) -> Option<Lsa> {
+pub fn insert_lsp(
+    top: &mut IsisTop,
+    level: Level,
+    lsp: IsisLsp,
+    bytes: Vec<u8>,
+    ifindex: u32,
+) -> Option<Lsa> {
     let key = lsp.lsp_id.clone();
 
     if top.config.net.sys_id() == key.sys_id() {
@@ -262,8 +263,14 @@ pub fn insert_lsp(top: &mut IsisTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     }
     let hold_time = lsp.hold_time;
     let mut lsa = Lsa::new(lsp);
+    lsa.ifindex = ifindex;
     lsa.bytes = bytes;
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
+
+    // Schedule SRM (Send Routing Message).
+    let msg = Message::Srm(key, level);
+    top.tx.send(msg);
+
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 

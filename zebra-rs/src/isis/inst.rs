@@ -18,7 +18,7 @@ use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
 use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
-use crate::isis::{ifsm, lsdb};
+use crate::isis::{ifsm, link_level_capable, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link::LinkAddr;
@@ -184,6 +184,38 @@ impl Isis {
     pub fn process_msg(&mut self, msg: Message) {
         tracing::info!("{}", msg);
         match msg {
+            Message::Srm(lsp_id, level) => {
+                for (_, link) in self.links.iter() {
+                    if !link_level_capable(&link.state.level(), &level) {
+                        return;
+                    }
+
+                    if *link.state.nbrs_up.get(&level) == 0 {
+                        return;
+                    }
+
+                    if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
+                        if lsa.ifindex == link.state.ifindex {
+                            return;
+                        }
+
+                        let hold_time =
+                            lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+
+                        if !lsa.bytes.is_empty() {
+                            let mut buf = BytesMut::from(&lsa.bytes[..]);
+
+                            isis_packet::write_hold_time(&mut buf, hold_time);
+
+                            link.ptx.send(PacketMessage::Send(
+                                Packet::Bytes(buf),
+                                link.state.ifindex,
+                                level,
+                            ));
+                        }
+                    }
+                }
+            }
             Message::SpfCalc(level) => {
                 // SPF calc.
                 let mut top = self.top();
@@ -1185,6 +1217,7 @@ pub enum Message {
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
+    Srm(IsisLspId, Level),
     DisOriginate(Level, u32),
     SpfCalc(Level),
 }
@@ -1192,6 +1225,9 @@ pub enum Message {
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Message::Srm(lsp_id, level) => {
+                write!(f, "[Message::Srm({}, {})]", lsp_id, level)
+            }
             Message::Recv(isis_packet, _, mac_addr) => {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
             }
