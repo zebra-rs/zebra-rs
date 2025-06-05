@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Error};
 use bytes::BytesMut;
 use isis_packet::{
-    IsLevel, IsisLsp, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv, IsisTlvLspEntries,
-    IsisType,
+    IsLevel, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv,
+    IsisTlvLspEntries, IsisType,
 };
 
 use crate::isis::inst::lsp_emit;
@@ -17,7 +19,7 @@ use super::lsdb;
 use super::nfsm::{isis_nfsm, NfsmEvent};
 use super::Level;
 
-fn link_level_capable(is_level: &IsLevel, level: &Level) -> bool {
+pub fn link_level_capable(is_level: &IsLevel, level: &Level) -> bool {
     match level {
         Level::L1 => *is_level == IsLevel::L1 || *is_level == IsLevel::L1L2,
         Level::L2 => *is_level == IsLevel::L2 || *is_level == IsLevel::L1L2,
@@ -191,8 +193,12 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
     if lsp.hold_time == 0 {
         lsdb::remove_lsp(top, level, lsp.lsp_id);
     } else {
-        lsdb::insert_lsp(top, level, lsp, packet.bytes);
+        lsdb::insert_lsp(top, level, lsp, packet.bytes, ifindex);
     }
+}
+
+struct LspFlag {
+    seq_number: u32,
 }
 
 pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
@@ -230,6 +236,15 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
+    // Local cache for LSDB.
+    let mut lsdb_flags: BTreeMap<IsisLspId, LspFlag> = BTreeMap::new();
+    for (_, lsa) in top.lsdb.get(&level).iter() {
+        let lsp_flag = LspFlag {
+            seq_number: lsa.lsp.seq_number,
+        };
+        lsdb_flags.insert(lsa.lsp.lsp_id.clone(), lsp_flag);
+    }
+
     let mut req = IsisTlvLspEntries::default();
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
@@ -253,7 +268,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 }
 
                 // Need to check sequence number.
-                match top.lsdb.get(&level).get(&lsp.lsp_id) {
+                match lsdb_flags.get(&lsp.lsp_id) {
                     None => {
                         // set_ssn();
                         if lsp.hold_time != 0 {
@@ -266,22 +281,44 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                             // println!("LSP REQ New(Purged): {}", lsp.lsp_id);
                         }
                     }
-                    Some(local) if local.lsp.seq_number < lsp.seq_number => {
+                    Some(local) if local.seq_number < lsp.seq_number => {
                         // set_ssn();
                         tracing::info!("CSNP: Update {}", lsp.lsp_id);
                         let mut psnp = lsp.clone();
                         psnp.seq_number = 0;
                         req.entries.push(psnp);
                     }
-                    Some(local) if local.lsp.seq_number > lsp.seq_number => {
+                    Some(local) if local.seq_number > lsp.seq_number => {
                         // set_srm();
                     }
-                    Some(local) if local.lsp.hold_time != 0 && lsp.hold_time == 0 => {
+                    Some(local) if lsp.hold_time == 0 => {
                         // purge_local() set srm();
                     }
                     _ => {
                         // Identical, nothing to do.
                     }
+                }
+                lsdb_flags.remove(&lsp.lsp_id);
+            }
+        }
+    }
+    if !lsdb_flags.is_empty() {
+        for (key, flag) in lsdb_flags.iter() {
+            // Flood.
+            let lsa = top.lsdb.get(&level).get(key);
+            if let Some(lsa) = lsa {
+                let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+
+                if !lsa.bytes.is_empty() {
+                    let mut buf = BytesMut::from(&lsa.bytes[..]);
+
+                    isis_packet::write_hold_time(&mut buf, hold_time);
+
+                    link.ptx.send(PacketMessage::Send(
+                        Packet::Bytes(buf),
+                        link.state.ifindex,
+                        level,
+                    ));
                 }
             }
         }
