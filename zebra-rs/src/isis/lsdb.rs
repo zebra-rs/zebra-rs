@@ -259,8 +259,9 @@ pub fn insert_lsp(
         update_pseudo();
     } else {
         update_lsp(top, level, key, &lsp);
-        spf_schedule(top, level);
     }
+    spf_schedule(top, level);
+
     let hold_time = lsp.hold_time;
     let mut lsa = Lsa::new(lsp);
     lsa.ifindex = ifindex;
