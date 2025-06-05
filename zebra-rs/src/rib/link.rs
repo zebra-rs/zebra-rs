@@ -219,6 +219,29 @@ pub struct InterfaceBrief {
     pub addresses: Vec<String>,
 }
 
+#[derive(Serialize)]
+pub struct InterfaceDetailed {
+    pub interface: String,
+    pub hardware: String,
+    pub index: u32,
+    pub metric: u32,
+    pub mtu: u32,
+    pub link_status: String,
+    pub flags: String,
+    pub vrf_binding: String,
+    pub label_switching: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_address: Option<String>,
+    pub inet_addresses: Vec<InterfaceAddress>,
+    pub inet6_addresses: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct InterfaceAddress {
+    pub address: String,
+    pub secondary: bool,
+}
+
 pub fn link_brief_show(rib: &Rib, buf: &mut String) {
     // Write the header just once if there is any link
     if !rib.links.is_empty() {
@@ -280,13 +303,80 @@ pub fn link_brief_show_json(rib: &Rib) -> String {
     serde_json::to_string_pretty(&interfaces).unwrap_or_else(|_| "{}".to_string())
 }
 
+pub fn link_detailed_show_json(rib: &Rib, link_name: Option<&str>) -> String {
+    let mut interfaces = Vec::new();
+
+    if let Some(name) = link_name {
+        // Show single interface
+        if let Some(link) = rib.link_by_name(name) {
+            interfaces.push(link_to_detailed_json(link));
+        } else {
+            let error = serde_json::json!({
+                "error": format!("interface {} not found", name)
+            });
+            return serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string());
+        }
+    } else {
+        // Show all interfaces
+        for link in rib.links.values() {
+            interfaces.push(link_to_detailed_json(link));
+        }
+    }
+
+    serde_json::to_string_pretty(&interfaces).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn link_to_detailed_json(link: &Link) -> InterfaceDetailed {
+    let inet_addresses: Vec<InterfaceAddress> = link
+        .addr4
+        .iter()
+        .map(|addr| InterfaceAddress {
+            address: addr.addr.to_string(),
+            secondary: addr.secondary,
+        })
+        .collect();
+
+    let inet6_addresses: Vec<String> = link
+        .addr6
+        .iter()
+        .map(|addr| addr.addr.to_string())
+        .collect();
+
+    InterfaceDetailed {
+        interface: link.name.clone(),
+        hardware: format!("{}", link.link_type),
+        index: link.index,
+        metric: link.metric,
+        mtu: link.mtu,
+        link_status: if link.is_up_and_running() {
+            "Up".to_string()
+        } else {
+            "Down".to_string()
+        },
+        flags: format!("{}", link.flags),
+        vrf_binding: "Not bound".to_string(),
+        label_switching: if link.label {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        },
+        mac_address: link.mac.map(|mac| format!("{}", mac)),
+        inet_addresses,
+        inet6_addresses,
+    }
+}
+
 pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
     let cb = os_traffic_dump();
     let mut buf = String::new();
 
     if args.is_empty() {
-        for (_, link) in rib.links.iter() {
-            link_info_show(link, &mut buf, &cb);
+        if json {
+            return link_detailed_show_json(rib, None);
+        } else {
+            for (_, link) in rib.links.iter() {
+                link_info_show(link, &mut buf, &cb);
+            }
         }
     } else {
         let link_name = args.string().unwrap();
@@ -300,10 +390,14 @@ pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
             }
         }
 
-        if let Some(link) = rib.link_by_name(&link_name) {
-            link_info_show(link, &mut buf, &cb)
+        if json {
+            return link_detailed_show_json(rib, Some(&link_name));
         } else {
-            write!(buf, "% interface {} not found", link_name).unwrap();
+            if let Some(link) = rib.link_by_name(&link_name) {
+                link_info_show(link, &mut buf, &cb)
+            } else {
+                write!(buf, "% interface {} not found", link_name).unwrap();
+            }
         }
     }
     buf
