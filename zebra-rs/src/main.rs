@@ -102,15 +102,13 @@ fn tracing_set(daemon_mode: bool) {
                 "Failed to setup syslog logging: {}, falling back to file",
                 e
             );
-            setup_tracing(LoggingOutput::File("zebra-rs.log".to_string())).unwrap_or_else(
-                |e| {
-                    eprintln!("Failed to setup file logging: {}, discarding logs", e);
-                    tracing_subscriber::fmt()
-                        .with_max_level(Level::INFO)
-                        .with_writer(std::io::sink)
-                        .init();
-                },
-            );
+            setup_tracing(LoggingOutput::File("zebra-rs.log".to_string())).unwrap_or_else(|e| {
+                eprintln!("Failed to setup file logging: {}, discarding logs", e);
+                tracing_subscriber::fmt()
+                    .with_max_level(Level::INFO)
+                    .with_writer(std::io::sink)
+                    .init();
+            });
         });
     } else {
         setup_tracing(LoggingOutput::Stdout).unwrap_or_else(|e| {
@@ -200,34 +198,55 @@ pub fn setup_tracing(output: LoggingOutput) -> anyhow::Result<()> {
             let safe_log_path = if path.starts_with('/') {
                 // Absolute path - validate and create directory if needed
                 let path_obj = std::path::Path::new(&path);
-                let parent = path_obj.parent()
+                let parent = path_obj
+                    .parent()
                     .ok_or_else(|| anyhow::anyhow!("Invalid log file path: {}", path))?;
-                
+
                 // Try to create the directory if it doesn't exist
                 if !parent.exists() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| anyhow::anyhow!("Failed to create log directory {}: {}", parent.display(), e))?;
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to create log directory {}: {}",
+                            parent.display(),
+                            e
+                        )
+                    })?;
                 }
-                
+
                 // Check if we can write to the directory
-                if !parent.exists() || std::fs::metadata(parent).map(|m| m.permissions().readonly()).unwrap_or(true) {
-                    return Err(anyhow::anyhow!("Cannot write to log directory: {}", parent.display()));
+                if !parent.exists()
+                    || std::fs::metadata(parent)
+                        .map(|m| m.permissions().readonly())
+                        .unwrap_or(true)
+                {
+                    return Err(anyhow::anyhow!(
+                        "Cannot write to log directory: {}",
+                        parent.display()
+                    ));
                 }
-                
+
                 path.clone()
             } else {
                 // Relative path - try /var/log first, fallback to user home or current dir
                 let fallback_paths = vec![
                     format!("/var/log/{}", path),
-                    dirs::home_dir().map(|mut h| { h.push(".zebra-rs"); h.push(&path); h.to_string_lossy().to_string() }).unwrap_or_else(|| format!("./{}", path)),
+                    dirs::home_dir()
+                        .map(|mut h| {
+                            h.push(".zebra-rs");
+                            h.push(&path);
+                            h.to_string_lossy().to_string()
+                        })
+                        .unwrap_or_else(|| format!("./{}", path)),
                     format!("./{}", path),
                 ];
-                
+
                 let mut chosen_path = None;
                 for test_path in fallback_paths {
                     let path_obj = std::path::Path::new(&test_path);
-                    let parent = path_obj.parent().unwrap_or_else(|| std::path::Path::new("."));
-                    
+                    let parent = path_obj
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+
                     // Try to create directory and test write permission
                     if let Ok(_) = std::fs::create_dir_all(parent) {
                         // Test write permission by trying to create a temp file
@@ -239,14 +258,19 @@ pub fn setup_tracing(output: LoggingOutput) -> anyhow::Result<()> {
                         }
                     }
                 }
-                
-                chosen_path.ok_or_else(|| anyhow::anyhow!("Cannot find writable directory for log file: {}", path))?
+
+                chosen_path.ok_or_else(|| {
+                    anyhow::anyhow!("Cannot find writable directory for log file: {}", path)
+                })?
             };
 
             // Extract directory and filename from the safe path
             let log_path = std::path::Path::new(&safe_log_path);
-            let log_dir = log_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-            let log_filename = log_path.file_name()
+            let log_dir = log_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let log_filename = log_path
+                .file_name()
                 .ok_or_else(|| anyhow::anyhow!("Invalid log filename"))?;
 
             let writer = rolling::never(log_dir, log_filename);
@@ -325,16 +349,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // tracing_set(arg.daemon);
-    setup_tracing(LoggingOutput::File(
-        "/home/kunihiro/zebra-rs.log".to_string(),
-    ))
-    .unwrap_or_else(|e| {
-        eprintln!("Failed to setup file logging: {}, discarding logs", e);
-        tracing_subscriber::fmt()
-            .with_max_level(Level::INFO)
-            .with_writer(std::io::sink)
-            .init();
-    });
+    // setup_tracing(LoggingOutput::File(
+    //     "/home/kunihiro/zebra-rs.log".to_string(),
+    // ))
+    // .unwrap_or_else(|e| {
+    //     eprintln!("Failed to setup file logging: {}, discarding logs", e);
+    //     tracing_subscriber::fmt()
+    //         .with_max_level(Level::INFO)
+    //         .with_writer(std::io::sink)
+    //         .init();
+    // });
 
     tracing::info!("zebra-rs started");
 
