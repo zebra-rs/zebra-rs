@@ -191,6 +191,10 @@ impl ConfigManager {
                 isis = true;
                 spawn_isis(self);
             }
+            // Handle logging configuration changes
+            if op == ConfigOp::Set && line.starts_with("logging output") {
+                self.handle_logging_config(&line);
+            }
         }
         for line in diff.lines() {
             if !line.is_empty() {
@@ -450,6 +454,34 @@ impl ConfigManager {
                     });
                 }
             }
+        }
+    }
+
+    fn handle_logging_config(&self, line: &str) {
+        // Parse logging output configuration: "logging output stdout|syslog|file"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == "logging" && parts[1] == "output" {
+            let output_type = parts[2];
+            let logging_output = match output_type {
+                "stdout" => crate::LoggingOutput::Stdout,
+                "syslog" => crate::LoggingOutput::Syslog,
+                "file" => {
+                    // For file output, we could extend to support custom paths
+                    // For now, use default filename (implementation will find safe path)
+                    crate::LoggingOutput::File("zebra-rs.log".to_string())
+                }
+                _ => {
+                    tracing::warn!("Unknown logging output type: {}", output_type);
+                    return;
+                }
+            };
+
+            // Note: Due to tracing-subscriber limitations, we can't reinitialize at runtime
+            // This would require a restart to take effect
+            tracing::info!(
+                "Logging output configuration change detected: {} (restart required)",
+                output_type
+            );
         }
     }
 }

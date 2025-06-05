@@ -437,7 +437,7 @@ impl Isis {
     }
 
     pub fn addr_add(&mut self, addr: LinkAddr) {
-        println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
+        // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
