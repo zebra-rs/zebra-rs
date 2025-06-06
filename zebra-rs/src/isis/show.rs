@@ -64,21 +64,21 @@ struct LinkJson {
 
 fn show_isis_graph(isis: &Isis, _args: Args, json: bool) -> String {
     let mut graphs = Vec::new();
-    
+
     // Process Level 1 graph
     if let Some(graph) = isis.graph.get(&Level::L1) {
         if let Some(graph_json) = format_graph(graph, "L1") {
             graphs.push(graph_json);
         }
     }
-    
+
     // Process Level 2 graph
     if let Some(graph) = isis.graph.get(&Level::L2) {
         if let Some(graph_json) = format_graph(graph, "L2") {
             graphs.push(graph_json);
         }
     }
-    
+
     if json {
         // Return JSON formatted output
         serde_json::to_string_pretty(&graphs)
@@ -86,21 +86,25 @@ fn show_isis_graph(isis: &Isis, _args: Args, json: bool) -> String {
     } else {
         // Return text formatted output
         let mut buf = String::new();
-        
+
         for graph_data in graphs {
             writeln!(buf, "\n{} IS-IS Graph:", graph_data.level).unwrap();
             writeln!(buf, "\nNodes:").unwrap();
             for node in &graph_data.nodes {
                 writeln!(buf, "  {} (id: {})", node.name, node.id).unwrap();
             }
-            
+
             writeln!(buf, "\nLinks:").unwrap();
             for link in &graph_data.links {
-                writeln!(buf, "  {} -> {} (cost: {})", 
-                    link.from_name, link.to_name, link.cost).unwrap();
+                writeln!(
+                    buf,
+                    "  {} -> {} (cost: {})",
+                    link.from_name, link.to_name, link.cost
+                )
+                .unwrap();
             }
         }
-        
+
         if buf.is_empty() {
             String::from("No IS-IS graph data available")
         } else {
@@ -113,14 +117,14 @@ fn show_isis_graph(isis: &Isis, _args: Args, json: bool) -> String {
 fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
     let mut nodes = Vec::new();
     let mut links = Vec::new();
-    
+
     // Collect all nodes
     for (id, node) in graph.iter() {
         nodes.push(NodeJson {
             id: *id,
             name: node.name.clone(),
         });
-        
+
         // Collect all outgoing links from this node
         for link in &node.olinks {
             // Get the destination node name
@@ -135,7 +139,7 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
             }
         }
     }
-    
+
     if nodes.is_empty() {
         None
     } else {

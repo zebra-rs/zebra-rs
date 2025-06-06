@@ -25,7 +25,7 @@ use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
-use crate::spf;
+use crate::spf::{self, Graph};
 use crate::{
     config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
     context::Context,
@@ -70,6 +70,7 @@ pub struct Isis {
     pub spf: Levels<Option<Timer>>,
     pub global_pool: Option<LabelPool>,
     pub local_pool: Option<LabelPool>,
+    pub graph: Levels<Option<Graph>>,
 }
 
 pub struct IsisTop<'a> {
@@ -86,6 +87,7 @@ pub struct IsisTop<'a> {
     pub hostname: &'a mut Levels<Hostname>,
     pub spf: &'a mut Levels<Option<Timer>>,
     pub local_pool: &'a mut Option<LabelPool>,
+    pub graph: &'a mut Levels<Option<Graph>>,
 }
 
 pub struct NeighborTop<'a> {
@@ -132,6 +134,7 @@ impl Isis {
             spf: Levels::<Option<Timer>>::default(),
             global_pool: None,
             local_pool: Some(LabelPool::new(15000, Some(16000))),
+            graph: Levels::<Option<Graph>>::default(),
         };
         isis.callback_build();
         isis.show_build();
@@ -223,6 +226,8 @@ impl Isis {
                 let mut top = self.top();
                 *top.spf.get_mut(&level) = None;
                 let (graph, s, sids) = graph(&mut top, level);
+
+                *top.graph.get_mut(&level) = Some(graph.clone());
 
                 let mut ilm: BTreeMap<u32, SpfIlm> = BTreeMap::new();
 
@@ -483,6 +488,7 @@ impl Isis {
             hostname: &mut self.hostname,
             spf: &mut self.spf,
             local_pool: &mut self.local_pool,
+            graph: &mut self.graph,
         };
         top
     }
@@ -902,9 +908,9 @@ pub fn graph(
                 name: sys_id.to_string(),
                 olinks: vec![],
                 ilinks: vec![],
-                is_disabled: false,
-                is_srv6: false,
-                is_srmpls: true,
+                // is_disabled: false,
+                // is_srv6: false,
+                // is_srmpls: true,
             };
 
             for tlv in lsa.lsp.tlvs.iter() {

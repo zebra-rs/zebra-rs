@@ -23,9 +23,9 @@ pub struct Node {
     pub name: String,
     pub olinks: Vec<Link>,
     pub ilinks: Vec<Link>,
-    pub is_disabled: bool,
-    pub is_srv6: bool,
-    pub is_srmpls: bool,
+    //pub is_disabled: bool,
+    //pub is_srv6: bool,
+    //pub is_srmpls: bool,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -41,9 +41,9 @@ impl Node {
             name: name.into(),
             olinks: Vec::new(),
             ilinks: Vec::new(),
-            is_disabled: false,
-            is_srv6: true,
-            is_srmpls: true,
+            // is_disabled: false,
+            // is_srv6: true,
+            // is_srmpls: true,
         }
     }
 
@@ -55,13 +55,13 @@ impl Node {
         }
     }
 
-    pub fn is_srv6_capable(&self) -> bool {
-        self.is_srv6
-    }
+    // pub fn is_srv6_capable(&self) -> bool {
+    //     self.is_srv6
+    // }
 
-    pub fn is_srmpls(&self) -> bool {
-        self.is_srmpls
-    }
+    // pub fn is_srmpls(&self) -> bool {
+    //     self.is_srmpls
+    // }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -148,15 +148,15 @@ pub fn spf_calc(
             continue;
         };
 
-        if edge.is_disabled {
-            continue;
-        }
+        // if edge.is_disabled {
+        //     continue;
+        // }
 
         for link in edge.links(direct).iter() {
             if let Some(x) = graph.get(&link.id(direct)) {
-                if x.is_disabled {
-                    continue;
-                }
+                // if x.is_disabled {
+                //     continue;
+                // }
             };
 
             let c = paths
@@ -282,7 +282,7 @@ pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<usize>> 
     let mut pc_graph: Graph = graph.to_owned(); // Clone only when necessary
 
     if let Some(x_node) = pc_graph.get_mut(&x) {
-        x_node.is_disabled = true;
+        // x_node.is_disabled = true;
     }
 
     spf(&pc_graph, s, &SpfOpt::default())
