@@ -44,3 +44,5 @@ pub use hostname::Hostname;
 
 pub mod labelpool;
 pub use labelpool::*;
+
+pub mod tracing;

@@ -10,6 +10,8 @@ use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::isis_info;
+
 use crate::isis::{
     srmpls::{LabelBlock, LabelConfig},
     Message,
@@ -251,7 +253,7 @@ pub fn insert_lsp(
     let key = lsp.lsp_id.clone();
 
     if top.config.net.sys_id() == key.sys_id() {
-        tracing::info!("Self originated LSP?");
+        isis_info!("Self originated LSP?");
         return None;
     }
 
