@@ -14,6 +14,8 @@ use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::isis_info;
+
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
 use crate::isis::link::{Afi, DisStatus};
@@ -182,7 +184,7 @@ impl Isis {
     }
 
     pub fn process_msg(&mut self, msg: Message) {
-        tracing::info!("{}", msg);
+        isis_info!("{}", msg);
         match msg {
             Message::Srm(lsp_id, level) => {
                 for (_, link) in self.links.iter() {
@@ -575,7 +577,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .map(|x| x.lsp.seq_number + 1)
         .unwrap_or(0x0001);
 
-    tracing::info!("LSP originate seq number: 0x{:04x}", seq_number);
+    isis_info!("LSP originate seq number: 0x{:04x}", seq_number);
 
     // XXX We need wrap around of seq_number.
 
