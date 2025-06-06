@@ -51,7 +51,7 @@ pub enum Message {
     },
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub enum IlmType {
     #[default]
     None,
