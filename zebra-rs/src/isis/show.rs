@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::{inst::ShowCallback, neigh::Neighbor, Isis};
 
 use crate::isis::{hostname, link, neigh, Level};
-use crate::{config::Args, rib::MacAddr};
+use crate::{config::Args, rib::MacAddr, spf};
 
 impl Isis {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -27,15 +27,124 @@ impl Isis {
         self.show_add("/show/isis/database", show_isis_database);
         self.show_add("/show/isis/database/detail", show_isis_database_detail);
         self.show_add("/show/isis/hostname", hostname::show);
+        self.show_add("/show/isis/graph", show_isis_graph);
     }
 }
 
-fn show_isis(_isis: &Isis, _args: Args, _json: bool) -> String {
+fn show_isis(isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis")
 }
 
 fn show_isis_summary(_isis: &Isis, _args: Args, _json: bool) -> String {
     String::from("show isis summary")
+}
+
+// JSON structures for ISIS graph
+#[derive(Serialize)]
+struct GraphJson {
+    pub level: String,
+    pub nodes: Vec<NodeJson>,
+    pub links: Vec<LinkJson>,
+}
+
+#[derive(Serialize)]
+struct NodeJson {
+    pub id: usize,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+struct LinkJson {
+    pub from_id: usize,
+    pub from_name: String,
+    pub to_id: usize,
+    pub to_name: String,
+    pub cost: u32,
+}
+
+fn show_isis_graph(isis: &Isis, _args: Args, json: bool) -> String {
+    let mut graphs = Vec::new();
+    
+    // Process Level 1 graph
+    if let Some(graph) = isis.graph.get(&Level::L1) {
+        if let Some(graph_json) = format_graph(graph, "L1") {
+            graphs.push(graph_json);
+        }
+    }
+    
+    // Process Level 2 graph
+    if let Some(graph) = isis.graph.get(&Level::L2) {
+        if let Some(graph_json) = format_graph(graph, "L2") {
+            graphs.push(graph_json);
+        }
+    }
+    
+    if json {
+        // Return JSON formatted output
+        serde_json::to_string_pretty(&graphs)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize graph: {}\"}}", e))
+    } else {
+        // Return text formatted output
+        let mut buf = String::new();
+        
+        for graph_data in graphs {
+            writeln!(buf, "\n{} IS-IS Graph:", graph_data.level).unwrap();
+            writeln!(buf, "\nNodes:").unwrap();
+            for node in &graph_data.nodes {
+                writeln!(buf, "  {} (id: {})", node.name, node.id).unwrap();
+            }
+            
+            writeln!(buf, "\nLinks:").unwrap();
+            for link in &graph_data.links {
+                writeln!(buf, "  {} -> {} (cost: {})", 
+                    link.from_name, link.to_name, link.cost).unwrap();
+            }
+        }
+        
+        if buf.is_empty() {
+            String::from("No IS-IS graph data available")
+        } else {
+            buf
+        }
+    }
+}
+
+// Helper function to format a graph into the JSON structure
+fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
+    let mut nodes = Vec::new();
+    let mut links = Vec::new();
+    
+    // Collect all nodes
+    for (id, node) in graph.iter() {
+        nodes.push(NodeJson {
+            id: *id,
+            name: node.name.clone(),
+        });
+        
+        // Collect all outgoing links from this node
+        for link in &node.olinks {
+            // Get the destination node name
+            if let Some(to_node) = graph.get(&link.to) {
+                links.push(LinkJson {
+                    from_id: link.from,
+                    from_name: node.name.clone(),
+                    to_id: link.to,
+                    to_name: to_node.name.clone(),
+                    cost: link.cost,
+                });
+            }
+        }
+    }
+    
+    if nodes.is_empty() {
+        None
+    } else {
+        Some(GraphJson {
+            level: level.to_string(),
+            nodes,
+            links,
+        })
+    }
 }
 
 fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
