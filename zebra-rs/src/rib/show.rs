@@ -1,7 +1,10 @@
 use ipnet::Ipv4Net;
 use serde::Serialize;
 
-use crate::{config::Args, rib::Nexthop};
+use crate::{
+    config::Args,
+    rib::{Label, Nexthop},
+};
 
 use super::{entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show, Group, Rib};
 use std::fmt::Write;
@@ -167,22 +170,42 @@ pub fn rib_entry_show(
                 } else {
                     uni.ifindex
                 };
-                writeln!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
+                write!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
+                if !uni.mpls.is_empty() {
+                    for mpls in uni.mpls.iter() {
+                        match mpls {
+                            Label::Implicit(label) => {
+                                write!(buf, ", label {} implicit-null", label).unwrap();
+                            }
+                            Label::Explicit(label) => {
+                                write!(buf, ", label {}", label).unwrap();
+                            }
+                        }
+                    }
+                }
+                writeln!(buf, "").unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
                     if i != 0 {
                         buf.push_str(&" ".repeat(offset).to_string());
                     }
-                    writeln!(
-                        buf,
-                        " via {}, {}, weight {}",
-                        uni.addr,
-                        rib.link_name(uni.ifindex),
-                        uni.weight
-                    )
-                    .unwrap();
+                    write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
+                    if !uni.mpls.is_empty() {
+                        for mpls in uni.mpls.iter() {
+                            match mpls {
+                                Label::Implicit(label) => {
+                                    write!(buf, ", label {} implicit-null", label).unwrap();
+                                }
+                                Label::Explicit(label) => {
+                                    write!(buf, ", label {}", label).unwrap();
+                                }
+                            }
+                        }
+                    }
+                    write!(buf, ", weight {}", uni.weight);
                 }
+                writeln!(buf, "").unwrap();
             }
             Nexthop::List(pro) => {
                 for (i, uni) in pro.nexthops.iter().enumerate() {
