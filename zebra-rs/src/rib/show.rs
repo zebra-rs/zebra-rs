@@ -240,8 +240,7 @@ pub fn rib_entry_show(
                             }
                         }
                     }
-                    write!(buf, ", weight {}", uni.weight);
-                    writeln!(buf, "").unwrap();
+                    writeln!(buf, ", weight {}", uni.weight).unwrap();
                 }
             }
             Nexthop::List(pro) => {
