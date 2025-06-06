@@ -25,12 +25,18 @@ pub struct RouteEntry {
 }
 
 #[derive(Serialize)]
+pub struct MplsLabelJson {
+    pub label: u32,
+    pub label_type: String,  // "implicit" or "explicit"
+}
+
+#[derive(Serialize)]
 pub struct NexthopJson {
     pub address: Option<String>,
     pub interface: String,
     pub weight: Option<u8>,
     pub metric: Option<u32>,
-    pub mpls_labels: Vec<u32>,
+    pub mpls_labels: Vec<MplsLabelJson>,
 }
 
 #[derive(Serialize)]
@@ -70,7 +76,18 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls_label.clone(),
+                mpls_labels: uni.mpls.iter().map(|label| {
+                    match label {
+                        Label::Implicit(l) => MplsLabelJson {
+                            label: *l,
+                            label_type: "implicit".to_string(),
+                        },
+                        Label::Explicit(l) => MplsLabelJson {
+                            label: *l,
+                            label_type: "explicit".to_string(),
+                        },
+                    }
+                }).collect(),
             }]
         }
         Nexthop::Multi(multi) => multi
@@ -81,7 +98,18 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(uni.ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls_label.clone(),
+                mpls_labels: uni.mpls.iter().map(|label| {
+                    match label {
+                        Label::Implicit(l) => MplsLabelJson {
+                            label: *l,
+                            label_type: "implicit".to_string(),
+                        },
+                        Label::Explicit(l) => MplsLabelJson {
+                            label: *l,
+                            label_type: "explicit".to_string(),
+                        },
+                    }
+                }).collect(),
             })
             .collect(),
         Nexthop::List(pro) => pro
@@ -92,7 +120,18 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(uni.ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls_label.clone(),
+                mpls_labels: uni.mpls.iter().map(|label| {
+                    match label {
+                        Label::Implicit(l) => MplsLabelJson {
+                            label: *l,
+                            label_type: "implicit".to_string(),
+                        },
+                        Label::Explicit(l) => MplsLabelJson {
+                            label: *l,
+                            label_type: "explicit".to_string(),
+                        },
+                    }
+                }).collect(),
             })
             .collect(),
     };
