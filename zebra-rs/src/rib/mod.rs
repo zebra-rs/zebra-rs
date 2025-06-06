@@ -40,3 +40,6 @@ pub mod router_id;
 
 pub mod mac_addr;
 pub use mac_addr::*;
+
+pub mod logging;
+pub use logging::*;
