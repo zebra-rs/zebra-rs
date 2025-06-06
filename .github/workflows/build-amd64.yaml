@@ -1,6 +1,9 @@
 name: Build for amd64
 
-on: [ workflow_dispatch ]
+on:
+  push:
+    branchs: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
