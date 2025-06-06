@@ -2,7 +2,7 @@ name: Build for arm64
 
 on:
   push:
-    branchs: [ main ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:

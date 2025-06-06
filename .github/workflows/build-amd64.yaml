@@ -2,7 +2,7 @@ name: Build for amd64
 
 on:
   push:
-    branchs: [ main ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
