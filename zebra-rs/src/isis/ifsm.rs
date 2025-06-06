@@ -3,6 +3,7 @@ use isis_packet::*;
 
 use crate::isis::link::DisStatus;
 use crate::rib::MacAddr;
+use crate::{isis_debug, isis_info};
 
 use super::inst::{Packet, PacketMessage};
 use super::link::{Afis, HelloPaddingPolicy, LinkTop};
@@ -109,7 +110,7 @@ pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
 }
 
 pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
-    tracing::info!("CSNP Send");
+    isis_info!("CSNP Send");
 
     let mut lsp_entries = IsisTlvLspEntries::default();
     for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
@@ -150,7 +151,7 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
     if has_level(ltop.state.level(), level) {
-        tracing::info!("Hello originate {} on {}", level, ltop.state.name);
+        isis_info!("Hello originate {} on {}", level, ltop.state.name);
         let hello = hello_generate(ltop, level);
         *ltop.state.hello.get_mut(&level) = Some(hello);
         hello_send(ltop, level);
@@ -186,7 +187,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
     // Check if DIS selection is dampened
     if ltop.state.dis_stats.get(&level).is_dampened() {
-        tracing::debug!(
+        isis_debug!(
             "DIS selection dampened on {} level {}",
             ltop.state.name,
             level
@@ -234,7 +235,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
                 nbr.sys_id, nbr.pdu.priority, nbr.mac
             );
 
-            tracing::info!(
+            isis_info!(
                 "DIS selection: {} on {} (priority: {}, neighbors: {})",
                 nbr.sys_id,
                 ltop.state.name,
@@ -247,10 +248,10 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
             if ltop.state.lan_id.get(&level).is_none() {
                 if !nbr.pdu.lan_id.is_empty() {
-                    tracing::info!("DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
+                    isis_info!("DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
                     *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
                 } else {
-                    tracing::debug!("DIS waiting for LAN Id in Hello packet");
+                    isis_debug!("DIS waiting for LAN Id in Hello packet");
                 }
             }
             (status, sys_id, reason)
@@ -266,7 +267,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             nbrs_up
         );
 
-        tracing::info!(
+        isis_info!(
             "DIS selection: self on {} (priority: {}, neighbors: {})",
             ltop.state.name,
             ltop.config.priority(),
@@ -302,7 +303,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Generate DIS pseudo node id.
     let pseudo_id: u8 = ltop.state.ifindex as u8;
     let lsp_id = IsisLspId::new(ltop.up_config.net.sys_id(), pseudo_id, 0);
-    tracing::info!("Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
+    isis_info!("Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
 
     // Set myself as DIS.
     *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
@@ -315,7 +316,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     hello_originate(ltop, level);
 
     // Generate LSP.
-    tracing::info!("LspOriginate from become_dis");
+    isis_info!("LspOriginate from become_dis");
     ltop.tx.send(Message::LspOriginate(level)).unwrap();
 
     // Generate DIS.
