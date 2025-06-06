@@ -47,6 +47,8 @@ ospf-packet = { git = "https://github.com/zebra-rs/ospf-packet", branch = "main"
 isis-packet = { git = "https://github.com/zebra-rs/isis-packet", branch = "main" }
 bitfield-struct = "0.9.3"
 rand = "0.8.5"
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
 bit-vec = "0.8.0"
 audit = "0.7.3"
 daemonize = "0.5"
