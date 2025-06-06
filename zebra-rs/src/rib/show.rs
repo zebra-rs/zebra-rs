@@ -1,7 +1,11 @@
 use ipnet::Ipv4Net;
 use serde::Serialize;
+use serde_json::Value;
 
-use crate::{config::Args, rib::Nexthop};
+use crate::{
+    config::Args,
+    rib::{Label, Nexthop},
+};
 
 use super::{entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show, Group, Rib};
 use std::fmt::Write;
@@ -27,7 +31,7 @@ pub struct NexthopJson {
     pub interface: String,
     pub weight: Option<u8>,
     pub metric: Option<u32>,
-    pub mpls_labels: Vec<u32>,
+    pub mpls_labels: Vec<Value>,
 }
 
 #[derive(Serialize)]
@@ -67,7 +71,19 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls_label.clone(),
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
+                        Label::Implicit(l) => serde_json::json!({
+                            "label": l,
+                            "label_type": "implicit"
+                        }),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
+                    })
+                    .collect(),
             }]
         }
         Nexthop::Multi(multi) => multi
@@ -78,7 +94,19 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(uni.ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls_label.clone(),
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
+                        Label::Implicit(l) => serde_json::json!({
+                            "label": l,
+                            "label_type": "implicit"
+                        }),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
+                    })
+                    .collect(),
             })
             .collect(),
         Nexthop::List(pro) => pro
@@ -89,7 +117,19 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(uni.ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls_label.clone(),
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
+                        Label::Implicit(l) => serde_json::json!({
+                            "label": l,
+                            "label_type": "implicit"
+                        }),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
+                    })
+                    .collect(),
             })
             .collect(),
     };
@@ -167,27 +207,47 @@ pub fn rib_entry_show(
                 } else {
                     uni.ifindex
                 };
-                writeln!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
+                write!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
+                if !uni.mpls.is_empty() {
+                    for mpls in uni.mpls.iter() {
+                        match mpls {
+                            Label::Implicit(label) => {
+                                write!(buf, ", label {} implicit-null", label).unwrap();
+                            }
+                            Label::Explicit(label) => {
+                                write!(buf, ", label {}", label).unwrap();
+                            }
+                        }
+                    }
+                }
+                writeln!(buf, "").unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
                     if i != 0 {
-                        buf.push_str(&" ".repeat(offset).to_string());
+                        buf.push_str(&" ".repeat(offset));
                     }
-                    writeln!(
-                        buf,
-                        " via {}, {}, weight {}",
-                        uni.addr,
-                        rib.link_name(uni.ifindex),
-                        uni.weight
-                    )
-                    .unwrap();
+                    write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
+                    if !uni.mpls.is_empty() {
+                        for mpls in uni.mpls.iter() {
+                            match mpls {
+                                Label::Implicit(label) => {
+                                    write!(buf, ", label {} implicit-null", label).unwrap();
+                                }
+                                Label::Explicit(label) => {
+                                    write!(buf, ", label {}", label).unwrap();
+                                }
+                            }
+                        }
+                    }
+                    write!(buf, ", weight {}", uni.weight);
+                    writeln!(buf, "").unwrap();
                 }
             }
             Nexthop::List(pro) => {
                 for (i, uni) in pro.nexthops.iter().enumerate() {
                     if i != 0 {
-                        buf.push_str(&" ".repeat(offset).to_string());
+                        buf.push_str(&" ".repeat(offset));
                     }
                     writeln!(
                         buf,

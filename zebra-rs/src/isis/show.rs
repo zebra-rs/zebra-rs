@@ -99,7 +99,7 @@ fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
         let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
         let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
         let system_id =
-            if let Some((hostname, _)) = isis.hostname.get(&Level::L2).get(&lsp_id.sys_id()) {
+            if let Some((hostname, _)) = isis.hostname.get(&Level::L1).get(&lsp_id.sys_id()) {
                 format!(
                     "{}.{:02x}-{:02x}",
                     hostname.clone(),
