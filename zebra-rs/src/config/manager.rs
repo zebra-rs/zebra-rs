@@ -463,12 +463,12 @@ impl ConfigManager {
         if parts.len() >= 3 && parts[0] == "logging" && parts[1] == "output" {
             let output_type = parts[2];
             let logging_output = match output_type {
-                "stdout" => crate::LoggingOutput::Stdout,
-                "syslog" => crate::LoggingOutput::Syslog,
+                "stdout" => crate::rib::LoggingOutput::Stdout,
+                "syslog" => crate::rib::LoggingOutput::Syslog,
                 "file" => {
                     // For file output, we could extend to support custom paths
                     // For now, use default filename (implementation will find safe path)
-                    crate::LoggingOutput::File("zebra-rs.log".to_string())
+                    crate::rib::LoggingOutput::File("zebra-rs.log".to_string())
                 }
                 _ => {
                     tracing::warn!("Unknown logging output type: {}", output_type);
