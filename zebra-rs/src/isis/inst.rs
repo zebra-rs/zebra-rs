@@ -249,7 +249,12 @@ impl Isis {
                                 }
                             }
                         }
-                        let spf_ilm = SpfIlm { nhops: nhops };
+                        // Adjacency labels start from 24000, so calculate index
+                        let adj_index = if label >= 24000 { label - 24000 + 1 } else { 1 };
+                        let spf_ilm = SpfIlm { 
+                            nhops: nhops,
+                            ilm_type: IlmType::Adjacency(adj_index),
+                        };
                         ilm.insert(label, spf_ilm);
                     }
 
@@ -1168,7 +1173,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
             }
             return IlmEntry {
                 rtype: RibType::Isis,
-                ilm_type: IlmType::None,
+                ilm_type: ilm.ilm_type.clone(),
                 nexthop: Nexthop::Uni(uni),
             };
         }
@@ -1187,7 +1192,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     }
     IlmEntry {
         rtype: RibType::Isis,
-        ilm_type: IlmType::None,
+        ilm_type: ilm.ilm_type.clone(),
         nexthop: Nexthop::Multi(multi),
     }
 }
@@ -1256,13 +1261,21 @@ impl Display for Message {
 #[derive(Debug, PartialEq)]
 pub struct SpfIlm {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
+    pub ilm_type: IlmType,
 }
 
 pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, SpfIlm>) {
     for (prefix, route) in rib.iter() {
         if let Some(sid) = route.sid {
+            // Calculate prefix index from SID (assuming 16000 is base)
+            let pfx_index = if sid >= 16000 && sid < 24000 { 
+                sid - 16000 
+            } else { 
+                0 
+            };
             let spf_ilm = SpfIlm {
                 nhops: route.nhops.clone(),
+                ilm_type: IlmType::Node(pfx_index),
             };
             ilm.insert(sid, spf_ilm);
         }
