@@ -10,6 +10,8 @@ use isis_packet::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::isis_warn;
+
 use crate::config::{Args, ConfigOp};
 use crate::isis::nfsm::NfsmState;
 use crate::rib::link::LinkAddr;
@@ -304,8 +306,7 @@ impl DisStatistics {
         if self.flap_count >= Self::FLAP_THRESHOLD {
             self.dampening_until =
                 Some(now + std::time::Duration::from_secs(Self::DAMPENING_PERIOD_SECS));
-            tracing::warn!(
-                proto = "isis",
+            isis_warn!(
                 "DIS flapping detected, applying dampening for {} seconds",
                 Self::DAMPENING_PERIOD_SECS
             );

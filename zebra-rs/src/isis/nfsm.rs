@@ -7,6 +7,7 @@ use isis_packet::{IsLevel, IsisHello, IsisTlv};
 use crate::isis::link::Afi;
 use crate::isis::Level;
 use crate::rib::MacAddr;
+use crate::isis_info;
 
 use super::inst::NeighborTop;
 use super::link::LinkTop;
@@ -191,7 +192,7 @@ pub fn nfsm_hello_received(
 
     let mut state = nbr.state;
 
-    tracing::info!(proto = "isis", "NBR Hello received");
+    isis_info!("NBR Hello received");
 
     if state == NfsmState::Down {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -217,7 +218,7 @@ pub fn nfsm_hello_received(
         && ntop.lan_id.get(&level).is_none()
     {
         *ntop.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
-        tracing::info!(proto = "isis", "DIS LAN ID is set in Hello {}", nbr.pdu.lan_id);
+        isis_info!("DIS LAN ID is set in Hello {}", nbr.pdu.lan_id);
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
@@ -266,7 +267,7 @@ pub fn isis_nfsm(
     let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
 
     if let Some(new_state) = next_state {
-        tracing::info!(proto = "isis", "NFSM State Transition {:?} -> {:?}", nbr.state, new_state);
+        isis_info!("NFSM State Transition {:?} -> {:?}", nbr.state, new_state);
         if new_state != nbr.state {
             nbr.prev = nbr.state;
             nbr.state = new_state;
