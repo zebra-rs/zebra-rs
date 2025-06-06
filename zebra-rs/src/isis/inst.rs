@@ -182,7 +182,7 @@ impl Isis {
     }
 
     pub fn process_msg(&mut self, msg: Message) {
-        tracing::info!("{}", msg);
+        tracing::info!(proto = "isis", "{}", msg);
         match msg {
             Message::Srm(lsp_id, level) => {
                 for (_, link) in self.links.iter() {
@@ -575,7 +575,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .map(|x| x.lsp.seq_number + 1)
         .unwrap_or(0x0001);
 
-    tracing::info!("LSP originate seq number: 0x{:04x}", seq_number);
+    tracing::info!(proto = "isis", "LSP originate seq number: 0x{:04x}", seq_number);
 
     // XXX We need wrap around of seq_number.
 

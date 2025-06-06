@@ -191,7 +191,7 @@ pub fn nfsm_hello_received(
 
     let mut state = nbr.state;
 
-    tracing::info!("NBR Hello received");
+    tracing::info!(proto = "isis", "NBR Hello received");
 
     if state == NfsmState::Down {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -217,7 +217,7 @@ pub fn nfsm_hello_received(
         && ntop.lan_id.get(&level).is_none()
     {
         *ntop.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
-        tracing::info!("DIS LAN ID is set in Hello {}", nbr.pdu.lan_id);
+        tracing::info!(proto = "isis", "DIS LAN ID is set in Hello {}", nbr.pdu.lan_id);
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
@@ -266,7 +266,7 @@ pub fn isis_nfsm(
     let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
 
     if let Some(new_state) = next_state {
-        tracing::info!("NFSM State Transition {:?} -> {:?}", nbr.state, new_state);
+        tracing::info!(proto = "isis", "NFSM State Transition {:?} -> {:?}", nbr.state, new_state);
         if new_state != nbr.state {
             nbr.prev = nbr.state;
             nbr.state = new_state;

@@ -251,7 +251,7 @@ pub fn insert_lsp(
     let key = lsp.lsp_id.clone();
 
     if top.config.net.sys_id() == key.sys_id() {
-        tracing::info!("Self originated LSP?");
+        tracing::info!(proto = "isis", "Self originated LSP?");
         return None;
     }
 

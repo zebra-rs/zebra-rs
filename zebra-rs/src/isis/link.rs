@@ -305,6 +305,7 @@ impl DisStatistics {
             self.dampening_until =
                 Some(now + std::time::Duration::from_secs(Self::DAMPENING_PERIOD_SECS));
             tracing::warn!(
+                proto = "isis",
                 "DIS flapping detected, applying dampening for {} seconds",
                 Self::DAMPENING_PERIOD_SECS
             );
