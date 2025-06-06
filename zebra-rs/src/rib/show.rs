@@ -71,8 +71,10 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls.iter().map(|label| {
-                    match label {
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
                         Label::Implicit(l) => serde_json::json!({
                             "label": l,
                             "label_type": "implicit"
@@ -80,8 +82,8 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                         Label::Explicit(l) => serde_json::json!({
                             "label": l
                         }),
-                    }
-                }).collect(),
+                    })
+                    .collect(),
             }]
         }
         Nexthop::Multi(multi) => multi
@@ -92,8 +94,10 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(uni.ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls.iter().map(|label| {
-                    match label {
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
                         Label::Implicit(l) => serde_json::json!({
                             "label": l,
                             "label_type": "implicit"
@@ -101,8 +105,8 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                         Label::Explicit(l) => serde_json::json!({
                             "label": l
                         }),
-                    }
-                }).collect(),
+                    })
+                    .collect(),
             })
             .collect(),
         Nexthop::List(pro) => pro
@@ -113,8 +117,10 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 interface: rib.link_name(uni.ifindex),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
-                mpls_labels: uni.mpls.iter().map(|label| {
-                    match label {
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
                         Label::Implicit(l) => serde_json::json!({
                             "label": l,
                             "label_type": "implicit"
@@ -122,8 +128,8 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                         Label::Explicit(l) => serde_json::json!({
                             "label": l
                         }),
-                    }
-                }).collect(),
+                    })
+                    .collect(),
             })
             .collect(),
     };
@@ -219,7 +225,7 @@ pub fn rib_entry_show(
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
                     if i != 0 {
-                        buf.push_str(&" ".repeat(offset).to_string());
+                        buf.push_str(&" ".repeat(offset));
                     }
                     write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
                     if !uni.mpls.is_empty() {
@@ -235,13 +241,13 @@ pub fn rib_entry_show(
                         }
                     }
                     write!(buf, ", weight {}", uni.weight);
+                    writeln!(buf, "").unwrap();
                 }
-                writeln!(buf, "").unwrap();
             }
             Nexthop::List(pro) => {
                 for (i, uni) in pro.nexthops.iter().enumerate() {
                     if i != 0 {
-                        buf.push_str(&" ".repeat(offset).to_string());
+                        buf.push_str(&" ".repeat(offset));
                     }
                     writeln!(
                         buf,
