@@ -77,7 +77,9 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                             "label": l,
                             "label_type": "implicit"
                         }),
-                        Label::Explicit(l) => serde_json::json!(l),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
                     }
                 }).collect(),
             }]
@@ -96,7 +98,9 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                             "label": l,
                             "label_type": "implicit"
                         }),
-                        Label::Explicit(l) => serde_json::json!(l),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
                     }
                 }).collect(),
             })
@@ -115,7 +119,9 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                             "label": l,
                             "label_type": "implicit"
                         }),
-                        Label::Explicit(l) => serde_json::json!(l),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
                     }
                 }).collect(),
             })
