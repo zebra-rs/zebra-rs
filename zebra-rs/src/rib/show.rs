@@ -333,7 +333,7 @@ pub struct IlmTable {
 pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut entries = Vec::new();
-        
+
         for (label, ilm) in rib.ilm.iter() {
             match &ilm.nexthop {
                 Nexthop::Uni(uni) => {
@@ -347,18 +347,26 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
                 _ => {}
             }
         }
-        
+
         let ilm_table = IlmTable { entries };
         serde_json::to_string_pretty(&ilm_table)
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize ILM: {}\"}}", e))
     } else {
         let mut buf = String::new();
-        
+
         // Add header
-        writeln!(buf, "Local  Outgoing    Prefix             Outgoing     Next Hop").unwrap();
+        writeln!(
+            buf,
+            "Local  Outgoing    Prefix             Outgoing     Next Hop"
+        )
+        .unwrap();
         writeln!(buf, "Label  Label       or ID              Interface").unwrap();
-        writeln!(buf, "------ ----------- ------------------ ------------ ---------------").unwrap();
-        
+        writeln!(
+            buf,
+            "------ ----------- ------------------ ------------ ---------------"
+        )
+        .unwrap();
+
         for (label, ilm) in rib.ilm.iter() {
             match &ilm.nexthop {
                 Nexthop::Uni(uni) => {
@@ -372,15 +380,21 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
                 _ => {}
             }
         }
-        
+
         buf
     }
 }
 
 // Helper function to format an ILM entry
-fn write_ilm_entry(buf: &mut String, rib: &Rib, label: u32, ilm: &super::inst::IlmEntry, uni: &super::NexthopUni) {
+fn write_ilm_entry(
+    buf: &mut String,
+    rib: &Rib,
+    label: u32,
+    ilm: &super::inst::IlmEntry,
+    uni: &super::NexthopUni,
+) {
     let local_label = format!("{:<6}", label);
-    
+
     // Determine outgoing label
     let outgoing_label = if uni.addr.is_unspecified() && uni.ifindex == 0 {
         format!("{:<11}", "Aggregate")
@@ -391,7 +405,7 @@ fn write_ilm_entry(buf: &mut String, rib: &Rib, label: u32, ilm: &super::inst::I
     } else {
         format!("{:<11}", uni.mpls_label[0])
     };
-    
+
     // Determine prefix or ID based on IlmType
     let prefix_or_id = match &ilm.ilm_type {
         super::inst::IlmType::Node(idx) => format!("SR Pfx (idx {:<3})", idx),
@@ -405,28 +419,34 @@ fn write_ilm_entry(buf: &mut String, rib: &Rib, label: u32, ilm: &super::inst::I
             }
         }
     };
-    
+
     let interface = if uni.addr.is_unspecified() && uni.ifindex == 0 {
         "default".to_string()
     } else {
         rib.link_name(uni.ifindex)
     };
-    
+
     let next_hop = if uni.addr.is_unspecified() {
         String::new()
     } else {
         uni.addr.to_string()
     };
-    
+
     writeln!(
         buf,
         "{} {} {:<18} {:<12} {}",
         local_label, outgoing_label, prefix_or_id, interface, next_hop
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 // Helper function to convert ILM entry to JSON
-fn ilm_to_json(rib: &Rib, label: u32, ilm: &super::inst::IlmEntry, uni: &super::NexthopUni) -> IlmJson {
+fn ilm_to_json(
+    rib: &Rib,
+    label: u32,
+    ilm: &super::inst::IlmEntry,
+    uni: &super::NexthopUni,
+) -> IlmJson {
     let outgoing_label = if uni.addr.is_unspecified() && uni.ifindex == 0 {
         "Aggregate".to_string()
     } else if uni.mpls_label.is_empty() {
@@ -436,7 +456,7 @@ fn ilm_to_json(rib: &Rib, label: u32, ilm: &super::inst::IlmEntry, uni: &super::
     } else {
         uni.mpls_label[0].to_string()
     };
-    
+
     let prefix_or_id = match &ilm.ilm_type {
         super::inst::IlmType::Node(idx) => format!("SR Pfx (idx {})", idx),
         super::inst::IlmType::Adjacency(idx) => format!("SR Adj (idx {})", idx),
@@ -448,19 +468,19 @@ fn ilm_to_json(rib: &Rib, label: u32, ilm: &super::inst::IlmEntry, uni: &super::
             }
         }
     };
-    
+
     let outgoing_interface = if uni.addr.is_unspecified() && uni.ifindex == 0 {
         "default".to_string()
     } else {
         rib.link_name(uni.ifindex)
     };
-    
+
     let next_hop = if uni.addr.is_unspecified() {
         String::new()
     } else {
         uni.addr.to_string()
     };
-    
+
     IlmJson {
         local_label: label,
         outgoing_label,
@@ -471,7 +491,10 @@ fn ilm_to_json(rib: &Rib, label: u32, ilm: &super::inst::IlmEntry, uni: &super::
 }
 
 // Helper function to find a route that uses this nexthop
-fn find_route_for_nexthop<'a>(rib: &'a Rib, target_uni: &super::NexthopUni) -> Option<(&'a Ipv4Net, &'a RibEntry)> {
+fn find_route_for_nexthop<'a>(
+    rib: &'a Rib,
+    target_uni: &super::NexthopUni,
+) -> Option<(&'a Ipv4Net, &'a RibEntry)> {
     for (prefix, entries) in rib.table.iter() {
         for entry in entries.iter() {
             match &entry.nexthop {
