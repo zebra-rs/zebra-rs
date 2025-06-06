@@ -1,4 +1,4 @@
-# Zebra
+# zebra-rs
 
 This is a routing protocol implementation project Zebra.
 
