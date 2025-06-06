@@ -278,17 +278,17 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
 
                 path.clone()
             } else {
-                // Relative path - try /var/log first, fallback to user home or current dir
+                // Relative path - try current dir first, fallback to user home or /var/log
                 let fallback_paths = vec![
-                    format!("/var/log/{}", path),
+                    format!("./{}", path),
                     dirs::home_dir()
                         .map(|mut h| {
                             h.push(".zebra-rs");
                             h.push(&path);
                             h.to_string_lossy().to_string()
                         })
-                        .unwrap_or_else(|| format!("./{}", path)),
-                    format!("./{}", path),
+                        .unwrap_or_else(|| format!("/var/log/{}", path)),
+                    format!("/var/log/{}", path),
                 ];
 
                 let mut chosen_path = None;
@@ -370,17 +370,17 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
 
                 path.clone()
             } else {
-                // Relative path - try /var/log first, fallback to user home or current dir
+                // Relative path - try current dir first, fallback to user home or /var/log
                 let fallback_paths = vec![
-                    format!("/var/log/{}", path),
+                    format!("./{}", path),
                     dirs::home_dir()
                         .map(|mut h| {
                             h.push(".zebra-rs");
                             h.push(&path);
                             h.to_string_lossy().to_string()
                         })
-                        .unwrap_or_else(|| format!("./{}", path)),
-                    format!("./{}", path),
+                        .unwrap_or_else(|| format!("/var/log/{}", path)),
+                    format!("/var/log/{}", path),
                 ];
 
                 let mut chosen_path = None;

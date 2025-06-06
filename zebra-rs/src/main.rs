@@ -42,8 +42,7 @@ struct Arg {
 
     #[arg(
         long,
-        help = "Log file path (required when --log-output=file)",
-        required_if_eq("log_output", "file")
+        help = "Log file path (optional, defaults to ./zebra-rs.log when --log-output=file)"
     )]
     log_file: Option<String>,
 
