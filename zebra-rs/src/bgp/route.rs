@@ -1,4 +1,4 @@
-use bgp_packet::{Attribute, UpdatePacket};
+use bgp_packet::{Attr, UpdatePacket};
 
 use super::peer::{ConfigRef, Peer};
 use std::net::IpAddr;
@@ -22,7 +22,7 @@ pub enum PeerType {
 #[allow(dead_code)]
 pub struct Route {
     pub from: IpAddr,
-    pub attrs: Vec<Attribute>,
+    pub attrs: Vec<Attr>,
     pub origin: u8,
     pub typ: PeerType,
     pub selected: bool,

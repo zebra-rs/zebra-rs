@@ -318,8 +318,8 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     if peer.peer_as != asn {
         peer_send_notification(
             peer,
-            NotificationCode::OpenMessageError,
-            OpenError::BadPeerAS as u8,
+            NotifyCode::OpenMsgError,
+            OpenError::BadPeerAS.into(),
             Vec::new(),
         );
         return State::Idle;
@@ -391,33 +391,33 @@ fn peer_send_update_test(peer: &mut Peer) {
     let mut update: UpdatePacket = UpdatePacket::new();
 
     let origin = Origin::new(ORIGIN_IGP);
-    update.attrs.push(Attribute::Origin(origin));
+    update.attrs.push(Attr::Origin(origin));
 
     let aspath: As4Path = As4Path::from_str("").unwrap();
-    update.attrs.push(Attribute::As4Path(aspath));
+    update.attrs.push(Attr::As4Path(aspath));
 
     let nexthop = NextHopAttr {
         next_hop: [10, 211, 55, 2],
     };
-    update.attrs.push(Attribute::NextHop(nexthop));
+    update.attrs.push(Attr::NextHop(nexthop));
 
     let med: Med = Med::new(123);
-    update.attrs.push(Attribute::Med(med));
+    update.attrs.push(Attr::Med(med));
 
     let lpref: LocalPref = LocalPref::new(100u32);
-    update.attrs.push(Attribute::LocalPref(lpref));
+    update.attrs.push(Attr::LocalPref(lpref));
 
     let atomic = AtomicAggregate::new();
-    update.attrs.push(Attribute::AtomicAggregate(atomic));
+    update.attrs.push(Attr::AtomicAggregate(atomic));
 
     let aggregator = Aggregator4::new(1, Ipv4Addr::new(10, 211, 55, 2));
-    update.attrs.push(Attribute::Aggregator4(aggregator));
+    update.attrs.push(Attr::Aggregator4(aggregator));
 
     let com = Community::from_str("100:10 100:20").unwrap();
-    update.attrs.push(Attribute::Community(com));
+    update.attrs.push(Attr::Community(com));
 
     let ecom = ExtCommunity::from_str("rt 123:100 soo 1.1.1.1:12").unwrap();
-    update.attrs.push(Attribute::ExtCommunity(ecom));
+    update.attrs.push(Attr::ExtendedCom(ecom));
 
     // let ecom6_val = ExtIpv6CommunityValue::new();
     // let ecom6 = ExtIpv6Community(vec![ecom6_val]);
@@ -460,7 +460,7 @@ pub fn fsm_conn_retry_expires(peer: &mut Peer) -> State {
 }
 
 pub fn fsm_holdtimer_expires(peer: &mut Peer) -> State {
-    peer_send_notification(peer, NotificationCode::HoldTimerExpired, 0, Vec::new());
+    peer_send_notification(peer, NotifyCode::HoldTimerExpired, 0, Vec::new());
     State::Idle
 }
 
@@ -522,6 +522,7 @@ pub fn peer_packet_parse(
                 let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
             }
             BgpPacket::Notification(p) => {
+                println!("{}", p);
                 let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
             }
             BgpPacket::Update(p) => {
@@ -663,12 +664,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
-pub fn peer_send_notification(
-    peer: &mut Peer,
-    code: NotificationCode,
-    sub_code: u8,
-    data: Vec<u8>,
-) {
+pub fn peer_send_notification(peer: &mut Peer, code: NotifyCode, sub_code: u8, data: Vec<u8>) {
     let notification = NotificationPacket::new(code, sub_code, data);
     let bytes: BytesMut = notification.into();
     peer.counter[BgpType::Notification as usize].sent += 1;
