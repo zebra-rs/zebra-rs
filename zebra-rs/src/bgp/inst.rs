@@ -9,24 +9,24 @@ use crate::policy::com_list::CommunityListMap;
 use crate::rib::api::{RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 /// Create an IPv6-only TCP listener to avoid conflicts with IPv4 binding
-async fn create_ipv6_listener() -> Result<TcpListener, std::io::Error> {
+fn create_ipv6_listener() -> Result<TcpListener, std::io::Error> {
     let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
-    
+
     // Set IPV6_V6ONLY to true to prevent binding to IPv4 as well
     socket.set_only_v6(true)?;
     socket.set_reuse_address(true)?;
-    
+
     let addr = "[::]:179".parse::<SocketAddr>().unwrap();
     socket.bind(&addr.into())?;
     socket.listen(128)?;
-    
+
     // Convert socket2::Socket to std::net::TcpListener, then to tokio::net::TcpListener
     let std_listener: std::net::TcpListener = socket.into();
     std_listener.set_nonblocking(true)?;
@@ -61,6 +61,7 @@ pub struct Bgp {
     pub pcallbacks: HashMap<String, PCallback>,
     pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
     pub listen_task: Option<Task<()>>,
+    pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
     pub clist: CommunityListMap,
 }
@@ -83,6 +84,7 @@ impl Bgp {
             callbacks: HashMap::new(),
             pcallbacks: HashMap::new(),
             listen_task: None,
+            listen_task6: None,
             listen_err: None,
             clist: CommunityListMap::new(),
         };
@@ -144,12 +146,14 @@ impl Bgp {
         match TcpListener::bind("0.0.0.0:179").await {
             Ok(listener) => {
                 ipv4_bound = true;
+                println!("Successfully bound to IPv4 0.0.0.0:179");
                 let tx_ipv4 = tx.clone();
-                Task::spawn(async move {
+                self.listen_task = Some(Task::spawn(async move {
                     println!("BGP listening on 0.0.0.0:179");
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
+                                println!("IPv4 connection accepted from: {}", sockaddr);
                                 if let Err(e) = tx_ipv4.send(Message::Accept(socket, sockaddr)) {
                                     eprintln!("Failed to send Accept message: {}", e);
                                     break;
@@ -160,7 +164,7 @@ impl Bgp {
                             }
                         }
                     }
-                });
+                }));
             }
             Err(e) => {
                 eprintln!("Failed to bind to IPv4 0.0.0.0:179: {}", e);
@@ -168,15 +172,17 @@ impl Bgp {
         }
 
         // Check if we can bind to IPv6 with IPv6-only socket
-        match create_ipv6_listener().await {
+        match create_ipv6_listener() {
             Ok(listener) => {
                 ipv6_bound = true;
+                println!("Successfully bound to IPv6 [::]:179");
                 let tx_ipv6 = tx_clone;
-                Task::spawn(async move {
+                self.listen_task6 = Some(Task::spawn(async move {
                     println!("BGP listening on [::]:179");
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
+                                println!("IPv6 connection accepted from: {}", sockaddr);
                                 if let Err(e) = tx_ipv6.send(Message::Accept(socket, sockaddr)) {
                                     eprintln!("Failed to send Accept message: {}", e);
                                     break;
@@ -187,7 +193,7 @@ impl Bgp {
                             }
                         }
                     }
-                });
+                }));
             }
             Err(e) => {
                 eprintln!("Failed to bind to IPv6 [::]:179: {}", e);
@@ -200,13 +206,13 @@ impl Bgp {
             ));
         }
 
-        // Create a dummy task for compatibility with existing code that expects listen_task
-        self.listen_task = Some(Task::spawn(async move {
-            // This task just keeps running
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-            }
-        }));
+        // Log which protocols are bound
+        match (ipv4_bound, ipv6_bound) {
+            (true, true) => println!("BGP dual-stack: listening on both IPv4 and IPv6"),
+            (true, false) => println!("BGP IPv4-only: listening on 0.0.0.0:179"),
+            (false, true) => println!("BGP IPv6-only: listening on [::]:179"),
+            (false, false) => unreachable!(),
+        }
 
         Ok(())
     }
