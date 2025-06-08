@@ -112,13 +112,15 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     let addr = IpAddr::V4(addr);
     let passive = args.boolean()?;
 
-    if op == ConfigOp::Set {
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
+    if let Some(peer) = bgp.peers.get_mut(&addr) {
+        if op == ConfigOp::Set {
             peer.config.transport.passive = passive;
-            peer.timer.idle_hold_timer = None;
-            peer.state = fsm_init(peer);
+        } else {
+            peer.config.transport.passive = false;
         }
+        peer.state = fsm_init(peer);
     }
+
     Some(())
 }
 
