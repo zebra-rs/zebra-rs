@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::{Attr, BgpType};
 use serde::Serialize;
+use serde_json::json;
 
 use super::inst::{Bgp, ShowCallback};
-use super::peer::{Peer, PeerCounter, PeerParam};
+use super::peer::{Peer, PeerCounter, PeerParam, State};
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) {
@@ -17,10 +18,17 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) {
         sent += counter.sent;
         rcvd += counter.rcvd;
     }
+    let updown = uptime(&peer.instant);
+    let state = if peer.state != State::Established {
+        peer.state.to_str()
+    } else {
+        "Estab"
+    };
+
     writeln!(
         buf,
-        "{:16} {:11} {:8} {:8}",
-        peer.address, peer.peer_as, rcvd, sent,
+        "{:16} {:11} {:8} {:8} {:8} {:8} {:8}",
+        peer.address, peer.peer_as, rcvd, sent, updown, state, sent
     )
     .unwrap();
 }
@@ -50,7 +58,7 @@ fn show_bgp_instance(bgp: &Bgp) -> String {
     } else {
         writeln!(
             buf,
-            "Neighbor                  AS  MsgRcvd  MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd"
+            "Neighbor                  AS  MsgRcvd  MsgSent   Up/Down  State/PfxRcd"
         )
         .unwrap();
         for (_, peer) in bgp.peers.iter() {
@@ -169,14 +177,96 @@ struct Neighbor<'a> {
     count: HashMap<&'a str, PeerCounter>,
 }
 
-fn uptime(instant: &Option<Instant>) -> String {
+const ONE_DAY_SECOND: u64 = 60 * 60 * 24;
+const ONE_WEEK_SECOND: u64 = ONE_DAY_SECOND * 7;
+const ONE_YEAR_SECOND: u64 = ONE_DAY_SECOND * 365;
+
+#[derive(Serialize)]
+struct UptimeInfo {
+    peer_uptime: String,
+    peer_uptime_msec: u64,
+    peer_uptime_established_epoch: u64,
+}
+
+/// Convert peer uptime to human readable format
+/// This is a direct translation of the C function peer_uptime()
+fn peer_uptime(instant: &Option<Instant>, use_json: bool) -> (String, Option<UptimeInfo>) {
     if let Some(instant) = instant {
         let now = Instant::now();
         let duration = now.duration_since(*instant);
-        format!("{:?}", duration)
+        let total_seconds = duration.as_secs();
+
+        if total_seconds == 0 {
+            let uptime_str = String::from("never");
+            if use_json {
+                let info = UptimeInfo {
+                    peer_uptime: uptime_str.clone(),
+                    peer_uptime_msec: 0,
+                    peer_uptime_established_epoch: 0,
+                };
+                return (uptime_str, Some(info));
+            }
+            return (uptime_str, None);
+        }
+
+        // Calculate time components
+        let days = (total_seconds / ONE_DAY_SECOND) as u32;
+        let hours = ((total_seconds % ONE_DAY_SECOND) / 3600) as u32;
+        let minutes = ((total_seconds % 3600) / 60) as u32;
+        let seconds = (total_seconds % 60) as u32;
+
+        let uptime_str = if total_seconds < ONE_DAY_SECOND {
+            // Less than a day: HH:MM:SS
+            format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+        } else if total_seconds < ONE_WEEK_SECOND {
+            // Less than a week: XdYYhZZm
+            format!("{}d{:02}h{:02}m", days, hours, minutes)
+        } else if total_seconds < ONE_YEAR_SECOND {
+            // Less than a year: XXwYdZZh
+            let weeks = days / 7;
+            let remaining_days = days % 7;
+            format!("{:02}w{}d{:02}h", weeks, remaining_days, hours)
+        } else {
+            // More than a year: XXyYYwZd
+            let years = days / 365;
+            let remaining_days = days % 365;
+            let weeks = remaining_days / 7;
+            let final_days = remaining_days % 7;
+            format!("{:02}y{:02}w{}d", years, weeks, final_days)
+        };
+
+        if use_json {
+            let epoch_now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let epoch_established = epoch_now - total_seconds;
+
+            let info = UptimeInfo {
+                peer_uptime: uptime_str.clone(),
+                peer_uptime_msec: total_seconds * 1000,
+                peer_uptime_established_epoch: epoch_established,
+            };
+            return (uptime_str, Some(info));
+        }
+
+        (uptime_str, None)
     } else {
-        String::from("never")
+        let uptime_str = String::from("never");
+        if use_json {
+            let info = UptimeInfo {
+                peer_uptime: uptime_str.clone(),
+                peer_uptime_msec: 0,
+                peer_uptime_established_epoch: 0,
+            };
+            return (uptime_str, Some(info));
+        }
+        (uptime_str, None)
     }
+}
+
+fn uptime(instant: &Option<Instant>) -> String {
+    peer_uptime(instant, false).0
 }
 
 fn fetch(peer: &Peer) -> Neighbor {
@@ -214,53 +304,6 @@ fn fetch(peer: &Peer) -> Neighbor {
     n.count.insert("total", total);
     n
 }
-
-// /* Display peer uptime.*/
-// char *peer_uptime(time_t uptime2, char *buf, size_t len, bool use_json,
-// 		  json_object *json)
-// {
-// 	time_t uptime1, epoch_tbuf;
-// 	struct tm tm;
-
-// 	/* If there is no connection has been done before print `never'. */
-// 	if (uptime2 == 0) {
-// 		if (use_json) {
-// 			json_object_string_add(json, "peerUptime", "never");
-// 			json_object_int_add(json, "peerUptimeMsec", 0);
-// 		} else
-// 			snprintf(buf, len, "never");
-// 		return buf;
-// 	}
-
-// 	/* Get current time. */
-// 	uptime1 = monotime(NULL);
-// 	uptime1 -= uptime2;
-// 	gmtime_r(&uptime1, &tm);
-
-// 	if (uptime1 < ONE_DAY_SECOND)
-// 		snprintf(buf, len, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min,
-// 			 tm.tm_sec);
-// 	else if (uptime1 < ONE_WEEK_SECOND)
-// 		snprintf(buf, len, "%dd%02dh%02dm", tm.tm_yday, tm.tm_hour,
-// 			 tm.tm_min);
-// 	else if (uptime1 < ONE_YEAR_SECOND)
-// 		snprintf(buf, len, "%02dw%dd%02dh", tm.tm_yday / 7,
-// 			 tm.tm_yday - ((tm.tm_yday / 7) * 7), tm.tm_hour);
-// 	else
-// 		snprintf(buf, len, "%02dy%02dw%dd", tm.tm_year - 70,
-// 			 tm.tm_yday / 7,
-// 			 tm.tm_yday - ((tm.tm_yday / 7) * 7));
-
-// 	if (use_json) {
-// 		epoch_tbuf = time(NULL) - uptime1;
-// 		json_object_string_add(json, "peerUptime", buf);
-// 		json_object_int_add(json, "peerUptimeMsec", uptime1 * 1000);
-// 		json_object_int_add(json, "peerUptimeEstablishedEpoch",
-// 				    epoch_tbuf);
-// 	}
-
-// 	return buf;
-// }
 
 fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
     writeln!(
