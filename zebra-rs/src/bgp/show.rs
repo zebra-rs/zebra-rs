@@ -3,7 +3,7 @@ use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
-use bgp_packet::BgpType;
+use bgp_packet::{Attr, BgpType};
 use serde::Serialize;
 
 use super::inst::{Bgp, ShowCallback};
@@ -68,26 +68,89 @@ Nexthop codes: @NNN nexthop's vrf id, < announce-nh-self
 Origin codes:  i - IGP, e - EGP, ? - incomplete
 RPKI validation codes: V valid, I invalid, N Not found
 
-     Network          Next Hop            Metric LocPrf Weight Path
+    Network          Next Hop            Metric LocPrf Weight Path
 "#;
+
+fn show_nexthop(attrs: &Vec<Attr>) -> String {
+    for attr in attrs.iter() {
+        if let Attr::NextHop(nhop) = attr {
+            return nhop.next_hop.to_string();
+        }
+    }
+    "".to_string()
+}
+
+fn show_med(attrs: &Vec<Attr>) -> String {
+    for attr in attrs.iter() {
+        if let Attr::Med(med) = attr {
+            return med.med.to_string();
+        }
+    }
+    "".to_string()
+}
+
+fn show_local_pref(attrs: &Vec<Attr>) -> String {
+    for attr in attrs.iter() {
+        if let Attr::LocalPref(lpref) = attr {
+            return lpref.local_pref.to_string();
+        }
+    }
+    "".to_string()
+}
+
+fn show_aspath(attrs: &Vec<Attr>) -> String {
+    for attr in attrs.iter() {
+        if let Attr::As4Path(aspath) = attr {
+            return aspath.to_string();
+        }
+    }
+    "".to_string()
+}
+
+fn show_origin(attrs: &Vec<Attr>) -> String {
+    for attr in attrs.iter() {
+        if let Attr::Origin(origin) = attr {
+            return origin.to_string();
+        }
+    }
+    "".to_string()
+}
 
 fn show_bgp_route(bgp: &Bgp) -> String {
     let mut buf = String::new();
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, _value) in bgp.ptree.iter() {
-        writeln!(buf, "{}", key).unwrap();
+    for (key, value) in bgp.ptree.iter() {
+        for (i, route) in value.iter().enumerate() {
+            let nexthop = show_nexthop(&route.attrs);
+            let med = show_med(&route.attrs);
+            let local_pref = show_local_pref(&route.attrs);
+            let aspath = show_aspath(&route.attrs);
+            let origin = show_origin(&route.attrs);
+            writeln!(
+                buf,
+                "    {:<16} {:<19} {:>6} {:>6} {:>6} {}{}",
+                key.to_string(),
+                nexthop,
+                med,
+                local_pref,
+                0,
+                aspath,
+                origin,
+            )
+            .unwrap();
+        }
     }
     buf
 }
 
 fn show_bgp(bgp: &Bgp, args: Args, _json: bool) -> String {
-    if args.is_empty() {
-        show_bgp_route(bgp)
-    } else {
-        show_bgp_instance(bgp)
-    }
+    show_bgp_route(bgp)
+}
+
+fn show_bgp_summary(bgp: &Bgp, args: Args, _json: bool) -> String {
+    show_bgp_instance(bgp)
 }
 
 #[derive(Serialize, Debug)]
@@ -291,7 +354,7 @@ impl Bgp {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp);
-        self.show_add("/show/ip/bgp/summary", show_bgp);
+        self.show_add("/show/ip/bgp/summary", show_bgp_summary);
         self.show_add("/show/ip/bgp/neighbor", show_bgp_neighbor);
         self.show_add("/show/community-list", show_community_list);
     }
