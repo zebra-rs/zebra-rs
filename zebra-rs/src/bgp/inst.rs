@@ -114,16 +114,79 @@ impl Bgp {
     }
 
     pub async fn listen(&mut self) -> anyhow::Result<()> {
-        let listener = TcpListener::bind("0.0.0.0:179").await?;
         let tx = self.tx.clone();
-
-        let listen_task = Task::spawn(async move {
-            loop {
-                let (socket, sockaddr) = listener.accept().await.unwrap();
-                tx.send(Message::Accept(socket, sockaddr)).unwrap();
+        let tx_clone = tx.clone();
+        
+        // Try to bind to both IPv4 and IPv6
+        let mut ipv4_bound = false;
+        let mut ipv6_bound = false;
+        
+        // Check if we can bind to IPv4
+        match TcpListener::bind("0.0.0.0:179").await {
+            Ok(listener) => {
+                ipv4_bound = true;
+                let tx_ipv4 = tx.clone();
+                Task::spawn(async move {
+                    println!("BGP listening on 0.0.0.0:179");
+                    loop {
+                        match listener.accept().await {
+                            Ok((socket, sockaddr)) => {
+                                if let Err(e) = tx_ipv4.send(Message::Accept(socket, sockaddr)) {
+                                    eprintln!("Failed to send Accept message: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("IPv4 accept error: {}", e);
+                            }
+                        }
+                    }
+                });
             }
-        });
-        self.listen_task = Some(listen_task);
+            Err(e) => {
+                eprintln!("Failed to bind to IPv4 0.0.0.0:179: {}", e);
+            }
+        }
+        
+        // Check if we can bind to IPv6
+        match TcpListener::bind("[::]:179").await {
+            Ok(listener) => {
+                ipv6_bound = true;
+                let tx_ipv6 = tx_clone;
+                Task::spawn(async move {
+                    println!("BGP listening on [::]:179");
+                    loop {
+                        match listener.accept().await {
+                            Ok((socket, sockaddr)) => {
+                                if let Err(e) = tx_ipv6.send(Message::Accept(socket, sockaddr)) {
+                                    eprintln!("Failed to send Accept message: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("IPv6 accept error: {}", e);
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("Failed to bind to IPv6 [::]:179: {}", e);
+            }
+        }
+        
+        if !ipv4_bound && !ipv6_bound {
+            return Err(anyhow::anyhow!("Failed to bind to any address (both IPv4 and IPv6)"));
+        }
+        
+        // Create a dummy task for compatibility with existing code that expects listen_task
+        self.listen_task = Some(Task::spawn(async move {
+            // This task just keeps running
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            }
+        }));
+        
         Ok(())
     }
 
