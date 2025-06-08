@@ -721,6 +721,10 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 if peer.state == State::Active {
                     peer.state = fsm_connected(peer, stream);
+                } else {
+                    // Idle, refuse connection.
+
+                    // Established, collision detect.
                 }
             }
         }
