@@ -12,7 +12,26 @@ use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
+
+/// Create an IPv6-only TCP listener to avoid conflicts with IPv4 binding
+async fn create_ipv6_listener() -> Result<TcpListener, std::io::Error> {
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    
+    // Set IPV6_V6ONLY to true to prevent binding to IPv4 as well
+    socket.set_only_v6(true)?;
+    socket.set_reuse_address(true)?;
+    
+    let addr = "[::]:179".parse::<SocketAddr>().unwrap();
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    
+    // Convert socket2::Socket to std::net::TcpListener, then to tokio::net::TcpListener
+    let std_listener: std::net::TcpListener = socket.into();
+    std_listener.set_nonblocking(true)?;
+    TcpListener::from_std(std_listener)
+}
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -116,11 +135,11 @@ impl Bgp {
     pub async fn listen(&mut self) -> anyhow::Result<()> {
         let tx = self.tx.clone();
         let tx_clone = tx.clone();
-        
+
         // Try to bind to both IPv4 and IPv6
         let mut ipv4_bound = false;
         let mut ipv6_bound = false;
-        
+
         // Check if we can bind to IPv4
         match TcpListener::bind("0.0.0.0:179").await {
             Ok(listener) => {
@@ -147,9 +166,9 @@ impl Bgp {
                 eprintln!("Failed to bind to IPv4 0.0.0.0:179: {}", e);
             }
         }
-        
-        // Check if we can bind to IPv6
-        match TcpListener::bind("[::]:179").await {
+
+        // Check if we can bind to IPv6 with IPv6-only socket
+        match create_ipv6_listener().await {
             Ok(listener) => {
                 ipv6_bound = true;
                 let tx_ipv6 = tx_clone;
@@ -174,11 +193,13 @@ impl Bgp {
                 eprintln!("Failed to bind to IPv6 [::]:179: {}", e);
             }
         }
-        
+
         if !ipv4_bound && !ipv6_bound {
-            return Err(anyhow::anyhow!("Failed to bind to any address (both IPv4 and IPv6)"));
+            return Err(anyhow::anyhow!(
+                "Failed to bind to any address (both IPv4 and IPv6)"
+            ));
         }
-        
+
         // Create a dummy task for compatibility with existing code that expects listen_task
         self.listen_task = Some(Task::spawn(async move {
             // This task just keeps running
@@ -186,7 +207,7 @@ impl Bgp {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
             }
         }));
-        
+
         Ok(())
     }
 
