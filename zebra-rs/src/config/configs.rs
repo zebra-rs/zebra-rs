@@ -103,6 +103,7 @@ impl Args {
             "ipv4-unicast" => Some(AfiSafi::new(Afi::Ip, Safi::Unicast)),
             "ipv4-labeled-unicast" => Some(AfiSafi::new(Afi::Ip, Safi::MplsLabel)),
             "l3vpn-ipv4-unicast" => Some(AfiSafi::new(Afi::Ip, Safi::MplsVpn)),
+            "l2vpn-evpn" => Some(AfiSafi::new(Afi::L2vpn, Safi::Evpn)),
             "ipv6-unicast" => Some(AfiSafi::new(Afi::Ip6, Safi::Unicast)),
             "ipv6-labeled-unicast" => Some(AfiSafi::new(Afi::Ip6, Safi::MplsLabel)),
             "l3vpn-ipv6-unicast" => Some(AfiSafi::new(Afi::Ip, Safi::MplsVpn)),
