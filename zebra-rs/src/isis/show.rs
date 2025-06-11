@@ -93,16 +93,10 @@ fn show_isis_graph(isis: &Isis, _args: Args, json: bool) -> String {
                 if !node.links.is_empty() {
                     writeln!(buf, "    Links:").unwrap();
                     for link in &node.links {
-                        writeln!(
-                            buf,
-                            "      -> {} (cost: {})",
-                            link.to_name, link.cost
-                        )
-                        .unwrap();
+                        writeln!(buf, "      -> {} (cost: {})", link.to_name, link.cost).unwrap();
                     }
                 }
             }
-
         }
 
         if buf.is_empty() {
@@ -120,7 +114,7 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
     // Collect all nodes with their links
     for (id, node) in graph.iter() {
         let mut node_links = Vec::new();
-        
+
         // Collect all outgoing links from this node
         for link in &node.olinks {
             // Get the destination node name
@@ -132,7 +126,7 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
                 });
             }
         }
-        
+
         nodes.push(NodeJson {
             id: *id,
             name: node.name.clone(),
@@ -150,54 +144,120 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
     }
 }
 
-fn show_isis_route(isis: &Isis, _args: Args, _json: bool) -> String {
-    let mut buf = String::new();
+// JSON structures for ISIS routes
+#[derive(Serialize)]
+struct RouteJson {
+    prefix: String,
+    metric: u32,
+    nexthops: Vec<NexthopJson>,
+}
 
-    // Helper closure to format and write out routes for a given level
-    let mut write_routes = |level: &Level| {
-        for (prefix, route) in isis.rib.get(level).iter() {
-            let mut shown = false;
-            for (addr, nhop) in route.nhops.iter() {
-                let sid = if let Some(sid) = route.sid {
-                    if nhop.adjacency {
-                        format!(", label {} implicit null", sid)
+#[derive(Serialize)]
+struct NexthopJson {
+    address: String,
+    interface: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    implicit_null: bool,
+}
+
+#[derive(Serialize)]
+struct RoutesJson {
+    level_1: Vec<RouteJson>,
+    level_2: Vec<RouteJson>,
+}
+
+fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
+    if json {
+        // JSON output
+        let mut routes_json = RoutesJson {
+            level_1: Vec::new(),
+            level_2: Vec::new(),
+        };
+
+        // Helper closure to collect routes for a given level
+        let collect_routes = |level: &Level| -> Vec<RouteJson> {
+            let mut routes = Vec::new();
+            
+            for (prefix, route) in isis.rib.get(level).iter() {
+                let mut nexthops = Vec::new();
+                
+                for (addr, nhop) in route.nhops.iter() {
+                    let nexthop_json = NexthopJson {
+                        address: addr.to_string(),
+                        interface: isis.ifname(nhop.ifindex),
+                        label: route.sid,
+                        implicit_null: route.sid.is_some() && nhop.adjacency,
+                    };
+                    nexthops.push(nexthop_json);
+                }
+                
+                routes.push(RouteJson {
+                    prefix: prefix.to_string(),
+                    metric: route.metric,
+                    nexthops,
+                });
+            }
+            
+            routes
+        };
+
+        routes_json.level_1 = collect_routes(&Level::L1);
+        routes_json.level_2 = collect_routes(&Level::L2);
+
+        serde_json::to_string_pretty(&routes_json)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e))
+    } else {
+        // Text output (existing implementation)
+        let mut buf = String::new();
+
+        // Helper closure to format and write out routes for a given level
+        let mut write_routes = |level: &Level| {
+            for (prefix, route) in isis.rib.get(level).iter() {
+                let mut shown = false;
+                for (addr, nhop) in route.nhops.iter() {
+                    let sid = if let Some(sid) = route.sid {
+                        if nhop.adjacency {
+                            format!(", label {} implicit null", sid)
+                        } else {
+                            format!(", label {}", sid)
+                        }
                     } else {
-                        format!(", label {}", sid)
+                        String::from("")
+                    };
+                    if !shown {
+                        writeln!(
+                            buf,
+                            "{:<20} [{}] via {}, {}{}",
+                            prefix.to_string(),
+                            route.metric,
+                            addr,
+                            isis.ifname(nhop.ifindex),
+                            sid
+                        )
+                        .unwrap();
+                        shown = true;
+                    } else {
+                        writeln!(
+                            buf,
+                            "                     [{}] via {}, {}{}",
+                            route.metric,
+                            addr,
+                            isis.ifname(nhop.ifindex),
+                            sid
+                        )
+                        .unwrap();
                     }
-                } else {
-                    String::from("")
-                };
-                if !shown {
-                    writeln!(
-                        buf,
-                        "{:<20} [{}] via {}, {}{}",
-                        prefix.to_string(),
-                        route.metric,
-                        addr,
-                        isis.ifname(nhop.ifindex),
-                        sid
-                    )
-                    .unwrap();
-                    shown = true;
-                } else {
-                    writeln!(
-                        buf,
-                        "                     [{}] via {}, {}{}",
-                        route.metric,
-                        addr,
-                        isis.ifname(nhop.ifindex),
-                        sid
-                    )
-                    .unwrap();
                 }
             }
-        }
-    };
+        };
 
-    write_routes(&Level::L1);
-    write_routes(&Level::L2);
+        write_routes(&Level::L1);
+        write_routes(&Level::L2);
 
-    buf
+        buf
+    }
 }
 
 fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
