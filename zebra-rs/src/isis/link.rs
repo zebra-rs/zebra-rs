@@ -2,6 +2,7 @@ use std::collections::btree_map::{Iter, IterMut};
 use std::collections::BTreeMap;
 use std::default;
 use std::fmt::Write;
+use serde::Serialize;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::{
@@ -628,8 +629,6 @@ pub fn config_hello_padding(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Op
     Some(())
 }
 
-use serde::Serialize;
-
 #[derive(Serialize)]
 struct LinkInfo {
     name: String,
@@ -674,6 +673,42 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
     buf
 }
 
+// JSON structures for interface detail
+#[derive(Serialize)]
+struct InterfaceDetailJson {
+    interface: String,
+    state: String,
+    active: bool,
+    circuit_id: String,
+    #[serde(rename = "type")]
+    link_type: String,
+    level: String,
+    snpa: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level_1_info: Option<LevelInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level_2_info: Option<LevelInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ip_prefixes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ipv6_link_locals: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ipv6_prefixes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct LevelInfo {
+    metric: u32,
+    active_neighbors: u32,
+    hello_interval: u64,
+    holddown_count: u32,
+    padding: String,
+    csnp_interval: u64,
+    psnp_interval: u64,
+    lan_priority: u8,
+    dis_status: String,
+}
+
 pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) {
     writeln!(
         buf,
@@ -716,56 +751,119 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) {
     .unwrap();
 }
 
-pub fn show_detail(isis: &Isis, _args: Args, _json: bool) -> String {
-    let mut buf = String::new();
-    for (ifindex, link) in isis.links.iter() {
-        if link.config.enabled() {
-            let link_state = if link.state.is_up() { "Up" } else { "Down" };
-            writeln!(
-                buf,
-                "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
-                link.state.name, link_state, link.state.ifindex
-            )
-            .unwrap();
-            writeln!(
-                buf,
-                "  Type: {}, Level: {}, SNPA: {}",
-                link.config.link_type(),
-                link.state.level(),
-                link.state.mac.unwrap(),
-            )
-            .unwrap();
-            if has_level(link.state.level(), Level::L1) {
-                writeln!(buf, "  Level-1 Information:").unwrap();
-                show_detail_entry(&mut buf, link, Level::L1);
-            }
-            if has_level(link.state.level(), Level::L2) {
-                writeln!(buf, "  Level-2 Information:").unwrap();
-                show_detail_entry(&mut buf, link, Level::L2);
-            }
-            // IPv4 Address.
-            if !link.state.v4addr.is_empty() {
-                writeln!(buf, "  IP Prefix(es):").unwrap();
-                for prefix in link.state.v4addr.iter() {
-                    writeln!(buf, "    {}", prefix).unwrap();
-                }
-            }
-            if !link.state.v6laddr.is_empty() {
-                writeln!(buf, "  IPv6 Link-Locals:").unwrap();
-                for prefix in link.state.v6laddr.iter() {
-                    writeln!(buf, "    {}", prefix).unwrap();
-                }
-            }
-            if !link.state.v6addr.is_empty() {
-                writeln!(buf, "  IPv6 Prefix(es):").unwrap();
-                for prefix in link.state.v6addr.iter() {
-                    writeln!(buf, "    {}", prefix).unwrap();
-                }
-            }
-            writeln!(buf, "").unwrap();
-        }
+fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
+    let padding = if link.config.hello_padding() == HelloPaddingPolicy::Always {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
+    
+    let dis_status = match link.state.dis_status.get(&level) {
+        DisStatus::NotSelected => "no DIS is selected",
+        DisStatus::Other => "is not DIS",
+        DisStatus::Myself => "is DIS",
+    }.to_string();
+    
+    LevelInfo {
+        metric: link.config.metric(),
+        active_neighbors: *link.state.nbrs_up.get(&level),
+        hello_interval: link.config.hello_interval(),
+        holddown_count: link.config.holddown_count(),
+        padding,
+        csnp_interval: link.config.csnp_interval(),
+        psnp_interval: link.config.psnp_interval(),
+        lan_priority: link.config.priority(),
+        dis_status,
     }
-    buf
+}
+
+pub fn show_detail(isis: &Isis, _args: Args, json: bool) -> String {
+    if json {
+        // JSON output
+        let mut interfaces = Vec::new();
+        
+        for (ifindex, link) in isis.links.iter() {
+            if link.config.enabled() {
+                let mut interface_detail = InterfaceDetailJson {
+                    interface: link.state.name.clone(),
+                    state: if link.state.is_up() { "Up".to_string() } else { "Down".to_string() },
+                    active: true,
+                    circuit_id: format!("0x{:02X}", link.state.ifindex),
+                    link_type: format!("{}", link.config.link_type()),
+                    level: format!("{}", link.state.level()),
+                    snpa: link.state.mac.map(|mac| mac.to_string()),
+                    level_1_info: None,
+                    level_2_info: None,
+                    ip_prefixes: link.state.v4addr.iter().map(|p| p.to_string()).collect(),
+                    ipv6_link_locals: link.state.v6laddr.iter().map(|p| p.to_string()).collect(),
+                    ipv6_prefixes: link.state.v6addr.iter().map(|p| p.to_string()).collect(),
+                };
+                
+                if has_level(link.state.level(), Level::L1) {
+                    interface_detail.level_1_info = Some(build_level_info(link, Level::L1));
+                }
+                if has_level(link.state.level(), Level::L2) {
+                    interface_detail.level_2_info = Some(build_level_info(link, Level::L2));
+                }
+                
+                interfaces.push(interface_detail);
+            }
+        }
+        
+        serde_json::to_string_pretty(&interfaces)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize interfaces: {}\"}}", e))
+    } else {
+        // Text output (existing implementation)
+        let mut buf = String::new();
+        for (ifindex, link) in isis.links.iter() {
+            if link.config.enabled() {
+                let link_state = if link.state.is_up() { "Up" } else { "Down" };
+                writeln!(
+                    buf,
+                    "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
+                    link.state.name, link_state, link.state.ifindex
+                )
+                .unwrap();
+                writeln!(
+                    buf,
+                    "  Type: {}, Level: {}, SNPA: {}",
+                    link.config.link_type(),
+                    link.state.level(),
+                    link.state.mac.unwrap(),
+                )
+                .unwrap();
+                if has_level(link.state.level(), Level::L1) {
+                    writeln!(buf, "  Level-1 Information:").unwrap();
+                    show_detail_entry(&mut buf, link, Level::L1);
+                }
+                if has_level(link.state.level(), Level::L2) {
+                    writeln!(buf, "  Level-2 Information:").unwrap();
+                    show_detail_entry(&mut buf, link, Level::L2);
+                }
+                // IPv4 Address.
+                if !link.state.v4addr.is_empty() {
+                    writeln!(buf, "  IP Prefix(es):").unwrap();
+                    for prefix in link.state.v4addr.iter() {
+                        writeln!(buf, "    {}", prefix).unwrap();
+                    }
+                }
+                if !link.state.v6laddr.is_empty() {
+                    writeln!(buf, "  IPv6 Link-Locals:").unwrap();
+                    for prefix in link.state.v6laddr.iter() {
+                        writeln!(buf, "    {}", prefix).unwrap();
+                    }
+                }
+                if !link.state.v6addr.is_empty() {
+                    writeln!(buf, "  IPv6 Prefix(es):").unwrap();
+                    for prefix in link.state.v6addr.iter() {
+                        writeln!(buf, "    {}", prefix).unwrap();
+                    }
+                }
+                writeln!(buf, "").unwrap();
+            }
+        }
+        buf
+    }
 }
 
 use std::fmt::{Display, Formatter, Result};
