@@ -179,10 +179,10 @@ fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
         // Helper closure to collect routes for a given level
         let collect_routes = |level: &Level| -> Vec<RouteJson> {
             let mut routes = Vec::new();
-            
+
             for (prefix, route) in isis.rib.get(level).iter() {
                 let mut nexthops = Vec::new();
-                
+
                 for (addr, nhop) in route.nhops.iter() {
                     let nexthop_json = NexthopJson {
                         address: addr.to_string(),
@@ -192,14 +192,14 @@ fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
                     };
                     nexthops.push(nexthop_json);
                 }
-                
+
                 routes.push(RouteJson {
                     prefix: prefix.to_string(),
                     metric: route.metric,
                     nexthops,
                 });
             }
-            
+
             routes
         };
 
@@ -260,74 +260,148 @@ fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
     }
 }
 
-fn show_isis_database(isis: &Isis, _args: Args, _json: bool) -> String {
-    let mut buf = String::new();
+// JSON structures for ISIS database
+#[derive(Serialize)]
+struct DatabaseJson {
+    level_1: Vec<LspEntryJson>,
+    level_2: Vec<LspEntryJson>,
+}
 
-    for (lsp_id, lsa) in isis.lsdb.l1.iter() {
-        let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
-        let originated = if lsa.originated { "*" } else { " " };
-        let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
-        let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
-        let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
-        let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
-        let system_id =
-            if let Some((hostname, _)) = isis.hostname.get(&Level::L1).get(&lsp_id.sys_id()) {
-                format!(
-                    "{}.{:02x}-{:02x}",
-                    hostname.clone(),
-                    lsp_id.pseudo_id(),
-                    lsp_id.fragment_id()
-                )
-            } else {
-                lsp_id.to_string()
-            };
-        writeln!(
-            buf,
-            "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}",
-            system_id.to_string(),
-            originated,
-            lsa.lsp.pdu_len.to_string(),
-            lsa.lsp.seq_number,
-            lsa.lsp.checksum,
-            rem,
-            types,
-        )
-        .unwrap();
+#[derive(Serialize)]
+struct LspEntryJson {
+    lsp_id: String,
+    system_id: String,
+    originated: bool,
+    pdu_len: u16,
+    seq_number: u32,
+    checksum: u16,
+    holdtime: u64,
+    att_bit: u8,
+    p_bit: u8,
+    ol_bit: u8,
+}
+
+fn show_isis_database(isis: &Isis, _args: Args, json: bool) -> String {
+    if json {
+        // JSON output
+        let mut database_json = DatabaseJson {
+            level_1: Vec::new(),
+            level_2: Vec::new(),
+        };
+
+        // Helper closure to collect LSP entries for a given level
+        let collect_lsp_entries = |level: &Level, lsdb: &crate::isis::lsdb::Lsdb| -> Vec<LspEntryJson> {
+            let mut entries = Vec::new();
+            
+            for (lsp_id, lsa) in lsdb.iter() {
+                let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+                let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
+                let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
+                let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
+                
+                let system_id = if let Some((hostname, _)) = isis.hostname.get(level).get(&lsp_id.sys_id()) {
+                    format!(
+                        "{}.{:02x}-{:02x}",
+                        hostname.clone(),
+                        lsp_id.pseudo_id(),
+                        lsp_id.fragment_id()
+                    )
+                } else {
+                    lsp_id.to_string()
+                };
+                
+                entries.push(LspEntryJson {
+                    lsp_id: lsp_id.to_string(),
+                    system_id,
+                    originated: lsa.originated,
+                    pdu_len: lsa.lsp.pdu_len,
+                    seq_number: lsa.lsp.seq_number,
+                    checksum: lsa.lsp.checksum,
+                    holdtime: rem,
+                    att_bit,
+                    p_bit,
+                    ol_bit,
+                });
+            }
+            
+            entries
+        };
+
+        database_json.level_1 = collect_lsp_entries(&Level::L1, &isis.lsdb.l1);
+        database_json.level_2 = collect_lsp_entries(&Level::L2, &isis.lsdb.l2);
+
+        serde_json::to_string_pretty(&database_json)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize database: {}\"}}", e))
+    } else {
+        // Text output (existing implementation)
+        let mut buf = String::new();
+
+        for (lsp_id, lsa) in isis.lsdb.l1.iter() {
+            let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+            let originated = if lsa.originated { "*" } else { " " };
+            let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
+            let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
+            let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
+            let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
+            let system_id =
+                if let Some((hostname, _)) = isis.hostname.get(&Level::L1).get(&lsp_id.sys_id()) {
+                    format!(
+                        "{}.{:02x}-{:02x}",
+                        hostname.clone(),
+                        lsp_id.pseudo_id(),
+                        lsp_id.fragment_id()
+                    )
+                } else {
+                    lsp_id.to_string()
+                };
+            writeln!(
+                buf,
+                "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}",
+                system_id.to_string(),
+                originated,
+                lsa.lsp.pdu_len.to_string(),
+                lsa.lsp.seq_number,
+                lsa.lsp.checksum,
+                rem,
+                types,
+            )
+            .unwrap();
+        }
+
+        for (lsp_id, lsa) in isis.lsdb.l2.iter() {
+            let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
+            let originated = if lsa.originated { "*" } else { " " };
+            let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
+            let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
+            let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
+            let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
+            let system_id =
+                if let Some((hostname, _)) = isis.hostname.get(&Level::L2).get(&lsp_id.sys_id()) {
+                    format!(
+                        "{}.{:02x}-{:02x}",
+                        hostname.clone(),
+                        lsp_id.pseudo_id(),
+                        lsp_id.fragment_id()
+                    )
+                } else {
+                    lsp_id.to_string()
+                };
+            writeln!(
+                buf,
+                "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}",
+                system_id.to_string(),
+                originated,
+                lsa.lsp.pdu_len.to_string(),
+                lsa.lsp.seq_number,
+                lsa.lsp.checksum,
+                rem,
+                types,
+            )
+            .unwrap();
+        }
+
+        buf
     }
-
-    for (lsp_id, lsa) in isis.lsdb.l2.iter() {
-        let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
-        let originated = if lsa.originated { "*" } else { " " };
-        let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
-        let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
-        let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
-        let types = format!("{}/{}/{}", att_bit, p_bit, ol_bit);
-        let system_id =
-            if let Some((hostname, _)) = isis.hostname.get(&Level::L2).get(&lsp_id.sys_id()) {
-                format!(
-                    "{}.{:02x}-{:02x}",
-                    hostname.clone(),
-                    lsp_id.pseudo_id(),
-                    lsp_id.fragment_id()
-                )
-            } else {
-                lsp_id.to_string()
-            };
-        writeln!(
-            buf,
-            "{:25} {} {:>8}  0x{:08x}  0x{:04x} {:9}  {}",
-            system_id.to_string(),
-            originated,
-            lsa.lsp.pdu_len.to_string(),
-            lsa.lsp.seq_number,
-            lsa.lsp.checksum,
-            rem,
-            types,
-        )
-        .unwrap();
-    }
-
-    buf
 }
 
 fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
