@@ -20,15 +20,15 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) {
     }
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
-        peer.state.to_str()
+        peer.state.to_str().to_string()
     } else {
-        "Estab"
+        0.to_string()
     };
 
     writeln!(
         buf,
-        "{:16} {:11} {:8} {:8} {:8} {:8} {:8}",
-        peer.address, peer.peer_as, rcvd, sent, updown, state, sent
+        "{:16} {:11} {:8} {:8} {:>8} {:>12} {:8}",
+        peer.address, peer.peer_as, rcvd, sent, updown, state, 0
     )
     .unwrap();
 }
@@ -58,7 +58,7 @@ fn show_bgp_instance(bgp: &Bgp) -> String {
     } else {
         writeln!(
             buf,
-            "Neighbor                  AS  MsgRcvd  MsgSent   Up/Down  State/PfxRcd"
+            "Neighbor                  AS  MsgRcvd  MsgSent  Up/Down State/PfxRcd   PfxSnt"
         )
         .unwrap();
         for (_, peer) in bgp.peers.iter() {
