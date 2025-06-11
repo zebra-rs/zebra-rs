@@ -290,26 +290,29 @@ fn show_isis_database(isis: &Isis, _args: Args, json: bool) -> String {
         };
 
         // Helper closure to collect LSP entries for a given level
-        let collect_lsp_entries = |level: &Level, lsdb: &crate::isis::lsdb::Lsdb| -> Vec<LspEntryJson> {
+        let collect_lsp_entries = |level: &Level,
+                                   lsdb: &crate::isis::lsdb::Lsdb|
+         -> Vec<LspEntryJson> {
             let mut entries = Vec::new();
-            
+
             for (lsp_id, lsa) in lsdb.iter() {
                 let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
                 let att_bit = if lsa.lsp.types.att_bits() != 0 { 1 } else { 0 };
                 let p_bit = if lsa.lsp.types.p_bits() { 1 } else { 0 };
                 let ol_bit = if lsa.lsp.types.ol_bits() { 1 } else { 0 };
-                
-                let system_id = if let Some((hostname, _)) = isis.hostname.get(level).get(&lsp_id.sys_id()) {
-                    format!(
-                        "{}.{:02x}-{:02x}",
-                        hostname.clone(),
-                        lsp_id.pseudo_id(),
-                        lsp_id.fragment_id()
-                    )
-                } else {
-                    lsp_id.to_string()
-                };
-                
+
+                let system_id =
+                    if let Some((hostname, _)) = isis.hostname.get(level).get(&lsp_id.sys_id()) {
+                        format!(
+                            "{}.{:02x}-{:02x}",
+                            hostname.clone(),
+                            lsp_id.pseudo_id(),
+                            lsp_id.fragment_id()
+                        )
+                    } else {
+                        lsp_id.to_string()
+                    };
+
                 entries.push(LspEntryJson {
                     lsp_id: lsp_id.to_string(),
                     system_id,
@@ -323,7 +326,7 @@ fn show_isis_database(isis: &Isis, _args: Args, json: bool) -> String {
                     ol_bit,
                 });
             }
-            
+
             entries
         };
 
