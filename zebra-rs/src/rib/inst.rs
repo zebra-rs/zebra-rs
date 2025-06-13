@@ -198,6 +198,7 @@ impl Rib {
             }
             FibMessage::NewRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
+                    // println!("{} {:?}", prefix, route.entry);
                     self.ipv4_route_add(&prefix, route.entry).await;
                 }
             }
