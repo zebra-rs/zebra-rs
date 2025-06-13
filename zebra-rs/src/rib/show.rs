@@ -192,8 +192,8 @@ pub fn rib_entry_show(
         writeln!(buf, " directly connected {}", rib.link_name(e.ifindex)).unwrap();
     } else {
         match &e.nexthop {
-            Nexthop::Link(_) => {
-                //
+            Nexthop::Link(_ifindex) => {
+                writeln!(buf, " via {}", rib.link_name(e.ifindex));
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
