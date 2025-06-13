@@ -254,6 +254,9 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     if prev_state != State::Idle && peer.state == State::Idle {
         peer.state = fsm_stop(peer);
     }
+    if prev_state == State::Established && peer.state != State::Established {
+        peer.instant = Some(Instant::now());
+    }
     println!("State: {:?} -> {:?}", prev_state, peer.state);
 }
 
