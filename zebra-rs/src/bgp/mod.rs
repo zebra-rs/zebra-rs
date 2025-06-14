@@ -9,3 +9,5 @@ pub mod peer;
 pub mod route;
 pub mod show;
 pub mod task;
+
+pub mod cap;
