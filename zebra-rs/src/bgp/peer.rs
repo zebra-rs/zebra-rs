@@ -14,9 +14,9 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
 
+use cap::CapMultiProtocol;
 use cap::CapabilityAs4;
 use cap::CapabilityGracefulRestart;
-use cap::CapabilityMultiProtocol;
 use cap::CapabilityPacket;
 use cap::CapabilityRouteRefresh;
 
@@ -633,7 +633,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     };
     let mut caps = Vec::new();
     for afi_safi in peer.config.afi_safi.0.iter() {
-        let cap = CapabilityMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
+        let cap = CapMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
         caps.push(CapabilityPacket::MultiProtocol(cap));
     }
     if peer.config.four_octet {
