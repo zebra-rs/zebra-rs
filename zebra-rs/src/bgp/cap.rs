@@ -1,36 +1,36 @@
 // Capability for sent and received.
 
-use bgp_packet::{Afi, Safi};
+use std::collections::HashMap;
 
-struct CapAfi {
-    pub afi: Afi,
-    pub safi: Safi,
-    pub sent: bool,
-    pub rcvd: bool,
+use bgp_packet::{cap::CapMultiProtocol, Afi, AfiSafi, Safi};
+
+#[derive(Default)]
+struct SendRecv {
+    pub send: bool,
+    pub recv: bool,
 }
 
 #[derive(Default)]
 struct CapAfiMap {
-    pub entries: Vec<CapAfi>,
+    pub entries: HashMap<CapMultiProtocol, SendRecv>,
 }
 
 impl CapAfiMap {
     pub fn new() -> Self {
+        let mp4uni = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+        let mp4vpn = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
+        let mp6uni = CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast);
+        let mpevpn = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
+
         let mut cmap = Self::default();
-        cmap.entries.push(CapAfi {
-            afi: Afi::Ip,
-            safi: Safi::Unicast,
-            sent: false,
-            rcvd: false,
-        });
+        cmap.entries.insert(mp4uni, SendRecv::default());
+        cmap.entries.insert(mp4vpn, SendRecv::default());
+        cmap.entries.insert(mp6uni, SendRecv::default());
+        cmap.entries.insert(mpevpn, SendRecv::default());
         cmap
     }
-    
-    pub fn get_mut(&mut self, afi: Afi, safi: Safi) -> Option<&mut CapAfi> {
-        self.entries.iter_mut().find(|e| e.afi == afi && e.safi == safi)
-    }
-    
-    pub fn get(&self, afi: Afi, safi: Safi) -> Option<&CapAfi> {
-        self.entries.iter().find(|e| e.afi == afi && e.safi == safi)
+
+    pub fn get(&self, mp: &CapMultiProtocol) -> Option<&SendRecv> {
+        self.entries.get(mp)
     }
 }
