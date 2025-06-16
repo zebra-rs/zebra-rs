@@ -72,11 +72,14 @@ impl ConfigManager {
     ) -> anyhow::Result<Self> {
         system_path.pop();
         system_path.push("zebra.conf");
+        let mut new_system_path = PathBuf::from(yang_path.clone());
+        new_system_path.pop();
+        new_system_path.push("zebra-rs.conf");
 
         let (tx, rx) = mpsc::channel(255);
         let mut cm = Self {
             yang_path,
-            config_path: system_path,
+            config_path: new_system_path,
             modes: HashMap::new(),
             store: ConfigStore::new(),
             tx,

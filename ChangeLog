@@ -1,3 +1,16 @@
+2025-06-15  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.7.0
+
+	* zebra-rs/src/config/manager.rs (ConfigManager.new): Respect
+	system_path as same as yang_path.
+
+	* packaging/patch/usr/lib/systemd/system/zebra-rs.service: Add
+	systemctl service for zebra-rs.
+
+	* zebra-rs/src/bgp/show.rs (render): Show capability information
+	for Established peer.
+
 2025-06-05  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.6.9
