@@ -20,6 +20,9 @@ use cap::CapabilityGracefulRestart;
 use cap::CapabilityPacket;
 use cap::CapabilityRouteRefresh;
 
+use crate::bgp::cap::cap_register_recv;
+
+use super::cap::{cap_register_send, CapAfiMap};
 use super::inst::Message;
 use super::route::route_from_peer;
 use super::route::Route;
@@ -150,6 +153,7 @@ pub struct Peer {
     pub tx: UnboundedSender<Message>,
     pub config: PeerConfig,
     pub instant: Option<Instant>,
+    pub cap_map: CapAfiMap,
 }
 
 impl Peer {
@@ -183,6 +187,7 @@ impl Peer {
             param_tx: PeerParam::default(),
             param_rx: PeerParam::default(),
             instant: None,
+            cap_map: CapAfiMap::new(),
         };
         peer.config
             .afi_safi
@@ -372,6 +377,9 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     if peer.param.hold_time > 0 {
         peer.timer.hold_timer = Some(peer_start_holdtimer(peer));
     }
+
+    // Register recv caps.
+    cap_register_recv(&packet.caps, &mut peer.cap_map);
 
     // Set established time.
     peer.instant = Some(Instant::now());
@@ -650,6 +658,8 @@ pub fn peer_send_open(peer: &mut Peer) {
         let cap = CapabilityGracefulRestart::new(restart_time);
         caps.push(CapabilityPacket::GracefulRestart(cap));
     }
+
+    cap_register_send(&caps, &mut peer.cap_map);
 
     // Remmeber sent hold time.
     peer.param_tx.hold_time = peer.hold_time();
