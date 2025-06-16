@@ -3,10 +3,12 @@ use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use bgp_packet::{Attr, BgpType};
+use bgp_packet::cap::CapMultiProtocol;
+use bgp_packet::{Afi, Attr, BgpType, Safi};
 use serde::Serialize;
 use serde_json::json;
 
+use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{Peer, PeerCounter, PeerParam, State};
 use crate::config::Args;
@@ -174,6 +176,7 @@ struct Neighbor<'a> {
     timer: PeerParam,
     timer_sent: PeerParam,
     timer_recv: PeerParam,
+    cap_map: CapAfiMap,
     count: HashMap<&'a str, PeerCounter>,
 }
 
@@ -282,6 +285,7 @@ fn fetch(peer: &Peer) -> Neighbor {
         timer: peer.param.clone(),
         timer_sent: peer.param_tx.clone(),
         timer_recv: peer.param_rx.clone(),
+        cap_map: peer.cap_map.clone(),
         count: HashMap::default(),
     };
 
@@ -315,15 +319,6 @@ fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
   Hold time {} seconds, keepalive {} seconds
   Sent Hold time {} seconds, sent keepalive {} seconds
   Recv Hold time {} seconds, Recieved keepalive {} seconds
-  Message statistics:
-                              Sent          Rcvd
-    Opens:              {:>10}    {:>10}
-    Notifications:      {:>10}    {:>10}
-    Updates:            {:>10}    {:>10}
-    Keepalives:         {:>10}    {:>10}
-    Route Refresh:      {:>10}    {:>10}
-    Capability:         {:>10}    {:>10}
-    Total:              {:>10}    {:>10}
 "#,
         neighbor.address,
         neighbor.remote_as,
@@ -339,6 +334,40 @@ fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
         neighbor.timer_sent.keepalive,
         neighbor.timer_recv.hold_time,
         neighbor.timer_recv.keepalive,
+    )?;
+    if neighbor.state == "Established" {
+        writeln!(out, "  Neighbor Capabilities:")?;
+        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
+            if cap.send || cap.recv {
+                writeln!(out, "    IPv4 Unicast: {}", cap.desc())?;
+            }
+        }
+        let afi = CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
+            if cap.send || cap.recv {
+                writeln!(out, "    IPv6 Unicast: {}", cap.desc())?;
+            }
+        }
+        let afi = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
+            if cap.send || cap.recv {
+                writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
+            }
+        }
+    }
+    writeln!(
+        out,
+        r#"  Message statistics:
+                              Sent          Rcvd
+    Opens:              {:>10}    {:>10}
+    Notifications:      {:>10}    {:>10}
+    Updates:            {:>10}    {:>10}
+    Keepalives:         {:>10}    {:>10}
+    Route Refresh:      {:>10}    {:>10}
+    Capability:         {:>10}    {:>10}
+    Total:              {:>10}    {:>10}
+"#,
         neighbor.count.get("open").unwrap().sent,
         neighbor.count.get("open").unwrap().rcvd,
         neighbor.count.get("notification").unwrap().sent,
@@ -354,6 +383,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
         neighbor.count.get("total").unwrap().sent,
         neighbor.count.get("total").unwrap().rcvd,
     )?;
+
     Ok(())
 }
 
