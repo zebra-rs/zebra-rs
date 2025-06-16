@@ -438,22 +438,49 @@ module config {
         leaf prefix {
           type inet:ipv4-prefix;
           description
-            "Members of the community set";
+            "Members of the prefix list";
         }
         leaf le {
           type uint8;
           description
-            "Members of the community set";
+            "Members of the prefix list";
         }
         leaf eq {
           type uint8;
           description
-            "Members of the community set";
+            "Members of the prefix list";
         }
         leaf ge {
           type uint8;
           description
-            "Members of the community set";
+            "Members of the prefix list";
+        }
+      }
+    }
+    list prefix-set {
+      key "name";
+      leaf name {
+        type string;
+      }
+      list prefixes {
+        key prefix;
+        leaf prefix {
+          type inet:ipv4-prefix;
+        }
+        leaf le {
+          type uint8;
+          description
+            "Members of the prefix set";
+        }
+        leaf eq {
+          type uint8;
+          description
+            "Members of the prefix set";
+        }
+        leaf ge {
+          type uint8;
+          description
+            "Members of the prefix set";
         }
       }
     }
