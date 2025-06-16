@@ -355,6 +355,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
                 writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
             }
         }
+        writeln!(out, "")?;
     }
     writeln!(
         out,
