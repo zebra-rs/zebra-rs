@@ -2,10 +2,7 @@
 
 use std::collections::HashMap;
 
-use bgp_packet::{
-    cap::{CapMultiProtocol, CapabilityPacket},
-    Afi, AfiSafi, Safi,
-};
+use bgp_packet::{cap::CapabilityPacket, Afi, AfiSafi, CapMultiProtocol, Safi};
 use serde::Serialize;
 
 #[derive(Default, Debug, Serialize, Clone)]
