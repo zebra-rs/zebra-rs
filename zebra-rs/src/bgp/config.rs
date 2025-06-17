@@ -76,17 +76,27 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         if let Some(addr) = args.v4addr() {
             let addr = IpAddr::V4(addr);
             let afi_safi: AfiSafi = args.afi_safi()?;
+            let enabled: bool = args.boolean()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
-                if !peer.config.afi_safi.has(&afi_safi) {
-                    peer.config.afi_safi.push(afi_safi);
+                if enabled {
+                    if !peer.config.afi_safi.has(&afi_safi) {
+                        peer.config.afi_safi.push(afi_safi);
+                    }
+                } else {
+                    peer.config.afi_safi.remove(&afi_safi);
                 }
             }
         } else if let Some(addr) = args.v6addr() {
             let addr = IpAddr::V6(addr);
             let afi_safi: AfiSafi = args.afi_safi()?;
+            let enabled: bool = args.boolean()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
-                if !peer.config.afi_safi.has(&afi_safi) {
-                    peer.config.afi_safi.push(afi_safi);
+                if enabled {
+                    if !peer.config.afi_safi.has(&afi_safi) {
+                        peer.config.afi_safi.push(afi_safi);
+                    }
+                } else {
+                    peer.config.afi_safi.remove(&afi_safi);
                 }
             }
         }

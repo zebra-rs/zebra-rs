@@ -143,6 +143,7 @@ submodule ietf-bgp-common-multiprotocol {
         "AFI,SAFI";
     }
     leaf enabled {
+      mandatory true;
       type boolean;
       default "false";
       description

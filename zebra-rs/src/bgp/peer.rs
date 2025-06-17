@@ -1,3 +1,4 @@
+use bgp_packet::cap::CapMultiProtocol;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use nom::AsBytes;
@@ -14,7 +15,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
 
-use cap::CapMultiProtocol;
 use cap::CapabilityAs4;
 use cap::CapabilityGracefulRestart;
 use cap::CapabilityPacket;

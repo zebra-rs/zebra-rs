@@ -204,16 +204,23 @@ impl Config {
             }
 
             if !self.list.borrow().is_empty() {
+                out.push_str(" {\n");
                 for value in self.list.borrow().iter() {
+                    out.push_str(&" ".repeat((depth + 1) * INDENT_LEVEL).to_string());
                     if self.quote() {
-                        out.push_str(&format!("\"{}\"", value));
+                        out.push_str(&format!("\"{}\";\n", value));
                     } else {
-                        out.push(' ');
-                        out.push_str(&value.to_string());
+                        out.push_str(&format!("{};\n", value));
                     }
                 }
-            }
-            if brace {
+                out.push_str(&" ".repeat(depth * INDENT_LEVEL).to_string());
+                out.push('}');
+                if brace {
+                    out.push_str(" {\n");
+                } else {
+                    out.push_str(";\n");
+                }
+            } else if brace {
                 out.push_str(" {\n");
             } else {
                 out.push_str(";\n");
@@ -649,5 +656,67 @@ pub fn config_match(config: &Rc<Config>, input: &str, mx: &mut Match) {
         config_match_dir(config, input, mx);
     } else {
         config_match_value(config, input, mx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::vtysh::CommandPath;
+
+    #[test]
+    fn test_leaf_list_round_trip() {
+        // Create a config with leaf-list values
+        let root = Rc::new(Config::new("".to_string(), None));
+        
+        // Simulate parsing "set prefix-test member 10.0.0.1/32" three times
+        let paths1 = vec![
+            CommandPath {
+                name: "prefix-test".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "member".to_string(),
+                ymatch: YangMatch::LeafList as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "10.0.0.1/32".to_string(),
+                ymatch: YangMatch::LeafListMatched as i32,
+                ..Default::default()
+            },
+        ];
+        set(paths1, root.clone());
+        
+        let paths2 = vec![
+            CommandPath {
+                name: "prefix-test".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "member".to_string(),
+                ymatch: YangMatch::LeafList as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "10.0.0.2/32".to_string(),
+                ymatch: YangMatch::LeafListMatched as i32,
+                ..Default::default()
+            },
+        ];
+        set(paths2, root.clone());
+        
+        // Format the config
+        let mut output = String::new();
+        root.format(&mut output);
+        
+        // Verify the output matches our new multi-line format
+        assert!(output.contains("prefix-test {"));
+        assert!(output.contains("  member {"));
+        assert!(output.contains("    10.0.0.1/32;"));
+        assert!(output.contains("    10.0.0.2/32;"));
+        assert!(output.contains("  }"));
     }
 }
