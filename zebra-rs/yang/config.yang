@@ -457,11 +457,6 @@ module config {
         }
       }
     }
-    container prefix-test {
-      leaf-list member {
-        type inet:ipv4-prefix;
-      }
-    }
     list prefix-set {
       key "name";
       leaf name {
