@@ -668,7 +668,7 @@ mod tests {
     fn test_leaf_list_round_trip() {
         // Create a config with leaf-list values
         let root = Rc::new(Config::new("".to_string(), None));
-        
+
         // Simulate parsing "set prefix-test member 10.0.0.1/32" three times
         let paths1 = vec![
             CommandPath {
@@ -688,7 +688,7 @@ mod tests {
             },
         ];
         set(paths1, root.clone());
-        
+
         let paths2 = vec![
             CommandPath {
                 name: "prefix-test".to_string(),
@@ -707,11 +707,11 @@ mod tests {
             },
         ];
         set(paths2, root.clone());
-        
+
         // Format the config
         let mut output = String::new();
         root.format(&mut output);
-        
+
         // Verify the output matches our new multi-line format
         assert!(output.contains("prefix-test {"));
         assert!(output.contains("  member {"));
