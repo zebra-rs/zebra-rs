@@ -253,69 +253,94 @@ impl Config {
         !self.prefix.is_empty()
     }
 
-    pub fn json_marshal(&self, pos: usize, out: &mut String) {
+    /// Helper method to append a comma if not the first element
+    fn append_comma_if_needed(&self, pos: usize, out: &mut String) {
         if pos != 0 {
             out.push(',');
         }
+    }
 
-        if !self.keys.borrow().is_empty() {
+    /// Helper method to marshal a simple key-value pair
+    fn marshal_key_value(&self, out: &mut String) {
+        let value = self.value.borrow();
+        if !value.is_empty() {
+            out.push_str(&format!("\"{}\":{}", self.name, format_json_value(&value)));
+        } else {
+            let value_list = self.list.borrow();
+            if !value_list.is_empty() {
+                let formatted_values: Vec<String> = value_list
+                    .iter()
+                    .map(|x| format_json_value(x))
+                    .collect();
+                out.push_str(&format!("\"{}\": [{}]", self.name, formatted_values.join(",")));
+            } else {
+                out.push_str(&format!("\"{}\":", self.name));
+            }
+        }
+    }
+
+    /// Helper method to marshal keys (list entries)
+    fn marshal_keys(&self, out: &mut String) {
+        let keys = self.keys.borrow();
+        for (pos, key) in keys.iter().enumerate() {
+            key.json_marshal(pos, out);
+        }
+    }
+
+    /// Helper method to marshal child configurations
+    fn marshal_configs(&self, out: &mut String) {
+        let configs = self.configs.borrow();
+        if configs.is_empty() {
+            return;
+        }
+
+        if !self.has_prefix() {
+            out.push('{');
+        }
+        
+        for (pos, config) in configs.iter().enumerate() {
+            let adjusted_pos = if self.has_prefix() { pos + 1 } else { pos };
+            config.json_marshal(adjusted_pos, out);
+        }
+        
+        out.push('}');
+    }
+
+    /// Convert this Config node to JSON representation
+    pub fn json_marshal(&self, pos: usize, out: &mut String) {
+        self.append_comma_if_needed(pos, out);
+
+        let has_keys = !self.keys.borrow().is_empty();
+        let has_configs = !self.configs.borrow().is_empty();
+
+        // Handle different node types
+        if has_keys {
+            // This is a list node
             out.push_str(&format!("\"{}\": [", self.name));
+            self.marshal_keys(out);
+            out.push(']');
         } else if self.has_prefix() {
+            // This is a keyed entry
             out.push('{');
             out.push_str(&format!(
                 "\"{}\":{}",
                 self.prefix,
                 format_json_value(&self.name)
             ));
+            self.marshal_keys(out);
+            self.marshal_configs(out);
+            if !has_configs && self.keys.borrow().is_empty() {
+                out.push('}');
+            }
         } else {
-            let value = self.value.borrow();
-            if !value.is_empty() {
-                out.push_str(&format!("\"{}\":{}", self.name, format_json_value(&value)));
-            } else {
-                let value_list = self.list.borrow();
-                if value_list.len() > 0 {
-                    let value_list: Vec<String> =
-                        value_list.iter().map(|x| format_json_value(x)).collect();
-                    let leaf_list = value_list.join(",");
-                    out.push_str(&format!("\"{}\": [{}]", self.name, leaf_list));
-                } else {
-                    out.push_str(&format!("\"{}\":", self.name));
-                }
+            // This is a regular node
+            self.marshal_key_value(out);
+            self.marshal_configs(out);
+            
+            // Handle presence containers (empty objects)
+            if !has_keys && !has_configs && self.presence {
+                out.push_str("{}");
             }
-        }
-
-        let keys = self.keys.borrow();
-        for (pos, n) in keys.iter().enumerate() {
-            // if n.key_only_config {
-            //     n.json_marshal(pos + 1, out);
-            // } else {
-            n.json_marshal(pos, out);
-            // }
-        }
-
-        let configs = self.configs.borrow();
-        if configs.len() > 0 {
-            if !self.has_prefix() {
-                out.push('{');
-            }
-            for (pos, n) in configs.iter().enumerate() {
-                if self.has_prefix() {
-                    n.json_marshal(pos + 1, out)
-                } else {
-                    n.json_marshal(pos, out)
-                }
-            }
-            out.push('}');
-        } else if self.has_prefix() && keys.is_empty() {
-            out.push('}');
-        }
-
-        if keys.is_empty() && configs.is_empty() && self.presence {
-            out.push_str("{}");
-        }
-
-        if !self.keys.borrow().is_empty() {
-            out.push(']');
         }
     }
 
@@ -718,5 +743,95 @@ mod tests {
         assert!(output.contains("    10.0.0.1/32;"));
         assert!(output.contains("    10.0.0.2/32;"));
         assert!(output.contains("  }"));
+    }
+
+    #[test]
+    fn test_json_marshal_leaf_list() {
+        // Create a config with leaf-list values
+        let root = Rc::new(Config::new("".to_string(), None));
+
+        // Build a simple structure with leaf-list
+        let paths = vec![
+            CommandPath {
+                name: "prefix-test".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "member".to_string(),
+                ymatch: YangMatch::LeafList as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "10.0.0.1/32".to_string(),
+                ymatch: YangMatch::LeafListMatched as i32,
+                ..Default::default()
+            },
+        ];
+        set(paths, root.clone());
+
+        let paths2 = vec![
+            CommandPath {
+                name: "prefix-test".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "member".to_string(),
+                ymatch: YangMatch::LeafList as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "10.0.0.2/32".to_string(),
+                ymatch: YangMatch::LeafListMatched as i32,
+                ..Default::default()
+            },
+        ];
+        set(paths2, root.clone());
+
+        // Test JSON output
+        let mut json_output = String::new();
+        root.json(&mut json_output);
+
+        // Verify JSON structure
+        assert!(json_output.contains("\"prefix-test\""));
+        assert!(json_output.contains("\"member\""));
+        assert!(json_output.contains("[\"10.0.0.1/32\",\"10.0.0.2/32\"]"));
+    }
+
+    #[test]
+    fn test_json_marshal_nested() {
+        // Create a more complex nested structure
+        let root = Rc::new(Config::new("".to_string(), None));
+
+        // Create: bgp { as 65000; }
+        let paths = vec![
+            CommandPath {
+                name: "bgp".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "as".to_string(),
+                ymatch: YangMatch::Leaf as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "65000".to_string(),
+                ymatch: YangMatch::LeafMatched as i32,
+                ..Default::default()
+            },
+        ];
+        set(paths, root.clone());
+
+        // Test JSON output
+        let mut json_output = String::new();
+        root.json(&mut json_output);
+
+        // Parse and verify JSON is valid
+        let parsed: serde_json::Value = serde_json::from_str(&json_output)
+            .expect("JSON output should be valid");
+        
+        assert_eq!(parsed["bgp"]["as"], 65000);
     }
 }
