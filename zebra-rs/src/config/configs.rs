@@ -268,11 +268,13 @@ impl Config {
         } else {
             let value_list = self.list.borrow();
             if !value_list.is_empty() {
-                let formatted_values: Vec<String> = value_list
-                    .iter()
-                    .map(|x| format_json_value(x))
-                    .collect();
-                out.push_str(&format!("\"{}\": [{}]", self.name, formatted_values.join(",")));
+                let formatted_values: Vec<String> =
+                    value_list.iter().map(|x| format_json_value(x)).collect();
+                out.push_str(&format!(
+                    "\"{}\": [{}]",
+                    self.name,
+                    formatted_values.join(",")
+                ));
             } else {
                 out.push_str(&format!("\"{}\":", self.name));
             }
@@ -297,12 +299,12 @@ impl Config {
         if !self.has_prefix() {
             out.push('{');
         }
-        
+
         for (pos, config) in configs.iter().enumerate() {
             let adjusted_pos = if self.has_prefix() { pos + 1 } else { pos };
             config.json_marshal(adjusted_pos, out);
         }
-        
+
         out.push('}');
     }
 
@@ -336,7 +338,7 @@ impl Config {
             // This is a regular node
             self.marshal_key_value(out);
             self.marshal_configs(out);
-            
+
             // Handle presence containers (empty objects)
             if !has_keys && !has_configs && self.presence {
                 out.push_str("{}");
@@ -829,9 +831,9 @@ mod tests {
         root.json(&mut json_output);
 
         // Parse and verify JSON is valid
-        let parsed: serde_json::Value = serde_json::from_str(&json_output)
-            .expect("JSON output should be valid");
-        
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_output).expect("JSON output should be valid");
+
         assert_eq!(parsed["bgp"]["as"], 65000);
     }
 }
