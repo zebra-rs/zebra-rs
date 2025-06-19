@@ -80,6 +80,9 @@ prefix-test {
         let commands = load_config_file(config.to_string());
         // Old format would produce a single command with all values
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0], "set prefix-test member 10.0.0.1/32 10.0.0.1/32 10.0.0.2/32");
+        assert_eq!(
+            commands[0],
+            "set prefix-test member 10.0.0.1/32 10.0.0.1/32 10.0.0.2/32"
+        );
     }
 }

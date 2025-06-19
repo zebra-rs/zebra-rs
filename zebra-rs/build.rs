@@ -2,10 +2,10 @@ use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::compile_protos("../proto/vtysh.proto")?;
-    
+
     // Capture git information at build time
     set_git_info();
-    
+
     Ok(())
 }
 
@@ -78,7 +78,9 @@ fn set_git_info() {
         .unwrap_or(false);
 
     // Get build date
-    let build_date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    let build_date = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
 
     // Set environment variables for use in the binary
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
@@ -87,7 +89,7 @@ fn set_git_info() {
     println!("cargo:rustc-env=GIT_BRANCH={}", git_branch);
     println!("cargo:rustc-env=GIT_DIRTY={}", git_dirty);
     println!("cargo:rustc-env=BUILD_DATE={}", build_date);
-    
+
     // Rerun build script if git HEAD changes
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs");
