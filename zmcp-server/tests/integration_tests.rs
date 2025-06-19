@@ -79,8 +79,11 @@ async fn test_json_rpc_message_format() {
 
         // Requests with ID should get responses, notifications should not
         if request.get("id").is_some() {
-            let response = response.expect(&format!("Request with ID should get response, test case {}", i));
-            
+            let response = response.expect(&format!(
+                "Request with ID should get response, test case {}",
+                i
+            ));
+
             // All responses should have jsonrpc field
             assert_eq!(response["jsonrpc"], "2.0", "Test case {}", i);
 
@@ -97,7 +100,11 @@ async fn test_json_rpc_message_format() {
             );
         } else {
             // Notifications should not get responses
-            assert!(response.is_none(), "Notification should not get response, test case {}", i);
+            assert!(
+                response.is_none(),
+                "Notification should not get response, test case {}",
+                i
+            );
         }
     }
 }
@@ -291,7 +298,10 @@ async fn test_mock_client_workflow() {
     // Check tools/call response (will error due to no zebra-rs)
     assert_eq!(responses[2]["id"], 3);
     // Check that this is an error response by content
-    assert!(responses[2]["result"]["content"][0]["text"].as_str().unwrap().contains("Error"));
+    assert!(responses[2]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Error"));
 }
 
 #[tokio::test]
@@ -380,14 +390,11 @@ async fn test_real_zebra_connection_and_isis_graph() {
                                     if let Some(nodes) = graph.get("nodes") {
                                         if nodes.is_array() {
                                             let node_array = nodes.as_array().unwrap();
-                                            println!(
-                                                "    Graph {}: {} nodes",
-                                                i,
-                                                node_array.len()
-                                            );
-                                            
+                                            println!("    Graph {}: {} nodes", i, node_array.len());
+
                                             // Count total links across all nodes
-                                            let total_links: usize = node_array.iter()
+                                            let total_links: usize = node_array
+                                                .iter()
                                                 .map(|node| {
                                                     node.get("links")
                                                         .and_then(|links| links.as_array())
@@ -397,8 +404,7 @@ async fn test_real_zebra_connection_and_isis_graph() {
                                                 .sum();
                                             println!(
                                                 "    Graph {}: {} total links",
-                                                i,
-                                                total_links
+                                                i, total_links
                                             );
                                         }
                                     }
@@ -411,9 +417,10 @@ async fn test_real_zebra_connection_and_isis_graph() {
                                     if nodes.is_array() {
                                         let node_array = nodes.as_array().unwrap();
                                         println!("    {} nodes", node_array.len());
-                                        
+
                                         // Count total links
-                                        let total_links: usize = node_array.iter()
+                                        let total_links: usize = node_array
+                                            .iter()
                                             .map(|node| {
                                                 node.get("links")
                                                     .and_then(|links| links.as_array())

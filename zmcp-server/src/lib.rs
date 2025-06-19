@@ -40,16 +40,20 @@ impl ZmcpServer {
         let result = match method {
             "initialize" => {
                 debug!("MCP initialize request");
-                
+
                 // Validate client protocol version
-                let client_version = params.get("protocolVersion")
+                let client_version = params
+                    .get("protocolVersion")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                
+
                 if !client_version.is_empty() && client_version != "2024-11-05" {
-                    warn!("Client protocol version mismatch: expected 2024-11-05, got {}", client_version);
+                    warn!(
+                        "Client protocol version mismatch: expected 2024-11-05, got {}",
+                        client_version
+                    );
                 }
-                
+
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
