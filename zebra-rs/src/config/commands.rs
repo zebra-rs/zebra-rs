@@ -1,6 +1,6 @@
+use super::ExecCode;
 use super::manager::ConfigManager;
 use super::util::trim_first_line;
-use super::ExecCode;
 use crate::version::VersionInfo;
 use libyang::Entry;
 use similar::TextDiff;

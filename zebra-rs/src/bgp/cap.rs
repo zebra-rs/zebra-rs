@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use bgp_packet::{cap::CapabilityPacket, Afi, AfiSafi, CapMultiProtocol, Safi};
+use bgp_packet::{Afi, AfiSafi, CapMultiProtocol, Safi, cap::CapabilityPacket};
 use serde::Serialize;
 
 #[derive(Default, Debug, Serialize, Clone)]
@@ -52,7 +52,7 @@ impl CapAfiMap {
 
 pub fn cap_register_send(caps: &[CapabilityPacket], cap_map: &mut CapAfiMap) {
     for cap in caps {
-        if let CapabilityPacket::MultiProtocol(ref mp) = cap {
+        if let CapabilityPacket::MultiProtocol(mp) = cap {
             if let Some(entry) = cap_map.get_mut(mp) {
                 entry.send = true;
             }
@@ -62,7 +62,7 @@ pub fn cap_register_send(caps: &[CapabilityPacket], cap_map: &mut CapAfiMap) {
 
 pub fn cap_register_recv(caps: &[CapabilityPacket], cap_map: &mut CapAfiMap) {
     for cap in caps {
-        if let CapabilityPacket::MultiProtocol(ref mp) = cap {
+        if let CapabilityPacket::MultiProtocol(mp) = cap {
             if let Some(entry) = cap_map.get_mut(mp) {
                 entry.recv = true;
             }

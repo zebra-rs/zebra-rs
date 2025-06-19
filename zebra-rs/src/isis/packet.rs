@@ -7,18 +7,18 @@ use isis_packet::{
     IsisTlvLspEntries, IsisType,
 };
 
+use crate::isis::Message;
 use crate::isis::inst::lsp_emit;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
-use crate::isis::Message;
 use crate::isis_info;
 use crate::rib::MacAddr;
 
+use super::Level;
 use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
 use super::link::LinkTop;
 use super::lsdb;
-use super::nfsm::{isis_nfsm, NfsmEvent};
-use super::Level;
+use super::nfsm::{NfsmEvent, isis_nfsm};
 
 pub fn link_level_capable(is_level: &IsLevel, level: &Level) -> bool {
     match level {

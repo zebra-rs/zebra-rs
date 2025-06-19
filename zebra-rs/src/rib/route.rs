@@ -3,9 +3,9 @@ use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fib::FibHandle;
-use crate::rib::resolve::{rib_resolve, ResolveOpt};
-use crate::rib::util::IpNetExt;
 use crate::rib::Nexthop;
+use crate::rib::resolve::{ResolveOpt, rib_resolve};
+use crate::rib::util::IpNetExt;
 
 use super::entry::RibEntry;
 use super::inst::{IlmEntry, Rib};

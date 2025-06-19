@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use super::peer::{ConfigRef, Peer};
-use crate::rib::{api::RibTx, entry::RibEntry, Nexthop, NexthopUni, RibSubType, RibType};
+use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
 use ipnet::IpNet;
 use tokio::sync::mpsc::UnboundedSender;
 

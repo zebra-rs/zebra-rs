@@ -251,11 +251,7 @@ pub fn p_space_nodes(graph: &Graph, s: usize, x: usize) -> HashSet<usize> {
                 return None; // Skip the source node
             }
             let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
-            if has_valid_paths {
-                Some(*node)
-            } else {
-                None
-            }
+            if has_valid_paths { Some(*node) } else { None }
         })
         .collect::<HashSet<_>>() // Collect into HashSet instead of Vec
 }
@@ -269,11 +265,7 @@ pub fn q_space_nodes(graph: &Graph, d: usize, x: usize) -> HashSet<usize> {
                 return None; // Skip the source node
             }
             let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
-            if has_valid_paths {
-                Some(*node)
-            } else {
-                None
-            }
+            if has_valid_paths { Some(*node) } else { None }
         })
         .collect::<HashSet<_>>()
 }

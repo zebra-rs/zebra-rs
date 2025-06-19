@@ -8,7 +8,7 @@ use std::path::PathBuf;
 mod bgp;
 use bgp::Bgp;
 mod rib;
-use rib::{logging_config_from_args, tracing_set, LogFormatType, LogOutputType, Rib};
+use rib::{LogFormatType, LogOutputType, Rib, logging_config_from_args, tracing_set};
 mod policy;
 use policy::Policy;
 mod context;
@@ -21,7 +21,7 @@ use daemonize::Daemonize;
 use std::io;
 use tracing::Level;
 use tracing_appender::rolling;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

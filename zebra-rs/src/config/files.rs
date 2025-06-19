@@ -1,5 +1,5 @@
-use super::token::tokenizer;
 use super::token::Token;
+use super::token::tokenizer;
 
 fn flatten(stack: &[Vec<String>]) -> String {
     let mut flat: Vec<String> = Vec::new();

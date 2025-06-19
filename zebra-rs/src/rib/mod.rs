@@ -2,7 +2,7 @@ pub mod api;
 pub use api::{RibRxChannel, RibTxChannel};
 
 pub mod inst;
-pub use inst::{serve, Message, Rib};
+pub use inst::{Message, Rib, serve};
 
 pub mod link;
 pub use link::{Link, LinkFlags, LinkType};
