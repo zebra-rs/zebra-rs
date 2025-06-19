@@ -458,6 +458,61 @@ impl FibHandle {
         }
     }
 
+    pub async fn addr_add_ipv6(
+        &self,
+        ifindex: u32,
+        prefix: &Ipv6Net,
+        secondary: bool,
+    ) -> anyhow::Result<()> {
+        let mut msg = AddressMessage::default();
+        msg.header.family = AddressFamily::Inet6;
+        msg.header.prefix_len = prefix.prefix_len();
+        msg.header.index = ifindex;
+        msg.header.scope = AddressScope::Universe;
+        if secondary {
+            msg.header.flags = AddressHeaderFlags::Secondary;
+        }
+        let attr = AddressAttribute::Local(IpAddr::V6(prefix.addr()));
+        msg.attributes.push(attr);
+
+        // If interface is p2p.
+        if false {
+            let attr = AddressAttribute::Address(IpAddr::V6(prefix.addr()));
+            msg.attributes.push(attr);
+        }
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewAddress(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+
+        let mut response = self.handle.clone().request(req)?;
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                return Err(anyhow::anyhow!("NewAddress IPv6 netlink error: {}", e));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn addr_del_ipv6(&self, ifindex: u32, prefix: &Ipv6Net) {
+        let mut msg = AddressMessage::default();
+        msg.header.family = AddressFamily::Inet6;
+        msg.header.prefix_len = prefix.prefix_len();
+        msg.header.index = ifindex;
+
+        let attr = AddressAttribute::Local(IpAddr::V6(prefix.addr()));
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelAddress(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("DelAddress IPv6 error: {}", e);
+            }
+        }
+    }
+
     pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Mpls;

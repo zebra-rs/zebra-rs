@@ -637,15 +637,22 @@ impl LinkConfig {
     }
 }
 
-/// Configure interface IPv4 addresses with validation.
+/// Configure interface IPv4 and IPv6 addresses with validation.
 ///
-/// This function handles configuration of IPv4 addresses on interfaces with validation:
+/// This function handles configuration of both IPv4 and IPv6 addresses on interfaces with validation:
+///
+/// **IPv4 validation:**
 /// - Rejects 0.0.0.0 as an interface address
 /// - Rejects addresses with zero prefix length (/0)
 ///
+/// **IPv6 validation:**
+/// - Rejects ::0 as an interface address
+/// - Rejects addresses with zero prefix length (/0)
+/// - Rejects loopback addresses (::1) on non-loopback interfaces
+///
 /// # Arguments
 /// * `rib` - Mutable reference to the RIB instance
-/// * `path` - Configuration path (e.g., "/interface/ipv4/address")
+/// * `path` - Configuration path (e.g., "/interface/ipv4/address" or "/interface/ipv6/address")
 /// * `args` - Command arguments containing interface name and address
 /// * `op` - Configuration operation (set/delete)
 // Temporary func
@@ -657,6 +664,7 @@ pub async fn link_config_exec(
 ) -> Result<()> {
     const LINK_ERR: &str = "missing interface name";
     const IPV4_ADDR_ERR: &str = "missing ipv4 address";
+    const IPV6_ADDR_ERR: &str = "missing ipv6 address";
 
     let ifname = args.string().context(LINK_ERR)?;
 
@@ -703,6 +711,66 @@ pub async fn link_config_exec(
                     secondary: false,
                 };
                 rib.addr_del(addr);
+            }
+        }
+    } else if path == "/interface/ipv6/address" {
+        let v6addr = args.v6net().context(IPV6_ADDR_ERR)?;
+
+        if op.is_set() {
+            // Validate against ::0 address
+            if v6addr.addr().is_unspecified() {
+                println!("Cannot configure ::0 as interface address");
+                return Ok(());
+            }
+
+            // Validate against zero prefix length
+            if v6addr.prefix_len() == 0 {
+                println!("Cannot configure address with zero prefix length");
+                return Ok(());
+            }
+
+            // Validate against loopback address on non-loopback interfaces
+            if v6addr.addr().is_loopback() {
+                if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                    if let Some(link) = rib.links.get(&ifindex) {
+                        if !link.is_loopback() {
+                            println!("Cannot configure loopback address on non-loopback interface");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                let result = rib.fib_handle.addr_add_ipv6(ifindex, &v6addr, false).await;
+                match result {
+                    Ok(_) => {
+                        let addr = FibAddr {
+                            addr: ipnet::IpNet::V6(v6addr),
+                            link_index: ifindex,
+                            secondary: false,
+                        };
+                        rib.addr_add(addr);
+                    }
+                    Err(_) => {
+                        println!("IPv6 address add failure");
+                    }
+                }
+            } else {
+                println!("Interface {} not found", ifname);
+            }
+        } else {
+            // Handle IPv6 address deletion
+            if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                rib.fib_handle.addr_del_ipv6(ifindex, &v6addr).await;
+                let addr = FibAddr {
+                    addr: ipnet::IpNet::V6(v6addr),
+                    link_index: ifindex,
+                    secondary: false,
+                };
+                rib.addr_del(addr);
+            } else {
+                println!("Interface {} not found", ifname);
             }
         }
     }
