@@ -1,4 +1,4 @@
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -154,6 +154,121 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
     }
 }
 
+// Helper function to convert IPv6 RibEntry to JSON format
+fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry {
+    let protocol = format!("{:?}", e.rtype).to_lowercase();
+    let subtype = format!("{:?}", e.rsubtype).to_lowercase();
+
+    let nexthops = match &e.nexthop {
+        Nexthop::Link(ifindex) => {
+            vec![NexthopJson {
+                address: None,
+                interface: rib.link_name(*ifindex),
+                weight: None,
+                metric: None,
+                mpls_labels: vec![],
+            }]
+        }
+        Nexthop::Uni(uni) => {
+            let grp = rib.nmap.get(uni.gid);
+            let ifindex: u32 = if let Some(grp) = grp {
+                if let Group::Uni(grp) = grp {
+                    grp.ifindex
+                } else {
+                    0
+                }
+            } else {
+                uni.ifindex
+            };
+
+            vec![NexthopJson {
+                address: Some(uni.addr.to_string()),
+                interface: rib.link_name(ifindex),
+                weight: Some(uni.weight),
+                metric: Some(uni.metric),
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
+                        Label::Implicit(l) => serde_json::json!({
+                            "label": l,
+                            "label_type": "implicit"
+                        }),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
+                    })
+                    .collect(),
+            }]
+        }
+        Nexthop::Multi(multi) => multi
+            .nexthops
+            .iter()
+            .map(|uni| NexthopJson {
+                address: Some(uni.addr.to_string()),
+                interface: rib.link_name(uni.ifindex),
+                weight: Some(uni.weight),
+                metric: Some(uni.metric),
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
+                        Label::Implicit(l) => serde_json::json!({
+                            "label": l,
+                            "label_type": "implicit"
+                        }),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        Nexthop::List(pro) => pro
+            .nexthops
+            .iter()
+            .map(|uni| NexthopJson {
+                address: Some(uni.addr.to_string()),
+                interface: rib.link_name(uni.ifindex),
+                weight: Some(uni.weight),
+                metric: Some(uni.metric),
+                mpls_labels: uni
+                    .mpls
+                    .iter()
+                    .map(|label| match label {
+                        Label::Implicit(l) => serde_json::json!({
+                            "label": l,
+                            "label_type": "implicit"
+                        }),
+                        Label::Explicit(l) => serde_json::json!({
+                            "label": l
+                        }),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+
+    let interface_name = if e.is_connected() {
+        Some(rib.link_name(e.ifindex))
+    } else {
+        None
+    };
+
+    RouteEntry {
+        prefix: prefix.to_string(),
+        protocol,
+        subtype,
+        selected: e.selected,
+        fib: e.fib,
+        valid: e.valid,
+        distance: e.distance,
+        metric: e.metric,
+        nexthops,
+        interface_name,
+    }
+}
+
 // Rendering.
 
 static SHOW_IPV4_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
@@ -164,9 +279,117 @@ static SHOW_IPV4_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static,
 
 "#;
 
+static SHOW_IPV6_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
+       O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
+       E1/E2 - OSPF external type 1/2 D - DHCP route
+       i - IS-IS, L1/L2 - IS-IS level-1/2, ia - IS-IS inter area
+       > - selected route, * - FIB route, S - Stale route
+
+"#;
+
 pub fn rib_entry_show(
     rib: &Rib,
     prefix: &Ipv4Net,
+    e: &RibEntry,
+    _json: bool,
+) -> anyhow::Result<String> {
+    let mut buf = String::new();
+
+    // All type route.
+    write!(
+        buf,
+        "{} {} {} {}",
+        e.rtype.abbrev(),
+        e.rsubtype.abbrev(),
+        e.selected(),
+        prefix,
+    )?;
+
+    if !e.is_connected() {
+        write!(buf, " [{}/{}]", &e.distance, &e.metric).unwrap();
+    }
+
+    let offset = buf.len();
+
+    if e.is_connected() {
+        writeln!(buf, " directly connected {}", rib.link_name(e.ifindex)).unwrap();
+    } else {
+        match &e.nexthop {
+            Nexthop::Link(_ifindex) => {
+                writeln!(buf, " via {}", rib.link_name(e.ifindex));
+            }
+            Nexthop::Uni(uni) => {
+                let grp = rib.nmap.get(uni.gid);
+
+                let ifindex: u32 = if let Some(grp) = grp {
+                    if let Group::Uni(grp) = grp {
+                        grp.ifindex
+                    } else {
+                        0
+                    }
+                } else {
+                    uni.ifindex
+                };
+                write!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
+                if !uni.mpls.is_empty() {
+                    for mpls in uni.mpls.iter() {
+                        match mpls {
+                            Label::Implicit(label) => {
+                                write!(buf, ", label {} implicit-null", label).unwrap();
+                            }
+                            Label::Explicit(label) => {
+                                write!(buf, ", label {}", label).unwrap();
+                            }
+                        }
+                    }
+                }
+                writeln!(buf, "").unwrap();
+            }
+            Nexthop::Multi(multi) => {
+                for (i, uni) in multi.nexthops.iter().enumerate() {
+                    if i != 0 {
+                        buf.push_str(&" ".repeat(offset));
+                    }
+                    write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
+                    if !uni.mpls.is_empty() {
+                        for mpls in uni.mpls.iter() {
+                            match mpls {
+                                Label::Implicit(label) => {
+                                    write!(buf, ", label {} implicit-null", label).unwrap();
+                                }
+                                Label::Explicit(label) => {
+                                    write!(buf, ", label {}", label).unwrap();
+                                }
+                            }
+                        }
+                    }
+                    writeln!(buf, ", weight {}", uni.weight).unwrap();
+                }
+            }
+            Nexthop::List(pro) => {
+                for (i, uni) in pro.nexthops.iter().enumerate() {
+                    if i != 0 {
+                        buf.push_str(&" ".repeat(offset));
+                    }
+                    writeln!(
+                        buf,
+                        " via {}, {}, metric {}",
+                        uni.addr,
+                        rib.link_name(uni.ifindex),
+                        uni.metric
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    Ok(buf)
+}
+
+// IPv6 route entry display function
+pub fn rib_entry_show_v6(
+    rib: &Rib,
+    prefix: &Ipv6Net,
     e: &RibEntry,
     _json: bool,
 ) -> anyhow::Result<String> {
@@ -293,9 +516,9 @@ pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut routes = Vec::new();
 
-        for (prefix, entries) in rib.table.iter() {
+        for (prefix, entries) in rib.table_v6.iter() {
             for entry in entries.iter() {
-                routes.push(rib_entry_to_json(rib, prefix, entry));
+                routes.push(rib_entry_to_json_v6(rib, prefix, entry));
             }
         }
 
@@ -304,11 +527,16 @@ pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e))
     } else {
         let mut buf = String::new();
-        buf.push_str(SHOW_IPV4_HEADER);
+        buf.push_str(SHOW_IPV6_HEADER);
 
-        for (prefix, entries) in rib.table.iter() {
+        for (prefix, entries) in rib.table_v6.iter() {
             for entry in entries.iter() {
-                write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap()).unwrap();
+                write!(
+                    buf,
+                    "{}",
+                    rib_entry_show_v6(rib, prefix, entry, json).unwrap()
+                )
+                .unwrap();
             }
         }
         buf

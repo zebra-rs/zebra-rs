@@ -212,7 +212,14 @@ impl FibHandle {
                 msg.attributes.push(attr);
 
                 // Gateway address.
-                let attr = NexthopAttribute::Gateway(RouteAddress::Inet(uni.addr));
+                let attr = match uni.addr {
+                    std::net::IpAddr::V4(ipv4) => {
+                        NexthopAttribute::Gateway(RouteAddress::Inet(ipv4))
+                    }
+                    std::net::IpAddr::V6(ipv6) => {
+                        NexthopAttribute::Gateway(RouteAddress::Inet6(ipv6))
+                    }
+                };
                 msg.attributes.push(attr);
 
                 // Outgoing if.
@@ -470,7 +477,10 @@ impl FibHandle {
 
         match ilm.nexthop {
             Nexthop::Uni(ref uni) => {
-                let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
+                let attr = match uni.addr {
+                    std::net::IpAddr::V4(ipv4) => RouteAttribute::Via(RouteVia::Inet(ipv4)),
+                    std::net::IpAddr::V6(ipv6) => RouteAttribute::Via(RouteVia::Inet6(ipv6)),
+                };
                 msg.attributes.push(attr);
 
                 if uni.ifindex != 0 {
@@ -494,7 +504,10 @@ impl FibHandle {
                 for uni in multi.nexthops.iter() {
                     let mut nhop = RouteNextHop::default();
 
-                    let attr = RouteAttribute::Via(RouteVia::Inet(uni.addr));
+                    let attr = match uni.addr {
+                        std::net::IpAddr::V4(ipv4) => RouteAttribute::Via(RouteVia::Inet(ipv4)),
+                        std::net::IpAddr::V6(ipv6) => RouteAttribute::Via(RouteVia::Inet6(ipv6)),
+                    };
                     nhop.attributes.push(attr);
 
                     if uni.ifindex != 0 {
@@ -769,7 +782,7 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
             }
             RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
                 let uni = NexthopUni {
-                    addr: n,
+                    addr: std::net::IpAddr::V4(n),
                     ..Default::default()
                 };
                 builder = builder.nexthop(Nexthop::Uni(uni));
@@ -780,7 +793,7 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
                     for attr in nhop.attributes.iter() {
                         if let RouteAttribute::Gateway(RouteAddress::Inet(n)) = attr {
                             let uni = NexthopUni {
-                                addr: *n,
+                                addr: std::net::IpAddr::V4(*n),
                                 ..Default::default()
                             };
                             multi.nexthops.push(uni);

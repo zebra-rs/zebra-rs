@@ -9,7 +9,7 @@ use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
 use crate::rib::RibEntries;
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
@@ -31,6 +31,14 @@ pub enum Message {
     },
     Ipv4Del {
         prefix: Ipv4Net,
+        rib: RibEntry,
+    },
+    Ipv6Add {
+        prefix: Ipv6Net,
+        rib: RibEntry,
+    },
+    Ipv6Del {
+        prefix: Ipv6Net,
         rib: RibEntry,
     },
     IlmAdd {
@@ -86,6 +94,7 @@ pub struct Rib {
     pub redists: Vec<UnboundedSender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
+    pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
@@ -110,6 +119,7 @@ impl Rib {
             redists: Vec::new(),
             links: BTreeMap::new(),
             table: PrefixMap::new(),
+            table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
             tx,
             rx,
@@ -148,6 +158,12 @@ impl Rib {
             Message::Ipv4Del { prefix, rib } => {
                 self.ipv4_route_del(&prefix, rib).await;
             }
+            Message::Ipv6Add { prefix, rib } => {
+                self.ipv6_route_add(&prefix, rib).await;
+            }
+            Message::Ipv6Del { prefix, rib } => {
+                self.ipv6_route_del(&prefix, rib).await;
+            }
             Message::IlmAdd { label, ilm } => {
                 //println!("IlmAdd {} {:?}", label, ilm);
                 self.ilm_add(label, ilm).await;
@@ -172,6 +188,7 @@ impl Rib {
             }
             Message::Resolve => {
                 self.ipv4_route_resolve().await;
+                self.ipv6_route_resolve().await;
             }
             Message::Subscribe { tx, proto } => {
                 // for (_, link) in self.links.iter() {
