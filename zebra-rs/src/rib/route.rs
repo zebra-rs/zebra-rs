@@ -516,7 +516,10 @@ fn rib_replace_system(
             }
             false
         }
-        Nexthop::Link(_ifindex) => true,
+        Nexthop::Link(_ifindex) => {
+            // For connected routes, only replace if the interface index matches
+            e.ifindex == entry.ifindex
+        }
     };
     // println!("replace {}", replace);
     if replace {
@@ -731,7 +734,10 @@ fn rib_replace_system_v6(
             }
             false
         }
-        Nexthop::Link(_ifindex) => true,
+        Nexthop::Link(_ifindex) => {
+            // For connected routes, only replace if the interface index matches
+            e.ifindex == entry.ifindex
+        }
     };
     if replace {
         return rib_replace_v6(table, prefix, entry.rtype);
