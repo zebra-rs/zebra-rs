@@ -77,20 +77,28 @@ async fn test_json_rpc_message_format() {
     for (i, request) in test_cases.iter().enumerate() {
         let response = server.handle_request(request.clone()).await;
 
-        // All responses should have jsonrpc field
-        assert_eq!(response["jsonrpc"], "2.0", "Test case {}", i);
+        // Requests with ID should get responses, notifications should not
+        if request.get("id").is_some() {
+            let response = response.expect(&format!("Request with ID should get response, test case {}", i));
+            
+            // All responses should have jsonrpc field
+            assert_eq!(response["jsonrpc"], "2.0", "Test case {}", i);
 
-        // If request had id, response should have same id
-        if let Some(request_id) = request.get("id") {
-            assert_eq!(response["id"], *request_id, "Test case {}", i);
+            // If request had id, response should have same id
+            if let Some(request_id) = request.get("id") {
+                assert_eq!(response["id"], *request_id, "Test case {}", i);
+            }
+
+            // Should have either result or error (we expect result for these)
+            assert!(
+                response.get("result").is_some() || response.get("error").is_some(),
+                "Test case {}",
+                i
+            );
+        } else {
+            // Notifications should not get responses
+            assert!(response.is_none(), "Notification should not get response, test case {}", i);
         }
-
-        // Should have either result or error (we expect result for these)
-        assert!(
-            response.get("result").is_some() || response.get("error").is_some(),
-            "Test case {}",
-            i
-        );
     }
 }
 
@@ -107,7 +115,7 @@ async fn test_tool_schema_validation() {
         "method": "tools/list"
     });
 
-    let response = server.handle_request(request).await;
+    let response = server.handle_request(request).await.unwrap();
 
     // Validate tool schema structure
     assert!(response["result"]["tools"].is_array());
@@ -152,7 +160,7 @@ async fn test_error_response_format() {
         "params": {}
     });
 
-    let response = server.handle_request(request).await;
+    let response = server.handle_request(request).await.unwrap();
 
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
@@ -181,7 +189,7 @@ async fn test_concurrent_requests() {
                 "method": "initialize",
                 "params": {}
             });
-            server.handle_request(request).await
+            server.handle_request(request).await.unwrap()
         }
     });
 
@@ -219,8 +227,9 @@ impl MockMcpClient {
 
     pub async fn send_requests(&mut self, server: &zmcp_server::ZmcpServer) {
         for request in &self.requests {
-            let response = server.handle_request(request.clone()).await;
-            self.responses.push(response);
+            if let Some(response) = server.handle_request(request.clone()).await {
+                self.responses.push(response);
+            }
         }
     }
 }
@@ -320,13 +329,13 @@ async fn test_real_zebra_connection_and_isis_graph() {
                     }
                 });
 
-                let response = server.handle_request(request).await;
+                let response = server.handle_request(request).await.unwrap();
 
                 // Validate response structure
                 assert_eq!(response["jsonrpc"], "2.0");
                 assert_eq!(response["id"], 1);
 
-                if !response["result"]["content"][0]["text"].as_str().unwrap().contains("Error") {
+                if response["result"]["isError"] == false {
                     // Success case - validate the ISIS graph data
                     let content = &response["result"]["content"][0]["text"];
                     assert!(content.is_string());
@@ -471,8 +480,8 @@ async fn test_real_zebra_connection_and_isis_graph() {
                 }
             });
 
-            let error_response = server.handle_request(invalid_request).await;
-            assert!(error_response["result"]["content"][0]["text"].as_str().unwrap().contains("Invalid level"));
+            let error_response = server.handle_request(invalid_request).await.unwrap();
+            assert_eq!(error_response["result"]["isError"], true);
             let error_text = error_response["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap();
