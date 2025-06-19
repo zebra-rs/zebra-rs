@@ -47,3 +47,10 @@ run:
 	@sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/release/zebra-rs
 	target/release/zebra-rs
 	#target/release/zebra-rs --log-format elasticsearch
+
+format:
+	cargo fmt --all
+
+mcp:
+	cargo build --release
+	cp target/release/zmcp-server ~/bin

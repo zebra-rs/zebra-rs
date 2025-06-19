@@ -4,4 +4,5 @@ members = [
   "zebra-rs",
   "zctl",
   "cli-helper",
+  "zmcp-server",
 ]

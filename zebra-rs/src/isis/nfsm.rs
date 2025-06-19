@@ -6,8 +6,8 @@ use isis_packet::{IsLevel, IsisHello, IsisTlv};
 
 use crate::isis::link::Afi;
 use crate::isis::Level;
-use crate::rib::MacAddr;
 use crate::isis_info;
+use crate::rib::MacAddr;
 
 use super::inst::NeighborTop;
 use super::link::LinkTop;

@@ -1,5 +1,5 @@
 /// ISIS-specific tracing macros that automatically include proto="isis" field
-/// 
+///
 /// This module provides convenience macros for ISIS protocol logging that automatically
 /// include the proto="isis" field for better log categorization and filtering.
 

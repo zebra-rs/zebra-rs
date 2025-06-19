@@ -4,8 +4,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::exit;
 use tonic::Request;
-use vtysh::apply_client::ApplyClient;
 use vtysh::ApplyRequest;
+use vtysh::apply_client::ApplyClient;
 
 pub mod vtysh {
     tonic::include_proto!("vtysh");
