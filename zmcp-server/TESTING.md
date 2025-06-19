@@ -100,6 +100,7 @@ cargo test mock
 - zebra-rs daemon running at `localhost:2650`
 - gRPC server enabled on zebra-rs
 - Network connectivity
+- **Updated**: Tests now work with real ISIS topology data
 
 ## Test Scenarios Covered
 
@@ -138,13 +139,17 @@ cargo test mock
 
 ## Test Output Examples
 
-### Successful Real Server Test
+### Successful Real Server Test (Updated with Real Data)
 ```
 ✓ Connected to zebra-rs at localhost:2650
   Testing: Test getting ISIS graph for both levels
-  ✓ Received ISIS graph data (2 bytes)
+  ✓ Received ISIS graph data (1566 bytes)
   ✓ ISIS graph data is valid JSON
-  ✓ Found 0 graph object(s)
+  ✓ Found 1 graph object(s)
+    Graph 0: 4 nodes
+    Graph 0: 10 total links
+  Testing: Test getting ISIS graph for L1 only
+  ✓ All graph objects have correct level: L1
   Testing error handling with real server
   ✓ Invalid level parameter correctly rejected
 ```

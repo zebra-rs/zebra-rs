@@ -66,11 +66,10 @@ impl ZmcpServer {
                                     "level": {
                                         "type": "string",
                                         "enum": ["L1", "L2", "both"],
-                                        "description": "IS-IS level to retrieve (L1, L2, or both)",
-                                        "default": "both"
+                                        "description": "IS-IS level to retrieve (L1, L2, or both)"
                                     }
                                 },
-                                "required": []
+                                "additionalProperties": false
                             }
                         }
                     ]
@@ -79,13 +78,26 @@ impl ZmcpServer {
             "tools/call" => self.handle_tool_call(params).await,
             _ => {
                 warn!("Unknown method: {}", method);
-                json!({
-                    "error": {
-                        "code": -32601,
-                        "message": "Method not found",
-                        "data": format!("Unknown method: {}", method)
-                    }
-                })
+                return if let Some(id) = id {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32601,
+                            "message": "Method not found",
+                            "data": format!("Unknown method: {}", method)
+                        }
+                    })
+                } else {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32601,
+                            "message": "Method not found",
+                            "data": format!("Unknown method: {}", method)
+                        }
+                    })
+                };
             }
         };
 
@@ -126,8 +138,7 @@ impl ZmcpServer {
                             "type": "text",
                             "text": result
                         }
-                    ],
-                    "isError": false
+                    ]
                 }),
                 Err(e) => {
                     error!("Tool execution failed: {}", e);
@@ -137,8 +148,7 @@ impl ZmcpServer {
                                 "type": "text",
                                 "text": format!("Error: {}", e)
                             }
-                        ],
-                        "isError": true
+                        ]
                     })
                 }
             },
@@ -150,8 +160,7 @@ impl ZmcpServer {
                             "type": "text",
                             "text": format!("Unknown tool: {}", tool_name)
                         }
-                    ],
-                    "isError": true
+                    ]
                 })
             }
         }
@@ -266,8 +275,8 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 3);
-        assert_eq!(response["result"]["error"]["code"], -32601);
-        assert_eq!(response["result"]["error"]["message"], "Method not found");
+        assert_eq!(response["error"]["code"], -32601);
+        assert_eq!(response["error"]["message"], "Method not found");
     }
 
     #[tokio::test]
@@ -287,7 +296,7 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 4);
-        assert_eq!(response["result"]["isError"], true);
+        // Check that this is an error response by looking for error text
         assert!(response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
@@ -313,12 +322,12 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 5);
-        // This will either succeed with empty data or fail with connection error
-        if response["result"]["isError"] == false {
-            // Success case - got empty ISIS data
+        // This will either succeed with data or fail with connection error
+        if !response["result"]["content"][0]["text"].as_str().unwrap().contains("Error") {
+            // Success case - got ISIS data (may be empty or populated)
             let content = response["result"]["content"][0]["text"].as_str().unwrap();
-            // Should be empty JSON array "[]" for empty ISIS data
-            assert!(content == "[]" || content.contains("[]"));
+            // Should be valid JSON (empty array "[]" or populated array with graph data)
+            assert!(content == "[]" || content.starts_with("["));
         } else {
             // Error case - connection failed
             assert!(response["result"]["content"][0]["text"]
@@ -347,7 +356,7 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 6);
-        assert_eq!(response["result"]["isError"], true);
+        // Check that this is an error response by looking for error text
         assert!(response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
@@ -420,7 +429,7 @@ mod tests {
         // Should handle gracefully
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
-        assert!(response["result"]["error"].is_object());
+        assert!(response["error"].is_object());
     }
 
     #[tokio::test]
@@ -441,7 +450,7 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
-        assert_eq!(response["result"]["isError"], true);
+        // Check that this is an error response by looking for error text
         assert!(response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
@@ -473,12 +482,12 @@ mod tests {
         // Should parse arguments correctly and execute (though will fail due to no zebra-rs)
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
-        // This will either succeed with empty data or fail with connection error
-        if response["result"]["isError"] == false {
-            // Success case - got empty ISIS data
+        // This will either succeed with data or fail with connection error
+        if !response["result"]["content"][0]["text"].as_str().unwrap().contains("Error") {
+            // Success case - got ISIS data (may be empty or populated)
             let content = response["result"]["content"][0]["text"].as_str().unwrap();
-            // Should be empty JSON array "[]" for empty ISIS data
-            assert!(content == "[]" || content.contains("[]"));
+            // Should be valid JSON (empty array "[]" or populated array with graph data)
+            assert!(content == "[]" || content.starts_with("["));
         } else {
             // Error case - should fail with connection error, not argument parsing error
             assert!(response["result"]["content"][0]["text"]
