@@ -8,8 +8,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::Link;
 
-use super::{addr::OspfAddr, task::Timer};
 use super::{Identity, IfsmState, Message, Neighbor};
+use super::{addr::OspfAddr, task::Timer};
 
 pub struct OspfLink {
     pub index: u32,

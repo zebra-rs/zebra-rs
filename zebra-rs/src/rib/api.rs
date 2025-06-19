@@ -1,7 +1,7 @@
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::entry::RibEntry;
-use super::{link::LinkAddr, Link, Rib};
+use super::{Link, Rib, link::LinkAddr};
 use ipnet::{IpNet, Ipv4Net};
 
 #[allow(dead_code)]

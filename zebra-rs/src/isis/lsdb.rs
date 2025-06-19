@@ -1,7 +1,7 @@
 use std::{
     collections::{
-        btree_map::{Iter, Values},
         BTreeMap,
+        btree_map::{Iter, Values},
     },
     default,
 };
@@ -13,15 +13,15 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::isis_info;
 
 use crate::isis::{
-    srmpls::{LabelBlock, LabelConfig},
     Message,
+    srmpls::{LabelBlock, LabelConfig},
 };
 
 use super::{
-    inst::{lsp_emit, lsp_flood, spf_schedule, IsisTop},
+    Level,
+    inst::{IsisTop, lsp_emit, lsp_flood, spf_schedule},
     link::Afi,
     task::Timer,
-    Level,
 };
 
 #[derive(Default)]

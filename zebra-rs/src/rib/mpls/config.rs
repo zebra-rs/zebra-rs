@@ -127,11 +127,7 @@ fn cache_lookup<'a>(
         cache.insert(*label, config_lookup(config, *label)?);
     }
     let cache = cache.get_mut(label)?;
-    if cache.delete {
-        None
-    } else {
-        Some(cache)
-    }
+    if cache.delete { None } else { Some(cache) }
 }
 
 fn config_builder() -> ConfigBuilder {

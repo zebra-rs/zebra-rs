@@ -6,8 +6,8 @@ use anyhow::Context;
 use bytes::BytesMut;
 use nix::sys::socket::{self, LinkAddr};
 use socket2::Socket;
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::rib::MacAddr;

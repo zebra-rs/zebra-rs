@@ -1,7 +1,7 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Integration tests for MCP protocol communication
 /// These tests spawn the actual zmcp-server binary and test the JSON-RPC protocol
@@ -298,10 +298,12 @@ async fn test_mock_client_workflow() {
     // Check tools/call response (will error due to no zebra-rs)
     assert_eq!(responses[2]["id"], 3);
     // Check that this is an error response by content
-    assert!(responses[2]["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Error"));
+    assert!(
+        responses[2]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Error")
+    );
 }
 
 #[tokio::test]

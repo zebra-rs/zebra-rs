@@ -13,21 +13,21 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send, ospf_ls_req_recv};
+use crate::rib::Link;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
-use crate::rib::Link;
 use crate::{
-    config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
+    config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Context,
     rib::RibRxChannel,
 };
 
 use super::area::OspfArea;
 use super::config::OspfNetworkConfig;
-use super::ifsm::{ospf_ifsm, IfsmEvent};
+use super::ifsm::{IfsmEvent, ospf_ifsm};
 use super::link::OspfLink;
 use super::network::{read_packet, write_packet};
-use super::nfsm::{ospf_nfsm, NfsmEvent};
+use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;

@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{serve, Bgp};
+pub use inst::{Bgp, serve};
 
 pub mod constant;
 pub use constant::*;

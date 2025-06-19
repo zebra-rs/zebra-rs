@@ -3,8 +3,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use futures::stream::StreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{
-    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE,
-    NLM_F_REQUEST,
+    NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST, NetlinkMessage,
+    NetlinkPayload,
 };
 use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
@@ -32,7 +32,7 @@ use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
-use crate::rib::{link, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
+use crate::rib::{Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType, link};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,

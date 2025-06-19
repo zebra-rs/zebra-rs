@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-use tonic::transport::Server;
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
+use tonic::transport::Server;
 
 use crate::config::api::DeployRequest;
 
