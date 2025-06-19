@@ -25,10 +25,11 @@ use crate::bgp::cap::cap_register_recv;
 use super::cap::{cap_register_send, CapAfiMap};
 use super::inst::Message;
 use super::route::route_from_peer;
-use super::route::Route;
+use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
 use super::task::*;
 use super::BGP_PORT;
 use super::{Bgp, BGP_HOLD_TIME};
+use crate::rib::api::RibTx;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -154,6 +155,10 @@ pub struct Peer {
     pub config: PeerConfig,
     pub instant: Option<Instant>,
     pub cap_map: CapAfiMap,
+    /// BGP Adj-RIB-In - routes received from this peer
+    pub adj_rib_in: BgpAdjRibIn,
+    /// BGP Adj-RIB-Out - routes to be advertised to this peer
+    pub adj_rib_out: BgpAdjRibOut,
 }
 
 impl Peer {
@@ -188,6 +193,8 @@ impl Peer {
             param_rx: PeerParam::default(),
             instant: None,
             cap_map: CapAfiMap::new(),
+            adj_rib_in: BgpAdjRibIn::new(),
+            adj_rib_out: BgpAdjRibOut::new(),
         };
         peer.config
             .afi_safi
@@ -228,6 +235,8 @@ impl Peer {
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
     pub ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
+    pub local_rib: &'a mut BgpLocalRib,
+    pub rib_tx: &'a UnboundedSender<RibTx>,
 }
 
 fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
@@ -238,6 +247,8 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         ptree: &mut bgp.ptree,
+        local_rib: &mut bgp.local_rib,
+        rib_tx: &bgp.rib,
     };
     let peer = bgp.peers.get_mut(&id).unwrap();
     let prev_state = peer.state.clone();
