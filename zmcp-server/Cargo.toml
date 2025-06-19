@@ -1,0 +1,40 @@
+[package]
+name = "zmcp-server"
+version = "0.7.0"
+edition = "2021"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
+description = "MCP (Model Context Protocol) server for Zebra routing daemon"
+license = "GPL-2.0"
+
+[[bin]]
+name = "zmcp-server"
+path = "src/main.rs"
+
+[dependencies]
+# Basic JSON-RPC for MCP protocol implementation
+futures = "0.3"
+
+# Async runtime and utilities
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# gRPC client (reuse from cli-helper)
+tonic = "0.12"
+prost = "0.13"
+
+# CLI parsing
+clap = { version = "4.0", features = ["derive"] }
+
+[build-dependencies]
+tonic-build = "0.12"
