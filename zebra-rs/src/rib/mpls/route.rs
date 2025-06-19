@@ -30,7 +30,7 @@ impl MplsRoute {
         if self.nexthops.len() == 1 {
             let (&addr, n) = self.nexthops.iter().next()?;
             let mut nhop = NexthopUni {
-                addr,
+                addr: std::net::IpAddr::V4(addr),
                 ..Default::default()
             };
             if let Some(out_label) = n.out_label {
@@ -43,7 +43,7 @@ impl MplsRoute {
         let mut multi = NexthopMulti::default();
         for (&addr, n) in self.nexthops.iter() {
             let mut nhop = NexthopUni {
-                addr,
+                addr: std::net::IpAddr::V4(addr),
                 ..Default::default()
             };
             if let Some(out_label) = n.out_label {
