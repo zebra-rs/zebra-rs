@@ -8,7 +8,7 @@ pub mod vtysh {
 }
 
 use vtysh::show_client::ShowClient;
-use vtysh::ShowRequest;
+use vtysh::{CommandPath, ShowRequest, YangMatch};
 
 /// Client for communicating with zebra-rs daemon via gRPC
 #[derive(Clone)]
@@ -29,10 +29,29 @@ impl ZebraClient {
 
         let mut client = ShowClient::connect(endpoint).await?;
 
+        let mut paths = Vec::new();
+        let cmds: Vec<&str> = command.split_whitespace().collect();
+        let len = cmds.len();
+        for (pos, cmd) in cmds.iter().enumerate() {
+            let ymatch = if pos != len - 1 {
+                YangMatch::Dir
+            } else {
+                YangMatch::Leaf
+            };
+            let path = CommandPath {
+                name: cmd.to_string(),
+                key: "".to_string(),
+                ymatch: ymatch.into(),
+                mandatory: vec![],
+                sort_priority: 0,
+            };
+            paths.push(path);
+        }
+
         let request = Request::new(ShowRequest {
             json,
             line: command.to_string(),
-            paths: vec![],
+            paths,
         });
 
         debug!("Executing show command: {}", command);

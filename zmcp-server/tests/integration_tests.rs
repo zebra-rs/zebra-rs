@@ -156,9 +156,9 @@ async fn test_error_response_format() {
 
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
-    assert!(response["result"]["error"].is_object());
+    assert!(response["error"].is_object());
 
-    let error = &response["result"]["error"];
+    let error = &response["error"];
     assert_eq!(error["code"], -32601);
     assert_eq!(error["message"], "Method not found");
     assert!(error["data"].is_string());
@@ -281,7 +281,8 @@ async fn test_mock_client_workflow() {
 
     // Check tools/call response (will error due to no zebra-rs)
     assert_eq!(responses[2]["id"], 3);
-    assert_eq!(responses[2]["result"]["isError"], true);
+    // Check that this is an error response by content
+    assert!(responses[2]["result"]["content"][0]["text"].as_str().unwrap().contains("Error"));
 }
 
 #[tokio::test]
@@ -325,7 +326,7 @@ async fn test_real_zebra_connection_and_isis_graph() {
                 assert_eq!(response["jsonrpc"], "2.0");
                 assert_eq!(response["id"], 1);
 
-                if response["result"]["isError"] == false {
+                if !response["result"]["content"][0]["text"].as_str().unwrap().contains("Error") {
                     // Success case - validate the ISIS graph data
                     let content = &response["result"]["content"][0]["text"];
                     assert!(content.is_string());
@@ -369,19 +370,26 @@ async fn test_real_zebra_connection_and_isis_graph() {
                                 for (i, graph) in graphs.iter().enumerate() {
                                     if let Some(nodes) = graph.get("nodes") {
                                         if nodes.is_array() {
+                                            let node_array = nodes.as_array().unwrap();
                                             println!(
                                                 "    Graph {}: {} nodes",
                                                 i,
-                                                nodes.as_array().unwrap().len()
+                                                node_array.len()
                                             );
-                                        }
-                                    }
-                                    if let Some(edges) = graph.get("edges") {
-                                        if edges.is_array() {
+                                            
+                                            // Count total links across all nodes
+                                            let total_links: usize = node_array.iter()
+                                                .map(|node| {
+                                                    node.get("links")
+                                                        .and_then(|links| links.as_array())
+                                                        .map(|arr| arr.len())
+                                                        .unwrap_or(0)
+                                                })
+                                                .sum();
                                             println!(
-                                                "    Graph {}: {} edges",
+                                                "    Graph {}: {} total links",
                                                 i,
-                                                edges.as_array().unwrap().len()
+                                                total_links
                                             );
                                         }
                                     }
@@ -389,15 +397,27 @@ async fn test_real_zebra_connection_and_isis_graph() {
                             } else if parsed.is_object() {
                                 println!("  ✓ Single graph object received");
 
-                                // Check for nodes/edges in single graph
+                                // Check for nodes/links in single graph
                                 if let Some(nodes) = parsed.get("nodes") {
                                     if nodes.is_array() {
-                                        println!("    {} nodes", nodes.as_array().unwrap().len());
+                                        let node_array = nodes.as_array().unwrap();
+                                        println!("    {} nodes", node_array.len());
+                                        
+                                        // Count total links
+                                        let total_links: usize = node_array.iter()
+                                            .map(|node| {
+                                                node.get("links")
+                                                    .and_then(|links| links.as_array())
+                                                    .map(|arr| arr.len())
+                                                    .unwrap_or(0)
+                                            })
+                                            .sum();
+                                        println!("    {} total links", total_links);
                                     }
                                 }
-                                if let Some(edges) = parsed.get("edges") {
-                                    if edges.is_array() {
-                                        println!("    {} edges", edges.as_array().unwrap().len());
+                                if let Some(links) = parsed.get("links") {
+                                    if links.is_array() {
+                                        println!("    {} links", links.as_array().unwrap().len());
                                     }
                                 }
                             }
@@ -452,7 +472,7 @@ async fn test_real_zebra_connection_and_isis_graph() {
             });
 
             let error_response = server.handle_request(invalid_request).await;
-            assert_eq!(error_response["result"]["isError"], true);
+            assert!(error_response["result"]["content"][0]["text"].as_str().unwrap().contains("Invalid level"));
             let error_text = error_response["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap();
@@ -555,26 +575,60 @@ async fn test_isis_graph_data_parsing_with_mock_data() {
     // Test ISIS graph filtering with realistic mock data
     let isis_tools = IsisTools::new(ZebraClient::new("http://mock".to_string(), 1234));
 
-    // Test data that simulates what zebra-rs might return
+    // Test data that matches actual zebra-rs ISIS graph format
     let mock_isis_data = serde_json::json!([
         {
             "level": "L1",
             "nodes": [
-                {"id": "R1", "hostname": "router1"},
-                {"id": "R2", "hostname": "router2"}
-            ],
-            "edges": [
-                {"from": "R1", "to": "R2", "cost": 10}
+                {
+                    "id": 0,
+                    "name": "0000.0000.0001",
+                    "links": [
+                        {
+                            "to_id": 1,
+                            "to_name": "0000.0000.0002",
+                            "cost": 10
+                        }
+                    ]
+                },
+                {
+                    "id": 1,
+                    "name": "0000.0000.0002",
+                    "links": [
+                        {
+                            "to_id": 0,
+                            "to_name": "0000.0000.0001",
+                            "cost": 10
+                        }
+                    ]
+                }
             ]
         },
         {
             "level": "L2",
             "nodes": [
-                {"id": "R1", "hostname": "router1"},
-                {"id": "R3", "hostname": "router3"}
-            ],
-            "edges": [
-                {"from": "R1", "to": "R3", "cost": 20}
+                {
+                    "id": 0,
+                    "name": "0000.0000.0001",
+                    "links": [
+                        {
+                            "to_id": 2,
+                            "to_name": "0000.0000.0003",
+                            "cost": 20
+                        }
+                    ]
+                },
+                {
+                    "id": 2,
+                    "name": "0000.0000.0003",
+                    "links": [
+                        {
+                            "to_id": 0,
+                            "to_name": "0000.0000.0001",
+                            "cost": 20
+                        }
+                    ]
+                }
             ]
         }
     ]);
@@ -588,7 +642,9 @@ async fn test_isis_graph_data_parsing_with_mock_data() {
     assert_eq!(l1_graphs.len(), 1);
     assert_eq!(l1_graphs[0]["level"], "L1");
     assert_eq!(l1_graphs[0]["nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(l1_graphs[0]["edges"].as_array().unwrap().len(), 1);
+    // In the new format, links are inside each node, not separate edges
+    let first_node_links = l1_graphs[0]["nodes"][0]["links"].as_array().unwrap();
+    assert_eq!(first_node_links.len(), 1);
 
     let l2_result = isis_tools
         .filter_graph_by_level(&mock_isis_data, "L2")
@@ -598,7 +654,9 @@ async fn test_isis_graph_data_parsing_with_mock_data() {
     assert_eq!(l2_graphs.len(), 1);
     assert_eq!(l2_graphs[0]["level"], "L2");
     assert_eq!(l2_graphs[0]["nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(l2_graphs[0]["edges"].as_array().unwrap().len(), 1);
+    // Check links in the first node of L2 graph
+    let first_node_links = l2_graphs[0]["nodes"][0]["links"].as_array().unwrap();
+    assert_eq!(first_node_links.len(), 1);
 
     let both_result = isis_tools
         .filter_graph_by_level(&mock_isis_data, "both")
@@ -609,14 +667,14 @@ async fn test_isis_graph_data_parsing_with_mock_data() {
 
     println!("✓ ISIS graph filtering tests passed with realistic topology data");
     println!(
-        "  L1 graph: {} nodes, {} edges",
+        "  L1 graph: {} nodes, {} links in first node",
         l1_graphs[0]["nodes"].as_array().unwrap().len(),
-        l1_graphs[0]["edges"].as_array().unwrap().len()
+        l1_graphs[0]["nodes"][0]["links"].as_array().unwrap().len()
     );
     println!(
-        "  L2 graph: {} nodes, {} edges",
+        "  L2 graph: {} nodes, {} links in first node",
         l2_graphs[0]["nodes"].as_array().unwrap().len(),
-        l2_graphs[0]["edges"].as_array().unwrap().len()
+        l2_graphs[0]["nodes"][0]["links"].as_array().unwrap().len()
     );
 }
 
@@ -636,34 +694,67 @@ async fn test_mcp_server_with_sample_isis_data() {
   {
     "level": "L1",
     "nodes": [
-      {"id": "0000.0000.0001", "hostname": "router1", "type": "l1"},
-      {"id": "0000.0000.0002", "hostname": "router2", "type": "l1"}
-    ],
-    "edges": [
-      {"from": "0000.0000.0001", "to": "0000.0000.0002", "cost": 10, "interface": "eth0"}
+      {
+        "id": 0,
+        "name": "0000.0000.0001",
+        "links": [
+          {
+            "to_id": 1,
+            "to_name": "0000.0000.0002",
+            "cost": 10
+          }
+        ]
+      },
+      {
+        "id": 1,
+        "name": "0000.0000.0002",
+        "links": [
+          {
+            "to_id": 0,
+            "to_name": "0000.0000.0001",
+            "cost": 10
+          }
+        ]
+      }
     ]
   },
   {
     "level": "L2", 
     "nodes": [
-      {"id": "0000.0000.0001", "hostname": "router1", "type": "l2"},
-      {"id": "0000.0000.0003", "hostname": "router3", "type": "l2"}
-    ],
-    "edges": [
-      {"from": "0000.0000.0001", "to": "0000.0000.0003", "cost": 20, "interface": "eth1"}
+      {
+        "id": 0,
+        "name": "0000.0000.0001",
+        "links": [
+          {
+            "to_id": 2,
+            "to_name": "0000.0000.0003",
+            "cost": 20
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "name": "0000.0000.0003",
+        "links": [
+          {
+            "to_id": 0,
+            "to_name": "0000.0000.0001",
+            "cost": 20
+          }
+        ]
+      }
     ]
   }
 ]"#
                 }
             ],
-            "isError": false
         }
     });
 
     // Validate the structure matches MCP tool response format
     assert_eq!(sample_response_structure["jsonrpc"], "2.0");
     assert!(sample_response_structure["result"]["content"].is_array());
-    assert_eq!(sample_response_structure["result"]["isError"], false);
+    // Verify this is a successful response (no error in content)
 
     let content = &sample_response_structure["result"]["content"][0]["text"];
     let isis_data: serde_json::Value = serde_json::from_str(content.as_str().unwrap()).unwrap();
@@ -675,23 +766,27 @@ async fn test_mcp_server_with_sample_isis_data() {
     // Validate L1 graph structure
     assert_eq!(graphs[0]["level"], "L1");
     assert!(graphs[0]["nodes"].is_array());
-    assert!(graphs[0]["edges"].is_array());
+    let l1_nodes = graphs[0]["nodes"].as_array().unwrap();
+    assert_eq!(l1_nodes.len(), 2);
+    assert!(l1_nodes[0]["links"].is_array());
 
     // Validate L2 graph structure
     assert_eq!(graphs[1]["level"], "L2");
     assert!(graphs[1]["nodes"].is_array());
-    assert!(graphs[1]["edges"].is_array());
+    let l2_nodes = graphs[1]["nodes"].as_array().unwrap();
+    assert_eq!(l2_nodes.len(), 2);
+    assert!(l2_nodes[0]["links"].is_array());
 
     println!("✓ Sample MCP response structure validation passed");
     println!("  Response contains {} ISIS level(s)", graphs.len());
     println!(
-        "  L1: {} nodes, {} edges",
-        graphs[0]["nodes"].as_array().unwrap().len(),
-        graphs[0]["edges"].as_array().unwrap().len()
+        "  L1: {} nodes, {} links in first node",
+        l1_nodes.len(),
+        l1_nodes[0]["links"].as_array().unwrap().len()
     );
     println!(
-        "  L2: {} nodes, {} edges",
-        graphs[1]["nodes"].as_array().unwrap().len(),
-        graphs[1]["edges"].as_array().unwrap().len()
+        "  L2: {} nodes, {} links in first node",
+        l2_nodes.len(),
+        l2_nodes[0]["links"].as_array().unwrap().len()
     );
 }
