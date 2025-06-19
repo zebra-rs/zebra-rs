@@ -1,4 +1,4 @@
-use super::api::RibRx;
+use super::api::{RibRx, RibTx};
 use super::entry::RibEntry;
 use super::link::{link_config_exec, LinkConfig};
 use super::{Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig};
@@ -262,6 +262,46 @@ impl Rib {
         }
     }
 
+    async fn process_api_msg(&mut self, msg: RibTx) {
+        use ipnet::IpNet;
+
+        match msg {
+            RibTx::RouteAdd { prefix, entry } => match prefix {
+                IpNet::V4(prefix) => {
+                    let msg = Message::Ipv4Add { prefix, rib: entry };
+                    self.process_msg(msg).await;
+                }
+                IpNet::V6(prefix) => {
+                    let msg = Message::Ipv6Add { prefix, rib: entry };
+                    self.process_msg(msg).await;
+                }
+            },
+            RibTx::RouteDel { prefix, entry } => match prefix {
+                IpNet::V4(prefix) => {
+                    let msg = Message::Ipv4Del { prefix, rib: entry };
+                    self.process_msg(msg).await;
+                }
+                IpNet::V6(prefix) => {
+                    let msg = Message::Ipv6Del { prefix, rib: entry };
+                    self.process_msg(msg).await;
+                }
+            },
+            RibTx::Subscribe(subscription) => {
+                let msg = Message::Subscribe {
+                    proto: "bgp".to_string(),
+                    tx: subscription.tx,
+                };
+                self.process_msg(msg).await;
+            }
+            RibTx::NexthopRegister() => {
+                // TODO: Implement nexthop registration
+            }
+            RibTx::NexthopUnregister() => {
+                // TODO: Implement nexthop unregistration
+            }
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         // Before get into FIB interaction, we enable sysctl.
         sysctl_enable();
@@ -283,6 +323,9 @@ impl Rib {
                 }
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
+                }
+                Some(msg) = self.api.rx.recv() => {
+                    self.process_api_msg(msg).await;
                 }
             }
         }
