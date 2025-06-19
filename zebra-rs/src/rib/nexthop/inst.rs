@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Label {
@@ -8,7 +8,7 @@ pub enum Label {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NexthopUni {
-    pub addr: Ipv4Addr,
+    pub addr: IpAddr,
     pub metric: u32,
     pub weight: u8,
     pub ifindex: u32,
@@ -19,7 +19,7 @@ pub struct NexthopUni {
 }
 
 impl NexthopUni {
-    pub fn from(addr: Ipv4Addr, metric: u32, mpls: Vec<Label>) -> Self {
+    pub fn new(addr: IpAddr, metric: u32, mpls: Vec<Label>) -> Self {
         let mut uni = Self {
             addr,
             metric,
@@ -39,12 +39,17 @@ impl NexthopUni {
         }
         uni
     }
+
+    // Backward compatibility method for IPv4
+    pub fn from(addr: Ipv4Addr, metric: u32, mpls: Vec<Label>) -> Self {
+        Self::new(IpAddr::V4(addr), metric, mpls)
+    }
 }
 
 impl Default for NexthopUni {
     fn default() -> Self {
         Self {
-            addr: Ipv4Addr::UNSPECIFIED,
+            addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             ifindex: 0,
             metric: 0,
             weight: 1,

@@ -1165,7 +1165,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     if ilm.nhops.len() == 1 {
         if let Some((&addr, nhop)) = ilm.nhops.iter().next() {
             let mut uni = NexthopUni {
-                addr,
+                addr: std::net::IpAddr::V4(addr),
                 ifindex: nhop.ifindex,
                 ..Default::default()
             };
@@ -1182,7 +1182,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     let mut multi = NexthopMulti::default();
     for ((&addr, nhop)) in ilm.nhops.iter() {
         let mut uni = NexthopUni {
-            addr,
+            addr: std::net::IpAddr::V4(addr),
             ifindex: nhop.ifindex,
             ..Default::default()
         };

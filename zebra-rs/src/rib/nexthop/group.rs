@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
@@ -44,7 +44,7 @@ impl GroupCommon {
 #[derive(Debug, Clone)]
 pub struct GroupUni {
     common: GroupCommon,
-    pub addr: Ipv4Addr,
+    pub addr: IpAddr,
     pub ifindex: u32,
     pub labels: Vec<u32>,
 }
@@ -60,10 +60,18 @@ impl GroupUni {
     }
 
     pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
-        let resolve = rib_resolve(table, self.addr, &ResolveOpt::default());
-        if let Resolve::Onlink(ifindex) = resolve {
-            self.ifindex = ifindex;
-            self.set_valid(true);
+        match self.addr {
+            IpAddr::V4(ipv4_addr) => {
+                let resolve = rib_resolve(table, ipv4_addr, &ResolveOpt::default());
+                if let Resolve::Onlink(ifindex) = resolve {
+                    self.ifindex = ifindex;
+                    self.set_valid(true);
+                }
+            }
+            IpAddr::V6(_ipv6_addr) => {
+                // TODO: Implement IPv6 resolution when IPv6 table is available
+                // For now, we'll leave IPv6 nexthops unresolved
+            }
         }
     }
 
