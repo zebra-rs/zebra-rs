@@ -21,16 +21,14 @@ impl IsisTools {
         debug!("Getting ISIS graph with args: {:?}", args);
 
         // Parse the level parameter
-        let level = args
-            .get("level")
-            .and_then(|v| v.as_str())
-            .unwrap_or("both");
+        let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("both");
 
         // Validate level parameter
         if !matches!(level, "L1" | "L2" | "both") {
             warn!("Invalid level parameter: {}", level);
             return Err(anyhow::anyhow!(
-                "Invalid level '{}'. Must be 'L1', 'L2', or 'both'", level
+                "Invalid level '{}'. Must be 'L1', 'L2', or 'both'",
+                level
             ));
         }
 
@@ -38,6 +36,12 @@ impl IsisTools {
         match self.client.show_isis_command("graph", true).await {
             Ok(json_output) => {
                 debug!("Received ISIS graph data: {} bytes", json_output.len());
+
+                // Handle empty response (ISIS not configured or no data)
+                if json_output.trim().is_empty() {
+                    warn!("ISIS graph command returned empty output");
+                    return Ok("[]".to_string()); // Return empty JSON array
+                }
 
                 // Parse the JSON to validate it
                 match serde_json::from_str::<Value>(&json_output) {
@@ -50,7 +54,13 @@ impl IsisTools {
                     }
                     Err(e) => {
                         error!("Failed to parse ISIS graph JSON: {}", e);
-                        Err(anyhow::anyhow!("Error parsing ISIS graph data: {}", e))
+                        // If parsing fails but we have data, it might be text format
+                        if !json_output.trim().is_empty() {
+                            warn!("ISIS graph data is not JSON format, returning as-is");
+                            Ok(json_output)
+                        } else {
+                            Err(anyhow::anyhow!("Error parsing ISIS graph data: {}", e))
+                        }
                     }
                 }
             }
@@ -62,7 +72,7 @@ impl IsisTools {
     }
 
     /// Filter graph data by IS-IS level
-    fn filter_graph_by_level(&self, data: &Value, level: &str) -> Result<Value> {
+    pub fn filter_graph_by_level(&self, data: &Value, level: &str) -> Result<Value> {
         if level == "both" {
             return Ok(data.clone());
         }
@@ -102,6 +112,7 @@ impl IsisTools {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn test_filter_graph_by_level_both() {
@@ -139,5 +150,64 @@ mod tests {
         let result = isis_tools.filter_graph_by_level(&data, "L2").unwrap();
         let expected = json!([{"level": "L2", "nodes": ["node2"]}]);
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_filter_graph_single_object() {
+        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
+        let data = json!({"level": "L1", "nodes": ["node1"]});
+
+        let result = isis_tools.filter_graph_by_level(&data, "L1").unwrap();
+        assert_eq!(result, data);
+
+        let result = isis_tools.filter_graph_by_level(&data, "L2").unwrap();
+        assert_eq!(result, json!([]));
+    }
+
+    #[test]
+    fn test_filter_graph_no_level_info() {
+        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
+        let data = json!({"nodes": ["node1"]});
+
+        let result = isis_tools.filter_graph_by_level(&data, "L1").unwrap();
+        assert_eq!(result, data); // Should return as-is when no level info
+    }
+
+    #[tokio::test]
+    async fn test_get_isis_graph_invalid_level() {
+        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
+        let mut args = HashMap::new();
+        args.insert("level".to_string(), json!("invalid"));
+
+        let result = isis_tools.get_isis_graph(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid level"));
+    }
+
+    #[tokio::test]
+    async fn test_get_isis_graph_default_level() {
+        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
+        let args = HashMap::new(); // No level specified
+
+        // This will fail because we don't have a real zebra-rs server, but we can test parameter parsing
+        let result = isis_tools.get_isis_graph(args).await;
+        // Should fail with connection error, not parameter validation error
+        assert!(result.is_err());
+        assert!(!result.unwrap_err().to_string().contains("Invalid level"));
+    }
+
+    #[tokio::test]
+    async fn test_get_isis_graph_valid_levels() {
+        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
+
+        for level in ["L1", "L2", "both"] {
+            let mut args = HashMap::new();
+            args.insert("level".to_string(), json!(level));
+
+            let result = isis_tools.get_isis_graph(args).await;
+            // Should fail with connection error, not parameter validation error
+            assert!(result.is_err());
+            assert!(!result.unwrap_err().to_string().contains("Invalid level"));
+        }
     }
 }

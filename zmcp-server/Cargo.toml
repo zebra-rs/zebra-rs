@@ -38,3 +38,9 @@ clap = { version = "4.0", features = ["derive"] }
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[dev-dependencies]
+# Testing dependencies
+tokio-test = "0.4"
+assert_matches = "1.5"
+mockall = "0.13"

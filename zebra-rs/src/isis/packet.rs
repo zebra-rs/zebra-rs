@@ -8,10 +8,10 @@ use isis_packet::{
 };
 
 use crate::isis::inst::lsp_emit;
-use crate::isis_info;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::isis::Message;
+use crate::isis_info;
 use crate::rib::MacAddr;
 
 use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
