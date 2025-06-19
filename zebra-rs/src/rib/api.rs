@@ -1,6 +1,8 @@
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use super::entry::RibEntry;
 use super::{link::LinkAddr, Link, Rib};
+use ipnet::{IpNet, Ipv4Net};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -24,8 +26,8 @@ pub struct Subscription {
 #[allow(dead_code)]
 pub enum RibTx {
     Subscribe(Subscription),
-    RouteAdd(),
-    RouteDel(),
+    RouteAdd { prefix: IpNet, entry: RibEntry },
+    RouteDel { prefix: IpNet, entry: RibEntry },
     NexthopRegister(),
     NexthopUnregister(),
 }
