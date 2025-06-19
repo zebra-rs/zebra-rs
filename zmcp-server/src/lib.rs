@@ -30,7 +30,7 @@ impl ZmcpServer {
         &self.zebra_client
     }
 
-    pub async fn handle_request(&self, request: Value) -> Value {
+    pub async fn handle_request(&self, request: Value) -> Option<Value> {
         let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let params = request.get("params").cloned().unwrap_or(json!({}));
         let id = request.get("id").cloned();
@@ -40,6 +40,16 @@ impl ZmcpServer {
         let result = match method {
             "initialize" => {
                 debug!("MCP initialize request");
+                
+                // Validate client protocol version
+                let client_version = params.get("protocolVersion")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                
+                if !client_version.is_empty() && client_version != "2024-11-05" {
+                    warn!("Client protocol version mismatch: expected 2024-11-05, got {}", client_version);
+                }
+                
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
@@ -78,8 +88,9 @@ impl ZmcpServer {
             "tools/call" => self.handle_tool_call(params).await,
             _ => {
                 warn!("Unknown method: {}", method);
-                return if let Some(id) = id {
-                    json!({
+                // For unknown methods, return error only if request has an ID
+                if let Some(id) = id {
+                    return Some(json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "error": {
@@ -87,32 +98,24 @@ impl ZmcpServer {
                             "message": "Method not found",
                             "data": format!("Unknown method: {}", method)
                         }
-                    })
+                    }));
                 } else {
-                    json!({
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32601,
-                            "message": "Method not found",
-                            "data": format!("Unknown method: {}", method)
-                        }
-                    })
-                };
+                    // For notifications (no ID), don't send response
+                    return None;
+                }
             }
         };
 
-        // Build response with id if present
+        // Build response with id if present (notifications with no ID don't get responses)
         if let Some(id) = id {
-            json!({
+            Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": result
-            })
+            }))
         } else {
-            json!({
-                "jsonrpc": "2.0",
-                "result": result
-            })
+            // For notifications (requests without ID), don't send a response
+            None
         }
     }
 
@@ -138,7 +141,8 @@ impl ZmcpServer {
                             "type": "text",
                             "text": result
                         }
-                    ]
+                    ],
+                    "isError": false
                 }),
                 Err(e) => {
                     error!("Tool execution failed: {}", e);
@@ -148,7 +152,8 @@ impl ZmcpServer {
                                 "type": "text",
                                 "text": format!("Error: {}", e)
                             }
-                        ]
+                        ],
+                        "isError": true
                     })
                 }
             },
@@ -160,7 +165,8 @@ impl ZmcpServer {
                             "type": "text",
                             "text": format!("Unknown tool: {}", tool_name)
                         }
-                    ]
+                    ],
+                    "isError": true
                 })
             }
         }
@@ -182,13 +188,16 @@ impl ZmcpServer {
 
             match serde_json::from_str::<Value>(&line) {
                 Ok(request) => {
-                    let response = self.handle_request(request).await;
-                    let response_str = serde_json::to_string(&response)?;
+                    if let Some(response) = self.handle_request(request).await {
+                        let response_str = serde_json::to_string(&response)?;
 
-                    debug!("Sending: {}", response_str);
-                    stdout.write_all(response_str.as_bytes()).await?;
-                    stdout.write_all(b"\n").await?;
-                    stdout.flush().await?;
+                        debug!("Sending: {}", response_str);
+                        stdout.write_all(response_str.as_bytes()).await?;
+                        stdout.write_all(b"\n").await?;
+                        stdout.flush().await?;
+                    } else {
+                        debug!("No response for notification request");
+                    }
                 }
                 Err(e) => {
                     error!("Failed to parse JSON request: {}", e);
@@ -229,7 +238,7 @@ mod tests {
             "params": {}
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
@@ -248,7 +257,7 @@ mod tests {
             "params": {}
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 2);
@@ -271,7 +280,7 @@ mod tests {
             "params": {}
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 3);
@@ -292,7 +301,7 @@ mod tests {
             }
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 4);
@@ -301,6 +310,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unknown tool"));
+        assert_eq!(response["result"]["isError"], true);
     }
 
     #[tokio::test]
@@ -318,18 +328,19 @@ mod tests {
             }
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 5);
         // This will either succeed with data or fail with connection error
-        if !response["result"]["content"][0]["text"].as_str().unwrap().contains("Error") {
+        if response["result"]["isError"] == false {
             // Success case - got ISIS data (may be empty or populated)
             let content = response["result"]["content"][0]["text"].as_str().unwrap();
             // Should be valid JSON (empty array "[]" or populated array with graph data)
             assert!(content == "[]" || content.starts_with("["));
         } else {
             // Error case - connection failed
+            assert_eq!(response["result"]["isError"], true);
             assert!(response["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
@@ -352,7 +363,7 @@ mod tests {
             }
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 6);
@@ -374,9 +385,8 @@ mod tests {
 
         let response = server.handle_request(request).await;
 
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert!(response.get("id").is_none());
-        assert!(response["result"].is_object());
+        // For requests without ID (notifications), should return None
+        assert!(response.is_none());
     }
 
     #[test]
@@ -406,7 +416,7 @@ mod tests {
             }
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         // Validate JSON-RPC response structure
         assert_eq!(response["jsonrpc"], "2.0");
@@ -424,9 +434,9 @@ mod tests {
             "id": 1
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
-        // Should handle gracefully
+        // Should handle gracefully - empty method should be treated as unknown method
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
         assert!(response["error"].is_object());
@@ -446,7 +456,7 @@ mod tests {
             }
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
@@ -455,6 +465,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unknown tool"));
+        assert_eq!(response["result"]["isError"], true);
     }
 
     #[tokio::test]
@@ -477,19 +488,20 @@ mod tests {
             }
         });
 
-        let response = server.handle_request(request).await;
+        let response = server.handle_request(request).await.unwrap();
 
         // Should parse arguments correctly and execute (though will fail due to no zebra-rs)
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
         // This will either succeed with data or fail with connection error
-        if !response["result"]["content"][0]["text"].as_str().unwrap().contains("Error") {
+        if response["result"]["isError"] == false {
             // Success case - got ISIS data (may be empty or populated)
             let content = response["result"]["content"][0]["text"].as_str().unwrap();
             // Should be valid JSON (empty array "[]" or populated array with graph data)
             assert!(content == "[]" || content.starts_with("["));
         } else {
             // Error case - should fail with connection error, not argument parsing error
+            assert_eq!(response["result"]["isError"], true);
             assert!(response["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
