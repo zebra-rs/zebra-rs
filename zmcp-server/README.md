@@ -108,8 +108,11 @@ The server provides detailed error information for:
 ## Logging
 
 Uses structured logging with configurable levels:
-- `info`: Basic operational messages
-- `debug`: Detailed request/response information
+- `warn` (default): Warnings and errors only - safe for MCP client communication
+- `debug`: Detailed request/response information (use --debug flag)
 - `error`: Error conditions and failures
+
+The default `warn` level ensures that log output doesn't interfere with MCP protocol 
+communication over stdin/stdout. Use `--debug` flag for detailed logging during development.
 
 Set `RUST_LOG` environment variable for custom log filtering.

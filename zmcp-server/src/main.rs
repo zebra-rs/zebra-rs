@@ -3,7 +3,7 @@ use clap::Parser;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use tracing_subscriber;
 
 mod tools;
@@ -50,7 +50,7 @@ impl ZmcpServer {
 
         let result = match method {
             "initialize" => {
-                info!("MCP initialize request");
+                debug!("MCP initialize request");
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
@@ -128,7 +128,7 @@ impl ZmcpServer {
             })
             .unwrap_or_default();
 
-        info!("Calling tool: {}", tool_name);
+        debug!("Calling tool: {}", tool_name);
 
         match tool_name {
             "get-isis-graph" => {
@@ -176,7 +176,7 @@ impl ZmcpServer {
         let mut stdout = io::stdout();
         let mut reader = BufReader::new(stdin).lines();
 
-        info!("MCP server ready, listening on stdin/stdout");
+        debug!("MCP server ready, listening on stdin/stdout");
 
         while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
@@ -214,7 +214,7 @@ impl ZmcpServer {
             }
         }
 
-        info!("MCP server shutdown");
+        debug!("MCP server shutdown");
         Ok(())
     }
 }
@@ -228,13 +228,13 @@ async fn main() -> Result<()> {
         .with_env_filter(if cli.debug {
             "debug"
         } else {
-            "info"
+            "warn"
         })
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting zmcp-server v{}", env!("CARGO_PKG_VERSION"));
-    info!("Connecting to zebra-rs at {}:{}", cli.base, cli.port);
+    debug!("Starting zmcp-server v{}", env!("CARGO_PKG_VERSION"));
+    debug!("Connecting to zebra-rs at {}:{}", cli.base, cli.port);
 
     let server = ZmcpServer::new(cli.base, cli.port);
 
@@ -245,7 +245,7 @@ async fn main() -> Result<()> {
         return Err(e);
     }
 
-    info!("Successfully connected to zebra-rs");
+    debug!("Successfully connected to zebra-rs");
 
     server.run().await?;
 
