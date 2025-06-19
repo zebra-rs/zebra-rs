@@ -499,6 +499,11 @@ module config {
           type inet:ipv4-prefix;
         }
       }
+      container ipv6 {
+        leaf address {
+          type inet:ipv6-prefix;
+        }
+      }
     }
     list vrf {
       key "name";
