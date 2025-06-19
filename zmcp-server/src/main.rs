@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, warn};
-use tracing_subscriber;
+use tracing_subscriber::{self, Registry};
 
 mod tools;
 mod client;
@@ -223,15 +223,22 @@ impl ZmcpServer {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(if cli.debug {
-            "debug"
+    // Initialize tracing - disable all terminal output for MCP compatibility
+    // Only enable logging if explicitly requested via RUST_LOG environment variable
+    if std::env::var("RUST_LOG").is_ok() || cli.debug {
+        let log_level = if cli.debug {
+            "debug".to_string()
         } else {
-            "warn"
-        })
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(log_level)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+    } else {
+        // Disable all logging output to keep stdin/stdout clean
+        tracing::subscriber::set_global_default(Registry::default())?;
+    }
 
     debug!("Starting zmcp-server v{}", env!("CARGO_PKG_VERSION"));
     debug!("Connecting to zebra-rs at {}:{}", cli.base, cli.port);

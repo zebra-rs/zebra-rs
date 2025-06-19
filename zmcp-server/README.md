@@ -34,14 +34,17 @@ JSON-formatted graph data containing nodes, links, and topology information.
 ### Basic Usage
 
 ```bash
-# Run MCP server connecting to local zebra-rs
+# Run MCP server connecting to local zebra-rs (silent operation)
 ./zmcp-server
 
 # Connect to zebra-rs on different host/port
 ./zmcp-server --base http://192.168.1.1 --port 2650
 
-# Enable debug logging
+# Enable debug logging for development
 ./zmcp-server --debug
+
+# Enable specific log level via environment
+RUST_LOG=warn ./zmcp-server
 ```
 
 ### Command Line Options
@@ -107,12 +110,16 @@ The server provides detailed error information for:
 
 ## Logging
 
-Uses structured logging with configurable levels:
-- `warn` (default): Warnings and errors only - safe for MCP client communication
-- `debug`: Detailed request/response information (use --debug flag)
-- `error`: Error conditions and failures
+**Default Behavior**: All logging is disabled to ensure clean MCP protocol communication over stdin/stdout.
 
-The default `warn` level ensures that log output doesn't interfere with MCP protocol 
-communication over stdin/stdout. Use `--debug` flag for detailed logging during development.
+**Enable Logging**:
+- `--debug`: Enable debug-level logging for development
+- `RUST_LOG=<level>`: Set custom log level via environment variable
 
-Set `RUST_LOG` environment variable for custom log filtering.
+**Available Levels**:
+- `debug`: Detailed request/response information
+- `warn`: Warnings and errors only
+- `error`: Error conditions and failures only
+
+The default silent operation ensures that log output never interferes with MCP JSON-RPC 
+communication. Enable logging only when needed for development or troubleshooting.
