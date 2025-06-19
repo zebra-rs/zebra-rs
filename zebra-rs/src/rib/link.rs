@@ -7,8 +7,9 @@ use crate::fib::sysctl::sysctl_mpls_enable;
 
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::{MacAddr, Message, Rib};
-use ipnet::{IpNet, Ipv4Net};
+use super::util::IpNetExt;
+use super::{MacAddr, Message, Rib, RibType};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt::{self, Write};
@@ -507,9 +508,36 @@ impl Rib {
 
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
-            if link_addr_update(link, addr.clone()).is_some() {
-                //
+            let was_addr_added = link_addr_update(link, addr.clone()).is_some();
+
+            // If address was successfully added and the interface is up and running,
+            // create a connected route
+            if was_addr_added && link.is_up_and_running() {
+                match addr.addr {
+                    IpNet::V4(v4_addr) => {
+                        let prefix = v4_addr.apply_mask();
+                        println!("Connected: {:?} - adding to RIB (interface up)", prefix);
+                        let mut rib = RibEntry::new(RibType::Connected);
+                        rib.ifindex = addr.ifindex;
+                        rib.set_valid(true);
+                        let msg = Message::Ipv4Add { prefix, rib };
+                        let _ = self.tx.send(msg);
+                    }
+                    IpNet::V6(v6_addr) => {
+                        let prefix = v6_addr.apply_mask();
+                        println!(
+                            "Connected IPv6: {:?} - adding to RIB (interface up)",
+                            prefix
+                        );
+                        let mut rib = RibEntry::new(RibType::Connected);
+                        rib.ifindex = addr.ifindex;
+                        rib.set_valid(true);
+                        let msg = Message::Ipv6Add { prefix, rib };
+                        let _ = self.tx.send(msg);
+                    }
+                }
             }
+
             self.api_addr_add(&addr);
         }
     }
@@ -517,6 +545,34 @@ impl Rib {
     pub fn addr_del(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
+            // Before removing the address, create connected route removal message if interface is up
+            if link.is_up_and_running() {
+                match addr.addr {
+                    IpNet::V4(v4_addr) => {
+                        let prefix = v4_addr.apply_mask();
+                        println!(
+                            "Connected: {:?} - removing from RIB (address deleted)",
+                            prefix
+                        );
+                        let mut rib = RibEntry::new(RibType::Connected);
+                        rib.ifindex = addr.ifindex;
+                        let msg = Message::Ipv4Del { prefix, rib };
+                        let _ = self.tx.send(msg);
+                    }
+                    IpNet::V6(v6_addr) => {
+                        let prefix = v6_addr.apply_mask();
+                        println!(
+                            "Connected IPv6: {:?} - removing from RIB (address deleted)",
+                            prefix
+                        );
+                        let mut rib = RibEntry::new(RibType::Connected);
+                        rib.ifindex = addr.ifindex;
+                        let msg = Message::Ipv6Del { prefix, rib };
+                        let _ = self.tx.send(msg);
+                    }
+                }
+            }
+
             link_addr_del(link, addr);
         }
     }

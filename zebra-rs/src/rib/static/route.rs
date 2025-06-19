@@ -33,7 +33,7 @@ impl StaticRoute {
         if self.nexthops.len() == 1 {
             let (p, n) = self.nexthops.iter().next()?;
             let nhop = NexthopUni {
-                addr: *p,
+                addr: std::net::IpAddr::V4(*p),
                 metric: n.metric.unwrap_or(metric),
                 weight: n.weight.unwrap_or(1),
                 ..Default::default()
@@ -60,7 +60,7 @@ impl StaticRoute {
             };
             for (p, n) in set.iter() {
                 let nhop = NexthopUni {
-                    addr: *p,
+                    addr: std::net::IpAddr::V4(*p),
                     metric: n.metric.unwrap_or(metric),
                     weight: n.weight.unwrap_or(1),
                     ..Default::default()
@@ -76,7 +76,7 @@ impl StaticRoute {
                 }
                 let (p, n) = set.first()?;
                 let nhop = NexthopUni {
-                    addr: *p,
+                    addr: std::net::IpAddr::V4(*p),
                     metric: *metric,
                     weight: n.weight.unwrap_or(1),
                     ..Default::default()

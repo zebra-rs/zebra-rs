@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
 };
 
 use netlink_packet_route::route::MplsLabel;
@@ -10,9 +10,9 @@ use crate::fib::FibHandle;
 use super::{Group, GroupMulti, GroupTrait, GroupUni, NexthopUni};
 
 pub struct NexthopMap {
-    map: BTreeMap<Ipv4Addr, usize>,
+    map: BTreeMap<IpAddr, usize>,
     set: BTreeMap<BTreeSet<(usize, u8)>, usize>,
-    mpls: BTreeMap<(Ipv4Addr, Vec<u32>), usize>,
+    mpls: BTreeMap<(IpAddr, Vec<u32>), usize>,
     pub groups: Vec<Option<Group>>,
 }
 
