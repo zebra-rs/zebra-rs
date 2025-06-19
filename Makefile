@@ -50,3 +50,7 @@ run:
 
 format:
 	cargo fmt --all
+
+mcp:
+	cargo build --release
+	cp target/release/zmcp-server ~/bin
