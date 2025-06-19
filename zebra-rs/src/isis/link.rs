@@ -1,8 +1,8 @@
+use serde::Serialize;
 use std::collections::btree_map::{Iter, IterMut};
 use std::collections::BTreeMap;
 use std::default;
 use std::fmt::Write;
-use serde::Serialize;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::{
@@ -757,13 +757,14 @@ fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
     } else {
         "no".to_string()
     };
-    
+
     let dis_status = match link.state.dis_status.get(&level) {
         DisStatus::NotSelected => "no DIS is selected",
         DisStatus::Other => "is not DIS",
         DisStatus::Myself => "is DIS",
-    }.to_string();
-    
+    }
+    .to_string();
+
     LevelInfo {
         metric: link.config.metric(),
         active_neighbors: *link.state.nbrs_up.get(&level),
@@ -781,12 +782,16 @@ pub fn show_detail(isis: &Isis, _args: Args, json: bool) -> String {
     if json {
         // JSON output
         let mut interfaces = Vec::new();
-        
+
         for (ifindex, link) in isis.links.iter() {
             if link.config.enabled() {
                 let mut interface_detail = InterfaceDetailJson {
                     interface: link.state.name.clone(),
-                    state: if link.state.is_up() { "Up".to_string() } else { "Down".to_string() },
+                    state: if link.state.is_up() {
+                        "Up".to_string()
+                    } else {
+                        "Down".to_string()
+                    },
                     active: true,
                     circuit_id: format!("0x{:02X}", link.state.ifindex),
                     link_type: format!("{}", link.config.link_type()),
@@ -798,18 +803,18 @@ pub fn show_detail(isis: &Isis, _args: Args, json: bool) -> String {
                     ipv6_link_locals: link.state.v6laddr.iter().map(|p| p.to_string()).collect(),
                     ipv6_prefixes: link.state.v6addr.iter().map(|p| p.to_string()).collect(),
                 };
-                
+
                 if has_level(link.state.level(), Level::L1) {
                     interface_detail.level_1_info = Some(build_level_info(link, Level::L1));
                 }
                 if has_level(link.state.level(), Level::L2) {
                     interface_detail.level_2_info = Some(build_level_info(link, Level::L2));
                 }
-                
+
                 interfaces.push(interface_detail);
             }
         }
-        
+
         serde_json::to_string_pretty(&interfaces)
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize interfaces: {}\"}}", e))
     } else {

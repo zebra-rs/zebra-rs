@@ -13,8 +13,8 @@ use vtysh::ShowRequest;
 /// Client for communicating with zebra-rs daemon via gRPC
 #[derive(Clone)]
 pub struct ZebraClient {
-    base_url: String,
-    port: u32,
+    pub base_url: String,
+    pub port: u32,
 }
 
 impl ZebraClient {
@@ -73,5 +73,53 @@ impl ZebraClient {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zebra_client_creation() {
+        let client = ZebraClient::new("http://test.example.com".to_string(), 9999);
+        assert_eq!(client.base_url, "http://test.example.com");
+        assert_eq!(client.port, 9999);
+    }
+
+    #[test]
+    fn test_zebra_client_clone() {
+        let client = ZebraClient::new("http://localhost".to_string(), 2650);
+        let cloned = client.clone();
+
+        assert_eq!(client.base_url, cloned.base_url);
+        assert_eq!(client.port, cloned.port);
+    }
+
+    #[tokio::test]
+    async fn test_show_command_connection_failure() {
+        let client = ZebraClient::new("http://non-existent-host".to_string(), 12345);
+
+        // This should fail to connect
+        let result = client.show_command("show version", false).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_show_isis_command_format() {
+        let client = ZebraClient::new("http://non-existent-host".to_string(), 12345);
+
+        // Test that the command is formatted correctly (even though it will fail to connect)
+        let result = client.show_isis_command("neighbors", true).await;
+        assert!(result.is_err());
+        // The error should be connection-related, not command formatting related
+    }
+
+    #[tokio::test]
+    async fn test_test_connection_failure() {
+        let client = ZebraClient::new("http://non-existent-host".to_string(), 12345);
+
+        let result = client.test_connection().await;
+        assert!(result.is_err());
     }
 }

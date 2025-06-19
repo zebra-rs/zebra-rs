@@ -1,15 +1,15 @@
-use std::io;
 use std::collections::HashMap;
+use std::io;
 
-use clap::{Arg, ValueEnum};
 use chrono::Utc;
+use clap::{Arg, ValueEnum};
 use serde_json::json;
-use tracing::{Level, Event, Subscriber};
+use tracing::{Event, Level, Subscriber};
 use tracing_appender::rolling;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 use tracing_subscriber::fmt::format::{Format, FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 #[derive(Debug, Clone)]
 pub enum LogFormat {
@@ -88,7 +88,7 @@ where
     ) -> std::fmt::Result {
         let metadata = event.metadata();
         let now = Utc::now();
-        
+
         // Create base Elasticsearch document
         let mut doc = json!({
             "@timestamp": now.to_rfc3339(),
@@ -115,23 +115,23 @@ where
         // Extract fields from the event
         let mut visitor = JsonVisitor::new();
         event.record(&mut visitor);
-        
+
         // Add message
         if let Some(message) = visitor.message {
             doc["message"] = json!(message);
         }
-        
+
         // Add protocol field if present
         if let Some(proto) = visitor.fields.get("proto") {
             doc["protocol"] = json!(proto);
             doc["service"]["protocol"] = json!(proto);
         }
-        
+
         // Add all other fields to a fields object
         if !visitor.fields.is_empty() {
             doc["fields"] = json!(visitor.fields);
         }
-        
+
         // Add metadata for Elasticsearch indexing
         doc["@metadata"] = json!({
             "index": format!("zebra-rs-{}", now.format("%Y.%m.%d")),
@@ -165,10 +165,11 @@ impl tracing::field::Visit for JsonVisitor {
         if name == "message" {
             self.message = Some(format!("{:?}", value));
         } else {
-            self.fields.insert(name.to_string(), json!(format!("{:?}", value)));
+            self.fields
+                .insert(name.to_string(), json!(format!("{:?}", value)));
         }
     }
-    
+
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         let name = field.name();
         if name == "message" {
@@ -177,15 +178,15 @@ impl tracing::field::Visit for JsonVisitor {
             self.fields.insert(name.to_string(), json!(value));
         }
     }
-    
+
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
         self.fields.insert(field.name().to_string(), json!(value));
     }
-    
+
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
         self.fields.insert(field.name().to_string(), json!(value));
     }
-    
+
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
         self.fields.insert(field.name().to_string(), json!(value));
     }

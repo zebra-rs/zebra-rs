@@ -251,7 +251,7 @@ impl Isis {
                         }
                         // Adjacency labels start from 24000, so calculate index
                         let adj_index = if label >= 24000 { label - 24000 + 1 } else { 1 };
-                        let spf_ilm = SpfIlm { 
+                        let spf_ilm = SpfIlm {
                             nhops: nhops,
                             ilm_type: IlmType::Adjacency(adj_index),
                         };
@@ -470,6 +470,7 @@ impl Isis {
                     self.process_cm_msg(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
+                    println!("XXX Show {:?}", msg);
                     self.process_show_msg(msg).await;
                 }
                 Some(msg) = self.rx.recv() => {
@@ -1268,10 +1269,10 @@ pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, Sp
     for (prefix, route) in rib.iter() {
         if let Some(sid) = route.sid {
             // Calculate prefix index from SID (assuming 16000 is base)
-            let pfx_index = if sid >= 16000 && sid < 24000 { 
-                sid - 16000 
-            } else { 
-                0 
+            let pfx_index = if sid >= 16000 && sid < 24000 {
+                sid - 16000
+            } else {
+                0
             };
             let spf_ilm = SpfIlm {
                 nhops: route.nhops.clone(),
