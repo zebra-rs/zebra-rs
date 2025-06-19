@@ -1,7 +1,7 @@
 [package]
 name = "zmcp-server"
 version = "0.7.0"
-edition = "2021"
+edition = "2024"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
 description = "MCP (Model Context Protocol) server for Zebra routing daemon"
 license = "GPL-2.0"

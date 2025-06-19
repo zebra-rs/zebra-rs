@@ -1,7 +1,7 @@
 use ipnet::IpNet;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::rib::{entry::RibEntry, link::IFF_UP, MacAddr};
+use crate::rib::{MacAddr, entry::RibEntry, link::IFF_UP};
 
 use super::{LinkFlags, LinkType};
 

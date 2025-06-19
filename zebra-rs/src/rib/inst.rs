@@ -1,9 +1,9 @@
 use super::api::{RibRx, RibTx};
 use super::entry::RibEntry;
-use super::link::{link_config_exec, LinkConfig};
+use super::link::{LinkConfig, link_config_exec};
 use super::{Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig};
 
-use crate::config::{path_from_command, Args};
+use crate::config::{Args, path_from_command};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;

@@ -7,7 +7,7 @@ use crate::{
     rib::{Label, Nexthop},
 };
 
-use super::{entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show, Group, Rib};
+use super::{Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show};
 use std::fmt::Write;
 
 // JSON-serializable structures for route display

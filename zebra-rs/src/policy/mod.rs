@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{serve, Policy};
+pub use inst::{Policy, serve};
 
 pub mod action;
 pub use action::Action;

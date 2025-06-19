@@ -85,11 +85,7 @@ fn cache_lookup<'a>(
         cache.insert(name.to_string(), plist_lookup(plist, name)?);
     }
     let cache = cache.get_mut(name)?;
-    if cache.delete {
-        None
-    } else {
-        Some(cache)
-    }
+    if cache.delete { None } else { Some(cache) }
 }
 
 fn prefix_ipv4_config_builder() -> ConfigBuilder {

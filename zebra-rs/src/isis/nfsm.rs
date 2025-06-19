@@ -4,8 +4,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use isis_packet::{IsLevel, IsisHello, IsisTlv};
 
-use crate::isis::link::Afi;
 use crate::isis::Level;
+use crate::isis::link::Afi;
 use crate::isis_info;
 use crate::rib::MacAddr;
 

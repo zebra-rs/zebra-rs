@@ -1,9 +1,9 @@
 use bgp_packet::AfiSafi;
 
 use super::{
-    inst::Callback,
-    peer::{fsm_init, Peer, PeerType},
     Bgp,
+    inst::Callback,
+    peer::{Peer, PeerType, fsm_init},
 };
 
 use crate::config::{Args, ConfigOp};

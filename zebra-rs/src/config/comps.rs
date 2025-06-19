@@ -1,7 +1,7 @@
+use super::Config;
 use super::parse::State;
 use super::parse::{entry_is_key, ymatch_complete, ytype_from_typedef};
 use super::vtysh::YangMatch;
-use super::Config;
 use libyang::{Entry, TypeNode, YangType};
 use std::rc::Rc;
 

@@ -1,6 +1,6 @@
-use crate::config::{path_from_command, ConfigChannel, ConfigOp, ConfigRequest};
+use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, path_from_command};
 
-use super::{prefix_ipv4_commit, prefix_ipv4_exec, PrefixListIpv4Map};
+use super::{PrefixListIpv4Map, prefix_ipv4_commit, prefix_ipv4_exec};
 
 pub struct Policy {
     pub cm: ConfigChannel,

@@ -27,7 +27,7 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
 use crate::spf::{self, Graph};
 use crate::{
-    config::{path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest},
+    config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Context,
     rib::RibRxChannel,
 };
@@ -40,8 +40,8 @@ use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::LabelMap;
 use super::task::{Timer, TimerType};
-use super::{process_packet, LabelPool, Level, Levels, NfsmState};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
+use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> String;
@@ -1127,33 +1127,33 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
 
 pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
     // Delete.
-    for (&prefix, route) in diff.only_curr.iter() {
+    for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Del {
-                prefix: prefix.clone(),
+                prefix: **prefix,
                 rib,
             };
             rib_tx.send(msg).unwrap();
         }
     }
     // Add (changed).
-    for (&prefix, _, route) in diff.different.iter() {
+    for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
-                prefix: prefix.clone(),
+                prefix: **prefix,
                 rib,
             };
             rib_tx.send(msg).unwrap();
         }
     }
     // Add (new).
-    for (&prefix, route) in diff.only_next.iter() {
+    for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
-                prefix: prefix.clone(),
+                prefix: **prefix,
                 rib,
             };
             rib_tx.send(msg).unwrap();
@@ -1200,26 +1200,35 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
 
 pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResult) {
     // Delete.
-    for (&label, &ref ilm) in diff.only_curr.iter() {
+    for (label, ilm) in diff.only_curr.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm = make_ilm_entry(label, ilm);
-            let msg = rib::Message::IlmDel { label, ilm };
+            let ilm_entry = make_ilm_entry(**label, ilm);
+            let msg = rib::Message::IlmDel {
+                label: **label,
+                ilm: ilm_entry,
+            };
             rib_tx.send(msg).unwrap();
         }
     }
     // Add (changed).
-    for (&label, _, &ref ilm) in diff.different.iter() {
+    for (label, _, ilm) in diff.different.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm = make_ilm_entry(label, ilm);
-            let msg = rib::Message::IlmAdd { label, ilm };
+            let ilm_entry = make_ilm_entry(**label, ilm);
+            let msg = rib::Message::IlmAdd {
+                label: **label,
+                ilm: ilm_entry,
+            };
             rib_tx.send(msg).unwrap();
         }
     }
     // Add (new).
-    for (&label, &ref ilm) in diff.only_next.iter() {
+    for (label, ilm) in diff.only_next.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm = make_ilm_entry(label, ilm);
-            let msg = rib::Message::IlmAdd { label, ilm };
+            let ilm_entry = make_ilm_entry(**label, ilm);
+            let msg = rib::Message::IlmAdd {
+                label: **label,
+                ilm: ilm_entry,
+            };
             rib_tx.send(msg).unwrap();
         }
     }

@@ -1,9 +1,9 @@
-use super::peer::{fsm, Event, Peer};
+use super::peer::{Event, Peer, fsm};
 use super::route::{BgpLocalRib, BgpRoute, Route};
 use crate::bgp::peer::accept;
 use crate::bgp::task::Task;
 use crate::config::{
-    path_from_command, Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel,
+    Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 use crate::policy::com_list::CommunityListMap;
 use crate::rib::api::{RibRxChannel, RibTx};

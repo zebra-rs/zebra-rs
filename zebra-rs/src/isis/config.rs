@@ -4,9 +4,9 @@ use isis_packet::{IsLevel, Nsap};
 
 use crate::config::{Args, ConfigOp};
 
-use super::link::Afis;
 use super::Isis;
-use super::{link, Level};
+use super::link::Afis;
+use super::{Level, link};
 
 impl Isis {
     pub fn callback_build(&mut self) {

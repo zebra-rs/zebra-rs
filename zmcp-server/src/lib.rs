@@ -2,7 +2,7 @@ pub mod client;
 pub mod tools;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, warn};
@@ -310,10 +310,12 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 4);
         // Check that this is an error response by looking for error text
-        assert!(response["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Unknown tool"));
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown tool")
+        );
         assert_eq!(response["result"]["isError"], true);
     }
 
@@ -345,10 +347,12 @@ mod tests {
         } else {
             // Error case - connection failed
             assert_eq!(response["result"]["isError"], true);
-            assert!(response["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Error"));
+            assert!(
+                response["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Error")
+            );
         }
     }
 
@@ -372,10 +376,12 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 6);
         // Check that this is an error response by looking for error text
-        assert!(response["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Invalid level"));
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid level")
+        );
     }
 
     #[tokio::test]
@@ -465,10 +471,12 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
         // Check that this is an error response by looking for error text
-        assert!(response["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Unknown tool"));
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown tool")
+        );
         assert_eq!(response["result"]["isError"], true);
     }
 
@@ -506,10 +514,12 @@ mod tests {
         } else {
             // Error case - should fail with connection error, not argument parsing error
             assert_eq!(response["result"]["isError"], true);
-            assert!(response["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Error"));
+            assert!(
+                response["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Error")
+            );
         }
     }
 }
