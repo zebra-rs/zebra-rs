@@ -4,12 +4,12 @@ mod vtysh {
 pub use vtysh::ExecCode;
 
 mod manager;
-pub use manager::event_loop;
 pub use manager::ConfigManager;
+pub use manager::event_loop;
 
 mod serve;
-pub use serve::serve;
 pub use serve::Cli;
+pub use serve::serve;
 
 mod configs;
 pub use configs::Args;

@@ -1,6 +1,6 @@
 use crate::config::{Args, ConfigOp};
 
-use super::{addr::OspfAddr, area::OspfArea, Ospf};
+use super::{Ospf, addr::OspfAddr, area::OspfArea};
 
 #[derive(Default)]
 pub struct OspfNetworkConfig {

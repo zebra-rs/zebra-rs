@@ -1,11 +1,11 @@
 use std::fmt::Write;
 
-use isis_packet::{nlpid_str, IsisHello, IsisTlv, IsisTlvProtoSupported};
+use isis_packet::{IsisHello, IsisTlv, IsisTlvProtoSupported, nlpid_str};
 use serde::Serialize;
 
-use super::{inst::ShowCallback, neigh::Neighbor, Isis};
+use super::{Isis, inst::ShowCallback, neigh::Neighbor};
 
-use crate::isis::{hostname, link, neigh, Level};
+use crate::isis::{Level, hostname, link, neigh};
 use crate::{config::Args, rib::MacAddr, spf};
 
 impl Isis {

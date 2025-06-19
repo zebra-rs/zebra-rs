@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{nlpid_str, IsisHello, IsisSysId};
+use isis_packet::{IsisHello, IsisSysId, nlpid_str};
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 

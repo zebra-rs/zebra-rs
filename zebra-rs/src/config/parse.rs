@@ -8,7 +8,7 @@ use super::nsap::match_nsap_addr;
 use super::util::*;
 use super::vtysh::{CommandPath, YangMatch};
 use super::{Completion, Config, ExecCode};
-use libyang::{range_match, Entry, MinMax, RangeExtract, RangeNode, TypeNode, YangType};
+use libyang::{Entry, MinMax, RangeExtract, RangeNode, TypeNode, YangType, range_match};
 use regex::Regex;
 use std::collections::HashMap;
 use std::rc::Rc;

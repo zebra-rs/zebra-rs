@@ -9,8 +9,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
@@ -22,13 +22,13 @@ use cap::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
 
-use super::cap::{cap_register_send, CapAfiMap};
+use super::BGP_PORT;
+use super::cap::{CapAfiMap, cap_register_send};
 use super::inst::Message;
 use super::route::route_from_peer;
 use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
 use super::task::*;
-use super::BGP_PORT;
-use super::{Bgp, BGP_HOLD_TIME};
+use super::{BGP_HOLD_TIME, Bgp};
 use crate::rib::api::RibTx;
 
 #[derive(Debug, Eq, PartialEq, Clone)]

@@ -124,11 +124,7 @@ fn cache_lookup<'a>(
         cache.insert(*prefix, config_lookup(config, prefix)?);
     }
     let cache = cache.get_mut(prefix)?;
-    if cache.delete {
-        None
-    } else {
-        Some(cache)
-    }
+    if cache.delete { None } else { Some(cache) }
 }
 
 fn config_builder() -> ConfigBuilder {

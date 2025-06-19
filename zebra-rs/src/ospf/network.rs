@@ -7,8 +7,8 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use nix::sys::socket::{self, ControlMessageOwned, SockaddrIn};
 use socket2::Socket;
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::ospf::Message;

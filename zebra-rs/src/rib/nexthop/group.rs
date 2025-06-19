@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 
+use Group::*;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use Group::*;
 
 use crate::rib::entry::RibEntries;
-use crate::rib::resolve::{rib_resolve, Resolve, ResolveOpt};
+use crate::rib::resolve::{Resolve, ResolveOpt, rib_resolve};
 
 use super::NexthopUni;
 

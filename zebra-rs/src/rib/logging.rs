@@ -6,10 +6,10 @@ use clap::{Arg, ValueEnum};
 use serde_json::json;
 use tracing::{Event, Level, Subscriber};
 use tracing_appender::rolling;
-use tracing_subscriber::fmt::format::{Format, FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::fmt::format::{Format, FormatEvent, FormatFields, Writer};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Clone)]
 pub enum LogFormat {
