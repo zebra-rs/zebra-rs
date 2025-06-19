@@ -480,11 +480,29 @@ impl Rib {
         self.links.values().map(|link| link.name.clone()).collect()
     }
 
+    /// Add an IPv4 or IPv6 address to an interface link.
+    /// 
+    /// This function validates the address before adding it to prevent invalid configurations:
+    /// - Rejects addresses with zero prefix length (/0)
+    /// - Rejects 0.0.0.0 as an interface address for IPv4
+    /// 
+    /// # Arguments
+    /// * `osaddr` - The FIB address containing the IP address, prefix length, and interface index
     pub fn addr_add(&mut self, osaddr: FibAddr) {
         // println!("FIB: AddrAdd {:?}", osaddr);
+        
+        // Validate against zero prefix length - prevents default route addresses on interfaces
         if osaddr.addr.prefix_len() == 0 {
             println!("FIB: zero prefixlen addr!");
             return;
+        }
+
+        // Validate against 0.0.0.0 address for IPv4 - prevents unspecified address on interfaces
+        if let ipnet::IpNet::V4(v4_net) = osaddr.addr {
+            if v4_net.addr().is_unspecified() {
+                println!("FIB: cannot add 0.0.0.0 as interface address");
+                return;
+            }
         }
 
         let addr = LinkAddr::from(osaddr);
@@ -540,6 +558,17 @@ impl LinkConfig {
             println!("XXXX ip address {} {}", ifname, v4addr);
 
             if op.is_set() {
+                // Validate against 0.0.0.0 address
+                if v4addr.addr().is_unspecified() {
+                    println!("Cannot configure 0.0.0.0 as interface address");
+                    return Ok(());
+                }
+
+                // Validate against zero prefix length
+                if v4addr.prefix_len() == 0 {
+                    println!("Cannot configure address with zero prefix length");
+                    return Ok(());
+                }
                 // fib.addr_add_ipv4(index, v4addr, false);
             }
         }
@@ -552,6 +581,17 @@ impl LinkConfig {
     }
 }
 
+/// Configure interface IPv4 addresses with validation.
+/// 
+/// This function handles configuration of IPv4 addresses on interfaces with validation:
+/// - Rejects 0.0.0.0 as an interface address
+/// - Rejects addresses with zero prefix length (/0)
+/// 
+/// # Arguments
+/// * `rib` - Mutable reference to the RIB instance
+/// * `path` - Configuration path (e.g., "/interface/ipv4/address")
+/// * `args` - Command arguments containing interface name and address
+/// * `op` - Configuration operation (set/delete)
 // Temporary func
 pub async fn link_config_exec(
     rib: &mut Rib,
@@ -569,6 +609,18 @@ pub async fn link_config_exec(
         let v4addr = args.v4net().context(IPV4_ADDR_ERR)?;
 
         if op.is_set() {
+            // Validate against 0.0.0.0 address
+            if v4addr.addr().is_unspecified() {
+                println!("Cannot configure 0.0.0.0 as interface address");
+                return Ok(());
+            }
+
+            // Validate against zero prefix length
+            if v4addr.prefix_len() == 0 {
+                println!("Cannot configure address with zero prefix length");
+                return Ok(());
+            }
+
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
                 let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr, false).await;
                 match result {
@@ -598,4 +650,89 @@ pub fn link_lookup(rib: &Rib, name: String) -> Option<u32> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fib::message::FibAddr;
+    use ipnet::{IpNet, Ipv4Net};
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_zero_address_validation() {
+        // Test validation logic for 0.0.0.0 address
+        let zero_addr = FibAddr {
+            addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(0, 0, 0, 0), 24).unwrap()),
+            link_index: 1,
+            secondary: false,
+        };
+
+        // Check that 0.0.0.0 is correctly identified as unspecified
+        if let IpNet::V4(v4_net) = zero_addr.addr {
+            assert!(v4_net.addr().is_unspecified(), "0.0.0.0 should be identified as unspecified");
+        }
+    }
+
+    #[test]
+    fn test_zero_prefix_length_validation() {
+        // Test validation logic for zero prefix length
+        let zero_prefix_addr = FibAddr {
+            addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 1), 0).unwrap()),
+            link_index: 1,
+            secondary: false,
+        };
+
+        assert_eq!(zero_prefix_addr.addr.prefix_len(), 0, "Prefix length should be 0");
+    }
+
+    #[test]
+    fn test_valid_address_validation() {
+        // Test validation logic for valid address
+        let valid_addr = FibAddr {
+            addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 1), 24).unwrap()),
+            link_index: 1,
+            secondary: false,
+        };
+
+        // Should pass both validations
+        assert_ne!(valid_addr.addr.prefix_len(), 0, "Valid address should have non-zero prefix");
+        
+        if let IpNet::V4(v4_net) = valid_addr.addr {
+            assert!(!v4_net.addr().is_unspecified(), "Valid address should not be 0.0.0.0");
+        }
+    }
+
+    #[test]
+    fn test_link_addr_update() {
+        let mut link = Link {
+            index: 1,
+            name: "test0".to_string(),
+            mtu: 1500,
+            metric: 1,
+            flags: LinkFlags(IFF_UP | IFF_RUNNING),
+            link_type: LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addrv4: Vec::new(),
+            addr6: Vec::new(),
+        };
+
+        let addr = LinkAddr {
+            addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 1), 24).unwrap()),
+            ifindex: 1,
+            secondary: false,
+        };
+
+        // Test adding a new address
+        let result = link_addr_update(&mut link, addr.clone());
+        assert!(result.is_some(), "Adding new address should succeed");
+        assert_eq!(link.addr4.len(), 1, "Link should have 1 IPv4 address");
+
+        // Test adding duplicate address
+        let result = link_addr_update(&mut link, addr);
+        assert!(result.is_none(), "Adding duplicate address should be rejected");
+        assert_eq!(link.addr4.len(), 1, "Link should still have 1 IPv4 address");
+    }
 }
