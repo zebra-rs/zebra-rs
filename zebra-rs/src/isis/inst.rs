@@ -187,7 +187,7 @@ impl Isis {
     }
 
     pub fn process_msg(&mut self, msg: Message) {
-        isis_info!("{}", msg);
+        // isis_info!("{}", msg);
         match msg {
             Message::Srm(lsp_id, level) => {
                 for (_, link) in self.links.iter() {

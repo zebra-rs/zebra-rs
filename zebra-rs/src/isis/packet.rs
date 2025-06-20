@@ -9,6 +9,7 @@ use isis_packet::{
 
 use crate::isis::Message;
 use crate::isis::inst::lsp_emit;
+use crate::isis::link::DisStatus;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::isis_info;
@@ -87,6 +88,7 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
             for entry in &ext_is_reach.entries {
+                isis_info!("DIS Neighbor ID {} <=> {}", entry.neighbor_id, neighbor_id);
                 if entry.neighbor_id == *neighbor_id {
                     return true;
                 }
@@ -162,22 +164,45 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
 
     // DIS
     if lsp.lsp_id.is_pseudo() {
-        // println!("DIS recv {}", lsp.lsp_id.sys_id());
+        isis_info!("[DIS LSP] recv on link {}", link.state.name);
 
-        if let Some(dis) = &link.state.dis.get(&level) {
-            if link.state.adj.get(&level).is_none() {
-                if lsp.lsp_id.sys_id() == *dis {
-                    // IS Neighbor include my LSP ID.
-                    if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
-                        isis_info!("Adjacency with DIS {}", dis);
-                        *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
-                        isis_info!("XXX LspOriginate from lsp_recv");
-                        link.tx.send(Message::LspOriginate(level)).unwrap();
+        match link.state.dis_status.get(&level) {
+            DisStatus::NotSelected => {
+                isis_info!(
+                    "DIS is not selected on {}, just store {} into LSDB",
+                    link.state.name,
+                    lsp.lsp_id
+                );
+            }
+            DisStatus::Myself => {
+                isis_info!(
+                    "DIS is self on {}, just store {} into LSDB",
+                    link.state.name,
+                    lsp.lsp_id
+                );
+            }
+            DisStatus::Other => {
+                if let Some(lan_id) = &link.state.lan_id.get(&level) {
+                    isis_info!("DIS is other {} on link {}", lan_id, link.state.name);
+                    if link.state.adj.get(&level).is_none() {
+                        isis_info!(
+                            "DIS Adjacency is None, comparing incoming sys_id {} with DIS sys_id {}",
+                            lsp.lsp_id.neighbor_id(),
+                            lan_id
+                        );
+                        if lsp.lsp_id.neighbor_id() == *lan_id {
+                            isis_info!("DIS is accepted, try to find Adj");
+                            // IS Neighbor include my LSP ID.
+                            if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
+                                isis_info!("DIS Adjacency with {}", lan_id);
+                                *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
+                                isis_info!("DIS LspOriginate from lsp_recv");
+                                link.tx.send(Message::LspOriginate(level)).unwrap();
+                            }
+                        }
                     }
                 }
             }
-        } else {
-            isis_info!("DIS sysid is not yet set");
         }
     }
 
@@ -198,10 +223,6 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
     }
 }
 
-struct LspFlag {
-    seq_number: u32,
-}
-
 pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         println!("Link not found {}", ifindex);
@@ -212,7 +233,8 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
-    isis_info!("CSNP recv");
+    isis_info!("CSNP Recv on {}", link.state.name);
+    isis_info!("---------");
 
     let (pdu, level) = match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => (pdu, Level::L1),
@@ -225,27 +247,35 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         return;
     }
 
+    for tlv in &pdu.tlvs {
+        if let IsisTlv::LspEntries(lsps) = tlv {
+            for lsp in &lsps.entries {
+                isis_info!("{}", lsp.lsp_id);
+            }
+        }
+    }
+    isis_info!("---------");
+
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
     let Some(dis) = &link.state.dis.get(&level) else {
-        println!("DIS was yet not selected");
+        isis_info!("CSNP DIS was yet not selected");
         return;
     };
 
     if pdu.source_id != *dis {
-        println!("DIS came from non DIS neighbor");
+        isis_info!("CSNP came from {} non DIS neighbor {}", pdu.source_id, *dis);
         return;
     }
 
     // Local cache for LSDB.
-    let mut lsdb_flags: BTreeMap<IsisLspId, LspFlag> = BTreeMap::new();
+    let mut lsdb_locals: BTreeMap<IsisLspId, u32> = BTreeMap::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
-        let lsp_flag = LspFlag {
-            seq_number: lsa.lsp.seq_number,
-        };
-        lsdb_flags.insert(lsa.lsp.lsp_id.clone(), lsp_flag);
+        lsdb_locals.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
     }
 
+    isis_info!("PSNP plan on {}", link.state.name);
+    isis_info!("---------");
     let mut req = IsisTlvLspEntries::default();
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
@@ -265,16 +295,16 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                             // );
                         }
                     }
-                    continue;
+                    // continue;
                 }
 
                 // Need to check sequence number.
-                match lsdb_flags.get(&lsp.lsp_id) {
+                match lsdb_locals.get(&lsp.lsp_id) {
                     None => {
                         // set_ssn();
                         if lsp.hold_time != 0 {
                             // println!("LSP REQ New: {}", lsp.lsp_id);
-                            isis_info!("CSNP: New Req {}", lsp.lsp_id);
+                            isis_info!("Req: {}", lsp.lsp_id);
                             let mut psnp = lsp.clone();
                             psnp.seq_number = 0;
                             req.entries.push(psnp);
@@ -282,30 +312,38 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                             // println!("LSP REQ New(Purged): {}", lsp.lsp_id);
                         }
                     }
-                    Some(local) if local.seq_number < lsp.seq_number => {
+                    Some(&seq_number) if seq_number < lsp.seq_number => {
                         // set_ssn();
-                        isis_info!("CSNP: Update {}", lsp.lsp_id);
+                        isis_info!("Upd: {}", lsp.lsp_id);
                         let mut psnp = lsp.clone();
                         psnp.seq_number = 0;
                         req.entries.push(psnp);
                     }
-                    Some(local) if local.seq_number > lsp.seq_number => {
-                        // set_srm();
+                    Some(&seq_number) if seq_number > lsp.seq_number => {
+                        let msg = Message::Srm(lsp.lsp_id, level);
+                        top.tx.send(msg);
                     }
-                    Some(local) if lsp.hold_time == 0 => {
+                    Some(&seq_number) if lsp.hold_time == 0 => {
                         // purge_local() set srm();
                     }
                     _ => {
                         // Identical, nothing to do.
                     }
                 }
-                lsdb_flags.remove(&lsp.lsp_id);
+                lsdb_locals.remove(&lsp.lsp_id);
             }
         }
     }
-    if !lsdb_flags.is_empty() {
-        for (key, flag) in lsdb_flags.iter() {
+    isis_info!("---------");
+
+    if !lsdb_locals.is_empty() {
+        // Local need to flood.
+        isis_info!("Flood plan on {}", link.state.name);
+        isis_info!("---------");
+
+        for (key, flag) in lsdb_locals.iter() {
             // Flood.
+            isis_info!("{}", key);
             let lsa = top.lsdb.get(&level).get(key);
             if let Some(lsa) = lsa {
                 let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
@@ -323,6 +361,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 }
             }
         }
+        isis_info!("---------");
     }
     if !req.entries.is_empty() {
         // Send PSNP.
