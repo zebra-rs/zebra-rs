@@ -10,6 +10,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::isis_info;
 use crate::rib::MacAddr;
 
 use super::inst::{Packet, PacketMessage};
@@ -38,6 +39,7 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
             };
 
             let Ok(mut packet) = isis_packet::parse(&input[3..]) else {
+                isis_info!("Error Packet parse");
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 

@@ -178,6 +178,17 @@ pub fn stop(ltop: &mut LinkTop) {
     }
 }
 
+pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
+    let tx = ltop.tx.clone();
+    let ifindex = ltop.state.ifindex;
+    Timer::once(1, move || {
+        let tx = tx.clone();
+        async move {
+            tx.send(Message::DisOriginate(level, ifindex)).unwrap();
+        }
+    })
+}
+
 pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     fn is_better(nbr: &Neighbor, curr_priority: u8, curr_mac: &Option<MacAddr>) -> bool {
         nbr.pdu.priority > curr_priority
@@ -295,6 +306,11 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
     // Record DIS change if status actually changed
     if old_status != new_status || old_sys_id != new_sys_id {
+        // DIS originate.
+        if new_status == DisStatus::Myself {
+            *ltop.timer.dis.get_mut(&level) = Some(dis_timer(ltop, level));
+        }
+
         // Generate LSP.
         isis_info!("LspOriginate from dis_selection");
         ltop.tx.send(Message::LspOriginate(level)).unwrap();
@@ -339,11 +355,6 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     );
     *ltop.state.lan_id.get_mut(&level) = Some(lsp_id.neighbor_id());
     hello_originate(ltop, level);
-
-    // Generate DIS.
-    ltop.tx
-        .send(Message::DisOriginate(level, ltop.state.ifindex))
-        .unwrap();
 
     // Schedule CSNP.
     *ltop.timer.csnp.get_mut(&level) = Some(csnp_timer(ltop, level));

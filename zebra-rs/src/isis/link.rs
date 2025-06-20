@@ -30,6 +30,7 @@ use super::{IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 pub struct LinkTimer {
     pub hello: Levels<Option<Timer>>,
     pub csnp: Levels<Option<Timer>>,
+    pub dis: Levels<Option<Timer>>,
 }
 
 pub struct Graph {}
@@ -657,10 +658,18 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
     let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
     for (ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
-            let dis_status = match link.state.dis_status.get(&Level::L2) {
-                DisStatus::NotSelected => "no DIS is selected",
-                DisStatus::Other => "is not DIS",
-                DisStatus::Myself => "is DIS",
+            let dis_status = if link.state.level == IsLevel::L2 {
+                match link.state.dis_status.get(&Level::L2) {
+                    DisStatus::NotSelected => "no DIS is selected",
+                    DisStatus::Other => "is not DIS",
+                    DisStatus::Myself => "is DIS",
+                }
+            } else {
+                match link.state.dis_status.get(&Level::L1) {
+                    DisStatus::NotSelected => "no DIS is selected",
+                    DisStatus::Other => "is not DIS",
+                    DisStatus::Myself => "is DIS",
+                }
             };
             let link_state = if link.state.is_up() { "Up" } else { "Down" };
             writeln!(
