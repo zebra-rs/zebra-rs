@@ -1,3 +1,43 @@
+2025-06-20  Claude Code  <noreply@anthropic.com>
+
+	* zebra-rs/src/rib/route.rs (rib_add_system_v6, rib_add_system): 
+	Fix IPv6 route show to display multiple connected routes per interface.
+	Connected routes with same prefix on different interfaces now remain
+	separate instead of being merged.
+
+	* zebra-rs/src/rib/route.rs (rib_replace_system_v6, rib_replace_system):
+	Fix IPv6/IPv4 connected route comparison to respect interface index.
+	Connected routes on different interfaces with same prefix now properly
+	coexist instead of replacing each other.
+
+	* rustfmt.toml: Update edition to 2024.
+
+	* zebra-rs/Cargo.toml, zmcp-server/Cargo.toml: Update Rust edition
+	to 2024. Fix compilation issues related to stricter match ergonomics
+	in edition 2024.
+
+	* zebra-rs/src/bgp/route.rs: Implement comprehensive BGP Local RIB
+	(Loc-RIB) system with RFC 4271 compliant best path selection algorithm.
+	Add BgpRoute, BgpLocalRib, BgpAdjRibIn, and BgpAdjRibOut structures.
+
+	* zebra-rs/src/rib/api.rs: Extend RibTx API with RouteAdd/RouteDel
+	variants for BGP route installation to main RIB.
+
+	* zebra-rs/src/rib/inst.rs: Add RIB API message processing to handle
+	BGP route installation and withdrawal.
+
+	* zebra-rs/src/rib/link.rs: Add IPv6 interface address configuration
+	support with comprehensive validation and connected route management.
+
+	* zebra-rs/src/fib/netlink/handle.rs: Add addr_add_ipv6 and 
+	addr_del_ipv6 functions for IPv6 address management.
+
+	* zebra-rs/src/rib/nexthop/inst.rs: Convert NexthopUni from Ipv4Addr
+	to IpAddr for IPv4/IPv6 dual-stack support.
+
+	* zebra-rs/src/rib/inst.rs: Add comprehensive IPv6 RIB support with
+	separate IPv6 table and message handling.
+
 2025-06-15  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.0
