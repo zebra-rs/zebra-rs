@@ -432,6 +432,12 @@ fn rib_rtype(entries: &[RibEntry], rtype: RibType) -> Option<usize> {
     entries.iter().position(|e| e.rtype == rtype)
 }
 
+fn rib_rtype_ifindex(entries: &[RibEntry], rtype: RibType, ifindex: u32) -> Option<usize> {
+    entries
+        .iter()
+        .position(|e| e.rtype == rtype && e.ifindex == ifindex)
+}
+
 fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = table.entry(*prefix).or_default();
     entries.push(entry);
@@ -439,7 +445,12 @@ fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: 
 
 fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = table.entry(*prefix).or_default();
-    let index = rib_rtype(entries, entry.rtype);
+    let index = if entry.is_connected() {
+        // For connected routes, check both type and interface index
+        rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
+    } else {
+        rib_rtype(entries, entry.rtype)
+    };
     match index {
         None => {
             entries.push(entry);
@@ -659,7 +670,12 @@ fn rib_add_system_v6(
     entry: RibEntry,
 ) {
     let entries = table.entry(*prefix).or_default();
-    let index = rib_rtype(entries, entry.rtype);
+    let index = if entry.is_connected() {
+        // For connected routes, check both type and interface index
+        rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
+    } else {
+        rib_rtype(entries, entry.rtype)
+    };
     match index {
         None => {
             entries.push(entry);
