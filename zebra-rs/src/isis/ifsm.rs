@@ -308,6 +308,8 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         // DIS originate.
         if new_status == DisStatus::Myself {
             *ltop.timer.dis.get_mut(&level) = Some(dis_timer(ltop, level));
+        } else {
+            *ltop.timer.dis.get_mut(&level) = None;
         }
 
         // Generate LSP.
@@ -338,7 +340,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Generate DIS pseudo node id.
     let pseudo_id: u8 = ltop.state.ifindex as u8;
     let lsp_id = IsisLspId::new(ltop.up_config.net.sys_id(), pseudo_id, 0);
-    isis_info!("YYY Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
+    isis_info!("Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
 
     // Set myself as DIS.
     *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
@@ -348,7 +350,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
 
     // Set LAN ID then generate hello.
     isis_info!(
-        "YYY Set DIS LAN_ID {} on {}",
+        "Set DIS LAN_ID {} on {}",
         lsp_id.neighbor_id(),
         ltop.state.name
     );
