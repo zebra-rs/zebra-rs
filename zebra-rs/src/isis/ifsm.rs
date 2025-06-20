@@ -308,8 +308,10 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         // DIS originate.
         if new_status == DisStatus::Myself {
             *ltop.timer.dis.get_mut(&level) = Some(dis_timer(ltop, level));
+            *ltop.timer.csnp.get_mut(&level) = Some(csnp_timer(ltop, level));
         } else {
             *ltop.timer.dis.get_mut(&level) = None;
+            *ltop.timer.csnp.get_mut(&level) = None;
         }
 
         // Generate LSP.
@@ -356,9 +358,6 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     );
     *ltop.state.lan_id.get_mut(&level) = Some(lsp_id.neighbor_id());
     hello_originate(ltop, level);
-
-    // Schedule CSNP.
-    *ltop.timer.csnp.get_mut(&level) = Some(csnp_timer(ltop, level));
 }
 
 pub fn drop_dis(ltop: &mut LinkTop, level: Level) {
