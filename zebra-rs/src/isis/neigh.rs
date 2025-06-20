@@ -223,6 +223,11 @@ pub fn show_detail(top: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, link) in top.links.iter() {
+        // Show Level-1 neighbors
+        for (_, adj) in &link.state.nbrs.l1 {
+            show_entry(&mut buf, top, adj);
+        }
+        // Show Level-2 neighbors
         for (_, adj) in &link.state.nbrs.l2 {
             show_entry(&mut buf, top, adj);
         }
