@@ -150,10 +150,10 @@ impl Bgp {
         match TcpListener::bind("0.0.0.0:179").await {
             Ok(listener) => {
                 ipv4_bound = true;
-                println!("Successfully bound to IPv4 0.0.0.0:179");
+                // println!("Successfully bound to IPv4 0.0.0.0:179");
                 let tx_ipv4 = tx.clone();
                 self.listen_task = Some(Task::spawn(async move {
-                    println!("BGP listening on 0.0.0.0:179");
+                    // println!("BGP listening on 0.0.0.0:179");
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
@@ -179,10 +179,10 @@ impl Bgp {
         match create_ipv6_listener() {
             Ok(listener) => {
                 ipv6_bound = true;
-                println!("Successfully bound to IPv6 [::]:179");
+                // println!("Successfully bound to IPv6 [::]:179");
                 let tx_ipv6 = tx_clone;
                 self.listen_task6 = Some(Task::spawn(async move {
-                    println!("BGP listening on [::]:179");
+                    // println!("BGP listening on [::]:179");
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
