@@ -110,10 +110,12 @@ pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
 }
 
 pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
-    isis_info!("CSNP Send");
+    isis_info!("CSNP Send on {}", ltop.state.name);
+    isis_info!("---------");
 
     let mut lsp_entries = IsisTlvLspEntries::default();
     for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
+        isis_info!("LSP: {}", lsp_id);
         let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
         let entry = IsisLspEntry {
             hold_time,
@@ -139,6 +141,7 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     let ifindex = ltop.state.ifindex;
     ltop.ptx
         .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
+    isis_info!("---------");
     Ok(())
 }
 
@@ -175,6 +178,17 @@ pub fn stop(ltop: &mut LinkTop) {
     }
 }
 
+pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
+    let tx = ltop.tx.clone();
+    let ifindex = ltop.state.ifindex;
+    Timer::once(1, move || {
+        let tx = tx.clone();
+        async move {
+            tx.send(Message::DisOriginate(level, ifindex)).unwrap();
+        }
+    })
+}
+
 pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     fn is_better(nbr: &Neighbor, curr_priority: u8, curr_mac: &Option<MacAddr>) -> bool {
         nbr.pdu.priority > curr_priority
@@ -185,15 +199,15 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
                 })
     }
 
-    // Check if DIS selection is dampened
-    if ltop.state.dis_stats.get(&level).is_dampened() {
-        isis_debug!(
-            "DIS selection dampened on {} level {}",
-            ltop.state.name,
-            level
-        );
-        return;
-    }
+    // Check if IS selection is dampened
+    // if ltop.state.dis_stats.get(&level).is_dampened() {
+    //     isis_debug!(
+    //         "DIS selection dampened on {} level {}",
+    //         ltop.state.name,
+    //         level
+    //     );
+    //     return;
+    // }
 
     // Store current DIS state for tracking
     let old_status = *ltop.state.dis_status.get(&level);
@@ -230,9 +244,14 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             nbr.dis = true;
             let status = DisStatus::Other;
             let sys_id = Some(nbr.sys_id.clone());
+            let mac_str = if let Some(mac) = nbr.mac {
+                format!("{}", mac)
+            } else {
+                "".to_string()
+            };
             let reason = format!(
-                "Neighbor {} elected (priority: {}, mac: {:?})",
-                nbr.sys_id, nbr.pdu.priority, nbr.mac
+                "Neighbor {} elected (priority: {}, mac: {})",
+                nbr.sys_id, nbr.pdu.priority, mac_str,
             );
 
             isis_info!(
@@ -244,12 +263,20 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             );
 
             *ltop.state.dis_status.get_mut(&level) = status.clone();
+            // Only here.
+            isis_info!(
+                "DIS sysid is set to {} on link {}",
+                nbr.sys_id,
+                ltop.state.name
+            );
             *ltop.state.dis.get_mut(&level) = sys_id.clone();
 
             if ltop.state.lan_id.get(&level).is_none() {
+                use IfsmEvent::*;
                 if !nbr.pdu.lan_id.is_empty() {
                     isis_info!("DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
                     *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
+                    nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
                 } else {
                     isis_debug!("DIS waiting for LAN Id in Hello packet");
                 }
@@ -279,6 +306,15 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
     // Record DIS change if status actually changed
     if old_status != new_status || old_sys_id != new_sys_id {
+        // DIS originate.
+        if new_status == DisStatus::Myself {
+            *ltop.timer.dis.get_mut(&level) = Some(dis_timer(ltop, level));
+        }
+
+        // Generate LSP.
+        isis_info!("LspOriginate from dis_selection");
+        ltop.tx.send(Message::LspOriginate(level)).unwrap();
+
         ltop.state
             .dis_stats
             .get_mut(&level)
@@ -303,7 +339,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Generate DIS pseudo node id.
     let pseudo_id: u8 = ltop.state.ifindex as u8;
     let lsp_id = IsisLspId::new(ltop.up_config.net.sys_id(), pseudo_id, 0);
-    isis_info!("Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
+    isis_info!("YYY Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
 
     // Set myself as DIS.
     *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
@@ -312,17 +348,13 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     *ltop.state.adj.get_mut(&level) = Some(lsp_id.neighbor_id());
 
     // Set LAN ID then generate hello.
+    isis_info!(
+        "YYY Set DIS LAN_ID {} on {}",
+        lsp_id.neighbor_id(),
+        ltop.state.name
+    );
     *ltop.state.lan_id.get_mut(&level) = Some(lsp_id.neighbor_id());
     hello_originate(ltop, level);
-
-    // Generate LSP.
-    isis_info!("LspOriginate from become_dis");
-    ltop.tx.send(Message::LspOriginate(level)).unwrap();
-
-    // Generate DIS.
-    ltop.tx
-        .send(Message::DisOriginate(level, ltop.state.ifindex))
-        .unwrap();
 
     // Schedule CSNP.
     *ltop.timer.csnp.get_mut(&level) = Some(csnp_timer(ltop, level));
