@@ -230,9 +230,14 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             nbr.dis = true;
             let status = DisStatus::Other;
             let sys_id = Some(nbr.sys_id.clone());
+            let mac_str = if let Some(mac) = nbr.mac {
+                format!("{}", mac)
+            } else {
+                "".to_string()
+            };
             let reason = format!(
-                "Neighbor {} elected (priority: {}, mac: {:?})",
-                nbr.sys_id, nbr.pdu.priority, nbr.mac
+                "Neighbor {} elected (priority: {}, mac: {})",
+                nbr.sys_id, nbr.pdu.priority, mac_str,
             );
 
             isis_info!(
