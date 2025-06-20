@@ -66,18 +66,17 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
         );
     }
 
+    let mut neighbors = Vec::new();
     for (_, nbr) in ltop.state.nbrs.get(&level).iter() {
         if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
             if let Some(mac) = nbr.mac {
-                hello.tlvs.push(
-                    IsisTlvIsNeighbor {
-                        octets: mac.octets(),
-                    }
-                    .into(),
-                );
+                neighbors.push(NeighborAddr {
+                    octets: mac.octets(),
+                })
             }
         }
     }
+    hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
     if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(ltop.state.mtu as usize);
     }
