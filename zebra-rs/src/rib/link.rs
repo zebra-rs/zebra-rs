@@ -516,7 +516,7 @@ impl Rib {
                 match addr.addr {
                     IpNet::V4(v4_addr) => {
                         let prefix = v4_addr.apply_mask();
-                        println!("Connected: {:?} - adding to RIB (interface up)", prefix);
+                        // println!("Connected: {:?} - adding to RIB (interface up)", prefix);
                         let mut rib = RibEntry::new(RibType::Connected);
                         rib.ifindex = addr.ifindex;
                         rib.set_valid(true);
@@ -525,10 +525,10 @@ impl Rib {
                     }
                     IpNet::V6(v6_addr) => {
                         let prefix = v6_addr.apply_mask();
-                        println!(
-                            "Connected IPv6: {:?} - adding to RIB (interface up)",
-                            prefix
-                        );
+                        // println!(
+                        //     "Connected IPv6: {:?} - adding to RIB (interface up)",
+                        //     prefix
+                        // );
                         let mut rib = RibEntry::new(RibType::Connected);
                         rib.ifindex = addr.ifindex;
                         rib.set_valid(true);
@@ -550,10 +550,10 @@ impl Rib {
                 match addr.addr {
                     IpNet::V4(v4_addr) => {
                         let prefix = v4_addr.apply_mask();
-                        println!(
-                            "Connected: {:?} - removing from RIB (address deleted)",
-                            prefix
-                        );
+                        // println!(
+                        //     "Connected: {:?} - removing from RIB (address deleted)",
+                        //     prefix
+                        // );
                         let mut rib = RibEntry::new(RibType::Connected);
                         rib.ifindex = addr.ifindex;
                         let msg = Message::Ipv4Del { prefix, rib };
@@ -561,10 +561,10 @@ impl Rib {
                     }
                     IpNet::V6(v6_addr) => {
                         let prefix = v6_addr.apply_mask();
-                        println!(
-                            "Connected IPv6: {:?} - removing from RIB (address deleted)",
-                            prefix
-                        );
+                        // println!(
+                        //     "Connected IPv6: {:?} - removing from RIB (address deleted)",
+                        //     prefix
+                        // );
                         let mut rib = RibEntry::new(RibType::Connected);
                         rib.ifindex = addr.ifindex;
                         let msg = Message::Ipv6Del { prefix, rib };

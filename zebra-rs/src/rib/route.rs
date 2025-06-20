@@ -19,13 +19,13 @@ impl Rib {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        println!("link down: {}", link.name);
+        // println!("link down: {}", link.name);
 
         // Remove connected route.
         for addr4 in link.addr4.iter() {
             if let IpNet::V4(addr) = addr4.addr {
                 let prefix = addr.apply_mask();
-                println!("Connected: {:?} down - removing from RIB", prefix);
+                // println!("Connected: {:?} down - removing from RIB", prefix);
                 let mut rib = RibEntry::new(RibType::Connected);
                 rib.ifindex = ifindex;
                 let msg = Message::Ipv4Del { prefix, rib };
@@ -36,7 +36,7 @@ impl Rib {
         for addr6 in link.addr6.iter() {
             if let IpNet::V6(addr) = addr6.addr {
                 let prefix = addr.apply_mask();
-                println!("Connected IPv6: {:?} down - removing from RIB", prefix);
+                // println!("Connected IPv6: {:?} down - removing from RIB", prefix);
                 let mut rib = RibEntry::new(RibType::Connected);
                 rib.ifindex = ifindex;
                 let msg = Message::Ipv6Del { prefix, rib };
@@ -107,13 +107,13 @@ impl Rib {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        println!("link up {}", link.name);
+        // println!("link up {}", link.name);
 
         // Add connected IPv4 routes when link comes up
         for addr4 in link.addr4.iter() {
             if let IpNet::V4(addr) = addr4.addr {
                 let prefix = addr.apply_mask();
-                println!("Connected: {:?} up - adding to RIB", prefix);
+                // println!("Connected: {:?} up - adding to RIB", prefix);
                 let mut rib = RibEntry::new(RibType::Connected);
                 rib.ifindex = ifindex;
                 rib.set_valid(true);
@@ -126,7 +126,7 @@ impl Rib {
         for addr6 in link.addr6.iter() {
             if let IpNet::V6(addr) = addr6.addr {
                 let prefix = addr.apply_mask();
-                println!("Connected IPv6: {:?} up - adding to RIB", prefix);
+                // println!("Connected IPv6: {:?} up - adding to RIB", prefix);
                 let mut rib = RibEntry::new(RibType::Connected);
                 rib.ifindex = ifindex;
                 rib.set_valid(true);
@@ -159,7 +159,7 @@ impl Rib {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             self.rib_selection(prefix, replace.pop()).await;
         } else {
-            println!("System route remove");
+            // println!("System route remove");
             let mut replace = rib_replace_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         }
@@ -207,7 +207,7 @@ impl Rib {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             self.rib_selection_v6(prefix, replace.pop()).await;
         } else {
-            println!("IPv6 System route remove");
+            // println!("IPv6 System route remove");
             let mut replace = rib_replace_system_v6(&mut self.table_v6, prefix, entry);
             self.rib_selection_v6(prefix, replace.pop()).await;
         }
@@ -478,7 +478,7 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                     let mut btree = BTreeMap::new();
 
                     for l in list.nexthops.iter() {
-                        println!("");
+                        // println!("");
                         btree.insert(l.metric, l.clone());
                     }
 
@@ -703,7 +703,7 @@ fn rib_add_system_v6(
                     let mut btree = BTreeMap::new();
 
                     for l in list.nexthops.iter() {
-                        println!("");
+                        // println!("");
                         btree.insert(l.metric, l.clone());
                     }
 
