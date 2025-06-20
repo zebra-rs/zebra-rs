@@ -1,4 +1,6 @@
-2025-06-20  Claude Code  <noreply@anthropic.com>
+2025-06-19  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.7.1
 
 	* zebra-rs/src/rib/route.rs (rib_add_system_v6, rib_add_system): 
 	Fix IPv6 route show to display multiple connected routes per interface.
