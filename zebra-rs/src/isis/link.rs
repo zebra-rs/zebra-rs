@@ -657,15 +657,21 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
     let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
     for (ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
+            let dis_status = match link.state.dis_status.get(&Level::L2) {
+                DisStatus::NotSelected => "no DIS is selected",
+                DisStatus::Other => "is not DIS",
+                DisStatus::Myself => "is DIS",
+            };
             let link_state = if link.state.is_up() { "Up" } else { "Down" };
             writeln!(
                 buf,
-                "  {:<11} 0x{:02X}     {:<8} {:<8} {}",
+                "  {:<11} 0x{:02X}     {:<8} {:<8} {} {}",
                 link.state.name,
                 link.state.ifindex,
                 link_state,
                 link.config.link_type().to_string(),
-                link.state.level
+                link.state.level,
+                dis_status,
             )
             .unwrap();
         }
@@ -749,6 +755,18 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) {
         dis_status
     )
     .unwrap();
+
+    // DIS Lan ID.
+    if let Some(lan_id) = link.state.lan_id.get(&level) {
+        writeln!(buf, "    LAN ID: {}", lan_id);
+    } else {
+        writeln!(buf, "    LAN ID: Not set");
+    }
+
+    // Hello.
+    if let Some(hello) = link.state.hello.get(&level) {
+        writeln!(buf, "    {}", hello);
+    }
 }
 
 fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
