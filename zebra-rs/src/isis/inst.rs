@@ -470,7 +470,6 @@ impl Isis {
                     self.process_cm_msg(msg);
                 }
                 Some(msg) = self.show.rx.recv() => {
-                    println!("XXX Show {:?}", msg);
                     self.process_show_msg(msg).await;
                 }
                 Some(msg) = self.rx.recv() => {

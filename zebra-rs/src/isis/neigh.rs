@@ -96,7 +96,7 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
         for (_, nbr) in &link.state.nbrs.l1 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id =
-                if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.pdu.source_id) {
+                if let Some((hostname, _)) = top.hostname.get(&Level::L1).get(&nbr.pdu.source_id) {
                     hostname.clone()
                 } else {
                     nbr.pdu.source_id.to_string()
@@ -147,13 +147,12 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
     buf
 }
 
-fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor) {
-    let system_id =
-        if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.pdu.source_id) {
-            hostname.clone()
-        } else {
-            nbr.pdu.source_id.to_string()
-        };
+fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) {
+    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.pdu.source_id) {
+        hostname.clone()
+    } else {
+        nbr.pdu.source_id.to_string()
+    };
     writeln!(buf, " {}", system_id).unwrap();
 
     writeln!(
@@ -225,11 +224,11 @@ pub fn show_detail(top: &Isis, _args: Args, _json: bool) -> String {
     for (_, link) in top.links.iter() {
         // Show Level-1 neighbors
         for (_, adj) in &link.state.nbrs.l1 {
-            show_entry(&mut buf, top, adj);
+            show_entry(&mut buf, top, adj, Level::L1);
         }
         // Show Level-2 neighbors
         for (_, adj) in &link.state.nbrs.l2 {
-            show_entry(&mut buf, top, adj);
+            show_entry(&mut buf, top, adj, Level::L2);
         }
     }
 
