@@ -9,6 +9,7 @@ use isis_packet::{
 
 use crate::isis::Message;
 use crate::isis::inst::lsp_emit;
+use crate::isis::link::DisStatus;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::isis_info;
@@ -87,6 +88,7 @@ pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool 
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
             for entry in &ext_is_reach.entries {
+                isis_info!("DIS Neighbor ID {} <=> {}", entry.neighbor_id, neighbor_id);
                 if entry.neighbor_id == *neighbor_id {
                     return true;
                 }
@@ -162,26 +164,45 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
 
     // DIS
     if lsp.lsp_id.is_pseudo() {
-        isis_info!("YYY Pseudo LSP recv on link {}", link.state.name);
+        isis_info!("[DIS LSP] recv on link {}", link.state.name);
 
-        if let Some(dis) = &link.state.dis.get(&level) {
-            if link.state.adj.get(&level).is_none() {
-                if lsp.lsp_id.sys_id() == *dis {
-                    // IS Neighbor include my LSP ID.
-                    if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
-                        isis_info!("Adjacency with DIS {}", dis);
-                        *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
-                        isis_info!("XXX LspOriginate from lsp_recv");
-                        link.tx.send(Message::LspOriginate(level)).unwrap();
+        match link.state.dis_status.get(&level) {
+            DisStatus::NotSelected => {
+                isis_info!(
+                    "DIS is not selected on {}, just store {} into LSDB",
+                    link.state.name,
+                    lsp.lsp_id
+                );
+            }
+            DisStatus::Myself => {
+                isis_info!(
+                    "DIS is self on {}, just store {} into LSDB",
+                    link.state.name,
+                    lsp.lsp_id
+                );
+            }
+            DisStatus::Other => {
+                if let Some(lan_id) = &link.state.lan_id.get(&level) {
+                    isis_info!("DIS is other {} on link {}", lan_id, link.state.name);
+                    if link.state.adj.get(&level).is_none() {
+                        isis_info!(
+                            "DIS Adjacency is None, comparing incoming sys_id {} with DIS sys_id {}",
+                            lsp.lsp_id.neighbor_id(),
+                            lan_id
+                        );
+                        if lsp.lsp_id.neighbor_id() == *lan_id {
+                            isis_info!("DIS is accepted, try to find Adj");
+                            // IS Neighbor include my LSP ID.
+                            if lsp_has_neighbor_id(&lsp, &top.config.net.neighbor_id()) {
+                                isis_info!("DIS Adjacency with {}", lan_id);
+                                *link.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
+                                isis_info!("DIS LspOriginate from lsp_recv");
+                                link.tx.send(Message::LspOriginate(level)).unwrap();
+                            }
+                        }
                     }
                 }
             }
-        } else {
-            isis_info!(
-                "Link {} is DIS, just store {} into LSDB",
-                link.state.name,
-                lsp.lsp_id
-            );
         }
     }
 

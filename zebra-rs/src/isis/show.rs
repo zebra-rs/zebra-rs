@@ -479,6 +479,15 @@ fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
 
     for (_, link) in top.links.iter() {
+        if let Some(dis) = &link.state.dis.l1 {
+            writeln!(buf, "Interface: {}", top.ifname(link.state.ifindex)).unwrap();
+            writeln!(buf, "  DIS: {}", dis);
+            if let Some(adj) = &link.state.adj.get(&Level::L1) {
+                writeln!(buf, "  Adj: {}", adj).unwrap();
+            } else {
+                writeln!(buf, "  Adj: N/A").unwrap();
+            }
+        }
         if let Some(dis) = &link.state.dis.l2 {
             writeln!(buf, "Interface: {}", top.ifname(link.state.ifindex)).unwrap();
             writeln!(buf, "  DIS: {}", dis);
