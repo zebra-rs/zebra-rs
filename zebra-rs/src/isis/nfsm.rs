@@ -192,7 +192,7 @@ pub fn nfsm_hello_received(
 
     let mut state = nbr.state;
 
-    isis_info!("NBR Hello received");
+    isis_info!("NBR Hello received on {} from {}", nbr.ifindex, nbr.sys_id);
 
     if state == NfsmState::Down {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
