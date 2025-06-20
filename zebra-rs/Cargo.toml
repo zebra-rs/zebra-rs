@@ -1,6 +1,6 @@
 [package]
 name = "zebra-rs"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 
 [lints.rust]
