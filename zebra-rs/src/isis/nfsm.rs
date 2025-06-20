@@ -95,8 +95,10 @@ fn nfsm_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
 
     for tlv in &pdu.tlvs {
         if let IsisTlv::IsNeighbor(neigh) = tlv {
-            if addr.octets() == neigh.octets() {
-                return true;
+            for neighbor in neigh.neighbors.iter() {
+                if addr.octets() == neighbor.octets {
+                    return true;
+                }
             }
         }
     }
