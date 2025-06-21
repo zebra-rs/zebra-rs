@@ -170,7 +170,11 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     writeln!(buf, "Interface: {}", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
     if link.link_type == LinkType::Ethernet {
-        writeln!(buf, "<macaddress>").unwrap();
+        if let Some(mac) = link.mac {
+            writeln!(buf, " {}", mac).unwrap();
+        } else {
+            writeln!(buf).unwrap();
+        }
     } else {
         writeln!(buf).unwrap();
     }
