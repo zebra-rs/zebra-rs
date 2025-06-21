@@ -1,3 +1,45 @@
+2025-06-21  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* zebra-rs/src/isis/ifsm.rs (csnp_send): Fix ISIS CSNP packet
+	generation to limit LSP entries to 15 per TLV as required by
+	protocol specification. Add proper TLV splitting logic.
+
+	* zebra-rs/src/rib/link.rs (link_info_show): Fix "show interface"
+	command to display actual MAC addresses instead of placeholder text.
+	Now shows properly formatted MAC addresses like "86:44:42:37:a4:be".
+
+	* zebra-rs/src/isis/socket.rs (isis_socket): Implement per-interface
+	IS-IS sockets. Each interface now has its own dedicated socket for
+	improved isolation and performance.
+
+	* zebra-rs/src/isis/link.rs: Add socket field to IsisLink structure
+	for per-interface packet handling.
+
+	* zebra-rs/src/isis/ifsm.rs (hello_generate): Fix ISIS IsNeighbor
+	TLV handling to properly create single TLV containing all neighbors
+	instead of multiple TLVs.
+
+	* zebra-rs/src/isis/nfsm.rs (nfsm_hello_has_mac): Fix to iterate
+	through neighbors vector within TLV structure.
+
+	* zebra-rs/src/isis/ifsm.rs (dis_timer): Add DIS timer management
+	for proper DIS origination scheduling after becoming DIS.
+
+	* zebra-rs/src/isis/packet.rs (lsp_recv): Improve DIS LSP processing
+	with enhanced state tracking and debug logging.
+
+	* zebra-rs/src/isis/show.rs (show_isis_adjacency): Add Level-1 DIS
+	information display alongside Level-2.
+
+	* zebra-rs/src/isis/neigh.rs (show_detail): Fix to display both
+	Level-1 and Level-2 ISIS neighbors in detailed view.
+
+	* zebra-rs/src/isis/neigh.rs (show): Fix Level-1 neighbor hostname
+	display to use correct L1 hostname table instead of L2.
+
+	* zebra-rs/src/rib/route.rs, zebra-rs/src/isis/inst.rs: Remove
+	debug println statements for cleaner production output.
+
 2025-06-19  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.1
