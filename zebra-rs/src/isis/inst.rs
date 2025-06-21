@@ -50,7 +50,7 @@ pub struct Isis {
     pub ctx: Context,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    pub ptx: UnboundedSender<PacketMessage>,
+    // pub ptx: UnboundedSender<PacketMessage>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
     pub rib_tx: UnboundedSender<rib::Message>,
@@ -58,7 +58,7 @@ pub struct Isis {
     pub links: IsisLinks,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    pub sock: Arc<AsyncFd<Socket>>,
+    // pub sock: Arc<AsyncFd<Socket>>,
     pub config: IsisConfig,
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
@@ -106,15 +106,15 @@ impl Isis {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
-        let sock = Arc::new(AsyncFd::new(isis_socket().unwrap()).unwrap());
+        // let sock = Arc::new(AsyncFd::new(isis_socket().unwrap()).unwrap());
 
         let (tx, rx) = mpsc::unbounded_channel();
-        let (ptx, prx) = mpsc::unbounded_channel();
+        // let (ptx, prx) = mpsc::unbounded_channel();
         let mut isis = Self {
             ctx,
             tx,
             rx,
-            ptx,
+            // ptx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
@@ -122,7 +122,7 @@ impl Isis {
             links: IsisLinks::default(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            sock,
+            // sock,
             config: IsisConfig::default(),
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
@@ -140,14 +140,14 @@ impl Isis {
         isis.show_build();
 
         let tx = isis.tx.clone();
-        let sock = isis.sock.clone();
-        tokio::spawn(async move {
-            read_packet(sock, tx).await;
-        });
-        let sock = isis.sock.clone();
-        tokio::spawn(async move {
-            write_packet(sock, prx).await;
-        });
+        // let sock = isis.sock.clone();
+        // tokio::spawn(async move {
+        //     read_packet(sock, tx).await;
+        // });
+        // let sock = isis.sock.clone();
+        // tokio::spawn(async move {
+        //     write_packet(sock, prx).await;
+        // });
         isis
     }
 
@@ -501,7 +501,7 @@ impl Isis {
     pub fn link_top<'a>(&'a mut self, ifindex: u32) -> Option<LinkTop<'a>> {
         self.links.get_mut(&ifindex).map(|link| LinkTop {
             tx: &self.tx,
-            ptx: &self.ptx,
+            ptx: &link.ptx,
             up_config: &self.config,
             lsdb: &self.lsdb,
             flags: &link.flags,
