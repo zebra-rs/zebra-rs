@@ -24,11 +24,11 @@ license: "MIT"
 changelog: "changelog.yaml"
 contents:
   - src: ../target/release/zebra-rs
-    dst: /usr/sbin/zebra-rs
+    dst: /usr/bin/zebra-rs
   - src: ../target/release/zctl
-    dst: /usr/sbin/zctl
+    dst: /usr/bin/zctl
   - src: ../target/release/zmcp-server
-    dst: /usr/sbin/zmcp-server
+    dst: /usr/bin/zmcp-server
   - src: ../cli/cli
     dst: /usr/bin/cli
   - src: ../target/release/cli-helper
