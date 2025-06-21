@@ -8,7 +8,7 @@ User=root
 Group=root
 StandardOutput=syslog
 StandardError=syslog
-ExecStart=/usr/sbin/zebra-rs
+ExecStart=/usr/bin/zebra-rs
 ExecStop=/bin/kill -INT ${MAINPID}
 Restart=always
 
