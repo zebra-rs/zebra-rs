@@ -1,15 +1,18 @@
 use serde::Serialize;
+use socket2::Socket;
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, IterMut};
 use std::default;
 use std::fmt::Write;
+use std::sync::Arc;
+use tokio::io::unix::AsyncFd;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::{
     IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
     IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType, SidLabelValue,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::isis_warn;
 
@@ -23,6 +26,8 @@ use super::config::IsisConfig;
 use super::ifsm::has_level;
 use super::inst::PacketMessage;
 use super::neigh::Neighbor;
+use super::network::{read_packet, write_packet};
+use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
 use super::{IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 
@@ -102,6 +107,7 @@ impl IsisLinks {
 pub struct IsisLink {
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<PacketMessage>,
+    pub sock: Arc<AsyncFd<Socket>>,
     pub flags: LinkFlags,
     pub config: LinkConfig,
     pub state: LinkState,
@@ -408,14 +414,13 @@ pub struct LinkStats {
 }
 
 impl IsisLink {
-    pub fn from(
-        link: Link,
-        tx: UnboundedSender<Message>,
-        ptx: UnboundedSender<PacketMessage>,
-    ) -> Self {
+    pub fn from(link: Link, tx: UnboundedSender<Message>) -> Self {
+        let sock = Arc::new(AsyncFd::new(isis_socket(link.index).unwrap()).unwrap());
+        let (ptx, prx) = mpsc::unbounded_channel();
         let mut is_link = Self {
-            tx,
+            tx: tx.clone(),
             ptx,
+            sock,
             flags: link.flags,
             config: LinkConfig::default(),
             state: LinkState::default(),
@@ -425,6 +430,17 @@ impl IsisLink {
         is_link.state.name = link.name.to_owned();
         is_link.state.mtu = link.mtu;
         is_link.state.mac = link.mac;
+        // Socket for read/write per interface.
+        let sock = is_link.sock.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            read_packet(sock, tx).await;
+        });
+        let sock = is_link.sock.clone();
+        tokio::spawn(async move {
+            write_packet(sock, prx).await;
+        });
+
         is_link
     }
 }
@@ -435,7 +451,7 @@ impl Isis {
         if let Some(_link) = self.links.get_mut(&link.index) {
             //
         } else {
-            let mut link = IsisLink::from(link, self.tx.clone(), self.ptx.clone());
+            let mut link = IsisLink::from(link, self.tx.clone());
             self.links.insert(link.state.ifindex, link);
         }
     }
