@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bytes::BytesMut;
 use isis_packet::*;
 
 use crate::isis::link::DisStatus;
@@ -112,7 +113,19 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     isis_info!("CSNP Send on {}", ltop.state.name);
     isis_info!("---------");
 
+    const MAX_LSP_ENTRIES_PER_TLV: usize = 15;
     let mut lsp_entries = IsisTlvLspEntries::default();
+    let mut entry_count = 0;
+
+    let mut csnp = IsisCsnp {
+        pdu_len: 0,
+        source_id: ltop.up_config.net.sys_id().clone(),
+        source_id_circuit: 0,
+        start: IsisLspId::start(),
+        end: IsisLspId::end(),
+        tlvs: vec![],
+    };
+
     for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
         isis_info!("LSP: {}", lsp_id);
         let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
@@ -123,16 +136,21 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
             checksum: lsa.lsp.checksum,
         };
         lsp_entries.entries.push(entry);
+        entry_count += 1;
+
+        // If we've reached the limit, push this TLV and start a new one
+        if entry_count >= MAX_LSP_ENTRIES_PER_TLV {
+            csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
+            lsp_entries = IsisTlvLspEntries::default();
+            entry_count = 0;
+        }
     }
-    let mut csnp = IsisCsnp {
-        pdu_len: 0,
-        source_id: ltop.up_config.net.sys_id().clone(),
-        source_id_circuit: 0,
-        start: IsisLspId::start(),
-        end: IsisLspId::end(),
-        tlvs: vec![],
-    };
-    csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
+
+    // Don't forget to add the last TLV if it has any entries
+    if !lsp_entries.entries.is_empty() {
+        csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
+    }
+
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(csnp.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(csnp.clone())),
