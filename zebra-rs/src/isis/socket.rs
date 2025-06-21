@@ -30,7 +30,7 @@ const fn bpf_filter_block(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filte
     libc::sock_filter { code, jt, jf, k }
 }
 
-pub fn isis_socket() -> Result<Socket, std::io::Error> {
+pub fn isis_socket(ifindex: u32) -> Result<Socket, std::io::Error> {
     let socket = Socket::new(
         Domain::PACKET,
         Type::DGRAM,
@@ -39,7 +39,7 @@ pub fn isis_socket() -> Result<Socket, std::io::Error> {
 
     socket.set_nonblocking(true);
 
-    let sockaddr = link_addr(libc::ETH_P_ALL as u16, 0, None);
+    let sockaddr = link_addr(libc::ETH_P_ALL as u16, ifindex, None);
 
     socket::bind(socket.as_raw_fd(), &sockaddr)?;
 
