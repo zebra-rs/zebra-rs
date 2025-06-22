@@ -10,7 +10,7 @@ unused = "allow"
 anyhow = "1.0"
 bytes = "1"
 ipnet = "2.9"
-nom = "7"
+# nom = "7"
 prost = "0.13"
 tokio = { version = "1", features = ["full", "tracing"] }
 tokio-stream = "0.1"
