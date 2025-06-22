@@ -11,3 +11,5 @@ pub mod show;
 pub mod task;
 
 pub mod cap;
+
+pub mod tracing;

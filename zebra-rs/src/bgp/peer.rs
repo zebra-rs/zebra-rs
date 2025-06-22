@@ -29,6 +29,7 @@ use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
 use super::task::*;
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::rib::api::RibTx;
+use crate::{bgp_debug, bgp_info};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -239,7 +240,7 @@ pub struct ConfigRef<'a> {
 }
 
 fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
-    println!("XX Recv update packet from id {}", id);
+    bgp_info!("Received update packet from peer {}", id);
 }
 
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
@@ -272,11 +273,15 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     if prev_state == State::Established && peer.state != State::Established {
         peer.instant = Some(Instant::now());
     }
-    println!("State: {:?} -> {:?}", prev_state, peer.state);
+    bgp_info!(
+        "BGP FSM state transition: {:?} -> {:?}",
+        prev_state,
+        peer.state
+    );
 }
 
 fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
-    println!("{}", bgp.router_id);
+    bgp_debug!("BGP router ID: {}", bgp.router_id);
     peer.state.clone()
 }
 
@@ -740,12 +745,25 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
         SocketAddr::V4(addr) => {
             let addr = IpAddr::V4(*addr.ip());
             if let Some(peer) = bgp.peers.get_mut(&addr) {
-                if peer.state == State::Active {
-                    peer.state = fsm_connected(peer, stream);
-                } else {
-                    // Idle, refuse connection.
-
-                    // Established, collision detect.
+                match peer.state {
+                    State::Idle => {
+                        //
+                    }
+                    State::Connect => {
+                        // Need to handle collition.
+                    }
+                    State::Active => {
+                        peer.state = fsm_connected(peer, stream);
+                    }
+                    State::OpenSent => {
+                        //
+                    }
+                    State::OpenConfirm => {
+                        //
+                    }
+                    State::Established => {
+                        //
+                    }
                 }
             }
         }
