@@ -327,25 +327,57 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         );
 
         // Remove all routes from Local RIB that came from this peer
-        let removed_local_rib = bgp_ref.local_rib.remove_peer_routes(peer_addr);
+        let rib_changes = bgp_ref.local_rib.remove_peer_routes(peer_addr);
         bgp_debug_cat!(
             bgp,
             category = "route",
-            "Removed {} routes from Local RIB for peer {}",
-            removed_local_rib.len(),
+            "Processing {} route changes in main RIB for peer {}",
+            rib_changes.len(),
             peer_addr
         );
 
-        // Remove routes from main RIB
-        for route in removed_local_rib {
-            if let Err(e) = send_route_to_rib(&route, bgp_ref.rib_tx, false) {
-                bgp_debug_cat!(
-                    bgp,
-                    category = "route",
-                    "Failed to remove route {} from main RIB: {}",
-                    route.prefix,
-                    e
-                );
+        // Process RIB changes (removals and installations)
+        for (prefix, old_best, new_best) in rib_changes {
+            // Remove old best path if it existed
+            if let Some(old_route) = old_best {
+                if let Err(e) = send_route_to_rib(&old_route, bgp_ref.rib_tx, false) {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Failed to remove route {} from main RIB: {}",
+                        prefix,
+                        e
+                    );
+                } else {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Removed route {} from main RIB (peer: {})",
+                        prefix,
+                        old_route.peer_addr
+                    );
+                }
+            }
+
+            // Install new best path if one was selected
+            if let Some(new_route) = new_best {
+                if let Err(e) = send_route_to_rib(&new_route, bgp_ref.rib_tx, true) {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Failed to install new best route {} to main RIB: {}",
+                        prefix,
+                        e
+                    );
+                } else {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Installed new best route {} to main RIB (peer: {})",
+                        prefix,
+                        new_route.peer_addr
+                    );
+                }
             }
         }
     }

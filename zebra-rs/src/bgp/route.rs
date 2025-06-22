@@ -443,42 +443,59 @@ impl BgpLocalRib {
     }
 
     /// Remove all routes from a specific peer (used when peer session goes down)
-    pub fn remove_peer_routes(&mut self, peer_addr: IpAddr) -> Vec<BgpRoute> {
-        let mut removed_routes = Vec::new();
+    /// Returns list of prefixes that had their best path removed and need main RIB updates
+    pub fn remove_peer_routes(
+        &mut self,
+        peer_addr: IpAddr,
+    ) -> Vec<(Ipv4Net, Option<BgpRoute>, Option<BgpRoute>)> {
+        let mut rib_changes = Vec::new();
+        let mut prefixes_to_remove = Vec::new();
         let mut prefixes_to_reselect = Vec::new();
 
         // Find all prefixes that have routes from this peer
         for (prefix, candidates) in self.candidates.iter_mut() {
             let original_len = candidates.len();
+
+            // Get current best path before removing routes
+            let old_best = self.routes.get(prefix).cloned();
+            let was_best_from_peer = old_best
+                .as_ref()
+                .map_or(false, |route| route.peer_addr == peer_addr);
+
+            // Remove routes from this peer
             candidates.retain(|r| r.peer_addr != peer_addr);
 
             if candidates.is_empty() {
-                // No more candidates, remove best path too
+                // No more candidates for this prefix
+                prefixes_to_remove.push(*prefix);
                 if let Some(removed_best) = self.routes.remove(prefix) {
-                    removed_routes.push(removed_best);
+                    // Prefix completely removed: (prefix, old_best, None)
+                    rib_changes.push((*prefix, Some(removed_best), None));
                 }
-            } else if original_len != candidates.len() {
-                // We removed route(s) from this peer, check if best path changed
-                if let Some(current_best) = self.routes.get(prefix) {
-                    if current_best.peer_addr == peer_addr {
-                        prefixes_to_reselect.push(*prefix);
-                    }
-                }
+            } else if original_len != candidates.len() && was_best_from_peer {
+                // We removed route(s) from this peer and it was the best path
+                // Need to reselect best path after the iteration
+                prefixes_to_reselect.push((*prefix, old_best));
             }
         }
 
         // Remove empty candidate entries
-        self.candidates
-            .retain(|_, candidates| !candidates.is_empty());
+        for prefix in prefixes_to_remove {
+            self.candidates.remove(&prefix);
+        }
 
         // Reselect best paths for affected prefixes
-        for prefix in prefixes_to_reselect {
+        for (prefix, old_best) in prefixes_to_reselect {
             if let Some(new_best) = self.select_best_path(prefix) {
-                removed_routes.push(new_best);
+                // Best path changed: (prefix, old_best, new_best)
+                rib_changes.push((prefix, old_best, Some(new_best)));
+            } else if let Some(old) = old_best {
+                // Only removal: (prefix, old_best, None)
+                rib_changes.push((prefix, Some(old), None));
             }
         }
 
-        removed_routes
+        rib_changes
     }
 }
 
