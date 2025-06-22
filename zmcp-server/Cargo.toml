@@ -30,14 +30,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # gRPC client (reuse from cli-helper)
-tonic = "0.12"
+tonic = "0.13"
 prost = "0.13"
 
 # CLI parsing
 clap = { version = "4.0", features = ["derive"] }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.13"
 
 [dev-dependencies]
 # Testing dependencies
