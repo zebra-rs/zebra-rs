@@ -24,12 +24,12 @@ use crate::bgp::cap::cap_register_recv;
 use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_register_send};
 use super::inst::Message;
-use super::route::route_from_peer;
 use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
+use super::route::{route_from_peer, send_route_to_rib};
 use super::task::*;
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::rib::api::RibTx;
-use crate::{bgp_debug, bgp_info};
+use crate::{bgp_debug, bgp_debug_cat, bgp_info};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -239,8 +239,38 @@ pub struct ConfigRef<'a> {
     pub rib_tx: &'a UnboundedSender<RibTx>,
 }
 
-fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
-    bgp_info!("Received update packet from peer {}", id);
+fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
+    bgp_debug_cat!(
+        bgp,
+        category = "update",
+        "Received update packet from peer {}",
+        id
+    );
+
+    if !update.ipv4_withdraw.is_empty() {
+        bgp_debug_cat!(
+            bgp,
+            category = "update",
+            "Withdrawn routes: {} prefixes",
+            update.ipv4_withdraw.len()
+        );
+    }
+    if !update.attrs.is_empty() {
+        bgp_debug_cat!(
+            bgp,
+            category = "update",
+            "Path attributes: {} attributes",
+            update.attrs.len()
+        );
+    }
+    if !update.ipv4_update.is_empty() {
+        bgp_debug_cat!(
+            bgp,
+            category = "update",
+            "NLRI: {} prefixes",
+            update.ipv4_update.len()
+        );
+    }
 }
 
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
@@ -272,6 +302,84 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     }
     if prev_state == State::Established && peer.state != State::Established {
         peer.instant = Some(Instant::now());
+
+        // Clear all routes from this peer when session goes down
+        let peer_addr = peer.address;
+
+        // Clear Adj-RIB-In for this peer
+        let _removed_adj_rib_in = peer.adj_rib_in.clear_all_routes();
+        bgp_debug_cat!(
+            bgp,
+            category = "route",
+            "Cleared {} routes from Adj-RIB-In for peer {}",
+            _removed_adj_rib_in.len(),
+            peer_addr
+        );
+
+        // Clear Adj-RIB-Out for this peer
+        let _removed_adj_rib_out = peer.adj_rib_out.clear_all_routes();
+        bgp_debug_cat!(
+            bgp,
+            category = "route",
+            "Cleared {} routes from Adj-RIB-Out for peer {}",
+            _removed_adj_rib_out.len(),
+            peer_addr
+        );
+
+        // Remove all routes from Local RIB that came from this peer
+        let rib_changes = bgp_ref.local_rib.remove_peer_routes(peer_addr);
+        bgp_debug_cat!(
+            bgp,
+            category = "route",
+            "Processing {} route changes in main RIB for peer {}",
+            rib_changes.len(),
+            peer_addr
+        );
+
+        // Process RIB changes (removals and installations)
+        for (prefix, old_best, new_best) in rib_changes {
+            // Remove old best path if it existed
+            if let Some(old_route) = old_best {
+                if let Err(e) = send_route_to_rib(&old_route, bgp_ref.rib_tx, false) {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Failed to remove route {} from main RIB: {}",
+                        prefix,
+                        e
+                    );
+                } else {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Removed route {} from main RIB (peer: {})",
+                        prefix,
+                        old_route.peer_addr
+                    );
+                }
+            }
+
+            // Install new best path if one was selected
+            if let Some(new_route) = new_best {
+                if let Err(e) = send_route_to_rib(&new_route, bgp_ref.rib_tx, true) {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Failed to install new best route {} to main RIB: {}",
+                        prefix,
+                        e
+                    );
+                } else {
+                    bgp_debug_cat!(
+                        bgp,
+                        category = "route",
+                        "Installed new best route {} to main RIB (peer: {})",
+                        prefix,
+                        new_route.peer_addr
+                    );
+                }
+            }
+        }
     }
     bgp_info!(
         "BGP FSM state transition: {:?} -> {:?}",
@@ -740,37 +848,66 @@ pub fn peer_refresh_holdtimer(peer: &Peer) {
     }
 }
 
-pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
-    match sockaddr {
-        SocketAddr::V4(addr) => {
-            let addr = IpAddr::V4(*addr.ip());
-            if let Some(peer) = bgp.peers.get_mut(&addr) {
-                match peer.state {
-                    State::Idle => {
-                        //
-                    }
-                    State::Connect => {
-                        // Need to handle collition.
-                    }
-                    State::Active => {
-                        peer.state = fsm_connected(peer, stream);
-                    }
-                    State::OpenSent => {
-                        //
-                    }
-                    State::OpenConfirm => {
-                        //
-                    }
-                    State::Established => {
-                        //
-                    }
-                }
+/// Handle incoming connection for a peer based on current BGP state
+fn handle_peer_connection(
+    bgp: &mut Bgp,
+    peer_addr: IpAddr,
+    stream: TcpStream,
+) -> Option<TcpStream> {
+    if let Some(peer) = bgp.peers.get_mut(&peer_addr) {
+        match peer.state {
+            State::Idle => {
+                bgp_info!("Idle state, rejecting remote connection from {}", peer_addr);
+                None
             }
+            State::Connect => {
+                // Cancel connect task.
+                bgp_info!("Connect state, cancel connection then accept {}", peer_addr);
+                peer.task.connect = None;
+                peer.state = fsm_connected(peer, stream);
+                None
+            }
+            State::Active => {
+                peer.state = fsm_connected(peer, stream);
+                None
+            }
+            State::OpenSent => {
+                // In case of OpenSent. We need to keep the session until we
+                // receives Open.
+                Some(stream)
+            }
+            State::OpenConfirm => {
+                // In case of OpenConfirm keep current session.
+                None
+            }
+            State::Established => {
+                bgp_info!(
+                    "Established state, rejecting remote connection from {}",
+                    peer_addr
+                );
+                None
+            }
+        }
+    } else {
+        Some(stream)
+    }
+}
+
+pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
+    let remaining_stream = match sockaddr {
+        SocketAddr::V4(addr) => {
+            let peer_addr = IpAddr::V4(*addr.ip());
+            handle_peer_connection(bgp, peer_addr, stream)
         }
         SocketAddr::V6(addr) => {
             println!("IPv6: {:?}", addr);
+            let peer_addr = IpAddr::V6(*addr.ip());
+            handle_peer_connection(bgp, peer_addr, stream)
         }
-    }
+    };
 
     // Next, lookup peer-group for dynamic peer.
+    if let Some(_stream) = remaining_stream {
+        // TODO: Handle dynamic peer lookup
+    }
 }

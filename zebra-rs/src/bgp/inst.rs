@@ -1,5 +1,6 @@
 use super::peer::{Event, Peer, fsm};
 use super::route::{BgpLocalRib, BgpRoute, Route};
+use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
 use crate::bgp::task::Task;
 use crate::config::{
@@ -67,6 +68,8 @@ pub struct Bgp {
     pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
     pub clist: CommunityListMap,
+    /// Debug configuration flags
+    pub debug_flags: BgpDebugFlags,
 }
 
 impl Bgp {
@@ -91,6 +94,7 @@ impl Bgp {
             listen_task6: None,
             listen_err: None,
             clist: CommunityListMap::new(),
+            debug_flags: BgpDebugFlags::default(),
         };
         bgp.callback_build();
         bgp.show_build();
