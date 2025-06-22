@@ -14,7 +14,7 @@ nom = "7"
 prost = "0.13"
 tokio = { version = "1", features = ["full", "tracing"] }
 tokio-stream = "0.1"
-tonic = "0.12"
+tonic = "0.13"
 console-subscriber = "0.1.5"
 libyang = { git = "https://github.com/zebra-rs/libyang" }
 #libyang = { path = "../../libyang" }
@@ -70,5 +70,5 @@ ioctl-rs = "0.2.0"
 net-route = "0.4.2"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.13"
 chrono = "0.4"
