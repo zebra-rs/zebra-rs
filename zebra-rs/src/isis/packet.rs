@@ -313,6 +313,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         }
                     }
                     Some(&seq_number) if seq_number < lsp.seq_number => {
+                        // When local sequence number is smaller than remote.
                         // set_ssn();
                         isis_info!("Upd: {}", lsp.lsp_id);
                         let mut psnp = lsp.clone();
@@ -320,6 +321,12 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         req.entries.push(psnp);
                     }
                     Some(&seq_number) if seq_number > lsp.seq_number => {
+                        isis_info!(
+                            "SRM: {} local seq: {} remote seq: {}",
+                            lsp.lsp_id,
+                            seq_number,
+                            lsp.seq_number
+                        );
                         let msg = Message::Srm(lsp.lsp_id, level);
                         top.tx.send(msg);
                     }
