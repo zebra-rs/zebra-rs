@@ -1,7 +1,6 @@
 use bgp_packet::cap::CapMultiProtocol;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
-use nom::AsBytes;
 use prefix_trie::PrefixMap;
 use serde::Serialize;
 use std::cmp::min;
@@ -571,15 +570,13 @@ pub async fn peer_read(
                     let _ = tx.send(Message::Event(ident, Event::ConnFail));
                     return;
                 }
-                while buf.len() >= BGP_HEADER_LEN as usize
-                    && buf.len() >= peek_bgp_length(buf.as_bytes())
-                {
-                    let length = peek_bgp_length(buf.as_bytes());
+                while buf.len() >= BGP_HEADER_LEN as usize && buf.len() >= peek_bgp_length(&buf) {
+                    let length = peek_bgp_length(&buf);
 
                     let mut remain = buf.split_off(length);
                     remain.reserve(BGP_PACKET_LEN * 2);
 
-                    match peer_packet_parse(buf.as_bytes(), ident, tx.clone(), &mut config) {
+                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config) {
                         Ok(_) => {
                             buf = remain;
                         }
