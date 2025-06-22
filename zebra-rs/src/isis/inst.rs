@@ -189,9 +189,14 @@ impl Isis {
     pub fn process_msg(&mut self, msg: Message) {
         // isis_info!("{}", msg);
         match msg {
-            Message::Srm(lsp_id, level) => {
+            Message::Srm(lsp_id, level, reason) => {
                 for (_, link) in self.links.iter() {
-                    isis_info!("SRM: processing on {}", link.state.name);
+                    isis_info!(
+                        "SRM: processing {} on {} due to {}",
+                        lsp_id,
+                        link.state.name,
+                        reason
+                    );
                     if !link_level_capable(&link.state.level(), &level) {
                         isis_info!(
                             "SRM: {} is not capable the level, continue",
@@ -1250,7 +1255,7 @@ pub enum Message {
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
-    Srm(IsisLspId, Level),
+    Srm(IsisLspId, Level, String),
     DisOriginate(Level, u32),
     SpfCalc(Level),
 }
@@ -1258,7 +1263,7 @@ pub enum Message {
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Message::Srm(lsp_id, level) => {
+            Message::Srm(lsp_id, level, _) => {
                 write!(f, "[Message::Srm({}, {})]", lsp_id, level)
             }
             Message::Recv(isis_packet, _, mac_addr) => {

@@ -257,6 +257,14 @@ pub fn insert_lsp(
         return None;
     }
 
+    // Check sequence number.
+    if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id) {
+        if lsp.seq_number <= lsa.lsp.seq_number {
+            isis_info!("Same or smaller seq_number, no need of updating LSDB");
+            return None;
+        }
+    }
+
     if key.is_pseudo() {
         update_pseudo();
     } else {
@@ -270,11 +278,13 @@ pub fn insert_lsp(
     lsa.bytes = bytes;
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
 
+    let lsa = top.lsdb.get_mut(&level).map.insert(key, lsa);
+
     // Schedule SRM (Send Routing Message).
-    let msg = Message::Srm(key, level);
+    let msg = Message::Srm(key, level, "LSDB update".to_string());
     top.tx.send(msg);
 
-    top.lsdb.get_mut(&level).map.insert(key, lsa)
+    lsa
 }
 
 pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> Option<Lsa> {

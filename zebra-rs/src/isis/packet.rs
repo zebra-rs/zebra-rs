@@ -327,7 +327,11 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                             seq_number,
                             lsp.seq_number
                         );
-                        let msg = Message::Srm(lsp.lsp_id, level);
+                        let msg = Message::Srm(
+                            lsp.lsp_id,
+                            level,
+                            format!("local seq {}, remote seq {}", seq_number, lsp.seq_number),
+                        );
                         top.tx.send(msg);
                     }
                     Some(&seq_number) if lsp.hold_time == 0 => {
