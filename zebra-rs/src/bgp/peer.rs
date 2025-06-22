@@ -234,7 +234,6 @@ impl Peer {
 
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
-    pub ptree: &'a mut PrefixMap<Ipv4Net, Vec<Route>>,
     pub local_rib: &'a mut BgpLocalRib,
     pub rib_tx: &'a UnboundedSender<RibTx>,
 }
@@ -276,7 +275,6 @@ fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
-        ptree: &mut bgp.ptree,
         local_rib: &mut bgp.local_rib,
         rib_tx: &bgp.rib,
     };
