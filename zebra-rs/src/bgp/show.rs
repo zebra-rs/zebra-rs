@@ -131,8 +131,9 @@ fn show_bgp_route(bgp: &Bgp) -> String {
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, value) in bgp.ptree.iter() {
+    for (key, value) in bgp.local_rib.entries.iter() {
         for (i, route) in value.iter().enumerate() {
+            let best = if route.best_path { ">" } else { " " };
             let nexthop = show_nexthop(&route.attrs);
             let med = show_med(&route.attrs);
             let local_pref = show_local_pref(&route.attrs);
@@ -140,7 +141,8 @@ fn show_bgp_route(bgp: &Bgp) -> String {
             let origin = show_origin(&route.attrs);
             writeln!(
                 buf,
-                "    {:<16} {:<19} {:>6} {:>6} {:>6} {}{}",
+                "{}  {:<16} {:<19} {:>6} {:>6} {:>6} {}{}",
+                best,
                 key.to_string(),
                 nexthop,
                 med,
