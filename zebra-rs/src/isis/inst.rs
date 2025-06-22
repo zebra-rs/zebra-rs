@@ -191,17 +191,24 @@ impl Isis {
         match msg {
             Message::Srm(lsp_id, level) => {
                 for (_, link) in self.links.iter() {
+                    isis_info!("SRM: processing on {}", link.state.name);
                     if !link_level_capable(&link.state.level(), &level) {
-                        return;
+                        isis_info!(
+                            "SRM: {} is not capable the level, continue",
+                            link.state.name
+                        );
+                        continue;
                     }
 
                     if *link.state.nbrs_up.get(&level) == 0 {
-                        return;
+                        isis_info!("SRM: {} neighbor is 0, continue", link.state.name);
+                        continue;
                     }
 
                     if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
                         if lsa.ifindex == link.state.ifindex {
-                            return;
+                            isis_info!("SRM: LSP comes from the same interface, continue");
+                            continue;
                         }
 
                         let hold_time =
@@ -212,11 +219,15 @@ impl Isis {
 
                             isis_packet::write_hold_time(&mut buf, hold_time);
 
+                            isis_info!("SRM: Send LSP on {}, {}", link.state.name, lsp_id);
+
                             link.ptx.send(PacketMessage::Send(
                                 Packet::Bytes(buf),
                                 link.state.ifindex,
                                 level,
                             ));
+                        } else {
+                            isis_info!("SRM: LSP does not have bytes, return");
                         }
                     }
                 }
