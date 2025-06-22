@@ -20,7 +20,7 @@ libyang = { git = "https://github.com/zebra-rs/libyang" }
 #libyang = { path = "../../libyang" }
 regex = "1.10"
 similar = "2"
-dirs = "5"
+dirs = "6"
 async-trait = "0.1"
 prefix-trie = { git = "https://github.com/zebra-rs/prefix-trie" }
 thiserror = "1"
