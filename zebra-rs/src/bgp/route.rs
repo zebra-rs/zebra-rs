@@ -243,14 +243,14 @@ pub struct BgpLocalRib {
     /// Best path routes per prefix
     pub routes: PrefixMap<Ipv4Net, BgpRoute>,
     /// All candidate routes per prefix (for show commands)
-    pub candidates: PrefixMap<Ipv4Net, Vec<BgpRoute>>,
+    pub entries: PrefixMap<Ipv4Net, Vec<BgpRoute>>,
 }
 
 impl BgpLocalRib {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
-            candidates: PrefixMap::new(),
+            entries: PrefixMap::new(),
         }
     }
 
@@ -259,7 +259,7 @@ impl BgpLocalRib {
         let prefix = route.prefix;
 
         // Add to candidates
-        let candidates = self.candidates.entry(prefix).or_default();
+        let candidates = self.entries.entry(prefix).or_default();
 
         // Remove existing route from same peer if present
         candidates.retain(|r| r.peer_addr != route.peer_addr);
@@ -274,12 +274,12 @@ impl BgpLocalRib {
         let mut removed_best = false;
 
         // Remove from candidates
-        if let Some(candidates) = self.candidates.get_mut(&prefix) {
+        if let Some(candidates) = self.entries.get_mut(&prefix) {
             let original_len = candidates.len();
             candidates.retain(|r| r.peer_addr != peer_addr);
 
             if candidates.is_empty() {
-                self.candidates.remove(&prefix);
+                self.entries.remove(&prefix);
                 removed_best = self.routes.remove(&prefix).is_some();
                 return if removed_best {
                     Some(BgpRoute::new(
@@ -313,41 +313,55 @@ impl BgpLocalRib {
 
     /// BGP best path selection algorithm per RFC 4271
     pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Option<BgpRoute> {
-        let candidates = match self.candidates.get(&prefix) {
-            Some(candidates) if !candidates.is_empty() => candidates,
-            _ => {
-                self.routes.remove(&prefix);
-                return None;
+        // First, find the best route index
+        let (best_idx, should_update) = {
+            let candidates = match self.entries.get(&prefix) {
+                Some(candidates) if !candidates.is_empty() => candidates,
+                _ => {
+                    self.routes.remove(&prefix);
+                    return None;
+                }
+            };
+
+            // If only one candidate, it's the best
+            if candidates.len() == 1 {
+                (0, true)
+            } else {
+                // BGP best path selection algorithm
+                let mut best_idx = 0;
+                let mut best = &candidates[0];
+
+                for (idx, candidate) in candidates.iter().enumerate().skip(1) {
+                    if std::ptr::eq(self.compare_routes(best, candidate), candidate) {
+                        best = candidate;
+                        best_idx = idx;
+                    }
+                }
+                (best_idx, true)
             }
         };
 
-        // If only one candidate, it's the best
-        if candidates.len() == 1 {
-            let mut best = candidates[0].clone();
-            best.best_path = true;
-            let old_best = self.routes.insert(prefix, best.clone());
-            return if old_best.is_some() && old_best.as_ref().unwrap().peer_addr != best.peer_addr {
-                Some(best)
+        // Now update the candidates with mutable access
+        if should_update {
+            let candidates = self.entries.get_mut(&prefix).unwrap();
+
+            // Clear best_path flag for all candidates
+            for candidate in candidates.iter_mut() {
+                candidate.best_path = false;
+            }
+
+            // Mark the best route
+            candidates[best_idx].best_path = true;
+            let best_route = candidates[best_idx].clone();
+
+            let old_best = self.routes.insert(prefix, best_route.clone());
+
+            // Return the new best path if it changed
+            if old_best.is_none() || old_best.as_ref().unwrap().peer_addr != best_route.peer_addr {
+                Some(best_route)
             } else {
                 None
-            };
-        }
-
-        // BGP best path selection algorithm
-        let mut best = &candidates[0];
-
-        for candidate in candidates.iter().skip(1) {
-            best = self.compare_routes(best, candidate);
-        }
-
-        let mut best_route = best.clone();
-        best_route.best_path = true;
-
-        let old_best = self.routes.insert(prefix, best_route.clone());
-
-        // Return the new best path if it changed
-        if old_best.is_none() || old_best.as_ref().unwrap().peer_addr != best_route.peer_addr {
-            Some(best_route)
+            }
         } else {
             None
         }
@@ -429,7 +443,7 @@ impl BgpLocalRib {
 
     /// Get all candidate routes for a prefix
     pub fn get_candidates(&self, prefix: &Ipv4Net) -> Option<&Vec<BgpRoute>> {
-        self.candidates.get(prefix)
+        self.entries.get(prefix)
     }
 
     /// Get all best paths
@@ -453,7 +467,7 @@ impl BgpLocalRib {
         let mut prefixes_to_reselect = Vec::new();
 
         // Find all prefixes that have routes from this peer
-        for (prefix, candidates) in self.candidates.iter_mut() {
+        for (prefix, candidates) in self.entries.iter_mut() {
             let original_len = candidates.len();
 
             // Get current best path before removing routes
@@ -481,7 +495,7 @@ impl BgpLocalRib {
 
         // Remove empty candidate entries
         for prefix in prefixes_to_remove {
-            self.candidates.remove(&prefix);
+            self.entries.remove(&prefix);
         }
 
         // Reselect best paths for affected prefixes
@@ -558,11 +572,6 @@ pub struct Route {
     pub selected: bool,
 }
 
-#[allow(dead_code)]
-fn attr_check() {
-    //
-}
-
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Determine peer type based on AS numbers
     let peer_type = if peer.local_as == peer.peer_as {
@@ -622,17 +631,5 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
                 }
             }
         }
-    }
-
-    // Legacy code for backward compatibility
-    for ipv4 in packet.ipv4_update.iter() {
-        let route = Route {
-            from: peer.address,
-            attrs: packet.attrs.clone(),
-            origin: 0u8,
-            typ: PeerType::IBGP,
-            selected: false,
-        };
-        bgp.ptree.entry(*ipv4).or_default().push(route);
     }
 }
