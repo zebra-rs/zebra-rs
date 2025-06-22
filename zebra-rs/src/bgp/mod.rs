@@ -13,3 +13,6 @@ pub mod task;
 pub mod cap;
 
 pub mod tracing;
+
+pub mod debug;
+pub use debug::BgpDebugFlags;
