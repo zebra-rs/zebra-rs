@@ -1,3 +1,33 @@
+2025-06-22  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.7.3
+
+	* zebra-rs/src/bgp/route.rs (select_best_path): Fix best_path flag
+	to be properly set in the candidates vector during route selection.
+	Restructure function to avoid borrow checker conflicts while
+	maintaining consistency between routes and entries.
+
+	* zebra-rs/src/bgp/show.rs (show_bgp_route): Add best path indicator
+	">" display for selected routes in BGP routing table output.
+
+	* zebra-rs/src/bgp/debug.rs: Implement BGP debug categories with
+	configurable filtering. Add BgpDebugFlags structure supporting
+	10 debug categories: event, update, open, notification, keepalive,
+	fsm, graceful_restart, route, policy, packet_dump.
+
+	* zebra-rs/src/bgp/tracing.rs: Add bgp_debug_cat! macro for
+	category-aware debug logging that checks debug flags at runtime
+	before performing expensive formatting operations.
+
+	* zebra-rs/src/bgp/config.rs: Add debug configuration handler for
+	"/routing/bgp/debug" command to enable/disable debug categories.
+
+	* zebra-rs/src/bgp/peer.rs: Update to use category-aware debug
+	logging throughout BGP peer handling and FSM operations.
+
+	* zebra-rs/src/bgp/inst.rs: Add debug_flags field to Bgp struct
+	for runtime debug category configuration.
+
 2025-06-21  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.2
