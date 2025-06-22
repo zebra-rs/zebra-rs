@@ -14,7 +14,7 @@ use isis_packet::{
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::isis_warn;
+use crate::{isis_info, isis_warn};
 
 use crate::config::{Args, ConfigOp};
 use crate::isis::nfsm::NfsmState;
@@ -548,15 +548,26 @@ pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
 }
 
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
+    let ifname = args.string()?;
     let metric = args.u32()?;
 
-    let link = isis.links.get_mut_by_name(&name)?;
-
+    let link = isis.links.get_mut_by_name(&ifname)?;
     if op.is_set() {
         link.config.metric = Some(metric);
     } else {
         link.config.metric = None;
+    }
+    // Originate L1 LSP when it is .
+    let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
+    if isis.lsdb.get(&Level::L1).get(&key).is_some() {
+        isis_info!("LSP Origilate L1 due to metric change");
+        isis.tx.send(Message::LspOriginate(Level::L1)).unwrap();
+    }
+
+    // Originate L2 LSP.
+    if isis.lsdb.get(&Level::L2).get(&key).is_some() {
+        isis_info!("LSP Origilate L2 due to metric change");
+        isis.tx.send(Message::LspOriginate(Level::L2)).unwrap();
     }
 
     Some(())
