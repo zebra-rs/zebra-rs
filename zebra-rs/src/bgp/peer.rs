@@ -29,7 +29,7 @@ use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
 use super::task::*;
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::rib::api::RibTx;
-use crate::{bgp_debug, bgp_info};
+use crate::{bgp_debug, bgp_debug_cat, bgp_info};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -239,8 +239,38 @@ pub struct ConfigRef<'a> {
     pub rib_tx: &'a UnboundedSender<RibTx>,
 }
 
-fn update_rib(_bgp: &mut Bgp, id: &Ipv4Addr, _update: &UpdatePacket) {
-    bgp_info!("Received update packet from peer {}", id);
+fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
+    bgp_debug_cat!(
+        bgp,
+        category = "update",
+        "Received update packet from peer {}",
+        id
+    );
+
+    if !update.ipv4_withdraw.is_empty() {
+        bgp_debug_cat!(
+            bgp,
+            category = "update",
+            "Withdrawn routes: {} prefixes",
+            update.ipv4_withdraw.len()
+        );
+    }
+    if !update.attrs.is_empty() {
+        bgp_debug_cat!(
+            bgp,
+            category = "update",
+            "Path attributes: {} attributes",
+            update.attrs.len()
+        );
+    }
+    if !update.ipv4_update.is_empty() {
+        bgp_debug_cat!(
+            bgp,
+            category = "update",
+            "NLRI: {} prefixes",
+            update.ipv4_update.len()
+        );
+    }
 }
 
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
@@ -747,7 +777,7 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 match peer.state {
                     State::Idle => {
-                        //
+                        bgp_info!("Idle state, rejecting remote connection from {}", addr);
                     }
                     State::Connect => {
                         // Need to handle collition.
@@ -769,6 +799,29 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
         }
         SocketAddr::V6(addr) => {
             println!("IPv6: {:?}", addr);
+            let addr = IpAddr::V6(*addr.ip());
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
+                match peer.state {
+                    State::Idle => {
+                        bgp_info!("Idle state, rejecting remote connection from {}", addr);
+                    }
+                    State::Connect => {
+                        // Need to handle collition.
+                    }
+                    State::Active => {
+                        peer.state = fsm_connected(peer, stream);
+                    }
+                    State::OpenSent => {
+                        //
+                    }
+                    State::OpenConfirm => {
+                        //
+                    }
+                    State::Established => {
+                        //
+                    }
+                }
+            }
         }
     }
 
