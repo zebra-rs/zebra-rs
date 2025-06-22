@@ -24,8 +24,8 @@ use crate::bgp::cap::cap_register_recv;
 use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_register_send};
 use super::inst::Message;
-use super::route::route_from_peer;
 use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
+use super::route::{route_from_peer, send_route_to_rib};
 use super::task::*;
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::rib::api::RibTx;
@@ -302,6 +302,52 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     }
     if prev_state == State::Established && peer.state != State::Established {
         peer.instant = Some(Instant::now());
+
+        // Clear all routes from this peer when session goes down
+        let peer_addr = peer.address;
+
+        // Clear Adj-RIB-In for this peer
+        let _removed_adj_rib_in = peer.adj_rib_in.clear_all_routes();
+        bgp_debug_cat!(
+            bgp,
+            category = "route",
+            "Cleared {} routes from Adj-RIB-In for peer {}",
+            _removed_adj_rib_in.len(),
+            peer_addr
+        );
+
+        // Clear Adj-RIB-Out for this peer
+        let _removed_adj_rib_out = peer.adj_rib_out.clear_all_routes();
+        bgp_debug_cat!(
+            bgp,
+            category = "route",
+            "Cleared {} routes from Adj-RIB-Out for peer {}",
+            _removed_adj_rib_out.len(),
+            peer_addr
+        );
+
+        // Remove all routes from Local RIB that came from this peer
+        let removed_local_rib = bgp_ref.local_rib.remove_peer_routes(peer_addr);
+        bgp_debug_cat!(
+            bgp,
+            category = "route",
+            "Removed {} routes from Local RIB for peer {}",
+            removed_local_rib.len(),
+            peer_addr
+        );
+
+        // Remove routes from main RIB
+        for route in removed_local_rib {
+            if let Err(e) = send_route_to_rib(&route, bgp_ref.rib_tx, false) {
+                bgp_debug_cat!(
+                    bgp,
+                    category = "route",
+                    "Failed to remove route {} from main RIB: {}",
+                    route.prefix,
+                    e
+                );
+            }
+        }
     }
     bgp_info!(
         "BGP FSM state transition: {:?} -> {:?}",
@@ -783,20 +829,24 @@ fn handle_peer_connection(
                 None
             }
             State::Connect => {
-                // Need to handle collision.
-                Some(stream)
+                // Cancel connect task.
+                bgp_info!("Connect state, cancel connection then accept {}", peer_addr);
+                peer.task.connect = None;
+                peer.state = fsm_connected(peer, stream);
+                None
             }
             State::Active => {
                 peer.state = fsm_connected(peer, stream);
                 None
             }
             State::OpenSent => {
-                // Handle collision detection
+                // In case of OpenSent. We need to keep the session until we
+                // receives Open.
                 Some(stream)
             }
             State::OpenConfirm => {
-                // Handle collision detection
-                Some(stream)
+                // In case of OpenConfirm keep current session.
+                None
             }
             State::Established => {
                 bgp_info!(

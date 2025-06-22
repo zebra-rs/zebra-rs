@@ -184,6 +184,14 @@ impl BgpAdjRibIn {
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
+
+    /// Clear all routes from Adj-RIB-In (used when peer session goes down)
+    pub fn clear_all_routes(&mut self) -> Vec<BgpRoute> {
+        let removed_routes: Vec<BgpRoute> =
+            self.routes.iter().map(|(_, route)| route.clone()).collect();
+        self.routes.clear();
+        removed_routes
+    }
 }
 
 /// BGP Adj-RIB-Out - stores routes to be advertised to a specific peer after policy application
@@ -218,6 +226,14 @@ impl BgpAdjRibOut {
     /// Get route count
     pub fn route_count(&self) -> usize {
         self.routes.len()
+    }
+
+    /// Clear all routes from Adj-RIB-Out (used when peer session goes down)
+    pub fn clear_all_routes(&mut self) -> Vec<BgpRoute> {
+        let removed_routes: Vec<BgpRoute> =
+            self.routes.iter().map(|(_, route)| route.clone()).collect();
+        self.routes.clear();
+        removed_routes
     }
 }
 
@@ -424,6 +440,45 @@ impl BgpLocalRib {
     /// Get total number of routes in Local RIB
     pub fn route_count(&self) -> usize {
         self.routes.len()
+    }
+
+    /// Remove all routes from a specific peer (used when peer session goes down)
+    pub fn remove_peer_routes(&mut self, peer_addr: IpAddr) -> Vec<BgpRoute> {
+        let mut removed_routes = Vec::new();
+        let mut prefixes_to_reselect = Vec::new();
+
+        // Find all prefixes that have routes from this peer
+        for (prefix, candidates) in self.candidates.iter_mut() {
+            let original_len = candidates.len();
+            candidates.retain(|r| r.peer_addr != peer_addr);
+
+            if candidates.is_empty() {
+                // No more candidates, remove best path too
+                if let Some(removed_best) = self.routes.remove(prefix) {
+                    removed_routes.push(removed_best);
+                }
+            } else if original_len != candidates.len() {
+                // We removed route(s) from this peer, check if best path changed
+                if let Some(current_best) = self.routes.get(prefix) {
+                    if current_best.peer_addr == peer_addr {
+                        prefixes_to_reselect.push(*prefix);
+                    }
+                }
+            }
+        }
+
+        // Remove empty candidate entries
+        self.candidates
+            .retain(|_, candidates| !candidates.is_empty());
+
+        // Reselect best paths for affected prefixes
+        for prefix in prefixes_to_reselect {
+            if let Some(new_best) = self.select_best_path(prefix) {
+                removed_routes.push(new_best);
+            }
+        }
+
+        removed_routes
     }
 }
 
