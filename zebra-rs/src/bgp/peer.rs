@@ -770,60 +770,62 @@ pub fn peer_refresh_holdtimer(peer: &Peer) {
     }
 }
 
-pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
-    match sockaddr {
-        SocketAddr::V4(addr) => {
-            let addr = IpAddr::V4(*addr.ip());
-            if let Some(peer) = bgp.peers.get_mut(&addr) {
-                match peer.state {
-                    State::Idle => {
-                        bgp_info!("Idle state, rejecting remote connection from {}", addr);
-                    }
-                    State::Connect => {
-                        // Need to handle collition.
-                    }
-                    State::Active => {
-                        peer.state = fsm_connected(peer, stream);
-                    }
-                    State::OpenSent => {
-                        //
-                    }
-                    State::OpenConfirm => {
-                        //
-                    }
-                    State::Established => {
-                        //
-                    }
-                }
+/// Handle incoming connection for a peer based on current BGP state
+fn handle_peer_connection(
+    bgp: &mut Bgp,
+    peer_addr: IpAddr,
+    stream: TcpStream,
+) -> Option<TcpStream> {
+    if let Some(peer) = bgp.peers.get_mut(&peer_addr) {
+        match peer.state {
+            State::Idle => {
+                bgp_info!("Idle state, rejecting remote connection from {}", peer_addr);
+                None
             }
+            State::Connect => {
+                // Need to handle collision.
+                Some(stream)
+            }
+            State::Active => {
+                peer.state = fsm_connected(peer, stream);
+                None
+            }
+            State::OpenSent => {
+                // Handle collision detection
+                Some(stream)
+            }
+            State::OpenConfirm => {
+                // Handle collision detection
+                Some(stream)
+            }
+            State::Established => {
+                bgp_info!(
+                    "Established state, rejecting remote connection from {}",
+                    peer_addr
+                );
+                None
+            }
+        }
+    } else {
+        Some(stream)
+    }
+}
+
+pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
+    let remaining_stream = match sockaddr {
+        SocketAddr::V4(addr) => {
+            let peer_addr = IpAddr::V4(*addr.ip());
+            handle_peer_connection(bgp, peer_addr, stream)
         }
         SocketAddr::V6(addr) => {
             println!("IPv6: {:?}", addr);
-            let addr = IpAddr::V6(*addr.ip());
-            if let Some(peer) = bgp.peers.get_mut(&addr) {
-                match peer.state {
-                    State::Idle => {
-                        bgp_info!("Idle state, rejecting remote connection from {}", addr);
-                    }
-                    State::Connect => {
-                        // Need to handle collition.
-                    }
-                    State::Active => {
-                        peer.state = fsm_connected(peer, stream);
-                    }
-                    State::OpenSent => {
-                        //
-                    }
-                    State::OpenConfirm => {
-                        //
-                    }
-                    State::Established => {
-                        //
-                    }
-                }
-            }
+            let peer_addr = IpAddr::V6(*addr.ip());
+            handle_peer_connection(bgp, peer_addr, stream)
         }
-    }
+    };
 
     // Next, lookup peer-group for dynamic peer.
+    if let Some(_stream) = remaining_stream {
+        // TODO: Handle dynamic peer lookup
+    }
 }
