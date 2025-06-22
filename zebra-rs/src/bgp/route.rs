@@ -623,16 +623,4 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
             }
         }
     }
-
-    // Legacy code for backward compatibility
-    for ipv4 in packet.ipv4_update.iter() {
-        let route = Route {
-            from: peer.address,
-            attrs: packet.attrs.clone(),
-            origin: 0u8,
-            typ: PeerType::IBGP,
-            selected: false,
-        };
-        bgp.ptree.entry(*ipv4).or_default().push(route);
-    }
 }

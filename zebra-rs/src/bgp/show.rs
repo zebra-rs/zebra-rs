@@ -131,7 +131,7 @@ fn show_bgp_route(bgp: &Bgp) -> String {
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, value) in bgp.ptree.iter() {
+    for (key, value) in bgp.local_rib.candidates.iter() {
         for (i, route) in value.iter().enumerate() {
             let nexthop = show_nexthop(&route.attrs);
             let med = show_med(&route.attrs);

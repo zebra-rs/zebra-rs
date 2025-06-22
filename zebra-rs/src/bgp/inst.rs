@@ -60,8 +60,6 @@ pub struct Bgp {
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
     pub pcallbacks: HashMap<String, PCallback>,
-    /// Legacy route storage (kept for backward compatibility)
-    pub ptree: PrefixMap<Ipv4Net, Vec<Route>>,
     /// BGP Local RIB (Loc-RIB) for best path selection
     pub local_rib: BgpLocalRib,
     pub listen_task: Option<Task<()>>,
@@ -81,7 +79,6 @@ impl Bgp {
             peers: BTreeMap::new(),
             tx,
             rx,
-            ptree: PrefixMap::<Ipv4Net, Vec<Route>>::new(),
             local_rib: BgpLocalRib::new(),
             rib,
             cm: ConfigChannel::new(),
