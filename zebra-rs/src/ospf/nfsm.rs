@@ -398,8 +398,8 @@ fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identit
             }
         }
         if nbr.dd.seqnum == 0 {
-            let mut rng = rand::thread_rng();
-            nbr.dd.seqnum = rng.r#gen();
+            let mut rng = rand::rng();
+            nbr.dd.seqnum = rng.random();
         } else {
             nbr.dd.seqnum += 1;
         }
