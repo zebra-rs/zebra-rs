@@ -44,7 +44,7 @@ use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
-pub type ShowCallback = fn(&Isis, Args, bool) -> String;
+pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
 pub struct Isis {
     pub ctx: Context,
@@ -181,7 +181,10 @@ impl Isis {
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
-            let output = f(self, args, msg.json);
+            let output = match f(self, args, msg.json) {
+                Ok(result) => result,
+                Err(e) => format!("Error formatting output: {}", e),
+            };
             msg.resp.send(output).await;
         }
     }
