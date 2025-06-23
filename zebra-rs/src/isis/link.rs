@@ -154,7 +154,7 @@ pub struct LinkConfig {
     pub prefix_sid: Option<SidLabelValue>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LinkType {
     Lan,
     P2p,
