@@ -59,6 +59,13 @@ module exec {
         "The name of the host.  This name can be a single domain
         label or the fully qualified domain name of the host.";
     }
+    container evpn {
+      container vni {
+        leaf all {
+          type empty;
+        }
+      }
+    }
     container ip {
       ext:help "Show IP commands";
       leaf route {
