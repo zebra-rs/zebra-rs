@@ -34,7 +34,7 @@ use crate::{
 
 use super::config::IsisConfig;
 use super::ifsm::has_level;
-use super::link::{Afis, IsisLink, IsisLinks, LinkState, LinkTop};
+use super::link::{Afis, IsisLink, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
@@ -380,6 +380,35 @@ impl Isis {
                 lsp_flood(&mut top, level, &buf);
                 insert_self_originate(&mut top, level, lsp);
             }
+            Message::LspPurge(level, lsp_id) => {
+                let mut top = self.top();
+
+                // Get current LSP if it exists
+                let seq_number = if let Some(existing) = top.lsdb.get(&level).get(&lsp_id) {
+                    existing.lsp.seq_number + 1
+                } else {
+                    isis_info!("Cannot purge LSP {} - not found in LSDB", lsp_id);
+                    return;
+                };
+
+                // Create purged LSP with incremented sequence number
+                let mut purged_lsp = IsisLsp {
+                    lsp_id,
+                    seq_number,
+                    hold_time: 0, // This purges the LSP
+                    types: IsisLspTypes::from(level.digit()),
+                    ..Default::default()
+                };
+
+                // Emit and flood the purged LSP
+                let buf = lsp_emit(&mut purged_lsp, level);
+                lsp_flood(&mut top, level, &buf);
+
+                // Insert as self-originated so we track it
+                insert_self_originate(&mut top, level, purged_lsp);
+
+                isis_info!("Purged LSP {} with seq {}", lsp_id, seq_number);
+            }
             Message::DisOriginate(level, ifindex) => {
                 let mut top = self.top();
                 let mut lsp = dis_generate(&mut top, level, ifindex);
@@ -696,10 +725,34 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         let Some(adj) = &link.state.adj.get(&level) else {
             continue;
         };
+
+        // Determine the correct neighbor ID
+        let neighbor_id = if link.config.link_type() == LinkType::Lan {
+            // On LAN, check if we're DIS or not
+            match link.state.dis_status.get(&level) {
+                DisStatus::Myself => {
+                    // We are DIS, use direct adjacency
+                    adj.clone()
+                }
+                DisStatus::Other | DisStatus::NotSelected => {
+                    // We're not DIS, reference the pseudonode if available
+                    if let Some(lan_id) = link.state.lan_id.get(&level) {
+                        lan_id.clone()
+                    } else {
+                        // No DIS selected yet, use direct adjacency
+                        adj.clone()
+                    }
+                }
+            }
+        } else {
+            // Point-to-point link, always use direct adjacency
+            adj.clone()
+        };
+
         // Ext IS Reach.
         let mut ext_is_reach = IsisTlvExtIsReach::default();
         let mut is_reach = IsisTlvExtIsReachEntry {
-            neighbor_id: adj.clone(),
+            neighbor_id,
             metric: link.config.metric(),
             subs: Vec::new(),
         };
@@ -1258,6 +1311,7 @@ pub enum Message {
     Nfsm(NfsmEvent, u32, IsisSysId, Level),
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
+    LspPurge(Level, IsisLspId),
     Srm(IsisLspId, Level, String),
     DisOriginate(Level, u32),
     SpfCalc(Level),
@@ -1280,6 +1334,9 @@ impl Display for Message {
                 write!(f, "[Message::Lsdb({:?})]", lsdb_event)
             }
             Message::LspOriginate(level) => write!(f, "[Message::LspOriginate({})]", level),
+            Message::LspPurge(level, lsp_id) => {
+                write!(f, "[Message::LspPurge({}, {})]", level, lsp_id)
+            }
             Message::DisOriginate(level, _) => write!(f, "[Message::DisOriginate({})]", level),
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
         }
