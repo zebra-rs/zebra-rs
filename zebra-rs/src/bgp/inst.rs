@@ -44,7 +44,7 @@ pub enum Message {
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
 pub type PCallback = fn(&mut CommunityListMap, Args, ConfigOp) -> Option<()>;
-pub type ShowCallback = fn(&Bgp, Args, bool) -> String;
+pub type ShowCallback = fn(&Bgp, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
 #[allow(dead_code)]
 pub struct Bgp {
@@ -134,7 +134,10 @@ impl Bgp {
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
-            let output = f(self, args, msg.json);
+            let output = match f(self, args, msg.json) {
+                Ok(result) => result,
+                Err(e) => format!("Error formatting output: {}", e),
+            };
             msg.resp.send(output).await.unwrap();
         }
     }
