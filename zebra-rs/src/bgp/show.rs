@@ -465,6 +465,15 @@ fn show_bgp_l2vpn_evpn(
     Ok(out)
 }
 
+fn show_evpn_vni_all(
+    bgp: &Bgp,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut out = String::from("EVPN output here");
+    Ok(out)
+}
+
 impl Bgp {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -476,5 +485,6 @@ impl Bgp {
         self.show_add("/show/ip/bgp/neighbor", show_bgp_neighbor);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         self.show_add("/show/community-list", show_community_list);
+        self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
     }
 }
