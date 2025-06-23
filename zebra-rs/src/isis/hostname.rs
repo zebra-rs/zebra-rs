@@ -44,19 +44,19 @@ fn map_to_string_map<K: ToString>(
         .collect()
 }
 
-pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
+pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let l1 = map_to_string_map(&isis.hostname.l1.map);
         let l2 = map_to_string_map(&isis.hostname.l2.map);
-        return serde_json::to_string_pretty(&serde_json::json!({
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
             "l1": l1,
             "l2": l2
         }))
-        .unwrap();
+        .unwrap());
     }
 
     if isis.hostname.l1.len() + isis.hostname.l2.len() == 0 {
-        return String::from("% No hostname was found");
+        return Ok(String::from("% No hostname was found"));
     }
 
     let mut buf = String::from("Level  System ID      Hostname\n");
@@ -67,8 +67,8 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
         };
         for (id, (host, originate)) in isis.hostname.get(level).map.iter() {
             let mark = if *originate { "*" } else { " " };
-            writeln!(buf, "{:<5}{} {:<13} {:<15}", label, mark, id, host).unwrap();
+            writeln!(buf, "{:<5}{} {:<13} {:<15}", label, mark, id, host)?;
         }
     }
-    buf
+    Ok(buf)
 }
