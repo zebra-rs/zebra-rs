@@ -13,7 +13,7 @@ use super::inst::{Bgp, ShowCallback};
 use super::peer::{Peer, PeerCounter, PeerParam, State};
 use crate::config::Args;
 
-fn show_peer_summary(buf: &mut String, peer: &Peer) {
+fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
     let mut sent: u64 = 0;
     let mut rcvd: u64 = 0;
     for counter in peer.counter.iter() {
@@ -31,11 +31,11 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) {
         buf,
         "{:16} {:11} {:8} {:8} {:>8} {:>12} {:8}",
         peer.address, peer.peer_as, rcvd, sent, updown, state, 0
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
-fn show_bgp_instance(bgp: &Bgp) -> String {
+fn show_bgp_instance(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
     let asn = if bgp.asn == 0 {
         "Not Configured".to_string()
@@ -51,24 +51,22 @@ fn show_bgp_instance(bgp: &Bgp) -> String {
         buf,
         "BGP router identifier {}, local AS number {}",
         identifier, asn
-    )
-    .unwrap();
-    writeln!(buf).unwrap();
+    )?;
+    writeln!(buf)?;
 
     if bgp.peers.is_empty() {
-        writeln!(buf, "No neighbor has been configured").unwrap();
+        writeln!(buf, "No neighbor has been configured")?;
     } else {
         writeln!(
             buf,
             "Neighbor                  AS  MsgRcvd  MsgSent  Up/Down State/PfxRcd   PfxSnt"
-        )
-        .unwrap();
+        )?;
         for (_, peer) in bgp.peers.iter() {
-            show_peer_summary(&mut buf, peer);
+            show_peer_summary(&mut buf, peer)?;
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 static SHOW_BGP_HEADER: &str = r#"Status codes:  s suppressed, d damped, h history, u unsorted,
@@ -126,7 +124,7 @@ fn show_origin(attrs: &Vec<Attr>) -> String {
     "".to_string()
 }
 
-fn show_bgp_route(bgp: &Bgp) -> String {
+fn show_bgp_route(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
     buf.push_str(SHOW_BGP_HEADER);
@@ -150,18 +148,21 @@ fn show_bgp_route(bgp: &Bgp) -> String {
                 0,
                 aspath,
                 origin,
-            )
-            .unwrap();
+            )?;
         }
     }
-    buf
+    Ok(buf)
 }
 
-fn show_bgp(bgp: &Bgp, args: Args, _json: bool) -> String {
+fn show_bgp(bgp: &Bgp, args: Args, _json: bool) -> std::result::Result<String, std::fmt::Error> {
     show_bgp_route(bgp)
 }
 
-fn show_bgp_summary(bgp: &Bgp, args: Args, _json: bool) -> String {
+fn show_bgp_summary(
+    bgp: &Bgp,
+    args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     show_bgp_instance(bgp)
 }
 
@@ -243,7 +244,7 @@ fn peer_uptime(instant: &Option<Instant>, use_json: bool) -> (String, Option<Upt
         if use_json {
             let epoch_now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs();
             let epoch_established = epoch_now - total_seconds;
 
@@ -311,7 +312,7 @@ fn fetch(peer: &Peer) -> Neighbor {
     n
 }
 
-fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
+fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
     writeln!(
         out,
         r#"BGP neighbor is {}, remote AS {}, local AS {}, {} link
@@ -371,26 +372,54 @@ fn render(out: &mut String, neighbor: &Neighbor) -> anyhow::Result<()> {
     Capability:         {:>10}    {:>10}
     Total:              {:>10}    {:>10}
 "#,
-        neighbor.count.get("open").unwrap().sent,
-        neighbor.count.get("open").unwrap().rcvd,
-        neighbor.count.get("notification").unwrap().sent,
-        neighbor.count.get("notification").unwrap().rcvd,
-        neighbor.count.get("update").unwrap().sent,
-        neighbor.count.get("update").unwrap().rcvd,
-        neighbor.count.get("keepalive").unwrap().sent,
-        neighbor.count.get("keepalive").unwrap().rcvd,
-        neighbor.count.get("routerefresh").unwrap().sent,
-        neighbor.count.get("routerefresh").unwrap().rcvd,
-        neighbor.count.get("capability").unwrap().sent,
-        neighbor.count.get("capability").unwrap().rcvd,
-        neighbor.count.get("total").unwrap().sent,
-        neighbor.count.get("total").unwrap().rcvd,
+        neighbor.count.get("open").map(|c| c.sent).unwrap_or(0),
+        neighbor.count.get("open").map(|c| c.rcvd).unwrap_or(0),
+        neighbor
+            .count
+            .get("notification")
+            .map(|c| c.sent)
+            .unwrap_or(0),
+        neighbor
+            .count
+            .get("notification")
+            .map(|c| c.rcvd)
+            .unwrap_or(0),
+        neighbor.count.get("update").map(|c| c.sent).unwrap_or(0),
+        neighbor.count.get("update").map(|c| c.rcvd).unwrap_or(0),
+        neighbor.count.get("keepalive").map(|c| c.sent).unwrap_or(0),
+        neighbor.count.get("keepalive").map(|c| c.rcvd).unwrap_or(0),
+        neighbor
+            .count
+            .get("routerefresh")
+            .map(|c| c.sent)
+            .unwrap_or(0),
+        neighbor
+            .count
+            .get("routerefresh")
+            .map(|c| c.rcvd)
+            .unwrap_or(0),
+        neighbor
+            .count
+            .get("capability")
+            .map(|c| c.sent)
+            .unwrap_or(0),
+        neighbor
+            .count
+            .get("capability")
+            .map(|c| c.rcvd)
+            .unwrap_or(0),
+        neighbor.count.get("total").map(|c| c.sent).unwrap_or(0),
+        neighbor.count.get("total").map(|c| c.rcvd).unwrap_or(0),
     )?;
 
     Ok(())
 }
 
-fn show_bgp_neighbor(bgp: &Bgp, args: Args, _json: bool) -> String {
+fn show_bgp_neighbor(
+    bgp: &Bgp,
+    args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
 
     if args.is_empty() {
@@ -399,33 +428,41 @@ fn show_bgp_neighbor(bgp: &Bgp, args: Args, _json: bool) -> String {
             neighbors.push(fetch(peer));
         }
         for neighbor in neighbors.iter() {
-            render(&mut out, neighbor).unwrap();
+            render(&mut out, neighbor)?;
         }
         // out = serde_json::to_string(&neighbors).unwrap();
     } else {
         // Specific neighbor.
     }
-    out
+    Ok(out)
 }
 
-fn show_community_list(bgp: &Bgp, _args: Args, _json: bool) -> String {
+fn show_community_list(
+    bgp: &Bgp,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::from("community-list");
     for (name, clist) in bgp.clist.0.iter() {
-        writeln!(out, "name: {:?}", name).unwrap();
+        writeln!(out, "name: {:?}", name)?;
         for (seq, entry) in clist.entry.iter() {
-            writeln!(out, " seq: {}", seq).unwrap();
+            writeln!(out, " seq: {}", seq)?;
             if let Some(action) = &entry.action {
-                writeln!(out, " action: {:?}", action).unwrap();
+                writeln!(out, " action: {:?}", action)?;
             }
         }
     }
 
-    out
+    Ok(out)
 }
 
-fn show_bgp_l2vpn_evpn(bgp: &Bgp, args: Args, _json: bool) -> String {
+fn show_bgp_l2vpn_evpn(
+    bgp: &Bgp,
+    args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
-    out
+    Ok(out)
 }
 
 impl Bgp {
