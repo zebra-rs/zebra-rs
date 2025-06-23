@@ -31,12 +31,20 @@ impl Isis {
     }
 }
 
-fn show_isis(isis: &Isis, _args: Args, _json: bool) -> String {
-    String::from("show isis")
+fn show_isis(
+    isis: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::from("show isis"))
 }
 
-fn show_isis_summary(_isis: &Isis, _args: Args, _json: bool) -> String {
-    String::from("show isis summary")
+fn show_isis_summary(
+    _isis: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::from("show isis summary"))
 }
 
 // JSON structures for ISIS graph
@@ -60,7 +68,11 @@ struct LinkJson {
     pub cost: u32,
 }
 
-fn show_isis_graph(isis: &Isis, _args: Args, json: bool) -> String {
+fn show_isis_graph(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut graphs = Vec::new();
 
     // Process Level 1 graph
@@ -79,30 +91,30 @@ fn show_isis_graph(isis: &Isis, _args: Args, json: bool) -> String {
 
     if json {
         // Return JSON formatted output
-        serde_json::to_string_pretty(&graphs)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize graph: {}\"}}", e))
+        Ok(serde_json::to_string_pretty(&graphs)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize graph: {}\"}}", e)))
     } else {
         // Return text formatted output
         let mut buf = String::new();
 
         for graph_data in graphs {
-            writeln!(buf, "\n{} IS-IS Graph:", graph_data.level).unwrap();
-            writeln!(buf, "\nNodes:").unwrap();
+            writeln!(buf, "\n{} IS-IS Graph:", graph_data.level)?;
+            writeln!(buf, "\nNodes:")?;
             for node in &graph_data.nodes {
-                writeln!(buf, "  {} (id: {})", node.name, node.id).unwrap();
+                writeln!(buf, "  {} (id: {})", node.name, node.id)?;
                 if !node.links.is_empty() {
-                    writeln!(buf, "    Links:").unwrap();
+                    writeln!(buf, "    Links:")?;
                     for link in &node.links {
-                        writeln!(buf, "      -> {} (cost: {})", link.to_name, link.cost).unwrap();
+                        writeln!(buf, "      -> {} (cost: {})", link.to_name, link.cost)?;
                     }
                 }
             }
         }
 
         if buf.is_empty() {
-            String::from("No IS-IS graph data available")
+            Ok(String::from("No IS-IS graph data available"))
         } else {
-            buf
+            Ok(buf)
         }
     }
 }
@@ -168,7 +180,11 @@ struct RoutesJson {
     level_2: Vec<RouteJson>,
 }
 
-fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
+fn show_isis_route(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         // JSON output
         let mut routes_json = RoutesJson {
@@ -206,14 +222,14 @@ fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
         routes_json.level_1 = collect_routes(&Level::L1);
         routes_json.level_2 = collect_routes(&Level::L2);
 
-        serde_json::to_string_pretty(&routes_json)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e))
+        Ok(serde_json::to_string_pretty(&routes_json)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)))
     } else {
         // Text output (existing implementation)
         let mut buf = String::new();
 
         // Helper closure to format and write out routes for a given level
-        let mut write_routes = |level: &Level| {
+        let mut write_routes = |level: &Level| -> std::fmt::Result {
             for (prefix, route) in isis.rib.get(level).iter() {
                 let mut shown = false;
                 for (addr, nhop) in route.nhops.iter() {
@@ -235,8 +251,7 @@ fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
                             addr,
                             isis.ifname(nhop.ifindex),
                             sid
-                        )
-                        .unwrap();
+                        )?;
                         shown = true;
                     } else {
                         writeln!(
@@ -246,17 +261,17 @@ fn show_isis_route(isis: &Isis, _args: Args, json: bool) -> String {
                             addr,
                             isis.ifname(nhop.ifindex),
                             sid
-                        )
-                        .unwrap();
+                        )?;
                     }
                 }
             }
+            Ok(())
         };
 
-        write_routes(&Level::L1);
-        write_routes(&Level::L2);
+        write_routes(&Level::L1)?;
+        write_routes(&Level::L2)?;
 
-        buf
+        Ok(buf)
     }
 }
 
@@ -281,7 +296,11 @@ struct LspEntryJson {
     ol_bit: u8,
 }
 
-fn show_isis_database(isis: &Isis, _args: Args, json: bool) -> String {
+fn show_isis_database(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         // JSON output
         let mut database_json = DatabaseJson {
@@ -333,8 +352,8 @@ fn show_isis_database(isis: &Isis, _args: Args, json: bool) -> String {
         database_json.level_1 = collect_lsp_entries(&Level::L1, &isis.lsdb.l1);
         database_json.level_2 = collect_lsp_entries(&Level::L2, &isis.lsdb.l2);
 
-        serde_json::to_string_pretty(&database_json)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize database: {}\"}}", e))
+        Ok(serde_json::to_string_pretty(&database_json)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize database: {}\"}}", e)))
     } else {
         // Text output (existing implementation)
         let mut buf = String::new();
@@ -367,8 +386,7 @@ fn show_isis_database(isis: &Isis, _args: Args, json: bool) -> String {
                 lsa.lsp.checksum,
                 rem,
                 types,
-            )
-            .unwrap();
+            )?;
         }
 
         for (lsp_id, lsa) in isis.lsdb.l2.iter() {
@@ -399,21 +417,24 @@ fn show_isis_database(isis: &Isis, _args: Args, json: bool) -> String {
                 lsa.lsp.checksum,
                 rem,
                 types,
-            )
-            .unwrap();
+            )?;
         }
 
-        buf
+        Ok(buf)
     }
 }
 
-fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
+fn show_isis_database_detail(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         // Use serde to serialize both L1 and L2 databases
         let mut all_lsps = Vec::new();
         all_lsps.extend(isis.lsdb.l1.values().map(|x| &x.lsp));
         all_lsps.extend(isis.lsdb.l2.values().map(|x| &x.lsp));
-        serde_json::to_string_pretty(&all_lsps).unwrap()
+        Ok(serde_json::to_string_pretty(&all_lsps).unwrap())
     } else {
         // Generate a nicely formatted string for human-readable format
         let mut result = String::new();
@@ -471,21 +492,25 @@ fn show_isis_database_detail(isis: &Isis, _args: Args, json: bool) -> String {
         // Add L2 database
         result.push_str(&format_level(&Level::L2, &isis.lsdb.l2));
 
-        result
+        Ok(result)
     }
 }
 
-fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
+fn show_isis_adjacency(
+    top: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
     for (_, link) in top.links.iter() {
         if let Some(dis) = &link.state.dis.l1 {
-            writeln!(buf, "Interface: {}", top.ifname(link.state.ifindex)).unwrap();
-            writeln!(buf, "  DIS: {}", dis);
+            writeln!(buf, "Interface: {}", top.ifname(link.state.ifindex))?;
+            writeln!(buf, "  DIS: {}", dis)?;
             if let Some(adj) = &link.state.adj.get(&Level::L1) {
-                writeln!(buf, "  Adj: {}", adj).unwrap();
+                writeln!(buf, "  Adj: {}", adj)?;
             } else {
-                writeln!(buf, "  Adj: N/A").unwrap();
+                writeln!(buf, "  Adj: N/A")?;
             }
         }
         if let Some(dis) = &link.state.dis.l2 {
@@ -498,5 +523,5 @@ fn show_isis_adjacency(top: &Isis, _args: Args, _json: bool) -> String {
             }
         }
     }
-    buf
+    Ok(buf)
 }

@@ -89,7 +89,7 @@ fn show_mac(mac: Option<MacAddr>) -> String {
     .unwrap_or_else(|| "N/A".to_string())
 }
 
-pub fn show(top: &Isis, _args: Args, json: bool) -> String {
+pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
     for (_, link) in top.links.iter() {
@@ -130,7 +130,7 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
     }
 
     if json {
-        return serde_json::to_string(&nbrs).unwrap();
+        return Ok(serde_json::to_string(&nbrs).unwrap());
     }
 
     let mut buf = String::new();
@@ -144,16 +144,16 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> String {
         .unwrap();
     }
 
-    buf
+    Ok(buf)
 }
 
-fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) {
+fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std::fmt::Result {
     let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.pdu.source_id) {
         hostname.clone()
     } else {
         nbr.pdu.source_id.to_string()
     };
-    writeln!(buf, " {}", system_id).unwrap();
+    writeln!(buf, " {}", system_id)?;
 
     writeln!(
         buf,
@@ -164,18 +164,18 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) {
     )
     .unwrap();
 
-    write!(buf, "    Circuit type: {}, Speaks:", nbr.pdu.circuit_type,).unwrap();
+    write!(buf, "    Circuit type: {}, Speaks:", nbr.pdu.circuit_type,)?;
 
     if let Some(proto) = &nbr.pdu.proto_tlv() {
         for (i, nlpid) in proto.nlpids.iter().enumerate() {
             if i != 0 {
-                write!(buf, ", {}", nlpid_str(*nlpid)).unwrap();
+                write!(buf, ", {}", nlpid_str(*nlpid))?;
             } else {
-                write!(buf, " {}", nlpid_str(*nlpid)).unwrap();
+                write!(buf, " {}", nlpid_str(*nlpid))?;
             }
         }
         if !proto.nlpids.is_empty() {
-            writeln!(buf, "").unwrap();
+            writeln!(buf, "")?;
         }
     }
 
@@ -190,47 +190,52 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) {
     let dis = if nbr.is_dis() { "is DIS" } else { "is not DIS" };
 
     // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 4m1s ago
-    writeln!(buf, "    LAN Priority: {}, {}", nbr.pdu.priority, dis).unwrap();
+    writeln!(buf, "    LAN Priority: {}, {}", nbr.pdu.priority, dis)?;
 
     if !nbr.naddr4.is_empty() {
-        writeln!(buf, "    IP Prefixes").unwrap();
+        writeln!(buf, "    IP Prefixes")?;
     }
     for (key, value) in &nbr.naddr4 {
-        write!(buf, "      {}", value.addr).unwrap();
+        write!(buf, "      {}", value.addr)?;
         if let Some(label) = value.label {
             write!(buf, " ({})", label);
         }
         writeln!(buf, "");
     }
     if !nbr.laddr6.is_empty() {
-        writeln!(buf, "    IPv6 Link-Locals").unwrap();
+        writeln!(buf, "    IPv6 Link-Locals")?;
     }
     for addr in &nbr.laddr6 {
-        writeln!(buf, "      {}", addr).unwrap();
+        writeln!(buf, "      {}", addr)?;
     }
     if !nbr.addr6.is_empty() {
-        writeln!(buf, "    IPv6 Prefixes").unwrap();
+        writeln!(buf, "    IPv6 Prefixes")?;
     }
     for addr in &nbr.addr6 {
-        writeln!(buf, "      {}", addr).unwrap();
+        writeln!(buf, "      {}", addr)?;
     }
 
-    writeln!(buf, "").unwrap();
+    writeln!(buf, "")?;
+    Ok(())
 }
 
-pub fn show_detail(top: &Isis, _args: Args, _json: bool) -> String {
+pub fn show_detail(
+    top: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
     for (_, link) in top.links.iter() {
         // Show Level-1 neighbors
         for (_, adj) in &link.state.nbrs.l1 {
-            show_entry(&mut buf, top, adj, Level::L1);
+            show_entry(&mut buf, top, adj, Level::L1)?;
         }
         // Show Level-2 neighbors
         for (_, adj) in &link.state.nbrs.l2 {
-            show_entry(&mut buf, top, adj, Level::L2);
+            show_entry(&mut buf, top, adj, Level::L2)?;
         }
     }
 
-    buf
+    Ok(buf)
 }

@@ -666,7 +666,7 @@ struct LinkInfo {
     level: String,
 }
 
-pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
+pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut links = Vec::new();
         for (ifindex, link) in isis.links.iter() {
@@ -680,7 +680,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
                 });
             }
         }
-        return serde_json::to_string_pretty(&links).unwrap();
+        return Ok(serde_json::to_string_pretty(&links).unwrap());
     }
     let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
     for (ifindex, link) in isis.links.iter() {
@@ -712,7 +712,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> String {
             .unwrap();
         }
     }
-    buf
+    Ok(buf)
 }
 
 // JSON structures for interface detail
@@ -751,14 +751,13 @@ struct LevelInfo {
     dis_status: String,
 }
 
-pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) {
+pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std::fmt::Result {
     writeln!(
         buf,
         "    Metric: {}, Active neighbors: {}",
         link.config.metric(),
         link.state.nbrs_up.get(&level)
-    )
-    .unwrap();
+    )?;
     let padding = if link.config.hello_padding() == HelloPaddingPolicy::Always {
         "yes"
     } else {
@@ -770,13 +769,13 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) {
         link.config.hello_interval(),
         link.config.holddown_count(),
         padding,
-    );
+    )?;
     writeln!(
         buf,
         "    CNSP interval: {}, PSNP interval: {}",
         link.config.csnp_interval(),
         link.config.psnp_interval()
-    );
+    )?;
 
     // DIS status.
     let dis_status = match link.state.dis_status.get(&level) {
@@ -789,20 +788,20 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) {
         "    LAN prirority: {}, {}",
         link.config.priority(),
         dis_status
-    )
-    .unwrap();
+    )?;
 
     // DIS Lan ID.
     if let Some(lan_id) = link.state.lan_id.get(&level) {
-        writeln!(buf, "    LAN ID: {}", lan_id);
+        writeln!(buf, "    LAN ID: {}", lan_id)?;
     } else {
-        writeln!(buf, "    LAN ID: Not set");
+        writeln!(buf, "    LAN ID: Not set")?;
     }
 
     // Hello.
     if let Some(hello) = link.state.hello.get(&level) {
-        writeln!(buf, "    {}", hello);
+        writeln!(buf, "    {}", hello)?;
     }
+    Ok(())
 }
 
 fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
@@ -832,7 +831,11 @@ fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
     }
 }
 
-pub fn show_detail(isis: &Isis, _args: Args, json: bool) -> String {
+pub fn show_detail(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         // JSON output
         let mut interfaces = Vec::new();
@@ -869,8 +872,11 @@ pub fn show_detail(isis: &Isis, _args: Args, json: bool) -> String {
             }
         }
 
-        serde_json::to_string_pretty(&interfaces)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize interfaces: {}\"}}", e))
+        Ok(
+            serde_json::to_string_pretty(&interfaces).unwrap_or_else(|e| {
+                format!("{{\"error\": \"Failed to serialize interfaces: {}\"}}", e)
+            }),
+        )
     } else {
         // Text output (existing implementation)
         let mut buf = String::new();
@@ -881,47 +887,45 @@ pub fn show_detail(isis: &Isis, _args: Args, json: bool) -> String {
                     buf,
                     "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
                     link.state.name, link_state, link.state.ifindex
-                )
-                .unwrap();
+                )?;
                 writeln!(
                     buf,
                     "  Type: {}, Level: {}, SNPA: {}",
                     link.config.link_type(),
                     link.state.level(),
-                    link.state.mac.unwrap(),
-                )
-                .unwrap();
+                    link.state.mac.unwrap_or(MacAddr::from([0, 0, 0, 0, 0, 0])),
+                )?;
                 if has_level(link.state.level(), Level::L1) {
-                    writeln!(buf, "  Level-1 Information:").unwrap();
-                    show_detail_entry(&mut buf, link, Level::L1);
+                    writeln!(buf, "  Level-1 Information:")?;
+                    show_detail_entry(&mut buf, link, Level::L1)?;
                 }
                 if has_level(link.state.level(), Level::L2) {
-                    writeln!(buf, "  Level-2 Information:").unwrap();
-                    show_detail_entry(&mut buf, link, Level::L2);
+                    writeln!(buf, "  Level-2 Information:")?;
+                    show_detail_entry(&mut buf, link, Level::L2)?;
                 }
                 // IPv4 Address.
                 if !link.state.v4addr.is_empty() {
-                    writeln!(buf, "  IP Prefix(es):").unwrap();
+                    writeln!(buf, "  IP Prefix(es):")?;
                     for prefix in link.state.v4addr.iter() {
-                        writeln!(buf, "    {}", prefix).unwrap();
+                        writeln!(buf, "    {}", prefix)?;
                     }
                 }
                 if !link.state.v6laddr.is_empty() {
-                    writeln!(buf, "  IPv6 Link-Locals:").unwrap();
+                    writeln!(buf, "  IPv6 Link-Locals:")?;
                     for prefix in link.state.v6laddr.iter() {
-                        writeln!(buf, "    {}", prefix).unwrap();
+                        writeln!(buf, "    {}", prefix)?;
                     }
                 }
                 if !link.state.v6addr.is_empty() {
-                    writeln!(buf, "  IPv6 Prefix(es):").unwrap();
+                    writeln!(buf, "  IPv6 Prefix(es):")?;
                     for prefix in link.state.v6addr.iter() {
-                        writeln!(buf, "    {}", prefix).unwrap();
+                        writeln!(buf, "    {}", prefix)?;
                     }
                 }
-                writeln!(buf, "").unwrap();
+                writeln!(buf, "")?;
             }
         }
-        buf
+        Ok(buf)
     }
 }
 
@@ -974,7 +978,11 @@ fn format_time_ago(timestamp: std::time::SystemTime) -> String {
     }
 }
 
-pub fn show_dis_statistics(isis: &Isis, mut args: Args, json: bool) -> String {
+pub fn show_dis_statistics(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -1024,7 +1032,7 @@ pub fn show_dis_statistics(isis: &Isis, mut args: Args, json: bool) -> String {
                 }
             }
         }
-        return serde_json::to_string_pretty(&stats).unwrap();
+        return Ok(serde_json::to_string_pretty(&stats).unwrap());
     }
 
     let mut buf = String::new();
@@ -1084,10 +1092,14 @@ pub fn show_dis_statistics(isis: &Isis, mut args: Args, json: bool) -> String {
         }
     }
 
-    buf
+    Ok(buf)
 }
 
-pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
+pub fn show_dis_history(
+    isis: &Isis,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -1133,7 +1145,7 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
                 }
             }
         }
-        return serde_json::to_string_pretty(&history).unwrap();
+        return Ok(serde_json::to_string_pretty(&history).unwrap());
     }
 
     let mut buf = String::new();
@@ -1141,13 +1153,11 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
     writeln!(
         buf,
         "Interface        Level  Time                From        To          Reason"
-    )
-    .unwrap();
+    )?;
     writeln!(
         buf,
         "---------------- ------ ------------------- ----------- ----------- ------"
-    )
-    .unwrap();
+    )?;
 
     for (_, link) in isis.links.iter() {
         if link.config.enabled() {
@@ -1189,5 +1199,5 @@ pub fn show_dis_history(isis: &Isis, mut args: Args, json: bool) -> String {
         }
     }
 
-    buf
+    Ok(buf)
 }
