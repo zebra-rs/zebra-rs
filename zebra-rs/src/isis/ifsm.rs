@@ -206,6 +206,28 @@ pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
     })
 }
 
+pub fn purge_pseudonode_lsp(ltop: &mut LinkTop, level: Level) {
+    // Only purge if we have an adjacency (meaning we were DIS)
+    let Some(adj) = ltop.state.adj.get(&level) else {
+        return;
+    };
+
+    isis_info!(
+        "Purging pseudonode LSP for {} level {} adj {}",
+        ltop.state.name,
+        level,
+        adj
+    );
+
+    // Create pseudonode LSP ID from the adjacency
+    let pseudonode_lsp_id = IsisLspId::from_neighbor_id(adj.clone(), 0);
+
+    // Send purge message to the main IS-IS instance
+    ltop.tx
+        .send(Message::LspPurge(level, pseudonode_lsp_id))
+        .unwrap();
+}
+
 pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     fn is_better(nbr: &Neighbor, curr_priority: u8, curr_mac: &Option<MacAddr>) -> bool {
         nbr.pdu.priority > curr_priority
@@ -323,16 +345,42 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
     // Record DIS change if status actually changed
     if old_status != new_status || old_sys_id != new_sys_id {
-        // DIS originate.
-        if new_status == DisStatus::Myself {
+        // Handle DIS status transitions
+        if old_status == DisStatus::Myself && new_status != DisStatus::Myself {
+            // We were DIS but no longer are
+            isis_info!(
+                "DIS transition: {} losing DIS status on level {}",
+                ltop.state.name,
+                level
+            );
+
+            // Purge our pseudonode LSP
+            purge_pseudonode_lsp(ltop, level);
+
+            // Clear LAN ID
+            *ltop.state.lan_id.get_mut(&level) = None;
+
+            // Stop DIS timers
+            *ltop.timer.dis.get_mut(&level) = None;
+            *ltop.timer.csnp.get_mut(&level) = None;
+        } else if new_status == DisStatus::Myself {
+            // We are becoming DIS
+            isis_info!(
+                "DIS transition: {} becoming DIS on level {}",
+                ltop.state.name,
+                level
+            );
+
+            // Start DIS timers
             *ltop.timer.dis.get_mut(&level) = Some(dis_timer(ltop, level));
             *ltop.timer.csnp.get_mut(&level) = Some(csnp_timer(ltop, level));
         } else {
+            // Not DIS (either staying non-DIS or switching between Other/NotSelected)
             *ltop.timer.dis.get_mut(&level) = None;
             *ltop.timer.csnp.get_mut(&level) = None;
         }
 
-        // Generate LSP.
+        // Generate LSP to reflect DIS status change
         isis_info!("LspOriginate from dis_selection");
         ltop.tx.send(Message::LspOriginate(level)).unwrap();
 
