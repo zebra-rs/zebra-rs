@@ -301,6 +301,9 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     if prev_state == State::Established && peer.state != State::Established {
         peer.instant = Some(Instant::now());
 
+        // Stop start timer.
+        peer.timer.idle_hold_timer = None;
+
         // Clear all routes from this peer when session goes down
         let peer_addr = peer.address;
 
@@ -435,13 +438,10 @@ pub fn open_asn(packet: &OpenPacket) -> u32 {
 }
 
 pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
-    println!("fsm_bgp_open");
-
     peer.counter[BgpType::Open as usize].rcvd += 1;
 
     // Peer ASN.
     let asn = open_asn(&packet);
-    println!("fsm_bgp_open: asn {}", asn);
 
     // Compare with configured asn.
     if peer.peer_as != asn {

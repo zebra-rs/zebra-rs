@@ -109,7 +109,20 @@ impl Bgp {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Event(peer, event) => {
-                println!("Message::Event: {:?}", event);
+                match event {
+                    Event::BGPOpen(ref msg) => {
+                        println!("{:?}", msg);
+                    }
+                    Event::UpdateMsg(ref msg) => {
+                        println!("{:?}", msg);
+                    }
+                    Event::KeepAliveMsg => {
+                        println!("KeepAlive:");
+                    }
+                    _ => {
+                        println!("Message::Event: {:?}", event);
+                    }
+                }
                 fsm(self, peer, event);
             }
             Message::Accept(socket, sockaddr) => {
