@@ -492,7 +492,7 @@ impl ConfigManager {
 fn is_bgp(paths: &[CommandPath]) -> bool {
     paths
         .iter()
-        .any(|x| x.name == "bgp" || x.name == "community-list")
+        .any(|x| x.name == "bgp" || x.name == "community-list" || x.name == "evpn")
 }
 
 fn is_ospf(paths: &[CommandPath]) -> bool {

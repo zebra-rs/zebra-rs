@@ -54,3 +54,8 @@ format:
 mcp:
 	cargo build --release
 	cp target/release/zmcp-server ~/bin
+
+allclean:
+	rm -rf ${HOME}/.cargo/git
+	rm -rf target
+	rm -f Cargo.lock

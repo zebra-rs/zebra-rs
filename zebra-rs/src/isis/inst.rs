@@ -963,12 +963,20 @@ pub fn graph(
         if !lsa.lsp.lsp_id.is_pseudo() {
             let sys_id = lsa.lsp.lsp_id.sys_id().clone();
             let id = top.lsp_map.get_mut(&level).get(&sys_id);
+            // Self originated LSP.
             if lsa.originated {
                 s = Some(id);
                 for tlv in lsa.lsp.tlvs.iter() {
+                    // Looking for Adjacency SID.
                     if let IsisTlv::ExtIsReach(tlv) = tlv {
                         for ent in tlv.entries.iter() {
                             for sub in ent.subs.iter() {
+                                // In case of P2P link,
+                                // if let neigh::IsisSubTlv::AdjSid(sid) = sub {
+                                //     if let SidLabelValue::Label(label) = sid.sid {
+                                //         sids.insert(label, sid.system_id.clone());
+                                //     }
+                                // }
                                 if let neigh::IsisSubTlv::LanAdjSid(sid) = sub {
                                     if let SidLabelValue::Label(label) = sid.sid {
                                         sids.insert(label, sid.system_id.clone());
