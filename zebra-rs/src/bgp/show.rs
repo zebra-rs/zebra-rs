@@ -118,7 +118,7 @@ fn show_aspath(attrs: &Vec<Attr>) -> String {
 fn show_origin(attrs: &Vec<Attr>) -> String {
     for attr in attrs.iter() {
         if let Attr::Origin(origin) = attr {
-            return origin.to_string();
+            return origin.short_str().to_string();
         }
     }
     "".to_string()
