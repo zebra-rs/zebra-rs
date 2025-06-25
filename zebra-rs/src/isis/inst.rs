@@ -988,9 +988,9 @@ pub fn graph(
                 }
             }
 
-            // Use hostname if available, otherwise fall back to system ID
+            // Use hostname with system ID if available, otherwise just system ID
             let node_name = if let Some((hostname, _)) = top.hostname.get(&level).get(&sys_id) {
-                hostname.clone()
+                format!("{} ({})", hostname, sys_id)
             } else {
                 sys_id.to_string()
             };
