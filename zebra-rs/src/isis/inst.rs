@@ -988,9 +988,9 @@ pub fn graph(
                 }
             }
 
-            // Use hostname with system ID if available, otherwise just system ID
+            // Separate hostname and system ID into distinct fields
             let node_name = if let Some((hostname, _)) = top.hostname.get(&level).get(&sys_id) {
-                format!("{} ({})", hostname, sys_id)
+                hostname.clone()
             } else {
                 sys_id.to_string()
             };
@@ -998,6 +998,7 @@ pub fn graph(
             let mut node = spf::Node {
                 id,
                 name: node_name,
+                sys_id: sys_id.to_string(),
                 olinks: vec![],
                 ilinks: vec![],
                 // is_disabled: false,
