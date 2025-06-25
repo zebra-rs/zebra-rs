@@ -988,9 +988,17 @@ pub fn graph(
                 }
             }
 
+            // Separate hostname and system ID into distinct fields
+            let node_name = if let Some((hostname, _)) = top.hostname.get(&level).get(&sys_id) {
+                hostname.clone()
+            } else {
+                sys_id.to_string()
+            };
+
             let mut node = spf::Node {
                 id,
-                name: sys_id.to_string(),
+                name: node_name,
+                sys_id: sys_id.to_string(),
                 olinks: vec![],
                 ilinks: vec![],
                 // is_disabled: false,
