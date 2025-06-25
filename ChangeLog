@@ -1,3 +1,32 @@
+2025-06-25  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* zebra-rs/src/isis/packet.rs (hello_p2p_recv): Implement IS-IS
+	point-to-point Hello PDU processing with simplified adjacency
+	formation. P2P adjacencies skip MAC validation and transition
+	directly from Down to Up state.
+
+	* zebra-rs/src/isis/nfsm.rs (nfsm_p2p_hello_received): Add P2P-
+	specific neighbor state machine that bypasses DIS election and
+	LAN-specific operations. Supports multi-level P2P adjacencies.
+
+	* zebra-rs/src/isis/ifsm.rs (hello_p2p_generate, hello_originate):
+	Add P2P Hello packet generation and sending logic. P2P interfaces
+	use simplified Hello structure without LAN ID or IS Neighbor TLV.
+	Skip DIS election and CSNP sending for P2P interfaces.
+
+	* zebra-rs/src/isis/inst.rs (graph): Enhance IS-IS topology graph
+	to display hostnames from Dynamic Hostname TLV (Type 137) alongside
+	system IDs. Separate name and sys_id as distinct fields for better
+	API integration.
+
+	* zebra-rs/src/isis/show.rs (show_isis_graph): Update graph display
+	to show hostname [system-id] format in text output and separate
+	name/sys_id fields in JSON output for improved readability.
+
+	* zebra-rs/src/spf/calc.rs (Node): Add sys_id field to Node structure
+	to distinguish between logical hostname and technical system ID
+	for comprehensive router identification.
+
 2025-06-22  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.3
