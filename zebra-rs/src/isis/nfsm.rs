@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsLevel, IsisHello, IsisTlv};
+use isis_packet::{IsLevel, IsisHello, IsisNeighborId, IsisTlv};
 
 use crate::isis::Level;
 use crate::isis::link::Afi;
@@ -45,6 +45,7 @@ impl Display for NfsmState {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum NfsmEvent {
     HelloReceived,
+    P2pHelloReceived,
     HoldTimerExpire,
 }
 
@@ -52,6 +53,7 @@ impl NfsmEvent {
     fn as_str(&self) -> &'static str {
         match self {
             NfsmEvent::HelloReceived => "HelloReceived",
+            NfsmEvent::P2pHelloReceived => "P2pHelloReceived",
             NfsmEvent::HoldTimerExpire => "HoldTimerExpire",
         }
     }
@@ -74,14 +76,17 @@ impl NfsmState {
         match self {
             Down => match ev {
                 HelloReceived => (nfsm_hello_received, None),
+                P2pHelloReceived => (nfsm_p2p_hello_received, None),
                 HoldTimerExpire => (nfsm_hold_timer_expire, None),
             },
             Init => match ev {
                 HelloReceived => (nfsm_hello_received, None),
+                P2pHelloReceived => (nfsm_p2p_hello_received, None),
                 HoldTimerExpire => (nfsm_hold_timer_expire, None),
             },
             Up => match ev {
                 HelloReceived => (nfsm_hello_received, None),
+                P2pHelloReceived => (nfsm_p2p_hello_received, None),
                 HoldTimerExpire => (nfsm_hold_timer_expire, None),
             },
         }
@@ -254,6 +259,50 @@ pub fn nfsm_hold_timer_expire(
     }
 
     Some(NfsmState::Down)
+}
+
+pub fn nfsm_p2p_hello_received(
+    ntop: &mut NeighborTop,
+    nbr: &mut Neighbor,
+    _mac: &Option<MacAddr>,
+    level: Level,
+) -> Option<NfsmState> {
+    use IfsmEvent::*;
+
+    let mut state = nbr.state;
+
+    isis_info!("P2P Hello received on {} from {}", nbr.ifindex, nbr.sys_id);
+
+    // P2P adjacency formation is simpler than LAN:
+    // - No DIS election needed
+    // - No MAC address validation required
+    // - Direct transition from Down to Up
+    match state {
+        NfsmState::Down => {
+            // Start Hello origination and go directly to Up
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+            state = NfsmState::Up;
+
+            // Set adjacency for P2P link - convert sys_id to neighbor_id
+            *ntop.adj.get_mut(&level) = Some(IsisNeighborId::from_sys_id(&nbr.pdu.source_id, 0));
+        }
+        NfsmState::Init | NfsmState::Up => {
+            // Already have adjacency, just refresh
+            // P2P links maintain simple adjacency without complex state changes
+        }
+    }
+
+    // Update interface addresses from Hello
+    nfsm_ifaddr_update(nbr, ntop.local_pool);
+
+    // Reset hold timer
+    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+    if state != nbr.state {
+        Some(state)
+    } else {
+        None
+    }
 }
 
 pub fn isis_nfsm(
