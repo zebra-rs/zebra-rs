@@ -16,6 +16,7 @@ use crate::isis_info;
 use crate::rib::MacAddr;
 
 use super::Level;
+use super::ifsm::has_level;
 use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
 use super::link::LinkTop;
 use super::lsdb;
@@ -82,7 +83,73 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
     );
 }
 
-pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {}
+pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
+    let Some(link) = top.links.get_mut(&ifindex) else {
+        return;
+    };
+
+    if !link.config.enabled() {
+        return;
+    }
+
+    // Extract P2P Hello PDU - P2P Hello uses the same structure as LAN Hello
+    // but comes as P2PHello packet type, needs to extract as L1Hello/L2Hello
+    let hello = match packet.pdu {
+        IsisPdu::L1Hello(pdu) | IsisPdu::L2Hello(pdu) => pdu,
+        _ => return,
+    };
+
+    // Check what levels this interface supports
+    let interface_level = link.state.level();
+
+    // P2P Hello contains circuit_type indicating what levels the sender supports
+    let sender_level = hello.circuit_type;
+
+    // Process the Hello for each compatible level
+    for level in [Level::L1, Level::L2] {
+        // Check if both sender and receiver support this level
+        if !has_level(interface_level, level) || !has_level(sender_level, level) {
+            continue;
+        }
+
+        // Create or update neighbor for this level
+        let nbr = link
+            .state
+            .nbrs
+            .get_mut(&level)
+            .entry(hello.source_id.clone())
+            .or_insert(Neighbor::new(
+                level,
+                hello.source_id.clone(),
+                hello.clone(),
+                ifindex,
+                mac,
+                link.tx.clone(),
+            ));
+
+        // Update neighbor's Hello PDU
+        nbr.pdu = hello.clone();
+
+        // For P2P interfaces, we use a simplified neighbor state machine
+        // Skip the MAC address validation that LAN interfaces require
+        let mut ntop = NeighborTop {
+            tx: &mut link.tx,
+            dis: &mut link.state.dis,
+            lan_id: &mut link.state.lan_id,
+            adj: &mut link.state.adj,
+            local_pool: &mut top.local_pool,
+        };
+
+        // Use P2P-specific neighbor state machine event
+        isis_nfsm(
+            &mut ntop,
+            nbr,
+            NfsmEvent::P2pHelloReceived,
+            &link.state.mac,
+            level,
+        );
+    }
+}
 
 pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool {
     for tlv in &lsp.tlvs {

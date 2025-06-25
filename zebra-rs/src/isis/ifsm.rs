@@ -7,7 +7,7 @@ use crate::rib::MacAddr;
 use crate::{isis_debug, isis_info};
 
 use super::inst::{Packet, PacketMessage};
-use super::link::{Afis, HelloPaddingPolicy, LinkTop};
+use super::link::{Afis, HelloPaddingPolicy, LinkTop, LinkType};
 use super::neigh::Neighbor;
 use super::task::Timer;
 use super::{IsisLink, Level, Message, NfsmState};
@@ -84,6 +84,48 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     hello
 }
 
+pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisHello {
+    let source_id = ltop.up_config.net.sys_id();
+
+    // P2P Hello doesn't use LAN ID
+    let mut hello = IsisHello {
+        circuit_type: ltop.state.level(),
+        source_id,
+        hold_time: ltop.config.hold_time(),
+        pdu_len: 0,
+        priority: 0,                       // Priority is not used in P2P
+        lan_id: IsisNeighborId::default(), // Empty for P2P
+        tlvs: Vec::new(),
+    };
+
+    // Add protocol support TLV
+    let tlv = proto_supported(&ltop.up_config.enable);
+    hello.tlvs.push(tlv.into());
+
+    // Add area address TLV
+    let area_addr = ltop.up_config.net.area_id();
+    let tlv = IsisTlvAreaAddr { area_addr };
+    hello.tlvs.push(tlv.into());
+
+    // Add IPv4 interface addresses
+    for prefix in &ltop.state.v4addr {
+        hello.tlvs.push(
+            IsisTlvIpv4IfAddr {
+                addr: prefix.addr(),
+            }
+            .into(),
+        );
+    }
+
+    // P2P doesn't need IS Neighbor TLV (no MAC addresses)
+    // P2P adjacency is identified by the system ID directly
+
+    if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
+        hello.padding(ltop.state.mtu as usize);
+    }
+    hello
+}
+
 fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
     let tx = ltop.tx.clone();
     let ifindex = ltop.state.ifindex;
@@ -99,10 +141,18 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
 
 pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     let hello = ltop.state.hello.get(&level).as_ref().context("")?;
-    let packet = match level {
-        Level::L1 => IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
-        Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
+
+    let packet = if ltop.config.link_type() == LinkType::P2p {
+        // For P2P interfaces, use P2P Hello packet type but with same PDU structure
+        IsisPacket::from(IsisType::P2PHello, IsisPdu::L1Hello(hello.clone()))
+    } else {
+        // For LAN interfaces, use level-specific Hello packet types
+        match level {
+            Level::L1 => IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
+            Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
+        }
     };
+
     let ifindex = ltop.state.ifindex;
     ltop.ptx
         .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
@@ -110,6 +160,12 @@ pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
 }
 
 pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
+    // P2P interfaces don't use CSNP for database synchronization
+    if ltop.config.link_type() == LinkType::P2p {
+        isis_debug!("Skipping CSNP send for P2P interface {}", ltop.state.name);
+        return Ok(());
+    }
+
     isis_info!("CSNP Send on {}", ltop.state.name);
     isis_info!("---------");
 
@@ -172,7 +228,13 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
 pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
     if has_level(ltop.state.level(), level) {
         isis_info!("Hello originate {} on {}", level, ltop.state.name);
-        let hello = hello_generate(ltop, level);
+
+        let hello = if ltop.config.link_type() == LinkType::P2p {
+            hello_p2p_generate(ltop, level)
+        } else {
+            hello_generate(ltop, level)
+        };
+
         *ltop.state.hello.get_mut(&level) = Some(hello);
         hello_send(ltop, level);
         *ltop.timer.hello.get_mut(&level) = Some(hello_timer(ltop, level));
@@ -229,6 +291,15 @@ pub fn purge_pseudonode_lsp(ltop: &mut LinkTop, level: Level) {
 }
 
 pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
+    // P2P interfaces don't need DIS election
+    if ltop.config.link_type() == LinkType::P2p {
+        isis_debug!(
+            "Skipping DIS selection for P2P interface {}",
+            ltop.state.name
+        );
+        return;
+    }
+
     fn is_better(nbr: &Neighbor, curr_priority: u8, curr_mac: &Option<MacAddr>) -> bool {
         nbr.pdu.priority > curr_priority
             || (nbr.pdu.priority == curr_priority
