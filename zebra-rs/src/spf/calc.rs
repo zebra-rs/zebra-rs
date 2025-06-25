@@ -21,6 +21,7 @@ impl SpfOpt {
 pub struct Node {
     pub id: usize,
     pub name: String,
+    pub sys_id: String,
     pub olinks: Vec<Link>,
     pub ilinks: Vec<Link>,
     //pub is_disabled: bool,
@@ -39,6 +40,7 @@ impl Node {
         Self {
             id,
             name: name.into(),
+            sys_id: name.into(), // Default to name for backward compatibility
             olinks: Vec::new(),
             ilinks: Vec::new(),
             // is_disabled: false,

@@ -58,6 +58,7 @@ struct GraphJson {
 struct NodeJson {
     pub id: usize,
     pub name: String,
+    pub sys_id: String,
     pub links: Vec<LinkJson>,
 }
 
@@ -101,7 +102,11 @@ fn show_isis_graph(
             writeln!(buf, "\n{} IS-IS Graph:", graph_data.level)?;
             writeln!(buf, "\nNodes:")?;
             for node in &graph_data.nodes {
-                writeln!(buf, "  {} (id: {})", node.name, node.id)?;
+                if node.name != node.sys_id {
+                    writeln!(buf, "  {} [{}] (id: {})", node.name, node.sys_id, node.id)?;
+                } else {
+                    writeln!(buf, "  {} (id: {})", node.sys_id, node.id)?;
+                }
                 if !node.links.is_empty() {
                     writeln!(buf, "    Links:")?;
                     for link in &node.links {
@@ -142,6 +147,7 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
         nodes.push(NodeJson {
             id: *id,
             name: node.name.clone(),
+            sys_id: node.sys_id.clone(),
             links: node_links,
         });
     }
