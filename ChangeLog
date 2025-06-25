@@ -1,5 +1,7 @@
 2025-06-25  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
+	* version: 0.7.4
+
 	* zebra-rs/src/isis/packet.rs (hello_p2p_recv): Implement IS-IS
 	point-to-point Hello PDU processing with simplified adjacency
 	formation. P2P adjacencies skip MAC validation and transition
