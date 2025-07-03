@@ -17,7 +17,7 @@ impl SpfOpt {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Default, Eq, PartialEq, Clone)]
 pub struct Node {
     pub id: usize,
     pub name: String,
