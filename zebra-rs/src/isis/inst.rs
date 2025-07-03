@@ -1009,8 +1009,7 @@ fn create_graph_node(
         id: node_id,
         name: node_name,
         sys_id: sys_id.to_string(),
-        olinks: vec![],
-        ilinks: vec![],
+        ..Default::default()
     };
 
     // Process outgoing links
@@ -1081,10 +1080,10 @@ fn collect_adjacency_sids(lsp: &IsisLsp, sids: &mut BTreeMap<u32, IsisSysId>) {
             for entry in &ext_reach.entries {
                 for sub in &entry.subs {
                     // TODO: Also handle P2P adjacency SIDs when implemented
-                    if let neigh::IsisSubTlv::LanAdjSid(adj_sid) = sub {
-                        if let SidLabelValue::Label(label) = adj_sid.sid {
-                            sids.insert(label, adj_sid.system_id.clone());
-                        }
+                    if let neigh::IsisSubTlv::LanAdjSid(adj_sid) = sub
+                        && let SidLabelValue::Label(label) = adj_sid.sid
+                    {
+                        sids.insert(label, adj_sid.system_id.clone());
                     }
                 }
             }
