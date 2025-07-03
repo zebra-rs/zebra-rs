@@ -951,93 +951,144 @@ impl LspMap {
     }
 }
 
+/// Build SPF graph from IS-IS LSDB
 pub fn graph(
     top: &mut IsisTop,
     level: Level,
 ) -> (spf::Graph, Option<usize>, BTreeMap<u32, IsisSysId>) {
-    let mut s: Option<usize> = None;
     let mut graph = spf::Graph::new();
-    let mut sids: BTreeMap<u32, IsisSysId> = BTreeMap::new();
+    let mut source_node = None;
+    let mut adjacency_sids = BTreeMap::new();
 
-    for (key, lsa) in top.lsdb.get(&level).iter() {
+    // First collect all the nodes we need to process
+    let mut nodes_to_process = Vec::new();
+    for (_, lsa) in top.lsdb.get(&level).iter() {
         if !lsa.lsp.lsp_id.is_pseudo() {
             let sys_id = lsa.lsp.lsp_id.sys_id().clone();
-            let id = top.lsp_map.get_mut(&level).get(&sys_id);
-            // Self originated LSP.
-            if lsa.originated {
-                s = Some(id);
-                for tlv in lsa.lsp.tlvs.iter() {
-                    // Looking for Adjacency SID.
-                    if let IsisTlv::ExtIsReach(tlv) = tlv {
-                        for ent in tlv.entries.iter() {
-                            for sub in ent.subs.iter() {
-                                // In case of P2P link,
-                                // if let neigh::IsisSubTlv::AdjSid(sid) = sub {
-                                //     if let SidLabelValue::Label(label) = sid.sid {
-                                //         sids.insert(label, sid.system_id.clone());
-                                //     }
-                                // }
-                                if let neigh::IsisSubTlv::LanAdjSid(sid) = sub {
-                                    if let SidLabelValue::Label(label) = sid.sid {
-                                        sids.insert(label, sid.system_id.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Separate hostname and system ID into distinct fields
-            let node_name = if let Some((hostname, _)) = top.hostname.get(&level).get(&sys_id) {
-                hostname.clone()
-            } else {
-                sys_id.to_string()
-            };
-
-            let mut node = spf::Node {
-                id,
-                name: node_name,
-                sys_id: sys_id.to_string(),
-                olinks: vec![],
-                ilinks: vec![],
-                // is_disabled: false,
-                // is_srv6: false,
-                // is_srmpls: true,
-            };
-
-            for tlv in lsa.lsp.tlvs.iter() {
-                if let IsisTlv::ExtIsReach(tlv) = tlv {
-                    for entry in tlv.entries.iter() {
-                        let lsp_id: IsisLspId = entry.neighbor_id.clone().into();
-                        let lsa = top.lsdb.get(&level).get(&lsp_id);
-                        if let Some(lsa) = lsa {
-                            for tlv in lsa.lsp.tlvs.iter() {
-                                if let IsisTlv::ExtIsReach(tlv) = tlv {
-                                    for e in tlv.entries.iter() {
-                                        if e.neighbor_id.sys_id() != sys_id {
-                                            let to = top
-                                                .lsp_map
-                                                .get_mut(&level)
-                                                .get(&e.neighbor_id.sys_id());
-                                            let link = spf::Link {
-                                                from: id,
-                                                to,
-                                                cost: e.metric + entry.metric,
-                                            };
-                                            node.olinks.push(link);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            graph.insert(id, node);
+            let is_originated = lsa.originated;
+            let lsp = lsa.lsp.clone();
+            nodes_to_process.push((sys_id, is_originated, lsp));
         }
     }
-    (graph, s, sids)
+
+    // Now process the nodes without holding an immutable borrow on LSDB
+    for (sys_id, is_originated, lsp) in nodes_to_process {
+        let node_id = top.lsp_map.get_mut(&level).get(&sys_id);
+
+        // Check if this is our own originated LSP
+        if is_originated {
+            source_node = Some(node_id);
+            collect_adjacency_sids(&lsp, &mut adjacency_sids);
+        }
+
+        // Create graph node
+        let node = create_graph_node(top, level, node_id, &sys_id, &lsp);
+        graph.insert(node_id, node);
+    }
+
+    (graph, source_node, adjacency_sids)
+}
+
+/// Create a graph node from an LSP
+fn create_graph_node(
+    top: &mut IsisTop,
+    level: Level,
+    node_id: usize,
+    sys_id: &IsisSysId,
+    lsp: &IsisLsp,
+) -> spf::Node {
+    // Get hostname if available
+    let node_name = top
+        .hostname
+        .get(&level)
+        .get(sys_id)
+        .map(|(hostname, _)| hostname.clone())
+        .unwrap_or_else(|| sys_id.to_string());
+
+    let mut node = spf::Node {
+        id: node_id,
+        name: node_name,
+        sys_id: sys_id.to_string(),
+        ..Default::default()
+    };
+
+    // Process outgoing links
+    process_outgoing_links(top, level, node_id, sys_id, lsp, &mut node.olinks);
+
+    node
+}
+
+/// Process outgoing links from Extended IS Reachability TLVs
+fn process_outgoing_links(
+    top: &mut IsisTop,
+    level: Level,
+    from_id: usize,
+    from_sys_id: &IsisSysId,
+    lsp: &IsisLsp,
+    links: &mut Vec<spf::Link>,
+) {
+    for tlv in &lsp.tlvs {
+        if let IsisTlv::ExtIsReach(ext_reach) = tlv {
+            for entry in &ext_reach.entries {
+                process_neighbor_link(top, level, from_id, from_sys_id, entry, links);
+            }
+        }
+    }
+}
+
+/// Process a single neighbor link entry
+fn process_neighbor_link(
+    top: &mut IsisTop,
+    level: Level,
+    from_id: usize,
+    from_sys_id: &IsisSysId,
+    entry: &IsisTlvExtIsReachEntry,
+    links: &mut Vec<spf::Link>,
+) {
+    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.clone().into();
+
+    // Look up the neighbor's LSP
+    if let Some(neighbor_lsa) = top.lsdb.get(&level).get(&neighbor_lsp_id) {
+        // Check the neighbor's links back to us
+        for tlv in &neighbor_lsa.lsp.tlvs {
+            if let IsisTlv::ExtIsReach(ext_reach) = tlv {
+                for neighbor_entry in &ext_reach.entries {
+                    // Skip if this is a link back to ourselves
+                    if neighbor_entry.neighbor_id.sys_id() == *from_sys_id {
+                        continue;
+                    }
+
+                    // Create link to this destination
+                    let to_sys_id = neighbor_entry.neighbor_id.sys_id();
+                    let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+
+                    links.push(spf::Link {
+                        from: from_id,
+                        to: to_id,
+                        cost: entry.metric + neighbor_entry.metric,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Collect adjacency SIDs from our originated LSP
+fn collect_adjacency_sids(lsp: &IsisLsp, sids: &mut BTreeMap<u32, IsisSysId>) {
+    for tlv in &lsp.tlvs {
+        if let IsisTlv::ExtIsReach(ext_reach) = tlv {
+            for entry in &ext_reach.entries {
+                for sub in &entry.subs {
+                    // TODO: Also handle P2P adjacency SIDs when implemented
+                    if let neigh::IsisSubTlv::LanAdjSid(adj_sid) = sub
+                        && let SidLabelValue::Label(label) = adj_sid.sid
+                    {
+                        sids.insert(label, adj_sid.system_id.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
