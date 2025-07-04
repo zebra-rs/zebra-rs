@@ -1354,7 +1354,7 @@ fn build_rib_from_spf(
                 };
 
                 let route = SpfRoute {
-                    metric: nhops.cost,
+                    metric: nhops.cost + entry.metric,
                     nhops: spf_nhops.clone(),
                     sid,
                 };
