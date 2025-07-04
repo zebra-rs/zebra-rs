@@ -1314,9 +1314,9 @@ fn build_rib_from_spf(
         // Build nexthop map
         let mut spf_nhops = BTreeMap::new();
         for p in &nhops.nexthops {
-            // p.len() == 1 means myself
-            if p.len() > 1 {
-                if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[1]) {
+            // p.is_empty() means myself
+            if !p.is_empty() {
+                if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0]) {
                     // Find nhop from links
                     for (ifindex, link) in top.links.iter() {
                         if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
@@ -1324,7 +1324,7 @@ fn build_rib_from_spf(
                                 if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                                     let nhop = SpfNexthop {
                                         ifindex: *ifindex,
-                                        adjacency: p[1] == *node,
+                                        adjacency: p[0] == *node,
                                     };
                                     spf_nhops.insert(ifaddr.addr, nhop);
                                 }
