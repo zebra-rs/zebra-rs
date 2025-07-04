@@ -1307,62 +1307,69 @@ fn build_rib_from_spf(
         }
 
         // Resolve node to system ID
-        if let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) {
-            // Build nexthop map
-            let mut spf_nhops = BTreeMap::new();
-            for p in &nhops.nexthops {
-                // p.len() == 1 means myself
-                if p.len() > 1 {
-                    if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[1]) {
-                        // Find nhop from links
-                        for (ifindex, link) in top.links.iter() {
-                            if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                                for tlv in nbr.pdu.tlvs.iter() {
-                                    if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                                        let nhop = SpfNexthop {
-                                            ifindex: *ifindex,
-                                            adjacency: p[1] == *node,
-                                        };
-                                        spf_nhops.insert(ifaddr.addr, nhop);
-                                    }
+        let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) else {
+            continue;
+        };
+
+        // Build nexthop map
+        let mut spf_nhops = BTreeMap::new();
+        for p in &nhops.nexthops {
+            // p.len() == 1 means myself
+            if p.len() > 1 {
+                if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[1]) {
+                    // Find nhop from links
+                    for (ifindex, link) in top.links.iter() {
+                        if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
+                            for tlv in nbr.pdu.tlvs.iter() {
+                                if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
+                                    let nhop = SpfNexthop {
+                                        ifindex: *ifindex,
+                                        adjacency: p[1] == *node,
+                                    };
+                                    spf_nhops.insert(ifaddr.addr, nhop);
                                 }
                             }
                         }
                     }
                 }
             }
+        }
 
-            // Process reachability entries for this node
-            if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) {
-                for entry in entries.iter() {
-                    let sid = if let Some(prefix_sid) = entry.prefix_sid() {
-                        match prefix_sid.sid {
-                            SidLabelValue::Index(index) => {
-                                if let Some(block) = top.label_map.get(&level).get(&sys_id) {
-                                    Some(block.global.start + index)
-                                } else {
-                                    None
-                                }
+        // Process reachability entries for this node
+        if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) {
+            for entry in entries.iter() {
+                let sid = if let Some(prefix_sid) = entry.prefix_sid() {
+                    match prefix_sid.sid {
+                        SidLabelValue::Index(index) => {
+                            if let Some(block) = top.label_map.get(&level).get(&sys_id) {
+                                Some(block.global.start + index)
+                            } else {
+                                None
                             }
-                            SidLabelValue::Label(label) => Some(label),
                         }
-                    } else {
-                        None
-                    };
-
-                    let route = SpfRoute {
-                        metric: nhops.cost,
-                        nhops: spf_nhops.clone(),
-                        sid,
-                    };
-
-                    if let Some(curr) = rib.get(&entry.prefix) {
-                        if curr.metric >= route.metric {
-                            rib.insert(entry.prefix.trunc(), route);
-                        }
-                    } else {
-                        rib.insert(entry.prefix.trunc(), route);
+                        SidLabelValue::Label(label) => Some(label),
                     }
+                } else {
+                    None
+                };
+
+                let route = SpfRoute {
+                    metric: nhops.cost,
+                    nhops: spf_nhops.clone(),
+                    sid,
+                };
+
+                println!("XX Prefix {} Cost {}", entry.prefix, nhops.cost);
+                println!("XX SpfNhops {:?}", spf_nhops);
+
+                if let Some(curr) = rib.get(&entry.prefix) {
+                    if curr.metric > route.metric {
+                        rib.insert(entry.prefix.trunc(), route);
+                    } else if curr.metric == route.metric {
+                        // TODO.  Merge route to existing SpfRoute.
+                    }
+                } else {
+                    rib.insert(entry.prefix.trunc(), route);
                 }
             }
         }
@@ -1404,6 +1411,9 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     if let Some(source) = source_node {
         // Run SPF algorithm
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+
+        // Debug print.
+        spf::disp(&spf_result, false);
 
         // Build RIB from SPF results
         let rib = build_rib_from_spf(top, level, source, &spf_result);
