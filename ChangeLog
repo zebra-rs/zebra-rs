@@ -1,3 +1,16 @@
+2025-07-04  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.7.5
+
+	* zebra-rs/src/isis/inst.rs (build_rib_from_spf): Fix IS-IS SPF
+	bug where equal-metric routes were not being merged for ECMP
+	support. Implement proper route comparison and nexthop merging
+	to enable Equal-Cost Multi-Path routing.
+
+	* zebra-rs/src/isis/inst.rs, zebra-rs/src/spf/calc.rs: Remove
+	self path entry from SPF calculations to improve routing
+	efficiency and avoid self-referential paths in SPF algorithm.
+
 2025-06-25  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.4
