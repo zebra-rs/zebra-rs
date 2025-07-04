@@ -1420,7 +1420,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
 
         // Debug print.
-        spf::disp(&spf_result, false);
+        // spf::disp(&spf_result, false);
 
         // Build RIB from SPF results
         let rib = build_rib_from_spf(top, level, source, &spf_result);
