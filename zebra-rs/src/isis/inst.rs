@@ -1359,16 +1359,23 @@ fn build_rib_from_spf(
                     sid,
                 };
 
-                println!("XX Prefix {} Cost {}", entry.prefix, nhops.cost);
-                println!("XX SpfNhops {:?}", spf_nhops);
-
-                if let Some(curr) = rib.get(&entry.prefix) {
+                if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
                     if curr.metric > route.metric {
-                        rib.insert(entry.prefix.trunc(), route);
+                        // New route has better metric, replace the existing one
+                        *curr = route;
                     } else if curr.metric == route.metric {
-                        // TODO.  Merge route to existing SpfRoute.
+                        // Equal metric - merge nexthops for ECMP
+                        for (addr, nhop) in route.nhops {
+                            curr.nhops.insert(addr, nhop);
+                        }
+                        // Update SID if current doesn't have one but new route does
+                        if curr.sid.is_none() && route.sid.is_some() {
+                            curr.sid = route.sid;
+                        }
                     }
+                    // If curr.metric < route.metric, do nothing (keep better route)
                 } else {
+                    // No existing route, insert the new one
                     rib.insert(entry.prefix.trunc(), route);
                 }
             }
