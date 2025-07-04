@@ -137,8 +137,8 @@ pub fn spf_calc(
     let mut bt = BTreeMap::<(u32, usize), Path>::new();
 
     let mut c = Path::new(root);
-    c.paths.push(vec![root]);
-    c.nexthops.insert(vec![root]);
+    c.paths.push(vec![]);
+    c.nexthops.insert(vec![]);
 
     paths.insert(root, c.clone());
     bt.insert((c.cost, root), c);
@@ -185,7 +185,7 @@ pub fn spf_calc(
             }
 
             if v.id == root {
-                let path = vec![root, c.id];
+                let path = vec![c.id];
 
                 if opt.full_path {
                     c.paths.push(path);
@@ -204,7 +204,7 @@ pub fn spf_calc(
                 for nhop in &v.nexthops {
                     if opt.path_max == 0 || c.nexthops.len() < opt.path_max {
                         let mut newnhop = nhop.clone();
-                        if nhop.len() < 2 {
+                        if nhop.is_empty() {
                             newnhop.push(c.id);
                         }
                         c.nexthops.insert(newnhop);
