@@ -28,6 +28,7 @@ impl Isis {
         self.show_add("/show/isis/database/detail", show_isis_database_detail);
         self.show_add("/show/isis/hostname", hostname::show);
         self.show_add("/show/isis/graph", show_isis_graph);
+        self.show_add("/show/isis/spf", show_isis_spf);
     }
 }
 
@@ -530,4 +531,12 @@ fn show_isis_adjacency(
         }
     }
     Ok(buf)
+}
+
+fn show_isis_spf(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok((String::new()))
 }
