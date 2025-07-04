@@ -137,6 +137,9 @@ module exec {
       leaf graph {
         type empty;
       }
+      leaf spf {
+        type empty;
+      }
       container adjacency {
         ext:help "IS-IS adjacency";
         presence "IS-IS adjacency";
