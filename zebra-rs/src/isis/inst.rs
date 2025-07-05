@@ -977,6 +977,7 @@ pub struct SpfRoute {
 pub struct SpfNexthop {
     pub ifindex: u32,
     pub adjacency: bool,
+    pub sys_id: Option<IsisSysId>,
 }
 
 /// Generic result for table diff operations
@@ -1271,6 +1272,7 @@ fn build_adjacency_ilm(
                         let nhop = SpfNexthop {
                             ifindex: *ifindex,
                             adjacency: true,
+                            sys_id: Some(nhop_id.clone()),
                         };
                         nhops.insert(ifaddr.addr, nhop);
                     }
@@ -1278,7 +1280,7 @@ fn build_adjacency_ilm(
             }
         }
 
-        // Adjacency labels start from 24000, so calculate index
+        // Adjacency labels start from 24000, so calculate index.
         let adj_index = if label >= 24000 { label - 24000 + 1 } else { 1 };
         let spf_ilm = SpfIlm {
             nhops,
@@ -1325,6 +1327,7 @@ fn build_rib_from_spf(
                                     let nhop = SpfNexthop {
                                         ifindex: *ifindex,
                                         adjacency: p[0] == *node,
+                                        sys_id: Some(nhop_id.clone()),
                                     };
                                     spf_nhops.insert(ifaddr.addr, nhop);
                                 }
@@ -1335,7 +1338,7 @@ fn build_rib_from_spf(
             }
         }
 
-        // Process reachability entries for this node
+        // Process reachability entries for this node.
         if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) {
             for entry in entries.iter() {
                 let sid = if let Some(prefix_sid) = entry.prefix_sid() {
