@@ -99,7 +99,8 @@ impl Exec for ExecService {
 }
 
 fn first_commands(resp: &CompletionResponse) -> String {
-    let mut s = String::from("");
+    let estimated_capacity = resp.comps.len() * 20;
+    let mut s = String::with_capacity(estimated_capacity);
     for comp in resp.comps.iter() {
         s.push_str(&comp.name);
         s.push('\n');
@@ -108,20 +109,40 @@ fn first_commands(resp: &CompletionResponse) -> String {
 }
 
 fn comp_commands(resp: &CompletionResponse) -> String {
-    let mut line = match resp.code {
-        ExecCode::Success => String::from("Success\n"),
-        ExecCode::Incomplete => String::from("Incomplete\n"),
-        ExecCode::Nomatch => String::from("NoMatch\n"),
-        ExecCode::Ambiguous => String::from("Ambiguous\n"),
-        _ => String::from("NoMatch\n"),
+    let base_size = match resp.code {
+        ExecCode::Success => 8,
+        ExecCode::Incomplete => 12,
+        ExecCode::Nomatch => 9,
+        ExecCode::Ambiguous => 11,
+        _ => 9,
     };
+    let estimated_capacity = base_size + (resp.comps.len() * 50);
+    let mut line = String::with_capacity(estimated_capacity);
+    
+    line.push_str(match resp.code {
+        ExecCode::Success => "Success\n",
+        ExecCode::Incomplete => "Incomplete\n",
+        ExecCode::Nomatch => "NoMatch\n",
+        ExecCode::Ambiguous => "Ambiguous\n",
+        _ => "NoMatch\n",
+    });
+    
     for comp in resp.comps.iter() {
         if comp.ymatch == YangMatch::Key {
-            line.push_str(&format!("{}\t+>\t{}\n", comp.name, comp.help));
+            line.push_str(&comp.name);
+            line.push_str("\t+>\t");
+            line.push_str(&comp.help);
+            line.push('\n');
         } else if comp.ymatch == YangMatch::Dir {
-            line.push_str(&format!("{}\t->\t{}\n", comp.name, comp.help));
+            line.push_str(&comp.name);
+            line.push_str("\t->\t");
+            line.push_str(&comp.help);
+            line.push('\n');
         } else {
-            line.push_str(&format!("{}\t  \t{}\n", comp.name, comp.help));
+            line.push_str(&comp.name);
+            line.push_str("\t  \t");
+            line.push_str(&comp.help);
+            line.push('\n');
         }
     }
     line
