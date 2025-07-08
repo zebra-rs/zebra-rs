@@ -331,7 +331,7 @@ fn show_isis_database(
                     if let Some((hostname, _)) = isis.hostname.get(level).get(&lsp_id.sys_id()) {
                         format!(
                             "{}.{:02x}-{:02x}",
-                            hostname.clone(),
+                            hostname,
                             lsp_id.pseudo_id(),
                             lsp_id.fragment_id()
                         )
@@ -453,7 +453,7 @@ fn show_isis_database_detail(
                 return String::new();
             }
 
-            let mut level_output = String::new();
+            let mut level_output = String::with_capacity(1024 + (lsdb.iter().count() * 100));
             level_output.push_str(&format!("\n{} Link State Database:\n", level));
             level_output.push_str(
                 "LSP ID                        PduLen  SeqNumber   Chksum  Holdtime  ATT/P/OL\n",
@@ -470,7 +470,7 @@ fn show_isis_database_detail(
                     if let Some((hostname, _)) = isis.hostname.get(level).get(&lsp_id.sys_id()) {
                         format!(
                             "{}.{:02x}-{:02x}",
-                            hostname.clone(),
+                            hostname,
                             lsp_id.pseudo_id(),
                             lsp_id.fragment_id()
                         )
