@@ -172,6 +172,9 @@ impl Isis {
             RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
             }
+            RibRx::AddrDel(addr) => {
+                self.addr_del(addr);
+            }
             _ => {
                 //
             }
