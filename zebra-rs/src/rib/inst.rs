@@ -199,8 +199,15 @@ impl Rib {
         }
     }
 
+    fn ifname(&self, ifindex: u32) -> String {
+        if let Some(link) = self.links.get(&ifindex) {
+            link.name.clone()
+        } else {
+            String::new()
+        }
+    }
+
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
-        println!("XXX: {:?}", msg);
         match msg {
             FibMessage::NewLink(link) => {
                 self.link_add(link);
@@ -209,9 +216,19 @@ impl Rib {
                 self.link_delete(link);
             }
             FibMessage::NewAddr(addr) => {
+                println!(
+                    "Rib::AddrAdd {} {}",
+                    addr.addr,
+                    self.ifname(addr.link_index)
+                );
                 self.addr_add(addr);
             }
             FibMessage::DelAddr(addr) => {
+                println!(
+                    "Rib::AddrDel {} {}",
+                    addr.addr,
+                    self.ifname(addr.link_index)
+                );
                 self.addr_del(addr);
             }
             FibMessage::NewRoute(route) => {
