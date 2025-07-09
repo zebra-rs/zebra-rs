@@ -133,7 +133,8 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
         return Ok(serde_json::to_string(&nbrs).unwrap());
     }
 
-    let mut buf = String::new();
+    let estimated_capacity = 60 + (nbrs.len() * 80);
+    let mut buf = String::with_capacity(estimated_capacity);
     buf.push_str("System Id           Interface   L  State         Holdtime SNPA\n");
     for nbr in &nbrs {
         writeln!(
@@ -224,7 +225,8 @@ pub fn show_detail(
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let mut buf = String::new();
+    let estimated_capacity = 512;
+    let mut buf = String::with_capacity(estimated_capacity);
 
     for (_, link) in top.links.iter() {
         // Show Level-1 neighbors

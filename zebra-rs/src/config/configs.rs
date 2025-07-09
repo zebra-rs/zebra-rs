@@ -189,7 +189,7 @@ impl Config {
 
         if self.display_entry() {
             if depth != 0 {
-                out.push_str(&" ".repeat(depth * INDENT_LEVEL).to_string());
+                out.push_str(&" ".repeat(depth * INDENT_LEVEL));
             }
             self.prefix_write(out);
 
@@ -206,14 +206,14 @@ impl Config {
             if !self.list.borrow().is_empty() {
                 out.push_str(" {\n");
                 for value in self.list.borrow().iter() {
-                    out.push_str(&" ".repeat((depth + 1) * INDENT_LEVEL).to_string());
+                    out.push_str(&" ".repeat((depth + 1) * INDENT_LEVEL));
                     if self.quote() {
                         out.push_str(&format!("\"{}\";\n", value));
                     } else {
                         out.push_str(&format!("{};\n", value));
                     }
                 }
-                out.push_str(&" ".repeat(depth * INDENT_LEVEL).to_string());
+                out.push_str(&" ".repeat(depth * INDENT_LEVEL));
                 out.push('}');
                 if brace {
                     out.push_str(" {\n");
@@ -237,7 +237,7 @@ impl Config {
 
         if self.display_entry() && brace {
             if depth != 0 {
-                out.push_str(&" ".repeat(depth * INDENT_LEVEL).to_string());
+                out.push_str(&" ".repeat(depth * INDENT_LEVEL));
             }
             out.push_str("}\n");
         }
