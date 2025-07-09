@@ -121,14 +121,14 @@ impl RibEntry {
         match &self.nexthop {
             Nexthop::Link(_) => {}
             Nexthop::Uni(uni) => {
-                println!(" uni {}", uni.addr);
+                // println!(" uni {}", uni.addr);
                 self.handle_nexthop_group(nmap, fib, uni.gid).await;
             }
             Nexthop::Multi(multi) => {
-                println!(" multi");
+                // println!(" multi");
                 self.handle_nexthop_group(nmap, fib, multi.gid).await;
                 for uni in &multi.nexthops {
-                    println!(" multi {}", uni.addr);
+                    // println!(" multi {}", uni.addr);
                     self.handle_nexthop_group(nmap, fib, uni.gid).await;
                 }
             }
@@ -142,7 +142,7 @@ impl RibEntry {
 
     async fn handle_nexthop_group(&self, nmap: &mut NexthopMap, fib: &FibHandle, gid: usize) {
         if let Some(group) = nmap.get_mut(gid) {
-            println!(" refcnt {} -> {}", group.refcnt(), group.refcnt() - 1);
+            // println!(" refcnt {} -> {}", group.refcnt(), group.refcnt() - 1);
             group.refcnt_dec();
             if group.refcnt() == 0 {
                 // If ref count is zero and the nexthop is installed, remove it from FIB
