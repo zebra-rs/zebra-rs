@@ -483,6 +483,33 @@ impl Isis {
         }
     }
 
+    pub fn addr_del(&mut self, addr: LinkAddr) {
+        // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+
+        match addr.addr {
+            IpNet::V4(prefix) => {
+                if !prefix.addr().is_loopback() {
+                    // TODO: Delete prefix from link.state.v4addr
+                }
+            }
+            IpNet::V6(prefix) => {
+                if prefix.addr().is_unicast_link_local() {
+                    // TODO: Delete from link.state.v6laddr.
+                } else {
+                    // TODO: Delete from link.state.v6addr.
+                }
+            }
+        }
+
+        if link.config.enabled() {
+            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
+            self.tx.send(msg);
+        }
+    }
+
     pub fn dis_send(&self, ifindex: u32) {
         let Some(_link) = self.links.get(&ifindex) else {
             return;
