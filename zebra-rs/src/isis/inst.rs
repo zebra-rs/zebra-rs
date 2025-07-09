@@ -164,15 +164,17 @@ impl Isis {
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
-        println!("RIB Message {:?}", msg);
+        // println!("RIB Message {:?}", msg);
         match msg {
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
             RibRx::AddrAdd(addr) => {
+                println!("Isis::AddrAdd {}", addr.addr);
                 self.addr_add(addr);
             }
             RibRx::AddrDel(addr) => {
+                println!("Isis::AddrDel {}", addr.addr);
                 self.addr_del(addr);
             }
             _ => {

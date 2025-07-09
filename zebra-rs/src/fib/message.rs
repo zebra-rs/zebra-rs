@@ -1,4 +1,6 @@
-use ipnet::IpNet;
+use std::fmt::Display;
+
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::rib::{MacAddr, entry::RibEntry, link::IFF_UP};
@@ -43,6 +45,20 @@ impl FibLink {
 #[derive(Default, Debug)]
 pub struct FibAddr {
     pub addr: IpNet,
+    pub link_index: u32,
+    pub secondary: bool,
+}
+
+#[derive(Default, Debug)]
+pub struct FibAddr4 {
+    pub addr: Ipv4Net,
+    pub link_index: u32,
+    pub secondary: bool,
+}
+
+#[derive(Default, Debug)]
+pub struct FibAddr6 {
+    pub addr: Ipv6Net,
     pub link_index: u32,
     pub secondary: bool,
 }
