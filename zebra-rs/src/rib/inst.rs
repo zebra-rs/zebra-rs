@@ -200,6 +200,7 @@ impl Rib {
     }
 
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
+        println!("XXX: {:?}", msg);
         match msg {
             FibMessage::NewLink(link) => {
                 self.link_add(link);
@@ -215,7 +216,6 @@ impl Rib {
             }
             FibMessage::NewRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
-                    // println!("{} {:?}", prefix, route.entry);
                     self.ipv4_route_add(&prefix, route.entry).await;
                 }
             }

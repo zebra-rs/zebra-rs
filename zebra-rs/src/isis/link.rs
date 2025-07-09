@@ -465,14 +465,49 @@ impl Isis {
         match addr.addr {
             IpNet::V4(prefix) => {
                 if !prefix.addr().is_loopback() {
-                    link.state.v4addr.push(prefix);
+                    // Push only when prefix does not exist
+                    if !link.state.v4addr.contains(&prefix) {
+                        link.state.v4addr.push(prefix);
+                    }
                 }
             }
             IpNet::V6(prefix) => {
                 if prefix.addr().is_unicast_link_local() {
-                    link.state.v6laddr.push(prefix);
+                    // Push only when prefix does not exist
+                    if !link.state.v6laddr.contains(&prefix) {
+                        link.state.v6laddr.push(prefix);
+                    }
                 } else {
-                    link.state.v6addr.push(prefix);
+                    // Push only when prefix does not exist
+                    if !link.state.v6addr.contains(&prefix) {
+                        link.state.v6addr.push(prefix);
+                    }
+                }
+            }
+        }
+
+        if link.config.enabled() {
+            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
+            self.tx.send(msg);
+        }
+    }
+
+    pub fn addr_del(&mut self, addr: LinkAddr) {
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+
+        match addr.addr {
+            IpNet::V4(prefix) => {
+                if !prefix.addr().is_loopback() {
+                    link.state.v4addr.retain(|p| p != &prefix);
+                }
+            }
+            IpNet::V6(prefix) => {
+                if prefix.addr().is_unicast_link_local() {
+                    link.state.v6laddr.retain(|p| p != &prefix);
+                } else {
+                    link.state.v6addr.retain(|p| p != &prefix);
                 }
             }
         }
