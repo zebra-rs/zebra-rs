@@ -465,14 +465,23 @@ impl Isis {
         match addr.addr {
             IpNet::V4(prefix) => {
                 if !prefix.addr().is_loopback() {
-                    link.state.v4addr.push(prefix);
+                    // Push only when prefix does not exist
+                    if !link.state.v4addr.contains(&prefix) {
+                        link.state.v4addr.push(prefix);
+                    }
                 }
             }
             IpNet::V6(prefix) => {
                 if prefix.addr().is_unicast_link_local() {
-                    link.state.v6laddr.push(prefix);
+                    // Push only when prefix does not exist
+                    if !link.state.v6laddr.contains(&prefix) {
+                        link.state.v6laddr.push(prefix);
+                    }
                 } else {
-                    link.state.v6addr.push(prefix);
+                    // Push only when prefix does not exist
+                    if !link.state.v6addr.contains(&prefix) {
+                        link.state.v6addr.push(prefix);
+                    }
                 }
             }
         }
@@ -484,7 +493,6 @@ impl Isis {
     }
 
     pub fn addr_del(&mut self, addr: LinkAddr) {
-        // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
@@ -492,14 +500,14 @@ impl Isis {
         match addr.addr {
             IpNet::V4(prefix) => {
                 if !prefix.addr().is_loopback() {
-                    // TODO: Delete prefix from link.state.v4addr
+                    link.state.v4addr.retain(|p| p != &prefix);
                 }
             }
             IpNet::V6(prefix) => {
                 if prefix.addr().is_unicast_link_local() {
-                    // TODO: Delete from link.state.v6laddr.
+                    link.state.v6laddr.retain(|p| p != &prefix);
                 } else {
-                    // TODO: Delete from link.state.v6addr.
+                    link.state.v6addr.retain(|p| p != &prefix);
                 }
             }
         }
