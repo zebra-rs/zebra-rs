@@ -62,7 +62,7 @@ pub struct FibRoute {
     pub entry: RibEntry,
 }
 
-#[allow(dead_code)]
+#[derive(Debug)]
 pub enum FibMessage {
     NewLink(FibLink),
     DelLink(FibLink),
