@@ -541,7 +541,6 @@ impl Rib {
                     }
                 }
             }
-
             self.api_addr_add(&addr);
         }
     }
@@ -577,7 +576,12 @@ impl Rib {
                 }
             }
 
-            link_addr_del(link, addr);
+            link_addr_del(link, addr.clone());
+
+            for tx in self.redists.iter() {
+                let link = RibRx::AddrDel(addr.clone());
+                let _ = tx.send(link);
+            }
         }
     }
 }

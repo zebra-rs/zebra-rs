@@ -69,4 +69,11 @@ impl Rib {
             let _ = tx.send(link);
         }
     }
+
+    pub fn api_addr_del(&self, addr: &LinkAddr) {
+        for tx in self.redists.iter() {
+            let link = RibRx::AddrDel(addr.clone());
+            let _ = tx.send(link);
+        }
+    }
 }
