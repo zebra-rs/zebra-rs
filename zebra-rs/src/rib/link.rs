@@ -26,7 +26,7 @@ pub struct Link {
     pub label: bool,
     pub mac: Option<MacAddr>,
     pub addr4: Vec<LinkAddr>,
-    pub addrv4: Vec<LinkAddr4>,
+    // pub addrv4: Vec<LinkAddr4>,
     pub addr6: Vec<LinkAddr>,
 }
 
@@ -42,7 +42,7 @@ impl Link {
             label: false,
             mac: link.mac,
             addr4: Vec::new(),
-            addrv4: Vec::new(),
+            // addrv4: Vec::new(),
             addr6: Vec::new(),
         }
     }
@@ -80,6 +80,13 @@ pub struct LinkAddr4 {
     pub ifaddr: Ipv4Net,
     pub ifindex: u32,
     pub secondary: bool,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize)]
+pub struct LinkAddr6 {
+    pub ifaddr: Ipv6Net,
+    pub ifindex: u32,
+    pub linklocal: bool,
 }
 
 impl LinkAddr {
@@ -541,7 +548,6 @@ impl Rib {
                     }
                 }
             }
-
             self.api_addr_add(&addr);
         }
     }
@@ -577,7 +583,12 @@ impl Rib {
                 }
             }
 
-            link_addr_del(link, addr);
+            link_addr_del(link, addr.clone());
+
+            for tx in self.redists.iter() {
+                let link = RibRx::AddrDel(addr.clone());
+                let _ = tx.send(link);
+            }
         }
     }
 }
@@ -690,6 +701,22 @@ pub async fn link_config_exec(
             }
 
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                // Check if IPv4 address is already configured on the link
+                if let Some(link) = rib.links.get(&ifindex) {
+                    // Check if this IPv4 address already exists on the interface
+                    for existing_addr in &link.addr4 {
+                        if let IpNet::V4(existing_v4) = existing_addr.addr {
+                            if existing_v4 == v4addr {
+                                println!(
+                                    "IPv4 address {} is already configured on interface {}",
+                                    v4addr, ifname
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
                 let result = rib.fib_handle.addr_add_ipv4(ifindex, &v4addr, false).await;
                 match result {
                     Ok(_) => {
@@ -745,7 +772,22 @@ pub async fn link_config_exec(
                 }
             }
 
+            // Check if IPv6 address is already configured on the link
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                if let Some(link) = rib.links.get(&ifindex) {
+                    // Check if this IPv6 address already exists on the interface
+                    for existing_addr in &link.addr6 {
+                        if let IpNet::V6(existing_v6) = existing_addr.addr {
+                            if existing_v6 == v6addr {
+                                println!(
+                                    "IPv6 address {} is already configured on interface {}",
+                                    v6addr, ifname
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 let result = rib.fib_handle.addr_add_ipv6(ifindex, &v6addr, false).await;
                 match result {
                     Ok(_) => {

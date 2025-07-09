@@ -38,7 +38,7 @@ use super::link::{Afis, IsisLink, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
-use super::srmpls::LabelMap;
+use super::srmpls::{LabelConfig, LabelMap};
 use super::task::{Timer, TimerType};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
@@ -164,13 +164,16 @@ impl Isis {
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
-        // println!("RIB Message {:?}", msg);
+        println!("RIB Message {:?}", msg);
         match msg {
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
             RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
+            }
+            RibRx::AddrDel(addr) => {
+                self.addr_del(addr);
             }
             _ => {
                 //
@@ -971,6 +974,7 @@ pub struct SpfRoute {
     pub metric: u32,
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
     pub sid: Option<u32>,
+    pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1343,6 +1347,7 @@ fn build_rib_from_spf(
             for entry in entries.iter() {
                 let sid = if let Some(prefix_sid) = entry.prefix_sid() {
                     match prefix_sid.sid {
+                        // Prefix SID label.
                         SidLabelValue::Index(index) => {
                             if let Some(block) = top.label_map.get(&level).get(&sys_id) {
                                 Some(block.global.start + index)
@@ -1356,10 +1361,19 @@ fn build_rib_from_spf(
                     None
                 };
 
+                let prefix_sid = if let Some(prefix_sid) = entry.prefix_sid()
+                    && let Some(block) = top.label_map.get(&level).get(&sys_id)
+                {
+                    Some((prefix_sid.sid.clone(), block.clone()))
+                } else {
+                    None
+                };
+
                 let route = SpfRoute {
                     metric: nhops.cost + entry.metric,
                     nhops: spf_nhops.clone(),
                     sid,
+                    prefix_sid,
                 };
 
                 if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -1374,6 +1388,9 @@ fn build_rib_from_spf(
                         // Update SID if current doesn't have one but new route does
                         if curr.sid.is_none() && route.sid.is_some() {
                             curr.sid = route.sid;
+                        }
+                        if curr.prefix_sid.is_none() && route.prefix_sid.is_some() {
+                            curr.prefix_sid = route.prefix_sid;
                         }
                     }
                     // If curr.metric < route.metric, do nothing (keep better route)

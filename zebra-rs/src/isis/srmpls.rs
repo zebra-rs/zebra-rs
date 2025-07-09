@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use bit_vec::BitVec;
 use isis_packet::IsisSysId;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct LabelBlock {
     pub start: u32,
     pub end: u32,
@@ -18,7 +18,7 @@ impl LabelBlock {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct LabelConfig {
     pub global: LabelBlock,
     pub local: Option<LabelBlock>,
