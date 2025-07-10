@@ -198,52 +198,7 @@ impl Isis {
         // isis_info!("{}", msg);
         match msg {
             Message::Srm(lsp_id, level, reason) => {
-                for (_, link) in self.links.iter() {
-                    isis_info!(
-                        "SRM: processing {} on {} due to {}",
-                        lsp_id,
-                        link.state.name,
-                        reason
-                    );
-                    if !link_level_capable(&link.state.level(), &level) {
-                        isis_info!(
-                            "SRM: {} is not capable the level, continue",
-                            link.state.name
-                        );
-                        continue;
-                    }
-
-                    if *link.state.nbrs_up.get(&level) == 0 {
-                        isis_info!("SRM: {} neighbor is 0, continue", link.state.name);
-                        continue;
-                    }
-
-                    if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
-                        if lsa.ifindex == link.state.ifindex {
-                            isis_info!("SRM: LSP comes from the same interface, continue");
-                            continue;
-                        }
-
-                        let hold_time =
-                            lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
-
-                        if !lsa.bytes.is_empty() {
-                            let mut buf = BytesMut::from(&lsa.bytes[..]);
-
-                            isis_packet::write_hold_time(&mut buf, hold_time);
-
-                            isis_info!("SRM: Send LSP on {}, {}", link.state.name, lsp_id);
-
-                            link.ptx.send(PacketMessage::Send(
-                                Packet::Bytes(buf),
-                                link.state.ifindex,
-                                level,
-                            ));
-                        } else {
-                            isis_info!("SRM: LSP does not have bytes, return");
-                        }
-                    }
-                }
+                self.process_srm(lsp_id, level, reason);
             }
             Message::SpfCalc(level) => {
                 let mut top = self.top();
@@ -254,129 +209,201 @@ impl Isis {
                 process_packet(&mut top, packet, ifindex, mac);
             }
             Message::LspOriginate(level) => {
-                let mut top = self.top();
-                let mut lsp = lsp_generate(&mut top, level);
-                let buf = lsp_emit(&mut lsp, level);
-                lsp_flood(&mut top, level, &buf);
-                insert_self_originate(&mut top, level, lsp);
+                self.process_lsp_originate(level);
             }
             Message::LspPurge(level, lsp_id) => {
-                let mut top = self.top();
-
-                // Get current LSP if it exists
-                let seq_number = if let Some(existing) = top.lsdb.get(&level).get(&lsp_id) {
-                    existing.lsp.seq_number + 1
-                } else {
-                    isis_info!("Cannot purge LSP {} - not found in LSDB", lsp_id);
-                    return;
-                };
-
-                // Create purged LSP with incremented sequence number
-                let mut purged_lsp = IsisLsp {
-                    lsp_id,
-                    seq_number,
-                    hold_time: 0, // This purges the LSP
-                    types: IsisLspTypes::from(level.digit()),
-                    ..Default::default()
-                };
-
-                // Emit and flood the purged LSP
-                let buf = lsp_emit(&mut purged_lsp, level);
-                lsp_flood(&mut top, level, &buf);
-
-                // Insert as self-originated so we track it
-                insert_self_originate(&mut top, level, purged_lsp);
-
-                isis_info!("Purged LSP {} with seq {}", lsp_id, seq_number);
+                self.process_lsp_purge(level, lsp_id);
             }
             Message::DisOriginate(level, ifindex) => {
-                let mut top = self.top();
-                let mut lsp = dis_generate(&mut top, level, ifindex);
-                let buf = lsp_emit(&mut lsp, level);
-                lsp_flood(&mut top, level, &buf);
-                insert_self_originate(&mut top, level, lsp);
+                self.process_dis_originate(level, ifindex);
             }
             Message::Ifsm(ev, ifindex, level) => {
-                let Some(mut top) = self.link_top(ifindex) else {
-                    return;
-                };
-                match ev {
-                    IfsmEvent::InterfaceUp => {
-                        //
-                    }
-                    IfsmEvent::InterfaceDown => {
-                        //
-                    }
-                    IfsmEvent::Start => {
-                        ifsm::start(&mut top);
-                    }
-                    IfsmEvent::Stop => {
-                        ifsm::stop(&mut top);
-                    }
-                    IfsmEvent::HelloTimerExpire => {
-                        if let Some(level) = level {
-                            ifsm::hello_send(&mut top, level);
-                        }
-                    }
-                    IfsmEvent::CsnpTimerExpire => {
-                        if let Some(level) = level {
-                            ifsm::csnp_send(&mut top, level);
-                        }
-                    }
-                    IfsmEvent::HelloOriginate => match level {
-                        Some(level) => ifsm::hello_originate(&mut top, level),
-                        None => {
-                            // In case of level is None, originate both L1/L2 Hello.
-                            ifsm::hello_originate(&mut top, Level::L1);
-                            ifsm::hello_originate(&mut top, Level::L2);
-                        }
-                    },
-                    IfsmEvent::DisSelection => match level {
-                        Some(level) => {
-                            ifsm::dis_selection(&mut top, level);
-                        }
-                        None => {
-                            ifsm::dis_selection(&mut top, Level::L1);
-                            ifsm::dis_selection(&mut top, Level::L2);
-                        }
-                    },
-                }
+                self.process_ifsm(ev, ifindex, level);
             }
             Message::Nfsm(ev, ifindex, sysid, level) => {
-                let ltop = self.link_top(ifindex);
-                let Some(mut ltop) = ltop else {
-                    return;
-                };
-                let mut ntop = NeighborTop {
-                    tx: &ltop.tx,
-                    dis: &mut ltop.state.dis,
-                    lan_id: &mut ltop.state.lan_id,
-                    adj: &mut ltop.state.adj,
-                    local_pool: &mut ltop.local_pool,
-                };
-                let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
-                    return;
-                };
-
-                isis_nfsm(&mut ntop, nbr, ev, &None, level);
-
-                if nbr.state == NfsmState::Down {
-                    ltop.state.nbrs.get_mut(&level).remove(&sysid);
-                    let msg = Message::SpfCalc(level);
-                    ltop.tx.send(msg).unwrap();
-                }
+                self.process_nfsm(ev, ifindex, sysid, level);
             }
             Message::Lsdb(ev, level, key) => {
-                use LsdbEvent::*;
-                let mut top = self.top();
-                match ev {
-                    RefreshTimerExpire => {
-                        lsdb::refresh_lsp(&mut top, level, key);
-                    }
-                    HoldTimerExpire => {
-                        lsdb::remove_lsp(&mut top, level, key);
-                    }
+                self.process_lsdb(ev, level, key);
+            }
+        }
+    }
+
+    fn process_srm(&mut self, lsp_id: IsisLspId, level: Level, reason: String) {
+        for (_, link) in self.links.iter() {
+            isis_info!(
+                "SRM: processing {} on {} due to {}",
+                lsp_id,
+                link.state.name,
+                reason
+            );
+            if !link_level_capable(&link.state.level(), &level) {
+                isis_info!(
+                    "SRM: {} is not capable the level, continue",
+                    link.state.name
+                );
+                continue;
+            }
+
+            if *link.state.nbrs_up.get(&level) == 0 {
+                isis_info!("SRM: {} neighbor is 0, continue", link.state.name);
+                continue;
+            }
+
+            if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
+                if lsa.ifindex == link.state.ifindex {
+                    isis_info!("SRM: LSP comes from the same interface, continue");
+                    continue;
                 }
+
+                let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+
+                if !lsa.bytes.is_empty() {
+                    let mut buf = BytesMut::from(&lsa.bytes[..]);
+
+                    isis_packet::write_hold_time(&mut buf, hold_time);
+
+                    isis_info!("SRM: Send LSP on {}, {}", link.state.name, lsp_id);
+
+                    link.ptx.send(PacketMessage::Send(
+                        Packet::Bytes(buf),
+                        link.state.ifindex,
+                        level,
+                    ));
+                } else {
+                    isis_info!("SRM: LSP does not have bytes, return");
+                }
+            }
+        }
+    }
+
+    fn process_lsp_originate(&mut self, level: Level) {
+        let mut top = self.top();
+        let mut lsp = lsp_generate(&mut top, level);
+        let buf = lsp_emit(&mut lsp, level);
+        lsp_flood(&mut top, level, &buf);
+        insert_self_originate(&mut top, level, lsp);
+    }
+
+    fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
+        let mut top = self.top();
+
+        // Get current LSP if it exists
+        let seq_number = if let Some(existing) = top.lsdb.get(&level).get(&lsp_id) {
+            existing.lsp.seq_number + 1
+        } else {
+            isis_info!("Cannot purge LSP {} - not found in LSDB", lsp_id);
+            return;
+        };
+
+        // Create purged LSP with incremented sequence number
+        let mut purged_lsp = IsisLsp {
+            lsp_id,
+            seq_number,
+            hold_time: 0, // This purges the LSP
+            types: IsisLspTypes::from(level.digit()),
+            ..Default::default()
+        };
+
+        // Emit and flood the purged LSP
+        let buf = lsp_emit(&mut purged_lsp, level);
+        lsp_flood(&mut top, level, &buf);
+
+        // Insert as self-originated so we track it
+        insert_self_originate(&mut top, level, purged_lsp);
+
+        isis_info!("Purged LSP {} with seq {}", lsp_id, seq_number);
+    }
+
+    fn process_dis_originate(&mut self, level: Level, ifindex: u32) {
+        let mut top = self.top();
+        let mut lsp = dis_generate(&mut top, level, ifindex);
+        let buf = lsp_emit(&mut lsp, level);
+        lsp_flood(&mut top, level, &buf);
+        insert_self_originate(&mut top, level, lsp);
+    }
+
+    fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
+        let Some(mut top) = self.link_top(ifindex) else {
+            return;
+        };
+        match ev {
+            IfsmEvent::InterfaceUp => {
+                //
+            }
+            IfsmEvent::InterfaceDown => {
+                //
+            }
+            IfsmEvent::Start => {
+                ifsm::start(&mut top);
+            }
+            IfsmEvent::Stop => {
+                ifsm::stop(&mut top);
+            }
+            IfsmEvent::HelloTimerExpire => {
+                if let Some(level) = level {
+                    ifsm::hello_send(&mut top, level);
+                }
+            }
+            IfsmEvent::CsnpTimerExpire => {
+                if let Some(level) = level {
+                    ifsm::csnp_send(&mut top, level);
+                }
+            }
+            IfsmEvent::HelloOriginate => match level {
+                Some(level) => ifsm::hello_originate(&mut top, level),
+                None => {
+                    // In case of level is None, originate both L1/L2 Hello.
+                    ifsm::hello_originate(&mut top, Level::L1);
+                    ifsm::hello_originate(&mut top, Level::L2);
+                }
+            },
+            IfsmEvent::DisSelection => match level {
+                Some(level) => {
+                    ifsm::dis_selection(&mut top, level);
+                }
+                None => {
+                    ifsm::dis_selection(&mut top, Level::L1);
+                    ifsm::dis_selection(&mut top, Level::L2);
+                }
+            },
+        }
+    }
+
+    fn process_nfsm(&mut self, ev: NfsmEvent, ifindex: u32, sysid: IsisSysId, level: Level) {
+        let ltop = self.link_top(ifindex);
+        let Some(mut ltop) = ltop else {
+            return;
+        };
+        let mut ntop = NeighborTop {
+            tx: &ltop.tx,
+            dis: &mut ltop.state.dis,
+            lan_id: &mut ltop.state.lan_id,
+            adj: &mut ltop.state.adj,
+            local_pool: &mut ltop.local_pool,
+        };
+        let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
+            return;
+        };
+
+        isis_nfsm(&mut ntop, nbr, ev, &None, level);
+
+        if nbr.state == NfsmState::Down {
+            ltop.state.nbrs.get_mut(&level).remove(&sysid);
+            let msg = Message::SpfCalc(level);
+            ltop.tx.send(msg).unwrap();
+        }
+    }
+
+    fn process_lsdb(&mut self, ev: LsdbEvent, level: Level, key: IsisLspId) {
+        use LsdbEvent::*;
+        let mut top = self.top();
+        match ev {
+            RefreshTimerExpire => {
+                lsdb::refresh_lsp(&mut top, level, key);
+            }
+            HoldTimerExpire => {
+                lsdb::remove_lsp(&mut top, level, key);
             }
         }
     }
