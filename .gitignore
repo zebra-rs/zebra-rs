@@ -5,3 +5,4 @@ Cargo.lock
 cli/cli
 CLAUDE.md
 .claude
+zebra-rs.log
