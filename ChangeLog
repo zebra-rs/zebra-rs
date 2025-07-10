@@ -1,3 +1,35 @@
+2025-07-10  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.7.6
+
+	* zebra-rs/src/isis/inst.rs (process_msg): Refactor large process_msg()
+	method into smaller, focused methods for improved code organization
+	and maintainability. Extract dedicated handlers for SRM, LSP originate,
+	LSP purge, DIS originate, IFSM, NFSM, and LSDB events.
+
+	* zebra-rs/src/isis/link.rs (addr_del): Implement address deletion
+	functionality to properly remove IPv4 and IPv6 addresses from ISIS
+	link state when interfaces are deconfigured.
+
+	* zebra-rs/src/isis/link.rs (addr_add): Add duplicate address validation
+	to prevent the same IPv4/IPv6 prefix from being added multiple times
+	to link state vectors.
+
+	* zebra-rs/src/rib/link.rs (link_config_exec): Add duplicate address
+	validation for both IPv4 and IPv6 addresses during configuration.
+	Prevent duplicate addresses from being configured on the same interface.
+
+	* zebra-rs/src/rib/fib.rs, zebra-rs/src/rib/logging.rs: Enhance IP
+	address add/delete logging for better debugging and monitoring of
+	address configuration changes.
+
+	* zebra-rs/src/spf/calc.rs (SpfNexthop): Add sys_id field to track
+	neighbor system ID for proper ILM (Incoming Label Map) neighbor
+	tracking in MPLS operations.
+
+	* String optimization: Pre-allocate capacity for string building
+	operations to improve performance throughout the codebase.
+
 2025-07-04  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.5
