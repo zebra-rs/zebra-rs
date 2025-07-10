@@ -118,7 +118,7 @@ fn comp_commands(resp: &CompletionResponse) -> String {
     };
     let estimated_capacity = base_size + (resp.comps.len() * 50);
     let mut line = String::with_capacity(estimated_capacity);
-    
+
     line.push_str(match resp.code {
         ExecCode::Success => "Success\n",
         ExecCode::Incomplete => "Incomplete\n",
@@ -126,7 +126,7 @@ fn comp_commands(resp: &CompletionResponse) -> String {
         ExecCode::Ambiguous => "Ambiguous\n",
         _ => "NoMatch\n",
     });
-    
+
     for comp in resp.comps.iter() {
         if comp.ymatch == YangMatch::Key {
             line.push_str(&comp.name);
