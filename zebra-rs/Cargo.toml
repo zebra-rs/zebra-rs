@@ -1,20 +1,20 @@
 [package]
 name = "zebra-rs"
-version = "0.7.6"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [lints.rust]
 unused = "allow"
 
 [dependencies]
-anyhow = "1.0"
+anyhow.workspace = true
 bytes = "1"
 ipnet = "2.9"
 # nom = "7"
-prost = "0.13"
-tokio = { version = "1", features = ["full", "tracing"] }
-tokio-stream = "0.1"
-tonic = "0.13"
+prost.workspace = true
+tokio = { workspace = true, features = ["tracing"] }
+tokio-stream.workspace = true
+tonic.workspace = true
 console-subscriber = "0.4"
 libyang = { git = "https://github.com/zebra-rs/libyang" }
 #libyang = { path = "../../libyang" }
@@ -70,5 +70,5 @@ ioctl-rs = "0.2.0"
 net-route = "0.4.2"
 
 [build-dependencies]
-tonic-build = "0.13"
+tonic-build.workspace = true
 chrono = "0.4"
