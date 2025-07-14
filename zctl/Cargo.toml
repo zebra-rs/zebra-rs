@@ -1,15 +1,15 @@
 [package]
 name = "zctl"
-version = "0.7.6"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-anyhow = "1.0.82"
-clap = { version = "4", features = ["derive"] }
-prost = "0.13"
-tokio = { version="1", features = ["full"] }
-tokio-stream = "0.1"
-tonic = "0.13"
+anyhow.workspace = true
+clap.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
 
 [build-dependencies]
-tonic-build = "0.13"
+tonic-build.workspace = true
