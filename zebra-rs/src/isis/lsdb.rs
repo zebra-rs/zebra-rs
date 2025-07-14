@@ -10,7 +10,7 @@ use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::isis_info;
+use crate::{isis_info, isis_database_trace};
 
 use crate::isis::{
     Message,
@@ -253,14 +253,14 @@ pub fn insert_lsp(
     let key = lsp.lsp_id.clone();
 
     if top.config.net.sys_id() == key.sys_id() {
-        isis_info!("Self originated LSP?");
+        isis_database_trace!(top.tracing, Lsdb, &level, "Self originated LSP?");
         return None;
     }
 
     // Check sequence number.
     if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id) {
         if lsp.seq_number <= lsa.lsp.seq_number {
-            isis_info!("Same or smaller seq_number, no need of updating LSDB");
+            isis_database_trace!(top.tracing, Lsdb, &level, "Same or smaller seq_number, no need of updating LSDB");
             return None;
         }
     }
