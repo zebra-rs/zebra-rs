@@ -6,3 +6,19 @@ members = [
   "cli-helper",
   "zmcp-server",
 ]
+
+[workspace.package]
+version = "0.7.6"
+edition = "2024"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
+license = "GPL-2.0"
+
+[workspace.dependencies]
+# Common dependencies used across multiple packages
+anyhow = "1.0"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.13"
+tonic-build = "0.13"
+clap = { version = "4", features = ["derive"] }
