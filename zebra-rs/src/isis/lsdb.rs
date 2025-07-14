@@ -10,7 +10,7 @@ use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{isis_info, isis_database_trace};
+use crate::{isis_database_trace, isis_info};
 
 use crate::isis::{
     Message,
@@ -260,7 +260,12 @@ pub fn insert_lsp(
     // Check sequence number.
     if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id) {
         if lsp.seq_number <= lsa.lsp.seq_number {
-            isis_database_trace!(top.tracing, Lsdb, &level, "Same or smaller seq_number, no need of updating LSDB");
+            isis_database_trace!(
+                top.tracing,
+                Lsdb,
+                &level,
+                "Same or smaller seq_number, no need of updating LSDB"
+            );
             return None;
         }
     }

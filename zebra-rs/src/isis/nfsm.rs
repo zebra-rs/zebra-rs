@@ -6,8 +6,8 @@ use isis_packet::{IsLevel, IsisHello, IsisNeighborId, IsisTlv};
 
 use crate::isis::Level;
 use crate::isis::link::Afi;
-use crate::{isis_info, isis_fsm_trace};
 use crate::rib::MacAddr;
+use crate::{isis_fsm_trace, isis_info, isis_packet_trace};
 
 use super::inst::NeighborTop;
 use super::link::LinkTop;
@@ -199,7 +199,15 @@ pub fn nfsm_hello_received(
 
     let mut state = nbr.state;
 
-    isis_info!("NBR Hello received on {} from {}", nbr.ifindex, nbr.sys_id);
+    isis_packet_trace!(
+        ntop.tracing,
+        Hello,
+        Receive,
+        &level,
+        "NBR Hello received on {} from {}",
+        nbr.ifindex,
+        nbr.sys_id
+    );
 
     if state == NfsmState::Down {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -225,7 +233,14 @@ pub fn nfsm_hello_received(
         && ntop.lan_id.get(&level).is_none()
     {
         *ntop.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
-        isis_info!("DIS LAN ID is set in Hello {}", nbr.pdu.lan_id);
+        isis_fsm_trace!(
+            ntop.tracing,
+            Nfsm,
+            true,
+            "DIS LAN ID is set in Hello {} on level {}",
+            nbr.pdu.lan_id,
+            level
+        );
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
@@ -271,7 +286,15 @@ pub fn nfsm_p2p_hello_received(
 
     let mut state = nbr.state;
 
-    isis_info!("P2P Hello received on {} from {}", nbr.ifindex, nbr.sys_id);
+    isis_packet_trace!(
+        ntop.tracing,
+        Hello,
+        Receive,
+        &level,
+        "P2P Hello received on {} from {}",
+        nbr.ifindex,
+        nbr.sys_id
+    );
 
     // P2P adjacency formation is simpler than LAN:
     // - No DIS election needed
@@ -318,7 +341,15 @@ pub fn isis_nfsm(
     let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
 
     if let Some(new_state) = next_state {
-        isis_info!("NFSM State Transition {:?} -> {:?}", nbr.state, new_state);
+        isis_fsm_trace!(
+            ntop.tracing,
+            Nfsm,
+            false,
+            "NFSM State Transition {:?} -> {:?} on level {}",
+            nbr.state,
+            new_state,
+            level
+        );
         if new_state != nbr.state {
             nbr.prev = nbr.state;
             nbr.state = new_state;

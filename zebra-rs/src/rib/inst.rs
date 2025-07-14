@@ -216,19 +216,19 @@ impl Rib {
                 self.link_delete(link);
             }
             FibMessage::NewAddr(addr) => {
-                println!(
-                    "Rib::AddrAdd {} {}",
-                    addr.addr,
-                    self.ifname(addr.link_index)
-                );
+                // println!(
+                //     "Rib::AddrAdd {} {}",
+                //     addr.addr,
+                //     self.ifname(addr.link_index)
+                // );
                 self.addr_add(addr);
             }
             FibMessage::DelAddr(addr) => {
-                println!(
-                    "Rib::AddrDel {} {}",
-                    addr.addr,
-                    self.ifname(addr.link_index)
-                );
+                // println!(
+                //     "Rib::AddrDel {} {}",
+                //     addr.addr,
+                //     self.ifname(addr.link_index)
+                // );
                 self.addr_del(addr);
             }
             FibMessage::NewRoute(route) => {

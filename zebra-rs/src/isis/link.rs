@@ -14,7 +14,7 @@ use isis_packet::{
 };
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::{isis_info, isis_warn, isis_event_trace};
+use crate::{isis_event_trace, isis_info, isis_warn};
 
 use crate::config::{Args, ConfigOp};
 use crate::isis::nfsm::NfsmState;
@@ -597,13 +597,23 @@ pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()
     // Originate L1 LSP when it is .
     let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
     if isis.lsdb.get(&Level::L1).get(&key).is_some() {
-        isis_event_trace!(isis.tracing, LspOriginate, &Level::L1, "LSP Originate L1 due to metric change");
+        isis_event_trace!(
+            isis.tracing,
+            LspOriginate,
+            &Level::L1,
+            "LSP Originate L1 due to metric change"
+        );
         isis.tx.send(Message::LspOriginate(Level::L1)).unwrap();
     }
 
     // Originate L2 LSP.
     if isis.lsdb.get(&Level::L2).get(&key).is_some() {
-        isis_event_trace!(isis.tracing, LspOriginate, &Level::L2, "LSP Originate L2 due to metric change");
+        isis_event_trace!(
+            isis.tracing,
+            LspOriginate,
+            &Level::L2,
+            "LSP Originate L2 due to metric change"
+        );
         isis.tx.send(Message::LspOriginate(Level::L2)).unwrap();
     }
 
