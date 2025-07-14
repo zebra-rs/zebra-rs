@@ -4,7 +4,7 @@ use isis_packet::*;
 
 use crate::isis::link::DisStatus;
 use crate::rib::MacAddr;
-use crate::{isis_debug, isis_info};
+use crate::{isis_debug, isis_info, isis_packet_trace, isis_event_trace, isis_database_trace};
 
 use super::inst::{Packet, PacketMessage};
 use super::link::{Afis, HelloPaddingPolicy, LinkTop, LinkType};
@@ -166,8 +166,8 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
         return Ok(());
     }
 
-    isis_info!("CSNP Send on {}", ltop.state.name);
-    isis_info!("---------");
+    isis_packet_trace!(ltop.tracing, Csnp, Send, &level, "CSNP Send on {}", ltop.state.name);
+    isis_packet_trace!(ltop.tracing, Csnp, Send, &level, "---------");
 
     const MAX_LSP_ENTRIES_PER_TLV: usize = 15;
     let mut lsp_entries = IsisTlvLspEntries::default();
@@ -183,7 +183,7 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     };
 
     for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
-        isis_info!("LSP: {}", lsp_id);
+        isis_database_trace!(ltop.tracing, Lsdb, &level, "LSP: {}", lsp_id);
         let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
         let entry = IsisLspEntry {
             hold_time,
@@ -214,7 +214,7 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     let ifindex = ltop.state.ifindex;
     ltop.ptx
         .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
-    isis_info!("---------");
+    isis_packet_trace!(ltop.tracing, Csnp, Send, &level, "---------");
     Ok(())
 }
 
@@ -227,7 +227,7 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
     if has_level(ltop.state.level(), level) {
-        isis_info!("Hello originate {} on {}", level, ltop.state.name);
+        isis_packet_trace!(ltop.tracing, Hello, Send, &level, "Hello originate {} on {}", level, ltop.state.name);
 
         let hello = if ltop.config.link_type() == LinkType::P2p {
             hello_p2p_generate(ltop, level)
@@ -274,7 +274,7 @@ pub fn purge_pseudonode_lsp(ltop: &mut LinkTop, level: Level) {
         return;
     };
 
-    isis_info!(
+    isis_event_trace!(ltop.tracing, LspPurge, &level,
         "Purging pseudonode LSP for {} level {} adj {}",
         ltop.state.name,
         level,
@@ -364,7 +364,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
                 nbr.sys_id, nbr.pdu.priority, mac_str,
             );
 
-            isis_info!(
+            isis_event_trace!(ltop.tracing, Dis, &level,
                 "DIS selection: {} on {} (priority: {}, neighbors: {})",
                 nbr.sys_id,
                 ltop.state.name,
@@ -374,7 +374,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
             *ltop.state.dis_status.get_mut(&level) = status.clone();
             // Only here.
-            isis_info!(
+            isis_event_trace!(ltop.tracing, Dis, &level,
                 "DIS sysid is set to {} on link {}",
                 nbr.sys_id,
                 ltop.state.name
@@ -384,7 +384,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             if ltop.state.lan_id.get(&level).is_none() {
                 use IfsmEvent::*;
                 if !nbr.pdu.lan_id.is_empty() {
-                    isis_info!("DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
+                    isis_event_trace!(ltop.tracing, Dis, &level, "DIS lan_id {} received in Hello packet", nbr.pdu.lan_id);
                     *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
                     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
                 } else {
@@ -404,7 +404,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             nbrs_up
         );
 
-        isis_info!(
+        isis_event_trace!(ltop.tracing, Dis, &level,
             "DIS selection: self on {} (priority: {}, neighbors: {})",
             ltop.state.name,
             ltop.config.priority(),
@@ -419,7 +419,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         // Handle DIS status transitions
         if old_status == DisStatus::Myself && new_status != DisStatus::Myself {
             // We were DIS but no longer are
-            isis_info!(
+            isis_event_trace!(ltop.tracing, Dis, &level,
                 "DIS transition: {} losing DIS status on level {}",
                 ltop.state.name,
                 level
@@ -436,7 +436,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             *ltop.timer.csnp.get_mut(&level) = None;
         } else if new_status == DisStatus::Myself {
             // We are becoming DIS
-            isis_info!(
+            isis_event_trace!(ltop.tracing, Dis, &level,
                 "DIS transition: {} becoming DIS on level {}",
                 ltop.state.name,
                 level
@@ -452,7 +452,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
         }
 
         // Generate LSP to reflect DIS status change
-        isis_info!("LspOriginate from dis_selection");
+        isis_event_trace!(ltop.tracing, LspOriginate, &level, "LspOriginate from dis_selection");
         ltop.tx.send(Message::LspOriginate(level)).unwrap();
 
         ltop.state
@@ -479,7 +479,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     // Generate DIS pseudo node id.
     let pseudo_id: u8 = ltop.state.ifindex as u8;
     let lsp_id = IsisLspId::new(ltop.up_config.net.sys_id(), pseudo_id, 0);
-    isis_info!("Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
+    isis_event_trace!(ltop.tracing, Dis, &level, "Generate DIS LSP_ID {} on {}", lsp_id, ltop.state.name);
 
     // Set myself as DIS.
     *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
@@ -488,7 +488,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     *ltop.state.adj.get_mut(&level) = Some(lsp_id.neighbor_id());
 
     // Set LAN ID then generate hello.
-    isis_info!(
+    isis_event_trace!(ltop.tracing, Dis, &level,
         "Set DIS LAN_ID {} on {}",
         lsp_id.neighbor_id(),
         ltop.state.name
