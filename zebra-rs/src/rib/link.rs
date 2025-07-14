@@ -707,10 +707,10 @@ pub async fn link_config_exec(
                     for existing_addr in &link.addr4 {
                         if let IpNet::V4(existing_v4) = existing_addr.addr {
                             if existing_v4 == v4addr {
-                                println!(
-                                    "IPv4 address {} is already configured on interface {}",
-                                    v4addr, ifname
-                                );
+                                // println!(
+                                //     "IPv4 address {} is already configured on interface {}",
+                                //     v4addr, ifname
+                                // );
                                 return Ok(());
                             }
                         }
@@ -779,10 +779,10 @@ pub async fn link_config_exec(
                     for existing_addr in &link.addr6 {
                         if let IpNet::V6(existing_v6) = existing_addr.addr {
                             if existing_v6 == v6addr {
-                                println!(
-                                    "IPv6 address {} is already configured on interface {}",
-                                    v6addr, ifname
-                                );
+                                // println!(
+                                //     "IPv6 address {} is already configured on interface {}",
+                                //     v6addr, ifname
+                                // );
                                 return Ok(());
                             }
                         }
