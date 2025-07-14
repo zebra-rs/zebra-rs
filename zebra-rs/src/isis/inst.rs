@@ -14,7 +14,7 @@ use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::isis_info;
+use crate::{isis_info, isis_event_trace, isis_database_trace};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
@@ -235,14 +235,14 @@ impl Isis {
 
     fn process_srm(&mut self, lsp_id: IsisLspId, level: Level, reason: String) {
         for (_, link) in self.links.iter() {
-            isis_info!(
+            isis_event_trace!(self.tracing, Flooding, &level,
                 "SRM: processing {} on {} due to {}",
                 lsp_id,
                 link.state.name,
                 reason
             );
             if !link_level_capable(&link.state.level(), &level) {
-                isis_info!(
+                isis_event_trace!(self.tracing, Flooding, &level,
                     "SRM: {} is not capable the level, continue",
                     link.state.name
                 );
@@ -250,13 +250,13 @@ impl Isis {
             }
 
             if *link.state.nbrs_up.get(&level) == 0 {
-                isis_info!("SRM: {} neighbor is 0, continue", link.state.name);
+                isis_event_trace!(self.tracing, Flooding, &level, "SRM: {} neighbor is 0, continue", link.state.name);
                 continue;
             }
 
             if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
                 if lsa.ifindex == link.state.ifindex {
-                    isis_info!("SRM: LSP comes from the same interface, continue");
+                    isis_event_trace!(self.tracing, Flooding, &level, "SRM: LSP comes from the same interface, continue");
                     continue;
                 }
 
@@ -267,7 +267,7 @@ impl Isis {
 
                     isis_packet::write_hold_time(&mut buf, hold_time);
 
-                    isis_info!("SRM: Send LSP on {}, {}", link.state.name, lsp_id);
+                    isis_event_trace!(self.tracing, Flooding, &level, "SRM: Send LSP on {}, {}", link.state.name, lsp_id);
 
                     link.ptx.send(PacketMessage::Send(
                         Packet::Bytes(buf),
@@ -275,7 +275,7 @@ impl Isis {
                         level,
                     ));
                 } else {
-                    isis_info!("SRM: LSP does not have bytes, return");
+                    isis_event_trace!(self.tracing, Flooding, &level, "SRM: LSP does not have bytes, return");
                 }
             }
         }
@@ -296,7 +296,7 @@ impl Isis {
         let seq_number = if let Some(existing) = top.lsdb.get(&level).get(&lsp_id) {
             existing.lsp.seq_number + 1
         } else {
-            isis_info!("Cannot purge LSP {} - not found in LSDB", lsp_id);
+            isis_event_trace!(self.tracing, LspPurge, &level, "Cannot purge LSP {} - not found in LSDB", lsp_id);
             return;
         };
 
@@ -316,7 +316,7 @@ impl Isis {
         // Insert as self-originated so we track it
         insert_self_originate(&mut top, level, purged_lsp);
 
-        isis_info!("Purged LSP {} with seq {}", lsp_id, seq_number);
+        isis_event_trace!(self.tracing, LspPurge, &level, "Purged LSP {} with seq {}", lsp_id, seq_number);
     }
 
     fn process_dis_originate(&mut self, level: Level, ifindex: u32) {
@@ -549,7 +549,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .map(|x| x.lsp.seq_number + 1)
         .unwrap_or(0x0001);
 
-    isis_info!("LSP originate seq number: 0x{:04x}", seq_number);
+    isis_event_trace!(top.tracing, LspOriginate, &level, "LSP originate seq number: 0x{:04x}", seq_number);
 
     // XXX We need wrap around of seq_number.
 
