@@ -7,6 +7,8 @@
 	in root workspace. Use workspace inheritance for common dependencies
 	(anyhow, prost, tokio, tonic, clap) across all workspace members.
 
+	* packaging/version-update.sh: Only update ../Cargo.toml.
+
 2025-07-10  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.6
