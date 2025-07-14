@@ -29,6 +29,7 @@ use super::neigh::Neighbor;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::task::{Timer, TimerType};
+use super::tracing::IsisTracing;
 use super::{IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 
 #[derive(Debug, Default)]
@@ -120,6 +121,7 @@ pub struct LinkTop<'a> {
     pub lsdb: &'a Levels<Lsdb>,
     pub flags: &'a LinkFlags,
     pub up_config: &'a IsisConfig,
+    pub tracing: &'a IsisTracing,
     pub config: &'a LinkConfig,
     pub state: &'a mut LinkState,
     pub timer: &'a mut LinkTimer,

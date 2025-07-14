@@ -20,6 +20,7 @@ use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::addr::IsisAddr;
 use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
+use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, link_level_capable, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
@@ -60,6 +61,7 @@ pub struct Isis {
     pub show_cb: HashMap<String, ShowCallback>,
     // pub sock: Arc<AsyncFd<Socket>>,
     pub config: IsisConfig,
+    pub tracing: IsisTracing,
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
     pub reach_map: Levels<Afis<ReachMap>>,
@@ -77,6 +79,7 @@ pub struct IsisTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub links: &'a mut IsisLinks,
     pub config: &'a IsisConfig,
+    pub tracing: &'a IsisTracing,
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
@@ -124,6 +127,7 @@ impl Isis {
             show_cb: HashMap::new(),
             // sock,
             config: IsisConfig::default(),
+            tracing: IsisTracing::default(),
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
             reach_map: Levels::<Afis<ReachMap>>::default(),
@@ -438,6 +442,7 @@ impl Isis {
             tx: &self.tx,
             links: &mut self.links,
             config: &self.config,
+            tracing: &self.tracing,
             lsdb: &mut self.lsdb,
             lsp_map: &mut self.lsp_map,
             reach_map: &mut self.reach_map,
@@ -458,6 +463,7 @@ impl Isis {
             tx: &self.tx,
             ptx: &link.ptx,
             up_config: &self.config,
+            tracing: &self.tracing,
             lsdb: &self.lsdb,
             flags: &link.flags,
             config: &mut link.config,

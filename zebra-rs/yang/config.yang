@@ -190,7 +190,7 @@ module config {
             type boolean;
             description "Enable all ISIS tracing";
           }
-          
+
           list packet {
             key "type";
             leaf "type" {
@@ -221,7 +221,7 @@ module config {
               description "ISIS level to trace";
             }
           }
-          
+
           list event {
             key "type";
             leaf "type" {
@@ -246,7 +246,7 @@ module config {
               description "ISIS level to trace";
             }
           }
-          
+
           list fsm {
             key "type";
             leaf "type" {
@@ -262,7 +262,7 @@ module config {
               description "Enable detailed FSM state transition tracing";
             }
           }
-          
+
           list database {
             key "type";
             leaf "type" {
@@ -283,7 +283,7 @@ module config {
               description "ISIS level to trace";
             }
           }
-          
+
           container segment-routing {
             leaf enable {
               type boolean;
