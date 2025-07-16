@@ -17,6 +17,7 @@ impl Isis {
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.callback_add("/routing/isis/tracing/event", config_tracing_event);
+        self.callback_add("/routing/isis/tracing/database", config_tracing_database);
         self.callback_add(
             "/routing/isis/interface/circuit-type",
             link::config_circuit_type,
@@ -153,6 +154,40 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
             } else {
                 isis.tracing.event.dis.enabled = false;
                 println!("DIS event tracing disabled");
+            }
+        }
+        "lsp-originate" => {
+            if op.is_set() {
+                isis.tracing.event.lsp_originate.enabled = true;
+                println!("LSP originate event tracing enabled");
+            } else {
+                isis.tracing.event.lsp_originate.enabled = false;
+                println!("LSP originate event tracing disabled");
+            }
+        }
+        _ => {
+            if op.is_set() {
+                println!("Trace on {} (not implemented)", ev);
+            } else {
+                println!("Trace off {} (not implemented)", ev);
+            }
+        }
+    }
+
+    Some(())
+}
+
+fn config_tracing_database(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ev = args.string()?;
+
+    match ev.as_str() {
+        "lsdb" => {
+            if op.is_set() {
+                isis.tracing.database.lsdb.enabled = true;
+                println!("LSDB database tracing enabled");
+            } else {
+                isis.tracing.database.lsdb.enabled = false;
+                println!("LSDB database tracing disabled");
             }
         }
         _ => {

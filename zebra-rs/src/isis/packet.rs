@@ -277,7 +277,6 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option
             // Pseudo LSP purge request.
             if lsp.hold_time == 0 {
                 if *link.state.dis_status.get(&level) == DisStatus::Myself {
-                    println!("I'm DIS on the link");
                     isis_event_trace!(
                         top.tracing,
                         Dis,
@@ -294,7 +293,11 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option
                     isis_event_trace!(top.tracing, Dis, &level, "DIS purge accepted (I'm not DIS)");
                 }
             } else {
-                //
+                if *link.state.dis_status.get(&level) == DisStatus::Myself {
+                    lsp_self_updated(top, level, lsp);
+                } else {
+                    // I'm no longer DIS. Treat it as other LSP.
+                }
             }
         } else {
             if lsp.hold_time == 0 {

@@ -536,13 +536,31 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
 
     let lsp_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
 
-    // Fetch current sequence number if LSP exists.
-    let seq_number = top
-        .lsdb
-        .get(&level)
-        .get(&lsp_id)
-        .map(|x| x.lsp.seq_number + 1)
-        .unwrap_or(0x0001);
+    // Determine sequence number based on base parameter and existing LSDB
+    let seq_number = if let Some(base_seq) = base {
+        // When base is provided, compare with existing LSDB sequence number
+        let lsdb_seq = top.lsdb.get(&level).get(&lsp_id).map(|x| x.lsp.seq_number);
+
+        match lsdb_seq {
+            None => base_seq + 1, // No existing LSP, use base + 1
+            Some(existing_seq) if base_seq >= existing_seq => base_seq + 1, // Base is larger or equal, use base + 1
+            Some(existing_seq) => existing_seq + 1, // Existing is larger, use existing + 1
+        }
+    } else {
+        // No base provided, use existing sequence number + 1 or start at 1
+        top.lsdb
+            .get(&level)
+            .get(&lsp_id)
+            .map(|x| x.lsp.seq_number + 1)
+            .unwrap_or(0x0001)
+    };
+    isis_event_trace!(
+        top.tracing,
+        Dis,
+        &level,
+        "DIS generate with seq_number {}",
+        seq_number
+    );
 
     let types = IsisLspTypes::from(level.digit());
     let mut lsp = IsisLsp {
