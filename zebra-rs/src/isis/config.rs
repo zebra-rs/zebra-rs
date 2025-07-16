@@ -150,19 +150,15 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
         "dis" => {
             if op.is_set() {
                 isis.tracing.event.dis.enabled = true;
-                println!("DIS event tracing enabled");
             } else {
                 isis.tracing.event.dis.enabled = false;
-                println!("DIS event tracing disabled");
             }
         }
         "lsp-originate" => {
             if op.is_set() {
                 isis.tracing.event.lsp_originate.enabled = true;
-                println!("LSP originate event tracing enabled");
             } else {
                 isis.tracing.event.lsp_originate.enabled = false;
-                println!("LSP originate event tracing disabled");
             }
         }
         _ => {
@@ -184,10 +180,8 @@ fn config_tracing_database(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
         "lsdb" => {
             if op.is_set() {
                 isis.tracing.database.lsdb.enabled = true;
-                println!("LSDB database tracing enabled");
             } else {
                 isis.tracing.database.lsdb.enabled = false;
-                println!("LSDB database tracing disabled");
             }
         }
         _ => {

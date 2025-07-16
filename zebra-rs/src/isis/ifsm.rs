@@ -190,7 +190,7 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     };
 
     for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
-        isis_database_trace!(ltop.tracing, Lsdb, &level, "LSP: {}", lsp_id);
+        // isis_database_trace!(ltop.tracing, Lsdb, &level, "LSP: {}", lsp_id);
         let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
         let entry = IsisLspEntry {
             hold_time,

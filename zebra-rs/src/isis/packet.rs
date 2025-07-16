@@ -264,8 +264,11 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option
     // Self LSP recieved.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
         // Self LSP logging.
-        println!(
-            "Self LSP {} {} {} seq {:04x} hold_time {}",
+        isis_event_trace!(
+            top.tracing,
+            Dis,
+            &level,
+            "Self LSP rcvd {} {} {} seq {:04x} hold_time {}",
             lsp.lsp_id,
             ifindex,
             mac_str(&mac),
@@ -289,14 +292,22 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option
                         .send(Message::DisOriginate(level, ifindex, Some(lsp.seq_number)))
                         .unwrap();
                 } else {
-                    top.lsdb.get_mut(&level).remove(&lsp.lsp_id);
                     isis_event_trace!(top.tracing, Dis, &level, "DIS purge accepted (I'm not DIS)");
+                    top.lsdb.get_mut(&level).remove(&lsp.lsp_id);
                 }
             } else {
                 if *link.state.dis_status.get(&level) == DisStatus::Myself {
+                    isis_event_trace!(top.tracing, Dis, &level, "DIS self update");
                     lsp_self_updated(top, level, lsp);
                 } else {
                     // I'm no longer DIS. Treat it as other LSP.
+                    isis_event_trace!(
+                        top.tracing,
+                        Dis,
+                        &level,
+                        "DIS I'm no longer DIS. Treat it as other LSP."
+                    );
+                    lsdb::insert_lsp(top, level, lsp, packet.bytes, ifindex);
                 }
             }
         } else {
