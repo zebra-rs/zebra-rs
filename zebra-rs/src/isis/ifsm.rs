@@ -278,7 +278,8 @@ pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
     Timer::once(1, move || {
         let tx = tx.clone();
         async move {
-            tx.send(Message::DisOriginate(level, ifindex)).unwrap();
+            tx.send(Message::DisOriginate(level, ifindex, None))
+                .unwrap();
         }
     })
 }

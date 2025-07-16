@@ -229,12 +229,20 @@ pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
             }
         }
         None => {
-            println!("Self LSP is not in LSDB");
+            println!("XXX Self LSP {} is not in LSDB", lsp.lsp_id);
         }
     }
 }
 
-pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
+fn mac_str(mac: &Option<MacAddr>) -> String {
+    if let Some(mac) = mac {
+        format!("{}", mac)
+    } else {
+        String::from("N/A")
+    }
+}
+
+pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
     };
@@ -250,6 +258,52 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
     };
 
     if !link_level_capable(&link.state.level(), &level) {
+        return;
+    }
+
+    // Self LSP recieved.
+    if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
+        // Self LSP logging.
+        println!(
+            "Self LSP {} {} {} seq {:04x} hold_time {}",
+            lsp.lsp_id,
+            ifindex,
+            mac_str(&mac),
+            lsp.seq_number,
+            lsp.hold_time
+        );
+        // Pseudo LSP has been received.
+        if lsp.lsp_id.is_pseudo() {
+            // Pseudo LSP purge request.
+            if lsp.hold_time == 0 {
+                if *link.state.dis_status.get(&level) == DisStatus::Myself {
+                    println!("I'm DIS on the link");
+                    isis_event_trace!(
+                        top.tracing,
+                        Dis,
+                        &level,
+                        "DIS purge trigger DIS LSP originate from base seq_num {} (I'm DIS)",
+                        lsp.seq_number
+                    );
+                    // Originate DIS with seqnumber + 1.
+                    top.tx
+                        .send(Message::DisOriginate(level, ifindex, Some(lsp.seq_number)))
+                        .unwrap();
+                } else {
+                    top.lsdb.get_mut(&level).remove(&lsp.lsp_id);
+                    isis_event_trace!(top.tracing, Dis, &level, "DIS purge accepted (I'm not DIS)");
+                }
+            } else {
+                //
+            }
+        } else {
+            if lsp.hold_time == 0 {
+                lsp_self_purged(top, level, lsp);
+            } else {
+                lsp_self_updated(top, level, lsp);
+            }
+        }
+
         return;
     }
 
@@ -334,16 +388,6 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Optio
                 }
             }
         }
-    }
-
-    // Self originated LSP came from DIS.
-    if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
-        if lsp.hold_time == 0 {
-            lsp_self_purged(top, level, lsp);
-        } else {
-            lsp_self_updated(top, level, lsp);
-        }
-        return;
     }
 
     if lsp.hold_time == 0 {

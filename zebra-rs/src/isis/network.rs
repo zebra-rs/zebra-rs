@@ -17,6 +17,35 @@ use super::inst::{Packet, PacketMessage};
 use super::socket::link_addr;
 use super::{Level, Message};
 
+fn hexdump(data: &[u8]) {
+    for (i, chunk) in data.chunks(16).enumerate() {
+        // offset
+        print!("{:08X}: ", i * 16);
+
+        // hex bytes
+        for byte in chunk {
+            print!("{:02X} ", byte);
+        }
+        // pad last line if short
+        for _ in 0..(16 - chunk.len()) {
+            print!("   ");
+        }
+
+        // ASCII representation
+        let ascii: String = chunk
+            .iter()
+            .map(|b| {
+                if b.is_ascii_graphic() {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        println!("|{ascii}|");
+    }
+}
+
 pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
     let mut buf = [0u8; 1024 * 16];
     let mut iov = [IoSliceMut::new(&mut buf)];
@@ -39,7 +68,8 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
             };
 
             let Ok(mut packet) = isis_packet::parse(&input[3..]) else {
-                isis_info!("Error Packet parse");
+                isis_info!("Error Packet parse on {}", addr.ifindex());
+                hexdump(&input[3..]);
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
