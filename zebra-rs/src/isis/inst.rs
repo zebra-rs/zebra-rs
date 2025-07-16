@@ -26,12 +26,12 @@ use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
-use crate::spf::{self, Graph};
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Context,
     rib::RibRxChannel,
 };
+use spf_rs as spf;
 
 use super::config::IsisConfig;
 use super::ifsm::has_level;
@@ -72,7 +72,7 @@ pub struct Isis {
     pub spf: Levels<Option<Timer>>,
     pub global_pool: Option<LabelPool>,
     pub local_pool: Option<LabelPool>,
-    pub graph: Levels<Option<Graph>>,
+    pub graph: Levels<Option<spf::Graph>>,
 }
 
 pub struct IsisTop<'a> {
@@ -90,7 +90,7 @@ pub struct IsisTop<'a> {
     pub hostname: &'a mut Levels<Hostname>,
     pub spf: &'a mut Levels<Option<Timer>>,
     pub local_pool: &'a mut Option<LabelPool>,
-    pub graph: &'a mut Levels<Option<Graph>>,
+    pub graph: &'a mut Levels<Option<spf::Graph>>,
 }
 
 pub struct NeighborTop<'a> {
@@ -139,7 +139,7 @@ impl Isis {
             spf: Levels::<Option<Timer>>::default(),
             global_pool: None,
             local_pool: Some(LabelPool::new(15000, Some(16000))),
-            graph: Levels::<Option<Graph>>::default(),
+            graph: Levels::<Option<spf::Graph>>::default(),
         };
         isis.callback_build();
         isis.show_build();
@@ -218,8 +218,8 @@ impl Isis {
             Message::LspPurge(level, lsp_id) => {
                 self.process_lsp_purge(level, lsp_id);
             }
-            Message::DisOriginate(level, ifindex) => {
-                self.process_dis_originate(level, ifindex);
+            Message::DisOriginate(level, ifindex, base) => {
+                self.process_dis_originate(level, ifindex, base);
             }
             Message::Ifsm(ev, ifindex, level) => {
                 self.process_ifsm(ev, ifindex, level);
@@ -361,9 +361,9 @@ impl Isis {
         );
     }
 
-    fn process_dis_originate(&mut self, level: Level, ifindex: u32) {
+    fn process_dis_originate(&mut self, level: Level, ifindex: u32, base: Option<u32>) {
         let mut top = self.top();
-        let mut lsp = dis_generate(&mut top, level, ifindex);
+        let mut lsp = dis_generate(&mut top, level, ifindex, base);
         let buf = lsp_emit(&mut lsp, level);
         lsp_flood(&mut top, level, &buf);
         insert_self_originate(&mut top, level, lsp);
@@ -523,7 +523,7 @@ impl Isis {
     }
 }
 
-pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32) -> IsisLsp {
+pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<u32>) -> IsisLsp {
     let neighbor_id = if let Some(link) = top.links.get(&ifindex) {
         if let Some(adj) = link.state.adj.get(&level) {
             adj.clone()
@@ -536,13 +536,32 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32) -> IsisLsp {
 
     let lsp_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
 
-    // Fetch current sequence number if LSP exists.
-    let seq_number = top
-        .lsdb
-        .get(&level)
-        .get(&lsp_id)
-        .map(|x| x.lsp.seq_number)
-        .unwrap_or(1);
+    // Determine sequence number based on base parameter and existing LSDB
+    let seq_number = if let Some(base_seq) = base {
+        // When base is provided, compare with existing LSDB sequence number
+        let lsdb_seq = top.lsdb.get(&level).get(&lsp_id).map(|x| x.lsp.seq_number);
+
+        match lsdb_seq {
+            None => base_seq + 1, // No existing LSP, use base + 1
+            Some(existing_seq) if base_seq >= existing_seq => base_seq + 1, // Base is larger or equal, use base + 1
+            Some(existing_seq) => existing_seq + 1, // Existing is larger, use existing + 1
+        }
+    } else {
+        // No base provided, use existing sequence number + 1 or start at 1
+        top.lsdb
+            .get(&level)
+            .get(&lsp_id)
+            .map(|x| x.lsp.seq_number + 1)
+            .unwrap_or(0x0001)
+    };
+    isis_event_trace!(
+        top.tracing,
+        Dis,
+        &level,
+        "DIS generate with seq_number {}",
+        seq_number
+    );
+
     let types = IsisLspTypes::from(level.digit());
     let mut lsp = IsisLsp {
         hold_time: top.config.hold_time(),
@@ -1306,7 +1325,7 @@ pub enum Message {
     LspOriginate(Level),
     LspPurge(Level, IsisLspId),
     Srm(IsisLspId, Level, String),
-    DisOriginate(Level, u32),
+    DisOriginate(Level, u32, Option<u32>),
     SpfCalc(Level),
 }
 
@@ -1330,7 +1349,7 @@ impl Display for Message {
             Message::LspPurge(level, lsp_id) => {
                 write!(f, "[Message::LspPurge({}, {})]", level, lsp_id)
             }
-            Message::DisOriginate(level, _) => write!(f, "[Message::DisOriginate({})]", level),
+            Message::DisOriginate(level, _, _) => write!(f, "[Message::DisOriginate({})]", level),
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
         }
     }

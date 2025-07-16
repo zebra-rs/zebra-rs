@@ -6,7 +6,8 @@ use serde::Serialize;
 use super::{Isis, inst::ShowCallback, neigh::Neighbor};
 
 use crate::isis::{Level, hostname, link, neigh};
-use crate::{config::Args, rib::MacAddr, spf};
+use crate::{config::Args, rib::MacAddr};
+use spf_rs as spf;
 
 impl Isis {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
