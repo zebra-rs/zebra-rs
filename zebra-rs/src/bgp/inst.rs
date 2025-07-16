@@ -126,7 +126,7 @@ impl Bgp {
                 fsm(self, peer, event);
             }
             Message::Accept(socket, sockaddr) => {
-                println!("Accept: {:?}", sockaddr);
+                // println!("Accept: {:?}", sockaddr);
                 accept(self, socket, sockaddr);
             }
             Message::Show(tx) => {
@@ -174,7 +174,7 @@ impl Bgp {
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
-                                println!("IPv4 connection accepted from: {}", sockaddr);
+                                // println!("IPv4 connection accepted from: {}", sockaddr);
                                 if let Err(e) = tx_ipv4.send(Message::Accept(socket, sockaddr)) {
                                     eprintln!("Failed to send Accept message: {}", e);
                                     break;

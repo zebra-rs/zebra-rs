@@ -16,6 +16,8 @@ impl Isis {
         self.callback_add("/routing/isis/timers/hold-time", config_hold_time);
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
+        self.callback_add("/routing/isis/tracing/event", config_tracing_event);
+        self.callback_add("/routing/isis/tracing/database", config_tracing_database);
         self.callback_add(
             "/routing/isis/interface/circuit-type",
             link::config_circuit_type,
@@ -138,5 +140,58 @@ fn config_te_router_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
     } else {
         isis.config.te_router_id = None;
     }
+    Some(())
+}
+
+fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ev = args.string()?;
+
+    match ev.as_str() {
+        "dis" => {
+            if op.is_set() {
+                isis.tracing.event.dis.enabled = true;
+            } else {
+                isis.tracing.event.dis.enabled = false;
+            }
+        }
+        "lsp-originate" => {
+            if op.is_set() {
+                isis.tracing.event.lsp_originate.enabled = true;
+            } else {
+                isis.tracing.event.lsp_originate.enabled = false;
+            }
+        }
+        _ => {
+            if op.is_set() {
+                println!("Trace on {} (not implemented)", ev);
+            } else {
+                println!("Trace off {} (not implemented)", ev);
+            }
+        }
+    }
+
+    Some(())
+}
+
+fn config_tracing_database(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ev = args.string()?;
+
+    match ev.as_str() {
+        "lsdb" => {
+            if op.is_set() {
+                isis.tracing.database.lsdb.enabled = true;
+            } else {
+                isis.tracing.database.lsdb.enabled = false;
+            }
+        }
+        _ => {
+            if op.is_set() {
+                println!("Trace on {} (not implemented)", ev);
+            } else {
+                println!("Trace off {} (not implemented)", ev);
+            }
+        }
+    }
+
     Some(())
 }

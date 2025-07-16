@@ -190,7 +190,7 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     };
 
     for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
-        isis_database_trace!(ltop.tracing, Lsdb, &level, "LSP: {}", lsp_id);
+        // isis_database_trace!(ltop.tracing, Lsdb, &level, "LSP: {}", lsp_id);
         let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
         let entry = IsisLspEntry {
             hold_time,
@@ -278,7 +278,8 @@ pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
     Timer::once(1, move || {
         let tx = tx.clone();
         async move {
-            tx.send(Message::DisOriginate(level, ifindex)).unwrap();
+            tx.send(Message::DisOriginate(level, ifindex, None))
+                .unwrap();
         }
     })
 }
