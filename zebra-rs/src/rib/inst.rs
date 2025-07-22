@@ -181,9 +181,11 @@ impl Rib {
                 let _ = tx.send(());
             }
             Message::LinkUp { ifindex } => {
+                println!("LinkUp {}", ifindex);
                 self.link_up(ifindex);
             }
             Message::LinkDown { ifindex } => {
+                println!("LinkDown {}", ifindex);
                 self.link_down(ifindex).await;
             }
             Message::Resolve => {

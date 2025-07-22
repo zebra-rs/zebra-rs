@@ -40,6 +40,17 @@ impl Isis {
             "/routing/isis/interface/ipv6/enable",
             link::config_ipv6_enable,
         );
+        self.callback_add("/routing/isis/distribute/rib", config_distribute_rib);
+    }
+}
+
+pub struct IsisDistribute {
+    pub rib: bool,
+}
+
+impl Default for IsisDistribute {
+    fn default() -> Self {
+        Self { rib: true }
     }
 }
 
@@ -52,6 +63,7 @@ pub struct IsisConfig {
     pub hold_time: Option<u16>,
     pub te_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
+    pub distribute: IsisDistribute,
 }
 
 // Default refresh time: 15 min.
@@ -191,6 +203,18 @@ fn config_tracing_database(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
                 println!("Trace off {} (not implemented)", ev);
             }
         }
+    }
+
+    Some(())
+}
+
+fn config_distribute_rib(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let enable = args.boolean()?;
+
+    if op.is_set() {
+        isis.config.distribute.rib = enable;
+    } else {
+        isis.config.distribute.rib = true;
     }
 
     Some(())
