@@ -93,8 +93,15 @@ module config {
       container isis {
         presence "Enables configuration of IS-IS";
         leaf net {
+          // First entry in "router isis" node.
           ext:sort "1";
           type isis:net;
+        }
+
+        container distribute {
+          leaf rib {
+            type boolean;
+          }
         }
 
         leaf is-type {
@@ -127,6 +134,7 @@ module config {
         }
 
         list interface {
+          // Last item in "router isis" node.
           ext:sort "-1";
           key "if-name";
           leaf if-name {

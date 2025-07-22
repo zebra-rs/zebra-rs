@@ -66,9 +66,12 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
             let Some(input) = msg.iovs().next() else {
                 return Err(ErrorKind::UnexpectedEof.into());
             };
-
             let Ok(mut packet) = isis_packet::parse(&input[3..]) else {
-                isis_info!("Error Packet parse on {}", addr.ifindex());
+                isis_info!(
+                    "Error Packet parse on {} len {}",
+                    addr.ifindex(),
+                    input.len(),
+                );
                 hexdump(&input[3..]);
                 return Err(ErrorKind::UnexpectedEof.into());
             };
