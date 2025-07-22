@@ -51,7 +51,6 @@ pub struct Isis {
     pub ctx: Context,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    // pub ptx: UnboundedSender<PacketMessage>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
     pub rib_tx: UnboundedSender<rib::Message>,
@@ -59,7 +58,6 @@ pub struct Isis {
     pub links: IsisLinks,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    // pub sock: Arc<AsyncFd<Socket>>,
     pub config: IsisConfig,
     pub tracing: IsisTracing,
     pub lsdb: Levels<Lsdb>,
@@ -110,15 +108,12 @@ impl Isis {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
-        // let sock = Arc::new(AsyncFd::new(isis_socket().unwrap()).unwrap());
 
         let (tx, rx) = mpsc::unbounded_channel();
-        // let (ptx, prx) = mpsc::unbounded_channel();
         let mut isis = Self {
             ctx,
             tx,
             rx,
-            // ptx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
@@ -126,7 +121,6 @@ impl Isis {
             links: IsisLinks::default(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            // sock,
             config: IsisConfig::default(),
             tracing: IsisTracing::default(),
             lsdb: Levels::<Lsdb>::default(),
@@ -143,16 +137,6 @@ impl Isis {
         };
         isis.callback_build();
         isis.show_build();
-
-        let tx = isis.tx.clone();
-        // let sock = isis.sock.clone();
-        // tokio::spawn(async move {
-        //     read_packet(sock, tx).await;
-        // });
-        // let sock = isis.sock.clone();
-        // tokio::spawn(async move {
-        //     write_packet(sock, prx).await;
-        // });
         isis
     }
 
@@ -1516,13 +1500,17 @@ fn apply_routing_updates(
     ilm: BTreeMap<u32, SpfIlm>,
 ) {
     // Update MPLS ILM
-    let ilm_diff = diff_ilm(top.ilm.get(&level), &ilm);
-    diff_ilm_apply(top.rib_tx.clone(), &ilm_diff);
+    if top.config.distribute.rib {
+        let ilm_diff = diff_ilm(top.ilm.get(&level), &ilm);
+        diff_ilm_apply(top.rib_tx.clone(), &ilm_diff);
+    }
     *top.ilm.get_mut(&level) = ilm;
 
     // Update RIB
-    let diff = diff(top.rib.get(&level), &rib);
-    diff_apply(top.rib_tx.clone(), &diff);
+    if top.config.distribute.rib {
+        let diff = diff(top.rib.get(&level), &rib);
+        diff_apply(top.rib_tx.clone(), &diff);
+    }
     *top.rib.get_mut(&level) = rib;
 }
 

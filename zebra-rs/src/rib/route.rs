@@ -44,6 +44,7 @@ impl Rib {
             }
         }
         // Remove DHCP and Kernel routes.
+        #[cfg(any())]
         for (prefix, rib) in self.table.iter() {
             for entry in rib.iter() {
                 if entry.rtype == RibType::Dhcp || entry.rtype == RibType::Kernel {
@@ -71,6 +72,7 @@ impl Rib {
             }
         }
         // Remove IPv6 DHCP and Kernel routes.
+        #[cfg(any())]
         for (prefix, rib) in self.table_v6.iter() {
             for entry in rib.iter() {
                 if entry.rtype == RibType::Dhcp || entry.rtype == RibType::Kernel {
@@ -180,6 +182,7 @@ impl Rib {
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
+        // Only called from Message::Resolve.
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle).await;
     }
@@ -580,7 +583,7 @@ async fn ipv4_nexthop_sync(
 ) {
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            // println!("before: {:?}", uni);
+            println!("before: {:?}", uni);
             // Resolve the next hop
             let resolve = match uni.addr {
                 std::net::IpAddr::V4(ipv4_addr) => {
@@ -606,7 +609,7 @@ async fn ipv4_nexthop_sync(
                     fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
             }
-            // println!("after: {:?}", uni);
+            println!("after: {:?}", uni);
         }
     }
 }
