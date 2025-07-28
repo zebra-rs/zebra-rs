@@ -581,9 +581,10 @@ async fn ipv4_nexthop_sync(
     table: &PrefixMap<Ipv4Net, RibEntries>,
     fib: &FibHandle,
 ) {
+    // Update Group::Uni first, then check Group::Multi.
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            println!("before: {:?}", uni);
+            // println!("B: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
             // Resolve the next hop
             let resolve = match uni.addr {
                 std::net::IpAddr::V4(ipv4_addr) => {
@@ -609,7 +610,32 @@ async fn ipv4_nexthop_sync(
                     fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
             }
-            println!("after: {:?}", uni);
+            // println!("A: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
+        }
+    }
+    // Collect multi nexthop validity updates to avoid borrow checker issues
+    let mut multi_updates: Vec<(usize, bool)> = Vec::new();
+
+    for (idx, nhop) in nmap.groups.iter().enumerate() {
+        if let Some(Group::Multi(multi)) = nhop {
+            // At least one of Group::Uni in multi.
+            let mut valid = false;
+            for (m, v) in multi.set.iter() {
+                // Get the nexthop group by ID
+                if let Some(Some(group)) = nmap.groups.get(*m) {
+                    if group.is_valid() {
+                        valid = true;
+                    }
+                }
+            }
+            multi_updates.push((idx, valid));
+        }
+    }
+
+    // Apply the validity updates
+    for (idx, valid) in multi_updates {
+        if let Some(Some(Group::Multi(multi))) = nmap.groups.get_mut(idx) {
+            multi.set_valid(valid);
         }
     }
 }
