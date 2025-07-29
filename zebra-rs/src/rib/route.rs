@@ -28,8 +28,10 @@ impl Rib {
                 // println!("Connected: {:?} down - removing from RIB", prefix);
                 let mut rib = RibEntry::new(RibType::Connected);
                 rib.ifindex = ifindex;
-                let msg = Message::Ipv4Del { prefix, rib };
-                let _ = self.tx.send(msg);
+                // let msg = Message::Ipv4Del { prefix, rib };
+                // let _ = self.tx.send(msg);
+                println!("Deleting Connected Prefix {prefix}");
+                let mut replace = rib_replace_system(&mut self.table, &prefix, rib);
             }
         }
         // Remove connected IPv6 route.
@@ -101,9 +103,19 @@ impl Rib {
         }
 
         // Resolve RIB.
-        let msg = Message::Resolve;
-        let _ = self.tx.send(msg);
+        // self.ipv4_route_resolve(true).await;
+        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+        ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+        // self.ipv6_route_resolve().await;
+        // let msg = Message::Resolve;
+        // let _ = self.tx.send(msg);
     }
+
+    // pub async fn ipv4_route_resolve(&mut self, ifdown: bool) {
+    //     // Only called from Message::Resolve.
+    //     ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+    //     ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, ifdown).await;
+    // }
 
     pub fn link_up(&mut self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
@@ -181,12 +193,6 @@ impl Rib {
         self.fib_handle.ilm_del(label, &ilm).await;
     }
 
-    pub async fn ipv4_route_resolve(&mut self) {
-        // Only called from Message::Resolve.
-        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
-        ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle).await;
-    }
-
     pub async fn ipv6_route_add(&mut self, prefix: &Ipv6Net, mut entry: RibEntry) {
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
@@ -225,7 +231,15 @@ impl Rib {
         let Some(entries) = self.table.get_mut(prefix) else {
             return;
         };
-        ipv4_entry_selection(prefix, entries, replace, &mut self.nmap, &self.fib_handle).await;
+        ipv4_entry_selection(
+            prefix,
+            entries,
+            replace,
+            &mut self.nmap,
+            &self.fib_handle,
+            false,
+        )
+        .await;
     }
 
     pub async fn rib_selection_v6(&mut self, prefix: &Ipv6Net, replace: Option<RibEntry>) {
@@ -236,12 +250,92 @@ impl Rib {
     }
 }
 
+async fn ipv4_nexthop_sync(
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv4Net, RibEntries>,
+    fib: &FibHandle,
+) {
+    // Update Group::Uni first, then check Group::Multi.
+    for nhop in nmap.groups.iter_mut().flatten() {
+        if let Group::Uni(uni) = nhop {
+            // println!("B: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
+            // Resolve the next hop
+            let resolve = match uni.addr {
+                std::net::IpAddr::V4(ipv4_addr) => {
+                    rib_resolve(table, ipv4_addr, &ResolveOpt::default())
+                }
+                std::net::IpAddr::V6(_) => {
+                    // IPv6 addresses should be handled by ipv6_nexthop_sync
+                    continue;
+                }
+            };
+
+            // Update the status of the next hop
+            let ifindex = resolve.is_valid();
+            if ifindex == 0 {
+                uni.set_valid(false);
+                uni.set_installed(false);
+                uni.set_ifindex(0);
+            } else {
+                uni.set_ifindex(ifindex);
+                uni.set_valid(true);
+                if !uni.is_installed() {
+                    uni.set_installed(true);
+                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                }
+            }
+            // println!("A: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
+        }
+    }
+    // Collect multi nexthop validity updates to avoid borrow checker issues
+    let mut multi_updates: Vec<(usize, bool)> = Vec::new();
+
+    for (idx, nhop) in nmap.groups.iter().enumerate() {
+        if let Some(Group::Multi(multi)) = nhop {
+            // At least one of Group::Uni in multi.
+            let mut valid = false;
+            for (m, v) in multi.set.iter() {
+                // Get the nexthop group by ID
+                if let Some(Some(group)) = nmap.groups.get(*m) {
+                    if group.is_valid() {
+                        valid = true;
+                    }
+                }
+            }
+            multi_updates.push((idx, valid));
+        }
+    }
+
+    // Apply the validity updates
+    for (idx, valid) in multi_updates {
+        if let Some(Some(Group::Multi(multi))) = nmap.groups.get_mut(idx) {
+            multi.set_valid(valid);
+        }
+    }
+}
+
+async fn ipv4_route_sync(
+    table: &mut PrefixMap<Ipv4Net, RibEntries>,
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+    ifdown: bool,
+) {
+    for (p, entries) in table.iter_mut() {
+        if ifdown {
+            println!("ipv4_route_sync {}", *p);
+        }
+        ipv4_entry_resolve(entries, nmap, ifdown);
+        ipv4_entry_selection(p, entries, None, nmap, fib, ifdown).await;
+    }
+}
+
 async fn ipv4_entry_selection(
     prefix: &Ipv4Net,
     entries: &mut RibEntries,
     replace: Option<RibEntry>,
     nmap: &mut NexthopMap,
     fib: &FibHandle,
+    ifdown: bool,
 ) {
     if let Some(mut replace) = replace {
         if replace.is_protocol() {
@@ -258,7 +352,13 @@ async fn ipv4_entry_selection(
     let next = rib_next(entries);
 
     if prev == next {
+        if ifdown {
+            println!("No change: {}", prefix);
+        }
         return;
+    }
+    if ifdown {
+        println!("Change: {} prev: {:?} next: {:?}", prefix, prev, next);
     }
     if let Some(prev) = prev {
         let prev = entries.get_mut(prev).unwrap();
@@ -335,23 +435,48 @@ fn entry_update(entry: &mut RibEntry) {
     }
 }
 
-fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {
-    for entry in entries.iter_mut() {
-        if entry.is_protocol() {
-            entry_resolve(entry, nmap);
-            entry_update(entry);
+fn entry_resolve2(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
+    match &mut entry.nexthop {
+        Nexthop::Link(iflink) => {
+            tracing::info!("Nexthop::Link({}): this won't happen", iflink);
+        }
+        Nexthop::Uni(uni) => {
+            nexthop_uni_resolve(uni, nmap);
+
+            if ifdown {
+                println!("uni.id {} uni.valid {}", uni.gid, uni.valid);
+            }
+
+            entry.valid = uni.valid;
+            entry.metric = uni.metric;
+        }
+        Nexthop::Multi(multi) => {
+            for uni in multi.nexthops.iter_mut() {
+                nexthop_uni_resolve(uni, nmap);
+            }
+        }
+        Nexthop::List(list) => {
+            for uni in list.nexthops.iter_mut() {
+                nexthop_uni_resolve(uni, nmap);
+            }
+            for uni in list.nexthops.iter() {
+                if uni.valid {
+                    entry.metric = uni.metric;
+                    entry.valid = uni.valid;
+                    return;
+                }
+            }
+            entry.metric = 0;
+            entry.valid = false;
         }
     }
 }
 
-async fn ipv4_route_sync(
-    table: &mut PrefixMap<Ipv4Net, RibEntries>,
-    nmap: &mut NexthopMap,
-    fib: &FibHandle,
-) {
-    for (p, entries) in table.iter_mut() {
-        ipv4_entry_resolve(entries, nmap);
-        ipv4_entry_selection(p, entries, None, nmap, fib).await;
+fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap, ifdown: bool) {
+    for entry in entries.iter_mut() {
+        if entry.is_protocol() {
+            entry_resolve2(entry, nmap, ifdown);
+        }
     }
 }
 
@@ -576,70 +701,6 @@ fn rib_next(entries: &RibEntries) -> Option<usize> {
     index
 }
 
-async fn ipv4_nexthop_sync(
-    nmap: &mut NexthopMap,
-    table: &PrefixMap<Ipv4Net, RibEntries>,
-    fib: &FibHandle,
-) {
-    // Update Group::Uni first, then check Group::Multi.
-    for nhop in nmap.groups.iter_mut().flatten() {
-        if let Group::Uni(uni) = nhop {
-            // println!("B: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
-            // Resolve the next hop
-            let resolve = match uni.addr {
-                std::net::IpAddr::V4(ipv4_addr) => {
-                    rib_resolve(table, ipv4_addr, &ResolveOpt::default())
-                }
-                std::net::IpAddr::V6(_) => {
-                    // IPv6 addresses should be handled by ipv6_nexthop_sync
-                    continue;
-                }
-            };
-
-            // Update the status of the next hop
-            let ifindex = resolve.is_valid();
-            if ifindex == 0 {
-                uni.set_valid(false);
-                uni.set_installed(false);
-                uni.set_ifindex(0);
-            } else {
-                uni.set_ifindex(ifindex);
-                uni.set_valid(true);
-                if !uni.is_installed() {
-                    uni.set_installed(true);
-                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
-                }
-            }
-            // println!("A: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
-        }
-    }
-    // Collect multi nexthop validity updates to avoid borrow checker issues
-    let mut multi_updates: Vec<(usize, bool)> = Vec::new();
-
-    for (idx, nhop) in nmap.groups.iter().enumerate() {
-        if let Some(Group::Multi(multi)) = nhop {
-            // At least one of Group::Uni in multi.
-            let mut valid = false;
-            for (m, v) in multi.set.iter() {
-                // Get the nexthop group by ID
-                if let Some(Some(group)) = nmap.groups.get(*m) {
-                    if group.is_valid() {
-                        valid = true;
-                    }
-                }
-            }
-            multi_updates.push((idx, valid));
-        }
-    }
-
-    // Apply the validity updates
-    for (idx, valid) in multi_updates {
-        if let Some(Some(Group::Multi(multi))) = nmap.groups.get_mut(idx) {
-            multi.set_valid(valid);
-        }
-    }
-}
-
 // IPv6 helper functions
 
 async fn ipv6_entry_selection(
@@ -817,8 +878,7 @@ async fn ipv6_route_sync(
 fn ipv6_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {
     for entry in entries.iter_mut() {
         if entry.is_protocol() {
-            entry_resolve(entry, nmap);
-            entry_update(entry);
+            entry_resolve2(entry, nmap, false);
         }
     }
 }

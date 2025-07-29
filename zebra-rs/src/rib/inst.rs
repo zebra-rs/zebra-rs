@@ -189,7 +189,7 @@ impl Rib {
                 self.link_down(ifindex).await;
             }
             Message::Resolve => {
-                self.ipv4_route_resolve().await;
+                // self.ipv4_route_resolve(false).await;
                 self.ipv6_route_resolve().await;
             }
             Message::Subscribe { tx, proto } => {
