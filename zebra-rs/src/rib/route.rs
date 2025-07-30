@@ -258,8 +258,6 @@ async fn ipv4_nexthop_sync(
     // Update Group::Uni first, then check Group::Multi.
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            // println!("B: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
-            // Resolve the next hop
             let resolve = match uni.addr {
                 std::net::IpAddr::V4(ipv4_addr) => {
                     rib_resolve(table, ipv4_addr, &ResolveOpt::default())
@@ -273,18 +271,34 @@ async fn ipv4_nexthop_sync(
             // Update the status of the next hop
             let ifindex = resolve.is_valid();
             if ifindex == 0 {
+                uni.set_ifindex(ifindex);
                 uni.set_valid(false);
-                uni.set_installed(false);
-                uni.set_ifindex(0);
+                if uni.is_installed() {
+                    println!(
+                        "UniDel: gid {} {}/{} {}",
+                        uni.gid(),
+                        uni.addr,
+                        uni.ifindex,
+                        uni.is_installed()
+                    );
+                    uni.set_installed(false);
+                    // fib.nexthop_del(&Group::Uni(uni.clone())).await;
+                }
             } else {
                 uni.set_ifindex(ifindex);
                 uni.set_valid(true);
                 if !uni.is_installed() {
+                    println!(
+                        "UniAdd: gid {} {}/{} {}",
+                        uni.gid(),
+                        uni.addr,
+                        uni.ifindex,
+                        uni.is_installed()
+                    );
                     uni.set_installed(true);
                     fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
             }
-            // println!("A: {}/{} {}", uni.addr, uni.ifindex, uni.is_installed());
         }
     }
     // Collect multi nexthop validity updates to avoid borrow checker issues
@@ -329,6 +343,14 @@ async fn ipv4_route_sync(
     }
 }
 
+fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap, ifdown: bool) {
+    for entry in entries.iter_mut() {
+        if entry.is_protocol() {
+            entry_resolve(entry, nmap, ifdown);
+        }
+    }
+}
+
 async fn ipv4_entry_selection(
     prefix: &Ipv4Net,
     entries: &mut RibEntries,
@@ -353,7 +375,7 @@ async fn ipv4_entry_selection(
 
     if prev == next {
         if ifdown {
-            println!("No change: {}", prefix);
+            // println!("No change: {}", prefix);
         }
         return;
     }
@@ -386,7 +408,8 @@ fn nexthop_uni_resolve(nhop: &mut NexthopUni, nmap: &NexthopMap) {
     }
 }
 
-fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap) {
+#[cfg(any())]
+fn entry_resolve_orig(entry: &mut RibEntry, nmap: &NexthopMap) {
     match &mut entry.nexthop {
         Nexthop::Link(iflink) => {
             tracing::info!("Nexthop::Link({}): this won't happen", iflink);
@@ -407,6 +430,7 @@ fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap) {
     }
 }
 
+#[cfg(any())]
 fn entry_update(entry: &mut RibEntry) {
     match &entry.nexthop {
         Nexthop::Link(iflink) => {
@@ -435,7 +459,7 @@ fn entry_update(entry: &mut RibEntry) {
     }
 }
 
-fn entry_resolve2(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
+fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
     match &mut entry.nexthop {
         Nexthop::Link(iflink) => {
             tracing::info!("Nexthop::Link({}): this won't happen", iflink);
@@ -454,6 +478,15 @@ fn entry_resolve2(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
             for uni in multi.nexthops.iter_mut() {
                 nexthop_uni_resolve(uni, nmap);
             }
+            for uni in multi.nexthops.iter() {
+                if uni.valid {
+                    entry.metric = uni.metric;
+                    entry.valid = uni.valid;
+                    return;
+                }
+            }
+            entry.metric = 0;
+            entry.valid = false;
         }
         Nexthop::List(list) => {
             for uni in list.nexthops.iter_mut() {
@@ -468,14 +501,6 @@ fn entry_resolve2(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
             }
             entry.metric = 0;
             entry.valid = false;
-        }
-    }
-}
-
-fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap, ifdown: bool) {
-    for entry in entries.iter_mut() {
-        if entry.is_protocol() {
-            entry_resolve2(entry, nmap, ifdown);
         }
     }
 }
@@ -878,7 +903,7 @@ async fn ipv6_route_sync(
 fn ipv6_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {
     for entry in entries.iter_mut() {
         if entry.is_protocol() {
-            entry_resolve2(entry, nmap, false);
+            entry_resolve(entry, nmap, false);
         }
     }
 }
