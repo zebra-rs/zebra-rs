@@ -408,57 +408,6 @@ fn nexthop_uni_resolve(nhop: &mut NexthopUni, nmap: &NexthopMap) {
     }
 }
 
-#[cfg(any())]
-fn entry_resolve_orig(entry: &mut RibEntry, nmap: &NexthopMap) {
-    match &mut entry.nexthop {
-        Nexthop::Link(iflink) => {
-            tracing::info!("Nexthop::Link({}): this won't happen", iflink);
-        }
-        Nexthop::Uni(uni) => {
-            nexthop_uni_resolve(uni, nmap);
-        }
-        Nexthop::Multi(multi) => {
-            for uni in multi.nexthops.iter_mut() {
-                nexthop_uni_resolve(uni, nmap);
-            }
-        }
-        Nexthop::List(list) => {
-            for uni in list.nexthops.iter_mut() {
-                nexthop_uni_resolve(uni, nmap);
-            }
-        }
-    }
-}
-
-#[cfg(any())]
-fn entry_update(entry: &mut RibEntry) {
-    match &entry.nexthop {
-        Nexthop::Link(iflink) => {
-            tracing::info!("Nexthop::Link({}): this won't happen", iflink);
-        }
-        Nexthop::Uni(uni) => {
-            entry.valid = uni.valid;
-            entry.metric = uni.metric;
-        }
-        Nexthop::Multi(multi) => {
-            for _uni in multi.nexthops.iter() {
-                //
-            }
-        }
-        Nexthop::List(list) => {
-            for uni in list.nexthops.iter() {
-                if uni.valid {
-                    entry.metric = uni.metric;
-                    entry.valid = uni.valid;
-                    return;
-                }
-            }
-            entry.metric = 0;
-            entry.valid = false;
-        }
-    }
-}
-
 fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
     match &mut entry.nexthop {
         Nexthop::Link(iflink) => {
