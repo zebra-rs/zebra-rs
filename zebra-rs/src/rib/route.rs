@@ -415,11 +415,6 @@ fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
         }
         Nexthop::Uni(uni) => {
             nexthop_uni_resolve(uni, nmap);
-
-            if ifdown {
-                println!("uni.id {} uni.valid {}", uni.gid, uni.valid);
-            }
-
             entry.valid = uni.valid;
             entry.metric = uni.metric;
         }
