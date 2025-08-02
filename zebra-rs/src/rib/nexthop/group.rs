@@ -16,14 +16,6 @@ pub enum Group {
     Multi(GroupMulti),
 }
 
-// impl Group {
-//     pub fn new_uni(addr: &Ipv4Addr, ifindex: u32, gid: usize) -> Self {
-//         let mut uni: GroupUni = GroupUni::new(gid, addr);
-//         uni.ifindex = ifindex;
-//         Group::Uni(uni)
-//     }
-// }
-
 #[derive(Default, Debug, Clone)]
 pub struct GroupCommon {
     gid: usize,
