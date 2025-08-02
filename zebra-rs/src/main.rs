@@ -151,8 +151,7 @@ async fn main() -> anyhow::Result<()> {
     bgp::serve(bgp);
 
     rib::serve(rib);
-
-    // rib::nanomsg::serve();
+    rib::nanomsg::serve();
 
     // Setup tracing based on CLI arguments
     let log_config = logging_config_from_args(&arg.log_output, &arg.log_file, &arg.log_format);
