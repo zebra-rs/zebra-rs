@@ -2,7 +2,7 @@ use std::{io::Read, thread, time::Duration};
 
 use nanomsg::{Protocol, Socket};
 use serde::{Deserialize, Serialize};
-use serde_json::{from_value, to_string, Value};
+use serde_json::{Value, from_value, to_string};
 
 struct Nanomsg {
     socket: Socket,
@@ -123,6 +123,8 @@ struct IsisIf {
     prefix_sid: Option<PrefixSid>,
     #[serde(rename = "adjacency-sid")]
     adjacency_sid: Option<PrefixSid>,
+    #[serde(rename = "srlg-group")]
+    srlg_group: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -192,6 +194,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 100 }),
+            srlg_group: "group-1".into(),
         };
         MsgEnum::IsisIf(msg)
     }
@@ -205,6 +208,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 200 }),
+            srlg_group: "group-1".into(),
         };
         MsgEnum::IsisIf(msg)
     }
@@ -218,6 +222,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: Some(PrefixSid { index: 200 }),
             adjacency_sid: None,
+            srlg_group: "".into(),
         };
         MsgEnum::IsisIf(msg)
     }
@@ -245,6 +250,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: None,
+            srlg_group: "".into(),
         };
         MsgEnum::IsisIf(msg)
     }
