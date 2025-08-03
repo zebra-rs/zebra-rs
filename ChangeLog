@@ -1,3 +1,53 @@
+2025-08-02  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.7.8
+
+	* zebra-rs/src/rib/route.rs (ipv4_nexthop_sync): Properly handle
+	NexthopMulti kernel updates. Fix TODO L623 by implementing proper
+	multi nexthop group validation with two-pass approach to avoid
+	borrow checker issues. Multi nexthop groups now correctly marked
+	valid/invalid based on component nexthop states.
+
+	* zebra-rs/src/fib/netlink/handle.rs: Enhanced kernel communication
+	for nexthop multi operations with better error handling for netlink
+	operations.
+
+	* zebra-rs/src/rib/route.rs (link_down): Improve interface down
+	handling with direct route resolution instead of async message
+	passing. Add immediate nexthop synchronization for faster
+	convergence and better debugging with prefix deletion logging.
+
+	* zebra-rs/src/isis/inst.rs (dis_generate): Fix DIS LSP originate
+	sequence number handling. Implement proper base sequence number
+	consideration when refreshing DIS pseudonode LSPs. Handle cases
+	where base is provided vs existing LSDB sequence numbers.
+
+	* zebra-rs/src/isis/config.rs (config_tracing_event): Add support
+	for "dis" and "lsp-originate" event tracing configuration.
+	Enable/disable specific ISIS event tracing categories via CLI.
+
+	* zebra-rs/src/isis/config.rs (config_tracing_database): Implement
+	"lsdb" database tracing configuration. Provide fine-grained control
+	over ISIS debugging output.
+
+	* zebra-rs/src/isis/config.rs (config_distribute_rib): Implement
+	ISIS distribute RIB feature. Add configuration command "router isis
+	distribute rib" to control whether ISIS routes are distributed to
+	the RIB. Default behavior is enabled for backward compatibility.
+
+	* zebra-rs/yang/config.yang: Add distribute/rib container under
+	ISIS configuration for route distribution control.
+
+	* zebra-rs/src/isis/: Implement comprehensive ISIS conditional
+	tracing system with fine-grained control over logging output based
+	on YANG configuration. Migrate ~44 isis_info! calls to conditional
+	macros with zero-cost abstractions. Add packet, event, database,
+	and FSM tracing categories.
+
+	* zebra-rs/src/isis/nfsm.rs: Minor update to add IsisTracing to
+	NeighborTop struct and migrate remaining isis_info! calls to use
+	proper conditional tracing macros.
+
 2025-07-14  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.7
