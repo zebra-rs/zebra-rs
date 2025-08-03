@@ -637,5 +637,43 @@ module config {
         type uint32;
       }
     }
+    container policy-options {
+      list policy {
+        key "name";
+        leaf "name" {
+          type string;
+        }
+        container "match" {
+          ext:sort "1";
+          leaf "prefix-list" {
+            type string;
+          }
+          leaf "community-list" {
+            type string;
+          }
+        }
+        leaf "apply" {
+          ext:sort "2";
+          type string;
+        }
+        container "set" {
+          ext:sort "3";
+          leaf "local-preference" {
+            type uint32;
+          }
+          leaf "med" {
+            type uint32;
+          }
+        }
+        leaf "action" {
+          ext:sort "4";
+          type enumeration {
+            enum accept;
+            enum reject;
+            enum pass;
+          }
+        }
+      }
+    }
   }
 }
