@@ -31,7 +31,8 @@ use crate::{
     context::Context,
     rib::RibRxChannel,
 };
-use spf_rs as spf;
+// use spf_rs as spf;
+use crate::spf;
 
 use super::config::IsisConfig;
 use super::ifsm::has_level;
