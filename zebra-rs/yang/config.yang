@@ -639,7 +639,7 @@ module config {
           type string;
         }
         container "match" {
-          ext:sort "1";
+          ext:sort "7";
           leaf "prefix-set" {
             type string;
           }
@@ -648,7 +648,7 @@ module config {
           }
         }
         leaf "apply" {
-          ext:sort "2";
+          ext:sort "5";
           type string;
         }
         container "set" {
@@ -661,7 +661,7 @@ module config {
           }
         }
         leaf "action" {
-          ext:sort "4";
+          ext:sort "1";
           type enumeration {
             enum accept;
             enum reject;
