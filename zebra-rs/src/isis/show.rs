@@ -7,7 +7,8 @@ use super::{Isis, inst::ShowCallback, neigh::Neighbor};
 
 use crate::isis::{Level, hostname, link, neigh};
 use crate::{config::Args, rib::MacAddr};
-use spf_rs as spf;
+// use spf_rs as spf;
+use crate::spf;
 
 impl Isis {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {

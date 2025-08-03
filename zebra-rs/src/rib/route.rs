@@ -103,51 +103,56 @@ impl Rib {
         }
 
         // Resolve RIB.
-        // self.ipv4_route_resolve(true).await;
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-        // self.ipv6_route_resolve().await;
-        // let msg = Message::Resolve;
-        // let _ = self.tx.send(msg);
     }
 
-    // pub async fn ipv4_route_resolve(&mut self, ifdown: bool) {
-    //     // Only called from Message::Resolve.
-    //     ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
-    //     ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, ifdown).await;
-    // }
-
-    pub fn link_up(&mut self, ifindex: u32) {
+    pub async fn link_up(&mut self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        // println!("link up {}", link.name);
+        println!("LinkUp {} ipv4 addr count {}", link.name, link.addr4.len());
 
         // Add connected IPv4 routes when link comes up
         for addr4 in link.addr4.iter() {
             if let IpNet::V4(addr) = addr4.addr {
                 let prefix = addr.apply_mask();
-                // println!("Connected: {:?} up - adding to RIB", prefix);
-                let mut rib = RibEntry::new(RibType::Connected);
-                rib.ifindex = ifindex;
-                rib.set_valid(true);
-                let msg = Message::Ipv4Add { prefix, rib };
-                let _ = self.tx.send(msg);
+                let mut entry = RibEntry::new(RibType::Connected);
+                entry.ifindex = ifindex;
+                entry.set_valid(true);
+
+                println!("Adding Connected Prefix {prefix}");
+
+                rib_add_system(&mut self.table, &prefix, entry);
+                rib_selection_ipv4(
+                    &mut self.table,
+                    &prefix,
+                    None,
+                    &mut self.nmap,
+                    &self.fib_handle,
+                )
+                .await;
+
+                // self.ipv4_route_add(&prefix, rib);
+                // let msg = Message::Ipv4Add { prefix, rib };
+                // let _ = self.tx.send(msg);
             }
         }
 
         // Add connected IPv6 routes when link comes up
-        for addr6 in link.addr6.iter() {
-            if let IpNet::V6(addr) = addr6.addr {
-                let prefix = addr.apply_mask();
-                // println!("Connected IPv6: {:?} up - adding to RIB", prefix);
-                let mut rib = RibEntry::new(RibType::Connected);
-                rib.ifindex = ifindex;
-                rib.set_valid(true);
-                let msg = Message::Ipv6Add { prefix, rib };
-                let _ = self.tx.send(msg);
-            }
-        }
+        // for addr6 in link.addr6.iter() {
+        //     if let IpNet::V6(addr) = addr6.addr {
+        //         let prefix = addr.apply_mask();
+        //         // println!("Connected IPv6: {:?} up - adding to RIB", prefix);
+        //         let mut rib = RibEntry::new(RibType::Connected);
+        //         rib.ifindex = ifindex;
+        //         rib.set_valid(true);
+        //         let msg = Message::Ipv6Add { prefix, rib };
+        //         let _ = self.tx.send(msg);
+        //     }
+        // }
+        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+        ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
@@ -250,7 +255,20 @@ impl Rib {
     }
 }
 
-async fn ipv4_nexthop_sync(
+pub async fn rib_selection_ipv4(
+    table: &mut PrefixMap<Ipv4Net, RibEntries>,
+    prefix: &Ipv4Net,
+    replace: Option<RibEntry>,
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+) {
+    let Some(entries) = table.get_mut(prefix) else {
+        return;
+    };
+    ipv4_entry_selection(prefix, entries, replace, nmap, fib, true).await;
+}
+
+pub async fn ipv4_nexthop_sync(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
     fib: &FibHandle,
@@ -274,70 +292,85 @@ async fn ipv4_nexthop_sync(
                 uni.set_ifindex(ifindex);
                 uni.set_valid(false);
                 if uni.is_installed() {
-                    println!(
-                        "UniDel: gid {} {}/{} {}",
-                        uni.gid(),
-                        uni.addr,
-                        uni.ifindex,
-                        uni.is_installed()
-                    );
+                    // println!(
+                    //     "UniDel: gid {} {}/{} {}",
+                    //     uni.gid(),
+                    //     uni.addr,
+                    //     uni.ifindex,
+                    //     uni.is_installed()
+                    // );
                     uni.set_installed(false);
-                    // fib.nexthop_del(&Group::Uni(uni.clone())).await;
+                    // XXX fib.nexthop_del(&Group::Uni(uni.clone())).await;
                 }
             } else {
                 uni.set_ifindex(ifindex);
                 uni.set_valid(true);
                 if !uni.is_installed() {
-                    println!(
-                        "UniAdd: gid {} {}/{} {}",
-                        uni.gid(),
-                        uni.addr,
-                        uni.ifindex,
-                        uni.is_installed()
-                    );
+                    // println!(
+                    //     "UniAdd: gid {} {}/{} {}",
+                    //     uni.gid(),
+                    //     uni.addr,
+                    //     uni.ifindex,
+                    //     uni.is_installed()
+                    // );
                     uni.set_installed(true);
                     fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
             }
         }
     }
-    // Collect multi nexthop validity updates to avoid borrow checker issues
-    let mut multi_updates: Vec<(usize, bool)> = Vec::new();
+
+    let mut multi_cache: BTreeMap<usize, BTreeSet<(usize, u8)>> = BTreeMap::new();
 
     for (idx, nhop) in nmap.groups.iter().enumerate() {
         if let Some(Group::Multi(multi)) = nhop {
-            // At least one of Group::Uni in multi.
-            let mut valid = false;
+            let mut set = BTreeSet::<(usize, u8)>::new();
             for (m, v) in multi.set.iter() {
-                // Get the nexthop group by ID
                 if let Some(Some(group)) = nmap.groups.get(*m) {
                     if group.is_valid() {
-                        valid = true;
+                        set.insert((*m, *v));
                     }
                 }
             }
-            multi_updates.push((idx, valid));
+            multi_cache.insert(idx, set);
         }
     }
 
-    // Apply the validity updates
-    for (idx, valid) in multi_updates {
+    for (idx, set) in multi_cache {
         if let Some(Some(Group::Multi(multi))) = nmap.groups.get_mut(idx) {
-            multi.set_valid(valid);
+            if set.is_empty() {
+                if multi.is_valid() {
+                    // Uninstall.
+                    // XXX fib.nexthop_del(&Group::Multi(multi.clone())).await;
+                }
+                multi.valid = set;
+                multi.set_valid(false);
+            } else {
+                if !multi.is_valid() {
+                    // Install.
+                    multi.valid = set;
+                    fib.nexthop_add(&Group::Multi(multi.clone())).await;
+                } else if multi.valid != set {
+                    // Update.
+                    println!("XXX NexthopMulti Update {:?} -> {:?}", multi.valid, set);
+                    multi.valid = set;
+                    fib.nexthop_add(&Group::Multi(multi.clone())).await;
+                } else {
+                    multi.valid = set;
+                }
+                multi.set_valid(true);
+            }
         }
     }
 }
 
-async fn ipv4_route_sync(
+pub async fn ipv4_route_sync(
     table: &mut PrefixMap<Ipv4Net, RibEntries>,
     nmap: &mut NexthopMap,
     fib: &FibHandle,
     ifdown: bool,
 ) {
     for (p, entries) in table.iter_mut() {
-        if ifdown {
-            println!("ipv4_route_sync {}", *p);
-        }
         ipv4_entry_resolve(entries, nmap, ifdown);
         ipv4_entry_selection(p, entries, None, nmap, fib, ifdown).await;
     }
@@ -371,12 +404,19 @@ async fn ipv4_entry_selection(
     let prev = rib_prev(entries);
 
     // New select.
+    if ifdown {
+        // println!("P: {}", prefix);
+        // for e in entries.iter() {
+        //     println!(
+        //         "E: {:?} distance {} metric {} valid {}",
+        //         e.rtype, e.distance, e.metric, e.valid
+        //     )
+        // }
+    }
+
     let next = rib_next(entries);
 
     if prev == next {
-        if ifdown {
-            // println!("No change: {}", prefix);
-        }
         return;
     }
     if ifdown {
@@ -385,8 +425,11 @@ async fn ipv4_entry_selection(
     if let Some(prev) = prev {
         let prev = entries.get_mut(prev).unwrap();
         prev.set_selected(false);
-
-        fib.route_ipv4_del(prefix, prev).await;
+        if ifdown {
+            // println!("Remove: {}", prefix);
+        } else {
+            fib.route_ipv4_del(prefix, prev).await;
+        }
         prev.set_fib(false);
     }
     if let Some(next) = next {
@@ -468,7 +511,11 @@ fn resolve_nexthop_uni(
     group.is_valid()
 }
 
-fn resolve_nexthop_multi(multi: &mut NexthopMulti, nmap: &mut NexthopMap, multi_valid: bool) {
+fn resolve_nexthop_multi(
+    multi: &mut NexthopMulti,
+    nmap: &mut NexthopMap,
+    valid: BTreeSet<(usize, u8)>,
+) {
     // Create set with gid:u32 and weight:u8.
     let mut set: BTreeSet<(usize, u8)> = BTreeSet::new();
 
@@ -480,7 +527,8 @@ fn resolve_nexthop_multi(multi: &mut NexthopMulti, nmap: &mut NexthopMap, multi_
         return;
     };
 
-    group.set_valid(multi_valid);
+    group.set_valid(!valid.is_empty());
+    group.valid = valid;
 
     // Reference counter increment.
     group.refcnt_inc();
@@ -503,14 +551,14 @@ fn rib_resolve_nexthop(
         let _ = resolve_nexthop_uni(uni, nmap, table);
     }
     if let Nexthop::Multi(multi) = &mut entry.nexthop {
-        let mut multi_valid = false;
+        let mut set = BTreeSet::<(usize, u8)>::new();
         for uni in multi.nexthops.iter_mut() {
             let valid = resolve_nexthop_uni(uni, nmap, table);
             if valid {
-                multi_valid = true;
+                set.insert((uni.gid, uni.weight));
             }
         }
-        resolve_nexthop_multi(multi, nmap, multi_valid);
+        resolve_nexthop_multi(multi, nmap, set);
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
         let mut _pro_valid = false;
@@ -649,25 +697,21 @@ fn rib_replace(
     replace
 }
 
-fn rib_prev(entries: &[RibEntry]) -> Option<usize> {
-    entries.iter().position(|e| e.is_selected())
+fn rib_prev(ribs: &RibEntries) -> Option<usize> {
+    ribs.iter().position(|e| e.is_selected())
 }
 
-fn rib_next(entries: &RibEntries) -> Option<usize> {
-    let index = entries
-        .iter()
-        .filter(|x| x.is_valid())
+fn rib_next(ribs: &RibEntries) -> Option<usize> {
+    ribs.iter()
         .enumerate()
-        .fold(
-            None,
-            |acc: Option<(usize, &RibEntry)>, (index, entry)| match acc {
-                Some((_, aentry)) if aentry < entry => acc,
-                _ => Some((index, entry)),
-            },
-        )
-        .map(|(index, _)| index);
-
-    index
+        .filter(|(_, e)| e.is_valid())
+        .min_by(|(_, a), (_, b)| {
+            a.distance
+                .cmp(&b.distance)
+                .then(a.metric.cmp(&b.metric))
+                .then(a.rtype.u8().cmp(&b.rtype.u8()))
+        })
+        .map(|(i, _)| i)
 }
 
 // IPv6 helper functions
@@ -866,14 +910,14 @@ fn rib_resolve_nexthop_v6(
         let _ = resolve_nexthop_uni_v6(uni, nmap);
     }
     if let Nexthop::Multi(multi) = &mut entry.nexthop {
-        let mut multi_valid = false;
+        let mut set = BTreeSet::<(usize, u8)>::new();
         for uni in multi.nexthops.iter_mut() {
             let valid = resolve_nexthop_uni_v6(uni, nmap);
             if valid {
-                multi_valid = true;
+                set.insert((uni.gid, uni.weight));
             }
         }
-        resolve_nexthop_multi(multi, nmap, multi_valid);
+        resolve_nexthop_multi(multi, nmap, set);
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
         let mut _pro_valid = false;

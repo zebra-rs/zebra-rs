@@ -19,7 +19,7 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt upgrade -y
-          sudo apt install -y protobuf-compiler
+          sudo apt install -y protobuf-compiler libnanomsg-dev
           cd cli
           ./configure
           make

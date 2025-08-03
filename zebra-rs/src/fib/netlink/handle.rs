@@ -102,7 +102,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute error: {}", e);
+                println!("NewRoute error: {prefix} {e}");
             }
         }
     }
@@ -256,7 +256,7 @@ impl FibHandle {
                 msg.attributes.push(attr);
 
                 let mut vec = Vec::<NexthopGroup>::new();
-                for (id, weight) in multi.set.iter() {
+                for (id, weight) in multi.valid.iter() {
                     let mut grp = NexthopGroup::default();
                     let weight = if *weight > 0 { *weight - 1 } else { 0 };
                     grp.id = *id as u32;
@@ -606,7 +606,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute error: {}", e);
+                println!("NewRoute error: {label}: {e}");
             }
         }
     }
