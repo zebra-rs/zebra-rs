@@ -21,6 +21,12 @@ pub enum RibType {
     Other(u8),
 }
 
+impl RibType {
+    pub fn u8(&self) -> u8 {
+        (*self).into()
+    }
+}
+
 impl From<u8> for RibType {
     fn from(d: u8) -> Self {
         match d {

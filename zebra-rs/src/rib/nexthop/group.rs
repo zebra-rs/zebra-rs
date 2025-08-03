@@ -82,10 +82,11 @@ impl GroupTrait for GroupUni {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GroupMulti {
     common: GroupCommon,
     pub set: BTreeSet<(usize, u8)>,
+    pub valid: BTreeSet<(usize, u8)>,
 }
 
 impl GroupMulti {
@@ -93,6 +94,7 @@ impl GroupMulti {
         Self {
             common: GroupCommon::new(gid),
             set: BTreeSet::new(),
+            valid: BTreeSet::new(),
         }
     }
 }
