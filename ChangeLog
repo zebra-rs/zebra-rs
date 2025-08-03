@@ -1,4 +1,6 @@
-2025-08-03  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+2025-08-02  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.7.8
 
 	* zebra-rs/src/rib/route.rs (ipv4_nexthop_sync): Properly handle
 	NexthopMulti kernel updates. Fix TODO L623 by implementing proper
