@@ -45,7 +45,7 @@ bgp-packet = { git = "https://github.com/zebra-rs/bgp-packet", branch = "main" }
 ospf-packet = { git = "https://github.com/zebra-rs/ospf-packet", branch = "main" }
 #isis-packet = { path = "../../isis-packet" }
 isis-packet = { git = "https://github.com/zebra-rs/isis-packet", branch = "main" }
-spf-rs = { path = "../../spf-rs" }
+#spf-rs = { path = "../../spf-rs" }
 bitfield-struct = "0.11"
 rand = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
