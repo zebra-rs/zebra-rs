@@ -493,7 +493,8 @@ pub fn parse(
             mandatory.push(entry.name.clone());
         }
     }
-    let sort_priority = entry
+    let sort_priority = mx
+        .matched_entry
         .extension
         .get("ext:sort")
         .map_or_else(|| 0, |v| v.parse::<i32>().unwrap_or(0));
