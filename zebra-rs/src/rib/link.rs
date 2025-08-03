@@ -626,7 +626,6 @@ impl LinkConfig {
         // let func = self.builder.map.get()
         if path == "/interface/ipv4/address" {
             let v4addr = args.v4net().context(IPV4_ADDR_ERR)?;
-            println!("XXXX ip address {} {}", ifname, v4addr);
 
             if op.is_set() {
                 // Validate against 0.0.0.0 address

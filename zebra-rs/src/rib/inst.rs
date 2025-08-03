@@ -9,6 +9,7 @@ use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
 use crate::rib::RibEntries;
+use crate::rib::route::{ipv4_nexthop_sync, ipv4_route_sync};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
@@ -182,7 +183,7 @@ impl Rib {
             }
             Message::LinkUp { ifindex } => {
                 println!("LinkUp {}", ifindex);
-                self.link_up(ifindex);
+                self.link_up(ifindex).await;
             }
             Message::LinkDown { ifindex } => {
                 println!("LinkDown {}", ifindex);
@@ -224,6 +225,9 @@ impl Rib {
                 //     self.ifname(addr.link_index)
                 // );
                 self.addr_add(addr);
+
+                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+                ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
             }
             FibMessage::DelAddr(addr) => {
                 // println!(
@@ -232,6 +236,9 @@ impl Rib {
                 //     self.ifname(addr.link_index)
                 // );
                 self.addr_del(addr);
+
+                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+                ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
             }
             FibMessage::NewRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
