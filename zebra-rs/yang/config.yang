@@ -579,11 +579,6 @@ module config {
         }
       }
     }
-    container prefix-test {
-      leaf-list member {
-        type inet:ipv4-prefix;
-      }
-    }
     list prefix-set {
       key "name";
       leaf name {
@@ -645,10 +640,10 @@ module config {
         }
         container "match" {
           ext:sort "1";
-          leaf "prefix-list" {
+          leaf "prefix-set" {
             type string;
           }
-          leaf "community-list" {
+          leaf "community-set" {
             type string;
           }
         }
