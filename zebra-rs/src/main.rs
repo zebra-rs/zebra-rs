@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
     config.subscribe("policy", policy.cm.tx.clone());
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("bgp", bgp.show.tx.clone());
+    config.subscribe_show("policy", policy.show.tx.clone());
 
     let cli = Cli::new(config.tx.clone());
 
