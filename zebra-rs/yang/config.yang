@@ -584,9 +584,9 @@ module config {
       leaf name {
         type string;
       }
-      list prefixes {
-        key prefix;
-        leaf prefix {
+      list "prefix" {
+        key "prefix";
+        leaf "prefix" {
           type inet:ipv4-prefix;
         }
         leaf le {
