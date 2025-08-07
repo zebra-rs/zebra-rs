@@ -13,7 +13,7 @@ pub mod com_list;
 pub mod policy_list;
 pub use policy_list::*;
 
-pub mod plist_ipv4;
-pub use plist_ipv4::{PrefixListIpv4, PrefixListIpv4Map, *};
+pub mod prefix_set;
+pub use prefix_set::{PrefixListIpv4, PrefixListIpv4Map, *};
 
 pub mod show;
