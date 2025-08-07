@@ -259,10 +259,6 @@ fn match_builder() -> MatchMap {
         .exec(|m, entry, input, node| {
             m.process(entry, match_string(input, node), cleaf(entry));
         })
-        .kind(YangType::Union)
-        .exec(|m, entry, input, node| {
-            m.process(entry, match_string(input, node), cleaf(entry));
-        })
         .build()
 }
 
@@ -286,13 +282,14 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
             for n in node.union.iter() {
                 let kind = ytype_from_typedef(&n.typedef).unwrap_or(n.kind);
                 if let Some(f) = matcher.get(&kind) {
-                    f(m, entry, input, node);
+                    f(m, entry, input, n);
                 }
             }
-        }
-        let kind = ytype_from_typedef(&node.typedef).unwrap_or(node.kind);
-        if let Some(f) = matcher.get(&kind) {
-            f(m, entry, input, node);
+        } else {
+            let kind = ytype_from_typedef(&node.typedef).unwrap_or(node.kind);
+            if let Some(f) = matcher.get(&kind) {
+                f(m, entry, input, node);
+            }
         }
     }
 
