@@ -136,8 +136,12 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
     use State::*;
 
     // Quickly reject on any invalid char for the mode:
-    if !s.chars().all(|c| is_valid_ipv6_char(c, prefix)) {
-        return (MatchType::None, 0);
+    if let Some((pos, _c)) = s
+        .char_indices()
+        .take_while(|&(_, c)| c != ' ')
+        .find(|&(_, c)| !is_valid_ipv6_char(c, prefix))
+    {
+        return (MatchType::None, pos);
     }
 
     let bytes = s.as_bytes();
@@ -219,7 +223,7 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
             }
             Slash => {
                 if i + 1 == len {
-                    return (MatchType::Partial, i);
+                    return (MatchType::Incomplete, i + 1);
                 }
                 state = Mask;
             }
@@ -238,29 +242,38 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
         }
     } else {
         if state != Mask {
-            return (MatchType::Partial, i);
+            return (MatchType::Incomplete, i);
         }
-        let mask_str = &s[i..];
 
-        // Mask must be nonempty, all digits, and in [0, 128]
-        if mask_str.is_empty() || !mask_str.chars().all(|c| c.is_ascii_digit()) {
-            return (MatchType::None, i);
+        let mut nums_seen = false;
+        let mut digit = 0i32;
+        while i < s.len() {
+            if is_whitespace(s, i) {
+                break;
+            }
+            if !s.as_bytes()[i].is_ascii_digit() {
+                return (MatchType::None, i);
+            }
+            nums_seen = true;
+            digit *= 10;
+            digit += (s.as_bytes()[i] - b'0') as i32;
+            if digit > 128 {
+                return (MatchType::None, i);
+            }
+            i += 1;
         }
-        match mask_str.parse::<i32>() {
-            Ok(mask) if (0..=IPV6_MAX_BITLEN).contains(&mask) => (MatchType::Exact, i),
-            _ => (MatchType::None, i),
+
+        if !nums_seen {
+            return (MatchType::Incomplete, i);
         }
+        (MatchType::Exact, i)
     }
 }
 
 pub fn match_ipv6_addr(src: &str) -> (MatchType, usize) {
-    let (typ, siz) = match_ipv6_prefix(src, false);
-    println!("{typ:?}");
-    (typ, siz)
+    match_ipv6_prefix(src, false)
 }
 
 pub fn match_ipv6_net(src: &str) -> (MatchType, usize) {
-    let (typ, siz) = match_ipv6_prefix(src, true);
-    println!("{typ:?}");
-    (typ, siz)
+    match_ipv6_prefix(src, true)
 }
