@@ -107,10 +107,12 @@ pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
     (MatchType::Exact, pos)
 }
 
+// Allowed characters for normal IPv6 addresses and IPv6 prefixes with masks:
 const IPV6_ADDR_STR: &str = "0123456789abcdefABCDEF:.";
 const IPV6_PREFIX_STR: &str = "0123456789abcdefABCDEF:./";
 const IPV6_MAX_BITLEN: i32 = 128;
 
+// State machine for parsing IPv6
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum State {
     Start,
@@ -122,107 +124,93 @@ enum State {
     Mask,
 }
 
+fn is_valid_ipv6_char(c: char, prefix: bool) -> bool {
+    if prefix {
+        IPV6_PREFIX_STR.contains(c)
+    } else {
+        IPV6_ADDR_STR.contains(c)
+    }
+}
+
 pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
     use State::*;
 
-    if !s.chars().all(|c| {
-        if prefix {
-            IPV6_PREFIX_STR.contains(c)
-        } else {
-            IPV6_ADDR_STR.contains(c)
-        }
-    }) {
+    // Quickly reject on any invalid char for the mode:
+    if !s.chars().all(|c| is_valid_ipv6_char(c, prefix)) {
         return (MatchType::None, 0);
     }
 
     let bytes = s.as_bytes();
-    let mut state = Start;
-    let mut colons = 0;
-    let mut nums = 0;
-    let mut double_colon = 0;
-    let mut i = 0;
     let len = bytes.len();
-    let mut sp = None::<usize>;
+
+    let mut state = Start;
+    let mut colons: usize = 0;
+    let mut nums = 0;
+    let mut double_colon = false;
+
+    let mut segment_start = None;
+    let mut i = 0;
 
     while i < len && state != Mask {
         match state {
             Start => {
                 if bytes[i] == b':' {
-                    let n = i + 1;
-                    if n >= len || (bytes[n] != b':' && bytes[n] != b'\0') {
+                    if bytes.get(i + 1) != Some(&b':') {
                         return (MatchType::None, i);
                     }
-                    colons -= 1;
+                    colons = colons.saturating_sub(1);
                     state = Colon;
-                    // Do not advance i, let Colon handle it.
-                    continue;
                 } else {
-                    sp = Some(i);
+                    segment_start = Some(i);
                     state = Addr;
                 }
             }
             Colon => {
                 colons += 1;
-                let n = i + 1;
-                if n < len && bytes[n] == b'/' {
+                if bytes.get(i + 1) == Some(&b'/') {
                     return (MatchType::None, i);
-                } else if n < len && bytes[n] == b':' {
+                } else if bytes.get(i + 1) == Some(&b':') {
                     state = Double;
                 } else {
-                    if n < len {
-                        sp = Some(n);
-                    }
+                    segment_start = bytes.get(i + 1).map(|_| i + 1);
                     state = Addr;
                 }
             }
             Double => {
-                if double_colon != 0 {
+                if double_colon {
                     return (MatchType::None, i);
                 }
-                let n = i + 1;
-                if n < len && bytes[n] == b':' {
+                if bytes.get(i + 1) == Some(&b':') {
                     return (MatchType::None, i);
-                } else {
-                    if n < len && bytes[n] != b'/' && bytes[n] != b'\0' {
+                }
+                if let Some(&next) = bytes.get(i + 1) {
+                    if next != b'/' && next != b'\0' {
                         colons += 1;
                     }
-                    if n < len {
-                        sp = Some(n);
-                        if bytes[n] == b'/' {
-                            state = Slash;
-                        } else {
-                            state = Addr;
-                        }
-                    }
+                    segment_start = Some(i + 1);
+                    state = if next == b'/' { Slash } else { Addr };
                 }
-                double_colon += 1;
+                double_colon = true;
                 nums += 1;
             }
             Addr => {
                 let n = i + 1;
-                if n == len || bytes[n] == b':' || bytes[n] == b'.' || bytes[n] == b'/' {
-                    // Address field max length is 4.
-                    let start = sp.unwrap_or(0);
-                    if i >= start + 4 {
+                let seg_start = segment_start.unwrap_or(0);
+                let next = bytes.get(n);
+                if next.map_or(true, |&b| b == b':' || b == b'.' || b == b'/') {
+                    if i >= seg_start + 4 {
                         return (MatchType::None, i);
                     }
-                    for j in start..=i {
-                        if bytes[j] == b'/' {
-                            return (MatchType::None, i);
-                        }
+                    if bytes[seg_start..=i].contains(&b'/') {
+                        return (MatchType::None, i);
                     }
                     nums += 1;
-
-                    if n < len && bytes[n] == b':' {
-                        state = Colon;
-                    } else if n < len && bytes[n] == b'.' {
-                        if colons != 0 || double_colon != 0 {
-                            state = Dot;
-                        } else {
-                            return (MatchType::None, i);
-                        }
-                    } else if n < len && bytes[n] == b'/' {
-                        state = Slash;
+                    match next {
+                        Some(b':') => state = Colon,
+                        Some(b'.') if colons != 0 || double_colon => state = Dot,
+                        Some(b'.') => return (MatchType::None, i),
+                        Some(b'/') => state = Slash,
+                        _ => (),
                     }
                 }
             }
@@ -237,52 +225,42 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
             }
             Mask => {}
         }
-        if nums > 11 {
-            return (MatchType::None, i);
-        }
-        if colons > 7 {
+        if nums > 11 || colons > 7 {
             return (MatchType::None, i);
         }
         i += 1;
     }
 
     if !prefix {
-        // Final ipv6 address validation.
-        if Ipv6Addr::from_str(s).is_ok() {
-            (MatchType::Exact, i)
-        } else {
-            (MatchType::Partial, i)
+        match Ipv6Addr::from_str(s) {
+            Ok(_) => (MatchType::Exact, i),
+            Err(_) => (MatchType::Partial, i),
         }
     } else {
-        println!("state {:?}", state);
         if state != Mask {
             return (MatchType::Partial, i);
         }
-        // Parse mask: string from i onward.
         let mask_str = &s[i..];
-        println!("mask_str: {}", mask_str);
+
+        // Mask must be nonempty, all digits, and in [0, 128]
+        if mask_str.is_empty() || !mask_str.chars().all(|c| c.is_ascii_digit()) {
+            return (MatchType::None, i);
+        }
         match mask_str.parse::<i32>() {
-            Ok(mask) if mask >= 0 && mask <= IPV6_MAX_BITLEN => {
-                if mask_str.chars().all(|c| c.is_ascii_digit()) {
-                    println!("exact");
-                    (MatchType::Exact, i)
-                } else {
-                    println!("exact");
-                    (MatchType::Partial, i)
-                }
-            }
-            _ => {
-                println!("none");
-                (MatchType::None, i)
-            }
+            Ok(mask) if (0..=IPV6_MAX_BITLEN).contains(&mask) => (MatchType::Exact, i),
+            _ => (MatchType::None, i),
         }
     }
 }
 
 pub fn match_ipv6_addr(src: &str) -> (MatchType, usize) {
-    match_ipv6_prefix(src, false)
+    let (typ, siz) = match_ipv6_prefix(src, false);
+    println!("{typ:?}");
+    (typ, siz)
 }
 
 pub fn match_ipv6_net(src: &str) -> (MatchType, usize) {
-    match_ipv6_prefix(src, true)
+    let (typ, siz) = match_ipv6_prefix(src, true);
+    println!("{typ:?}");
+    (typ, siz)
 }
