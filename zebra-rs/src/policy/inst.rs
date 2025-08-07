@@ -4,7 +4,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixListMap, prefix_ipv4_commit, prefix_ipv4_exec};
+use super::{PolicyConfig, PrefixSetConfig, prefix_ipv4_commit, prefix_ipv4_exec};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
@@ -13,7 +13,7 @@ pub struct Policy {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
-    pub prefix_list: PrefixListMap,
+    pub prefix_list: PrefixSetConfig,
 }
 
 impl Policy {
@@ -23,7 +23,7 @@ impl Policy {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
-            prefix_list: PrefixListMap::default(),
+            prefix_list: PrefixSetConfig::default(),
         };
         policy.show_build();
         policy

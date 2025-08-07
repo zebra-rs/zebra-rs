@@ -14,6 +14,6 @@ pub mod policy_list;
 pub use policy_list::*;
 
 pub mod prefix_set;
-pub use prefix_set::{PrefixList, PrefixListMap, *};
+pub use prefix_set::{PrefixList, PrefixSetConfig, *};
 
 pub mod show;
