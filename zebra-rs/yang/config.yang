@@ -584,7 +584,7 @@ module config {
       leaf name {
         type string;
       }
-      list "prefix" {
+      list "prefixes" {
         key "prefix";
         leaf "prefix" {
           type union {
