@@ -172,7 +172,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelRoute error: {}", e);
+                println!("DelRoute error: {e} {prefix}");
             }
         }
     }
@@ -202,8 +202,16 @@ impl FibHandle {
         msg.header.protocol = RouteProtocol::Zebra;
         msg.header.flags = NexthopFlags::Onlink;
 
+        // Logging purpose.
+        let mut gid: usize = 0;
+        let mut refcnt: usize = 0;
+
         match nexthop {
             Group::Uni(uni) => {
+                // Logging.
+                gid = uni.gid();
+                refcnt = uni.refcnt();
+
                 // IPv4.
                 msg.header.address_family = AddressFamily::Inet;
 
@@ -246,6 +254,10 @@ impl FibHandle {
                 }
             }
             Group::Multi(multi) => {
+                // Logging.
+                gid = multi.gid();
+                refcnt = multi.refcnt();
+
                 // Unspec.
                 msg.header.address_family = AddressFamily::Unspec;
 
@@ -275,10 +287,10 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             match msg.payload {
                 NetlinkPayload::Error(e) => {
-                    println!("NewNexthop error: {}", e);
+                    println!("NewNexthop error: {e} gid: {gid} refcnt: {refcnt}");
                 }
                 NetlinkPayload::Done(m) => {
-                    println!("NewNexthop done {:?}", m);
+                    println!("NewNexthop done {m:?}");
                 }
                 _ => {
                     println!("NewNexthop other return");
@@ -303,10 +315,9 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!(
-                    "DelNexthop error: {} gid: {} refcnt: {}",
-                    e,
-                    nexthop.gid(),
-                    nexthop.refcnt()
+                    "DelNexthop error: {e} gid: {gid} refcnt: {refcnt}",
+                    gid = nexthop.gid(),
+                    refcnt = nexthop.refcnt()
                 );
             }
         }
@@ -335,7 +346,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewLink error: {}", e);
+                println!("NewLink error: {e}");
             }
         }
     }

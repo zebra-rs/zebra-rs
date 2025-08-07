@@ -181,6 +181,10 @@ module exec {
         type inet:ipv6-prefix;
       }
     }
+    container "policy" {
+      ext:help "Show policy";
+      presence "Show policy";
+    }
   }
   container cli {
     ext:help "Command line interface";
