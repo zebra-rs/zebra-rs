@@ -527,58 +527,6 @@ module config {
         }
       }
     }
-    list prefix-list {
-      description
-        "Enclosing container for list of defined BGP community
-           sets.";
-      key "name";
-      description
-        "List of defined BGP community sets.";
-      leaf name {
-        type string;
-        description
-          "Name / label of the community set -- this is used to
-               reference the set in match conditions.";
-      }
-      list seq {
-        key "seq";
-        description
-          "List of defined BGP community sets.";
-        leaf seq {
-          type uint32;
-          description
-            "Name / label of the community set -- this is used to
-               reference the set in match conditions.";
-        }
-        leaf action {
-          mandatory true;
-          type enumeration {
-            enum permit;
-            enum deny;
-          }
-        }
-        leaf prefix {
-          type inet:ipv4-prefix;
-          description
-            "Members of the prefix list";
-        }
-        leaf le {
-          type uint8;
-          description
-            "Members of the prefix list";
-        }
-        leaf eq {
-          type uint8;
-          description
-            "Members of the prefix list";
-        }
-        leaf ge {
-          type uint8;
-          description
-            "Members of the prefix list";
-        }
-      }
-    }
     list prefix-set {
       key "name";
       leaf name {
