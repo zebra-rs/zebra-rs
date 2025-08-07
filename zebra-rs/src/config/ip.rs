@@ -107,57 +107,6 @@ pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
     (MatchType::Exact, pos)
 }
 
-pub fn match_ipv6_addr(src: &str) -> (MatchType, usize) {
-    let addr = src.parse::<Ipv6Addr>();
-    match addr {
-        Ok(_) => (MatchType::Exact, src.len()),
-        Err(_) => (MatchType::Incomplete, 0usize),
-    }
-}
-
-pub fn match_ipv6_net(src: &str) -> (MatchType, usize) {
-    let p = src.find('/');
-    if p.is_none() {
-        let (m, pos) = match_ipv6_addr(src);
-        if m == MatchType::Exact {
-            return (MatchType::Partial, pos);
-        } else {
-            return (MatchType::Incomplete, pos);
-        }
-    }
-    let mut len = p.unwrap();
-    // Skip '/'.
-    len += 1;
-    let remain = src.to_owned().split_off(len);
-
-    let mut num_seen = false;
-    let mut mask = 0;
-    for ch in remain.chars() {
-        match ch {
-            ch if ch.is_whitespace() => {
-                break;
-            }
-            '0'..='9' => {
-                len += 1;
-                num_seen = true;
-                mask *= 10;
-                mask += ch as u8 - b'0';
-                if mask > 128 {
-                    return (MatchType::None, 0usize);
-                }
-            }
-            _ => {
-                return (MatchType::None, 0usize);
-            }
-        }
-    }
-    if num_seen {
-        (MatchType::Exact, len)
-    } else {
-        (MatchType::Partial, len)
-    }
-}
-
 const IPV6_ADDR_STR: &str = "0123456789abcdefABCDEF:.";
 const IPV6_PREFIX_STR: &str = "0123456789abcdefABCDEF:./";
 const IPV6_MAX_BITLEN: i32 = 128;
@@ -173,12 +122,8 @@ enum State {
     Mask,
 }
 
-pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
+pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
     use State::*;
-    let s = match s {
-        None => return MatchType::Partial,
-        Some(x) => x,
-    };
 
     if !s.chars().all(|c| {
         if prefix {
@@ -187,7 +132,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
             IPV6_ADDR_STR.contains(c)
         }
     }) {
-        return MatchType::None;
+        return (MatchType::None, 0);
     }
 
     let bytes = s.as_bytes();
@@ -205,7 +150,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
                 if bytes[i] == b':' {
                     let n = i + 1;
                     if n >= len || (bytes[n] != b':' && bytes[n] != b'\0') {
-                        return MatchType::None;
+                        return (MatchType::None, i);
                     }
                     colons -= 1;
                     state = Colon;
@@ -220,7 +165,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
                 colons += 1;
                 let n = i + 1;
                 if n < len && bytes[n] == b'/' {
-                    return MatchType::None;
+                    return (MatchType::None, i);
                 } else if n < len && bytes[n] == b':' {
                     state = Double;
                 } else {
@@ -232,11 +177,11 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
             }
             Double => {
                 if double_colon != 0 {
-                    return MatchType::None;
+                    return (MatchType::None, i);
                 }
                 let n = i + 1;
                 if n < len && bytes[n] == b':' {
-                    return MatchType::None;
+                    return (MatchType::None, i);
                 } else {
                     if n < len && bytes[n] != b'/' && bytes[n] != b'\0' {
                         colons += 1;
@@ -259,11 +204,11 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
                     // Address field max length is 4.
                     let start = sp.unwrap_or(0);
                     if i >= start + 4 {
-                        return MatchType::None;
+                        return (MatchType::None, i);
                     }
                     for j in start..=i {
                         if bytes[j] == b'/' {
-                            return MatchType::None;
+                            return (MatchType::None, i);
                         }
                     }
                     nums += 1;
@@ -274,7 +219,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
                         if colons != 0 || double_colon != 0 {
                             state = Dot;
                         } else {
-                            return MatchType::None;
+                            return (MatchType::None, i);
                         }
                     } else if n < len && bytes[n] == b'/' {
                         state = Slash;
@@ -286,17 +231,17 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
             }
             Slash => {
                 if i + 1 == len {
-                    return MatchType::Partial;
+                    return (MatchType::Partial, i);
                 }
                 state = Mask;
             }
             Mask => {}
         }
         if nums > 11 {
-            return MatchType::None;
+            return (MatchType::None, i);
         }
         if colons > 7 {
-            return MatchType::None;
+            return (MatchType::None, i);
         }
         i += 1;
     }
@@ -304,25 +249,40 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
     if !prefix {
         // Final ipv6 address validation.
         if Ipv6Addr::from_str(s).is_ok() {
-            MatchType::Exact
+            (MatchType::Exact, i)
         } else {
-            MatchType::Partial
+            (MatchType::Partial, i)
         }
     } else {
+        println!("state {:?}", state);
         if state != Mask {
-            return MatchType::Partial;
+            return (MatchType::Partial, i);
         }
         // Parse mask: string from i onward.
         let mask_str = &s[i..];
+        println!("mask_str: {}", mask_str);
         match mask_str.parse::<i32>() {
             Ok(mask) if mask >= 0 && mask <= IPV6_MAX_BITLEN => {
                 if mask_str.chars().all(|c| c.is_ascii_digit()) {
-                    MatchType::Exact
+                    println!("exact");
+                    (MatchType::Exact, i)
                 } else {
-                    MatchType::Partial
+                    println!("exact");
+                    (MatchType::Partial, i)
                 }
             }
-            _ => MatchType::None,
+            _ => {
+                println!("none");
+                (MatchType::None, i)
+            }
         }
     }
+}
+
+pub fn match_ipv6_addr(src: &str) -> (MatchType, usize) {
+    match_ipv6_prefix(src, false)
+}
+
+pub fn match_ipv6_net(src: &str) -> (MatchType, usize) {
+    match_ipv6_prefix(src, true)
 }
