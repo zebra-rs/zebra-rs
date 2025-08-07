@@ -579,20 +579,18 @@ module config {
         }
       }
     }
-    container prefix-test {
-      leaf-list member {
-        type inet:ipv4-prefix;
-      }
-    }
     list prefix-set {
       key "name";
       leaf name {
         type string;
       }
-      list prefixes {
-        key prefix;
-        leaf prefix {
-          type inet:ipv4-prefix;
+      list "prefix" {
+        key "prefix";
+        leaf "prefix" {
+          type union {
+            type inet:ipv4-prefix;
+            type inet:ipv6-prefix;
+          }
         }
         leaf le {
           type uint8;
@@ -635,6 +633,51 @@ module config {
       leaf id {
         mandatory true;
         type uint32;
+      }
+    }
+    container policy-options {
+      list policy {
+        key "name";
+        leaf "name" {
+          type string;
+        }
+        list entry {
+          key "number";
+          leaf "number" {
+            type uint32;
+          }
+          container "match" {
+            ext:sort "7";
+            leaf "prefix-set" {
+              type string;
+            }
+            leaf "community-set" {
+              type string;
+            }
+          }
+          leaf "apply" {
+            ext:sort "5";
+            type string;
+          }
+          container "set" {
+            ext:sort "3";
+            leaf "local-preference" {
+              type uint32;
+            }
+            leaf "med" {
+              type uint32;
+            }
+          }
+          leaf "action" {
+            ext:sort "1";
+            type enumeration {
+              enum accept;
+              enum reject;
+              enum pass;
+            }
+          }
+
+        }
       }
     }
   }
