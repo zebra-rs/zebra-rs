@@ -4,7 +4,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixListIpv4Map, prefix_ipv4_commit, prefix_ipv4_exec};
+use super::{PolicyConfig, PrefixListMap, prefix_ipv4_commit, prefix_ipv4_exec};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
@@ -13,7 +13,7 @@ pub struct Policy {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
-    pub plist_v4: PrefixListIpv4Map,
+    pub prefix_list: PrefixListMap,
 }
 
 impl Policy {
@@ -23,7 +23,7 @@ impl Policy {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
-            plist_v4: PrefixListIpv4Map::default(),
+            prefix_list: PrefixListMap::default(),
         };
         policy.show_build();
         policy
@@ -34,14 +34,13 @@ impl Policy {
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
                 if path.as_str().starts_with("/policy-options") {
-                    println!("path {path}");
                     self.policy_config.exec(path, args, msg.op);
-                } else {
-                    prefix_ipv4_exec(self, path, args, msg.op);
+                } else if path.as_str().starts_with("/prefix-set") {
+                    self.prefix_list.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
-                prefix_ipv4_commit(&mut self.plist_v4.plist, &mut self.plist_v4.cache);
+                self.prefix_list.commit();
                 self.policy_config.commit();
             }
             _ => {}
