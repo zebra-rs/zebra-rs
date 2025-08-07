@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
+use strum_macros::EnumString;
 
 use crate::config::{Args, ConfigOp};
 
@@ -20,10 +21,13 @@ impl PolicyList {
     }
 }
 
-#[derive(Clone)]
+#[derive(EnumString, Clone)]
 pub enum PolicyAction {
+    #[strum(serialize = "accept")]
     Accept,
+    #[strum(serialize = "pass")]
     Pass,
+    #[strum(serialize = "reject")]
     Reject,
 }
 
@@ -149,6 +153,16 @@ impl ConfigBuilder {
                 }
                 Ok(())
             })
+            .path("/entry")
+            .set(|policy, cache, name, seq, args| {
+                let _ = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                list.entry.remove(&seq).context(ARG_ERR)?;
+                Ok(())
+            })
             .path("/entry/match/prefix-set")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -234,8 +248,8 @@ impl ConfigBuilder {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
 
-                let action = args.string().context(ARG_ERR)?;
-                // entry.med = Some(med);
+                let action: PolicyAction = args.string().context(ARG_ERR)?.parse()?;
+                entry.action = Some(action);
 
                 Ok(())
             })
