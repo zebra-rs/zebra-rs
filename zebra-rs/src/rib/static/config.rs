@@ -41,21 +41,19 @@ impl StaticConfig {
 
     pub fn commit(&mut self, tx: UnboundedSender<Message>) {
         while let Some((p, s)) = self.cache.pop_first() {
-            {
-                if s.delete {
-                    self.config.remove(&p);
-                    let msg = Message::Ipv4Del {
-                        prefix: p,
-                        rib: RibEntry::new(RibType::Static),
-                    };
+            if s.delete {
+                self.config.remove(&p);
+                let msg = Message::Ipv4Del {
+                    prefix: p,
+                    rib: RibEntry::new(RibType::Static),
+                };
+                let _ = tx.send(msg);
+            } else {
+                let entry = s.to_entry();
+                self.config.insert(p, s);
+                if let Some(rib) = entry {
+                    let msg = Message::Ipv4Add { prefix: p, rib };
                     let _ = tx.send(msg);
-                } else {
-                    let entry = s.to_entry();
-                    self.config.insert(p, s);
-                    if let Some(rib) = entry {
-                        let msg = Message::Ipv4Add { prefix: p, rib };
-                        let _ = tx.send(msg);
-                    }
                 }
             }
         }

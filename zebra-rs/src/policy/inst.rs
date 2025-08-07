@@ -42,6 +42,7 @@ impl Policy {
             }
             ConfigOp::CommitEnd => {
                 prefix_ipv4_commit(&mut self.plist_v4.plist, &mut self.plist_v4.cache);
+                self.policy_config.commit();
             }
             _ => {}
         }
