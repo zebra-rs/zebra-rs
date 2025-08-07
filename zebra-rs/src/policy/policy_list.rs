@@ -20,9 +20,21 @@ impl PolicyList {
     }
 }
 
+#[derive(Clone)]
+pub enum PolicyAction {
+    Accept,
+    Pass,
+    Reject,
+}
+
 #[derive(Default, Clone)]
 pub struct PolicyEntry {
     prefix_set: Option<String>,
+    community_set: Option<String>,
+    apply: Option<String>,
+    local_pref: Option<u32>,
+    med: Option<u32>,
+    action: Option<PolicyAction>,
 }
 
 pub struct PolicyConfig {
@@ -55,6 +67,16 @@ impl PolicyConfig {
         let seq = args.u32().context(ENTRY_SEQ_ERR)?;
 
         handler(&mut self.config, &mut self.cache, name, seq, &mut args)
+    }
+
+    pub fn commit(&mut self) {
+        while let Some((name, s)) = self.cache.pop_first() {
+            if s.delete {
+                self.config.remove(&name);
+            } else {
+                //
+            }
+        }
     }
 }
 
@@ -112,6 +134,21 @@ impl ConfigBuilder {
         const ARG_ERR: &str = "missing argument";
 
         ConfigBuilder::default()
+            .path("")
+            .set(|policy, cache, name, seq, args| {
+                let _ = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                if let Some(list) = cache.get_mut(&name) {
+                    list.delete = true;
+                } else {
+                    let mut list = config_lookup(policy, &name).context(ARG_ERR)?;
+                    list.delete = true;
+                    cache.insert(name, list);
+                }
+                Ok(())
+            })
             .path("/entry/match/prefix-set")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -126,6 +163,86 @@ impl ConfigBuilder {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
                 entry.prefix_set = None;
+                Ok(())
+            })
+            .path("/entry/match/community-set")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let community_set = args.string().context(ARG_ERR)?;
+                entry.community_set = Some(community_set);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.community_set = None;
+                Ok(())
+            })
+            .path("/entry/apply")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let apply = args.string().context(ARG_ERR)?;
+                entry.apply = Some(apply);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.apply = None;
+                Ok(())
+            })
+            .path("/entry/set/local-preference")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let local_pref = args.u32().context(ARG_ERR)?;
+                entry.local_pref = Some(local_pref);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.local_pref = None;
+                Ok(())
+            })
+            .path("/entry/set/med")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let med = args.u32().context(ARG_ERR)?;
+                entry.med = Some(med);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.med = None;
+                Ok(())
+            })
+            .path("/entry/action")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let action = args.string().context(ARG_ERR)?;
+                // entry.med = Some(med);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.action = None;
                 Ok(())
             })
     }
