@@ -209,7 +209,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
                     }
                     colons -= 1;
                     state = Colon;
-                    // do not advance i, let Colon handle it.
+                    // Do not advance i, let Colon handle it.
                     continue;
                 } else {
                     sp = Some(i);
@@ -256,7 +256,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
             Addr => {
                 let n = i + 1;
                 if n == len || bytes[n] == b':' || bytes[n] == b'.' || bytes[n] == b'/' {
-                    // address field max length 4
+                    // Address field max length is 4.
                     let start = sp.unwrap_or(0);
                     if i >= start + 4 {
                         return MatchType::None;
@@ -302,7 +302,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
     }
 
     if !prefix {
-        // final ipv6 address validation
+        // Final ipv6 address validation.
         if Ipv6Addr::from_str(s).is_ok() {
             MatchType::Exact
         } else {
@@ -312,7 +312,7 @@ pub fn match_ipv6_prefix(s: Option<&str>, prefix: bool) -> MatchType {
         if state != Mask {
             return MatchType::Partial;
         }
-        // parse mask: string from i onward
+        // Parse mask: string from i onward.
         let mask_str = &s[i..];
         match mask_str.parse::<i32>() {
             Ok(mask) if mask >= 0 && mask <= IPV6_MAX_BITLEN => {
