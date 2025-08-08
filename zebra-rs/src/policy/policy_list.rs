@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use strum_macros::EnumString;
 
 use crate::config::{Args, ConfigOp};
+
+use super::Policy;
 
 #[derive(Default, Clone)]
 pub struct PolicyList {
@@ -276,4 +278,8 @@ impl ConfigBuilder {
         self.map.insert((self.path.clone(), ConfigOp::Delete), func);
         self
     }
+}
+
+pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
+    Ok(String::from("show policy output"))
 }

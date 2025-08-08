@@ -1,19 +1,21 @@
 use std::collections::HashMap;
 
+use anyhow::{Error, Result};
+
 use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixSetConfig, prefix_ipv4_commit};
+use super::{PolicyConfig, PrefixSetConfig};
 
-pub type ShowCallback = fn(&Policy, Args, bool) -> std::result::Result<String, std::fmt::Error>;
+pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
 pub struct Policy {
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
-    pub prefix_list: PrefixSetConfig,
+    pub prefix_set: PrefixSetConfig,
 }
 
 impl Policy {
@@ -23,7 +25,7 @@ impl Policy {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
-            prefix_list: PrefixSetConfig::default(),
+            prefix_set: PrefixSetConfig::new(),
         };
         policy.show_build();
         policy
@@ -36,11 +38,11 @@ impl Policy {
                 if path.as_str().starts_with("/policy-options") {
                     self.policy_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/prefix-set") {
-                    self.prefix_list.exec(path, args, msg.op);
+                    self.prefix_set.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
-                self.prefix_list.commit();
+                self.prefix_set.commit();
                 self.policy_config.commit();
             }
             _ => {}
