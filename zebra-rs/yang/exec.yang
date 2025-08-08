@@ -185,6 +185,10 @@ module exec {
       ext:help "Show policy";
       presence "Show policy";
     }
+    container "prefix-set" {
+      ext:help "Show prefix-set";
+      presence "Show prefix-set";
+    }
   }
   container cli {
     ext:help "Command line interface";

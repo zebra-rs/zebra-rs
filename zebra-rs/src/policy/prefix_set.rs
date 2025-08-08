@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::net::Ipv4Addr;
 
 use super::{Action, Policy};
@@ -44,7 +45,7 @@ impl PrefixSetConfig {
             if s.delete {
                 self.config.remove(&name);
             } else {
-                //
+                self.config.insert(name, s);
             }
         }
     }
@@ -56,21 +57,11 @@ pub struct PrefixSet {
     pub delete: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct PrefixSetEntry {
     pub le: Option<u8>,
     pub eq: Option<u8>,
     pub ge: Option<u8>,
-}
-
-impl Default for PrefixSetEntry {
-    fn default() -> Self {
-        Self {
-            le: None,
-            eq: None,
-            ge: None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -119,19 +110,6 @@ fn cache_lookup<'a>(
     }
     let cache = cache.get_mut(name)?;
     if cache.delete { None } else { Some(cache) }
-}
-
-pub fn prefix_ipv4_commit(
-    config: &mut BTreeMap<String, PrefixSet>,
-    cache: &mut BTreeMap<String, PrefixSet>,
-) {
-    while let Some((n, s)) = cache.pop_first() {
-        if s.delete {
-            config.remove(&n);
-        } else {
-            config.insert(n, s);
-        }
-    }
 }
 
 impl ConfigBuilder {
@@ -244,17 +222,23 @@ impl ConfigBuilder {
     }
 }
 
-pub fn prefix_set_show(sets: &BTreeMap<String, PrefixSet>) {
-    for (name, set) in sets.iter() {
-        println!("prefix-set: {} [{}]", name, set.len());
+pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
+    let mut buf = String::new();
+    for (name, set) in policy.prefix_set.config.iter() {
+        writeln!(buf, "prefix-set: {}", name)?;
         for (prefix, entry) in set.entry.iter() {
-            println!(
-                " {} le: {} eq: {} ge: {}",
-                prefix,
-                entry.le.unwrap_or(0),
-                entry.eq.unwrap_or(0),
-                entry.ge.unwrap_or(0)
-            );
+            write!(buf, " {}", prefix,)?;
+            if let Some(le) = entry.le {
+                write!(buf, " le: {}", le);
+            }
+            if let Some(eq) = entry.eq {
+                write!(buf, " eq: {}", eq);
+            }
+            if let Some(ge) = entry.ge {
+                write!(buf, " ge: {}", ge);
+            }
+            writeln!(buf, "");
         }
     }
+    Ok(buf)
 }
