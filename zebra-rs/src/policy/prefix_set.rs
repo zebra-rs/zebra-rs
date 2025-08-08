@@ -52,41 +52,20 @@ impl PrefixSetConfig {
 
 #[derive(Default, Clone, Debug)]
 pub struct PrefixSet {
-    pub entry: BTreeMap<u32, PrefixListEntry>,
+    pub entry: BTreeMap<IpNet, PrefixSetEntry>,
     pub delete: bool,
 }
 
 #[derive(Clone, Debug)]
-pub struct PrefixListEntry {
-    pub prefix: Ipv4Net,
+pub struct PrefixSetEntry {
     pub le: Option<u8>,
     pub eq: Option<u8>,
     pub ge: Option<u8>,
 }
 
-impl PrefixListEntry {
-    pub fn apply(&self, prefix: &Ipv4Net) -> bool {
-        if self.prefix.contains(prefix) {
-            if let Some(le) = self.le {
-                return prefix.prefix_len() <= le;
-            }
-            if let Some(eq) = self.eq {
-                return prefix.prefix_len() == eq;
-            }
-            if let Some(ge) = self.ge {
-                return prefix.prefix_len() >= ge;
-            }
-            self.prefix.prefix_len() == prefix.prefix_len()
-        } else {
-            false
-        }
-    }
-}
-
-impl Default for PrefixListEntry {
+impl Default for PrefixSetEntry {
     fn default() -> Self {
         Self {
-            prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
             le: None,
             eq: None,
             ge: None,
@@ -120,37 +99,37 @@ fn config_lookup(plist: &BTreeMap<String, PrefixSet>, name: &String) -> Option<P
 }
 
 fn cache_get<'a>(
-    plist: &'a BTreeMap<String, PrefixSet>,
+    config: &'a BTreeMap<String, PrefixSet>,
     cache: &'a mut BTreeMap<String, PrefixSet>,
     name: &'a String,
 ) -> Option<&'a mut PrefixSet> {
     if cache.get(name).is_none() {
-        cache.insert(name.to_string(), config_get(plist, name));
+        cache.insert(name.to_string(), config_get(config, name));
     }
     cache.get_mut(name)
 }
 
 fn cache_lookup<'a>(
-    plist: &'a BTreeMap<String, PrefixSet>,
+    config: &'a BTreeMap<String, PrefixSet>,
     cache: &'a mut BTreeMap<String, PrefixSet>,
     name: &'a String,
 ) -> Option<&'a mut PrefixSet> {
     if cache.get(name).is_none() {
-        cache.insert(name.to_string(), config_lookup(plist, name)?);
+        cache.insert(name.to_string(), config_lookup(config, name)?);
     }
     let cache = cache.get_mut(name)?;
     if cache.delete { None } else { Some(cache) }
 }
 
 pub fn prefix_ipv4_commit(
-    plist: &mut BTreeMap<String, PrefixSet>,
+    config: &mut BTreeMap<String, PrefixSet>,
     cache: &mut BTreeMap<String, PrefixSet>,
 ) {
     while let Some((n, s)) = cache.pop_first() {
         if s.delete {
-            plist.remove(&n);
+            config.remove(&n);
         } else {
-            plist.insert(n, s);
+            config.insert(n, s);
         }
     }
 }
@@ -181,58 +160,69 @@ impl ConfigBuilder {
             })
             .path("/prefixes")
             .set(|config, cache, name, args| {
-                let prefix = args.v4net().context(PREFIX_ERR)?;
-                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.entry(seq).or_default();
-                // seq.prefix = prefix;
+                let prefix = args.net().context(PREFIX_ERR)?;
+                let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                let _entry = set.entry.entry(prefix).or_default();
                 Ok(())
             })
-            .del(|config, cache, name, _args| {
-                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.get_mut(&seq).context(PREFIX_ERR)?;
-                // seq.prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
+            .del(|config, cache, name, args| {
+                let prefix = args.net().context(PREFIX_ERR)?;
+                let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                set.entry.remove(&prefix).context(CONFIG_ERR)?;
                 Ok(())
             })
             .path("/prefixes/le")
             .set(|config, cache, name, args| {
-                // let le = args.u8().context(LE_ERR)?;
-                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.entry(seq).or_default();
-                // seq.le = Some(le);
+                let prefix = args.net().context(PREFIX_ERR)?;
+                let le = args.u8().context(LE_ERR)?;
+
+                let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                let entry = set.entry.entry(prefix).or_default();
+                entry.le = Some(le);
                 Ok(())
             })
-            .del(|config, cache, name, _args| {
-                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.get_mut(&seq).context(LE_ERR)?;
-                // seq.le = None;
+            .del(|config, cache, name, args| {
+                let prefix = args.net().context(PREFIX_ERR)?;
+
+                let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                let entry = set.entry.get_mut(&prefix).context(LE_ERR)?;
+                entry.le = None;
                 Ok(())
             })
             .path("/prefixes/eq")
             .set(|config, cache, name, args| {
-                // let eq = args.u8().context(EQ_ERR)?;
-                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.entry(seq).or_default();
-                // seq.eq = Some(eq);
+                let prefix = args.net().context(PREFIX_ERR)?;
+                let eq = args.u8().context(EQ_ERR)?;
+
+                let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                let entry = set.entry.entry(prefix).or_default();
+                entry.eq = Some(eq);
                 Ok(())
             })
-            .del(|config, cache, name, _args| {
-                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.get_mut(&seq).context(EQ_ERR)?;
-                // seq.eq = None;
+            .del(|config, cache, name, args| {
+                let prefix = args.net().context(PREFIX_ERR)?;
+
+                let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                let entry = set.entry.get_mut(&prefix).context(EQ_ERR)?;
+                entry.eq = None;
                 Ok(())
             })
             .path("/prefixes/ge")
             .set(|config, cache, name, args| {
-                // let ge = args.u8().context(GE_ERR)?;
-                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.entry(seq).or_default();
-                // seq.ge = Some(ge);
+                let prefix = args.net().context(PREFIX_ERR)?;
+                let ge = args.u8().context(GE_ERR)?;
+
+                let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                let entry = set.entry.entry(prefix).or_default();
+                entry.ge = Some(ge);
                 Ok(())
             })
-            .del(|config, cache, name, _args| {
-                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                // let seq = config.entry.get_mut(&seq).context(GE_ERR)?;
-                // seq.ge = None;
+            .del(|config, cache, name, args| {
+                let prefix = args.net().context(PREFIX_ERR)?;
+
+                let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                let entry = set.entry.get_mut(&prefix).context(GE_ERR)?;
+                entry.ge = None;
                 Ok(())
             })
     }
@@ -254,17 +244,16 @@ impl ConfigBuilder {
     }
 }
 
-pub fn plist_ipv4_show(plist: &BTreeMap<String, PrefixSet>) {
-    for (n, p) in plist.iter() {
-        println!("name: {}", n);
-        for (seq, e) in p.entry.iter() {
+pub fn prefix_set_show(sets: &BTreeMap<String, PrefixSet>) {
+    for (name, set) in sets.iter() {
+        println!("prefix-set: {} [{}]", name, set.len());
+        for (prefix, entry) in set.entry.iter() {
             println!(
-                " seq: {} prefix: {} le: {} eq: {} ge: {}",
-                seq,
-                e.prefix,
-                e.le.unwrap_or(0),
-                e.eq.unwrap_or(0),
-                e.ge.unwrap_or(0)
+                " {} le: {} eq: {} ge: {}",
+                prefix,
+                entry.le.unwrap_or(0),
+                entry.eq.unwrap_or(0),
+                entry.ge.unwrap_or(0)
             );
         }
     }
