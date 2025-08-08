@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn set_git_info() {
     // Get git commit hash
     let git_hash = Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
         .and_then(|output| {
@@ -27,7 +27,7 @@ fn set_git_info() {
 
     // Get git commit date
     let git_date = Command::new("git")
-        .args(&["log", "-1", "--format=%cd", "--date=iso"])
+        .args(["log", "-1", "--format=%cd", "--date=iso"])
         .output()
         .ok()
         .and_then(|output| {
@@ -42,7 +42,7 @@ fn set_git_info() {
 
     // Get git commit message (first line)
     let git_message = Command::new("git")
-        .args(&["log", "-1", "--format=%s"])
+        .args(["log", "-1", "--format=%s"])
         .output()
         .ok()
         .and_then(|output| {
@@ -57,7 +57,7 @@ fn set_git_info() {
 
     // Get git branch name
     let git_branch = Command::new("git")
-        .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
         .and_then(|output| {
@@ -72,7 +72,7 @@ fn set_git_info() {
 
     // Check if repository is dirty
     let git_dirty = Command::new("git")
-        .args(&["diff-index", "--quiet", "HEAD", "--"])
+        .args(["diff-index", "--quiet", "HEAD", "--"])
         .output()
         .map(|output| !output.status.success())
         .unwrap_or(false);
@@ -83,12 +83,12 @@ fn set_git_info() {
         .to_string();
 
     // Set environment variables for use in the binary
-    println!("cargo:rustc-env=GIT_HASH={}", git_hash);
-    println!("cargo:rustc-env=GIT_DATE={}", git_date);
-    println!("cargo:rustc-env=GIT_MESSAGE={}", git_message);
-    println!("cargo:rustc-env=GIT_BRANCH={}", git_branch);
-    println!("cargo:rustc-env=GIT_DIRTY={}", git_dirty);
-    println!("cargo:rustc-env=BUILD_DATE={}", build_date);
+    println!("cargo:rustc-env=GIT_HASH={git_hash}");
+    println!("cargo:rustc-env=GIT_DATE={git_date}");
+    println!("cargo:rustc-env=GIT_MESSAGE={git_message}");
+    println!("cargo:rustc-env=GIT_BRANCH={git_branch}");
+    println!("cargo:rustc-env=GIT_DIRTY={git_dirty}");
+    println!("cargo:rustc-env=BUILD_DATE={build_date}");
 
     // Rerun build script if git HEAD changes
     println!("cargo:rerun-if-changed=../.git/HEAD");
