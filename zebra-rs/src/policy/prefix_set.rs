@@ -10,8 +10,8 @@ use crate::config::{Args, ConfigOp};
 
 #[derive(Default)]
 pub struct PrefixSetConfig {
-    pub config: BTreeMap<String, PrefixList>,
-    pub cache: BTreeMap<String, PrefixList>,
+    pub config: BTreeMap<String, PrefixSet>,
+    pub cache: BTreeMap<String, PrefixSet>,
     builder: ConfigBuilder,
 }
 
@@ -51,25 +51,13 @@ impl PrefixSetConfig {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct PrefixList {
+pub struct PrefixSet {
     pub entry: BTreeMap<u32, PrefixListEntry>,
     pub delete: bool,
 }
 
-impl PrefixList {
-    pub fn apply(&self, prefix: &Ipv4Net) -> Action {
-        for (_, seq) in self.entry.iter() {
-            if seq.apply(prefix) {
-                return seq.action.clone();
-            }
-        }
-        Action::Deny
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct PrefixListEntry {
-    pub action: Action,
     pub prefix: Ipv4Net,
     pub le: Option<u8>,
     pub eq: Option<u8>,
@@ -98,7 +86,6 @@ impl PrefixListEntry {
 impl Default for PrefixListEntry {
     fn default() -> Self {
         Self {
-            action: Action::Permit,
             prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
             le: None,
             eq: None,
@@ -114,57 +101,50 @@ struct ConfigBuilder {
 }
 
 type Handler = fn(
-    plist: &mut BTreeMap<String, PrefixList>,
-    cache: &mut BTreeMap<String, PrefixList>,
+    config: &mut BTreeMap<String, PrefixSet>,
+    cache: &mut BTreeMap<String, PrefixSet>,
     name: &String,
     args: &mut Args,
 ) -> Result<()>;
 
-fn plist_get(plist: &BTreeMap<String, PrefixList>, name: &String) -> PrefixList {
+fn config_get(plist: &BTreeMap<String, PrefixSet>, name: &String) -> PrefixSet {
     let Some(entry) = plist.get(name) else {
-        return PrefixList::default();
+        return PrefixSet::default();
     };
     entry.clone()
 }
 
-fn plist_lookup(plist: &BTreeMap<String, PrefixList>, name: &String) -> Option<PrefixList> {
+fn config_lookup(plist: &BTreeMap<String, PrefixSet>, name: &String) -> Option<PrefixSet> {
     let entry = plist.get(name)?;
     Some(entry.clone())
 }
 
 fn cache_get<'a>(
-    plist: &'a BTreeMap<String, PrefixList>,
-    cache: &'a mut BTreeMap<String, PrefixList>,
+    plist: &'a BTreeMap<String, PrefixSet>,
+    cache: &'a mut BTreeMap<String, PrefixSet>,
     name: &'a String,
-) -> Option<&'a mut PrefixList> {
+) -> Option<&'a mut PrefixSet> {
     if cache.get(name).is_none() {
-        cache.insert(name.to_string(), plist_get(plist, name));
+        cache.insert(name.to_string(), config_get(plist, name));
     }
     cache.get_mut(name)
 }
 
 fn cache_lookup<'a>(
-    plist: &'a BTreeMap<String, PrefixList>,
-    cache: &'a mut BTreeMap<String, PrefixList>,
+    plist: &'a BTreeMap<String, PrefixSet>,
+    cache: &'a mut BTreeMap<String, PrefixSet>,
     name: &'a String,
-) -> Option<&'a mut PrefixList> {
+) -> Option<&'a mut PrefixSet> {
     if cache.get(name).is_none() {
-        cache.insert(name.to_string(), plist_lookup(plist, name)?);
+        cache.insert(name.to_string(), config_lookup(plist, name)?);
     }
     let cache = cache.get_mut(name)?;
     if cache.delete { None } else { Some(cache) }
 }
 
-// fn prefix_ipv4_config_builder() -> ConfigBuilder {}
-
-pub fn prefix_ipv4_exec(policy: &mut Policy, path: String, args: Args, op: ConfigOp) {
-    // let builder = prefix_ipv4_config_builder();
-    // let _ = builder.exec(path.as_str(), op, &mut policy.plist_v4, args);
-}
-
 pub fn prefix_ipv4_commit(
-    plist: &mut BTreeMap<String, PrefixList>,
-    cache: &mut BTreeMap<String, PrefixList>,
+    plist: &mut BTreeMap<String, PrefixSet>,
+    cache: &mut BTreeMap<String, PrefixSet>,
 ) {
     while let Some((n, s)) = cache.pop_first() {
         if s.delete {
@@ -185,73 +165,73 @@ impl ConfigBuilder {
 
         ConfigBuilder::default()
             .path("")
-            .set(|plist, cache, name, _args| {
-                // let _ = cache_get(plist, cache, name).context(CONFIG_ERR)?;
+            .set(|config, cache, name, _args| {
+                let _ = cache_get(config, cache, name).context(CONFIG_ERR)?;
                 Ok(())
             })
-            .del(|plist, cache, name, _args| {
-                // if let Some(plist) = cache.get_mut(name) {
-                //     plist.delete = true;
-                // } else {
-                //     let mut plist = plist_lookup(plist, name).context(CONFIG_ERR)?;
-                //     plist.delete = true;
-                //     cache.insert(name.to_string(), plist);
-                // }
+            .del(|config, cache, name, _args| {
+                if let Some(list) = cache.get_mut(name) {
+                    list.delete = true;
+                } else {
+                    let mut list = config_lookup(config, name).context(CONFIG_ERR)?;
+                    list.delete = true;
+                    cache.insert(name.to_string(), list);
+                }
                 Ok(())
             })
             .path("/prefixes")
-            .set(|plist, cache, name, args| {
-                // let prefix = args.v4net().context(PREFIX_ERR)?;
-                // let plist = cache_get(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.entry(seq).or_default();
+            .set(|config, cache, name, args| {
+                let prefix = args.v4net().context(PREFIX_ERR)?;
+                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.entry(seq).or_default();
                 // seq.prefix = prefix;
                 Ok(())
             })
-            .del(|plist, cache, name, _args| {
-                // let plist = cache_lookup(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.get_mut(&seq).context(PREFIX_ERR)?;
+            .del(|config, cache, name, _args| {
+                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.get_mut(&seq).context(PREFIX_ERR)?;
                 // seq.prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
                 Ok(())
             })
             .path("/prefixes/le")
-            .set(|plist, cache, name, args| {
+            .set(|config, cache, name, args| {
                 // let le = args.u8().context(LE_ERR)?;
-                // let plist = cache_get(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.entry(seq).or_default();
+                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.entry(seq).or_default();
                 // seq.le = Some(le);
                 Ok(())
             })
-            .del(|plist, cache, name, _args| {
-                // let plist = cache_lookup(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.get_mut(&seq).context(LE_ERR)?;
+            .del(|config, cache, name, _args| {
+                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.get_mut(&seq).context(LE_ERR)?;
                 // seq.le = None;
                 Ok(())
             })
             .path("/prefixes/eq")
-            .set(|plist, cache, name, args| {
+            .set(|config, cache, name, args| {
                 // let eq = args.u8().context(EQ_ERR)?;
-                // let plist = cache_get(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.entry(seq).or_default();
+                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.entry(seq).or_default();
                 // seq.eq = Some(eq);
                 Ok(())
             })
-            .del(|plist, cache, name, _args| {
-                // let plist = cache_lookup(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.get_mut(&seq).context(EQ_ERR)?;
+            .del(|config, cache, name, _args| {
+                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.get_mut(&seq).context(EQ_ERR)?;
                 // seq.eq = None;
                 Ok(())
             })
             .path("/prefixes/ge")
-            .set(|plist, cache, name, args| {
+            .set(|config, cache, name, args| {
                 // let ge = args.u8().context(GE_ERR)?;
-                // let plist = cache_get(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.entry(seq).or_default();
+                // let config = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.entry(seq).or_default();
                 // seq.ge = Some(ge);
                 Ok(())
             })
-            .del(|plist, cache, name, _args| {
-                // let plist = cache_lookup(plist, cache, name).context(CONFIG_ERR)?;
-                // let seq = plist.entry.get_mut(&seq).context(GE_ERR)?;
+            .del(|config, cache, name, _args| {
+                // let config = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                // let seq = config.entry.get_mut(&seq).context(GE_ERR)?;
                 // seq.ge = None;
                 Ok(())
             })
@@ -274,14 +254,13 @@ impl ConfigBuilder {
     }
 }
 
-pub fn plist_ipv4_show(plist: &BTreeMap<String, PrefixList>) {
+pub fn plist_ipv4_show(plist: &BTreeMap<String, PrefixSet>) {
     for (n, p) in plist.iter() {
         println!("name: {}", n);
         for (seq, e) in p.entry.iter() {
             println!(
-                " seq: {} action: {} prefix: {} le: {} eq: {} ge: {}",
+                " seq: {} prefix: {} le: {} eq: {} ge: {}",
                 seq,
-                e.action,
                 e.prefix,
                 e.le.unwrap_or(0),
                 e.eq.unwrap_or(0),

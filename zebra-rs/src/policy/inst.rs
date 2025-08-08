@@ -4,7 +4,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixSetConfig, prefix_ipv4_commit, prefix_ipv4_exec};
+use super::{PolicyConfig, PrefixSetConfig, prefix_ipv4_commit};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
