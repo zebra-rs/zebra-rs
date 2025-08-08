@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
+use std::fmt::Write;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use strum_macros::EnumString;
 
 use crate::config::{Args, ConfigOp};
+
+use super::Policy;
 
 #[derive(Default, Clone)]
 pub struct PolicyList {
@@ -78,7 +81,7 @@ impl PolicyConfig {
             if s.delete {
                 self.config.remove(&name);
             } else {
-                //
+                self.config.insert(name, s);
             }
         }
     }
@@ -276,4 +279,18 @@ impl ConfigBuilder {
         self.map.insert((self.path.clone(), ConfigOp::Delete), func);
         self
     }
+}
+
+pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
+    let mut buf = String::new();
+    for (name, policy) in policy.policy_config.config.iter() {
+        writeln!(buf, "policy-list: {}", name);
+        for (seq, entry) in policy.entry.iter() {
+            writeln!(buf, " entry: {}", seq);
+            if let Some(prefix_set) = &entry.prefix_set {
+                writeln!(buf, "  match: prefix_set {}", prefix_set);
+            }
+        }
+    }
+    Ok(buf)
 }

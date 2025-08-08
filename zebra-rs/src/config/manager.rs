@@ -506,7 +506,7 @@ fn is_isis(paths: &[CommandPath]) -> bool {
 fn is_policy(paths: &[CommandPath]) -> bool {
     paths
         .iter()
-        .any(|x| x.name == "prefix-list" || x.name == "policy")
+        .any(|x| x.name == "prefix-set" || x.name == "policy")
 }
 
 fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
