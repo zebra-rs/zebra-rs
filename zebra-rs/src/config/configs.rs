@@ -5,9 +5,9 @@ use super::parse::match_keyword;
 use super::parse::{Match, MatchType};
 use super::vtysh::{CommandPath, YangMatch};
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::collections::VecDeque;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::{cell::RefCell, rc::Rc};
 
 const INDENT_LEVEL: usize = 2;
@@ -91,6 +91,32 @@ impl Args {
 
     pub fn v6net(&mut self) -> Option<Ipv6Net> {
         arg_parse_type!(self, Ipv6Net);
+    }
+
+    pub fn addr(&mut self) -> Option<IpAddr> {
+        let item = self.0.front()?;
+        if let Ok(addr) = item.parse::<Ipv4Addr>() {
+            self.0.pop_front();
+            return Some(IpAddr::V4(addr));
+        }
+        if let Ok(addr) = item.parse::<Ipv6Addr>() {
+            self.0.pop_front();
+            return Some(IpAddr::V6(addr));
+        }
+        None
+    }
+
+    pub fn net(&mut self) -> Option<IpNet> {
+        let item = self.0.front()?;
+        if let Ok(net) = item.parse::<Ipv4Net>() {
+            self.0.pop_front();
+            return Some(IpNet::V4(net));
+        }
+        if let Ok(net) = item.parse::<Ipv6Net>() {
+            self.0.pop_front();
+            return Some(IpNet::V6(net));
+        }
+        None
     }
 
     pub fn boolean(&mut self) -> Option<bool> {
