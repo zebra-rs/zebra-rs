@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write;
 
 use anyhow::{Context, Error, Result};
 use strum_macros::EnumString;
@@ -80,7 +81,7 @@ impl PolicyConfig {
             if s.delete {
                 self.config.remove(&name);
             } else {
-                //
+                self.config.insert(name, s);
             }
         }
     }
@@ -281,5 +282,15 @@ impl ConfigBuilder {
 }
 
 pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
-    Ok(String::from("show policy output"))
+    let mut buf = String::new();
+    for (name, policy) in policy.policy_config.config.iter() {
+        writeln!(buf, "policy-list: {}", name);
+        for (seq, entry) in policy.entry.iter() {
+            writeln!(buf, " entry: {}", seq);
+            if let Some(prefix_set) = &entry.prefix_set {
+                writeln!(buf, "  match: prefix_set {}", prefix_set);
+            }
+        }
+    }
+    Ok(buf)
 }
