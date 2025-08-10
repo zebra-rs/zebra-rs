@@ -113,6 +113,19 @@ pub struct PeerConfig {
     pub graceful_restart: Option<u32>,
     pub received: Vec<CapabilityPacket>,
     pub hold_time: Option<u16>,
+    pub idle_hold_time: Option<u16>,
+}
+
+const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
+
+impl PeerConfig {
+    pub fn idle_hold_time(&self) -> u64 {
+        if let Some(idle_hold_time) = self.idle_hold_time {
+            idle_hold_time as u64
+        } else {
+            DEFAULT_IDLE_HOLD_TIME
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -361,11 +374,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     if prev_state == peer.state {
         return;
     }
-    bgp_info!(
-        "BGP FSM state transition: {:?} -> {:?}",
-        prev_state,
-        peer.state
-    );
+    bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
 
     // Update instant when entering or leaving the Established state.
     if (prev_state.is_established() && !peer.state.is_established())
@@ -601,12 +610,16 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
 pub fn peer_start_idle_hold_timer(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    Timer::new(Timer::second(1), TimerType::Once, move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::Event(ident, Event::Start));
-        }
-    })
+    Timer::new(
+        Timer::second(peer.config.idle_hold_time()),
+        TimerType::Once,
+        move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::Event(ident, Event::Start));
+            }
+        },
+    )
 }
 
 pub fn peer_start_connect_retry_timer(peer: &Peer) -> Timer {
