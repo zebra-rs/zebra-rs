@@ -4,6 +4,7 @@ use super::{
     Bgp,
     inst::Callback,
     peer::{Peer, PeerType, fsm_init},
+    timer,
 };
 
 use crate::config::{Args, ConfigOp};
@@ -134,30 +135,6 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
-fn config_hold_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    if op == ConfigOp::Set {
-        let addr: Ipv4Addr = args.v4addr()?;
-        let addr = IpAddr::V4(addr);
-        let hold_time: u16 = args.u16()?;
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.config.hold_time = Some(hold_time);
-        }
-    }
-    Some(())
-}
-
-fn config_idle_hold_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    if op == ConfigOp::Set {
-        let addr: Ipv4Addr = args.v4addr()?;
-        let addr = IpAddr::V4(addr);
-        let idle_hold_time: u16 = args.u16()?;
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.config.idle_hold_time = Some(idle_hold_time);
-        }
-    }
-    Some(())
-}
-
 fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let category = args.string()?;
     let enable = op == ConfigOp::Set;
@@ -199,8 +176,13 @@ impl Bgp {
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/afi-safis/afi-safi/enabled", config_afi_safi);
-        self.callback_peer("/timers/hold-time", config_hold_time);
-        self.callback_peer("/timers/idle-hold-time", config_idle_hold_time);
+
+        self.callback_peer("/timers/hold-time", timer::config::hold_time);
+        self.callback_peer("/timers/idle-hold-time", timer::config::idle_hold_time);
+        self.callback_peer(
+            "/timers/connect-retry-time",
+            timer::config::connect_retry_time,
+        );
 
         self.pcallback_add("/community-list", config_com_list);
         self.pcallback_add("/community-list/seq", config_com_list_seq);

@@ -7,11 +7,11 @@ use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Args;
+use crate::context::Timer;
 use crate::rib::MacAddr;
 
 use super::link::Afis;
 use super::nfsm::{NeighborAddr4, NfsmState};
-use super::task::Timer;
 use super::{Isis, Level, Message};
 
 // IS-IS Neighbor

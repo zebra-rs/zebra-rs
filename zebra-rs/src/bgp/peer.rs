@@ -22,13 +22,13 @@ use cap::CapabilityRouteRefresh;
 use crate::bgp::cap::cap_register_recv;
 use crate::config::Args;
 
-use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_register_send};
 use super::inst::Message;
 use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
 use super::route::{route_from_peer, send_route_to_rib};
-use super::task::*;
 use super::{BGP_HOLD_TIME, Bgp};
+use super::{BGP_PORT, timer};
+use crate::context::task::*;
 use crate::rib::api::RibTx;
 use crate::{bgp_debug, bgp_debug_cat, bgp_info};
 
@@ -112,20 +112,7 @@ pub struct PeerConfig {
     pub route_refresh: bool,
     pub graceful_restart: Option<u32>,
     pub received: Vec<CapabilityPacket>,
-    pub hold_time: Option<u16>,
-    pub idle_hold_time: Option<u16>,
-}
-
-const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
-
-impl PeerConfig {
-    pub fn idle_hold_time(&self) -> u64 {
-        if let Some(idle_hold_time) = self.idle_hold_time {
-            idle_hold_time as u64
-        } else {
-            DEFAULT_IDLE_HOLD_TIME
-        }
-    }
+    pub timer: timer::Config,
 }
 
 #[derive(Debug)]
@@ -236,10 +223,6 @@ impl Peer {
             fsm_init(self);
             self.active = true;
         }
-    }
-
-    pub fn hold_time(&self) -> u16 {
-        self.config.hold_time.unwrap_or(BGP_HOLD_TIME)
     }
 
     pub fn count_clear(&mut self) {
@@ -485,7 +468,8 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         peer.param.hold_time = 0;
         peer.param.keepalive = 0;
     } else {
-        peer.param.hold_time = min(packet.hold_time, peer.hold_time());
+        let hold_time = peer.config.timer.hold_time() as u16;
+        peer.param.hold_time = min(packet.hold_time, hold_time);
         peer.param.keepalive = peer.param.hold_time / 3;
     }
     if peer.param.keepalive > 0 {
@@ -610,22 +594,18 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
 pub fn peer_start_idle_hold_timer(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    Timer::new(
-        Timer::second(peer.config.idle_hold_time()),
-        TimerType::Once,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::Event(ident, Event::Start));
-            }
-        },
-    )
+    Timer::once(peer.config.timer.idle_hold_time(), move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::Start));
+        }
+    })
 }
 
 pub fn peer_start_connect_retry_timer(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    Timer::new(Timer::second(5), TimerType::Once, move || {
+    Timer::once(peer.config.timer.connect_retry_time(), move || {
         let tx = tx.clone();
         async move {
             let _ = tx.send(Message::Event(ident, Event::Start));
@@ -778,16 +758,11 @@ pub fn peer_send_open(peer: &mut Peer) {
     cap_register_send(&caps, &mut peer.cap_map);
 
     // Remmeber sent hold time.
-    peer.param_tx.hold_time = peer.hold_time();
-    peer.param_tx.keepalive = peer.hold_time() / 3;
+    let hold_time = peer.config.timer.hold_time() as u16;
+    peer.param_tx.hold_time = hold_time;
+    peer.param_tx.keepalive = hold_time / 3;
 
-    let open = OpenPacket::new(
-        header,
-        peer.local_as as u16,
-        peer.hold_time(),
-        &router_id,
-        caps,
-    );
+    let open = OpenPacket::new(header, peer.local_as as u16, hold_time, &router_id, caps);
     let bytes: BytesMut = open.into();
     peer.counter[BgpType::Open as usize].sent += 1;
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
@@ -803,16 +778,12 @@ pub fn peer_send_notification(peer: &mut Peer, code: NotifyCode, sub_code: u8, d
 pub fn peer_start_keepalive(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    Timer::new(
-        Timer::second(peer.param.keepalive as u64),
-        TimerType::Infinite,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::Event(ident, Event::KeepaliveTimerExpires));
-            }
-        },
-    )
+    Timer::repeat(peer.param.keepalive as u64, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::KeepaliveTimerExpires));
+        }
+    })
 }
 
 pub fn peer_send_keepalive(peer: &mut Peer) {
@@ -825,16 +796,12 @@ pub fn peer_send_keepalive(peer: &mut Peer) {
 pub fn peer_start_holdtimer(peer: &Peer) -> Timer {
     let ident = peer.ident;
     let tx = peer.tx.clone();
-    Timer::new(
-        Timer::second(peer.param.hold_time as u64),
-        TimerType::Infinite,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::Event(ident, Event::HoldTimerExpires));
-            }
-        },
-    )
+    Timer::once(peer.param.hold_time as u64, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::HoldTimerExpires));
+        }
+    })
 }
 
 pub fn peer_refresh_holdtimer(peer: &Peer) {
