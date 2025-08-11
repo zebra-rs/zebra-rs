@@ -8,7 +8,6 @@ pub mod config;
 pub mod peer;
 pub mod route;
 pub mod show;
-pub mod task;
 
 pub mod cap;
 
@@ -16,3 +15,5 @@ pub mod tracing;
 
 pub mod debug;
 pub use debug::BgpDebugFlags;
+
+pub mod timer;

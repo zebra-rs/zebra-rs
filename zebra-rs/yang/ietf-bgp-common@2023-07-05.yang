@@ -103,7 +103,7 @@ submodule ietf-bgp-common {
     description
       "Config parameters related to timers associated with the BGP
        peer";
-    leaf connect-retry-interval {
+    leaf connect-retry-time {
       type uint16 {
         range "1..max";
       }
