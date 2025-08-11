@@ -30,7 +30,7 @@ use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::context::task::*;
 use crate::rib::api::RibTx;
-use crate::{bgp_debug, bgp_debug_cat, bgp_info};
+use crate::{bgp_debug, bgp_debug_cat, bgp_info, rib};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -235,7 +235,7 @@ impl Peer {
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut BgpLocalRib,
-    pub rib_tx: &'a UnboundedSender<RibTx>,
+    pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
 fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
@@ -289,7 +289,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         local_rib: &mut bgp.local_rib,
-        rib_tx: &bgp.rib,
+        rib_tx: &bgp.rib_tx,
     };
     let peer = bgp.peers.get_mut(&id).unwrap();
     let prev_state = peer.state.clone();

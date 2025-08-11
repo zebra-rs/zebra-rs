@@ -17,3 +17,6 @@ pub mod debug;
 pub use debug::BgpDebugFlags;
 
 pub mod timer;
+
+pub mod link;
+pub use link::*;

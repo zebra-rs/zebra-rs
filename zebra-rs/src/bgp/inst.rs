@@ -7,6 +7,7 @@ use crate::config::{
 };
 use crate::context::Task;
 use crate::policy::com_list::CommunityListMap;
+use crate::rib;
 use crate::rib::api::{RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
@@ -56,7 +57,7 @@ pub struct Bgp {
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    pub rib: UnboundedSender<RibTx>,
+    pub rib_tx: UnboundedSender<rib::Message>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
     pub pcallbacks: HashMap<String, PCallback>,
@@ -71,7 +72,14 @@ pub struct Bgp {
 }
 
 impl Bgp {
-    pub fn new(rib: UnboundedSender<RibTx>) -> Self {
+    pub fn new(rib_tx: UnboundedSender<rib::Message>) -> Self {
+        let chan = RibRxChannel::new();
+        let msg = rib::Message::Subscribe {
+            proto: "isis".into(),
+            tx: chan.tx.clone(),
+        };
+        let _ = rib_tx.send(msg);
+
         let (tx, rx) = mpsc::unbounded_channel();
         let mut bgp = Self {
             asn: 0,
@@ -80,7 +88,7 @@ impl Bgp {
             tx,
             rx,
             local_rib: BgpLocalRib::new(),
-            rib,
+            rib_tx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
