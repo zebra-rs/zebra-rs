@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use isis_packet::{IsLevel, IsisHello, IsisNeighborId, IsisTlv};
 
+use crate::context::Timer;
 use crate::isis::Level;
 use crate::isis::link::Afi;
 use crate::rib::MacAddr;
@@ -13,7 +14,7 @@ use super::inst::NeighborTop;
 use super::link::LinkTop;
 use super::{IfsmEvent, IsisLink, LabelPool, Message};
 
-use super::{neigh::Neighbor, task::Timer};
+use super::neigh::Neighbor;
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {

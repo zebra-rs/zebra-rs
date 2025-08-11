@@ -32,6 +32,7 @@ use crate::{
     rib::RibRxChannel,
 };
 // use spf_rs as spf;
+use crate::context::{Timer, TimerType};
 use crate::spf;
 
 use super::config::IsisConfig;
@@ -41,7 +42,6 @@ use super::lsdb::insert_self_originate;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::task::{Timer, TimerType};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 

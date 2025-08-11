@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{isis_database_trace, isis_info};
 
+use crate::context::Timer;
 use crate::isis::{
     Message,
     srmpls::{LabelBlock, LabelConfig},
@@ -21,7 +22,6 @@ use super::{
     Level,
     inst::{IsisTop, lsp_emit, lsp_flood, spf_schedule},
     link::Afi,
-    task::Timer,
 };
 
 #[derive(Default)]
