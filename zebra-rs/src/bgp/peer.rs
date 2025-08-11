@@ -134,6 +134,7 @@ impl PeerType {
 pub struct PeerParam {
     pub hold_time: u16,
     pub keepalive: u16,
+    pub local_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug)]
@@ -472,6 +473,9 @@ fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) ->
 }
 
 pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
+    if let Ok(local_addr) = stream.local_addr() {
+        peer.param.local_addr = Some(local_addr);
+    }
     peer.task.connect = None;
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     peer.packet_tx = Some(packet_tx);
@@ -612,7 +616,6 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
             IpAddr::V4(addr) => format!("{}:{}", addr, BGP_PORT),
             IpAddr::V6(addr) => format!("[{}]:{}", addr, BGP_PORT),
         };
-        // XXX Here is a connection to the peer.
         let result = TcpStream::connect(addr).await;
         match result {
             Ok(stream) => {
