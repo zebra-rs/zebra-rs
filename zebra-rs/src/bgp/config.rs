@@ -3,7 +3,7 @@ use bgp_packet::AfiSafi;
 use super::{
     Bgp,
     inst::Callback,
-    peer::{Peer, PeerType, fsm_init},
+    peer::{Peer, PeerType},
     timer,
 };
 
@@ -53,7 +53,7 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
                 } else {
                     PeerType::External
                 };
-                peer.update();
+                peer.start();
             }
         } else if let Some(addr) = args.v6addr() {
             let addr = IpAddr::V6(addr);
@@ -65,7 +65,7 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
                 } else {
                     PeerType::External
                 };
-                peer.update();
+                peer.start();
             }
         }
     }
@@ -112,7 +112,7 @@ fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         let identifier: Ipv4Addr = args.v4addr()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.local_identifier = Some(identifier);
-            peer.update();
+            peer.start();
         }
     }
     Some(())
@@ -129,7 +129,6 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
         } else {
             peer.config.transport.passive = false;
         }
-        peer.state = fsm_init(peer);
     }
 
     Some(())

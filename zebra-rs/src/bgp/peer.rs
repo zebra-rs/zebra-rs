@@ -3,7 +3,6 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use serde::Serialize;
-use std::cmp::min;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
@@ -20,14 +19,15 @@ use cap::CapabilityPacket;
 use cap::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
+use crate::bgp::timer;
 use crate::config::Args;
 
+use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_register_send};
 use super::inst::Message;
 use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
 use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_HOLD_TIME, Bgp};
-use super::{BGP_PORT, timer};
 use crate::context::task::*;
 use crate::rib::api::RibTx;
 use crate::{bgp_debug, bgp_debug_cat, bgp_info};
@@ -160,9 +160,7 @@ pub struct Peer {
     pub config: PeerConfig,
     pub instant: Option<Instant>,
     pub cap_map: CapAfiMap,
-    /// BGP Adj-RIB-In - routes received from this peer
     pub adj_rib_in: BgpAdjRibIn,
-    /// BGP Adj-RIB-Out - routes to be advertised to this peer
     pub adj_rib_out: BgpAdjRibOut,
 }
 
@@ -218,9 +216,9 @@ impl Peer {
         self.config.transport.passive
     }
 
-    pub fn update(&mut self) {
+    pub fn start(&mut self) {
         if self.peer_as != 0 && !self.address.is_unspecified() && !self.active {
-            fsm_init(self);
+            timer::update_timers(self);
             self.active = true;
         }
     }
@@ -248,51 +246,6 @@ fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
     }
     if !update.ipv4_update.is_empty() {
         //;
-    }
-}
-
-fn peer_update_timers(peer: &mut Peer) {
-    use State::*;
-    match peer.state {
-        Idle => {
-            if peer.is_passive() {
-                // When the peer is configured as passive, its status will transition to
-                // Active. This is the only place we manipulate the peer status outside the
-                // FSM.
-                peer.state = Active;
-                peer.timer.idle_hold_timer = None;
-            } else {
-                if peer.timer.idle_hold_timer.is_none() {
-                    peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
-                }
-            }
-            peer.timer.keepalive = None;
-        }
-        Connect => {
-            peer.timer.idle_hold_timer = None;
-            peer.timer.keepalive = None;
-        }
-        Active => {
-            peer.timer.idle_hold_timer = None;
-            peer.timer.keepalive = None;
-        }
-        OpenSent => {
-            peer.timer.idle_hold_timer = None;
-            peer.timer.keepalive = None;
-        }
-        OpenConfirm => {
-            peer.timer.idle_hold_timer = None;
-            peer.timer.keepalive = None;
-        }
-        Established => {
-            peer.timer.idle_hold_timer = None;
-            if peer.timer.hold_timer.is_none() && peer.param.hold_time > 0 {
-                peer.timer.hold_timer = Some(peer_start_holdtimer(peer));
-            }
-            if peer.timer.keepalive.is_none() && peer.param.keepalive > 0 {
-                peer.timer.keepalive = Some(peer_start_keepalive(peer));
-            }
-        }
     }
 }
 
@@ -365,22 +318,8 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     {
         peer.instant = Some(Instant::now());
     }
-    peer_update_timers(peer);
-}
 
-fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
-    bgp_debug!("BGP router ID: {}", bgp.router_id);
-    peer.state.clone()
-}
-
-pub fn fsm_init(peer: &mut Peer) -> State {
-    if peer.is_passive() {
-        peer.timer.idle_hold_timer = None;
-        State::Active
-    } else {
-        peer.timer.idle_hold_timer = Some(peer_start_idle_hold_timer(peer));
-        State::Idle
-    }
+    timer::update_timers(peer);
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
@@ -389,13 +328,12 @@ pub fn fsm_start(peer: &mut Peer) -> State {
 }
 
 pub fn fsm_stop(peer: &mut Peer) -> State {
-    peer.task.writer = None;
-    peer.task.reader = None;
-    peer.timer.idle_hold_timer = None;
-    peer.timer.connect_retry = None;
-    peer.timer.keepalive = None;
-    peer.timer.hold_timer = None;
-    fsm_init(peer)
+    State::Idle
+}
+
+fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
+    bgp_debug!("BGP router ID: {}", bgp.router_id);
+    peer.state.clone()
 }
 
 pub fn capability_as4(caps: &[CapabilityPacket]) -> Option<u32> {
@@ -459,25 +397,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         packet.bgp_id[3],
     );
 
-    // Record received hold time and calcuate keepalive value.
-    peer.param_rx.hold_time = packet.hold_time;
-    peer.param_rx.keepalive = packet.hold_time / 3;
-
-    // Hold timer negotiation.
-    if packet.hold_time == 0 {
-        peer.param.hold_time = 0;
-        peer.param.keepalive = 0;
-    } else {
-        let hold_time = peer.config.timer.hold_time() as u16;
-        peer.param.hold_time = min(packet.hold_time, hold_time);
-        peer.param.keepalive = peer.param.hold_time / 3;
-    }
-    if peer.param.keepalive > 0 {
-        peer.timer.keepalive = Some(peer_start_keepalive(peer));
-    }
-    if peer.param.hold_time > 0 {
-        peer.timer.hold_timer = Some(peer_start_holdtimer(peer));
-    }
+    timer::update_open_timers(peer, &packet);
 
     // Register recv caps.
     cap_register_recv(&packet.caps, &mut peer.cap_map);
@@ -492,7 +412,7 @@ pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> Sta
 
 pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     peer.counter[BgpType::Keepalive as usize].rcvd += 1;
-    peer_refresh_holdtimer(peer);
+    timer::refresh_hold_timer(peer);
     State::Established
 }
 
@@ -543,7 +463,7 @@ fn peer_send_update_test(peer: &mut Peer) {
 
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter[BgpType::Update as usize].rcvd += 1;
-    peer_refresh_holdtimer(peer);
+    timer::refresh_hold_timer(peer);
     route_from_peer(peer, packet, bgp);
 
     peer_send_update_test(peer);
@@ -587,30 +507,8 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
 pub fn fsm_conn_fail(peer: &mut Peer) -> State {
     peer.task.writer = None;
     peer.task.reader = None;
-    peer.timer.connect_retry = Some(peer_start_connect_retry_timer(peer));
+    peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
     State::Active
-}
-
-pub fn peer_start_idle_hold_timer(peer: &Peer) -> Timer {
-    let ident = peer.ident;
-    let tx = peer.tx.clone();
-    Timer::once(peer.config.timer.idle_hold_time(), move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::Event(ident, Event::Start));
-        }
-    })
-}
-
-pub fn peer_start_connect_retry_timer(peer: &Peer) -> Timer {
-    let ident = peer.ident;
-    let tx = peer.tx.clone();
-    Timer::once(peer.config.timer.connect_retry_time(), move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::Event(ident, Event::Start));
-        }
-    })
 }
 
 pub fn peer_packet_parse(
@@ -775,39 +673,11 @@ pub fn peer_send_notification(peer: &mut Peer, code: NotifyCode, sub_code: u8, d
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
-pub fn peer_start_keepalive(peer: &Peer) -> Timer {
-    let ident = peer.ident;
-    let tx = peer.tx.clone();
-    Timer::repeat(peer.param.keepalive as u64, move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::Event(ident, Event::KeepaliveTimerExpires));
-        }
-    })
-}
-
 pub fn peer_send_keepalive(peer: &mut Peer) {
     let header = BgpHeader::new(BgpType::Keepalive, BGP_HEADER_LEN);
     let bytes: BytesMut = header.into();
     peer.counter[BgpType::Keepalive as usize].sent += 1;
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
-}
-
-pub fn peer_start_holdtimer(peer: &Peer) -> Timer {
-    let ident = peer.ident;
-    let tx = peer.tx.clone();
-    Timer::once(peer.param.hold_time as u64, move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::Event(ident, Event::HoldTimerExpires));
-        }
-    })
-}
-
-pub fn peer_refresh_holdtimer(peer: &Peer) {
-    if let Some(holdtimer) = peer.timer.hold_timer.as_ref() {
-        holdtimer.refresh();
-    }
 }
 
 /// Handle incoming connection for a peer based on current BGP state
