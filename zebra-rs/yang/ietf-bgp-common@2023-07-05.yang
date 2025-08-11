@@ -182,6 +182,11 @@ submodule ietf-bgp-common {
         range "0..max";
       }
     }
+    leaf delay-open-time {
+      type uint16 {
+        range "0..max";
+      }
+    }
     leaf min-as-origination-interval {
       type uint16 {
         range "0..max";
