@@ -177,6 +177,11 @@ submodule ietf-bgp-common {
         "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 4.4,
          RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 10.";
     }
+    leaf idle-hold-time {
+      type uint16 {
+        range "0..max";
+      }
+    }
     leaf min-as-origination-interval {
       type uint16 {
         range "0..max";

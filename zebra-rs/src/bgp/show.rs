@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
-use super::peer::{Peer, PeerCounter, PeerParam, State};
+use super::peer::{self, Peer, PeerCounter, PeerParam, State};
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
@@ -275,7 +275,7 @@ fn uptime(instant: &Option<Instant>) -> String {
     peer_uptime(instant, false).0
 }
 
-fn fetch(peer: &Peer) -> Neighbor {
+fn fetch(peer: &Peer) -> Neighbor<'_> {
     let mut n = Neighbor {
         address: peer.address,
         remote_as: peer.peer_as,
@@ -483,6 +483,7 @@ impl Bgp {
         self.show_add("/show/ip/bgp", show_bgp);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary);
         self.show_add("/show/ip/bgp/neighbor", show_bgp_neighbor);
+        self.show_add("/show/ip/bgp/clear", peer::clear);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
