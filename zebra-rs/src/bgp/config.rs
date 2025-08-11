@@ -183,6 +183,10 @@ impl Bgp {
             "/timers/connect-retry-time",
             timer::config::connect_retry_time,
         );
+        self.callback_peer(
+            "/timers/delay-open-time",
+            timer::config::delay_open_time,
+        );
 
         self.pcallback_add("/community-list", config_com_list);
         self.pcallback_add("/community-list/seq", config_com_list_seq);

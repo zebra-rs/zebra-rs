@@ -7,6 +7,7 @@ use super::Bgp;
 #[derive(Debug, Default, Clone)]
 pub struct Config {
     pub idle_hold_time: Option<u16>,
+    pub delay_open_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub connect_retry_time: Option<u16>,
 }
@@ -21,6 +22,14 @@ impl Config {
             idle_hold_time as u64
         } else {
             DEFAULT_IDLE_HOLD_TIME
+        }
+    }
+
+    pub fn delay_open_time(&self) -> Option<u64> {
+        if let Some(delay_open_time) = self.delay_open_time {
+            Some(delay_open_time as u64)
+        } else {
+            None
         }
     }
 
@@ -54,6 +63,20 @@ pub mod config {
             peer.config.timer.idle_hold_time = Some(idle_hold_time);
         } else {
             peer.config.timer.idle_hold_time = None;
+        }
+        Some(())
+    }
+
+    pub fn delay_open_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+        let addr = args.addr()?;
+        let delay_open_time: u16 = args.u16()?;
+
+        let peer = bgp.peers.get_mut(&addr)?;
+
+        if op.is_set() {
+            peer.config.timer.delay_open_time = Some(delay_open_time);
+        } else {
+            peer.config.timer.delay_open_time = None;
         }
         Some(())
     }
