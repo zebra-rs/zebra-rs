@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use bytes::BytesMut;
 use isis_packet::*;
 
+use crate::context::Timer;
 use crate::isis::link::DisStatus;
 use crate::rib::MacAddr;
 use crate::{isis_database_trace, isis_debug, isis_event_trace, isis_info, isis_packet_trace};
@@ -9,7 +10,6 @@ use crate::{isis_database_trace, isis_debug, isis_event_trace, isis_info, isis_p
 use super::inst::{Packet, PacketMessage};
 use super::link::{Afis, HelloPaddingPolicy, LinkTop, LinkType};
 use super::neigh::Neighbor;
-use super::task::Timer;
 use super::{IsisLink, Level, Message, NfsmState};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

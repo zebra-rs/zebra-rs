@@ -17,6 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use crate::{isis_event_trace, isis_info, isis_warn};
 
 use crate::config::{Args, ConfigOp};
+use crate::context::{Timer, TimerType};
 use crate::isis::nfsm::NfsmState;
 use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlags, MacAddr};
@@ -28,7 +29,6 @@ use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
-use super::task::{Timer, TimerType};
 use super::tracing::IsisTracing;
 use super::{IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 

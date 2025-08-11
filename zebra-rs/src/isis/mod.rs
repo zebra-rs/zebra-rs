@@ -14,8 +14,6 @@ pub mod socket;
 
 pub mod adj;
 
-pub mod task;
-
 pub mod nfsm;
 pub use nfsm::{NfsmEvent, NfsmState};
 
