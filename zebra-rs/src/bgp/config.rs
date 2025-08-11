@@ -3,7 +3,7 @@ use bgp_packet::AfiSafi;
 use super::{
     Bgp,
     inst::Callback,
-    peer::{Peer, PeerType, fsm_init},
+    peer::{Peer, PeerType},
     timer,
 };
 
@@ -53,7 +53,7 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
                 } else {
                     PeerType::External
                 };
-                peer.update();
+                peer.start();
             }
         } else if let Some(addr) = args.v6addr() {
             let addr = IpAddr::V6(addr);
@@ -65,7 +65,7 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
                 } else {
                     PeerType::External
                 };
-                peer.update();
+                peer.start();
             }
         }
     }
@@ -112,7 +112,7 @@ fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         let identifier: Ipv4Addr = args.v4addr()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.local_identifier = Some(identifier);
-            peer.update();
+            peer.start();
         }
     }
     Some(())
@@ -129,7 +129,6 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
         } else {
             peer.config.transport.passive = false;
         }
-        peer.state = fsm_init(peer);
     }
 
     Some(())
@@ -168,6 +167,10 @@ impl Bgp {
         self.callbacks.insert(neighbor_prefix + path, cb);
     }
 
+    fn timer(&mut self, path: &str, cb: Callback) {
+        let prefix = String::from("/routing/bgp/neighbor/timers");
+    }
+
     pub fn callback_build(&mut self) {
         self.callback_add("/routing/bgp/global/as", config_global_asn);
         self.callback_add("/routing/bgp/global/identifier", config_global_identifier);
@@ -177,12 +180,13 @@ impl Bgp {
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/afi-safis/afi-safi/enabled", config_afi_safi);
 
-        self.callback_peer("/timers/hold-time", timer::config::hold_time);
-        self.callback_peer("/timers/idle-hold-time", timer::config::idle_hold_time);
-        self.callback_peer(
-            "/timers/connect-retry-time",
-            timer::config::connect_retry_time,
-        );
+        // Timer configuration.
+        self.timer("/hold-time", timer::config::hold_time);
+        self.timer("/idle-hold-time", timer::config::idle_hold_time);
+        self.timer("/connect-retry-time", timer::config::connect_retry_time);
+        self.timer("/delay-open-time", timer::config::delay_open_time);
+        self.timer("/advertisement-interval", timer::config::adv_interval);
+        self.timer("/originate-interval", timer::config::orig_interval);
 
         self.pcallback_add("/community-list", config_com_list);
         self.pcallback_add("/community-list/seq", config_com_list_seq);

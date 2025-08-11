@@ -182,7 +182,12 @@ submodule ietf-bgp-common {
         range "0..max";
       }
     }
-    leaf min-as-origination-interval {
+    leaf delay-open-time {
+      type uint16 {
+        range "0..max";
+      }
+    }
+    leaf originate-interval {
       type uint16 {
         range "0..max";
       }
@@ -195,7 +200,7 @@ submodule ietf-bgp-common {
          9.2.1.2,
          RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 10.";
     }
-    leaf min-route-advertisement-interval {
+    leaf advertisement-interval {
       type uint16 {
         range "0..max";
       }
