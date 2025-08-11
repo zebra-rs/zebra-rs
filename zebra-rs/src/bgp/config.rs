@@ -187,7 +187,7 @@ fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
 
 impl Bgp {
     fn callback_peer(&mut self, path: &str, cb: Callback) {
-        let neighbor_prefix = String::from("/routing/bgp/neighbors/neighbor");
+        let neighbor_prefix = String::from("/routing/bgp/neighbor");
         self.callbacks.insert(neighbor_prefix + path, cb);
     }
 
