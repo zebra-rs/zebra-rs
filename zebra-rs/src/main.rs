@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut rib = Rib::new()?;
 
-    let bgp = Bgp::new(rib.api.tx.clone());
+    let bgp = Bgp::new(rib.tx.clone());
     rib.subscribe(bgp.redist.tx.clone(), "bgp".to_string());
 
     let policy = Policy::new();
