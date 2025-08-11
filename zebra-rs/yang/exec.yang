@@ -76,6 +76,10 @@ module exec {
       container bgp {
         ext:help "BGP commands";
         presence "BGP RIB";
+        leaf clear {
+          ext:help "Temporary command for BGP clear";
+          type empty;
+        }
         leaf summary {
           ext:help "BGP summary information";
           type empty;

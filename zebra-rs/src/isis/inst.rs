@@ -465,7 +465,7 @@ impl Isis {
             }
         }
     }
-    pub fn top(&mut self) -> IsisTop {
+    pub fn top(&mut self) -> IsisTop<'_> {
         let top = IsisTop {
             tx: &self.tx,
             links: &mut self.links,

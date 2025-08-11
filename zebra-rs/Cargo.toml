@@ -10,9 +10,8 @@ unused = "allow"
 anyhow.workspace = true
 bytes = "1"
 ipnet = "2.9"
-# nom = "7"
 prost.workspace = true
-tokio = { workspace = true, features = ["tracing"] }
+tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 console-subscriber = "0.4"
