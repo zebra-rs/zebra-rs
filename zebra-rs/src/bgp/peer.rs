@@ -908,5 +908,8 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
 }
 
 pub fn clear(bgp: &Bgp, args: Args, _json: bool) -> std::result::Result<String, std::fmt::Error> {
+    for (addr, peer) in bgp.peers.iter() {
+        let _ = bgp.tx.send(Message::Event(peer.ident, Event::Stop));
+    }
     Ok(String::from("clear bgp"))
 }
