@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::CapMultiProtocol;
@@ -313,10 +313,16 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
 }
 
 fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
+    let local_info = if let Some(local_addr) = &neighbor.timer.local_addr {
+        format!("  Local host: {}, Local port: {}\n", local_addr.ip(), local_addr.port())
+    } else {
+        String::new()
+    };
+    
     writeln!(
         out,
         r#"BGP neighbor is {}, remote AS {}, local AS {}, {} link
-  BGP version 4, remote router ID {}, local router ID {}
+{}  BGP version 4, remote router ID {}, local router ID {}
   BGP state = {}, up for {}
   Last read 00:00:00, Last write 00:00:00
   Hold time {} seconds, keepalive {} seconds
@@ -327,6 +333,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.remote_as,
         neighbor.local_as,
         neighbor.peer_type,
+        local_info,
         neighbor.remote_router_id,
         neighbor.local_router_id,
         neighbor.state,
