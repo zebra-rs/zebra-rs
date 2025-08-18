@@ -8,7 +8,7 @@ use crate::config::{
 use crate::context::Task;
 use crate::policy::com_list::CommunityListMap;
 use crate::rib;
-use crate::rib::api::{RibRxChannel, RibTx};
+use crate::rib::api::{RibRx, RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -58,6 +58,7 @@ pub struct Bgp {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub rib_tx: UnboundedSender<rib::Message>,
+    pub rib_rx: UnboundedReceiver<RibRx>,
     pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
     pub pcallbacks: HashMap<String, PCallback>,
@@ -89,6 +90,7 @@ impl Bgp {
             rx,
             local_rib: BgpLocalRib::new(),
             rib_tx,
+            rib_rx: chan.rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -246,12 +248,42 @@ impl Bgp {
         Ok(())
     }
 
+    pub fn process_rib_msg(&mut self, msg: RibRx) {
+        // println!("RIB Message {:?}", msg);
+        match msg {
+            RibRx::LinkAdd(link) => {
+                //self.link_add(link);
+            }
+            RibRx::AddrAdd(addr) => {
+                // isis_info!("Isis::AddrAdd {}", addr.addr);
+                // self.addr_add(addr);
+            }
+            RibRx::AddrDel(addr) => {
+                // isis_info!("Isis::AddrDel {}", addr.addr);
+                // self.addr_del(addr);
+            }
+            _ => {
+                //
+            }
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         if let Err(err) = self.listen().await {
             self.listen_err = Some(err);
         }
         loop {
+            match self.rib_rx.recv().await {
+                Some(RibRx::EoR) => break,
+                Some(msg) => self.process_rib_msg(msg),
+                None => break,
+            }
+        }
+        loop {
             tokio::select! {
+                Some(msg) = self.rib_rx.recv() => {
+                    self.process_rib_msg(msg);
+                }
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);
                 }
