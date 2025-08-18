@@ -160,7 +160,7 @@ impl Nanomsg {
 
     fn isis_global_update(&self) -> MsgEnum {
         let msg = IsisGlobal {
-            hostname: "zebra".into(),
+            hostname: "s".into(),
         };
         MsgEnum::IsisGlobal(msg)
     }
@@ -168,17 +168,17 @@ impl Nanomsg {
     fn isis_instance_add(&self) -> MsgEnum {
         let net = IsisNet {
             del: vec![],
-            add: vec!["49.0000.0000.0000.0002.00".into()],
+            add: vec!["49.0000.0000.0000.0001.00".into()],
         };
         let msg = IsisInstance {
-            instance_tag: "zebra".into(),
+            instance_tag: "s".into(),
             log_adjacency_changes: true,
             net,
             is_type: 2,
             metric_style: 2,
             segment_routing: "mpls".into(),
             mpls_traffic_eng: RouterId {
-                router_id: "2.2.2.3".into(),
+                router_id: "10.0.0.1".into(),
             },
             ipv4_unicast: AddressFamily { ti_lfa: true },
         };
@@ -188,9 +188,9 @@ impl Nanomsg {
     fn isis_if_add_enp0s6(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "enp0s6".into(),
-            instance_tag: "zebra".into(),
+            instance_tag: "s".into(),
             ipv4_enable: true,
-            network_type: 1,
+            network_type: 2,
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 100 }),
@@ -202,9 +202,9 @@ impl Nanomsg {
     fn isis_if_add_enp0s7(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "enp0s7".into(),
-            instance_tag: "zebra".into(),
+            instance_tag: "s".into(),
             ipv4_enable: true,
-            network_type: 1,
+            network_type: 2,
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 200 }),
@@ -216,11 +216,11 @@ impl Nanomsg {
     fn isis_if_add_lo(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "lo".into(),
-            instance_tag: "zebra".into(),
+            instance_tag: "s".into(),
             ipv4_enable: true,
             network_type: 1,
             circuit_type: 2,
-            prefix_sid: Some(PrefixSid { index: 200 }),
+            prefix_sid: Some(PrefixSid { index: 100 }),
             adjacency_sid: None,
             srlg_group: "".into(),
         };
@@ -244,7 +244,7 @@ impl Nanomsg {
     fn isis_if_add_lo_no_sid(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "lo".into(),
-            instance_tag: "zebra".into(),
+            instance_tag: "s".into(),
             ipv4_enable: true,
             network_type: 1,
             circuit_type: 2,
