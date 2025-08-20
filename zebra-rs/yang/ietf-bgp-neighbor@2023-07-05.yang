@@ -106,6 +106,14 @@ submodule ietf-bgp-neighbor {
              Loc-RIB";
         }
       }
+      container long-lived-graceful-restart {
+        leaf enabled {
+          type boolean;
+        }
+        leaf restart-time {
+          type uint32;
+        }
+      }
       container graceful-restart {
         if-feature "bt:graceful-restart";
         description

@@ -420,10 +420,11 @@ module iana-bgp-types {
   /* BGP Route Reflector Types. */
 
   typedef rr-cluster-id-type {
-    type union {
-      type uint32;
-      type yang:dotted-quad;
-    }
+    type string;
+    // type union {
+    //   type uint32;
+    //   type yang:dotted-quad;
+    // }
     description
       "Union type for route reflector cluster ids:
        option 1: 4-byte number

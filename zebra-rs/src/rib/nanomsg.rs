@@ -109,6 +109,11 @@ struct PrefixSid {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct IsisIfLevel {
+    metric: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct IsisIf {
     ifname: String,
     #[serde(rename = "instance-tag")]
@@ -125,6 +130,8 @@ struct IsisIf {
     adjacency_sid: Option<PrefixSid>,
     #[serde(rename = "srlg-group")]
     srlg_group: String,
+    #[serde(rename = "l2-config")]
+    l2_config: Option<IsisIfLevel>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -195,6 +202,7 @@ impl Nanomsg {
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 100 }),
             srlg_group: "group-1".into(),
+            l2_config: Some(IsisIfLevel { metric: 20 }),
         };
         MsgEnum::IsisIf(msg)
     }
@@ -209,6 +217,7 @@ impl Nanomsg {
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 200 }),
             srlg_group: "group-1".into(),
+            l2_config: Some(IsisIfLevel { metric: 20 }),
         };
         MsgEnum::IsisIf(msg)
     }
@@ -223,6 +232,7 @@ impl Nanomsg {
             prefix_sid: Some(PrefixSid { index: 100 }),
             adjacency_sid: None,
             srlg_group: "".into(),
+            l2_config: None,
         };
         MsgEnum::IsisIf(msg)
     }
@@ -251,6 +261,7 @@ impl Nanomsg {
             prefix_sid: None,
             adjacency_sid: None,
             srlg_group: "".into(),
+            l2_config: None,
         };
         MsgEnum::IsisIf(msg)
     }
