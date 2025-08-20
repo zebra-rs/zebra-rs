@@ -30,7 +30,7 @@ use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::context::task::*;
 use crate::rib::api::RibTx;
-use crate::{bgp_debug, bgp_debug_cat, bgp_info};
+use crate::{bgp_debug, bgp_debug_cat, bgp_info, rib};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -134,6 +134,7 @@ impl PeerType {
 pub struct PeerParam {
     pub hold_time: u16,
     pub keepalive: u16,
+    pub local_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug)]
@@ -234,7 +235,7 @@ impl Peer {
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut BgpLocalRib,
-    pub rib_tx: &'a UnboundedSender<RibTx>,
+    pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
 fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
@@ -288,7 +289,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         local_rib: &mut bgp.local_rib,
-        rib_tx: &bgp.rib,
+        rib_tx: &bgp.rib_tx,
     };
     let peer = bgp.peers.get_mut(&id).unwrap();
     let prev_state = peer.state.clone();
@@ -472,6 +473,9 @@ fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) ->
 }
 
 pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
+    if let Ok(local_addr) = stream.local_addr() {
+        peer.param.local_addr = Some(local_addr);
+    }
     peer.task.connect = None;
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     peer.packet_tx = Some(packet_tx);
@@ -612,7 +616,6 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
             IpAddr::V4(addr) => format!("{}:{}", addr, BGP_PORT),
             IpAddr::V6(addr) => format!("[{}]:{}", addr, BGP_PORT),
         };
-        // XXX Here is a connection to the peer.
         let result = TcpStream::connect(addr).await;
         match result {
             Ok(stream) => {
