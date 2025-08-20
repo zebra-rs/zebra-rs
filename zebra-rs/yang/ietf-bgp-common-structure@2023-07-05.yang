@@ -153,6 +153,9 @@ submodule ietf-bgp-common-structure {
           "Enable ability to receive multiple path advertisements for
            an NLRI from the neighbor or group";
       }
+      leaf send-max {
+        type uint8;
+      }
       choice send {
         description
           "Choice of sending the max. number of paths or to send

@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use super::peer::{ConfigRef, Peer};
+use crate::rib;
 use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
 use ipnet::IpNet;
 use tokio::sync::mpsc::UnboundedSender;
@@ -516,7 +517,7 @@ impl BgpLocalRib {
 /// Send a BGP route to the main RIB for installation
 pub fn send_route_to_rib(
     bgp_route: &BgpRoute,
-    rib_tx: &UnboundedSender<RibTx>,
+    rib_tx: &UnboundedSender<rib::Message>,
     install: bool,
 ) -> Result<(), anyhow::Error> {
     // Create RIB entry for BGP route
@@ -541,18 +542,18 @@ pub fn send_route_to_rib(
     rib_entry.nexthop = Nexthop::Uni(nexthop_uni);
 
     // Convert prefix to IpNet
-    let prefix = IpNet::V4(bgp_route.prefix);
+    let prefix = bgp_route.prefix.clone();
 
     // Send appropriate message to RIB
     let msg = if install {
-        RibTx::RouteAdd {
+        rib::Message::Ipv4Add {
             prefix,
-            entry: rib_entry,
+            rib: rib_entry,
         }
     } else {
-        RibTx::RouteDel {
+        rib::Message::Ipv4Del {
             prefix,
-            entry: rib_entry,
+            rib: rib_entry,
         }
     };
 

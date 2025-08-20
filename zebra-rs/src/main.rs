@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut rib = Rib::new()?;
 
-    let bgp = Bgp::new(rib.api.tx.clone());
+    let bgp = Bgp::new(rib.tx.clone());
     rib.subscribe(bgp.redist.tx.clone(), "bgp".to_string());
 
     let policy = Policy::new();
@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
     bgp::serve(bgp);
 
     rib::serve(rib);
-    rib::nanomsg::serve();
+    // rib::nanomsg::serve();
 
     // Setup tracing based on CLI arguments
     let log_config = logging_config_from_args(&arg.log_output, &arg.log_file, &arg.log_format);
