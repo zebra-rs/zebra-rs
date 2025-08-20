@@ -566,12 +566,12 @@ module ietf-bgp {
           uses prefix-limit-state-common;
         }
 
-        container afi-safis {
+        //container afi-safis {
           description
             "Per-address-family configuration parameters associated
                with the neighbor";
           uses bgp-neighbor-afi-safi-list;
-        }
+        //}
 
         leaf session-state {
           type enumeration {

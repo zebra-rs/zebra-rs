@@ -618,6 +618,9 @@ submodule ietf-bgp-common {
       reference
         "RFC 4724: Graceful Restart Mechanism for BGP.";
     }
+    leaf long-lived-enabled {
+      type boolean;
+    }
   }
 
   grouping global-group-use-multiple-paths {
