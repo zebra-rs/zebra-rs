@@ -1,3 +1,52 @@
+2025-08-20  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* zebra-rs/src/bgp/show.rs (show_bgp_neighbor): Display local IP
+	address and port in BGP neighbor show command. Shows "Local host:
+	<IP>, Local port: <port>" when TCP connection is established. Uses
+	peer.param.local_addr populated during connection establishment.
+
+	* zebra-rs/src/bgp/peer.rs (clear): Implement BGP clear command
+	functionality. Sends Stop events to all configured peers to reset
+	BGP sessions when "clear bgp" is executed.
+
+	* zebra-rs/src/bgp/timer.rs: Extract BGP timer logic into dedicated
+	module. Move timer creation, update logic, and negotiation from
+	peer.rs. Add timer helper macros start_timer! and start_repeater!
+	for cleaner code. Centralize timer management with state-based
+	lifecycle.
+
+	* zebra-rs/src/bgp/timer.rs: Add more BGP timer configurations:
+	delay-open-time, advertisement-interval (MinRouteAdvertisementInterval),
+	and AS origination interval (MinASOriginationInterval). Extended
+	timer::Config with optional fields and configuration handlers.
+
+	* zebra-rs/yang/ietf-bgp@2023-07-05.yang: Reduce BGP neighbor
+	configuration hierarchy from /routing/bgp/neighbors/neighbor to
+	/routing/bgp/neighbor for simpler, more intuitive CLI structure.
+
+	* zebra-rs/src/context/task.rs: Move task.rs from ISIS module to
+	shared context module for code reuse between BGP and ISIS. Remove
+	duplicate BGP-specific task module.
+
+	* zebra-rs/src/config/configs.rs: Implement addr() and net() methods
+	in Args for parsing IP addresses and networks supporting both IPv4
+	and IPv6. Methods parse input and return appropriate IpAddr or IpNet
+	enum variants.
+
+	* zebra-rs/src/config/parse.rs: Fix YANG union type handling. Pass
+	individual union member TypeNodes to matchers instead of parent node.
+	Remove redundant Union type handler from match_builder.
+
+	* zebra-rs/src/policy/: Implement route policy framework foundation.
+	Replace plist_ipv4 with unified prefix_set module. Add policy list
+	management with entry-based evaluation. Extend YANG with
+	policy-options configuration supporting prefix sets, policy lists,
+	match conditions, and actions.
+
+	* zebra-rs/Cargo.toml: Implement cargo workspace inheritance for
+	centralized version and dependency management. Add workspace.package
+	and workspace.dependencies sections.
+
 2025-08-02  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* version: 0.7.8
