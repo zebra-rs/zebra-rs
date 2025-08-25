@@ -24,9 +24,6 @@ pub struct Node {
     pub sys_id: String,
     pub olinks: Vec<Link>,
     pub ilinks: Vec<Link>,
-    //pub is_disabled: bool,
-    //pub is_srv6: bool,
-    //pub is_srmpls: bool,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -43,9 +40,6 @@ impl Node {
             sys_id: name.into(), // Default to name for backward compatibility
             olinks: Vec::new(),
             ilinks: Vec::new(),
-            // is_disabled: false,
-            // is_srv6: true,
-            // is_srmpls: true,
         }
     }
 
@@ -57,13 +51,9 @@ impl Node {
         }
     }
 
-    // pub fn is_srv6_capable(&self) -> bool {
-    //     self.is_srv6
-    // }
-
-    // pub fn is_srmpls(&self) -> bool {
-    //     self.is_srmpls
-    // }
+    pub fn is_disabled(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -150,15 +140,15 @@ pub fn spf_calc(
             continue;
         };
 
-        // if edge.is_disabled {
-        //     continue;
-        // }
+        if edge.is_disabled() {
+            continue;
+        }
 
         for link in edge.links(direct).iter() {
             if let Some(x) = graph.get(&link.id(direct)) {
-                // if x.is_disabled {
-                //     continue;
-                // }
+                if x.is_disabled() {
+                    continue;
+                }
             };
 
             let c = paths
@@ -458,5 +448,61 @@ pub fn disp(spf: &BTreeMap<usize, Path>, full_path: bool) {
                 println!("  metric {} path {:?}", nhops.cost, p);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ecmp() {
+        let mut graph = BTreeMap::new();
+
+        // First, insert all nodes
+        let nodes = vec![
+            Node::new("N1", 0),
+            Node::new("N2", 1),
+            Node::new("N3", 2),
+            Node::new("N4", 3),
+            Node::new("N5", 4),
+        ];
+
+        for node in nodes {
+            graph.insert(node.id, node);
+        }
+
+        // Define links between nodes
+        let links = vec![
+            (0, 1, 10),
+            (0, 2, 10),
+            (1, 0, 10),
+            (1, 2, 5),
+            (1, 3, 10),
+            (2, 0, 10),
+            (2, 1, 5),
+            (2, 3, 10),
+            (3, 1, 10),
+            (3, 2, 10),
+            (3, 4, 10),
+            (4, 3, 10),
+        ];
+
+        // Now add links to the respective nodes stored in our BTreeMap
+        for (from, to, cost) in links {
+            graph
+                .get_mut(&from)
+                .unwrap()
+                .olinks
+                .push(Link::new(from, to, cost));
+        }
+
+        let mut opt = SpfOpt::new();
+        let tree = spf(&graph, 0, &opt);
+        disp(&tree, false);
+
+        opt.full_path = true;
+        let tree = spf(&graph, 0, &opt);
+        disp(&tree, true);
     }
 }
