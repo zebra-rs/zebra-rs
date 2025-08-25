@@ -6,7 +6,7 @@ pub type Graph = BTreeMap<usize, Node>;
 #[derive(Default)]
 pub struct SpfOpt {
     pub full_path: bool,
-    pub path_max: usize,
+    pub path_max: Option<usize>,
     pub srmpls: bool,
     pub srv6: bool,
 }
@@ -119,6 +119,7 @@ impl Path {
 pub fn spf_calc(
     graph: &Graph,
     root: usize,
+    x: Option<usize>,
     opt: &SpfOpt,
     direct: &SpfDirect,
 ) -> BTreeMap<usize, Path> {
@@ -140,16 +141,21 @@ pub fn spf_calc(
             continue;
         };
 
-        if edge.is_disabled() {
+        // For TI-LFA, we skip down node.
+        if let Some(x) = x
+            && edge.id == x
+        {
             continue;
         }
 
         for link in edge.links(direct).iter() {
-            if let Some(x) = graph.get(&link.id(direct)) {
-                if x.is_disabled() {
-                    continue;
-                }
-            };
+            // For TI-LFA, we skip a link which connects to down node.
+            if let Some(x) = x
+                && let Some(next) = graph.get(&link.id(direct))
+                && next.id == x
+            {
+                continue;
+            }
 
             let c = paths
                 .entry(link.id(direct))
@@ -184,7 +190,7 @@ pub fn spf_calc(
                 }
             } else if opt.full_path {
                 for path in &v.paths {
-                    if opt.path_max == 0 || c.paths.len() < opt.path_max {
+                    if opt.path_max.map_or(true, |max| c.paths.len() < max) {
                         let mut newpath = path.clone();
                         newpath.push(c.id);
                         c.paths.push(newpath);
@@ -192,7 +198,7 @@ pub fn spf_calc(
                 }
             } else {
                 for nhop in &v.nexthops {
-                    if opt.path_max == 0 || c.nexthops.len() < opt.path_max {
+                    if opt.path_max.map_or(true, |max| c.paths.len() < max) {
                         let mut newnhop = nhop.clone();
                         if nhop.is_empty() {
                             newnhop.push(c.id);
@@ -223,11 +229,11 @@ pub fn spf_calc(
 }
 
 pub fn spf(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
-    spf_calc(graph, root, opt, &SpfDirect::Normal)
+    spf_calc(graph, root, None, opt, &SpfDirect::Normal)
 }
 
 pub fn spf_reverse(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
-    spf_calc(graph, root, opt, &SpfDirect::Reverse)
+    spf_calc(graph, root, None, opt, &SpfDirect::Reverse)
 }
 
 pub fn path_has_x(path: &[usize], x: usize) -> bool {
@@ -453,6 +459,8 @@ pub fn disp(spf: &BTreeMap<usize, Path>, full_path: bool) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -497,12 +505,97 @@ mod tests {
                 .push(Link::new(from, to, cost));
         }
 
+        // SPF with nexthop tracking mode.
         let mut opt = SpfOpt::new();
         let tree = spf(&graph, 0, &opt);
-        disp(&tree, false);
 
+        // node: 0 nexthops: 1
+        //   metric 0 path []
+        // node: 1 nexthops: 1
+        //   metric 10 path [1]
+        // node: 2 nexthops: 1
+        //   metric 10 path [2]
+        // node: 3 nexthops: 2
+        //   metric 20 path [2]
+        //   metric 20 path [1]
+        // node: 4 nexthops: 2
+        //   metric 30 path [1]
+        //   metric 30 path [2]
+
+        // Verify source node has only one nexthop with metric = 0 and empty
+        // path.
+        let Some(s) = tree.get(&0) else {
+            panic!("SPF does not have source node");
+        };
+        assert_eq!(s.cost, 0);
+        assert_eq!(s.nexthops.len(), 1);
+        assert!(s.nexthops.iter().next().unwrap().is_empty());
+
+        // Verify ECMP node.
+        let Some(n) = tree.get(&3) else {
+            panic!("SPF node 3 does not exist");
+        };
+        assert_eq!(n.cost, 20);
+        assert_eq!(n.nexthops.len(), 2);
+        let nhops: BTreeSet<usize> = n.nexthops.iter().flatten().copied().collect();
+        assert_eq!(nhops, BTreeSet::from([1, 2]));
+
+        // SPF with full path tracking mode.
         opt.full_path = true;
         let tree = spf(&graph, 0, &opt);
-        disp(&tree, true);
+
+        // node: 0 nexthops: 1
+        //   metric 0 path []
+        // node: 1 nexthops: 1
+        //   metric 10 path [1]
+        // node: 2 nexthops: 1
+        //   metric 10 path [2]
+        // node: 3 nexthops: 2
+        //   metric 20 path [1, 3]
+        //   metric 20 path [2, 3]
+        // node: 4 nexthops: 2
+        //   metric 30 path [1, 3, 4]
+        //   metric 30 path [2, 3, 4]
+
+        // Source node.
+        let Some(s) = tree.get(&0) else {
+            panic!("SPF does not have source node");
+        };
+        assert_eq!(s.cost, 0);
+        assert_eq!(s.nexthops.len(), 1);
+        assert!(s.nexthops.iter().next().unwrap().is_empty());
+
+        // Node 4.
+        let Some(n) = tree.get(&4) else {
+            panic!("SPF node 4 does not exist");
+        };
+        assert_eq!(n.cost, 30);
+        assert_eq!(n.paths.len(), 2);
+        assert_eq!(*n.paths.get(0).unwrap(), vec![1, 3, 4]);
+        assert_eq!(*n.paths.get(1).unwrap(), vec![2, 3, 4]);
+
+        // SPF with full path and path max = 1.
+        opt.full_path = true;
+        opt.path_max = Some(1);
+        let tree = spf(&graph, 0, &opt);
+
+        // node: 0 nexthops: 1
+        //   metric 0 path []
+        // node: 1 nexthops: 1
+        //   metric 10 path [1]
+        // node: 2 nexthops: 1
+        //   metric 10 path [2]
+        // node: 3 nexthops: 1
+        //   metric 20 path [1, 3]
+        // node: 4 nexthops: 1
+        //   metric 30 path [1, 3, 4]
+
+        // Node 3.
+        let Some(n) = tree.get(&3) else {
+            panic!("SPF node 3 does not exist");
+        };
+        assert_eq!(n.cost, 20);
+        assert_eq!(n.paths.len(), 1);
+        assert_eq!(*n.paths.get(0).unwrap(), vec![1, 3]);
     }
 }
