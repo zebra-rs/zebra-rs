@@ -909,7 +909,7 @@ mod tests {
             label: false,
             mac: None,
             addr4: Vec::new(),
-            addrv4: Vec::new(),
+            //addrv4: Vec::new(),
             addr6: Vec::new(),
         };
 
@@ -945,7 +945,7 @@ mod tests {
             label: false,
             mac: None,
             addr4: Vec::new(),
-            addrv4: Vec::new(),
+            //addrv4: Vec::new(),
             addr6: Vec::new(),
         };
 
