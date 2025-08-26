@@ -557,9 +557,7 @@ mod tests {
         assert_eq!(*n.paths.get(0).unwrap(), vec![1, 3]);
     }
 
-    #[test]
-    fn tilfa() {
-        //
+    fn tilfa_graph() -> Graph {
         let mut graph = BTreeMap::new();
 
         // Insert nodes
@@ -625,6 +623,30 @@ mod tests {
                 .ilinks
                 .push(Link::new(from, to, cost));
         }
+        graph
+    }
+
+    fn seg_disp(graph: &Graph, seg: &SrSegment) -> String {
+        match seg {
+            SrSegment::NodeSid(id) => {
+                format!("NodeSid({})", graph.get(&id).map(|n| &n.name).unwrap())
+            }
+            SrSegment::AdjSid(from, to) => {
+                format!(
+                    "AdjSid({}, {})",
+                    graph.get(&from).map(|n| &n.name).unwrap(),
+                    graph.get(&to).map(|n| &n.name).unwrap()
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn tilfa_test() {
+        let mut graph = tilfa_graph();
+
+        let node_name = |graph: &Graph, id: usize| graph.get(&id).map(|n| &n.name).unwrap().clone();
+
         // TI-LFA draft
         // *  First, P(S, N1) is computed and results in [N3, N2, R1].
         let s = 0;
@@ -632,21 +654,24 @@ mod tests {
         let x = 1;
 
         let p = p_space_nodes(&graph, s, x);
-        let mut p_nodes = BTreeSet::<&str>::new();
+        let mut p_nodes = BTreeSet::<String>::new();
         for n in p.iter() {
-            let node = nodes.get(*n).unwrap();
-            p_nodes.insert(&node.name);
+            let name = node_name(&graph, *n);
+            p_nodes.insert(name);
         }
-        assert_eq!(p_nodes, BTreeSet::from(["N3", "N2", "R1"]));
+        assert_eq!(
+            p_nodes,
+            BTreeSet::from(["N3".into(), "N2".into(), "R1".into()])
+        );
 
         // Then, Q(D, N1) is computed and results in [R3].
         let q = q_space_nodes(&graph, d, x);
-        let mut q_nodes = BTreeSet::<&str>::new();
+        let mut q_nodes = BTreeSet::<String>::new();
         for n in q.iter() {
-            let node = nodes.get(*n).unwrap();
-            q_nodes.insert(&node.name);
+            let name = node_name(&graph, *n);
+            q_nodes.insert(name);
         }
-        assert_eq!(q_nodes, BTreeSet::from(["R3"]));
+        assert_eq!(q_nodes, BTreeSet::from(["R3".into()]));
 
         // *  The expected post-convergence path from S to D considering the
         // failure of N1 is <N2 -> R1 -> R2 -> R3 -> D> (we are naming it
@@ -654,10 +679,10 @@ mod tests {
         let mut pc_paths = pc_paths(&graph, s, d, x);
         assert_eq!(pc_paths.len(), 1);
         let pc_path = pc_paths.get(0).unwrap();
-        let mut pc_nodes = Vec::<&str>::new();
+        let mut pc_nodes = Vec::<String>::new();
         for n in pc_path.iter() {
-            let node = nodes.get(*n).unwrap();
-            pc_nodes.push(&node.name);
+            let name = node_name(&graph, *n);
+            pc_nodes.push(name);
         }
         assert_eq!(pc_nodes, vec!["N2", "R1", "R2", "R3", "D"]);
 
@@ -678,41 +703,39 @@ mod tests {
 
             print!("  ");
             for i in pc_inter.iter() {
-                let node = nodes.get(i.id).unwrap();
-                print!(" {}", node.name);
+                let name = node_name(&graph, i.id);
+                print!(" {}", name);
             }
             println!("");
 
             print!("P ");
             for i in pc_inter.iter() {
-                let node = nodes.get(i.id).unwrap();
                 print!(" {} ", if i.p { "o" } else { "x" });
             }
             println!("");
 
             print!("Q ");
             for i in pc_inter.iter() {
-                let node = nodes.get(i.id).unwrap();
                 print!(" {} ", if i.q { "o" } else { "x" });
             }
             println!("");
 
             // Asssert P(S, N1)
-            let mut p_inter = Vec::<&str>::new();
+            let mut p_inter = Vec::<String>::new();
             for i in pc_inter.iter() {
                 if i.p {
-                    let node = nodes.get(i.id).unwrap();
-                    p_inter.push(&node.name);
+                    let name = node_name(&graph, i.id);
+                    p_inter.push(name);
                 };
             }
             assert_eq!(p_inter, vec!["N2", "R1"]);
 
             // Assert Q(D, N1)
-            let mut q_inter = Vec::<&str>::new();
+            let mut q_inter = Vec::<String>::new();
             for i in pc_inter.iter().rev() {
                 if i.q {
-                    let node = nodes.get(i.id).unwrap();
-                    q_inter.push(&node.name);
+                    let name = node_name(&graph, i.id);
+                    q_inter.push(name);
                 };
             }
             assert_eq!(q_inter, vec!["R3"]);
@@ -728,27 +751,41 @@ mod tests {
             let second_segment = repair_list.get(1).unwrap();
             let third_segment = repair_list.get(2).unwrap();
 
-            // Helper function.
-            let disp = |graph: &Graph, x: &SrSegment| match x {
-                SrSegment::NodeSid(nid) => {
-                    format!("NodeSid({})", graph.get(&nid).map(|n| &n.name).unwrap())
-                }
-                SrSegment::AdjSid(from, to) => {
-                    format!(
-                        "AdjSid({}, {})",
-                        graph.get(&from).map(|n| &n.name).unwrap(),
-                        graph.get(&to).map(|n| &n.name).unwrap()
-                    )
-                }
-            };
-            let first_disp = disp(&graph, first_segment);
+            let first_disp = seg_disp(&graph, first_segment);
             assert_eq!(first_disp, "NodeSid(R1)");
 
-            let second_disp = disp(&graph, second_segment);
+            let second_disp = seg_disp(&graph, second_segment);
             assert_eq!(second_disp, "AdjSid(R1, R2)");
 
-            let third_disp = disp(&graph, third_segment);
+            let third_disp = seg_disp(&graph, third_segment);
             assert_eq!(third_disp, "AdjSid(R2, R3)");
         }
+    }
+
+    #[test]
+    fn tilfa_api() {
+        let graph = tilfa_graph();
+
+        let s = 0;
+        let d = 7;
+        let x = 1;
+
+        let repair_paths = tilfa(&graph, s, d, x);
+        assert_eq!(repair_paths.len(), 1);
+        let repair_list = repair_paths.get(0).unwrap();
+
+        assert_eq!(repair_list.len(), 3);
+        let first_segment = repair_list.get(0).unwrap();
+        let second_segment = repair_list.get(1).unwrap();
+        let third_segment = repair_list.get(2).unwrap();
+
+        let first_disp = seg_disp(&graph, first_segment);
+        assert_eq!(first_disp, "NodeSid(R1)");
+
+        let second_disp = seg_disp(&graph, second_segment);
+        assert_eq!(second_disp, "AdjSid(R1, R2)");
+
+        let third_disp = seg_disp(&graph, third_segment);
+        assert_eq!(third_disp, "AdjSid(R2, R3)");
     }
 }
