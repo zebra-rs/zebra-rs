@@ -22,7 +22,7 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::area::OspfArea;
+use super::area::{OspfArea, OspfAreaMap};
 use super::config::OspfNetworkConfig;
 use super::ifsm::{IfsmEvent, ospf_ifsm};
 use super::link::OspfLink;
@@ -42,7 +42,7 @@ pub struct Ospf {
     pub callbacks: HashMap<String, Callback>,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink>,
-    pub areas: BTreeMap<u8, OspfArea>,
+    pub areas: OspfAreaMap,
     pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -84,7 +84,7 @@ impl Ospf {
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
             links: BTreeMap::new(),
-            areas: BTreeMap::new(),
+            areas: OspfAreaMap::new(),
             table: PrefixMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
