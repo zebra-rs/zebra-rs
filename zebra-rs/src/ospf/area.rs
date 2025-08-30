@@ -5,7 +5,7 @@ pub struct OspfAreaMap {
     pub vec: Vec<Option<OspfArea>>,
 }
 
-pub trait MapSlot {
+pub trait MapVec {
     fn id(&self) -> usize;
     fn set_id(&mut self, id: usize);
 }
@@ -28,9 +28,20 @@ impl OspfAreaMap {
         self.vec.get_mut(index)?.as_mut()
     }
 
-    // pub fn fetch(&mut self, area_id: u32) -> &OspfArea {
-    //     //
-    // }
+    pub fn fetch(&mut self, area_id: u32) -> Option<&mut OspfArea> {
+        let index = if let Some(&index) = self.mapping.get(&area_id) {
+            index
+        } else {
+            let index = self.vec.len();
+            self.mapping.insert(area_id, index);
+            self.vec.push(None);
+            index
+        };
+        if self.vec[index].is_none() {
+            self.vec[index] = Some(OspfArea::new(index, area_id));
+        }
+        self.vec.get_mut(index).and_then(|slot| slot.as_mut())
+    }
 }
 
 pub struct OspfArea {
@@ -41,5 +52,15 @@ pub struct OspfArea {
 impl OspfArea {
     pub fn new(id: usize, area_id: u32) -> Self {
         Self { id, area_id }
+    }
+}
+
+impl MapVec for OspfArea {
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    fn set_id(&mut self, id: usize) {
+        self.id = id;
     }
 }
