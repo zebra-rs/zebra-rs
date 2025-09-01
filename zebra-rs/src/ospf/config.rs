@@ -15,15 +15,28 @@ impl Ospf {
     }
 }
 
+// network 192.168.10.0/24 area 0
+// network 192.168.3.0/24 area 0
+
 fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let network = args.v4net()?;
     let area_id = args.u32()?;
 
-    let area = ospf.areas.fetch(area_id)?;
-
     if op.is_set() {
-        let entry = ospf.table.entry(network).or_default();
-        entry.area = area.id();
+        let area = ospf.areas.fetch(area_id)?;
+        let network_area = ospf.table.entry(network).or_default();
+        network_area.area = area.id();
+    } else {
+        ospf.table.remove(&network);
+    }
+
+    for (_, link) in ospf.links.iter() {
+        let enabled = link.enabled;
+        let area_id = link.area_id;
+
+        for addr in link.addr.iter() {
+            // ospf.table.get();
+        }
     }
 
     Some(())
