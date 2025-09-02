@@ -392,6 +392,20 @@ module ietf-bgp {
             "The remote IP address of this entry's BGP peer.";
         }
 
+        // Clear neighbor action.
+        action clear {
+          description "Reset/refresh this specific BGP neighbor";
+          input {
+            leaf mode {
+              type enumeration { enum hard; enum soft-in; enum soft-out; enum soft; }
+              default "soft";
+            }
+          }
+          output {
+            leaf result { type string; }
+          }
+        }
+
         leaf peer-group {
           type leafref {
             path "../../../peer-groups/peer-group/name";
