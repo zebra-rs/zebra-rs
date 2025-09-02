@@ -490,43 +490,18 @@ module config {
       }
     }
 
-    list community-list {
-      description
-        "Enclosing container for list of defined BGP community
-           sets.";
+    list community-set {
       key "name";
-      description
-        "List of defined BGP community sets.";
       leaf name {
         type string;
-        description
-          "Name / label of the community set -- this is used to
-               reference the set in match conditions.";
       }
-      list seq {
-        key "seq";
+      leaf-list member {
+        type string;
         description
-          "List of defined BGP community sets.";
-        leaf seq {
-          type uint32;
-          description
-            "Name / label of the community set -- this is used to
-               reference the set in match conditions.";
-        }
-        leaf action {
-          mandatory true;
-          type enumeration {
-            enum permit;
-            enum deny;
-          }
-        }
-        leaf-list member {
-          type string;
-          description
-            "Members of the community set";
-        }
+          "Members of the community set";
       }
     }
+
     list prefix-set {
       key "name";
       leaf name {
@@ -636,6 +611,9 @@ module config {
             }
             leaf "med" {
               type uint32;
+            }
+            leaf "next-hop" {
+              type inet:ipv4-address;
             }
           }
           leaf "action" {
