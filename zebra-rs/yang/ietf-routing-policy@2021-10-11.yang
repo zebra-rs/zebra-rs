@@ -503,47 +503,11 @@ module ietf-routing-policy {
          Import and export policies are with respect to the local
          routing table, i.e., export (send) and import (receive),
          depending on the context.";
-      leaf-list import-policy {
-        type leafref {
-          path "/rt-pol:routing-policy/rt-pol:policy-definitions/"
-             + "rt-pol:policy-definition/rt-pol:name";
-          require-instance true;
-        }
-        ordered-by user;
-        description
-          "List of policy names in sequence to be applied on
-           receiving redistributed routes from another routing
-           protocol or receiving a routing update in the current
-           context, e.g., for the current peer group, neighbor,
-           address family, etc.";
+      leaf in {
+        type string;
       }
-      leaf default-import-policy {
-        type default-policy-type;
-        default "reject-route";
-        description
-          "Explicitly set a default policy if no policy definition
-           in the import policy chain is satisfied.";
-      }
-      leaf-list export-policy {
-        type leafref {
-          path "/rt-pol:routing-policy/rt-pol:policy-definitions/"
-             + "rt-pol:policy-definition/rt-pol:name";
-          require-instance true;
-        }
-        ordered-by user;
-        description
-          "List of policy names in sequence to be applied on
-           redistributing routes from one routing protocol to another
-           or sending a routing update in the current context, e.g.,
-           for the current peer group, neighbor, address family,
-           etc.";
-      }
-      leaf default-export-policy {
-        type default-policy-type;
-        default "reject-route";
-        description
-          "Explicitly set a default policy if no policy definition
-           in the export policy chain is satisfied.";
+      leaf out {
+        type string;
       }
     }
   }
