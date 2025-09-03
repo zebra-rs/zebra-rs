@@ -1,4 +1,4 @@
-use std::{io::Read, thread, time::Duration};
+use std::{io::Read, net::Ipv4Addr, thread, time::Duration};
 
 use nanomsg::{Protocol, Socket};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,9 @@ enum MsgEnum {
     IsisInstance(IsisInstance),
     IsisIf(IsisIf),
     SegmentRouting(SegmentRouting),
+    BgpGlobal(BgpGlobal),
+    BgpInstance(BgpInstance),
+    BgpNeighbor(BgpNeighbor),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -154,13 +157,61 @@ struct SegmentRouting {
     local_block: LocalBlock,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpGlobal {
+    #[serde(rename = "4octet-asn")]
+    four_octet_asn: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Redistribute {
+    #[serde(rename = "type")]
+    typ: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RedistributeAf {
+    ipv4: Vec<Redistribute>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpInstance {
+    #[serde(rename = "as")]
+    asn: u32,
+    instance: u32,
+    #[serde(rename = "router-id")]
+    router_id: Ipv4Addr,
+    redistribute: RedistributeAf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpNeighbor {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    #[serde(rename = "bgp-instance")]
+    bgp_instance: u32,
+    address: Ipv4Addr,
+    #[serde(rename = "remote-as")]
+    remote_as: u32,
+    #[serde(rename = "local-as")]
+    local_as: u32,
+    #[serde(rename = "address-family")]
+    address_family: Vec<BgpAddressFamily>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BgpAddressFamily {
+    afi: u32,
+    safi: u32,
+}
+
 use std::io::Write;
 
 impl Nanomsg {
     pub fn new() -> anyhow::Result<Self> {
         let mut socket = Socket::new(Protocol::Pair)?;
         // socket.bind("ipc:///tmp/ipc/pair/fibd_isisd")?;
-        socket.bind("ipc:///tmp/ipc/pair/config-ng_isisd")?;
+        socket.bind("ipc:///tmp/ipc/pair/config-ng_bgpd")?;
         let nanomsg = Self { socket };
         Ok(nanomsg)
     }
@@ -266,12 +317,70 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
+    fn bgp_global(&self) -> MsgEnum {
+        let msg = BgpGlobal {
+            four_octet_asn: true,
+        };
+        MsgEnum::BgpGlobal(msg)
+    }
+
+    fn bgp_instance(&self) -> MsgEnum {
+        let router_id = "10.0.0.1".parse::<Ipv4Addr>().unwrap();
+        let redist = Redistribute { typ: 1 };
+        let redistribute = RedistributeAf { ipv4: vec![redist] };
+        let msg = BgpInstance {
+            asn: 65501,
+            instance: 1,
+            router_id: router_id,
+            redistribute,
+        };
+        MsgEnum::BgpInstance(msg)
+    }
+
+    fn bgp_neighbor(&self) -> MsgEnum {
+        let address = "192.168.2.2".parse::<Ipv4Addr>().unwrap();
+        let ipv4_uni = BgpAddressFamily { afi: 1, safi: 1 };
+        let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
+        let msg = BgpNeighbor {
+            vrf_id: 0,
+            bgp_instance: 1,
+            address,
+            remote_as: 65501,
+            local_as: 65501,
+            address_family: vec![ipv4_uni, vpnv4_uni],
+        };
+        MsgEnum::BgpNeighbor(msg)
+    }
+
     pub fn parse(&mut self, text: &str) -> anyhow::Result<()> {
         let value: Result<Msg, serde_json::Error> = serde_json::from_str(text);
         thread::sleep(Duration::from_millis(100));
         match value {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
+                if msg.method == "bgp-global:request" {
+                    println!("BGP Global");
+                    let msg = MsgSend {
+                        method: String::from("bgp-global:update"),
+                        data: self.bgp_global(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                }
+                if msg.method == "bgp-instance:request" {
+                    println!("BGP Instance");
+                    let msg = MsgSend {
+                        method: String::from("bgp-instance:add"),
+                        data: self.bgp_instance(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    println!("BGP Neighbor");
+                    let msg = MsgSend {
+                        method: String::from("bgp-neighbor:add"),
+                        data: self.bgp_neighbor(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                }
                 if msg.method == "isis-global:request" {
                     thread::sleep(Duration::from_secs(1));
                     // isis-global:update

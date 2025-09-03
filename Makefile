@@ -43,6 +43,7 @@ cap:
 run:
 	@mkdir -p /tmp/ipc/pair
 	@sudo rm -f /tmp/ipc/pair/config-ng_isisd
+	@sudo rm -f /tmp/ipc/pair/config-ng_bgpd
 	@cargo build --bin zebra-rs --release
 	@sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/release/zebra-rs
 	target/release/zebra-rs
