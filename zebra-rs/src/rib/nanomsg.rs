@@ -15,6 +15,18 @@ struct Msg {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct VrfWrapper {
+    #[serde(rename = "vrf-name")]
+    vrf_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MsgWrapper {
+    method: String,
+    data: VrfWrapper,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct RouterIdRequest {
     #[serde(rename = "vrf-id")]
     vrf_id: u32,
@@ -37,6 +49,7 @@ enum MsgEnum {
     BgpGlobal(BgpGlobal),
     BgpInstance(BgpInstance),
     BgpNeighbor(BgpNeighbor),
+    Vrf(Vrf),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -176,12 +189,16 @@ struct RedistributeAf {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BgpInstance {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
     #[serde(rename = "as")]
     asn: u32,
     instance: u32,
     #[serde(rename = "router-id")]
     router_id: Ipv4Addr,
     redistribute: RedistributeAf,
+    #[serde(rename = "route-target-in")]
+    route_target_in: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -205,13 +222,22 @@ pub struct BgpAddressFamily {
     safi: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Vrf {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    #[serde(rename = "vrf-name")]
+    vrf_name: String,
+    #[serde(rename = "route-distinguisher")]
+    rd: String,
+}
+
 use std::io::Write;
 
 impl Nanomsg {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(path: &str) -> anyhow::Result<Self> {
         let mut socket = Socket::new(Protocol::Pair)?;
-        // socket.bind("ipc:///tmp/ipc/pair/fibd_isisd")?;
-        socket.bind("ipc:///tmp/ipc/pair/config-ng_bgpd")?;
+        socket.bind(path)?;
         let nanomsg = Self { socket };
         Ok(nanomsg)
     }
@@ -329,10 +355,27 @@ impl Nanomsg {
         let redist = Redistribute { typ: 1 };
         let redistribute = RedistributeAf { ipv4: vec![redist] };
         let msg = BgpInstance {
+            vrf_id: 0,
             asn: 65501,
             instance: 1,
             router_id: router_id,
             redistribute,
+            route_target_in: vec![],
+        };
+        MsgEnum::BgpInstance(msg)
+    }
+
+    fn bgp_vrf(&self) -> MsgEnum {
+        let router_id = "192.168.10.1".parse::<Ipv4Addr>().unwrap();
+        let redist = Redistribute { typ: 1 };
+        let redistribute = RedistributeAf { ipv4: vec![redist] };
+        let msg = BgpInstance {
+            vrf_id: 1,
+            asn: 65501,
+            instance: 2,
+            router_id: router_id,
+            redistribute,
+            route_target_in: vec!["1:1".to_string()],
         };
         MsgEnum::BgpInstance(msg)
     }
@@ -352,6 +395,15 @@ impl Nanomsg {
         MsgEnum::BgpNeighbor(msg)
     }
 
+    fn vrf(&self) -> MsgEnum {
+        let msg = Vrf {
+            vrf_id: 1,
+            vrf_name: "vrf1".to_string(),
+            rd: "1:1".to_string(),
+        };
+        MsgEnum::Vrf(msg)
+    }
+
     pub fn parse(&mut self, text: &str) -> anyhow::Result<()> {
         let value: Result<Msg, serde_json::Error> = serde_json::from_str(text);
         thread::sleep(Duration::from_millis(100));
@@ -359,6 +411,11 @@ impl Nanomsg {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
                 if msg.method == "bgp-global:request" {
+                    let msg = MsgSend {
+                        method: String::from("vrf:add"),
+                        data: self.vrf(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
                     println!("BGP Global");
                     let msg = MsgSend {
                         method: String::from("bgp-global:update"),
@@ -367,7 +424,6 @@ impl Nanomsg {
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "bgp-instance:request" {
-                    println!("BGP Instance");
                     let msg = MsgSend {
                         method: String::from("bgp-instance:add"),
                         data: self.bgp_instance(),
@@ -378,6 +434,14 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("bgp-neighbor:add"),
                         data: self.bgp_neighbor(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let vrf: MsgWrapper = serde_json::from_str(text).unwrap();
+                    println!("BGP Instance for VRF {}", vrf.data.vrf_name);
+                    let msg = MsgSend {
+                        method: String::from("bgp-instance:add"),
+                        data: self.bgp_vrf(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
@@ -480,7 +544,13 @@ impl Nanomsg {
 }
 
 pub fn serve() {
-    let nanomsg = Nanomsg::new();
+    let nanomsg = Nanomsg::new("ipc:///tmp/ipc/pair/config-ng_isisd");
+    if let Ok(mut nanomsg) = nanomsg {
+        tokio::spawn(async move {
+            nanomsg.event_loop().await;
+        });
+    }
+    let nanomsg = Nanomsg::new("ipc:///tmp/ipc/pair/config-ng_bgpd");
     if let Ok(mut nanomsg) = nanomsg {
         tokio::spawn(async move {
             nanomsg.event_loop().await;
