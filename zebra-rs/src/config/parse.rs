@@ -21,6 +21,7 @@ pub struct State {
     pub show: bool,
     pub paths: Vec<CommandPath>,
     pub links: Vec<String>,
+    pub choice_states: HashMap<String, String>, // choice_name -> active_case_name
 }
 
 impl State {
@@ -33,7 +34,20 @@ impl State {
             paths: Vec::new(),
             index: 0usize,
             links: Vec::new(),
+            choice_states: HashMap::new(),
         }
+    }
+
+    pub fn set_active_choice_case(&mut self, choice_name: &str, case_name: &str) {
+        self.choice_states.insert(choice_name.to_string(), case_name.to_string());
+    }
+
+    pub fn get_active_choice_case(&self, choice_name: &str) -> Option<&String> {
+        self.choice_states.get(choice_name)
+    }
+
+    pub fn clear_choice_case(&mut self, choice_name: &str) {
+        self.choice_states.remove(choice_name);
     }
 }
 
@@ -274,8 +288,35 @@ pub fn ytype_from_typedef(typedef: &Option<String>) -> Option<YangType> {
     })
 }
 
-fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
+fn is_choice_case(entry: &Rc<Entry>) -> Option<(String, String)> {
+    // Check for choice-test subnet choice
+    if entry.name == "prefix-length" || entry.name == "netmask" {
+        return Some(("choice-test-subnet".to_string(), entry.name.clone()));
+    }
+    
+    // Add more choice patterns here as needed
+    // Example for routing policy choices:
+    // if entry.name == "protocol-eq" || entry.name == "protocol-neq" {
+    //     return Some(("policy-protocol".to_string(), entry.name.clone()));
+    // }
+    
+    None
+}
+
+fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State) {
     let matcher = match_builder();
+
+    // Handle choice case logic
+    if let Some((choice_name, case_name)) = is_choice_case(entry) {
+        if let Some(active_case) = s.get_active_choice_case(&choice_name) {
+            if active_case != &case_name {
+                // Different case is active, clear it
+                s.clear_choice_case(&choice_name);
+            }
+        }
+        // Set this case as active
+        s.set_active_choice_case(&choice_name, &case_name);
+    }
 
     if let Some(node) = &entry.type_node {
         if node.kind == YangType::Union {
@@ -303,8 +344,17 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &State) {
     }
 }
 
-fn entry_match_dir(entry: &Rc<Entry>, str: &str, m: &mut Match) {
+fn entry_match_dir(entry: &Rc<Entry>, str: &str, m: &mut Match, state: &State) {
     for entry in entry.dir.borrow().iter() {
+        // Check if this entry is part of a choice
+        if let Some((choice_name, case_name)) = is_choice_case(entry) {
+            // Only include if this case is active or no case is active yet
+            if let Some(active_case) = state.get_active_choice_case(&choice_name) {
+                if active_case != &case_name {
+                    continue; // Skip inactive choice case
+                }
+            }
+        }
         m.match_entry(entry, str);
     }
 }
@@ -322,7 +372,7 @@ fn entry_key(entry: &Rc<Entry>, index: usize) -> Option<Rc<Entry>> {
     None
 }
 
-fn entry_match_key(entry: &Rc<Entry>, input: &str, m: &mut Match, state: &State) {
+fn entry_match_key(entry: &Rc<Entry>, input: &str, m: &mut Match, state: &mut State) {
     let key = entry_key(entry, state.index);
     if let Some(e) = key {
         entry_match_type(&e, input, m, state);
@@ -421,16 +471,16 @@ pub fn parse(
     let mut mx = Match::default();
     match s.ymatch {
         YangMatch::Dir | YangMatch::DirMatched => {
-            entry_match_dir(&entry, input, &mut mx);
+            entry_match_dir(&entry, input, &mut mx, &s);
         }
         YangMatch::Key => {
-            entry_match_key(&entry, input, &mut mx, &s);
+            entry_match_key(&entry, input, &mut mx, &mut s);
         }
         YangMatch::KeyMatched => {
             entry_match_key_matched(&entry, input, &mut mx);
         }
         YangMatch::Leaf | YangMatch::LeafList | YangMatch::LeafListMatched => {
-            entry_match_type(&entry, input, &mut mx, &s);
+            entry_match_type(&entry, input, &mut mx, &mut s);
         }
         YangMatch::LeafMatched => {
             // Nothing to do.
