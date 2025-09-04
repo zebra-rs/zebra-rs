@@ -55,7 +55,6 @@ daemonize = "0.5"
 hex = "0.4.3"
 strum = "0.27"
 strum_macros = "0.27"
-nanomsg = "0.7.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = { git = "https://github.com/zebra-rs/rtnetlink", rev = "2d7b1830e9bd9a049a757f0a79ccd16216450bf2" }
