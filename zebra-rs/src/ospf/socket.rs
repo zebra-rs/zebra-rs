@@ -58,30 +58,30 @@ pub fn set_ipv6_pktinfo(socket: &Socket) {
     };
 }
 
-pub fn ospf_join_if(socket: &AsyncFd<Socket>, _ifindex: u32) {
+pub fn ospf_join_if(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
     socket
         .get_ref()
-        .join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
+        .join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex));
 }
 
-pub fn ospf_leave_if(socket: &AsyncFd<Socket>, _ifindex: u32) {
+pub fn ospf_leave_if(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.5").unwrap();
     socket
         .get_ref()
-        .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
+        .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex));
 }
 
-pub fn ospf_join_alldrouters(socket: &AsyncFd<Socket>, _ifindex: u32) {
+pub fn ospf_join_alldrouters(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.6").unwrap();
     socket
         .get_ref()
-        .join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
+        .join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex));
 }
 
-pub fn ospf_leave_alldrouters(socket: &AsyncFd<Socket>, _ifindex: u32) {
+pub fn ospf_leave_alldrouters(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr: Ipv4Addr = Ipv4Addr::from_str("224.0.0.6").unwrap();
     socket
         .get_ref()
-        .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(3));
+        .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex));
 }
