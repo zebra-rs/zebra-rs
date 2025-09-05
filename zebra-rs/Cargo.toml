@@ -40,8 +40,8 @@ nix = { version = "0.30", features = ["fs", "net", "socket", "uio", "user"] }
 libc = "0.2.167"
 #bgp-packet = { path = "../../bgp-packet" }
 bgp-packet = { git = "https://github.com/zebra-rs/bgp-packet", branch = "main" }
-#ospf-packet = { path = "../../ospf-packet" }
-ospf-packet = { git = "https://github.com/zebra-rs/ospf-packet", branch = "main" }
+ospf-packet = { path = "../../ospf-packet" }
+#ospf-packet = { git = "https://github.com/zebra-rs/ospf-packet", branch = "main" }
 #isis-packet = { path = "../../isis-packet" }
 isis-packet = { git = "https://github.com/zebra-rs/isis-packet", branch = "main" }
 #spf-rs = { path = "../../spf-rs" }
