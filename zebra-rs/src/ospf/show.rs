@@ -12,7 +12,7 @@ impl Ospf {
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/ospf", show_ospf);
         self.show_add("/show/ip/ospf/interface", show_ospf_interface);
-        self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor);
+        self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor_detail);
         self.show_add("/show/ip/opsf/database", show_ospf_database);
     }
 }
@@ -63,6 +63,36 @@ fn show_ospf_neighbor(ospf: &Ospf, _args: Args, _json: bool) -> String {
         if oi.enabled {
             for (router_id, nbr) in oi.nbrs.iter() {
                 render_nbr(&mut buf, router_id, nbr);
+            }
+        }
+    }
+    buf
+}
+
+fn render_nbr_detail(out: &mut String, src: &Ipv4Addr, nbr: &Neighbor) {
+    writeln!(
+        out,
+        r#" Neighbor {}, interface address {}
+    In the area XX via interface xx local interface IP xx
+    Neighbor priority is {}, state is {}
+    DR is {} BDR is {}"#,
+        nbr.ident.router_id,
+        nbr.ident.prefix.addr(),
+        nbr.ident.priority,
+        nbr.state,
+        nbr.ident.d_router,
+        nbr.ident.bd_router
+    )
+    .unwrap();
+}
+
+fn show_ospf_neighbor_detail(ospf: &Ospf, _args: Args, _json: bool) -> String {
+    let mut buf = String::new();
+
+    for (_, oi) in ospf.links.iter() {
+        if oi.enabled {
+            for (src, nbr) in oi.nbrs.iter() {
+                render_nbr_detail(&mut buf, src, nbr);
             }
         }
     }
