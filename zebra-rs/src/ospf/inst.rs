@@ -117,7 +117,7 @@ impl Ospf {
     }
 
     fn link_add(&mut self, link: Link) {
-        println!("OSPF: LinkAdd {} {}", link.name, link.index);
+        // println!("OSPF: LinkAdd {} {}", link.name, link.index);
         if let Some(_link) = self.links.get_mut(&link.index) {
             //
         } else {
@@ -128,17 +128,12 @@ impl Ospf {
                 self.top.router_id,
                 self.ptx.clone(),
             );
-            if link.name == "enp0s6" {
-                self.tx
-                    .send(Message::Ifsm(link.index, IfsmEvent::InterfaceUp))
-                    .unwrap();
-            }
             self.links.insert(link.index, link);
         }
     }
 
     fn addr_add(&mut self, addr: LinkAddr) {
-        println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
+        // println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
@@ -146,24 +141,33 @@ impl Ospf {
             return;
         };
         let addr = OspfAddr::from(&addr, prefix);
-        if addr.ifindex == 3 {
-            self.tx
-                .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp))
-                .unwrap();
-        }
         link.addr.push(addr.clone());
-        let entry = self.table.entry(*prefix).or_default();
-        entry.addr = Some(addr);
-
         link.ident.prefix = *prefix;
-
-        if link.name == "enp0s6" {
-            link.enabled = true;
-        }
     }
 
     async fn process_msg(&mut self, msg: Message) {
         match msg {
+            Message::Enable(ifindex, area_id) => {
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
+                link.enabled = true;
+                let area = self.areas.fetch(area_id);
+                area.links.insert(ifindex);
+                println!("Enabling ifindex:{} area_id:{}", ifindex, area_id);
+                self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+            }
+            Message::Disable(ifindex, area_id) => {
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
+                link.enabled = false;
+                let area = self.areas.fetch(area_id);
+                area.links.remove(&ifindex);
+                println!("Disabling ifindex:{} area_id:{}", ifindex, area_id);
+                self.tx
+                    .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
+            }
             Message::Recv(packet, src, _from, index, _dest) => {
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
@@ -242,6 +246,13 @@ impl Ospf {
 
     pub async fn event_loop(&mut self) {
         loop {
+            match self.rib_rx.recv().await {
+                Some(RibRx::EoR) => break,
+                Some(msg) => self.process_rib_msg(msg),
+                None => break,
+            }
+        }
+        loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg).await;
@@ -260,11 +271,6 @@ impl Ospf {
     }
 }
 
-pub fn ospf_interface_enable(oi: &mut OspfLink, _laddr: &LinkAddr) {
-    oi.enabled = true;
-    // oi.ident.addr = laddr.addr;
-}
-
 pub fn serve(mut ospf: Ospf) {
     tokio::spawn(async move {
         ospf.event_loop().await;
@@ -272,6 +278,8 @@ pub fn serve(mut ospf: Ospf) {
 }
 
 pub enum Message {
+    Enable(u32, u32),
+    Disable(u32, u32),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, Ipv4Addr, NfsmEvent),
     HelloTimer(u32),

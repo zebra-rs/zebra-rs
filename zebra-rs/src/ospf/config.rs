@@ -4,9 +4,11 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
 use super::OspfLink;
+use super::area::OspfAreaMap;
 use super::{Ospf, addr::OspfAddr, area::OspfArea};
 
 use crate::config::{Args, ConfigOp};
+use crate::ospf::Message;
 use crate::rib::util::*;
 
 #[derive(Default)]
@@ -24,6 +26,7 @@ impl Ospf {
 fn config_ospf_network_apply(
     links: &mut BTreeMap<u32, OspfLink>,
     table: &PrefixMap<Ipv4Net, OspfNetworkConfig>,
+    areas: &mut OspfAreaMap,
 ) {
     for (_, link) in links.iter() {
         // Enabled -> Disabled
@@ -37,6 +40,7 @@ fn config_ospf_network_apply(
 
         for addr in link.addr.iter() {
             let prefix = addr.prefix.addr().to_host_prefix();
+            println!("Lookup {}", prefix);
             if let Some((_, network_config)) = table.get_lpm(&prefix) {
                 // Found network configuration, break at here.
                 next = true;
@@ -50,22 +54,24 @@ fn config_ospf_network_apply(
                 if curr_id != next_id {
                     // Enalbed -> Enabled
                     // Area id has been changed.
-                    println!("LINK: ");
-                    // Remove from old area.
-                    // Add to old area.
+                    println!("LINK: {} Area change {} -> {}", link.name, curr_id, next_id);
+                    // Disable link.
+                    link.tx.send(Message::Disable(link.index, curr_id));
+                    // Enable link.
+                    link.tx.send(Message::Enable(link.index, next_id));
                 }
             } else {
                 // Enabled -> Disabled.
                 // Stop event to the link.
-                println!("LINK: ");
-                // Delete from old area.
+                println!("LINK: {} Disable OSPF for area {}", link.name, curr_id);
+                link.tx.send(Message::Disable(link.index, curr_id));
             }
         } else {
             if next {
                 // Disabled -> Enabled.
                 // Start event to the link.
-                println!("LINK: ");
-                // Add to new area.
+                println!("LINK: {} Enable OSPF for area {}", link.name, next_id);
+                link.tx.send(Message::Enable(link.index, next_id));
             }
         }
     }
@@ -83,7 +89,7 @@ fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<
         ospf.table.remove(&network);
     }
 
-    config_ospf_network_apply(&mut ospf.links, &ospf.table);
+    config_ospf_network_apply(&mut ospf.links, &ospf.table, &mut ospf.areas);
 
     Some(())
 }
