@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
-use ospf_packet::{OspfDbDesc, OspfHello, Ospfv2Packet, Ospfv2Payload};
+use ospf_packet::{OspfDbDesc, OspfHello, OspfLsType, Ospfv2Packet, Ospfv2Payload};
 
 use crate::ospf::nfsm::ospf_nfsm;
 
@@ -61,8 +61,8 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
         return;
     }
 
-    println!("== RECV ==");
-    println!("{}", packet);
+    println!("== RECV Hello ==");
+    // println!("{}", packet);
 
     let Ospfv2Payload::Hello(ref hello) = packet.payload else {
         return;
@@ -166,8 +166,54 @@ pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
         .unwrap();
 }
 
+enum FloodScope {
+    Area,
+    As,
+    Link,
+    Unknown,
+}
+
+fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
+    use OspfLsType::*;
+    match ls_type {
+        Router => FloodScope::Area,
+        Network => FloodScope::Area,
+        Summary => FloodScope::Area,
+        SummaryAsbr => FloodScope::Area,
+        AsExternal => FloodScope::As,
+        NssaAsExternal => FloodScope::Area,
+        OpaqueLinkLocal => FloodScope::Link,
+        OpaqueAreaLocal => FloodScope::Area,
+        OpaqueAsWide => FloodScope::As,
+        Unknown(_) => FloodScope::Unknown,
+    }
+}
+
+fn ospf_lsa_lookup(ls_type: OspfLsType, ls_id: u32, adv_router: &Ipv4Addr) {
+    match lsa_flood_scope(ls_type) {
+        FloodScope::Area => {
+            //
+        }
+        FloodScope::As => {
+            //
+        }
+        FloodScope::Link => {
+            //
+        }
+        FloodScope::Unknown => {
+            // Nothing to do.
+        }
+    }
+}
+
 fn ospf_db_desc_proc(nbr: &mut Neighbor, dd: &OspfDbDesc) {
+    println!("XXX DBDesc proc");
     nbr.dd.recv = dd.clone();
+
+    for lsah in dd.lsa_headers.iter() {
+        println!("LSA ID {}", lsah.ls_id,);
+        ospf_lsa_lookup(lsah.ls_type, lsah.ls_id, &lsah.adv_router);
+    }
 }
 
 fn is_dd_dup(dd: &OspfDbDesc, prev: &OspfDbDesc) -> bool {
@@ -180,15 +226,16 @@ fn nbr_sched_event(nbr: &Neighbor, ev: NfsmEvent) {
         .unwrap();
 }
 
-pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
+pub fn ospf_db_desc_recv(
+    oi: &mut OspfLink,
+    nbr: &mut Neighbor,
+    packet: &Ospfv2Packet,
+    src: &Ipv4Addr,
+) {
     use NfsmState::*;
     println!("== DB DESC ==");
     println!("{}", packet);
 
-    // Find neighbor.
-    let Some(nbr) = oi.nbrs.get_mut(src) else {
-        return;
-    };
     println!("NBR: {}", nbr.ident.router_id);
 
     // Get DD.
