@@ -29,9 +29,6 @@ fn config_ospf_network_apply(
     areas: &mut OspfAreaMap,
 ) {
     for (_, link) in links.iter() {
-        // Enabled -> Disabled
-        // Disabled -> Enabled
-        // Enabled -> Enabled (area changed)
         let curr = link.enabled;
         let curr_id = link.area_id;
 
@@ -40,7 +37,6 @@ fn config_ospf_network_apply(
 
         for addr in link.addr.iter() {
             let prefix = addr.prefix.addr().to_host_prefix();
-            println!("Lookup {}", prefix);
             if let Some((_, network_config)) = table.get_lpm(&prefix) {
                 // Found network configuration, break at here.
                 next = true;
@@ -52,25 +48,17 @@ fn config_ospf_network_apply(
         if curr {
             if next {
                 if curr_id != next_id {
-                    // Enalbed -> Enabled
-                    // Area id has been changed.
-                    println!("LINK: {} Area change {} -> {}", link.name, curr_id, next_id);
-                    // Disable link.
+                    // Enabled -> Enabled (area change).
                     link.tx.send(Message::Disable(link.index, curr_id));
-                    // Enable link.
                     link.tx.send(Message::Enable(link.index, next_id));
                 }
             } else {
                 // Enabled -> Disabled.
-                // Stop event to the link.
-                println!("LINK: {} Disable OSPF for area {}", link.name, curr_id);
                 link.tx.send(Message::Disable(link.index, curr_id));
             }
         } else {
             if next {
                 // Disabled -> Enabled.
-                // Start event to the link.
-                println!("LINK: {} Enable OSPF for area {}", link.name, next_id);
                 link.tx.send(Message::Enable(link.index, next_id));
             }
         }
