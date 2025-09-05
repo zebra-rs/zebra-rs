@@ -35,7 +35,7 @@ pub struct OspfArea {
     pub id: u32,
 
     // Set of interfaces belongs to this area.
-    pub links: BTreeSet<usize>,
+    pub links: BTreeSet<u32>,
 }
 
 impl OspfArea {
