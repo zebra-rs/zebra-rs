@@ -61,6 +61,9 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
         return;
     }
 
+    println!("== RECV ==");
+    println!("{}", packet);
+
     let Ospfv2Payload::Hello(ref hello) = packet.payload else {
         return;
     };
@@ -81,6 +84,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     let mut init = false;
     let nbr = oi.nbrs.entry(*src).or_insert_with(|| {
         init = true;
+        println!("Hello: Init is true");
         Neighbor::new(
             oi.tx.clone(),
             oi.index,
@@ -178,7 +182,8 @@ fn nbr_sched_event(nbr: &Neighbor, ev: NfsmEvent) {
 
 pub fn ospf_db_desc_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
     use NfsmState::*;
-    println!("DB DESC: {}", packet);
+    println!("== DB DESC ==");
+    println!("{}", packet);
 
     // Find neighbor.
     let Some(nbr) = oi.nbrs.get_mut(src) else {
