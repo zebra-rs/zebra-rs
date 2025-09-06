@@ -22,7 +22,6 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::Lsdb;
 use super::area::{OspfArea, OspfAreaMap};
 use super::config::OspfNetworkConfig;
 use super::ifsm::{IfsmEvent, ospf_ifsm};
@@ -30,6 +29,7 @@ use super::link::OspfLink;
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
+use super::{Identity, Lsdb, Neighbor};
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
@@ -67,14 +67,28 @@ impl OspfTop {
 pub struct LinkTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub router_id: &'a Ipv4Addr,
+    pub db_desc_in: &'a mut usize,
+    pub ident: &'a Identity,
     // pub area_lsdb: &'a Lsdb,
 }
 
 impl Ospf {
-    pub fn link_top<'a>(&'a mut self, ifindex: u32) -> Option<LinkTop<'a>> {
-        self.links.get_mut(&ifindex).map(|link| LinkTop {
-            tx: &self.tx,
-            router_id: &self.router_id,
+    pub fn link_top<'a>(
+        &'a mut self,
+        ifindex: u32,
+        src: &Ipv4Addr,
+    ) -> Option<(LinkTop<'a>, &'a mut Neighbor)> {
+        self.links.get_mut(&ifindex).map(|link| {
+            let nbr = link.nbrs.get_mut(&src).unwrap();
+            (
+                LinkTop {
+                    tx: &self.tx,
+                    router_id: &self.router_id,
+                    db_desc_in: &mut link.db_desc_in,
+                    ident: &link.ident,
+                },
+                nbr,
+            )
         })
     }
 
@@ -193,18 +207,8 @@ impl Ospf {
                         ospf_hello_recv(&self.top, link, &packet, &src);
                     }
                     OspfType::DbDesc => {
-                        let Some(link) = self.links.get_mut(&index) else {
-                            return;
-                        };
-                        let Some(nbr) = link.nbrs.get_mut(&src) else {
-                            return;
-                        };
-
-                        let ltop = self.link_top(index);
-                        let Some(mut ltop) = ltop else {
-                            return;
-                        };
-                        ospf_db_desc_recv(ltop, nbr, &packet, &src);
+                        let (mut ltop, mut nbr) = self.link_top(index, &src).unwrap();
+                        ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
                     }
                     OspfType::LsRequest => {
                         let Some(link) = self.links.get_mut(&index) else {
