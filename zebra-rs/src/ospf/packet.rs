@@ -3,11 +3,11 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 use ospf_packet::{OspfDbDesc, OspfHello, OspfLsType, Ospfv2Packet, Ospfv2Payload};
 
-use crate::ospf::nfsm::ospf_nfsm;
+use crate::ospf::nfsm::{ospf_db_summary_isempty, ospf_nfsm};
 
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::{LinkTop, OspfTop},
+    inst::OspfInterface,
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -62,7 +62,12 @@ fn ospf_hello_is_nbr_changed(nbr: &Neighbor, prev: &Identity) -> bool {
         prev.priority != current.priority // Priority changed
 }
 
-pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, src: &Ipv4Addr) {
+pub fn ospf_hello_recv(
+    router_id: &Ipv4Addr,
+    oi: &mut OspfLink,
+    packet: &Ospfv2Packet,
+    src: &Ipv4Addr,
+) {
     let Some(addr) = oi.addr.first() else {
         return;
     };
@@ -71,7 +76,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
         return;
     }
 
-    println!("== RECV Hello ==");
+    println!("== RECV Hello from {} ==", src);
     // println!("{}", packet);
 
     let Ospfv2Payload::Hello(ref hello) = packet.payload else {
@@ -115,7 +120,7 @@ pub fn ospf_hello_recv(top: &OspfTop, oi: &mut OspfLink, packet: &Ospfv2Packet, 
     nbr.ident.d_router = hello.d_router;
     nbr.ident.bd_router = hello.bd_router;
 
-    if !ospf_hello_twoway_check(&top.router_id, &nbr, hello) {
+    if !ospf_hello_twoway_check(router_id, &nbr, hello) {
         println!("opsf_nfsm:Oneway");
         ospf_nfsm(nbr, NfsmEvent::OneWayReceived, &oi.ident);
     } else {
@@ -162,11 +167,17 @@ pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
     let mut dd = OspfDbDesc::default();
 
     dd.if_mtu = 1500;
+    if ospf_db_summary_isempty(nbr) && nbr.state >= NfsmState::Exchange {
+        println!("   XX DB_DESC more flag off");
+        nbr.dd.flags.set_more(false);
+    }
     dd.flags = nbr.dd.flags;
     dd.seqnum = nbr.dd.seqnum;
     dd.options.set_external(true);
 
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
+    println!("   XXX DB_DESC sent XXX");
+    println!("{}", packet);
     nbr.ptx
         .send(Message::Send(
             packet,
@@ -199,45 +210,62 @@ fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
     }
 }
 
-fn ospf_lsa_lookup(ls_type: OspfLsType, ls_id: u32, adv_router: &Ipv4Addr) {
+fn ospf_lsa_lookup(oi: &mut OspfInterface, ls_type: OspfLsType, ls_id: u32, adv_router: &Ipv4Addr) {
     match lsa_flood_scope(ls_type) {
         FloodScope::Area => {
-            //
+            println!("FloodScope::Area");
+            oi.lsdb_area;
         }
         FloodScope::As => {
+            println!("FloodScope::As");
             //
         }
         FloodScope::Link => {
+            println!("FloodScope::Link");
             //
         }
         FloodScope::Unknown => {
+            println!("FloodScope::Unknown");
             // Nothing to do.
         }
     }
 }
 
-fn ospf_db_desc_proc(oi: &mut LinkTop, nbr: &mut Neighbor, dd: &OspfDbDesc) {
+fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc) {
     println!("ospf_db_desc_proc() {}", dd.lsa_headers.len());
     nbr.dd.recv = dd.clone();
 
     for lsah in dd.lsa_headers.iter() {
         println!("LSA ID {}", lsah.ls_id,);
-        ospf_lsa_lookup(lsah.ls_type, lsah.ls_id, &lsah.adv_router);
+        let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, &lsah.adv_router);
     }
 
-    // FLAG_MS.
-    if dd.flags.master() {
+    if nbr.dd.flags.master() {
         println!("DB_DESC packet as master");
+        nbr.dd.seqnum += 1;
+
+        // When both side does not have more, exchange is done.
+        if !dd.flags.more() && !nbr.dd.flags.more() {
+            nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
+        } else {
+            ospf_db_desc_send(nbr, oi.ident);
+        }
     } else {
+        // Slave.
         println!("DB_DESC packet as Slave");
         nbr.dd.seqnum = dd.seqnum;
 
-        // When master's more flags is not set.
-        // XXX
+        // When master's more flags is not set and local system does not have
+        // information to be sent.
+        if !dd.flags.more() && ospf_db_summary_isempty(nbr) {
+            nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
+        }
 
         // Going to send packet.
         ospf_db_desc_send(nbr, oi.ident);
     }
+
+    nbr.dd.recv = dd.clone();
 }
 
 fn is_dd_dup(dd: &OspfDbDesc, prev: &OspfDbDesc) -> bool {
@@ -251,14 +279,14 @@ fn nbr_sched_event(nbr: &Neighbor, ev: NfsmEvent) {
 }
 
 pub fn ospf_db_desc_recv(
-    oi: &mut LinkTop,
+    oi: &mut OspfInterface,
     nbr: &mut Neighbor,
     packet: &Ospfv2Packet,
     src: &Ipv4Addr,
 ) {
     use NfsmState::*;
-    println!("== DB DESC ==");
-    println!("{}", packet);
+    println!("== DB DESC from {} ==", src);
+    // println!("{}", packet);
 
     println!("NBR: {}", nbr.ident.router_id);
 
@@ -346,18 +374,23 @@ pub fn ospf_db_desc_recv(
                 nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
                 return;
             }
+            if dd.options != nbr.dd.recv.options {
+                println!("XXX Option mismatch");
+                nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
+            if (nbr.dd.flags.master() && dd.seqnum != nbr.dd.seqnum)
+                || (!nbr.dd.flags.master() && dd.seqnum != nbr.dd.seqnum + 1)
+            {
+                println!("XXX From {} Sequence number mismatch", src);
+                nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
+
+            ospf_db_desc_proc(oi, nbr, dd);
         }
         _ => {
             //
         }
     }
-}
-
-pub fn ospf_ls_req_recv(
-    _top: &OspfTop,
-    _oi: &mut OspfLink,
-    packet: &Ospfv2Packet,
-    _src: &Ipv4Addr,
-) {
-    println!("LS REQ: {}", packet);
 }

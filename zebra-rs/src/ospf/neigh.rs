@@ -7,7 +7,7 @@ use ospf_packet::{DbDescFlags, OspfDbDesc, OspfOptions};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::task::Timer;
-use super::{Identity, Message, NfsmState};
+use super::{Identity, Lsdb, Message, NfsmState};
 
 pub struct Neighbor {
     pub ifindex: u32,
@@ -22,6 +22,7 @@ pub struct Neighbor {
     pub state_change: usize,
     pub dd: NeighborDbDesc,
     pub ptx: UnboundedSender<Message>,
+    pub db_sum: Lsdb,
 }
 
 #[bitfield(u8, debug = true)]
@@ -77,6 +78,7 @@ impl Neighbor {
             state_change: 0,
             dd: NeighborDbDesc::new(),
             ptx,
+            db_sum: Lsdb::new(),
         };
         nbr.ident.prefix = prefix;
         nbr

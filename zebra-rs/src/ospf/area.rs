@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
+use super::Lsdb;
+
 pub struct OspfAreaMap(BTreeMap<Ipv4Addr, OspfArea>);
 
 impl OspfAreaMap {
@@ -39,6 +41,9 @@ pub struct OspfArea {
 
     // Set of interfaces belongs to this area.
     pub links: BTreeSet<u32>,
+
+    // LSDB of this area.
+    pub lsdb: Lsdb,
 }
 
 impl OspfArea {
@@ -46,6 +51,7 @@ impl OspfArea {
         Self {
             id,
             links: BTreeSet::new(),
+            lsdb: Lsdb::new(),
         }
     }
 }

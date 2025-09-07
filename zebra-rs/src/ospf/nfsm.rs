@@ -184,6 +184,10 @@ impl NfsmState {
     }
 }
 
+pub fn ospf_db_summary_isempty(nbr: &Neighbor) -> bool {
+    nbr.db_sum.is_empty()
+}
+
 pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
     // /* Clear Database Summary list. */
     // if (!ospf_db_summary_isempty (nbr))
@@ -407,7 +411,8 @@ fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identit
         nbr.dd.flags.set_more(true);
         nbr.dd.flags.set_init(true);
 
-        ospf_db_desc_send(nbr, oident);
+        println!("DB_DESC from NFSM");
+        // ospf_db_desc_send(nbr, oident);
     }
 }
 
