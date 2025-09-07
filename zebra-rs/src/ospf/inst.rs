@@ -78,8 +78,8 @@ impl Ospf {
         ifindex: u32,
         src: &Ipv4Addr,
     ) -> Option<(LinkTop<'a>, &'a mut Neighbor)> {
-        self.links.get_mut(&ifindex).map(|link| {
-            if let Some(nbr) = link.nbrs.get_mut(&src) {
+        self.links.get_mut(&ifindex).and_then(|link| {
+            link.nbrs.get_mut(&src).map(|nbr| {
                 (
                     LinkTop {
                         tx: &self.tx,
@@ -89,9 +89,7 @@ impl Ospf {
                     },
                     nbr,
                 )
-            } else {
-                None
-            }
+            })
         })
     }
 
