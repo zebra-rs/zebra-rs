@@ -12,4 +12,8 @@ impl Lsdb {
             db: BTreeMap::new(),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.db.is_empty()
+    }
 }

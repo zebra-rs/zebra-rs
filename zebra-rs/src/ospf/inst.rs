@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
-use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send, ospf_ls_req_recv};
+use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::Link;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -49,46 +49,42 @@ pub struct Ospf {
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub router_id: Ipv4Addr,
-    pub top: OspfTop,
+    pub lsdb_as: Lsdb,
 }
 
-pub struct OspfTop {
-    pub router_id: Ipv4Addr,
-}
-
-impl OspfTop {
-    pub fn new() -> Self {
-        Self {
-            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
-        }
-    }
-}
-
-pub struct LinkTop<'a> {
+// OSPF inteface structure which points out upper layer struct members.
+pub struct OspfInterface<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub router_id: &'a Ipv4Addr,
-    pub db_desc_in: &'a mut usize,
     pub ident: &'a Identity,
-    // pub area_lsdb: &'a Lsdb,
+    pub addr: &'a Vec<OspfAddr>,
+    pub db_desc_in: &'a mut usize,
+    pub lsdb_as: &'a Lsdb,
+    pub lsdb_area: &'a Lsdb,
 }
 
 impl Ospf {
-    pub fn link_top<'a>(
+    pub fn ospf_interface<'a>(
         &'a mut self,
         ifindex: u32,
         src: &Ipv4Addr,
-    ) -> Option<(LinkTop<'a>, &'a mut Neighbor)> {
+    ) -> Option<(OspfInterface<'a>, &'a mut Neighbor)> {
         self.links.get_mut(&ifindex).and_then(|link| {
-            link.nbrs.get_mut(&src).map(|nbr| {
-                (
-                    LinkTop {
-                        tx: &self.tx,
-                        router_id: &self.router_id,
-                        db_desc_in: &mut link.db_desc_in,
-                        ident: &link.ident,
-                    },
-                    nbr,
-                )
+            self.areas.get_mut(link.area).and_then(|area| {
+                link.nbrs.get_mut(&src).map(|nbr| {
+                    (
+                        OspfInterface {
+                            tx: &self.tx,
+                            router_id: &self.router_id,
+                            ident: &link.ident,
+                            addr: &link.addr,
+                            db_desc_in: &mut link.db_desc_in,
+                            lsdb_as: &mut self.lsdb_as,
+                            lsdb_area: &mut area.lsdb,
+                        },
+                        nbr,
+                    )
+                })
             })
         })
     }
@@ -106,7 +102,6 @@ impl Ospf {
         let (ptx, prx) = mpsc::unbounded_channel();
         let mut ospf = Self {
             ctx,
-            top: OspfTop::new(),
             tx,
             rx,
             ptx,
@@ -119,6 +114,7 @@ impl Ospf {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
+            lsdb_as: Lsdb::new(),
             sock,
         };
         ospf.callback_build();
@@ -160,7 +156,7 @@ impl Ospf {
                 self.tx.clone(),
                 link,
                 self.sock.clone(),
-                self.top.router_id,
+                self.router_id,
                 self.ptx.clone(),
             );
             self.links.insert(link.index, link);
@@ -193,11 +189,11 @@ impl Ospf {
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
-                ospf_hello_recv(&self.top, link, &packet, &src);
+                ospf_hello_recv(&self.router_id, link, &packet, &src);
             }
             OspfType::DbDesc => {
                 println!("DB_DESC: ifindex {}, nbr src {}", index, src);
-                if let Some((mut ltop, mut nbr)) = self.link_top(index, &src) {
+                if let Some((mut ltop, mut nbr)) = self.ospf_interface(index, &src) {
                     ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
                 } else {
                     println!("DB_DESC: Pakcet from unknown neighbor {}", src);
@@ -208,7 +204,7 @@ impl Ospf {
                     return;
                 };
                 println!("LS_REQ: {}", packet);
-                ospf_ls_req_recv(&self.top, link, &packet, &src);
+                // ospf_ls_req_recv(&self.top, link, &packet, &src);
             }
             OspfType::LsUpdate => {
                 println!("LS_UPD: {}", packet);
@@ -246,7 +242,7 @@ impl Ospf {
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
             }
             Message::Recv(packet, src, from, index, dest) => {
-                self.process_recv(packet, src, from, index, dest);
+                self.process_recv(packet, src, from, index, dest).await;
             }
             Message::Ifsm(index, ev) => {
                 let Some(link) = self.links.get_mut(&index) else {
