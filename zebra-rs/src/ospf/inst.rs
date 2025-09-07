@@ -79,16 +79,19 @@ impl Ospf {
         src: &Ipv4Addr,
     ) -> Option<(LinkTop<'a>, &'a mut Neighbor)> {
         self.links.get_mut(&ifindex).map(|link| {
-            let nbr = link.nbrs.get_mut(&src).unwrap();
-            (
-                LinkTop {
-                    tx: &self.tx,
-                    router_id: &self.router_id,
-                    db_desc_in: &mut link.db_desc_in,
-                    ident: &link.ident,
-                },
-                nbr,
-            )
+            if let Some(nbr) = link.nbrs.get_mut(&src) {
+                (
+                    LinkTop {
+                        tx: &self.tx,
+                        router_id: &self.router_id,
+                        db_desc_in: &mut link.db_desc_in,
+                        ident: &link.ident,
+                    },
+                    nbr,
+                )
+            } else {
+                None
+            }
         })
     }
 
@@ -175,6 +178,48 @@ impl Ospf {
         link.ident.prefix = *prefix;
     }
 
+    async fn process_recv(
+        &mut self,
+        packet: Ospfv2Packet,
+        src: Ipv4Addr,
+        from: Ipv4Addr,
+        index: u32,
+        dest: Ipv4Addr,
+    ) {
+        match packet.typ {
+            OspfType::Hello => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                ospf_hello_recv(&self.top, link, &packet, &src);
+            }
+            OspfType::DbDesc => {
+                println!("DB_DESC: ifindex {}, nbr src {}", index, src);
+                if let Some((mut ltop, mut nbr)) = self.link_top(index, &src) {
+                    ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
+                } else {
+                    println!("DB_DESC: Pakcet from unknown neighbor {}", src);
+                }
+            }
+            OspfType::LsRequest => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                println!("LS_REQ: {}", packet);
+                ospf_ls_req_recv(&self.top, link, &packet, &src);
+            }
+            OspfType::LsUpdate => {
+                println!("LS_UPD: {}", packet);
+            }
+            OspfType::LsAck => {
+                println!("LS_ACK: {}", packet);
+            }
+            OspfType::Unknown(typ) => {
+                println!("Unknown: packet type {}", typ);
+            }
+        }
+    }
+
     async fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Enable(ifindex, area_id) => {
@@ -198,35 +243,8 @@ impl Ospf {
                 self.tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
             }
-            Message::Recv(packet, src, _from, index, _dest) => {
-                match packet.typ {
-                    OspfType::Hello => {
-                        let Some(link) = self.links.get_mut(&index) else {
-                            return;
-                        };
-                        ospf_hello_recv(&self.top, link, &packet, &src);
-                    }
-                    OspfType::DbDesc => {
-                        let (mut ltop, mut nbr) = self.link_top(index, &src).unwrap();
-                        ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
-                    }
-                    OspfType::LsRequest => {
-                        let Some(link) = self.links.get_mut(&index) else {
-                            return;
-                        };
-                        println!("LS_REQ: {}", packet);
-                        ospf_ls_req_recv(&self.top, link, &packet, &src);
-                    }
-                    OspfType::LsUpdate => {
-                        println!("LS_UPD: {}", packet);
-                    }
-                    OspfType::LsAck => {
-                        println!("LS_ACK: {}", packet);
-                    }
-                    _ => {
-                        //
-                    }
-                }
+            Message::Recv(packet, src, from, index, dest) => {
+                self.process_recv(packet, src, from, index, dest);
             }
             Message::Ifsm(index, ev) => {
                 let Some(link) = self.links.get_mut(&index) else {

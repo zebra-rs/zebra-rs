@@ -103,6 +103,7 @@ pub struct Rib {
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
     pub nmap: NexthopMap,
+    pub router_id: Ipv4Addr,
 }
 
 impl Rib {
@@ -128,6 +129,7 @@ impl Rib {
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
             nmap: NexthopMap::default(),
+            router_id: Ipv4Addr::UNSPECIFIED,
         };
         rib.show_build();
         Ok(rib)
@@ -148,6 +150,10 @@ impl Rib {
             }
         }
         self.redists.push(tx.clone());
+        if !self.router_id.is_unspecified() {
+            let msg = RibRx::RouterIdUpdate(self.router_id);
+            tx.send(msg).unwrap();
+        }
         tx.send(RibRx::EoR).unwrap();
     }
 
@@ -166,7 +172,6 @@ impl Rib {
                 self.ipv6_route_del(&prefix, rib).await;
             }
             Message::IlmAdd { label, ilm } => {
-                //println!("IlmAdd {} {:?}", label, ilm);
                 self.ilm_add(label, ilm).await;
             }
             Message::IlmDel { label, ilm } => {
@@ -228,6 +233,8 @@ impl Rib {
 
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+
+                self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
                 // println!(
@@ -239,6 +246,8 @@ impl Rib {
 
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+
+                self.router_id_update();
             }
             FibMessage::NewRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
