@@ -334,8 +334,8 @@ pub fn serve(mut ospf: Ospf) {
 }
 
 pub enum Message {
-    Enable(u32, u32),
-    Disable(u32, u32),
+    Enable(u32, Ipv4Addr),
+    Disable(u32, Ipv4Addr),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, Ipv4Addr, NfsmEvent),
     HelloTimer(u32),
