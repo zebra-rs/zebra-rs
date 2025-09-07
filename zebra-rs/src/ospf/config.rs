@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
@@ -11,10 +12,18 @@ use crate::config::{Args, ConfigOp};
 use crate::ospf::Message;
 use crate::rib::util::*;
 
-#[derive(Default)]
 pub struct OspfNetworkConfig {
-    pub area_id: u32,
+    pub area_id: Ipv4Addr,
     pub addr: Option<OspfAddr>,
+}
+
+impl Default for OspfNetworkConfig {
+    fn default() -> Self {
+        Self {
+            area_id: Ipv4Addr::UNSPECIFIED,
+            addr: None,
+        }
+    }
 }
 
 impl Ospf {
@@ -33,7 +42,7 @@ fn config_ospf_network_apply(
         let curr_id = link.area_id;
 
         let mut next = false;
-        let mut next_id = 0;
+        let mut next_id = Ipv4Addr::UNSPECIFIED;
 
         for addr in link.addr.iter() {
             let prefix = addr.prefix.addr().to_host_prefix();
@@ -67,7 +76,8 @@ fn config_ospf_network_apply(
 
 fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let network = args.v4net()?;
-    let area_id = args.u32()?;
+    let area_id_u32 = args.u32()?;
+    let area_id = Ipv4Addr::from(area_id_u32);
 
     if op.is_set() {
         let area = ospf.areas.fetch(area_id);
