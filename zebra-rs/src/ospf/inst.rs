@@ -147,6 +147,10 @@ impl Ospf {
         }
     }
 
+    fn router_id_update(&mut self, router_id: Ipv4Addr) {
+        self.router_id = router_id;
+    }
+
     fn link_add(&mut self, link: Link) {
         // println!("OSPF: LinkAdd {} {}", link.name, link.index);
         if let Some(_link) = self.links.get_mut(&link.index) {
@@ -273,6 +277,9 @@ impl Ospf {
 
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
+            RibRx::RouterIdUpdate(router_id) => {
+                self.router_id_update(router_id);
+            }
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
