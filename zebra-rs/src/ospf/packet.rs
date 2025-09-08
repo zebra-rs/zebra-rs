@@ -167,6 +167,7 @@ pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
     let mut dd = OspfDbDesc::default();
 
     dd.if_mtu = 1500;
+    println!("XXX nbr.state {}", nbr.state);
     if ospf_db_summary_isempty(nbr) && nbr.state >= NfsmState::Exchange {
         println!("   XX DB_DESC more flag off");
         nbr.dd.flags.set_more(false);
@@ -213,8 +214,8 @@ fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
 fn ospf_lsa_lookup<'a>(
     oi: &'a mut OspfInterface,
     ls_type: OspfLsType,
-    ls_id: u32,
-    adv_router: &Ipv4Addr,
+    ls_id: Ipv4Addr,
+    adv_router: Ipv4Addr,
 ) -> Option<&'a OspfLsa> {
     match lsa_flood_scope(ls_type) {
         FloodScope::Area => {
@@ -242,7 +243,7 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
 
     for lsah in dd.lsa_headers.iter() {
         println!("LSA ID {}", lsah.ls_id,);
-        let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, &lsah.adv_router);
+        let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router);
     }
 
     if nbr.dd.flags.master() {
@@ -257,7 +258,10 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         }
     } else {
         // Slave.
-        println!("DB_DESC packet as Slave");
+        println!(
+            "XXX DB_DESC packet as Slave: dd.flags.more() {}",
+            dd.flags.more()
+        );
         nbr.dd.seqnum = dd.seqnum;
 
         // When master's more flags is not set and local system does not have

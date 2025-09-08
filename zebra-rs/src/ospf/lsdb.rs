@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use ospf_packet::{OspfLsType, OspfLsa};
 
-pub type LsTable = BTreeMap<(u32, Ipv4Addr), OspfLsa>;
+pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), OspfLsa>;
 
 pub struct Lsdb {
     pub tables: LsTypes<LsTable>,
@@ -57,10 +57,10 @@ impl Lsdb {
     pub fn lookup_by_id(
         &self,
         ls_type: OspfLsType,
-        ls_id: u32,
-        adv_router: &Ipv4Addr,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
     ) -> Option<&OspfLsa> {
         let table = self.tables.get(&ls_type);
-        table.get(&(ls_id, *adv_router))
+        table.get(&(ls_id, adv_router))
     }
 }
