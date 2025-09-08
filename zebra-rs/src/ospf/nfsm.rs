@@ -307,6 +307,7 @@ pub fn ospf_nfsm_twoway_received(nbr: &mut Neighbor, oident: &Identity) -> Optio
 }
 
 pub fn ospf_nfsm_negotiation_done(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+    println!("ospf_nfsm_negotiation_done");
     None
 }
 

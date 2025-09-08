@@ -113,7 +113,7 @@ impl Ospf {
             table: PrefixMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
+            router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
             lsdb_as: Lsdb::new(),
             sock,
         };
@@ -143,8 +143,19 @@ impl Ospf {
         }
     }
 
+    pub fn router_lsa_originate(&mut self) {
+        if let Some(area) = self.areas.get_mut(Ipv4Addr::UNSPECIFIED) {
+            //let lsa = router_lsa(area);
+            //area.lsdb.insert(lsa);
+        }
+    }
+
     fn router_id_update(&mut self, router_id: Ipv4Addr) {
         self.router_id = router_id;
+        for (_, link) in self.links.iter_mut() {
+            link.ident.router_id = router_id;
+        }
+        self.router_lsa_originate();
     }
 
     fn link_add(&mut self, link: Link) {
