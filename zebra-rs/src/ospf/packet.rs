@@ -210,12 +210,12 @@ fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
     }
 }
 
-fn ospf_lsa_lookup(
-    oi: &mut OspfInterface,
+fn ospf_lsa_lookup<'a>(
+    oi: &'a mut OspfInterface,
     ls_type: OspfLsType,
     ls_id: u32,
     adv_router: &Ipv4Addr,
-) -> Option<OspfLsa> {
+) -> Option<&'a OspfLsa> {
     match lsa_flood_scope(ls_type) {
         FloodScope::Area => {
             println!("FloodScope::Area");

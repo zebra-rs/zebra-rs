@@ -59,7 +59,8 @@ impl Lsdb {
         ls_type: OspfLsType,
         ls_id: u32,
         adv_router: &Ipv4Addr,
-    ) -> Option<OspfLsa> {
-        self.tables.get(&ls_type).get(&ls_id)
+    ) -> Option<&OspfLsa> {
+        let table = self.tables.get(&ls_type);
+        table.get(&(ls_id, *adv_router))
     }
 }
