@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
-use ospf_packet::{OspfDbDesc, OspfHello, OspfLsType, Ospfv2Packet, Ospfv2Payload};
+use ospf_packet::{OspfDbDesc, OspfHello, OspfLsType, OspfLsa, Ospfv2Packet, Ospfv2Payload};
 
 use crate::ospf::nfsm::{ospf_db_summary_isempty, ospf_nfsm};
 
@@ -210,23 +210,28 @@ fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
     }
 }
 
-fn ospf_lsa_lookup(oi: &mut OspfInterface, ls_type: OspfLsType, ls_id: u32, adv_router: &Ipv4Addr) {
+fn ospf_lsa_lookup(
+    oi: &mut OspfInterface,
+    ls_type: OspfLsType,
+    ls_id: u32,
+    adv_router: &Ipv4Addr,
+) -> Option<OspfLsa> {
     match lsa_flood_scope(ls_type) {
         FloodScope::Area => {
             println!("FloodScope::Area");
-            oi.lsdb_area;
+            return oi.lsdb_area.lookup_by_id(ls_type, ls_id, adv_router);
         }
         FloodScope::As => {
             println!("FloodScope::As");
-            //
+            None
         }
         FloodScope::Link => {
             println!("FloodScope::Link");
-            //
+            None
         }
         FloodScope::Unknown => {
             println!("FloodScope::Unknown");
-            // Nothing to do.
+            None
         }
     }
 }
