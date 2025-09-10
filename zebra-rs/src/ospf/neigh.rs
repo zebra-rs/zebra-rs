@@ -1,13 +1,14 @@
+use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
 use bitfield_struct::bitfield;
 use ipnet::Ipv4Net;
-use ospf_packet::{DbDescFlags, OspfDbDesc, OspfOptions};
+use ospf_packet::{DbDescFlags, OspfDbDesc, OspfLsRequestEntry, OspfOptions};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::task::Timer;
-use super::{Identity, Lsdb, Message, NfsmState};
+use super::{Identity, LsTable, Lsdb, Message, NfsmState};
 
 pub struct Neighbor {
     pub ifindex: u32,
@@ -23,6 +24,7 @@ pub struct Neighbor {
     pub dd: NeighborDbDesc,
     pub ptx: UnboundedSender<Message>,
     pub db_sum: Lsdb,
+    pub ls_req: BTreeSet<OspfLsRequestEntry>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -38,6 +40,7 @@ pub struct NeighborTimer {
     pub db_desc_free: Option<Timer>,
     pub db_desc: Option<Timer>,
     pub ls_upd: Option<Timer>,
+    pub ls_req: Option<Timer>,
 }
 
 pub struct NeighborDbDesc {
@@ -79,6 +82,7 @@ impl Neighbor {
             dd: NeighborDbDesc::new(),
             ptx,
             db_sum: Lsdb::new(),
+            ls_req: BTreeSet::new(),
         };
         nbr.ident.prefix = prefix;
         nbr
