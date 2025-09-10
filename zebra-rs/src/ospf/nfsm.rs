@@ -247,6 +247,27 @@ pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {
     }
 }
 
+pub fn ospf_ls_req_timer(nbr: &Neighbor) -> Timer {
+    let tx = nbr.tx.clone();
+    let prefix = nbr.ident.prefix.clone();
+    let ifindex = nbr.ifindex;
+    Timer::new(Timer::second(1), TimerType::Once, move || {
+        use NfsmEvent::*;
+        let tx = tx.clone();
+        async move {
+            println!("ospf_ls_req_timer");
+            tx.send(Message::Nfsm(ifindex, prefix.addr(), InactivityTimer))
+                .unwrap();
+        }
+    })
+}
+
+pub fn ospf_nfsm_ls_req_timer_on(nbr: &mut Neighbor) {
+    if nbr.timer.ls_req.is_none() {
+        nbr.timer.ls_req = Some(ospf_ls_req_timer(nbr));
+    }
+}
+
 impl Neighbor {
     pub fn nfsm_ignore(&mut self, _oident: &Identity) -> Option<NfsmState> {
         None

@@ -1,9 +1,14 @@
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
-use ospf_packet::{OspfDbDesc, OspfHello, OspfLsType, OspfLsa, Ospfv2Packet, Ospfv2Payload};
+use ospf_packet::{
+    OspfDbDesc, OspfHello, OspfLsRequestEntry, OspfLsType, OspfLsa, Ospfv2Packet, Ospfv2Payload,
+};
 
-use crate::ospf::nfsm::{ospf_db_summary_isempty, ospf_nfsm};
+use crate::ospf::{
+    nfsm::{ospf_db_summary_isempty, ospf_nfsm, ospf_nfsm_ls_req_timer_on},
+    ospf_ls_rquest_new,
+};
 
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
@@ -220,7 +225,7 @@ fn ospf_lsa_lookup<'a>(
     match lsa_flood_scope(ls_type) {
         FloodScope::Area => {
             println!("FloodScope::Area");
-            return oi.lsdb_area.lookup_by_id(ls_type, ls_id, adv_router);
+            oi.lsdb_area.lookup_by_id(ls_type, ls_id, adv_router)
         }
         FloodScope::As => {
             println!("FloodScope::As");
@@ -237,13 +242,23 @@ fn ospf_lsa_lookup<'a>(
     }
 }
 
+fn ospf_ls_request_add(nbr: &mut Neighbor, ls_req: OspfLsRequestEntry) {
+    nbr.ls_req.insert(ls_req);
+}
+
 fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc) {
     println!("ospf_db_desc_proc() {}", dd.lsa_headers.len());
     nbr.dd.recv = dd.clone();
 
     for lsah in dd.lsa_headers.iter() {
-        println!("LSA ID {}", lsah.ls_id,);
+        println!("LSA: ID {} Adv {}", lsah.ls_id, lsah.adv_router);
         let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router);
+        if find.is_none() {
+            println!("We don't have LSA");
+            let lsr = ospf_ls_rquest_new(lsah);
+            ospf_ls_request_add(nbr, lsr);
+            ospf_nfsm_ls_req_timer_on(nbr);
+        }
     }
 
     if nbr.dd.flags.master() {
