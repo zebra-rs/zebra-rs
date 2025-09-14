@@ -113,7 +113,7 @@ struct IsisInstance {
     #[serde(rename = "segment-routing")]
     segment_routing: String,
     #[serde(rename = "mpls-traffic-eng")]
-    mpls_traffic_eng: RouterId,
+    mpls_traffic_eng: Option<RouterId>,
     #[serde(rename = "ipv4 unicast")]
     ipv4_unicast: AddressFamily,
 }
@@ -261,9 +261,29 @@ impl Nanomsg {
             is_type: 2,
             metric_style: 2,
             segment_routing: "mpls".into(),
-            mpls_traffic_eng: RouterId {
+            mpls_traffic_eng: Some(RouterId {
                 router_id: "10.0.0.1".into(),
-            },
+            }),
+            ipv4_unicast: AddressFamily { ti_lfa: true },
+        };
+        MsgEnum::IsisInstance(msg)
+    }
+
+    fn isis_instance_add2(&self) -> MsgEnum {
+        let net = IsisNet {
+            del: vec![],
+            add: vec!["49.0000.0000.0000.0001.00".into()],
+        };
+        let msg = IsisInstance {
+            instance_tag: "s".into(),
+            log_adjacency_changes: true,
+            net,
+            is_type: 2,
+            metric_style: 2,
+            segment_routing: "mpls".into(),
+            mpls_traffic_eng: Some(RouterId {
+                router_id: "9.9.9.9".into(),
+            }),
             ipv4_unicast: AddressFamily { ti_lfa: true },
         };
         MsgEnum::IsisInstance(msg)
@@ -482,6 +502,12 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
                         data: self.isis_if_add_enp0s7(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("isis-instance:add"),
+                        data: self.isis_instance_add2(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
