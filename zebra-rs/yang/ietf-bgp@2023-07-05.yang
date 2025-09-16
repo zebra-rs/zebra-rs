@@ -386,6 +386,10 @@ module ietf-bgp {
               dynamically.";
         }
 
+        leaf rtc {
+          type boolean;
+        }
+
         leaf remote-address {
           type inet:ip-address;
           description
