@@ -1,3 +1,41 @@
+2025-09-16  Kunihiro Ishiguro  <kunihiro@zebra.dev>
+
+	* version: 0.8.0
+
+	* zebra-rs/src/ospf/area.rs: Change OspfArea id type from u32 to
+	Ipv4Addr for better type safety and clarity. Update OspfAreaMap
+	methods to use Ipv4Addr as key type. OSPF area IDs are represented
+	as IPv4 addresses in the protocol.
+
+	* zebra-rs/src/ospf/link.rs (OspfLink): Change area_id field from
+	u32 to Ipv4Addr to match area ID type changes.
+
+	* zebra-rs/src/ospf/config.rs: Update OspfNetworkConfig area_id
+	type to Ipv4Addr. Add conversion from u32 input to Ipv4Addr in
+	config parsing. Implement manual Default trait for
+	OspfNetworkConfig.
+
+	* zebra-rs/src/ospf/inst.rs (Message): Update Enable and Disable
+	variants to use Ipv4Addr for area_id parameter. Fix link_top()
+	method to properly handle Option chaining with and_then().
+
+	* zebra-rs/src/ospf/lsdb.rs (lookup_by_id): Implement proper LSA
+	lookup using composite key (ls_id, adv_router). Fix return type to
+	Option<&OspfLsa> to avoid unnecessary cloning.
+
+	* zebra-rs/src/ospf/config.rs: Fix incorrect to_host_prefix() call
+	on Ipv4Net. Remove unnecessary conversion as addr.prefix is already
+	an Ipv4Net type.
+
+	* zebra-rs/src/rib/router_id.rs: Fix IPv4 address extraction from
+	LinkAddr. Use filter_map with pattern matching to properly extract
+	Ipv4Addr from IpNet enum, handling only IPv4 variants.
+
+	* zebra-rs/src/config/parse.rs: Implement comprehensive YANG choice
+	statement parsing support. Add choice_states tracking to State
+	struct. Implement is_choice_case() detection, automatic case
+	switching, and directory filtering for inactive choice cases.
+
 2025-08-20  Kunihiro Ishiguro  <kunihiro@zebra.dev>
 
 	* zebra-rs/src/bgp/show.rs (show_bgp_neighbor): Display local IP
