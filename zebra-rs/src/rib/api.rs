@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::entry::RibEntry;
@@ -52,6 +54,7 @@ pub enum RibRx {
     LinkDel(Link),
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
+    RouterIdUpdate(Ipv4Addr),
     EoR,
 }
 

@@ -51,14 +51,14 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
-            println!(
-                "Read: type {} src {} ifaddr {} ifindex {} dest {}",
-                packet.1.typ,
-                src.ip(),
-                group,
-                ifindex,
-                ifaddr
-            );
+            // println!(
+            //     "Read: type {} src {} ifaddr {} ifindex {} dest {}",
+            //     packet.1.typ,
+            //     src.ip(),
+            //     group,
+            //     ifindex,
+            //     ifaddr
+            // );
 
             tx.send(Message::Recv(packet.1, src.ip(), group, ifindex, ifaddr))
                 .unwrap();

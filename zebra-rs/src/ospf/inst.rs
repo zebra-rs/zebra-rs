@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
-use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send, ospf_ls_req_recv};
+use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::Link;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
@@ -22,13 +22,14 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::area::OspfArea;
+use super::area::{OspfArea, OspfAreaMap};
 use super::config::OspfNetworkConfig;
 use super::ifsm::{IfsmEvent, ospf_ifsm};
 use super::link::OspfLink;
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
+use super::{Identity, Lsdb, Neighbor};
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
@@ -42,27 +43,52 @@ pub struct Ospf {
     pub callbacks: HashMap<String, Callback>,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink>,
-    pub areas: BTreeMap<u8, OspfArea>,
+    pub areas: OspfAreaMap,
     pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub top: OspfTop,
-}
-
-pub struct OspfTop {
     pub router_id: Ipv4Addr,
+    pub lsdb_as: Lsdb,
 }
 
-impl OspfTop {
-    pub fn new() -> Self {
-        Self {
-            router_id: Ipv4Addr::from_str("3.3.3.3").unwrap(),
-        }
-    }
+// OSPF inteface structure which points out upper layer struct members.
+pub struct OspfInterface<'a> {
+    pub tx: &'a UnboundedSender<Message>,
+    pub router_id: &'a Ipv4Addr,
+    pub ident: &'a Identity,
+    pub addr: &'a Vec<OspfAddr>,
+    pub db_desc_in: &'a mut usize,
+    pub lsdb_as: &'a Lsdb,
+    pub lsdb_area: &'a Lsdb,
 }
 
 impl Ospf {
+    pub fn ospf_interface<'a>(
+        &'a mut self,
+        ifindex: u32,
+        src: &Ipv4Addr,
+    ) -> Option<(OspfInterface<'a>, &'a mut Neighbor)> {
+        self.links.get_mut(&ifindex).and_then(|link| {
+            self.areas.get_mut(link.area).and_then(|area| {
+                link.nbrs.get_mut(&src).map(|nbr| {
+                    (
+                        OspfInterface {
+                            tx: &self.tx,
+                            router_id: &self.router_id,
+                            ident: &link.ident,
+                            addr: &link.addr,
+                            db_desc_in: &mut link.db_desc_in,
+                            lsdb_as: &mut self.lsdb_as,
+                            lsdb_area: &mut area.lsdb,
+                        },
+                        nbr,
+                    )
+                })
+            })
+        })
+    }
+
     pub fn new(ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
         let chan = RibRxChannel::new();
         let msg = crate::rib::Message::Subscribe {
@@ -76,7 +102,6 @@ impl Ospf {
         let (ptx, prx) = mpsc::unbounded_channel();
         let mut ospf = Self {
             ctx,
-            top: OspfTop::new(),
             tx,
             rx,
             ptx,
@@ -84,10 +109,12 @@ impl Ospf {
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
             links: BTreeMap::new(),
-            areas: BTreeMap::new(),
+            areas: OspfAreaMap::new(),
             table: PrefixMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
+            router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
+            lsdb_as: Lsdb::new(),
             sock,
         };
         ospf.callback_build();
@@ -116,8 +143,23 @@ impl Ospf {
         }
     }
 
+    pub fn router_lsa_originate(&mut self) {
+        if let Some(area) = self.areas.get_mut(Ipv4Addr::UNSPECIFIED) {
+            //let lsa = router_lsa(area);
+            //area.lsdb.insert(lsa);
+        }
+    }
+
+    fn router_id_update(&mut self, router_id: Ipv4Addr) {
+        self.router_id = router_id;
+        for (_, link) in self.links.iter_mut() {
+            link.ident.router_id = router_id;
+        }
+        self.router_lsa_originate();
+    }
+
     fn link_add(&mut self, link: Link) {
-        println!("OSPF: LinkAdd {} {}", link.name, link.index);
+        // println!("OSPF: LinkAdd {} {}", link.name, link.index);
         if let Some(_link) = self.links.get_mut(&link.index) {
             //
         } else {
@@ -125,20 +167,15 @@ impl Ospf {
                 self.tx.clone(),
                 link,
                 self.sock.clone(),
-                self.top.router_id,
+                self.router_id,
                 self.ptx.clone(),
             );
-            if link.name == "enp0s6" {
-                self.tx
-                    .send(Message::Ifsm(link.index, IfsmEvent::InterfaceUp))
-                    .unwrap();
-            }
             self.links.insert(link.index, link);
         }
     }
 
     fn addr_add(&mut self, addr: LinkAddr) {
-        println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
+        // println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
@@ -146,50 +183,77 @@ impl Ospf {
             return;
         };
         let addr = OspfAddr::from(&addr, prefix);
-        if addr.ifindex == 3 {
-            self.tx
-                .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp))
-                .unwrap();
-        }
         link.addr.push(addr.clone());
-        let entry = self.table.entry(*prefix).or_default();
-        entry.addr = Some(addr);
-
         link.ident.prefix = *prefix;
+    }
 
-        if link.name == "enp0s6" {
-            link.enabled = true;
+    async fn process_recv(
+        &mut self,
+        packet: Ospfv2Packet,
+        src: Ipv4Addr,
+        from: Ipv4Addr,
+        index: u32,
+        dest: Ipv4Addr,
+    ) {
+        match packet.typ {
+            OspfType::Hello => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                ospf_hello_recv(&self.router_id, link, &packet, &src);
+            }
+            OspfType::DbDesc => {
+                println!("DB_DESC: ifindex {}, nbr src {}", index, src);
+                if let Some((mut ltop, mut nbr)) = self.ospf_interface(index, &src) {
+                    ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
+                } else {
+                    println!("DB_DESC: Pakcet from unknown neighbor {}", src);
+                }
+            }
+            OspfType::LsRequest => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                println!("LS_REQ: {}", packet);
+                // ospf_ls_req_recv(&self.top, link, &packet, &src);
+            }
+            OspfType::LsUpdate => {
+                println!("LS_UPD: {}", packet);
+            }
+            OspfType::LsAck => {
+                println!("LS_ACK: {}", packet);
+            }
+            OspfType::Unknown(typ) => {
+                println!("Unknown: packet type {}", typ);
+            }
         }
     }
 
     async fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Recv(packet, src, _from, index, _dest) => {
-                let Some(link) = self.links.get_mut(&index) else {
+            Message::Enable(ifindex, area_id) => {
+                let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
-
-                match packet.typ {
-                    OspfType::Hello => {
-                        ospf_hello_recv(&self.top, link, &packet, &src);
-                    }
-                    OspfType::DbDesc => {
-                        ospf_db_desc_recv(&self.top, link, &packet, &src);
-                    }
-                    OspfType::LsRequest => {
-                        println!("LS_REQ: {}", packet);
-                        ospf_ls_req_recv(&self.top, link, &packet, &src);
-                    }
-                    OspfType::LsUpdate => {
-                        println!("LS_UPD: {}", packet);
-                    }
-                    OspfType::LsAck => {
-                        println!("LS_ACK: {}", packet);
-                    }
-                    _ => {
-                        //
-                    }
-                }
+                link.enabled = true;
+                let area = self.areas.fetch(area_id);
+                area.links.insert(ifindex);
+                println!("Enabling ifindex:{} area_id:{}", ifindex, area_id);
+                self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+            }
+            Message::Disable(ifindex, area_id) => {
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
+                link.enabled = false;
+                let area = self.areas.fetch(area_id);
+                area.links.remove(&ifindex);
+                println!("Disabling ifindex:{} area_id:{}", ifindex, area_id);
+                self.tx
+                    .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
+            }
+            Message::Recv(packet, src, from, index, dest) => {
+                self.process_recv(packet, src, from, index, dest).await;
             }
             Message::Ifsm(index, ev) => {
                 let Some(link) = self.links.get_mut(&index) else {
@@ -220,6 +284,9 @@ impl Ospf {
 
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
+            RibRx::RouterIdUpdate(router_id) => {
+                self.router_id_update(router_id);
+            }
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
@@ -242,6 +309,13 @@ impl Ospf {
 
     pub async fn event_loop(&mut self) {
         loop {
+            match self.rib_rx.recv().await {
+                Some(RibRx::EoR) => break,
+                Some(msg) => self.process_rib_msg(msg),
+                None => break,
+            }
+        }
+        loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg).await;
@@ -260,11 +334,6 @@ impl Ospf {
     }
 }
 
-pub fn ospf_interface_enable(oi: &mut OspfLink, _laddr: &LinkAddr) {
-    oi.enabled = true;
-    // oi.ident.addr = laddr.addr;
-}
-
 pub fn serve(mut ospf: Ospf) {
     tokio::spawn(async move {
         ospf.event_loop().await;
@@ -272,6 +341,8 @@ pub fn serve(mut ospf: Ospf) {
 }
 
 pub enum Message {
+    Enable(u32, Ipv4Addr),
+    Disable(u32, Ipv4Addr),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, Ipv4Addr, NfsmEvent),
     HelloTimer(u32),

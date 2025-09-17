@@ -172,9 +172,11 @@ pub fn ospf_wait_timer(oi: &OspfLink) -> Timer {
 pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
     println!("ospf_ifsm_interface_up");
     if link.addr.is_empty() {
+        println!("link addr is empty");
         return None;
     }
 
+    println!("ospf_join_if index {}", link.index);
     ospf_join_if(&link.sock, link.index);
 
     // Comment out until we support pointopoint interface.
