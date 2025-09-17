@@ -1,24 +1,35 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
-use super::Link;
+use super::{Link, Rib};
 
 fn router_id(links: &BTreeMap<u32, Link>) -> Option<Ipv4Addr> {
-    // Helper function to find a router ID based on loopback status and if the link is up.
     fn find_router_id(links: &BTreeMap<u32, Link>, loopback: bool) -> Option<Ipv4Addr> {
-        // links
-        //     .values()
-        //     .filter(|link| link.is_up() && link.is_loopback() == loopback) // Match loopback and check if up
-        //     .flat_map(|link| &link.addrv4) // Flatten addrv4 field into an iterator
-        //     .map(|laddr| laddr.ifaddr.addr()) // Extract Ipv4Addr
-        //     .find(|&addr| addr != Ipv4Addr::LOCALHOST) // Find the first non-localhost address
-        None
+        links
+            .values()
+            .filter(|link| link.is_loopback() == loopback)
+            .flat_map(|link| &link.addr4)
+            .filter_map(|laddr| match laddr.addr {
+                ipnet::IpNet::V4(v4net) => Some(v4net.addr()),
+                _ => None,
+            })
+            .find(|&addr| addr != Ipv4Addr::LOCALHOST)
     }
 
-    // Try to find a router ID from up loopback interfaces first, then fallback to up non-loopback interfaces.
+    // Try to find a router ID from up loopback interfaces first, then fallback
+    // to non-loopback interfaces.
     find_router_id(links, true).or_else(|| find_router_id(links, false))
 }
 
-fn router_id_update() {
-    //
+impl Rib {
+    pub fn router_id_update(&mut self) {
+        if let Some(router_id) = router_id(&self.links) {
+            if self.router_id != router_id {
+                println!("Update: router_id {} -> {}", self.router_id, router_id);
+                self.router_id = router_id;
+
+                //
+            }
+        }
+    }
 }

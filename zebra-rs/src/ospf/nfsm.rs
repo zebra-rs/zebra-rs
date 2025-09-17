@@ -184,6 +184,10 @@ impl NfsmState {
     }
 }
 
+pub fn ospf_db_summary_isempty(nbr: &Neighbor) -> bool {
+    nbr.db_sum.is_empty()
+}
+
 pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
     // /* Clear Database Summary list. */
     // if (!ospf_db_summary_isempty (nbr))
@@ -240,6 +244,27 @@ pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {
             nbr.timer.db_desc = None;
             nbr.timer.ls_upd = None;
         }
+    }
+}
+
+pub fn ospf_ls_req_timer(nbr: &Neighbor) -> Timer {
+    let tx = nbr.tx.clone();
+    let prefix = nbr.ident.prefix.clone();
+    let ifindex = nbr.ifindex;
+    Timer::new(Timer::second(1), TimerType::Once, move || {
+        use NfsmEvent::*;
+        let tx = tx.clone();
+        async move {
+            println!("ospf_ls_req_timer");
+            tx.send(Message::Nfsm(ifindex, prefix.addr(), InactivityTimer))
+                .unwrap();
+        }
+    })
+}
+
+pub fn ospf_nfsm_ls_req_timer_on(nbr: &mut Neighbor) {
+    if nbr.timer.ls_req.is_none() {
+        nbr.timer.ls_req = Some(ospf_ls_req_timer(nbr));
     }
 }
 
@@ -303,6 +328,7 @@ pub fn ospf_nfsm_twoway_received(nbr: &mut Neighbor, oident: &Identity) -> Optio
 }
 
 pub fn ospf_nfsm_negotiation_done(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+    println!("ospf_nfsm_negotiation_done");
     None
 }
 
@@ -407,7 +433,8 @@ fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identit
         nbr.dd.flags.set_more(true);
         nbr.dd.flags.set_init(true);
 
-        ospf_db_desc_send(nbr, oident);
+        println!("DB_DESC from NFSM");
+        // ospf_db_desc_send(nbr, oident);
     }
 }
 
