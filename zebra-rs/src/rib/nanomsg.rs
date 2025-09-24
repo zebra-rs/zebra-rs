@@ -113,7 +113,7 @@ struct IsisInstance {
     metric_style: u32,
     #[serde(rename = "segment-routing")]
     segment_routing: String,
-    #[serde(rename = "mpls-traffic-eng")]
+    #[serde(rename = "mpls-traffic-eng", skip_serializing_if = "Option::is_none")]
     mpls_traffic_eng: Option<RouterId>,
     #[serde(rename = "ipv4 unicast")]
     ipv4_unicast: AddressFamily,
@@ -141,9 +141,9 @@ struct IsisIf {
     network_type: u32,
     #[serde(rename = "circuit-type")]
     circuit_type: u32,
-    #[serde(rename = "prefix-sid")]
+    #[serde(rename = "prefix-sid", skip_serializing_if = "Option::is_none")]
     prefix_sid: Option<PrefixSid>,
-    #[serde(rename = "adjacency-sid")]
+    #[serde(rename = "adjacency-sid", skip_serializing_if = "Option::is_none")]
     adjacency_sid: Option<PrefixSid>,
     #[serde(rename = "srlg-group")]
     srlg_group: String,
