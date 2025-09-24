@@ -45,6 +45,7 @@ enum MsgEnum {
     IsisGlobal(IsisGlobal),
     IsisInstance(IsisInstance),
     IsisIf(IsisIf),
+    IsisIfDel(IsisIfDel),
     SegmentRouting(SegmentRouting),
     BgpGlobal(BgpGlobal),
     BgpInstance(BgpInstance),
@@ -148,6 +149,11 @@ struct IsisIf {
     srlg_group: String,
     #[serde(rename = "l2-config")]
     l2_config: Option<IsisIfLevel>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IsisIfDel {
+    ifname: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -289,6 +295,21 @@ impl Nanomsg {
         MsgEnum::IsisInstance(msg)
     }
 
+    fn isis_if_add_enp0s6_none(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "enp0s6".into(),
+            instance_tag: "s".into(),
+            ipv4_enable: true,
+            network_type: 2,
+            circuit_type: 2,
+            prefix_sid: None,
+            adjacency_sid: None,
+            srlg_group: "group-1".into(),
+            l2_config: Some(IsisIfLevel { metric: 20 }),
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
     fn isis_if_add_enp0s6(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "enp0s6".into(),
@@ -334,21 +355,7 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
-    fn segment_routing_update(&self) -> MsgEnum {
-        let msg = SegmentRouting {
-            global_block: GlobalBlock {
-                begin: 16000,
-                end: 23999,
-            },
-            local_block: LocalBlock {
-                begin: 15000,
-                end: 15999,
-            },
-        };
-        MsgEnum::SegmentRouting(msg)
-    }
-
-    fn isis_if_add_lo_no_sid(&self) -> MsgEnum {
+    fn isis_if_add_lo_none(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "lo".into(),
             instance_tag: "s".into(),
@@ -361,6 +368,27 @@ impl Nanomsg {
             l2_config: None,
         };
         MsgEnum::IsisIf(msg)
+    }
+
+    fn isis_if_del_lo(&self) -> MsgEnum {
+        let msg = IsisIfDel {
+            ifname: "lo".into(),
+        };
+        MsgEnum::IsisIfDel(msg)
+    }
+
+    fn segment_routing_update(&self) -> MsgEnum {
+        let msg = SegmentRouting {
+            global_block: GlobalBlock {
+                begin: 16000,
+                end: 23999,
+            },
+            local_block: LocalBlock {
+                begin: 15000,
+                end: 15999,
+            },
+        };
+        MsgEnum::SegmentRouting(msg)
     }
 
     fn bgp_global(&self) -> MsgEnum {
@@ -510,6 +538,26 @@ impl Nanomsg {
                         data: self.isis_instance_add2(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    // let msg = MsgSend {
+                    //     method: String::from("isis-if:delete"),
+                    //     data: self.isis_if_del_lo(),
+                    // };
+                    // self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    thread::sleep(Duration::from_secs(3));
+
+                    let msg = MsgSend {
+                        method: String::from("isis-if:add"),
+                        data: self.isis_if_add_lo_none(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    // let msg = MsgSend {
+                    //     method: String::from("isis-if:add"),
+                    //     data: self.isis_if_add_enp0s6(),
+                    // };
+                    // self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);
