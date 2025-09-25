@@ -503,11 +503,6 @@ impl Nanomsg {
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "isis-instance:request" {
-                    let msg = MsgSend {
-                        method: String::from("segment-routing:update"),
-                        data: self.segment_routing_update(),
-                    };
-                    self.socket.write_all(to_string(&msg)?.as_bytes());
                     // isis-instance:add
                     let msg = MsgSend {
                         method: String::from("isis-instance:add"),
@@ -523,7 +518,7 @@ impl Nanomsg {
 
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
-                        data: self.isis_if_add_enp0s6_none(),
+                        data: self.isis_if_add_enp0s6(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
@@ -539,33 +534,11 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    // let msg = MsgSend {
-                    //     method: String::from("isis-if:delete"),
-                    //     data: self.isis_if_del_lo(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
-
-                    thread::sleep(Duration::from_secs(6));
-
-                    // let msg = MsgSend {
-                    //     method: String::from("isis-if:add"),
-                    //     data: self.isis_if_add_lo(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
-
                     let msg = MsgSend {
-                        method: String::from("isis-if:add"),
-                        data: self.isis_if_add_enp0s6(),
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
-
-                    // thread::sleep(Duration::from_secs(3));
-
-                    // let msg = MsgSend {
-                    //     method: String::from("isis-if:add"),
-                    //     data: self.isis_if_add_enp0s6_none(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);
