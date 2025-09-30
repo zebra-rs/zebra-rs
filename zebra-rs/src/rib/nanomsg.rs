@@ -50,6 +50,7 @@ enum MsgEnum {
     BgpGlobal(BgpGlobal),
     BgpInstance(BgpInstance),
     BgpNeighbor(BgpNeighbor),
+    BgpNetwork(BgpNetwork),
     Vrf(Vrf),
 }
 
@@ -220,6 +221,27 @@ struct BgpNeighbor {
     local_as: u32,
     #[serde(rename = "address-family")]
     address_family: Vec<BgpAddressFamily>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpRoute {
+    afi: u32,
+    safi: u32,
+    #[serde(rename = "route-distinguisher")]
+    rd: String,
+    prefix: String,
+    #[serde(rename = "mpls-label")]
+    mpls_label: u32,
+}
+
+// network 192.168.3.0 255.255.255.0 rd 1:1 label 128
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpNetwork {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    #[serde(rename = "instance")]
+    bgp_instance: u32,
+    route: BgpRoute,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -443,6 +465,25 @@ impl Nanomsg {
         MsgEnum::BgpNeighbor(msg)
     }
 
+    fn bgp_network(&self) -> MsgEnum {
+        let address = "192.168.2.2".parse::<Ipv4Addr>().unwrap();
+        let ipv4_uni = BgpAddressFamily { afi: 1, safi: 1 };
+        let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
+        let route = BgpRoute {
+            afi: 1,
+            safi: 1,
+            rd: "1:1".to_string(),
+            prefix: "192.168.3.0/24".to_string(),
+            mpls_label: 18,
+        };
+        let msg = BgpNetwork {
+            vrf_id: 1,
+            bgp_instance: 2,
+            route,
+        };
+        MsgEnum::BgpNetwork(msg)
+    }
+
     fn vrf(&self) -> MsgEnum {
         let msg = Vrf {
             vrf_id: 1,
@@ -490,6 +531,12 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("bgp-instance:add"),
                         data: self.bgp_vrf(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                    //
+                    let msg = MsgSend {
+                        method: String::from("bgp-network:add"),
+                        data: self.bgp_network(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
