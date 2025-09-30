@@ -413,6 +413,20 @@ impl Nanomsg {
         MsgEnum::SegmentRouting(msg)
     }
 
+    fn segment_routing_update_global(&self) -> MsgEnum {
+        let msg = SegmentRouting {
+            global_block: GlobalBlock {
+                begin: 16000,
+                end: 18000,
+            },
+            local_block: LocalBlock {
+                begin: 15000,
+                end: 15999,
+            },
+        };
+        MsgEnum::SegmentRouting(msg)
+    }
+
     fn bgp_global(&self) -> MsgEnum {
         let msg = BgpGlobal {
             four_octet_asn: true,
@@ -584,6 +598,12 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("segment-routing:update"),
                         data: self.segment_routing_update(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update_global(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
