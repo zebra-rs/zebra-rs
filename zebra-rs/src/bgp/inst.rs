@@ -121,10 +121,10 @@ impl Bgp {
             Message::Event(peer, event) => {
                 match event {
                     Event::BGPOpen(ref msg) => {
-                        println!("{:?}", msg);
+                        println!("{}", msg);
                     }
                     Event::UpdateMsg(ref msg) => {
-                        println!("{:?}", msg);
+                        println!("{}", msg);
                     }
                     Event::KeepAliveMsg => {
                         println!("KeepAlive:");

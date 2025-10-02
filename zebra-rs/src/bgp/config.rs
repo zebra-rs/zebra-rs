@@ -178,7 +178,7 @@ impl Bgp {
         self.callback_peer("/peer-as", config_peer_as);
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
-        self.callback_peer("/afi-safis/afi-safi/enabled", config_afi_safi);
+        self.callback_peer("/afi-safi/enabled", config_afi_safi);
 
         // Timer configuration.
         self.timer("/hold-time", timer::config::hold_time);

@@ -30,7 +30,7 @@ impl From<u8> for BgpOrigin {
 }
 
 /// BGP peer type for route advertisement rules
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum PeerType {
     IBGP,
@@ -576,9 +576,9 @@ pub struct Route {
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Determine peer type based on AS numbers
     let peer_type = if peer.local_as == peer.peer_as {
-        super::route::PeerType::IBGP
+        PeerType::IBGP
     } else {
-        super::route::PeerType::EBGP
+        PeerType::EBGP
     };
 
     // Process route announcements
@@ -601,10 +601,10 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
             if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
                 eprintln!("Failed to install BGP route {} to RIB: {}", ipv4, e);
             } else {
-                println!(
-                    "Installed new best path for {}: {:?}",
-                    ipv4, new_best.peer_addr
-                );
+                // println!(
+                //     "Installed new best path for {}: {:?}",
+                //     ipv4, new_best.peer_addr
+                // );
             }
         }
     }
