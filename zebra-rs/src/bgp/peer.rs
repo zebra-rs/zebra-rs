@@ -420,7 +420,7 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
 fn peer_send_update_test(peer: &mut Peer) {
     let mut update: UpdatePacket = UpdatePacket::new();
 
-    let origin = Origin::new(ORIGIN_IGP);
+    let origin = Origin::Igp;
     update.attrs.push(Attr::Origin(origin));
 
     let aspath: As4Path = As4Path::from_str("100").unwrap();
@@ -465,9 +465,10 @@ fn peer_send_update_test(peer: &mut Peer) {
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter[BgpType::Update as usize].rcvd += 1;
     timer::refresh_hold_timer(peer);
+
     route_from_peer(peer, packet, bgp);
 
-    peer_send_update_test(peer);
+    // peer_send_update_test(peer);
 
     State::Established
 }

@@ -1,4 +1,4 @@
-use bgp_packet::{Attr, UpdatePacket};
+use bgp_packet::{Attr, Origin, UpdatePacket};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::BTreeMap;
@@ -10,24 +10,6 @@ use crate::rib;
 use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
 use ipnet::IpNet;
 use tokio::sync::mpsc::UnboundedSender;
-
-/// BGP route origin types as defined in RFC 4271
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BgpOrigin {
-    Igp = 0,        // IGP (lowest preference)
-    Egp = 1,        // EGP
-    Incomplete = 2, // Incomplete (highest preference)
-}
-
-impl From<u8> for BgpOrigin {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => BgpOrigin::Igp,
-            1 => BgpOrigin::Egp,
-            _ => BgpOrigin::Incomplete,
-        }
-    }
-}
 
 /// BGP peer type for route advertisement rules
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
@@ -61,7 +43,7 @@ pub struct BgpRoute {
     /// Local preference (IBGP only)
     pub local_pref: Option<u32>,
     /// Origin type
-    pub origin: BgpOrigin,
+    pub origin: Origin,
     /// Weight (Cisco-style, highest priority)
     pub weight: u32,
     /// Route installation time
@@ -92,7 +74,7 @@ impl BgpRoute {
             as_path_len: 0,
             med: None,
             local_pref: None,
-            origin: BgpOrigin::Incomplete,
+            origin: Origin::Incomplete,
             weight: 0,
             installed: Instant::now(),
             best_path: false,
@@ -110,7 +92,7 @@ impl BgpRoute {
             match attr {
                 Attr::Origin(origin) => {
                     // Convert Origin to u8 value first, then to BgpOrigin
-                    self.origin = BgpOrigin::from(origin.origin);
+                    self.origin = *origin;
                 }
                 Attr::As4Path(as_path) => {
                     // Calculate AS path length for path selection (use As4Path for 4-byte ASN support)
@@ -573,7 +555,7 @@ pub struct Route {
     pub selected: bool,
 }
 
-pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
+pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Determine peer type based on AS numbers
     let peer_type = if peer.local_as == peer.peer_as {
         PeerType::IBGP
@@ -587,7 +569,7 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
             peer.address,
             peer.peer_as,
             peer.local_as,
-            peer_type.clone(),
+            peer_type,
             *ipv4,
             packet.attrs.clone(),
         );
@@ -633,4 +615,20 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
             }
         }
     }
+}
+
+// BGP Attribute for quick access to each attribute. This would be used for
+// consolidating route advertisement.
+#[derive(Clone, Debug)]
+pub struct BgpAttr {
+    /// Origin type
+    pub origin: Origin,
+    /// Multi-Exit Discriminator
+    pub med: Option<u32>,
+    /// Local preference (IBGP only)
+    pub local_pref: Option<u32>,
+}
+
+pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
+    // Convert Vec<Attr> to BgpAttr.
 }
