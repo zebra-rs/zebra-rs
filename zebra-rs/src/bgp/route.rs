@@ -1,4 +1,7 @@
-use bgp_packet::{As4Path, Attr, Community, ExtCommunity, Origin, UpdatePacket, Vpnv4Nexthop};
+use bgp_packet::{
+    Aggregator, As4Path, Attr, ClusterList, Community, ExtCommunity, LargeCommunity, Origin,
+    OriginatorId, PmsiTunnel, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
+};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::BTreeMap;
@@ -637,10 +640,24 @@ pub struct BgpAttr {
     pub med: Option<u32>,
     /// Local preference (IBGP only)
     pub local_pref: Option<u32>,
+    /// Atomic Aggregate
+    pub atomic_aggregate: Option<bool>,
+    /// Aggregator.
+    pub aggregator: Option<Aggregator>,
     /// Community
     pub com: Option<Community>,
-    /// Community
+    /// Originator ID
+    pub originator_id: Option<OriginatorId>,
+    /// Cluster List
+    pub cluster_list: Option<ClusterList>,
+    /// Extended Community
     pub ecom: Option<ExtCommunity>,
+    /// PMSI Tunnel
+    pub pmsi_tunnel: Option<PmsiTunnel>,
+    /// AIGP
+    pub aigp: Option<u64>,
+    /// Large Community
+    pub lcom: Option<LargeCommunity>,
 }
 
 impl BgpAttr {
@@ -653,48 +670,139 @@ impl BgpAttr {
                     target.origin = *v;
                 }
                 Attr::As2Path(v) => {
-                    // TODO: Convert As2Path to As4Path.
+                    // TODO
                 }
                 Attr::As4Path(v) => {
                     target.aspath = Some(v.clone());
                 }
-                Attr::NextHop(v) => {}
+                Attr::NextHop(v) => {
+                    target.nexthop = Some(BgpNexthop::Ipv4(v.nexthop));
+                }
                 Attr::Med(v) => {
                     target.med = Some(v.med);
                 }
                 Attr::LocalPref(v) => {
                     target.local_pref = Some(v.local_pref);
                 }
-                // Attr::AtomicAggregate(atomic_aggregate) => todo!(),
-                // Attr::Aggregator2(aggregator2) => todo!(),
-                // Attr::Aggregator4(aggregator4) => todo!(),
+                Attr::AtomicAggregate(_v) => {
+                    target.atomic_aggregate = Some(true);
+                }
+                Attr::Aggregator(v) => {
+                    target.aggregator = Some(v.clone());
+                }
+                Attr::Aggregator2(v) => {
+                    // TODO
+                }
                 Attr::Community(v) => {
                     target.com = Some(v.clone());
                 }
-                // Attr::OriginatorId(originator_id) => todo!(),
-                // Attr::ClusterList(cluster_list) => todo!(),
-                // Attr::MpReachNlri(mp_nlri_reach_attr) => todo!(),
-                // Attr::MpUnreachNlri(mp_nlri_unreach_attr) => todo!(),
+                Attr::OriginatorId(v) => {
+                    target.originator_id = Some(v.clone());
+                }
+                Attr::ClusterList(v) => {
+                    target.cluster_list = Some(v.clone());
+                }
+                Attr::MpReachNlri(_v) => {
+                    // Ignore in attribute conversion.
+                }
+                Attr::MpUnreachNlri(_v) => {
+                    // Ignore in attribute conversion.
+                }
                 Attr::ExtendedCom(v) => {
                     target.ecom = Some(v.clone());
                 }
-                // Attr::PmsiTunnel(pmsi_tunnel) => todo!(),
-                // Attr::Aigp(aigp) => todo!(),
-                // Attr::LargeCom(large_community) => todo!(),
+                Attr::PmsiTunnel(v) => {
+                    target.pmsi_tunnel = Some(v.clone());
+                }
+                Attr::Aigp(v) => {
+                    target.aigp = Some(v.aigp);
+                }
+                Attr::LargeCom(v) => {
+                    target.lcom = Some(v.clone());
+                }
                 _ => {
-                    //
+                    // TODO for unknown attribute
                 }
             }
         }
-
         target
     }
 }
 
+#[derive(Default)]
+struct Ipv4Nlri {
+    pub eor: bool,
+    pub update: Vec<Ipv4Net>,
+    pub withdraw: Vec<Ipv4Net>,
+}
+
+#[derive(Default)]
+struct Vpnv4Nlri {
+    pub eor: bool,
+    pub update: Vec<Vpnv4Net>,
+    pub withdraw: Vec<Vpnv4Net>,
+}
+
+enum BgpNlri {
+    Ipv4(Ipv4Nlri),
+    Vpnv4(Vpnv4Nlri),
+    Empty,
+}
+
+impl BgpNlri {
+    fn from(packet: &UpdatePacket) -> Self {
+        // IPv4 End of RIB.
+        if packet.attrs.is_empty() {
+            if packet.ipv4_update.is_empty() && packet.ipv4_withdraw.is_empty() {
+                let eor = Ipv4Nlri {
+                    eor: true,
+                    ..Default::default()
+                };
+                return BgpNlri::Ipv4(eor);
+            }
+        }
+        // IPv4 updates.
+        if !packet.ipv4_update.is_empty() {
+            let update = Ipv4Nlri {
+                update: packet.ipv4_update.clone(),
+                ..Default::default()
+            };
+            return BgpNlri::Ipv4(update);
+        }
+        if !packet.ipv4_withdraw.is_empty() {
+            let withdraw = Ipv4Nlri {
+                withdraw: packet.ipv4_withdraw.clone(),
+                ..Default::default()
+            };
+            return BgpNlri::Ipv4(withdraw);
+        }
+        BgpNlri::Empty
+    }
+}
+
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
-    // Convert Vec<Attr> to BgpAttr.
+    // Convert UpdatePacket to BgpAttr.
     let attr = BgpAttr::from(&packet.attrs);
 
-    // Create BgpRoutes.
-    // let rib = BgpRib::new();
+    // Convert UpdatePacket to BgpNlri.
+    let nlri = BgpNlri::from(&packet);
+
+    // Process NLRI.
+    use BgpNlri::*;
+    match nlri {
+        Ipv4(nlri) => {
+            if nlri.eor {
+                println!("IPv4 EoR");
+            }
+            for update in nlri.update.iter() {
+                println!("IPv4 Update: {}", update);
+            }
+            for withdraw in nlri.withdraw.iter() {
+                println!("IPv4 Withdraw: {}", withdraw);
+            }
+        }
+        _ => {
+            //
+        }
+    }
 }
