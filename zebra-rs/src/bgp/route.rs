@@ -1,4 +1,4 @@
-use bgp_packet::{Attr, Origin, UpdatePacket};
+use bgp_packet::{As4Path, Attr, Community, ExtCommunity, Origin, UpdatePacket, Vpnv4Nexthop};
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use std::collections::BTreeMap;
@@ -33,7 +33,7 @@ pub struct BgpRoute {
     /// Route prefix
     pub prefix: Ipv4Net,
     /// Next hop address
-    pub next_hop: Ipv4Addr,
+    pub nexthop: Ipv4Addr,
     /// All BGP path attributes
     pub attrs: Vec<Attr>,
     /// AS path length (for best path selection)
@@ -69,7 +69,7 @@ impl BgpRoute {
             local_as,
             peer_type,
             prefix,
-            next_hop: Ipv4Addr::UNSPECIFIED,
+            nexthop: Ipv4Addr::UNSPECIFIED,
             attrs: attrs.clone(),
             as_path_len: 0,
             med: None,
@@ -113,7 +113,7 @@ impl BgpRoute {
                     }
                 }
                 Attr::NextHop(nh) => {
-                    self.next_hop = nh.next_hop;
+                    self.nexthop = nh.nexthop;
                 }
                 Attr::Med(med) => {
                     self.med = Some(med.med);
@@ -512,7 +512,7 @@ pub fn send_route_to_rib(
 
     // Create nexthop - convert IPv4 nexthop to IpAddr
     let nexthop_uni = NexthopUni {
-        addr: IpAddr::V4(bgp_route.next_hop),
+        addr: IpAddr::V4(bgp_route.nexthop),
         metric: bgp_route.med.unwrap_or(0),
         weight: bgp_route.weight as u8,
         ifindex: 0, // TODO: Resolve interface index from nexthop
@@ -617,18 +617,84 @@ pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut Con
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum BgpNexthop {
+    Ipv4(Ipv4Addr),
+    Vpnv4(Vpnv4Nexthop),
+}
+
 // BGP Attribute for quick access to each attribute. This would be used for
 // consolidating route advertisement.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct BgpAttr {
     /// Origin type
     pub origin: Origin,
+    /// AS Path
+    pub aspath: Option<As4Path>,
+    /// Nexthop
+    pub nexthop: Option<BgpNexthop>,
     /// Multi-Exit Discriminator
     pub med: Option<u32>,
     /// Local preference (IBGP only)
     pub local_pref: Option<u32>,
+    /// Community
+    pub com: Option<Community>,
+    /// Community
+    pub ecom: Option<ExtCommunity>,
+}
+
+impl BgpAttr {
+    fn from(attrs: &[Attr]) -> Self {
+        let mut target = BgpAttr::default();
+
+        for attr in attrs.iter() {
+            match attr {
+                Attr::Origin(v) => {
+                    target.origin = *v;
+                }
+                Attr::As2Path(v) => {
+                    // TODO: Convert As2Path to As4Path.
+                }
+                Attr::As4Path(v) => {
+                    target.aspath = Some(v.clone());
+                }
+                Attr::NextHop(v) => {}
+                Attr::Med(v) => {
+                    target.med = Some(v.med);
+                }
+                Attr::LocalPref(v) => {
+                    target.local_pref = Some(v.local_pref);
+                }
+                // Attr::AtomicAggregate(atomic_aggregate) => todo!(),
+                // Attr::Aggregator2(aggregator2) => todo!(),
+                // Attr::Aggregator4(aggregator4) => todo!(),
+                Attr::Community(v) => {
+                    target.com = Some(v.clone());
+                }
+                // Attr::OriginatorId(originator_id) => todo!(),
+                // Attr::ClusterList(cluster_list) => todo!(),
+                // Attr::MpReachNlri(mp_nlri_reach_attr) => todo!(),
+                // Attr::MpUnreachNlri(mp_nlri_unreach_attr) => todo!(),
+                Attr::ExtendedCom(v) => {
+                    target.ecom = Some(v.clone());
+                }
+                // Attr::PmsiTunnel(pmsi_tunnel) => todo!(),
+                // Attr::Aigp(aigp) => todo!(),
+                // Attr::LargeCom(large_community) => todo!(),
+                _ => {
+                    //
+                }
+            }
+        }
+
+        target
+    }
 }
 
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Convert Vec<Attr> to BgpAttr.
+    let attr = BgpAttr::from(&packet.attrs);
+
+    // Create BgpRoutes.
+    // let rib = BgpRib::new();
 }

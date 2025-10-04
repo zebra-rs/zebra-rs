@@ -427,7 +427,7 @@ fn peer_send_update_test(peer: &mut Peer) {
     update.attrs.push(Attr::As4Path(aspath));
 
     let nexthop = NexthopAttr {
-        next_hop: [10, 211, 55, 2].into(),
+        nexthop: [10, 211, 55, 2].into(),
     };
     update.attrs.push(Attr::NextHop(nexthop));
 
@@ -440,8 +440,8 @@ fn peer_send_update_test(peer: &mut Peer) {
     let atomic = AtomicAggregate::new();
     update.attrs.push(Attr::AtomicAggregate(atomic));
 
-    let aggregator = Aggregator4::new(1, Ipv4Addr::new(10, 211, 55, 2));
-    update.attrs.push(Attr::Aggregator4(aggregator));
+    let aggregator = Aggregator::new(1, Ipv4Addr::new(10, 211, 55, 2));
+    update.attrs.push(Attr::Aggregator(aggregator));
 
     let com = Community::from_str("100:10 100:20").unwrap();
     update.attrs.push(Attr::Community(com));
@@ -521,29 +521,30 @@ pub fn peer_packet_parse(
     ident: IpAddr,
     tx: UnboundedSender<Message>,
     config: &mut PeerConfig,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     let as4 = !config.received.is_empty();
 
-    if let Ok((_, p)) = parse_bgp_packet(rx, as4) {
-        match p {
-            BgpPacket::Open(p) => {
-                config.received = p.caps.clone();
-                let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+    match parse_bgp_packet(rx, as4) {
+        Ok((_, p)) => {
+            match p {
+                BgpPacket::Open(p) => {
+                    config.received = p.caps.clone();
+                    let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+                }
+                BgpPacket::Keepalive(_) => {
+                    let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
+                }
+                BgpPacket::Notification(p) => {
+                    println!("{}", p);
+                    let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
+                }
+                BgpPacket::Update(p) => {
+                    let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
+                }
             }
-            BgpPacket::Keepalive(_) => {
-                let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
-            }
-            BgpPacket::Notification(p) => {
-                println!("{}", p);
-                let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
-            }
-            BgpPacket::Update(p) => {
-                let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
-            }
+            Ok(())
         }
-        Ok(())
-    } else {
-        Err("parse error")
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -572,7 +573,7 @@ pub async fn peer_read(
                             buf = remain;
                         }
                         Err(err) => {
-                            println!("E: {}", err);
+                            println!("Packet Parse Error: {}", err);
                             let _ = tx.send(Message::Event(ident, Event::ConnFail));
                             return;
                         }

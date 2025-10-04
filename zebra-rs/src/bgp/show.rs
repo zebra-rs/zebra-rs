@@ -82,7 +82,7 @@ RPKI validation codes: V valid, I invalid, N Not found
 fn show_nexthop(attrs: &Vec<Attr>) -> String {
     for attr in attrs.iter() {
         if let Attr::NextHop(nhop) = attr {
-            return nhop.next_hop.to_string();
+            return nhop.nexthop.to_string();
         }
     }
     "".to_string()
