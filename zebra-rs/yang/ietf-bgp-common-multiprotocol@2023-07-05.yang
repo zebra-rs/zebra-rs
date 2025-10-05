@@ -15,6 +15,9 @@ submodule ietf-bgp-common-multiprotocol {
   import ietf-routing-policy {
     prefix rt-pol;
   }
+  import extension {
+    prefix ext;
+  }
 
   // meta
 
@@ -143,6 +146,7 @@ submodule ietf-bgp-common-multiprotocol {
         "AFI,SAFI";
     }
     leaf enabled {
+      ext:sort "50";
       mandatory true;
       type boolean;
       default "false";
