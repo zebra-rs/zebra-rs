@@ -1,8 +1,10 @@
+use bgp_packet::addpath::AddPathValue;
 use bgp_packet::cap::CapMultiProtocol;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
@@ -23,7 +25,7 @@ use crate::bgp::timer;
 use crate::config::Args;
 
 use super::BGP_PORT;
-use super::cap::{CapAfiMap, cap_register_send};
+use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
 use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
 use super::route::{route_from_peer, send_route_to_rib};
@@ -108,6 +110,7 @@ pub struct PeerTransportConfig {
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
     pub afi_safi: AfiSafis,
+    pub add_path: BTreeSet<AddPathValue>,
     pub four_octet: bool,
     pub route_refresh: bool,
     pub graceful_restart: Option<u32>,
@@ -163,6 +166,7 @@ pub struct Peer {
     pub cap_map: CapAfiMap,
     pub adj_rib_in: BgpAdjRibIn,
     pub adj_rib_out: BgpAdjRibOut,
+    pub opt: ParseOption,
 }
 
 impl Peer {
@@ -199,6 +203,7 @@ impl Peer {
             cap_map: CapAfiMap::new(),
             adj_rib_in: BgpAdjRibIn::new(),
             adj_rib_out: BgpAdjRibOut::new(),
+            opt: ParseOption::default(),
         };
         peer.config
             .afi_safi
@@ -403,6 +408,9 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     // Register recv caps.
     cap_register_recv(&packet.caps, &mut peer.cap_map);
 
+    // Register add path caps.
+    cap_addpath_recv(&packet.caps, &mut peer.opt, &peer.config.add_path);
+
     State::Established
 }
 
@@ -453,8 +461,9 @@ fn peer_send_update_test(peer: &mut Peer) {
     // let ecom6 = ExtIpv6Community(vec![ecom6_val]);
     // update.attrs.push(Attribute::ExtIpv6Community(ecom6));
 
-    let ipv4net: Ipv4Net = "1.1.1.1/32".parse().unwrap();
-    update.ipv4_update.push(ipv4net);
+    let prefix: Ipv4Net = "1.1.1.1/32".parse().unwrap();
+    let ipv4nlri = Ipv4Nlri { id: 0, prefix };
+    update.ipv4_update.push(ipv4nlri);
 
     let bytes: BytesMut = update.into();
 
@@ -524,7 +533,9 @@ pub fn peer_packet_parse(
 ) -> Result<(), String> {
     let as4 = !config.received.is_empty();
 
-    match parse_bgp_packet(rx, as4) {
+    // TODO.  Lookup existing peer using ident.
+
+    match parse_bgp_packet(rx, as4, Some(ParseOption::default())) {
         Ok((_, p)) => {
             match p {
                 BgpPacket::Open(p) => {
@@ -656,6 +667,11 @@ pub fn peer_send_open(peer: &mut Peer) {
     if let Some(restart_time) = peer.config.graceful_restart {
         let cap = CapabilityGracefulRestart::new(restart_time);
         caps.push(CapabilityPacket::GracefulRestart(cap));
+    }
+    for add_path in peer.config.add_path.iter() {
+        let mut cap = CapabilityAddPath::default();
+        cap.values.push(add_path.clone());
+        caps.push(CapabilityPacket::AddPath(cap));
     }
 
     cap_register_send(&caps, &mut peer.cap_map);

@@ -1,12 +1,14 @@
+use std::collections::BTreeMap;
+use std::fmt;
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::Instant;
+
 use bgp_packet::{
-    Aggregator, As4Path, Attr, ClusterList, Community, ExtCommunity, LargeCommunity, Origin,
-    OriginatorId, PmsiTunnel, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
+    Aggregator, As4Path, Attr, ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity,
+    Origin, OriginatorId, PmsiTunnel, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
 };
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
-use std::time::Instant;
 
 use super::peer::{ConfigRef, Peer};
 use crate::rib;
@@ -34,7 +36,7 @@ pub struct BgpRoute {
     /// Peer type (IBGP/EBGP)
     pub peer_type: PeerType,
     /// Route prefix
-    pub prefix: Ipv4Net,
+    pub prefix: Ipv4Nlri,
     /// Next hop address
     pub nexthop: Ipv4Addr,
     /// All BGP path attributes
@@ -63,7 +65,7 @@ impl BgpRoute {
         peer_as: u32,
         local_as: u32,
         peer_type: PeerType,
-        prefix: Ipv4Net,
+        prefix: Ipv4Nlri,
         attrs: Vec<Attr>,
     ) -> Self {
         let mut route = Self {
@@ -153,7 +155,7 @@ impl BgpAdjRibIn {
 
     /// Add a route to Adj-RIB-In
     pub fn add_route(&mut self, route: BgpRoute) -> Option<BgpRoute> {
-        self.routes.insert(route.prefix, route)
+        self.routes.insert(route.prefix.prefix, route)
     }
 
     /// Remove a route from Adj-RIB-In
@@ -196,7 +198,7 @@ impl BgpAdjRibOut {
 
     /// Add a route to Adj-RIB-Out
     pub fn add_route(&mut self, route: BgpRoute) -> Option<BgpRoute> {
-        self.routes.insert(route.prefix, route)
+        self.routes.insert(route.prefix.prefix, route)
     }
 
     /// Remove a route from Adj-RIB-Out
@@ -242,7 +244,7 @@ impl BgpLocalRib {
 
     /// Add or update a route in the Local RIB and perform best path selection
     pub fn update_route(&mut self, route: BgpRoute) -> Option<BgpRoute> {
-        let prefix = route.prefix;
+        let prefix = route.prefix.prefix;
 
         // Add to candidates
         let candidates = self.entries.entry(prefix).or_default();
@@ -273,7 +275,7 @@ impl BgpLocalRib {
                         0,
                         0,
                         PeerType::EBGP,
-                        prefix,
+                        Ipv4Nlri { id: 0, prefix },
                         vec![],
                     ))
                 } else {
@@ -532,12 +534,12 @@ pub fn send_route_to_rib(
     // Send appropriate message to RIB
     let msg = if install {
         rib::Message::Ipv4Add {
-            prefix,
+            prefix: prefix.prefix,
             rib: rib_entry,
         }
     } else {
         rib::Message::Ipv4Del {
-            prefix,
+            prefix: prefix.prefix,
             rib: rib_entry,
         }
     };
@@ -573,7 +575,7 @@ pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut Con
             peer.peer_as,
             peer.local_as,
             peer_type,
-            *ipv4,
+            ipv4.clone(),
             packet.attrs.clone(),
         );
 
@@ -584,7 +586,7 @@ pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut Con
         if let Some(new_best) = bgp.local_rib.update_route(bgp_route) {
             // 3. Install new best path into main RIB
             if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
-                eprintln!("Failed to install BGP route {} to RIB: {}", ipv4, e);
+                eprintln!("Failed to install BGP route {} to RIB: {}", ipv4.prefix, e);
             } else {
                 // println!(
                 //     "Installed new best path for {}: {:?}",
@@ -597,23 +599,32 @@ pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut Con
     // Process route withdrawals
     for ipv4 in packet.ipv4_withdraw.iter() {
         // 1. Remove from peer's Adj-RIB-In
-        peer.adj_rib_in.remove_route(*ipv4);
+        peer.adj_rib_in.remove_route(ipv4.prefix);
 
         // 2. Remove from Local RIB and check if best path changed
-        if let Some(removed_best) = bgp.local_rib.remove_route(*ipv4, peer.address) {
+        if let Some(removed_best) = bgp.local_rib.remove_route(ipv4.prefix, peer.address) {
             // 3. Remove old best path from main RIB
             if let Err(e) = send_route_to_rib(&removed_best, bgp.rib_tx, false) {
-                eprintln!("Failed to remove BGP route {} from RIB: {}", ipv4, e);
+                eprintln!("Failed to remove BGP route {} from RIB: {}", ipv4.prefix, e);
             } else {
-                println!("Removed route for {} from peer {}", ipv4, peer.address);
+                println!(
+                    "Removed route for {} from peer {}",
+                    ipv4.prefix, peer.address
+                );
             }
 
             // 4. Install new best path if available
-            if let Some(new_best) = bgp.local_rib.get_best_path(ipv4) {
+            if let Some(new_best) = bgp.local_rib.get_best_path(&ipv4.prefix) {
                 if let Err(e) = send_route_to_rib(new_best, bgp.rib_tx, true) {
-                    eprintln!("Failed to install new BGP route {} to RIB: {}", ipv4, e);
+                    eprintln!(
+                        "Failed to install new BGP route {} to RIB: {}",
+                        ipv4.prefix, e
+                    );
                 } else {
-                    println!("Installed new best path for {} after withdrawal", ipv4);
+                    println!(
+                        "Installed new best path for {} after withdrawal",
+                        ipv4.prefix
+                    );
                 }
             }
         }
@@ -729,23 +740,78 @@ impl BgpAttr {
     }
 }
 
-#[derive(Default)]
-struct Ipv4Nlri {
-    pub eor: bool,
-    pub update: Vec<Ipv4Net>,
-    pub withdraw: Vec<Ipv4Net>,
+impl fmt::Display for BgpAttr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "BGP Attr:")?;
+        writeln!(f, " {}", self.origin);
+        if let Some(v) = &self.aspath {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.med {
+            writeln!(f, " MED: {}", v);
+        }
+        if let Some(v) = &self.local_pref {
+            writeln!(f, " LocalPref: {}", v);
+        }
+        if let Some(_) = &self.atomic_aggregate {
+            writeln!(f, " Atomic Aggregate");
+        }
+        if let Some(v) = &self.aggregator {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.com {
+            writeln!(f, "{}", v);
+        }
+        if let Some(v) = &self.originator_id {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.cluster_list {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.ecom {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.pmsi_tunnel {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.aigp {
+            writeln!(f, " AIGP: {}", v);
+        }
+        if let Some(v) = &self.lcom {
+            writeln!(f, " {}", v);
+        }
+        // Nexthop
+        if let Some(v) = &self.nexthop {
+            match v {
+                BgpNexthop::Ipv4(v) => {
+                    writeln!(f, " Nexthop: {}", v);
+                }
+                BgpNexthop::Vpnv4(v) => {
+                    writeln!(f, " Nexthop: {}", v);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
-struct Vpnv4Nlri {
+struct Ipv4NlriVec {
+    pub eor: bool,
+    pub update: Vec<Ipv4Nlri>,
+    pub withdraw: Vec<Ipv4Nlri>,
+}
+
+#[derive(Default)]
+struct Vpnv4NlriVec {
     pub eor: bool,
     pub update: Vec<Vpnv4Net>,
     pub withdraw: Vec<Vpnv4Net>,
 }
 
 enum BgpNlri {
-    Ipv4(Ipv4Nlri),
-    Vpnv4(Vpnv4Nlri),
+    Ipv4(Ipv4NlriVec),
+    Vpnv4(Vpnv4NlriVec),
     Empty,
 }
 
@@ -754,7 +820,7 @@ impl BgpNlri {
         // IPv4 End of RIB.
         if packet.attrs.is_empty() {
             if packet.ipv4_update.is_empty() && packet.ipv4_withdraw.is_empty() {
-                let eor = Ipv4Nlri {
+                let eor = Ipv4NlriVec {
                     eor: true,
                     ..Default::default()
                 };
@@ -763,14 +829,14 @@ impl BgpNlri {
         }
         // IPv4 updates.
         if !packet.ipv4_update.is_empty() {
-            let update = Ipv4Nlri {
+            let update = Ipv4NlriVec {
                 update: packet.ipv4_update.clone(),
                 ..Default::default()
             };
             return BgpNlri::Ipv4(update);
         }
         if !packet.ipv4_withdraw.is_empty() {
-            let withdraw = Ipv4Nlri {
+            let withdraw = Ipv4NlriVec {
                 withdraw: packet.ipv4_withdraw.clone(),
                 ..Default::default()
             };
@@ -780,9 +846,18 @@ impl BgpNlri {
     }
 }
 
+pub fn route_ipv4_update(peer: &mut Peer, prefix: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
+    //
+}
+
+pub fn route_ipv4_withdraw(peer: &mut Peer, prefix: &Ipv4Nlri, bgp: &mut ConfigRef) {
+    //
+}
+
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Convert UpdatePacket to BgpAttr.
     let attr = BgpAttr::from(&packet.attrs);
+    print!("{}", attr);
 
     // Convert UpdatePacket to BgpNlri.
     let nlri = BgpNlri::from(&packet);
@@ -795,10 +870,12 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
                 println!("IPv4 EoR");
             }
             for update in nlri.update.iter() {
-                println!("IPv4 Update: {}", update);
+                println!("IPv4 Update: {}", update.prefix);
+                route_ipv4_update(peer, update, &attr, bgp);
             }
             for withdraw in nlri.withdraw.iter() {
-                println!("IPv4 Withdraw: {}", withdraw);
+                println!("IPv4 Withdraw: {}", withdraw.prefix);
+                route_ipv4_withdraw(peer, withdraw, bgp);
             }
         }
         _ => {
