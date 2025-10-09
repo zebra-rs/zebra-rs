@@ -94,7 +94,6 @@ pub fn cap_addpath_recv(
                                     send: false,
                                 },
                             );
-                            println!("XXX CAP AFI {}, SAFI {} recv", cap.afi, cap.safi);
                         }
                     }
                 }

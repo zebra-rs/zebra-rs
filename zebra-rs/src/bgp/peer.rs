@@ -530,16 +530,16 @@ pub fn peer_packet_parse(
     ident: IpAddr,
     tx: UnboundedSender<Message>,
     config: &mut PeerConfig,
+    opt: &mut ParseOption,
 ) -> Result<(), String> {
     let as4 = !config.received.is_empty();
 
-    // TODO.  Lookup existing peer using ident.
-
-    match parse_bgp_packet(rx, as4, Some(ParseOption::default())) {
+    match parse_bgp_packet(rx, as4, Some(opt.clone())) {
         Ok((_, p)) => {
             match p {
                 BgpPacket::Open(p) => {
                     config.received = p.caps.clone();
+                    cap_addpath_recv(&p.caps, opt, &config.add_path);
                     let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
                 }
                 BgpPacket::Keepalive(_) => {
@@ -564,6 +564,7 @@ pub async fn peer_read(
     tx: UnboundedSender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
+    mut opt: ParseOption,
 ) {
     let mut buf = BytesMut::with_capacity(BGP_PACKET_LEN * 2);
     loop {
@@ -579,7 +580,7 @@ pub async fn peer_read(
                     let mut remain = buf.split_off(length);
                     remain.reserve(BGP_PACKET_LEN * 2);
 
-                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config) {
+                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config, &mut opt) {
                         Ok(_) => {
                             buf = remain;
                         }
@@ -603,8 +604,9 @@ pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let config = peer.config.clone();
+    let opt = peer.opt.clone();
     Task::spawn(async move {
-        peer_read(ident, tx.clone(), read_half, config).await;
+        peer_read(ident, tx.clone(), read_half, config, opt).await;
     })
 }
 
