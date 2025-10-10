@@ -21,13 +21,14 @@ use cap::CapabilityPacket;
 use cap::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
+use crate::bgp::route::route_clean;
 use crate::bgp::timer;
 use crate::config::Args;
 
 use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
-use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
+use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, BgpLocalRibOrig, Route};
 use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::context::task::*;
@@ -239,7 +240,8 @@ impl Peer {
 
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
-    pub local_rib: &'a mut BgpLocalRib,
+    pub local_rib: &'a mut BgpLocalRibOrig,
+    pub lrib: &'a mut BgpLocalRib,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
@@ -294,6 +296,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         local_rib: &mut bgp.local_rib,
+        lrib: &mut bgp.lrib,
         rib_tx: &bgp.rib_tx,
     };
     let peer = bgp.peers.get_mut(&id).unwrap();
@@ -317,6 +320,12 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         return;
     }
     bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
+
+    if prev_state.is_established() && !peer.state.is_established() {
+        // TODO: clear BgpRib in
+        println!("Clear BGP RIB");
+        route_clean(peer, &mut bgp_ref);
+    }
 
     // Update instant when entering or leaving the Established state.
     if (prev_state.is_established() && !peer.state.is_established())

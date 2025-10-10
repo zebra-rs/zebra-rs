@@ -227,14 +227,14 @@ impl BgpAdjRibOut {
 
 /// BGP Local RIB (Loc-RIB) - stores best paths selected from all Adj-RIB-In
 #[derive(Debug, Default)]
-pub struct BgpLocalRib {
+pub struct BgpLocalRibOrig {
     /// Best path routes per prefix
     pub routes: PrefixMap<Ipv4Net, BgpRoute>,
     /// All candidate routes per prefix (for show commands)
     pub entries: PrefixMap<Ipv4Net, Vec<BgpRoute>>,
 }
 
-impl BgpLocalRib {
+impl BgpLocalRibOrig {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
@@ -846,11 +846,71 @@ impl BgpNlri {
     }
 }
 
-pub fn route_ipv4_update(peer: &mut Peer, prefix: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
-    //
+#[derive(Debug, Clone)]
+pub struct BgpRib {
+    // AddPath ID.
+    pub id: u32,
+
+    // BGP Attribute.
+    pub attr: BgpAttr,
+
+    // Peer ID.
+    pub ident: IpAddr,
 }
 
-pub fn route_ipv4_withdraw(peer: &mut Peer, prefix: &Ipv4Nlri, bgp: &mut ConfigRef) {
+impl BgpRib {
+    pub fn new(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr) -> Self {
+        BgpRib {
+            id: nlri.id,
+            attr: attr.clone(),
+            ident: peer.ident,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct BgpLocalRib {
+    // Best path routes per prefix
+    pub routes: PrefixMap<Ipv4Net, BgpRib>,
+
+    // All candidate routes per prefix (for show commands)
+    pub entries: PrefixMap<Ipv4Net, Vec<BgpRib>>,
+}
+
+impl BgpLocalRib {
+    pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> Option<BgpRib> {
+        let candidates = self.entries.entry(prefix).or_default();
+
+        candidates.retain(|r| r.ident != rib.ident && r.id != rib.id);
+        candidates.push(rib.clone());
+        None
+    }
+
+    pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRoute> {
+        for (prefix, candidates) in self.entries.iter_mut() {
+            candidates.retain(|r| r.ident != ident);
+        }
+        vec![]
+    }
+}
+
+pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
+    let rib = BgpRib::new(peer, nlri, attr);
+
+    if let Some(new_best) = bgp.lrib.update_route(nlri.prefix, rib) {
+        // 3. Install new best path into main RIB
+        // if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
+        //     // eprintln!("Failed to install BGP route {} to RIB: {}", ipv4.prefix, e);
+        // } else {
+        //     // println!(
+        //     //     "Installed new best path for {}: {:?}",
+        //     //     ipv4, new_best.peer_addr
+        //     // );
+        // }
+    }
+}
+
+pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef) {
     //
 }
 
@@ -882,4 +942,9 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
             //
         }
     }
+}
+
+pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
+    // IPv4 Unicast.
+    bgp.lrib.remove_peer_routes(peer.ident);
 }

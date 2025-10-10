@@ -129,26 +129,15 @@ fn show_bgp_route(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, value) in bgp.local_rib.entries.iter() {
+    for (key, value) in bgp.lrib.entries.iter() {
         for (i, route) in value.iter().enumerate() {
-            let best = if route.best_path { ">" } else { " " };
-            let nexthop = show_nexthop(&route.attrs);
-            let med = show_med(&route.attrs);
-            let local_pref = show_local_pref(&route.attrs);
-            let aspath = show_aspath(&route.attrs);
-            let origin = show_origin(&route.attrs);
-            writeln!(
-                buf,
-                "{}  {:<16} {:<19} {:>6} {:>6} {:>6} {}{}",
-                best,
-                key.to_string(),
-                nexthop,
-                med,
-                local_pref,
-                0,
-                aspath,
-                origin,
-            )?;
+            // let best = if route.best_path { ">" } else { " " };
+            // let nexthop = show_nexthop(&route.attrs);
+            // let med = show_med(&route.attrs);
+            // let local_pref = show_local_pref(&route.attrs);
+            // let aspath = show_aspath(&route.attrs);
+            // let origin = show_origin(&route.attrs);
+            writeln!(buf, "{}", key.to_string())?;
         }
     }
     Ok(buf)
