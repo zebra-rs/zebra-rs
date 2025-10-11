@@ -52,9 +52,9 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 peer.peer_as = asn;
                 peer.peer_type = if peer.peer_as == bgp.asn {
-                    PeerType::Internal
+                    PeerType::IBGP
                 } else {
-                    PeerType::External
+                    PeerType::EBGP
                 };
                 peer.start();
             }
@@ -64,9 +64,9 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 peer.peer_as = asn;
                 peer.peer_type = if peer.peer_as == bgp.asn {
-                    PeerType::Internal
+                    PeerType::IBGP
                 } else {
-                    PeerType::External
+                    PeerType::EBGP
                 };
                 peer.start();
             }

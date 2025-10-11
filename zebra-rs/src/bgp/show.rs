@@ -12,6 +12,7 @@ use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{self, Peer, PeerCounter, PeerParam, State};
 use super::route::{BgpAttr, BgpNexthop};
+use crate::bgp::route::RouteType;
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
@@ -130,15 +131,17 @@ fn show_bgp_route(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
 
     for (key, value) in bgp.lrib.entries.iter() {
         for (i, rib) in value.iter().enumerate() {
-            // let best = if route.best_path { ">" } else { " " };
             let valid = "*";
             let best = ">";
-            let internal = "i";
+            let internal = if rib.typ == RouteType::IBGP { "i" } else { " " };
             let nexthop = show_nexthop(&rib.attr);
             let med = show_med(&rib.attr);
             let local_pref = show_local_pref(&rib.attr);
             let weight = rib.weight;
-            let aspath = show_aspath(&rib.attr);
+            let mut aspath = show_aspath(&rib.attr);
+            if !aspath.is_empty() {
+                aspath.push(' ');
+            }
             let origin = show_origin(&rib.attr);
             writeln!(
                 buf,

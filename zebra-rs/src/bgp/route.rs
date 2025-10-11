@@ -10,19 +10,19 @@ use bgp_packet::{
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
-use super::peer::{ConfigRef, Peer};
+use super::peer::{ConfigRef, Peer, PeerType};
 use crate::rib;
 use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
 use ipnet::IpNet;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// BGP peer type for route advertisement rules
-#[derive(Clone, Debug, PartialEq, Eq, Copy)]
-#[allow(clippy::upper_case_acronyms)]
-pub enum PeerType {
-    IBGP,
-    EBGP,
-}
+// #[derive(Clone, Debug, PartialEq, Eq, Copy)]
+// #[allow(clippy::upper_case_acronyms)]
+// pub enum PeerType {
+//     IBGP,
+//     EBGP,
+// }
 
 /// Enhanced BGP route structure for proper path selection
 #[derive(Clone, Debug)]
@@ -33,8 +33,6 @@ pub struct BgpRoute {
     pub peer_as: u32,
     /// Local AS number
     pub local_as: u32,
-    /// Peer type (IBGP/EBGP)
-    pub peer_type: PeerType,
     /// Route prefix
     pub prefix: Ipv4Nlri,
     /// Next hop address
@@ -64,7 +62,6 @@ impl BgpRoute {
         peer_addr: IpAddr,
         peer_as: u32,
         local_as: u32,
-        peer_type: PeerType,
         prefix: Ipv4Nlri,
         attrs: Vec<Attr>,
     ) -> Self {
@@ -72,7 +69,6 @@ impl BgpRoute {
             peer_addr,
             peer_as,
             local_as,
-            peer_type,
             prefix,
             nexthop: Ipv4Addr::UNSPECIFIED,
             attrs: attrs.clone(),
@@ -133,9 +129,9 @@ impl BgpRoute {
         }
 
         // Set default local preference for IBGP routes
-        if self.peer_type == PeerType::IBGP && self.local_pref.is_none() {
-            self.local_pref = Some(100); // Default local preference
-        }
+        // if self.peer_type == PeerType::IBGP && self.local_pref.is_none() {
+        //     self.local_pref = Some(100); // Default local preference
+        // }
     }
 }
 
@@ -274,7 +270,6 @@ impl BgpLocalRibOrig {
                         peer_addr,
                         0,
                         0,
-                        PeerType::EBGP,
                         Ipv4Nlri { id: 0, prefix },
                         vec![],
                     ))
@@ -403,11 +398,11 @@ impl BgpLocalRibOrig {
         }
 
         // 7. Prefer EBGP over IBGP
-        match (&route1.peer_type, &route2.peer_type) {
-            (PeerType::EBGP, PeerType::IBGP) => return route1,
-            (PeerType::IBGP, PeerType::EBGP) => return route2,
-            _ => {}
-        }
+        // match (&route1.peer_type, &route2.peer_type) {
+        //     (PeerType::EBGP, PeerType::IBGP) => return route1,
+        //     (PeerType::IBGP, PeerType::EBGP) => return route2,
+        //     _ => {}
+        // }
 
         // 8. Prefer route with lower IGP metric to next hop (not implemented)
 
@@ -562,11 +557,11 @@ pub struct Route {
 
 pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Determine peer type based on AS numbers
-    let peer_type = if peer.local_as == peer.peer_as {
-        PeerType::IBGP
-    } else {
-        PeerType::EBGP
-    };
+    // let peer_type = if peer.local_as == peer.peer_as {
+    //     PeerType::IBGP
+    // } else {
+    //     PeerType::EBGP
+    // };
 
     // Process route announcements
     for ipv4 in packet.ipv4_update.iter() {
@@ -574,7 +569,6 @@ pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut Con
             peer.address,
             peer.peer_as,
             peer.local_as,
-            peer_type,
             ipv4.clone(),
             packet.attrs.clone(),
         );
@@ -848,6 +842,13 @@ impl BgpNlri {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
+pub enum RouteType {
+    IBGP,
+    EBGP,
+    Origin,
+}
+
 #[derive(Debug, Clone)]
 pub struct BgpRib {
     // AddPath ID.
@@ -858,21 +859,24 @@ pub struct BgpRib {
     pub ident: IpAddr,
     // Weight
     pub weight: u32,
+    // Route type.
+    pub typ: RouteType,
 }
 
 impl BgpRib {
-    pub fn new(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr) -> Self {
+    pub fn new(peer: &mut Peer, typ: RouteType, nlri: &Ipv4Nlri, attr: &BgpAttr) -> Self {
         BgpRib {
             id: nlri.id,
             attr: attr.clone(),
             ident: peer.ident,
             weight: 0,
+            typ,
         }
     }
 }
 
 #[derive(Debug, Default)]
-pub struct BgpLocalRib {
+pub struct LocalRib {
     // Best path routes per prefix
     pub routes: PrefixMap<Ipv4Net, BgpRib>,
 
@@ -880,10 +884,9 @@ pub struct BgpLocalRib {
     pub entries: PrefixMap<Ipv4Net, Vec<BgpRib>>,
 }
 
-impl BgpLocalRib {
+impl LocalRib {
     pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> Option<BgpRib> {
         let candidates = self.entries.entry(prefix).or_default();
-
         candidates.retain(|r| r.ident != rib.ident && r.id != rib.id);
         candidates.push(rib.clone());
         None
@@ -898,7 +901,12 @@ impl BgpLocalRib {
 }
 
 pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
-    let rib = BgpRib::new(peer, nlri, attr);
+    let typ = if peer.peer_type == PeerType::IBGP {
+        RouteType::IBGP
+    } else {
+        RouteType::EBGP
+    };
+    let rib = BgpRib::new(peer, typ, nlri, attr);
 
     if let Some(new_best) = bgp.lrib.update_route(nlri.prefix, rib) {
         // 3. Install new best path into main RIB

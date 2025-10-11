@@ -28,7 +28,7 @@ use crate::config::Args;
 use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
-use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, BgpLocalRibOrig, Route};
+use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRibOrig, LocalRib, Route};
 use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::context::task::*;
@@ -119,17 +119,17 @@ pub struct PeerConfig {
     pub timer: timer::Config,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum PeerType {
-    Internal,
-    External,
+    IBGP,
+    EBGP,
 }
 
 impl PeerType {
     pub fn to_str(&self) -> &'static str {
         match self {
-            Self::Internal => "internal",
-            Self::External => "external",
+            Self::IBGP => "internal",
+            Self::EBGP => "external",
         }
     }
 }
@@ -186,7 +186,7 @@ impl Peer {
             peer_as,
             address,
             active: false,
-            peer_type: PeerType::Internal,
+            peer_type: PeerType::IBGP,
             state: State::Idle,
             task: PeerTask::default(),
             timer: PeerTimer::default(),
@@ -241,7 +241,7 @@ impl Peer {
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut BgpLocalRibOrig,
-    pub lrib: &'a mut BgpLocalRib,
+    pub lrib: &'a mut LocalRib,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 

@@ -1,5 +1,5 @@
 use super::peer::{Event, Peer, fsm};
-use super::route::{BgpLocalRib, BgpLocalRibOrig, BgpRoute, Route};
+use super::route::{BgpLocalRibOrig, BgpRoute, LocalRib, Route};
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
 use crate::config::{
@@ -64,7 +64,7 @@ pub struct Bgp {
     pub pcallbacks: HashMap<String, PCallback>,
     /// BGP Local RIB (Loc-RIB) for best path selection
     pub local_rib: BgpLocalRibOrig,
-    pub lrib: BgpLocalRib,
+    pub lrib: LocalRib,
     pub listen_task: Option<Task<()>>,
     pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
@@ -90,7 +90,7 @@ impl Bgp {
             tx,
             rx,
             local_rib: BgpLocalRibOrig::new(),
-            lrib: BgpLocalRib::default(),
+            lrib: LocalRib::default(),
             rib_tx,
             rib_rx: chan.rx,
             cm: ConfigChannel::new(),
