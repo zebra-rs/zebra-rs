@@ -124,7 +124,7 @@ impl fmt::Display for LinkType {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Copy)]
 pub struct LinkFlags(pub u32);
 
 pub const IFF_UP: u32 = 1 << 0;
@@ -448,7 +448,7 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 }
 
 impl Rib {
-    pub fn link_add(&mut self, oslink: FibLink) {
+    pub async fn link_add(&mut self, oslink: FibLink) {
         if let Some(link) = self.links.get_mut(&oslink.index) {
             if link.is_up() {
                 if !oslink.is_up() {
@@ -467,7 +467,10 @@ impl Rib {
             let link = Link::from(oslink);
             sysctl_mpls_enable(&link.name);
             self.api_link_add(&link);
-            self.links.insert(link.index, link);
+            self.links.insert(link.index, link.clone());
+            if !link.is_up() {
+                self.make_link_up(link.index).await;
+            }
         }
     }
 

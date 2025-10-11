@@ -198,6 +198,18 @@ impl Rib {
         self.fib_handle.ilm_del(label, &ilm).await;
     }
 
+    pub async fn make_link_up(&mut self, ifindex: u32) {
+        if let Some(link) = self.links.get(&ifindex) {
+            self.fib_handle.link_set_up(ifindex, link.flags.0).await;
+        }
+    }
+
+    pub async fn make_link_down(&mut self, ifindex: u32) {
+        if let Some(link) = self.links.get(&ifindex) {
+            self.fib_handle.link_set_down(ifindex, link.flags.0);
+        }
+    }
+
     pub async fn ipv6_route_add(&mut self, prefix: &Ipv6Net, mut entry: RibEntry) {
         let is_connected = entry.is_connected();
         if entry.is_protocol() {

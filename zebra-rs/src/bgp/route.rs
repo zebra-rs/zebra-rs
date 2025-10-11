@@ -642,7 +642,7 @@ pub enum BgpNexthop {
 #[derive(Clone, Debug, Default)]
 pub struct BgpAttr {
     /// Origin type
-    pub origin: Origin,
+    pub origin: Option<Origin>,
     /// AS Path
     pub aspath: Option<As4Path>,
     /// Nexthop
@@ -678,7 +678,7 @@ impl BgpAttr {
         for attr in attrs.iter() {
             match attr {
                 Attr::Origin(v) => {
-                    target.origin = *v;
+                    target.origin = Some(*v);
                 }
                 Attr::As2Path(v) => {
                     // TODO
@@ -743,9 +743,11 @@ impl BgpAttr {
 impl fmt::Display for BgpAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "BGP Attr:")?;
-        writeln!(f, " {}", self.origin);
+        if let Some(v) = &self.origin {
+            writeln!(f, " Origin: {}", v);
+        }
         if let Some(v) = &self.aspath {
-            writeln!(f, " {}", v);
+            writeln!(f, " AS Path: {}", v);
         }
         if let Some(v) = &self.med {
             writeln!(f, " MED: {}", v);
@@ -850,12 +852,12 @@ impl BgpNlri {
 pub struct BgpRib {
     // AddPath ID.
     pub id: u32,
-
     // BGP Attribute.
     pub attr: BgpAttr,
-
     // Peer ID.
     pub ident: IpAddr,
+    // Weight
+    pub weight: u32,
 }
 
 impl BgpRib {
@@ -864,6 +866,7 @@ impl BgpRib {
             id: nlri.id,
             attr: attr.clone(),
             ident: peer.ident,
+            weight: 0,
         }
     }
 }
@@ -917,7 +920,7 @@ pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Convert UpdatePacket to BgpAttr.
     let attr = BgpAttr::from(&packet.attrs);
-    print!("{}", attr);
+    // print!("{}", attr);
 
     // Convert UpdatePacket to BgpNlri.
     let nlri = BgpNlri::from(&packet);

@@ -764,7 +764,6 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
             handle_peer_connection(bgp, peer_addr, stream)
         }
         SocketAddr::V6(addr) => {
-            println!("IPv6: {:?}", addr);
             let peer_addr = IpAddr::V6(*addr.ip());
             handle_peer_connection(bgp, peer_addr, stream)
         }

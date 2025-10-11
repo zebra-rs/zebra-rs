@@ -126,7 +126,7 @@ impl Bgp {
                         println!("{}", msg);
                     }
                     Event::UpdateMsg(ref msg) => {
-                        println!("{}", msg);
+                        println!("{:#?}", msg);
                     }
                     Event::KeepAliveMsg => {
                         println!("KeepAlive:");
