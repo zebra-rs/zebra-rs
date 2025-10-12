@@ -193,7 +193,12 @@ impl tracing::field::Visit for JsonVisitor {
 }
 
 pub fn tracing_set(daemon_mode: bool, log_config: Option<LoggingConfig>) {
-    // console_subscriber::init();
+    // Enable console_subscriber for tokio-console debugging if TOKIO_CONSOLE env var is set
+    if std::env::var("TOKIO_CONSOLE").is_ok() {
+        console_subscriber::init();
+        return;
+    }
+
     let config = if let Some(config) = log_config {
         // Use CLI-specified logging configuration
         config

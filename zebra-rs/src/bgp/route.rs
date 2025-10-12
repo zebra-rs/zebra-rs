@@ -862,13 +862,16 @@ pub struct LocalRib {
 }
 
 impl LocalRib {
-    pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> Vec<BgpRib> {
+    pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>) {
         let candidates = self.entries.entry(prefix).or_default();
         let replaced: Vec<BgpRib> = candidates
             .extract_if(.., |r| r.ident == rib.ident && r.id == rib.id)
             .collect();
         candidates.push(rib.clone());
-        replaced
+
+        let selected = self.select_best_path(prefix);
+
+        (replaced, selected)
     }
 
     pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
@@ -889,8 +892,9 @@ impl LocalRib {
         all_removed
     }
 
-    pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Option<BgpRoute> {
-        None
+    pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
+        //
+        vec![]
     }
 }
 
@@ -902,7 +906,7 @@ pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: 
     };
     let rib = BgpRib::new(peer.ident, typ, nlri.id, 0, attr);
 
-    let replaced = bgp.lrib.update_route(nlri.prefix, rib);
+    let (replaced, selected) = bgp.lrib.update_route(nlri.prefix, rib);
     if replaced.is_empty() {
         peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
     }

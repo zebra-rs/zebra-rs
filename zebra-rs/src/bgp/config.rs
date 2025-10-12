@@ -109,8 +109,6 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     let network = args.v4net()?;
-    println!("afi_safi {:?}", afi_safi);
-    println!("network {}", network);
     if afi_safi.afi != Afi::Ip || afi_safi.safi != Safi::Unicast {
         return None;
     }
