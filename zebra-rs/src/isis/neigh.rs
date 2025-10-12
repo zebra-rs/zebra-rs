@@ -78,6 +78,33 @@ struct NeighborBrief {
     snpa: String,
 }
 
+#[derive(Serialize)]
+struct NeighborDetail {
+    system_id: String,
+    interface: String,
+    level: u8,
+    state: String,
+    circuit_type: u8,
+    speaks: Vec<String>,
+    snpa: String,
+    lan_id: String,
+    lan_priority: u8,
+    is_dis: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ip_prefixes: Vec<IpPrefix>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ipv6_link_locals: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ipv6_prefixes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct IpPrefix {
+    address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<u32>,
+}
+
 fn show_mac(mac: Option<MacAddr>) -> String {
     mac.map(|mac| {
         let mac = mac.octets();
@@ -220,11 +247,78 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     Ok(())
 }
 
+fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetail {
+    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.pdu.source_id) {
+        hostname.clone()
+    } else {
+        nbr.pdu.source_id.to_string()
+    };
+
+    let speaks = if let Some(proto) = &nbr.pdu.proto_tlv() {
+        proto
+            .nlpids
+            .iter()
+            .map(|nlpid| nlpid_str(*nlpid).to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let ip_prefixes = nbr
+        .naddr4
+        .iter()
+        .map(|(_, value)| IpPrefix {
+            address: value.addr.to_string(),
+            label: value.label,
+        })
+        .collect();
+
+    let ipv6_link_locals = nbr.laddr6.iter().map(|addr| addr.to_string()).collect();
+    let ipv6_prefixes = nbr.addr6.iter().map(|addr| addr.to_string()).collect();
+
+    NeighborDetail {
+        system_id,
+        interface: top.ifname(nbr.ifindex),
+        level: nbr.level.digit(),
+        state: nbr.state.to_string(),
+        circuit_type: nbr.pdu.circuit_type.into(),
+        speaks,
+        snpa: show_mac(nbr.mac),
+        lan_id: nbr.pdu.lan_id.to_string(),
+        lan_priority: nbr.pdu.priority,
+        is_dis: nbr.is_dis(),
+        ip_prefixes,
+        ipv6_link_locals,
+        ipv6_prefixes,
+    }
+}
+
 pub fn show_detail(
     top: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut neighbors: Vec<NeighborDetail> = Vec::new();
+
+        for (_, link) in top.links.iter() {
+            // Collect Level-1 neighbors
+            for (_, adj) in &link.state.nbrs.l1 {
+                neighbors.push(neighbor_to_detail(top, adj, Level::L1));
+            }
+            // Collect Level-2 neighbors
+            for (_, adj) in &link.state.nbrs.l2 {
+                neighbors.push(neighbor_to_detail(top, adj, Level::L2));
+            }
+        }
+
+        return Ok(
+            serde_json::to_string_pretty(&neighbors).unwrap_or_else(|e| {
+                format!("{{\"error\": \"Failed to serialize neighbors: {}\"}}", e)
+            }),
+        );
+    }
+
     let estimated_capacity = 512;
     let mut buf = String::with_capacity(estimated_capacity);
 
