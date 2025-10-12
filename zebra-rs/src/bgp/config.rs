@@ -1,4 +1,7 @@
-use bgp_packet::AfiSafi;
+use bgp_packet::{
+    Afi, AfiSafi, Safi,
+    addpath::{AddPathSendReceive, AddPathValue},
+};
 
 use super::{
     Bgp,
@@ -49,9 +52,9 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 peer.peer_as = asn;
                 peer.peer_type = if peer.peer_as == bgp.asn {
-                    PeerType::Internal
+                    PeerType::IBGP
                 } else {
-                    PeerType::External
+                    PeerType::EBGP
                 };
                 peer.start();
             }
@@ -61,9 +64,9 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 peer.peer_as = asn;
                 peer.peer_type = if peer.peer_as == bgp.asn {
-                    PeerType::Internal
+                    PeerType::IBGP
                 } else {
-                    PeerType::External
+                    PeerType::EBGP
                 };
                 peer.start();
             }
@@ -93,12 +96,61 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             let enabled: bool = args.boolean()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 if enabled {
-                    if !peer.config.afi_safi.has(&afi_safi) {
-                        peer.config.afi_safi.push(afi_safi);
-                    }
+                    peer.config.afi_safi.set(afi_safi);
                 } else {
                     peer.config.afi_safi.remove(&afi_safi);
                 }
+            }
+        }
+    }
+    Some(())
+}
+
+fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let network = args.v4net()?;
+    if afi_safi.afi != Afi::Ip || afi_safi.safi != Safi::Unicast {
+        return None;
+    }
+    if op.is_set() {
+        bgp.route_add(network);
+    } else {
+        bgp.route_del(network);
+    }
+    Some(())
+}
+
+fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        if let Some(addr) = args.v4addr() {
+            let addr = IpAddr::V4(addr);
+            let afi_safi: AfiSafi = args.afi_safi()?;
+            let add_path_str: String = args.string()?;
+            let send_receive: AddPathSendReceive = add_path_str.parse().ok()?;
+            let add_path = AddPathValue {
+                afi: afi_safi.afi,
+                safi: afi_safi.safi,
+                send_receive,
+            };
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
+                peer.config.add_path.insert(add_path);
+            } else {
+                // TODO
+            }
+        } else if let Some(addr) = args.v6addr() {
+            let addr = IpAddr::V6(addr);
+            let afi_safi: AfiSafi = args.afi_safi()?;
+            let add_path_str: String = args.string()?;
+            let send_receive: AddPathSendReceive = add_path_str.parse().ok()?;
+            let add_path = AddPathValue {
+                afi: afi_safi.afi,
+                safi: afi_safi.safi,
+                send_receive,
+            };
+            if let Some(peer) = bgp.peers.get_mut(&addr) {
+                peer.config.add_path.insert(add_path);
+            } else {
+                // TODO
             }
         }
     }
@@ -167,6 +219,11 @@ impl Bgp {
         self.callbacks.insert(neighbor_prefix + path, cb);
     }
 
+    fn callback_afi_safi(&mut self, path: &str, cb: Callback) {
+        let neighbor_prefix = String::from("/routing/bgp/neighbor");
+        self.callbacks.insert(neighbor_prefix + path, cb);
+    }
+
     fn timer(&mut self, path: &str, cb: Callback) {
         let prefix = String::from("/routing/bgp/neighbor/timers");
     }
@@ -178,7 +235,8 @@ impl Bgp {
         self.callback_peer("/peer-as", config_peer_as);
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
-        self.callback_peer("/afi-safis/afi-safi/enabled", config_afi_safi);
+        self.callback_peer("/afi-safi/enabled", config_afi_safi);
+        self.callback_peer("/afi-safi/add-path", config_add_path);
 
         // Timer configuration.
         self.timer("/hold-time", timer::config::hold_time);
@@ -194,5 +252,8 @@ impl Bgp {
 
         // Debug configuration
         self.callback_add("/routing/bgp/debug", config_debug_category);
+
+        // Network configuration
+        self.callback_add("/routing/bgp/afi-safi/network", config_network);
     }
 }

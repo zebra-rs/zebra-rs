@@ -1,8 +1,10 @@
+use bgp_packet::addpath::AddPathValue;
 use bgp_packet::cap::CapMultiProtocol;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
@@ -19,13 +21,14 @@ use cap::CapabilityPacket;
 use cap::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
+use crate::bgp::route::route_clean;
 use crate::bgp::timer;
 use crate::config::Args;
 
 use super::BGP_PORT;
-use super::cap::{CapAfiMap, cap_register_send};
+use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
-use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRib, Route};
+use super::route::{AdjRibIn, AdjRibOut, BgpLocalRibOrig, LocalRib, Route};
 use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::context::task::*;
@@ -108,6 +111,7 @@ pub struct PeerTransportConfig {
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
     pub afi_safi: AfiSafis,
+    pub add_path: BTreeSet<AddPathValue>,
     pub four_octet: bool,
     pub route_refresh: bool,
     pub graceful_restart: Option<u32>,
@@ -115,17 +119,17 @@ pub struct PeerConfig {
     pub timer: timer::Config,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum PeerType {
-    Internal,
-    External,
+    IBGP,
+    EBGP,
 }
 
 impl PeerType {
     pub fn to_str(&self) -> &'static str {
         match self {
-            Self::Internal => "internal",
-            Self::External => "external",
+            Self::IBGP => "internal",
+            Self::EBGP => "external",
         }
     }
 }
@@ -135,6 +139,68 @@ pub struct PeerParam {
     pub hold_time: u16,
     pub keepalive: u16,
     pub local_addr: Option<SocketAddr>,
+}
+
+#[derive(Debug, Default)]
+pub struct PeerStatEntry {
+    tx: u64,
+    rx: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PeerStat(BTreeMap<AfiSafi, PeerStatEntry>);
+
+impl PeerStat {
+    pub fn clear(&mut self) {
+        for (_, entry) in self.0.iter_mut() {
+            entry.tx = 0;
+            entry.rx = 0;
+        }
+    }
+
+    pub fn rx(&self, afi: Afi, safi: Safi) -> u64 {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get(&afi_safi) {
+            entry.rx
+        } else {
+            0
+        }
+    }
+
+    pub fn tx(&self, afi: Afi, safi: Safi) -> u64 {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get(&afi_safi) {
+            entry.tx
+        } else {
+            0
+        }
+    }
+
+    pub fn rx_inc(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        let entry = self.0.entry(afi_safi).or_default();
+        entry.rx += 1;
+    }
+
+    pub fn rx_dec(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get_mut(&afi_safi) {
+            entry.rx -= 1;
+        }
+    }
+
+    pub fn tx_inc(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        let entry = self.0.entry(afi_safi).or_default();
+        entry.tx += 1;
+    }
+
+    pub fn tx_dec(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get_mut(&afi_safi) {
+            entry.tx -= 1;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -157,12 +223,14 @@ pub struct Peer {
     pub param_tx: PeerParam,
     pub param_rx: PeerParam,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
+    pub stat: PeerStat,
     pub tx: UnboundedSender<Message>,
     pub config: PeerConfig,
     pub instant: Option<Instant>,
     pub cap_map: CapAfiMap,
-    pub adj_rib_in: BgpAdjRibIn,
-    pub adj_rib_out: BgpAdjRibOut,
+    pub adj_rib_in: AdjRibIn,
+    pub adj_rib_out: AdjRibOut,
+    pub opt: ParseOption,
 }
 
 impl Peer {
@@ -181,12 +249,11 @@ impl Peer {
             peer_as,
             address,
             active: false,
-            peer_type: PeerType::Internal,
+            peer_type: PeerType::IBGP,
             state: State::Idle,
             task: PeerTask::default(),
             timer: PeerTimer::default(),
             counter: [PeerCounter::default(); BgpType::Max as usize],
-            packet_tx: None,
             tx,
             remote_id: Ipv4Addr::UNSPECIFIED,
             local_identifier: None,
@@ -195,10 +262,13 @@ impl Peer {
             param: PeerParam::default(),
             param_tx: PeerParam::default(),
             param_rx: PeerParam::default(),
+            stat: PeerStat::default(),
+            packet_tx: None,
             instant: None,
             cap_map: CapAfiMap::new(),
-            adj_rib_in: BgpAdjRibIn::new(),
-            adj_rib_out: BgpAdjRibOut::new(),
+            adj_rib_in: AdjRibIn::new(),
+            adj_rib_out: AdjRibOut::new(),
+            opt: ParseOption::default(),
         };
         peer.config
             .afi_safi
@@ -234,7 +304,8 @@ impl Peer {
 
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
-    pub local_rib: &'a mut BgpLocalRib,
+    pub local_rib: &'a mut BgpLocalRibOrig,
+    pub lrib: &'a mut LocalRib,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
@@ -289,6 +360,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         local_rib: &mut bgp.local_rib,
+        lrib: &mut bgp.lrib,
         rib_tx: &bgp.rib_tx,
     };
     let peer = bgp.peers.get_mut(&id).unwrap();
@@ -312,6 +384,13 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         return;
     }
     bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
+
+    if prev_state.is_established() && !peer.state.is_established() {
+        // TODO: clear BgpRib in
+        println!("Clear BGP RIB");
+        route_clean(peer, &mut bgp_ref);
+        peer.stat.clear();
+    }
 
     // Update instant when entering or leaving the Established state.
     if (prev_state.is_established() && !peer.state.is_established())
@@ -403,6 +482,9 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     // Register recv caps.
     cap_register_recv(&packet.caps, &mut peer.cap_map);
 
+    // Register add path caps.
+    cap_addpath_recv(&packet.caps, &mut peer.opt, &peer.config.add_path);
+
     State::Established
 }
 
@@ -420,14 +502,14 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
 fn peer_send_update_test(peer: &mut Peer) {
     let mut update: UpdatePacket = UpdatePacket::new();
 
-    let origin = Origin::new(ORIGIN_IGP);
+    let origin = Origin::Igp;
     update.attrs.push(Attr::Origin(origin));
 
     let aspath: As4Path = As4Path::from_str("100").unwrap();
     update.attrs.push(Attr::As4Path(aspath));
 
     let nexthop = NexthopAttr {
-        next_hop: [10, 211, 55, 2].into(),
+        nexthop: [10, 211, 55, 2].into(),
     };
     update.attrs.push(Attr::NextHop(nexthop));
 
@@ -440,8 +522,8 @@ fn peer_send_update_test(peer: &mut Peer) {
     let atomic = AtomicAggregate::new();
     update.attrs.push(Attr::AtomicAggregate(atomic));
 
-    let aggregator = Aggregator4::new(1, Ipv4Addr::new(10, 211, 55, 2));
-    update.attrs.push(Attr::Aggregator4(aggregator));
+    let aggregator = Aggregator::new(1, Ipv4Addr::new(10, 211, 55, 2));
+    update.attrs.push(Attr::Aggregator(aggregator));
 
     let com = Community::from_str("100:10 100:20").unwrap();
     update.attrs.push(Attr::Community(com));
@@ -453,8 +535,9 @@ fn peer_send_update_test(peer: &mut Peer) {
     // let ecom6 = ExtIpv6Community(vec![ecom6_val]);
     // update.attrs.push(Attribute::ExtIpv6Community(ecom6));
 
-    let ipv4net: Ipv4Net = "1.1.1.1/32".parse().unwrap();
-    update.ipv4_update.push(ipv4net);
+    let prefix: Ipv4Net = "1.1.1.1/32".parse().unwrap();
+    let ipv4nlri = Ipv4Nlri { id: 0, prefix };
+    update.ipv4_update.push(ipv4nlri);
 
     let bytes: BytesMut = update.into();
 
@@ -465,9 +548,10 @@ fn peer_send_update_test(peer: &mut Peer) {
 fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
     peer.counter[BgpType::Update as usize].rcvd += 1;
     timer::refresh_hold_timer(peer);
+
     route_from_peer(peer, packet, bgp);
 
-    peer_send_update_test(peer);
+    // peer_send_update_test(peer);
 
     State::Established
 }
@@ -520,29 +604,32 @@ pub fn peer_packet_parse(
     ident: IpAddr,
     tx: UnboundedSender<Message>,
     config: &mut PeerConfig,
-) -> Result<(), &'static str> {
+    opt: &mut ParseOption,
+) -> Result<(), String> {
     let as4 = !config.received.is_empty();
 
-    if let Ok((_, p)) = parse_bgp_packet(rx, as4) {
-        match p {
-            BgpPacket::Open(p) => {
-                config.received = p.caps.clone();
-                let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+    match parse_bgp_packet(rx, as4, Some(opt.clone())) {
+        Ok((_, p)) => {
+            match p {
+                BgpPacket::Open(p) => {
+                    config.received = p.caps.clone();
+                    cap_addpath_recv(&p.caps, opt, &config.add_path);
+                    let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+                }
+                BgpPacket::Keepalive(_) => {
+                    let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
+                }
+                BgpPacket::Notification(p) => {
+                    println!("{}", p);
+                    let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
+                }
+                BgpPacket::Update(p) => {
+                    let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
+                }
             }
-            BgpPacket::Keepalive(_) => {
-                let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
-            }
-            BgpPacket::Notification(p) => {
-                println!("{}", p);
-                let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
-            }
-            BgpPacket::Update(p) => {
-                let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
-            }
+            Ok(())
         }
-        Ok(())
-    } else {
-        Err("parse error")
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -551,6 +638,7 @@ pub async fn peer_read(
     tx: UnboundedSender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
+    mut opt: ParseOption,
 ) {
     let mut buf = BytesMut::with_capacity(BGP_PACKET_LEN * 2);
     loop {
@@ -566,12 +654,12 @@ pub async fn peer_read(
                     let mut remain = buf.split_off(length);
                     remain.reserve(BGP_PACKET_LEN * 2);
 
-                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config) {
+                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config, &mut opt) {
                         Ok(_) => {
                             buf = remain;
                         }
                         Err(err) => {
-                            println!("E: {}", err);
+                            println!("Packet Parse Error: {}", err);
                             let _ = tx.send(Message::Event(ident, Event::ConnFail));
                             return;
                         }
@@ -590,8 +678,9 @@ pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let config = peer.config.clone();
+    let opt = peer.opt.clone();
     Task::spawn(async move {
-        peer_read(ident, tx.clone(), read_half, config).await;
+        peer_read(ident, tx.clone(), read_half, config, opt).await;
     })
 }
 
@@ -654,6 +743,11 @@ pub fn peer_send_open(peer: &mut Peer) {
     if let Some(restart_time) = peer.config.graceful_restart {
         let cap = CapabilityGracefulRestart::new(restart_time);
         caps.push(CapabilityPacket::GracefulRestart(cap));
+    }
+    for add_path in peer.config.add_path.iter() {
+        let mut cap = CapabilityAddPath::default();
+        cap.values.push(add_path.clone());
+        caps.push(CapabilityPacket::AddPath(cap));
     }
 
     cap_register_send(&caps, &mut peer.cap_map);
@@ -735,7 +829,6 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
             handle_peer_connection(bgp, peer_addr, stream)
         }
         SocketAddr::V6(addr) => {
-            println!("IPv6: {:?}", addr);
             let peer_addr = IpAddr::V6(*addr.ip());
             handle_peer_connection(bgp, peer_addr, stream)
         }
