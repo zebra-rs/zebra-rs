@@ -124,7 +124,66 @@ fn show_nexthop(attr: &BgpAttr) -> String {
     }
 }
 
-fn show_bgp_route(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
+#[derive(Serialize)]
+struct BgpRouteJson {
+    prefix: String,
+    valid: bool,
+    best: bool,
+    internal: bool,
+    route_type: String,
+    next_hop: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metric: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_pref: Option<u32>,
+    weight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+}
+
+fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut routes: Vec<BgpRouteJson> = Vec::new();
+
+        for (key, value) in bgp.lrib.entries.iter() {
+            for rib in value.iter() {
+                let aspath_str = show_aspath(&rib.attr);
+                let origin_str = show_origin(&rib.attr);
+
+                routes.push(BgpRouteJson {
+                    prefix: key.to_string(),
+                    valid: true,
+                    best: true,
+                    internal: rib.typ == RouteType::IBGP,
+                    route_type: if rib.typ == RouteType::IBGP {
+                        "iBGP".to_string()
+                    } else {
+                        "eBGP".to_string()
+                    },
+                    next_hop: show_nexthop(&rib.attr),
+                    metric: rib.attr.med,
+                    local_pref: rib.attr.local_pref,
+                    weight: rib.weight,
+                    as_path: if aspath_str.is_empty() {
+                        None
+                    } else {
+                        Some(aspath_str)
+                    },
+                    origin: if origin_str.is_empty() {
+                        None
+                    } else {
+                        Some(origin_str)
+                    },
+                });
+            }
+        }
+
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
+
     let mut buf = String::new();
 
     buf.push_str(SHOW_BGP_HEADER);
@@ -159,8 +218,8 @@ fn show_bgp_route(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
     Ok(buf)
 }
 
-fn show_bgp(bgp: &Bgp, args: Args, _json: bool) -> std::result::Result<String, std::fmt::Error> {
-    show_bgp_route(bgp)
+fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
+    show_bgp_route(bgp, json)
 }
 
 fn show_bgp_summary(
