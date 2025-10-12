@@ -1,5 +1,5 @@
 use bgp_packet::{
-    AfiSafi,
+    Afi, AfiSafi, Safi,
     addpath::{AddPathSendReceive, AddPathValue},
 };
 
@@ -106,6 +106,22 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let network = args.v4net()?;
+    println!("afi_safi {:?}", afi_safi);
+    println!("network {}", network);
+    if afi_safi.afi != Afi::Ip || afi_safi.safi != Safi::Unicast {
+        return None;
+    }
+    if op.is_set() {
+        bgp.route_add(network);
+    } else {
+        bgp.route_del(network);
+    }
+    Some(())
+}
+
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op.is_set() {
         if let Some(addr) = args.v4addr() {
@@ -205,6 +221,11 @@ impl Bgp {
         self.callbacks.insert(neighbor_prefix + path, cb);
     }
 
+    fn callback_afi_safi(&mut self, path: &str, cb: Callback) {
+        let neighbor_prefix = String::from("/routing/bgp/neighbor");
+        self.callbacks.insert(neighbor_prefix + path, cb);
+    }
+
     fn timer(&mut self, path: &str, cb: Callback) {
         let prefix = String::from("/routing/bgp/neighbor/timers");
     }
@@ -233,5 +254,8 @@ impl Bgp {
 
         // Debug configuration
         self.callback_add("/routing/bgp/debug", config_debug_category);
+
+        // Network configuration
+        self.callback_add("/routing/bgp/afi-safi/network", config_network);
     }
 }

@@ -10,19 +10,12 @@ use bgp_packet::{
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
+use super::Bgp;
 use super::peer::{ConfigRef, Peer, PeerType};
 use crate::rib;
 use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
 use ipnet::IpNet;
 use tokio::sync::mpsc::UnboundedSender;
-
-/// BGP peer type for route advertisement rules
-// #[derive(Clone, Debug, PartialEq, Eq, Copy)]
-// #[allow(clippy::upper_case_acronyms)]
-// pub enum PeerType {
-//     IBGP,
-//     EBGP,
-// }
 
 /// Enhanced BGP route structure for proper path selection
 #[derive(Clone, Debug)]
@@ -91,10 +84,6 @@ impl BgpRoute {
     fn parse_attributes(&mut self, attrs: &[Attr]) {
         for attr in attrs {
             match attr {
-                Attr::Origin(origin) => {
-                    // Convert Origin to u8 value first, then to BgpOrigin
-                    self.origin = *origin;
-                }
                 Attr::As4Path(as_path) => {
                     // Calculate AS path length for path selection (use As4Path for 4-byte ASN support)
                     self.as_path_len = as_path
@@ -102,25 +91,6 @@ impl BgpRoute {
                         .iter()
                         .map(|segment| segment.asn.len() as u32)
                         .sum();
-                }
-                Attr::As2Path(as_path) => {
-                    // Fallback to 2-byte AS path if As4Path not present
-                    if self.as_path_len == 0 {
-                        self.as_path_len = as_path
-                            .segs
-                            .iter()
-                            .map(|segment| segment.asn.len() as u32)
-                            .sum();
-                    }
-                }
-                Attr::NextHop(nh) => {
-                    self.nexthop = nh.nexthop;
-                }
-                Attr::Med(med) => {
-                    self.med = Some(med.med);
-                }
-                Attr::LocalPref(local_pref) => {
-                    self.local_pref = Some(local_pref.local_pref);
                 }
                 _ => {
                     // Handle other attributes as needed
@@ -180,12 +150,12 @@ impl AdjRibIn {
 
 /// BGP Adj-RIB-Out - stores routes to be advertised to a specific peer after policy application
 #[derive(Debug, Default)]
-pub struct BgpAdjRibOut {
+pub struct AdjRibOut {
     /// Routes to be advertised to peer (after policy application)
     pub routes: PrefixMap<Ipv4Net, BgpRoute>,
 }
 
-impl BgpAdjRibOut {
+impl AdjRibOut {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
@@ -666,6 +636,13 @@ pub struct BgpAttr {
 }
 
 impl BgpAttr {
+    fn new() -> Self {
+        let mut target = BgpAttr::default();
+
+        target.origin = Some(Origin::Igp);
+        target
+    }
+
     fn from(attrs: &[Attr]) -> Self {
         let mut target = BgpAttr::default();
 
@@ -864,12 +841,12 @@ pub struct BgpRib {
 }
 
 impl BgpRib {
-    pub fn new(peer: &mut Peer, typ: RouteType, nlri: &Ipv4Nlri, attr: &BgpAttr) -> Self {
+    pub fn new(ident: IpAddr, typ: RouteType, id: u32, weight: u32, attr: &BgpAttr) -> Self {
         BgpRib {
-            id: nlri.id,
+            id,
             attr: attr.clone(),
-            ident: peer.ident,
-            weight: 0,
+            ident,
+            weight,
             typ,
         }
     }
@@ -902,11 +879,18 @@ impl LocalRib {
         removed
     }
 
-    pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRoute> {
+    pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRib> {
+        let mut all_removed: Vec<BgpRib> = Vec::new();
         for (prefix, candidates) in self.entries.iter_mut() {
-            candidates.retain(|r| r.ident != ident);
+            let mut removed: Vec<BgpRib> =
+                candidates.extract_if(.., |r| r.ident == ident).collect();
+            all_removed.append(&mut removed);
         }
-        vec![]
+        all_removed
+    }
+
+    pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Option<BgpRoute> {
+        None
     }
 }
 
@@ -916,7 +900,7 @@ pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: 
     } else {
         RouteType::EBGP
     };
-    let rib = BgpRib::new(peer, typ, nlri, attr);
+    let rib = BgpRib::new(peer.ident, typ, nlri.id, 0, attr);
 
     let replaced = bgp.lrib.update_route(nlri.prefix, rib);
     if replaced.is_empty() {
@@ -975,4 +959,18 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
 pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
     // IPv4 Unicast.
     bgp.lrib.remove_peer_routes(peer.ident);
+}
+
+impl Bgp {
+    pub fn route_add(&mut self, prefix: Ipv4Net) {
+        let ident = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let attr = BgpAttr::new();
+        let rib = BgpRib::new(ident, RouteType::Origin, 0, 32768, &attr);
+        let replaced = self.lrib.update_route(prefix, rib);
+    }
+
+    pub fn route_del(&mut self, prefix: Ipv4Net) {
+        let ident = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let removed = self.lrib.remove_route(prefix, 0, ident);
+    }
 }
