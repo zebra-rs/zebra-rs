@@ -38,8 +38,8 @@ sysctl = "0.6"
 socket2 = "0.5.8"
 nix = { version = "0.30", features = ["fs", "net", "socket", "uio", "user"] }
 libc = "0.2.167"
-#bgp-packet = { path = "../../bgp-packet" }
-bgp-packet = { git = "https://github.com/zebra-rs/bgp-packet", branch = "main" }
+bgp-packet = { path = "../../bgp-packet" }
+#bgp-packet = { git = "https://github.com/zebra-rs/bgp-packet", branch = "main" }
 #ospf-packet = { path = "../../ospf-packet" }
 ospf-packet = { git = "https://github.com/zebra-rs/ospf-packet", branch = "main" }
 #isis-packet = { path = "../../isis-packet" }
@@ -55,6 +55,7 @@ daemonize = "0.5"
 hex = "0.4.3"
 strum = "0.27"
 strum_macros = "0.27"
+nanomsg = "0.7.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = { git = "https://github.com/zebra-rs/rtnetlink", rev = "2d7b1830e9bd9a049a757f0a79ccd16216450bf2" }

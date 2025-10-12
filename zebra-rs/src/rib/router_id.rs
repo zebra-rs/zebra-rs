@@ -25,10 +25,7 @@ impl Rib {
     pub fn router_id_update(&mut self) {
         if let Some(router_id) = router_id(&self.links) {
             if self.router_id != router_id {
-                println!("Update: router_id {} -> {}", self.router_id, router_id);
                 self.router_id = router_id;
-
-                //
             }
         }
     }

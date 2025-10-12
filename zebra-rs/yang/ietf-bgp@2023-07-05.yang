@@ -266,6 +266,28 @@ module ietf-bgp {
       ext:help "Top-level configuration for the BGP router";
       description
         "Top-level configuration for the BGP router.";
+
+      list afi-safi {
+        ext:sort "-1";
+        key "name";
+        description
+          "AFI,SAFI configuration available for the
+               neighbor or group.";
+        leaf name {
+          type identityref {
+            base bt:afi-safi-type;
+          }
+          description
+            "AFI,SAFI";
+        }
+
+        list network {
+          key "prefix";
+          leaf prefix {
+            type inet:ipv4-prefix;
+          }
+        }
+      }
       container global {
         presence "Enables global configuration of BGP";
         description

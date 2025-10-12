@@ -16,6 +16,9 @@ submodule ietf-bgp-neighbor {
       "RFC XXXX: YANG Model for Border Gateway Protocol (BGP-4).";
   }
 
+  import extension {
+    prefix ext;
+  }
   // Include the common submodule
 
   include ietf-bgp-common;
@@ -176,6 +179,14 @@ submodule ietf-bgp-neighbor {
       }
       // uses mp-all-afi-safi-list-contents;
       uses bgp-neighbor-use-multiple-paths;
+      leaf add-path {
+        ext:sort "10";
+        type enumeration {
+          enum send;
+          enum receive;
+          enum send-receive;
+        }
+      }
     }
   }
 }

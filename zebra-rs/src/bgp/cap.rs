@@ -1,8 +1,12 @@
 // Capability for sent and received.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use bgp_packet::{Afi, AfiSafi, CapMultiProtocol, Safi, cap::CapabilityPacket};
+use bgp_packet::{
+    Afi, AfiSafi, CapMultiProtocol, Direct, ParseOption, Safi,
+    addpath::{AddPathSendReceive, AddPathValue},
+    cap::CapabilityPacket,
+};
 use serde::Serialize;
 
 #[derive(Default, Debug, Serialize, Clone)]
@@ -65,6 +69,34 @@ pub fn cap_register_recv(caps: &[CapabilityPacket], cap_map: &mut CapAfiMap) {
         if let CapabilityPacket::MultiProtocol(mp) = cap {
             if let Some(entry) = cap_map.get_mut(mp) {
                 entry.recv = true;
+            }
+        }
+    }
+}
+
+pub fn cap_addpath_recv(
+    caps: &[CapabilityPacket],
+    cap_map: &mut ParseOption,
+    configs: &BTreeSet<AddPathValue>,
+) {
+    cap_map.clear();
+    for cap in caps {
+        if let CapabilityPacket::AddPath(caps) = cap {
+            for cap in caps.values.iter() {
+                for config in configs.iter() {
+                    if cap.afi == config.afi && cap.safi == config.safi {
+                        if config.send_receive.is_receive() || cap.send_receive.is_send() {
+                            let afi_safi = AfiSafi::new(cap.afi, cap.safi);
+                            cap_map.add_path.insert(
+                                afi_safi,
+                                Direct {
+                                    recv: true,
+                                    send: false,
+                                },
+                            );
+                        }
+                    }
+                }
             }
         }
     }

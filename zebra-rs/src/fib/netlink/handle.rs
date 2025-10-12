@@ -396,6 +396,40 @@ impl FibHandle {
         }
     }
 
+    pub async fn link_set_up(&self, ifindex: u32, flags: u32) {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+        msg.header.flags = LinkFlags::Up;
+        msg.header.change_mask = LinkFlags::Up;
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("link_set_up error: {}", e);
+            }
+        }
+    }
+
+    pub async fn link_set_down(&self, ifindex: u32, flags: u32) {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+        msg.header.flags = LinkFlags::empty();
+        msg.header.change_mask = LinkFlags::Up;
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("link_set_down error: {}", e);
+            }
+        }
+    }
+
     pub async fn link_set_mtu(&self, ifindex: u32, mtu: u32) {
         let mut msg = LinkMessage::default();
         msg.header.index = ifindex;

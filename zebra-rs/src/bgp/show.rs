@@ -11,6 +11,8 @@ use serde_json::json;
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{self, Peer, PeerCounter, PeerParam, State};
+use super::route::{BgpAttr, BgpNexthop};
+use crate::bgp::route::RouteType;
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
@@ -24,7 +26,7 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
     let state = if peer.state != State::Established {
         peer.state.to_str().to_string()
     } else {
-        0.to_string()
+        peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
     };
 
     writeln!(
@@ -76,52 +78,50 @@ Nexthop codes: @NNN nexthop's vrf id, < announce-nh-self
 Origin codes:  i - IGP, e - EGP, ? - incomplete
 RPKI validation codes: V valid, I invalid, N Not found
 
-    Network          Next Hop            Metric LocPrf Weight Path
+    Network            Next Hop            Metric LocPrf Weight Path
 "#;
 
-fn show_nexthop(attrs: &Vec<Attr>) -> String {
-    for attr in attrs.iter() {
-        if let Attr::NextHop(nhop) = attr {
-            return nhop.next_hop.to_string();
-        }
+fn show_med(attr: &BgpAttr) -> String {
+    if let Some(med) = attr.med {
+        med.to_string()
+    } else {
+        "".to_string()
     }
-    "".to_string()
 }
 
-fn show_med(attrs: &Vec<Attr>) -> String {
-    for attr in attrs.iter() {
-        if let Attr::Med(med) = attr {
-            return med.med.to_string();
-        }
+fn show_local_pref(attr: &BgpAttr) -> String {
+    if let Some(local_pref) = attr.local_pref {
+        local_pref.to_string()
+    } else {
+        "".to_string()
     }
-    "".to_string()
 }
 
-fn show_local_pref(attrs: &Vec<Attr>) -> String {
-    for attr in attrs.iter() {
-        if let Attr::LocalPref(lpref) = attr {
-            return lpref.local_pref.to_string();
-        }
+fn show_aspath(attr: &BgpAttr) -> String {
+    if let Some(aspath) = &attr.aspath {
+        aspath.to_string()
+    } else {
+        "".to_string()
     }
-    "".to_string()
 }
 
-fn show_aspath(attrs: &Vec<Attr>) -> String {
-    for attr in attrs.iter() {
-        if let Attr::As4Path(aspath) = attr {
-            return aspath.to_string();
-        }
+fn show_origin(attr: &BgpAttr) -> String {
+    if let Some(origin) = &attr.origin {
+        origin.to_string()
+    } else {
+        "".to_string()
     }
-    "".to_string()
 }
 
-fn show_origin(attrs: &Vec<Attr>) -> String {
-    for attr in attrs.iter() {
-        if let Attr::Origin(origin) = attr {
-            return origin.short_str().to_string();
+fn show_nexthop(attr: &BgpAttr) -> String {
+    if let Some(nexthop) = &attr.nexthop {
+        match nexthop {
+            BgpNexthop::Ipv4(v) => v.to_string(),
+            BgpNexthop::Vpnv4(v) => v.to_string(),
         }
+    } else {
+        "0.0.0.0".to_string()
     }
-    "".to_string()
 }
 
 fn show_bgp_route(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
@@ -129,23 +129,28 @@ fn show_bgp_route(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, value) in bgp.local_rib.entries.iter() {
-        for (i, route) in value.iter().enumerate() {
-            let best = if route.best_path { ">" } else { " " };
-            let nexthop = show_nexthop(&route.attrs);
-            let med = show_med(&route.attrs);
-            let local_pref = show_local_pref(&route.attrs);
-            let aspath = show_aspath(&route.attrs);
-            let origin = show_origin(&route.attrs);
+    for (key, value) in bgp.lrib.entries.iter() {
+        for (i, rib) in value.iter().enumerate() {
+            let valid = "*";
+            let best = ">";
+            let internal = if rib.typ == RouteType::IBGP { "i" } else { " " };
+            let nexthop = show_nexthop(&rib.attr);
+            let med = show_med(&rib.attr);
+            let local_pref = show_local_pref(&rib.attr);
+            let weight = rib.weight;
+            let mut aspath = show_aspath(&rib.attr);
+            if !aspath.is_empty() {
+                aspath.push(' ');
+            }
+            let origin = show_origin(&rib.attr);
             writeln!(
                 buf,
-                "{}  {:<16} {:<19} {:>6} {:>6} {:>6} {}{}",
-                best,
+                "{valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
                 key.to_string(),
                 nexthop,
                 med,
                 local_pref,
-                0,
+                weight,
                 aspath,
                 origin,
             )?;

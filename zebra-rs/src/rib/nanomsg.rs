@@ -1,4 +1,4 @@
-use std::{io::Read, thread, time::Duration};
+use std::{io::Read, net::Ipv4Addr, thread, time::Duration};
 
 use nanomsg::{Protocol, Socket};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,18 @@ struct Nanomsg {
 struct Msg {
     method: String,
     data: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VrfWrapper {
+    #[serde(rename = "vrf-name")]
+    vrf_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MsgWrapper {
+    method: String,
+    data: VrfWrapper,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,7 +45,13 @@ enum MsgEnum {
     IsisGlobal(IsisGlobal),
     IsisInstance(IsisInstance),
     IsisIf(IsisIf),
+    IsisIfDel(IsisIfDel),
     SegmentRouting(SegmentRouting),
+    BgpGlobal(BgpGlobal),
+    BgpInstance(BgpInstance),
+    BgpNeighbor(BgpNeighbor),
+    BgpNetwork(BgpNetwork),
+    Vrf(Vrf),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,8 +114,8 @@ struct IsisInstance {
     metric_style: u32,
     #[serde(rename = "segment-routing")]
     segment_routing: String,
-    #[serde(rename = "mpls-traffic-eng")]
-    mpls_traffic_eng: RouterId,
+    #[serde(rename = "mpls-traffic-eng", skip_serializing_if = "Option::is_none")]
+    mpls_traffic_eng: Option<RouterId>,
     #[serde(rename = "ipv4 unicast")]
     ipv4_unicast: AddressFamily,
 }
@@ -124,14 +142,19 @@ struct IsisIf {
     network_type: u32,
     #[serde(rename = "circuit-type")]
     circuit_type: u32,
-    #[serde(rename = "prefix-sid")]
+    #[serde(rename = "prefix-sid", skip_serializing_if = "Option::is_none")]
     prefix_sid: Option<PrefixSid>,
-    #[serde(rename = "adjacency-sid")]
+    #[serde(rename = "adjacency-sid", skip_serializing_if = "Option::is_none")]
     adjacency_sid: Option<PrefixSid>,
     #[serde(rename = "srlg-group")]
     srlg_group: String,
     #[serde(rename = "l2-config")]
     l2_config: Option<IsisIfLevel>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IsisIfDel {
+    ifname: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -154,13 +177,95 @@ struct SegmentRouting {
     local_block: LocalBlock,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpGlobal {
+    #[serde(rename = "4octet-asn")]
+    four_octet_asn: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Redistribute {
+    #[serde(rename = "type")]
+    typ: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RedistributeAf {
+    ipv4: Vec<Redistribute>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpInstance {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    #[serde(rename = "as")]
+    asn: u32,
+    instance: u32,
+    #[serde(rename = "router-id")]
+    router_id: Ipv4Addr,
+    redistribute: RedistributeAf,
+    #[serde(rename = "route-target-in")]
+    route_target_in: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpNeighbor {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    #[serde(rename = "bgp-instance")]
+    bgp_instance: u32,
+    address: Ipv4Addr,
+    #[serde(rename = "remote-as")]
+    remote_as: u32,
+    #[serde(rename = "local-as")]
+    local_as: u32,
+    #[serde(rename = "address-family")]
+    address_family: Vec<BgpAddressFamily>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpRoute {
+    afi: u32,
+    safi: u32,
+    #[serde(rename = "route-distinguisher")]
+    rd: String,
+    prefix: String,
+    #[serde(rename = "mpls-label")]
+    mpls_label: u32,
+}
+
+// network 192.168.3.0 255.255.255.0 rd 1:1 label 128
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpNetwork {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    #[serde(rename = "instance")]
+    bgp_instance: u32,
+    route: BgpRoute,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BgpAddressFamily {
+    afi: u32,
+    safi: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Vrf {
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    #[serde(rename = "vrf-name")]
+    vrf_name: String,
+    #[serde(rename = "route-distinguisher")]
+    rd: String,
+}
+
 use std::io::Write;
 
 impl Nanomsg {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(path: &str) -> anyhow::Result<Self> {
         let mut socket = Socket::new(Protocol::Pair)?;
-        // socket.bind("ipc:///tmp/ipc/pair/fibd_isisd")?;
-        socket.bind("ipc:///tmp/ipc/pair/config-ng_isisd")?;
+        socket.bind(path)?;
         let nanomsg = Self { socket };
         Ok(nanomsg)
     }
@@ -184,9 +289,29 @@ impl Nanomsg {
             is_type: 2,
             metric_style: 2,
             segment_routing: "mpls".into(),
-            mpls_traffic_eng: RouterId {
+            mpls_traffic_eng: Some(RouterId {
                 router_id: "10.0.0.1".into(),
-            },
+            }),
+            ipv4_unicast: AddressFamily { ti_lfa: true },
+        };
+        MsgEnum::IsisInstance(msg)
+    }
+
+    fn isis_instance_add2(&self) -> MsgEnum {
+        let net = IsisNet {
+            del: vec![],
+            add: vec!["49.0000.0000.0000.0001.00".into()],
+        };
+        let msg = IsisInstance {
+            instance_tag: "s".into(),
+            log_adjacency_changes: true,
+            net,
+            is_type: 2,
+            metric_style: 2,
+            segment_routing: "mpls".into(),
+            mpls_traffic_eng: Some(RouterId {
+                router_id: "9.9.9.9".into(),
+            }),
             ipv4_unicast: AddressFamily { ti_lfa: true },
         };
         MsgEnum::IsisInstance(msg)
@@ -197,10 +322,25 @@ impl Nanomsg {
             ifname: "enp0s6".into(),
             instance_tag: "s".into(),
             ipv4_enable: true,
-            network_type: 2,
+            network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 100 }),
+            srlg_group: "group-1".into(),
+            l2_config: Some(IsisIfLevel { metric: 20 }),
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
+    fn isis_if_add_enp0s6_none(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "enp0s6".into(),
+            instance_tag: "s".into(),
+            ipv4_enable: true,
+            network_type: 1,
+            circuit_type: 2,
+            prefix_sid: None,
+            adjacency_sid: None,
             srlg_group: "group-1".into(),
             l2_config: Some(IsisIfLevel { metric: 20 }),
         };
@@ -237,21 +377,7 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
-    fn segment_routing_update(&self) -> MsgEnum {
-        let msg = SegmentRouting {
-            global_block: GlobalBlock {
-                begin: 16000,
-                end: 23999,
-            },
-            local_block: LocalBlock {
-                begin: 15000,
-                end: 15999,
-            },
-        };
-        MsgEnum::SegmentRouting(msg)
-    }
-
-    fn isis_if_add_lo_no_sid(&self) -> MsgEnum {
+    fn isis_if_add_lo_none(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "lo".into(),
             instance_tag: "s".into(),
@@ -266,12 +392,168 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
+    fn isis_if_del_lo(&self) -> MsgEnum {
+        let msg = IsisIfDel {
+            ifname: "lo".into(),
+        };
+        MsgEnum::IsisIfDel(msg)
+    }
+
+    fn segment_routing_update(&self) -> MsgEnum {
+        let msg = SegmentRouting {
+            global_block: GlobalBlock {
+                begin: 16000,
+                end: 23999,
+            },
+            local_block: LocalBlock {
+                begin: 15000,
+                end: 15999,
+            },
+        };
+        MsgEnum::SegmentRouting(msg)
+    }
+
+    fn segment_routing_update_global(&self) -> MsgEnum {
+        let msg = SegmentRouting {
+            global_block: GlobalBlock {
+                begin: 16000,
+                end: 18000,
+            },
+            local_block: LocalBlock {
+                begin: 15000,
+                end: 15999,
+            },
+        };
+        MsgEnum::SegmentRouting(msg)
+    }
+
+    fn bgp_global(&self) -> MsgEnum {
+        let msg = BgpGlobal {
+            four_octet_asn: true,
+        };
+        MsgEnum::BgpGlobal(msg)
+    }
+
+    fn bgp_instance(&self) -> MsgEnum {
+        let router_id = "10.0.0.1".parse::<Ipv4Addr>().unwrap();
+        let redist = Redistribute { typ: 1 };
+        let redistribute = RedistributeAf { ipv4: vec![redist] };
+        let msg = BgpInstance {
+            vrf_id: 0,
+            asn: 65501,
+            instance: 1,
+            router_id: router_id,
+            redistribute,
+            route_target_in: vec![],
+        };
+        MsgEnum::BgpInstance(msg)
+    }
+
+    fn bgp_vrf(&self) -> MsgEnum {
+        let router_id = "192.168.10.1".parse::<Ipv4Addr>().unwrap();
+        let redist = Redistribute { typ: 1 };
+        let redistribute = RedistributeAf { ipv4: vec![redist] };
+        let msg = BgpInstance {
+            vrf_id: 1,
+            asn: 65501,
+            instance: 2,
+            router_id: router_id,
+            redistribute,
+            route_target_in: vec!["1:1".to_string()],
+        };
+        MsgEnum::BgpInstance(msg)
+    }
+
+    fn bgp_neighbor(&self) -> MsgEnum {
+        let address = "192.168.2.2".parse::<Ipv4Addr>().unwrap();
+        let ipv4_uni = BgpAddressFamily { afi: 1, safi: 1 };
+        let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
+        let msg = BgpNeighbor {
+            vrf_id: 0,
+            bgp_instance: 1,
+            address,
+            remote_as: 65501,
+            local_as: 65501,
+            address_family: vec![ipv4_uni, vpnv4_uni],
+        };
+        MsgEnum::BgpNeighbor(msg)
+    }
+
+    fn bgp_network(&self) -> MsgEnum {
+        let address = "192.168.2.2".parse::<Ipv4Addr>().unwrap();
+        let ipv4_uni = BgpAddressFamily { afi: 1, safi: 1 };
+        let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
+        let route = BgpRoute {
+            afi: 1,
+            safi: 1,
+            rd: "1:1".to_string(),
+            prefix: "192.168.3.0/24".to_string(),
+            mpls_label: 18,
+        };
+        let msg = BgpNetwork {
+            vrf_id: 1,
+            bgp_instance: 2,
+            route,
+        };
+        MsgEnum::BgpNetwork(msg)
+    }
+
+    fn vrf(&self) -> MsgEnum {
+        let msg = Vrf {
+            vrf_id: 1,
+            vrf_name: "vrf1".to_string(),
+            rd: "1:1".to_string(),
+        };
+        MsgEnum::Vrf(msg)
+    }
+
     pub fn parse(&mut self, text: &str) -> anyhow::Result<()> {
         let value: Result<Msg, serde_json::Error> = serde_json::from_str(text);
         thread::sleep(Duration::from_millis(100));
         match value {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
+                if msg.method == "bgp-global:request" {
+                    let msg = MsgSend {
+                        method: String::from("vrf:add"),
+                        data: self.vrf(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                    println!("BGP Global");
+                    let msg = MsgSend {
+                        method: String::from("bgp-global:update"),
+                        data: self.bgp_global(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                }
+                if msg.method == "bgp-instance:request" {
+                    let msg = MsgSend {
+                        method: String::from("bgp-instance:add"),
+                        data: self.bgp_instance(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    println!("BGP Neighbor");
+                    let msg = MsgSend {
+                        method: String::from("bgp-neighbor:add"),
+                        data: self.bgp_neighbor(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let vrf: MsgWrapper = serde_json::from_str(text).unwrap();
+                    println!("BGP Instance for VRF {}", vrf.data.vrf_name);
+                    let msg = MsgSend {
+                        method: String::from("bgp-instance:add"),
+                        data: self.bgp_vrf(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                    //
+                    let msg = MsgSend {
+                        method: String::from("bgp-network:add"),
+                        data: self.bgp_network(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                }
                 if msg.method == "isis-global:request" {
                     thread::sleep(Duration::from_secs(1));
                     // isis-global:update
@@ -282,11 +564,6 @@ impl Nanomsg {
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "isis-instance:request" {
-                    let msg = MsgSend {
-                        method: String::from("segment-routing:update"),
-                        data: self.segment_routing_update(),
-                    };
-                    self.socket.write_all(to_string(&msg)?.as_bytes());
                     // isis-instance:add
                     let msg = MsgSend {
                         method: String::from("isis-instance:add"),
@@ -309,6 +586,24 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
                         data: self.isis_if_add_enp0s7(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("isis-instance:add"),
+                        data: self.isis_instance_add2(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update_global(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
@@ -371,7 +666,13 @@ impl Nanomsg {
 }
 
 pub fn serve() {
-    let nanomsg = Nanomsg::new();
+    let nanomsg = Nanomsg::new("ipc:///tmp/ipc/pair/config-ng_isisd");
+    if let Ok(mut nanomsg) = nanomsg {
+        tokio::spawn(async move {
+            nanomsg.event_loop().await;
+        });
+    }
+    let nanomsg = Nanomsg::new("ipc:///tmp/ipc/pair/config-ng_bgpd");
     if let Ok(mut nanomsg) = nanomsg {
         tokio::spawn(async move {
             nanomsg.event_loop().await;

@@ -1,41 +1,21 @@
-use bgp_packet::{Attr, UpdatePacket};
-use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
-use super::peer::{ConfigRef, Peer};
+use bgp_packet::{
+    Afi, Aggregator, As4Path, Attr, ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity,
+    Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
+};
+use ipnet::Ipv4Net;
+use prefix_trie::PrefixMap;
+
+use super::Bgp;
+use super::peer::{ConfigRef, Peer, PeerType};
 use crate::rib;
 use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
 use ipnet::IpNet;
 use tokio::sync::mpsc::UnboundedSender;
-
-/// BGP route origin types as defined in RFC 4271
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BgpOrigin {
-    Igp = 0,        // IGP (lowest preference)
-    Egp = 1,        // EGP
-    Incomplete = 2, // Incomplete (highest preference)
-}
-
-impl From<u8> for BgpOrigin {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => BgpOrigin::Igp,
-            1 => BgpOrigin::Egp,
-            _ => BgpOrigin::Incomplete,
-        }
-    }
-}
-
-/// BGP peer type for route advertisement rules
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(clippy::upper_case_acronyms)]
-pub enum PeerType {
-    IBGP,
-    EBGP,
-}
 
 /// Enhanced BGP route structure for proper path selection
 #[derive(Clone, Debug)]
@@ -46,12 +26,10 @@ pub struct BgpRoute {
     pub peer_as: u32,
     /// Local AS number
     pub local_as: u32,
-    /// Peer type (IBGP/EBGP)
-    pub peer_type: PeerType,
     /// Route prefix
-    pub prefix: Ipv4Net,
+    pub prefix: Ipv4Nlri,
     /// Next hop address
-    pub next_hop: Ipv4Addr,
+    pub nexthop: Ipv4Addr,
     /// All BGP path attributes
     pub attrs: Vec<Attr>,
     /// AS path length (for best path selection)
@@ -61,7 +39,7 @@ pub struct BgpRoute {
     /// Local preference (IBGP only)
     pub local_pref: Option<u32>,
     /// Origin type
-    pub origin: BgpOrigin,
+    pub origin: Origin,
     /// Weight (Cisco-style, highest priority)
     pub weight: u32,
     /// Route installation time
@@ -77,22 +55,20 @@ impl BgpRoute {
         peer_addr: IpAddr,
         peer_as: u32,
         local_as: u32,
-        peer_type: PeerType,
-        prefix: Ipv4Net,
+        prefix: Ipv4Nlri,
         attrs: Vec<Attr>,
     ) -> Self {
         let mut route = Self {
             peer_addr,
             peer_as,
             local_as,
-            peer_type,
             prefix,
-            next_hop: Ipv4Addr::UNSPECIFIED,
+            nexthop: Ipv4Addr::UNSPECIFIED,
             attrs: attrs.clone(),
             as_path_len: 0,
             med: None,
             local_pref: None,
-            origin: BgpOrigin::Incomplete,
+            origin: Origin::Incomplete,
             weight: 0,
             installed: Instant::now(),
             best_path: false,
@@ -108,10 +84,6 @@ impl BgpRoute {
     fn parse_attributes(&mut self, attrs: &[Attr]) {
         for attr in attrs {
             match attr {
-                Attr::Origin(origin) => {
-                    // Convert Origin to u8 value first, then to BgpOrigin
-                    self.origin = BgpOrigin::from(origin.origin);
-                }
                 Attr::As4Path(as_path) => {
                     // Calculate AS path length for path selection (use As4Path for 4-byte ASN support)
                     self.as_path_len = as_path
@@ -120,25 +92,6 @@ impl BgpRoute {
                         .map(|segment| segment.asn.len() as u32)
                         .sum();
                 }
-                Attr::As2Path(as_path) => {
-                    // Fallback to 2-byte AS path if As4Path not present
-                    if self.as_path_len == 0 {
-                        self.as_path_len = as_path
-                            .segs
-                            .iter()
-                            .map(|segment| segment.asn.len() as u32)
-                            .sum();
-                    }
-                }
-                Attr::NextHop(nh) => {
-                    self.next_hop = nh.next_hop;
-                }
-                Attr::Med(med) => {
-                    self.med = Some(med.med);
-                }
-                Attr::LocalPref(local_pref) => {
-                    self.local_pref = Some(local_pref.local_pref);
-                }
                 _ => {
                     // Handle other attributes as needed
                 }
@@ -146,20 +99,20 @@ impl BgpRoute {
         }
 
         // Set default local preference for IBGP routes
-        if self.peer_type == PeerType::IBGP && self.local_pref.is_none() {
-            self.local_pref = Some(100); // Default local preference
-        }
+        // if self.peer_type == PeerType::IBGP && self.local_pref.is_none() {
+        //     self.local_pref = Some(100); // Default local preference
+        // }
     }
 }
 
 /// BGP Adj-RIB-In - stores routes received from a specific peer before policy application
 #[derive(Debug, Default)]
-pub struct BgpAdjRibIn {
+pub struct AdjRibIn {
     /// Routes received from peer (before policy application)
     pub routes: PrefixMap<Ipv4Net, BgpRoute>,
 }
 
-impl BgpAdjRibIn {
+impl AdjRibIn {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
@@ -168,7 +121,7 @@ impl BgpAdjRibIn {
 
     /// Add a route to Adj-RIB-In
     pub fn add_route(&mut self, route: BgpRoute) -> Option<BgpRoute> {
-        self.routes.insert(route.prefix, route)
+        self.routes.insert(route.prefix.prefix, route)
     }
 
     /// Remove a route from Adj-RIB-In
@@ -197,12 +150,12 @@ impl BgpAdjRibIn {
 
 /// BGP Adj-RIB-Out - stores routes to be advertised to a specific peer after policy application
 #[derive(Debug, Default)]
-pub struct BgpAdjRibOut {
+pub struct AdjRibOut {
     /// Routes to be advertised to peer (after policy application)
     pub routes: PrefixMap<Ipv4Net, BgpRoute>,
 }
 
-impl BgpAdjRibOut {
+impl AdjRibOut {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
@@ -211,7 +164,7 @@ impl BgpAdjRibOut {
 
     /// Add a route to Adj-RIB-Out
     pub fn add_route(&mut self, route: BgpRoute) -> Option<BgpRoute> {
-        self.routes.insert(route.prefix, route)
+        self.routes.insert(route.prefix.prefix, route)
     }
 
     /// Remove a route from Adj-RIB-Out
@@ -240,14 +193,14 @@ impl BgpAdjRibOut {
 
 /// BGP Local RIB (Loc-RIB) - stores best paths selected from all Adj-RIB-In
 #[derive(Debug, Default)]
-pub struct BgpLocalRib {
+pub struct BgpLocalRibOrig {
     /// Best path routes per prefix
     pub routes: PrefixMap<Ipv4Net, BgpRoute>,
     /// All candidate routes per prefix (for show commands)
     pub entries: PrefixMap<Ipv4Net, Vec<BgpRoute>>,
 }
 
-impl BgpLocalRib {
+impl BgpLocalRibOrig {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
@@ -257,7 +210,7 @@ impl BgpLocalRib {
 
     /// Add or update a route in the Local RIB and perform best path selection
     pub fn update_route(&mut self, route: BgpRoute) -> Option<BgpRoute> {
-        let prefix = route.prefix;
+        let prefix = route.prefix.prefix;
 
         // Add to candidates
         let candidates = self.entries.entry(prefix).or_default();
@@ -287,8 +240,7 @@ impl BgpLocalRib {
                         peer_addr,
                         0,
                         0,
-                        PeerType::EBGP,
-                        prefix,
+                        Ipv4Nlri { id: 0, prefix },
                         vec![],
                     ))
                 } else {
@@ -416,11 +368,11 @@ impl BgpLocalRib {
         }
 
         // 7. Prefer EBGP over IBGP
-        match (&route1.peer_type, &route2.peer_type) {
-            (PeerType::EBGP, PeerType::IBGP) => return route1,
-            (PeerType::IBGP, PeerType::EBGP) => return route2,
-            _ => {}
-        }
+        // match (&route1.peer_type, &route2.peer_type) {
+        //     (PeerType::EBGP, PeerType::IBGP) => return route1,
+        //     (PeerType::IBGP, PeerType::EBGP) => return route2,
+        //     _ => {}
+        // }
 
         // 8. Prefer route with lower IGP metric to next hop (not implemented)
 
@@ -530,7 +482,7 @@ pub fn send_route_to_rib(
 
     // Create nexthop - convert IPv4 nexthop to IpAddr
     let nexthop_uni = NexthopUni {
-        addr: IpAddr::V4(bgp_route.next_hop),
+        addr: IpAddr::V4(bgp_route.nexthop),
         metric: bgp_route.med.unwrap_or(0),
         weight: bgp_route.weight as u8,
         ifindex: 0, // TODO: Resolve interface index from nexthop
@@ -547,12 +499,12 @@ pub fn send_route_to_rib(
     // Send appropriate message to RIB
     let msg = if install {
         rib::Message::Ipv4Add {
-            prefix,
+            prefix: prefix.prefix,
             rib: rib_entry,
         }
     } else {
         rib::Message::Ipv4Del {
-            prefix,
+            prefix: prefix.prefix,
             rib: rib_entry,
         }
     };
@@ -573,13 +525,13 @@ pub struct Route {
     pub selected: bool,
 }
 
-pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
+pub fn route_from_peer_orig(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
     // Determine peer type based on AS numbers
-    let peer_type = if peer.local_as == peer.peer_as {
-        super::route::PeerType::IBGP
-    } else {
-        super::route::PeerType::EBGP
-    };
+    // let peer_type = if peer.local_as == peer.peer_as {
+    //     PeerType::IBGP
+    // } else {
+    //     PeerType::EBGP
+    // };
 
     // Process route announcements
     for ipv4 in packet.ipv4_update.iter() {
@@ -587,8 +539,7 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
             peer.address,
             peer.peer_as,
             peer.local_as,
-            peer_type.clone(),
-            *ipv4,
+            ipv4.clone(),
             packet.attrs.clone(),
         );
 
@@ -599,12 +550,12 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
         if let Some(new_best) = bgp.local_rib.update_route(bgp_route) {
             // 3. Install new best path into main RIB
             if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
-                eprintln!("Failed to install BGP route {} to RIB: {}", ipv4, e);
+                eprintln!("Failed to install BGP route {} to RIB: {}", ipv4.prefix, e);
             } else {
-                println!(
-                    "Installed new best path for {}: {:?}",
-                    ipv4, new_best.peer_addr
-                );
+                // println!(
+                //     "Installed new best path for {}: {:?}",
+                //     ipv4, new_best.peer_addr
+                // );
             }
         }
     }
@@ -612,25 +563,418 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
     // Process route withdrawals
     for ipv4 in packet.ipv4_withdraw.iter() {
         // 1. Remove from peer's Adj-RIB-In
-        peer.adj_rib_in.remove_route(*ipv4);
+        peer.adj_rib_in.remove_route(ipv4.prefix);
 
         // 2. Remove from Local RIB and check if best path changed
-        if let Some(removed_best) = bgp.local_rib.remove_route(*ipv4, peer.address) {
+        if let Some(removed_best) = bgp.local_rib.remove_route(ipv4.prefix, peer.address) {
             // 3. Remove old best path from main RIB
             if let Err(e) = send_route_to_rib(&removed_best, bgp.rib_tx, false) {
-                eprintln!("Failed to remove BGP route {} from RIB: {}", ipv4, e);
+                eprintln!("Failed to remove BGP route {} from RIB: {}", ipv4.prefix, e);
             } else {
-                println!("Removed route for {} from peer {}", ipv4, peer.address);
+                println!(
+                    "Removed route for {} from peer {}",
+                    ipv4.prefix, peer.address
+                );
             }
 
             // 4. Install new best path if available
-            if let Some(new_best) = bgp.local_rib.get_best_path(ipv4) {
+            if let Some(new_best) = bgp.local_rib.get_best_path(&ipv4.prefix) {
                 if let Err(e) = send_route_to_rib(new_best, bgp.rib_tx, true) {
-                    eprintln!("Failed to install new BGP route {} to RIB: {}", ipv4, e);
+                    eprintln!(
+                        "Failed to install new BGP route {} to RIB: {}",
+                        ipv4.prefix, e
+                    );
                 } else {
-                    println!("Installed new best path for {} after withdrawal", ipv4);
+                    println!(
+                        "Installed new best path for {} after withdrawal",
+                        ipv4.prefix
+                    );
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum BgpNexthop {
+    Ipv4(Ipv4Addr),
+    Vpnv4(Vpnv4Nexthop),
+}
+
+// BGP Attribute for quick access to each attribute. This would be used for
+// consolidating route advertisement.
+#[derive(Clone, Debug, Default)]
+pub struct BgpAttr {
+    /// Origin type
+    pub origin: Option<Origin>,
+    /// AS Path
+    pub aspath: Option<As4Path>,
+    /// Nexthop
+    pub nexthop: Option<BgpNexthop>,
+    /// Multi-Exit Discriminator
+    pub med: Option<u32>,
+    /// Local preference (IBGP only)
+    pub local_pref: Option<u32>,
+    /// Atomic Aggregate
+    pub atomic_aggregate: Option<bool>,
+    /// Aggregator.
+    pub aggregator: Option<Aggregator>,
+    /// Community
+    pub com: Option<Community>,
+    /// Originator ID
+    pub originator_id: Option<OriginatorId>,
+    /// Cluster List
+    pub cluster_list: Option<ClusterList>,
+    /// Extended Community
+    pub ecom: Option<ExtCommunity>,
+    /// PMSI Tunnel
+    pub pmsi_tunnel: Option<PmsiTunnel>,
+    /// AIGP
+    pub aigp: Option<u64>,
+    /// Large Community
+    pub lcom: Option<LargeCommunity>,
+}
+
+impl BgpAttr {
+    fn new() -> Self {
+        let mut target = BgpAttr::default();
+
+        target.origin = Some(Origin::Igp);
+        target
+    }
+
+    fn from(attrs: &[Attr]) -> Self {
+        let mut target = BgpAttr::default();
+
+        for attr in attrs.iter() {
+            match attr {
+                Attr::Origin(v) => {
+                    target.origin = Some(*v);
+                }
+                Attr::As2Path(v) => {
+                    // TODO
+                }
+                Attr::As4Path(v) => {
+                    target.aspath = Some(v.clone());
+                }
+                Attr::NextHop(v) => {
+                    target.nexthop = Some(BgpNexthop::Ipv4(v.nexthop));
+                }
+                Attr::Med(v) => {
+                    target.med = Some(v.med);
+                }
+                Attr::LocalPref(v) => {
+                    target.local_pref = Some(v.local_pref);
+                }
+                Attr::AtomicAggregate(_v) => {
+                    target.atomic_aggregate = Some(true);
+                }
+                Attr::Aggregator(v) => {
+                    target.aggregator = Some(v.clone());
+                }
+                Attr::Aggregator2(v) => {
+                    // TODO
+                }
+                Attr::Community(v) => {
+                    target.com = Some(v.clone());
+                }
+                Attr::OriginatorId(v) => {
+                    target.originator_id = Some(v.clone());
+                }
+                Attr::ClusterList(v) => {
+                    target.cluster_list = Some(v.clone());
+                }
+                Attr::MpReachNlri(_v) => {
+                    // Ignore in attribute conversion.
+                }
+                Attr::MpUnreachNlri(_v) => {
+                    // Ignore in attribute conversion.
+                }
+                Attr::ExtendedCom(v) => {
+                    target.ecom = Some(v.clone());
+                }
+                Attr::PmsiTunnel(v) => {
+                    target.pmsi_tunnel = Some(v.clone());
+                }
+                Attr::Aigp(v) => {
+                    target.aigp = Some(v.aigp);
+                }
+                Attr::LargeCom(v) => {
+                    target.lcom = Some(v.clone());
+                }
+                _ => {
+                    // TODO for unknown attribute
+                }
+            }
+        }
+        target
+    }
+}
+
+impl fmt::Display for BgpAttr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "BGP Attr:")?;
+        if let Some(v) = &self.origin {
+            writeln!(f, " Origin: {}", v);
+        }
+        if let Some(v) = &self.aspath {
+            writeln!(f, " AS Path: {}", v);
+        }
+        if let Some(v) = &self.med {
+            writeln!(f, " MED: {}", v);
+        }
+        if let Some(v) = &self.local_pref {
+            writeln!(f, " LocalPref: {}", v);
+        }
+        if let Some(_) = &self.atomic_aggregate {
+            writeln!(f, " Atomic Aggregate");
+        }
+        if let Some(v) = &self.aggregator {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.com {
+            writeln!(f, "{}", v);
+        }
+        if let Some(v) = &self.originator_id {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.cluster_list {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.ecom {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.pmsi_tunnel {
+            writeln!(f, " {}", v);
+        }
+        if let Some(v) = &self.aigp {
+            writeln!(f, " AIGP: {}", v);
+        }
+        if let Some(v) = &self.lcom {
+            writeln!(f, " {}", v);
+        }
+        // Nexthop
+        if let Some(v) = &self.nexthop {
+            match v {
+                BgpNexthop::Ipv4(v) => {
+                    writeln!(f, " Nexthop: {}", v);
+                }
+                BgpNexthop::Vpnv4(v) => {
+                    writeln!(f, " Nexthop: {}", v);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Ipv4NlriVec {
+    pub eor: bool,
+    pub update: Vec<Ipv4Nlri>,
+    pub withdraw: Vec<Ipv4Nlri>,
+}
+
+#[derive(Default)]
+struct Vpnv4NlriVec {
+    pub eor: bool,
+    pub update: Vec<Vpnv4Net>,
+    pub withdraw: Vec<Vpnv4Net>,
+}
+
+enum BgpNlri {
+    Ipv4(Ipv4NlriVec),
+    Vpnv4(Vpnv4NlriVec),
+    Empty,
+}
+
+impl BgpNlri {
+    fn from(packet: &UpdatePacket) -> Self {
+        // IPv4 End of RIB.
+        if packet.attrs.is_empty() {
+            if packet.ipv4_update.is_empty() && packet.ipv4_withdraw.is_empty() {
+                let eor = Ipv4NlriVec {
+                    eor: true,
+                    ..Default::default()
+                };
+                return BgpNlri::Ipv4(eor);
+            }
+        }
+        // IPv4 updates.
+        if !packet.ipv4_update.is_empty() {
+            let update = Ipv4NlriVec {
+                update: packet.ipv4_update.clone(),
+                ..Default::default()
+            };
+            return BgpNlri::Ipv4(update);
+        }
+        if !packet.ipv4_withdraw.is_empty() {
+            let withdraw = Ipv4NlriVec {
+                withdraw: packet.ipv4_withdraw.clone(),
+                ..Default::default()
+            };
+            return BgpNlri::Ipv4(withdraw);
+        }
+        BgpNlri::Empty
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
+pub enum RouteType {
+    IBGP,
+    EBGP,
+    Origin,
+}
+
+#[derive(Debug, Clone)]
+pub struct BgpRib {
+    // AddPath ID.
+    pub id: u32,
+    // BGP Attribute.
+    pub attr: BgpAttr,
+    // Peer ID.
+    pub ident: IpAddr,
+    // Weight
+    pub weight: u32,
+    // Route type.
+    pub typ: RouteType,
+}
+
+impl BgpRib {
+    pub fn new(ident: IpAddr, typ: RouteType, id: u32, weight: u32, attr: &BgpAttr) -> Self {
+        BgpRib {
+            id,
+            attr: attr.clone(),
+            ident,
+            weight,
+            typ,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LocalRib {
+    // Best path routes per prefix
+    pub routes: PrefixMap<Ipv4Net, BgpRib>,
+
+    // All candidate routes per prefix (for show commands)
+    pub entries: PrefixMap<Ipv4Net, Vec<BgpRib>>,
+}
+
+impl LocalRib {
+    pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>) {
+        let candidates = self.entries.entry(prefix).or_default();
+        let replaced: Vec<BgpRib> = candidates
+            .extract_if(.., |r| r.ident == rib.ident && r.id == rib.id)
+            .collect();
+        candidates.push(rib.clone());
+
+        let selected = self.select_best_path(prefix);
+
+        (replaced, selected)
+    }
+
+    pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
+        let candidates = self.entries.entry(prefix).or_default();
+        let removed: Vec<BgpRib> = candidates
+            .extract_if(.., |r| r.ident == ident && r.id == id)
+            .collect();
+        removed
+    }
+
+    pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRib> {
+        let mut all_removed: Vec<BgpRib> = Vec::new();
+        for (prefix, candidates) in self.entries.iter_mut() {
+            let mut removed: Vec<BgpRib> =
+                candidates.extract_if(.., |r| r.ident == ident).collect();
+            all_removed.append(&mut removed);
+        }
+        all_removed
+    }
+
+    pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
+        //
+        vec![]
+    }
+}
+
+pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
+    let typ = if peer.peer_type == PeerType::IBGP {
+        RouteType::IBGP
+    } else {
+        RouteType::EBGP
+    };
+    let rib = BgpRib::new(peer.ident, typ, nlri.id, 0, attr);
+
+    let (replaced, selected) = bgp.lrib.update_route(nlri.prefix, rib);
+    if replaced.is_empty() {
+        peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
+    }
+    // if let Some(new_best) = bgp.lrib.update_route(nlri.prefix, rib) {
+    // 3. Install new best path into main RIB
+    // if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
+    //     // eprintln!("Failed to install BGP route {} to RIB: {}", ipv4.prefix, e);
+    // } else {
+    //     // println!(
+    //     //     "Installed new best path for {}: {:?}",
+    //     //     ipv4, new_best.peer_addr
+    //     // );
+    // }
+    // }
+}
+
+pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef) {
+    let removed = bgp.lrib.remove_route(nlri.prefix, nlri.id, peer.ident);
+    if !removed.is_empty() {
+        peer.stat.rx_dec(Afi::Ip, Safi::Unicast);
+    }
+}
+
+pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
+    // Convert UpdatePacket to BgpAttr.
+    let attr = BgpAttr::from(&packet.attrs);
+    // print!("{}", attr);
+
+    // Convert UpdatePacket to BgpNlri.
+    let nlri = BgpNlri::from(&packet);
+
+    // Process NLRI.
+    use BgpNlri::*;
+    match nlri {
+        Ipv4(nlri) => {
+            if nlri.eor {
+                println!("IPv4 EoR");
+            }
+            for update in nlri.update.iter() {
+                println!("IPv4 Update: {}", update.prefix);
+                route_ipv4_update(peer, update, &attr, bgp);
+            }
+            for withdraw in nlri.withdraw.iter() {
+                println!("IPv4 Withdraw: {}", withdraw.prefix);
+                route_ipv4_withdraw(peer, withdraw, bgp);
+            }
+        }
+        _ => {
+            //
+        }
+    }
+}
+
+pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
+    // IPv4 Unicast.
+    bgp.lrib.remove_peer_routes(peer.ident);
+}
+
+impl Bgp {
+    pub fn route_add(&mut self, prefix: Ipv4Net) {
+        let ident = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let attr = BgpAttr::new();
+        let rib = BgpRib::new(ident, RouteType::Origin, 0, 32768, &attr);
+        let replaced = self.lrib.update_route(prefix, rib);
+    }
+
+    pub fn route_del(&mut self, prefix: Ipv4Net) {
+        let ident = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let removed = self.lrib.remove_route(prefix, 0, ident);
     }
 }

@@ -218,7 +218,7 @@ impl Rib {
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
         match msg {
             FibMessage::NewLink(link) => {
-                self.link_add(link);
+                self.link_add(link).await;
             }
             FibMessage::DelLink(link) => {
                 self.link_delete(link);

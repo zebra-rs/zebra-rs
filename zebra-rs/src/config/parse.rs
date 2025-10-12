@@ -39,7 +39,8 @@ impl State {
     }
 
     pub fn set_active_choice_case(&mut self, choice_name: &str, case_name: &str) {
-        self.choice_states.insert(choice_name.to_string(), case_name.to_string());
+        self.choice_states
+            .insert(choice_name.to_string(), case_name.to_string());
     }
 
     pub fn get_active_choice_case(&self, choice_name: &str) -> Option<&String> {
@@ -293,13 +294,13 @@ fn is_choice_case(entry: &Rc<Entry>) -> Option<(String, String)> {
     if entry.name == "prefix-length" || entry.name == "netmask" {
         return Some(("choice-test-subnet".to_string(), entry.name.clone()));
     }
-    
+
     // Add more choice patterns here as needed
     // Example for routing policy choices:
     // if entry.name == "protocol-eq" || entry.name == "protocol-neq" {
     //     return Some(("policy-protocol".to_string(), entry.name.clone()));
     // }
-    
+
     None
 }
 
