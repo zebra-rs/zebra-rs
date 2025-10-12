@@ -4,8 +4,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use bgp_packet::{
-    Aggregator, As4Path, Attr, ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity,
-    Origin, OriginatorId, PmsiTunnel, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
+    Afi, Aggregator, As4Path, Attr, ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity,
+    Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
 };
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
@@ -137,12 +137,12 @@ impl BgpRoute {
 
 /// BGP Adj-RIB-In - stores routes received from a specific peer before policy application
 #[derive(Debug, Default)]
-pub struct BgpAdjRibIn {
+pub struct AdjRibIn {
     /// Routes received from peer (before policy application)
     pub routes: PrefixMap<Ipv4Net, BgpRoute>,
 }
 
-impl BgpAdjRibIn {
+impl AdjRibIn {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
@@ -885,11 +885,13 @@ pub struct LocalRib {
 }
 
 impl LocalRib {
-    pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> Option<BgpRib> {
+    pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> Vec<BgpRib> {
         let candidates = self.entries.entry(prefix).or_default();
-        candidates.retain(|r| r.ident != rib.ident && r.id != rib.id);
+        let removed: Vec<BgpRib> = candidates
+            .extract_if(.., |r| r.ident != rib.ident && r.id != rib.id)
+            .collect();
         candidates.push(rib.clone());
-        None
+        removed
     }
 
     pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRoute> {
@@ -908,17 +910,21 @@ pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: 
     };
     let rib = BgpRib::new(peer, typ, nlri, attr);
 
-    if let Some(new_best) = bgp.lrib.update_route(nlri.prefix, rib) {
-        // 3. Install new best path into main RIB
-        // if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
-        //     // eprintln!("Failed to install BGP route {} to RIB: {}", ipv4.prefix, e);
-        // } else {
-        //     // println!(
-        //     //     "Installed new best path for {}: {:?}",
-        //     //     ipv4, new_best.peer_addr
-        //     // );
-        // }
+    let replaced = bgp.lrib.update_route(nlri.prefix, rib);
+    if replaced.is_empty() {
+        peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
     }
+    // if let Some(new_best) = bgp.lrib.update_route(nlri.prefix, rib) {
+    // 3. Install new best path into main RIB
+    // if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
+    //     // eprintln!("Failed to install BGP route {} to RIB: {}", ipv4.prefix, e);
+    // } else {
+    //     // println!(
+    //     //     "Installed new best path for {}: {:?}",
+    //     //     ipv4, new_best.peer_addr
+    //     // );
+    // }
+    // }
 }
 
 pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef) {

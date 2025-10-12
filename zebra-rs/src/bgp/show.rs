@@ -26,7 +26,7 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
     let state = if peer.state != State::Established {
         peer.state.to_str().to_string()
     } else {
-        0.to_string()
+        peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
     };
 
     writeln!(

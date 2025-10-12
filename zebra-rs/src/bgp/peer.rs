@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
@@ -28,7 +28,7 @@ use crate::config::Args;
 use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
-use super::route::{BgpAdjRibIn, BgpAdjRibOut, BgpLocalRibOrig, LocalRib, Route};
+use super::route::{AdjRibIn, BgpAdjRibOut, BgpLocalRibOrig, LocalRib, Route};
 use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_HOLD_TIME, Bgp};
 use crate::context::task::*;
@@ -141,6 +141,68 @@ pub struct PeerParam {
     pub local_addr: Option<SocketAddr>,
 }
 
+#[derive(Debug, Default)]
+pub struct PeerStatEntry {
+    tx: u64,
+    rx: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PeerStat(BTreeMap<AfiSafi, PeerStatEntry>);
+
+impl PeerStat {
+    pub fn clear(&mut self) {
+        for (_, entry) in self.0.iter_mut() {
+            entry.tx = 0;
+            entry.rx = 0;
+        }
+    }
+
+    pub fn rx(&self, afi: Afi, safi: Safi) -> u64 {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get(&afi_safi) {
+            entry.rx
+        } else {
+            0
+        }
+    }
+
+    pub fn tx(&self, afi: Afi, safi: Safi) -> u64 {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get(&afi_safi) {
+            entry.tx
+        } else {
+            0
+        }
+    }
+
+    pub fn rx_inc(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        let entry = self.0.entry(afi_safi).or_default();
+        entry.rx += 1;
+    }
+
+    pub fn rx_dec(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get_mut(&afi_safi) {
+            entry.rx -= 1;
+        }
+    }
+
+    pub fn tx_inc(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        let entry = self.0.entry(afi_safi).or_default();
+        entry.tx += 1;
+    }
+
+    pub fn tx_dec(&mut self, afi: Afi, safi: Safi) {
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(entry) = self.0.get_mut(&afi_safi) {
+            entry.tx -= 1;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Peer {
     pub ident: IpAddr,
@@ -161,11 +223,12 @@ pub struct Peer {
     pub param_tx: PeerParam,
     pub param_rx: PeerParam,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
+    pub stat: PeerStat,
     pub tx: UnboundedSender<Message>,
     pub config: PeerConfig,
     pub instant: Option<Instant>,
     pub cap_map: CapAfiMap,
-    pub adj_rib_in: BgpAdjRibIn,
+    pub adj_rib_in: AdjRibIn,
     pub adj_rib_out: BgpAdjRibOut,
     pub opt: ParseOption,
 }
@@ -191,7 +254,6 @@ impl Peer {
             task: PeerTask::default(),
             timer: PeerTimer::default(),
             counter: [PeerCounter::default(); BgpType::Max as usize],
-            packet_tx: None,
             tx,
             remote_id: Ipv4Addr::UNSPECIFIED,
             local_identifier: None,
@@ -200,9 +262,11 @@ impl Peer {
             param: PeerParam::default(),
             param_tx: PeerParam::default(),
             param_rx: PeerParam::default(),
+            stat: PeerStat::default(),
+            packet_tx: None,
             instant: None,
             cap_map: CapAfiMap::new(),
-            adj_rib_in: BgpAdjRibIn::new(),
+            adj_rib_in: AdjRibIn::new(),
             adj_rib_out: BgpAdjRibOut::new(),
             opt: ParseOption::default(),
         };
@@ -325,6 +389,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         // TODO: clear BgpRib in
         println!("Clear BGP RIB");
         route_clean(peer, &mut bgp_ref);
+        peer.stat.clear();
     }
 
     // Update instant when entering or leaving the Established state.
