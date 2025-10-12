@@ -887,10 +887,18 @@ pub struct LocalRib {
 impl LocalRib {
     pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> Vec<BgpRib> {
         let candidates = self.entries.entry(prefix).or_default();
-        let removed: Vec<BgpRib> = candidates
-            .extract_if(.., |r| r.ident != rib.ident && r.id != rib.id)
+        let replaced: Vec<BgpRib> = candidates
+            .extract_if(.., |r| r.ident == rib.ident && r.id == rib.id)
             .collect();
         candidates.push(rib.clone());
+        replaced
+    }
+
+    pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
+        let candidates = self.entries.entry(prefix).or_default();
+        let removed: Vec<BgpRib> = candidates
+            .extract_if(.., |r| r.ident == ident && r.id == id)
+            .collect();
         removed
     }
 
@@ -928,7 +936,10 @@ pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: 
 }
 
 pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef) {
-    //
+    let removed = bgp.lrib.remove_route(nlri.prefix, nlri.id, peer.ident);
+    if !removed.is_empty() {
+        peer.stat.rx_dec(Afi::Ip, Safi::Unicast);
+    }
 }
 
 pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
