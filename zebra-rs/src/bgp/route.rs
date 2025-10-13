@@ -838,6 +838,8 @@ pub struct BgpRib {
     pub weight: u32,
     // Route type.
     pub typ: RouteType,
+    // Whether this candidate is currently the best path.
+    pub best_path: bool,
 }
 
 impl BgpRib {
@@ -848,6 +850,7 @@ impl BgpRib {
             ident,
             weight,
             typ,
+            best_path: false,
         }
     }
 }
@@ -893,8 +896,153 @@ impl LocalRib {
     }
 
     pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
-        //
-        vec![]
+        let mut changes = Vec::new();
+        let old_best = self.routes.get(&prefix).cloned();
+
+        if !self.entries.contains_key(&prefix) {
+            if let Some(mut removed_best) = self.routes.remove(&prefix) {
+                removed_best.best_path = false;
+                changes.push(removed_best);
+            }
+            return changes;
+        }
+
+        let is_empty = self
+            .entries
+            .get(&prefix)
+            .map(|candidates| candidates.is_empty())
+            .unwrap_or(true);
+
+        if is_empty {
+            self.entries.remove(&prefix);
+            if let Some(mut removed_best) = self.routes.remove(&prefix) {
+                removed_best.best_path = false;
+                changes.push(removed_best);
+            }
+            return changes;
+        }
+
+        let best = {
+            let candidates = self.entries.get_mut(&prefix).expect("prefix checked above");
+
+            let mut best_index = 0usize;
+            for index in 1..candidates.len() {
+                if Self::is_better(&candidates[index], &candidates[best_index]) {
+                    best_index = index;
+                }
+            }
+
+            for rib in candidates.iter_mut() {
+                rib.best_path = false;
+            }
+            candidates[best_index].best_path = true;
+            candidates[best_index].clone()
+        };
+
+        let changed = match &old_best {
+            Some(old) => old.ident != best.ident || old.id != best.id,
+            None => true,
+        };
+
+        if changed {
+            if let Some(mut previous) = old_best {
+                previous.best_path = false;
+                changes.push(previous);
+            }
+            self.routes.insert(prefix, best.clone());
+            changes.push(best);
+        } else {
+            self.routes.insert(prefix, best);
+        }
+
+        changes
+    }
+
+    fn is_better(candidate: &BgpRib, incumbent: &BgpRib) -> bool {
+        if candidate.weight != incumbent.weight {
+            return candidate.weight > incumbent.weight;
+        }
+
+        let candidate_lp = Self::effective_local_pref(candidate);
+        let incumbent_lp = Self::effective_local_pref(incumbent);
+        if candidate_lp != incumbent_lp {
+            return candidate_lp > incumbent_lp;
+        }
+
+        let candidate_local = matches!(candidate.typ, RouteType::Origin);
+        let incumbent_local = matches!(incumbent.typ, RouteType::Origin);
+        if candidate_local != incumbent_local {
+            return candidate_local;
+        }
+
+        let candidate_as_len = Self::as_path_len(candidate);
+        let incumbent_as_len = Self::as_path_len(incumbent);
+        if candidate_as_len != incumbent_as_len {
+            return candidate_as_len < incumbent_as_len;
+        }
+
+        let candidate_origin_rank = Self::origin_rank(candidate.attr.origin);
+        let incumbent_origin_rank = Self::origin_rank(incumbent.attr.origin);
+        if candidate_origin_rank != incumbent_origin_rank {
+            return candidate_origin_rank < incumbent_origin_rank;
+        }
+
+        if candidate.ident == incumbent.ident {
+            let candidate_med = candidate.attr.med.unwrap_or(0);
+            let incumbent_med = incumbent.attr.med.unwrap_or(0);
+            if candidate_med != incumbent_med {
+                return candidate_med < incumbent_med;
+            }
+        }
+
+        let candidate_type_rank = Self::route_type_rank(candidate.typ);
+        let incumbent_type_rank = Self::route_type_rank(incumbent.typ);
+        if candidate_type_rank != incumbent_type_rank {
+            return candidate_type_rank < incumbent_type_rank;
+        }
+
+        if candidate.ident != incumbent.ident {
+            return candidate.ident < incumbent.ident;
+        }
+
+        if candidate.id != incumbent.id {
+            return candidate.id < incumbent.id;
+        }
+
+        false
+    }
+
+    fn effective_local_pref(rib: &BgpRib) -> u32 {
+        rib.attr.local_pref.unwrap_or(100)
+    }
+
+    fn as_path_len(rib: &BgpRib) -> u32 {
+        rib.attr
+            .aspath
+            .as_ref()
+            .map(|path| {
+                path.segs
+                    .iter()
+                    .map(|segment| segment.asn.len() as u32)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn origin_rank(origin: Option<Origin>) -> u8 {
+        match origin.unwrap_or(Origin::Incomplete) {
+            Origin::Igp => 0,
+            Origin::Egp => 1,
+            Origin::Incomplete => 2,
+        }
+    }
+
+    fn route_type_rank(typ: RouteType) -> u8 {
+        match typ {
+            RouteType::Origin => 0,
+            RouteType::EBGP => 1,
+            RouteType::IBGP => 2,
+        }
     }
 }
 
