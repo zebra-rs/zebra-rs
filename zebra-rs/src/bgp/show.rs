@@ -191,7 +191,7 @@ fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt
     for (key, value) in bgp.lrib.entries.iter() {
         for (i, rib) in value.iter().enumerate() {
             let valid = "*";
-            let best = ">";
+            let best = if rib.best_path { ">" } else { " " };
             let internal = if rib.typ == RouteType::IBGP { "i" } else { " " };
             let nexthop = show_nexthop(&rib.attr);
             let med = show_med(&rib.attr);
