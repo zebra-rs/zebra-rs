@@ -29,7 +29,7 @@ struct Cli {
     #[arg(short, long, help = "Show command flag")]
     show: bool,
 
-    #[arg(short, long, help = "Show command port", default_value = "2650")]
+    #[arg(short, long, help = "Show command port", default_value = "2666")]
     port: u32,
 
     #[arg(short, long, help = "Show output in JSON format")]

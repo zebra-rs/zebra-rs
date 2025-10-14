@@ -310,14 +310,14 @@ async fn test_mock_client_workflow() {
 async fn test_real_zebra_connection_and_isis_graph() {
     use zmcp_server::ZmcpServer;
 
-    // This test requires a real zebra-rs server running at localhost:2650
+    // This test requires a real zebra-rs server running at localhost:2666
     // Skip if not available
-    let server = ZmcpServer::new("http://localhost".to_string(), 2650);
+    let server = ZmcpServer::new("http://localhost".to_string(), 2666);
 
     // Test connection first
     match server.zebra_client().test_connection().await {
         Ok(_) => {
-            println!("✓ Connected to zebra-rs at localhost:2650");
+            println!("✓ Connected to zebra-rs at localhost:2666");
 
             // Test the full MCP workflow with real zebra-rs
             let test_cases = vec![
@@ -498,10 +498,10 @@ async fn test_real_zebra_connection_and_isis_graph() {
             println!("  ✓ Invalid level parameter correctly rejected");
         }
         Err(e) => {
-            println!("⚠ Skipping real zebra-rs test - server not available at localhost:2650");
+            println!("⚠ Skipping real zebra-rs test - server not available at localhost:2666");
             println!("  Connection error: {}", e);
             println!("  To run this test, start zebra-rs with: make run");
-            println!("  Or start it manually with gRPC server enabled on port 2650");
+            println!("  Or start it manually with gRPC server enabled on port 2666");
 
             // This is not a test failure - just means the server isn't running
             // We'll skip the test gracefully
@@ -514,7 +514,7 @@ async fn test_direct_zebra_client_isis_command() {
     use zmcp_server::client::ZebraClient;
 
     // Test the zebra client directly for ISIS commands
-    let client = ZebraClient::new("http://localhost".to_string(), 2650);
+    let client = ZebraClient::new("http://localhost".to_string(), 2666);
 
     match client.test_connection().await {
         Ok(_) => {
@@ -580,7 +580,7 @@ async fn test_direct_zebra_client_isis_command() {
             }
         }
         Err(_) => {
-            println!("⚠ Skipping direct client test - zebra-rs not available at localhost:2650");
+            println!("⚠ Skipping direct client test - zebra-rs not available at localhost:2666");
         }
     }
 }
