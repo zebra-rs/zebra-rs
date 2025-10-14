@@ -27,11 +27,11 @@ _cli_interactive_setup ()
 }
 _cli_interactive_setup
 
-if [[ $interactive ]]; then
-  if [ ! `basename "/$0"` = "cli" ];then
-   return 0
-  fi
-fi
+# if [[ $interactive ]]; then
+#   if [ ! `basename "/$0"` = "cli" ];then
+#    return 0
+#   fi
+# fi
 
 # CLI command tool name.
 cli_command=cli-helper
