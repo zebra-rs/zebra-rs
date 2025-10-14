@@ -38,7 +38,7 @@ JSON-formatted graph data containing nodes, links, and topology information.
 ./zmcp-server
 
 # Connect to zebra-rs on different host/port
-./zmcp-server --base http://192.168.1.1 --port 2650
+./zmcp-server --base http://192.168.1.1 --port 2666
 
 # Enable debug logging for development
 ./zmcp-server --debug
@@ -50,7 +50,7 @@ RUST_LOG=warn ./zmcp-server
 ### Command Line Options
 
 - `--base <URL>`: Base URL of zebra-rs server (default: http://127.0.0.1)
-- `--port <PORT>`: Show server port (default: 2650)
+- `--port <PORT>`: Show server port (default: 2666)
 - `--debug`: Enable debug logging
 
 ### MCP Client Integration

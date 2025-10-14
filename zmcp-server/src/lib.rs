@@ -234,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_initialize() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
         let request = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -253,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_list() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
         let request = json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -276,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_unknown_method() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
         let request = json!({
             "jsonrpc": "2.0",
             "id": 3,
@@ -294,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_unknown_tool() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
         let request = json!({
             "jsonrpc": "2.0",
             "id": 4,
@@ -321,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_isis_graph() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
         let request = json!({
             "jsonrpc": "2.0",
             "id": 5,
@@ -358,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_invalid_params() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
         let request = json!({
             "jsonrpc": "2.0",
             "id": 6,
@@ -386,7 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_no_id() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
         let request = json!({
             "jsonrpc": "2.0",
             "method": "initialize",
@@ -409,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_rpc_request_structure() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
 
         // Test well-formed JSON-RPC request
         let request = json!({
@@ -437,7 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_malformed_request_handling() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
 
         // Request without required fields
         let request = json!({
@@ -454,7 +454,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tools_call_parameter_validation() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
 
         // Test missing tool name
         let request = json!({
@@ -482,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tools_call_argument_parsing() {
-        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2650);
+        let server = ZmcpServer::new("http://127.0.0.1".to_string(), 2666);
 
         // Test with complex nested arguments
         let request = json!({

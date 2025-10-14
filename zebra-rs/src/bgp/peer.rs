@@ -21,7 +21,7 @@ use cap::CapabilityPacket;
 use cap::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
-use crate::bgp::route::route_clean;
+use crate::bgp::route::{route_advertise, route_clean};
 use crate::bgp::timer;
 use crate::config::Args;
 
@@ -231,6 +231,8 @@ pub struct Peer {
     pub adj_rib_in: AdjRibIn,
     pub adj_rib_out: AdjRibOut,
     pub opt: ParseOption,
+    pub policy_in: Option<String>,
+    pub policy_out: Option<String>,
 }
 
 impl Peer {
@@ -269,6 +271,8 @@ impl Peer {
             adj_rib_in: AdjRibIn::new(),
             adj_rib_out: AdjRibOut::new(),
             opt: ParseOption::default(),
+            policy_out: None,
+            policy_in: None,
         };
         peer.config
             .afi_safi
@@ -386,17 +390,16 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
 
     if prev_state.is_established() && !peer.state.is_established() {
-        // TODO: clear BgpRib in
-        println!("Clear BGP RIB");
+        peer.instant = Some(Instant::now());
+
         route_clean(peer, &mut bgp_ref);
         peer.stat.clear();
     }
 
     // Update instant when entering or leaving the Established state.
-    if (prev_state.is_established() && !peer.state.is_established())
-        || (!prev_state.is_established() && peer.state.is_established())
-    {
+    if !prev_state.is_established() && peer.state.is_established() {
         peer.instant = Some(Instant::now());
+        route_advertise(peer, &mut bgp_ref);
     }
 
     timer::update_timers(peer);

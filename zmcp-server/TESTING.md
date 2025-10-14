@@ -97,7 +97,7 @@ cargo test mock
 - Standard dependencies (tokio, serde_json, etc.)
 
 ### Real Server Tests (Optional)
-- zebra-rs daemon running at `localhost:2650`
+- zebra-rs daemon running at `localhost:2666`
 - gRPC server enabled on zebra-rs
 - Network connectivity
 - **Updated**: Tests now work with real ISIS topology data
@@ -141,7 +141,7 @@ cargo test mock
 
 ### Successful Real Server Test (Updated with Real Data)
 ```
-✓ Connected to zebra-rs at localhost:2650
+✓ Connected to zebra-rs at localhost:2666
   Testing: Test getting ISIS graph for both levels
   ✓ Received ISIS graph data (1566 bytes)
   ✓ ISIS graph data is valid JSON
@@ -164,7 +164,7 @@ cargo test mock
 ## Troubleshooting
 
 ### Test Failures
-1. **Connection errors**: Ensure zebra-rs is running on port 2650
+1. **Connection errors**: Ensure zebra-rs is running on port 2666
 2. **Permission errors**: Check network capabilities for raw sockets
 3. **Protocol errors**: Verify gRPC service is enabled in zebra-rs
 
