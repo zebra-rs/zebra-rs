@@ -4,8 +4,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use bgp_packet::{
-    Afi, Aggregator, As4Path, Attr, ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity,
-    Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
+    Afi, Aggregator, As4Path, Attr, CapMultiProtocol, ClusterList, Community, ExtCommunity,
+    Ipv4Nlri, LargeCommunity, Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net,
+    Vpnv4Nexthop,
 };
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
@@ -1020,12 +1021,7 @@ impl LocalRib {
         rib.attr
             .aspath
             .as_ref()
-            .map(|path| {
-                path.segs
-                    .iter()
-                    .map(|segment| segment.asn.len() as u32)
-                    .sum()
-            })
+            .map(|path| path.length)
             .unwrap_or(0)
     }
 
@@ -1111,6 +1107,26 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
 pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
     // IPv4 Unicast.
     bgp.lrib.remove_peer_routes(peer.ident);
+}
+
+pub fn route_update_ipv4(peer: &mut Peer, prefix: &Ipv4Net, rib: &BgpRib, bgp: &mut ConfigRef) {
+    //
+}
+
+pub fn route_advertise_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
+    for (key, value) in bgp.lrib.routes.iter() {
+        println!("key {}", key);
+        //route_update_ipv4(peer, key, value, bgp);
+    }
+}
+
+pub fn route_advertise(peer: &mut Peer, bgp: &mut ConfigRef) {
+    let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+    if let Some(cap) = peer.cap_map.entries.get(&afi) {
+        if cap.send && cap.recv {
+            route_advertise_ipv4(peer, bgp);
+        }
+    }
 }
 
 impl Bgp {
