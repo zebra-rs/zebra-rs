@@ -4,12 +4,14 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use bgp_packet::{
-    Afi, Aggregator, As4Path, Attr, CapMultiProtocol, ClusterList, Community, ExtCommunity,
-    Ipv4Nlri, LargeCommunity, Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net,
-    Vpnv4Nexthop,
+    AS_SEQ, Afi, AfiSafi, Aggregator, As4Path, As4Segment, AtomicAggregate, Attr, CapMultiProtocol,
+    ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity, LocalPref, Med, NexthopAttr,
+    Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
 };
+use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
+use std::collections::VecDeque;
 
 use super::Bgp;
 use super::peer::{ConfigRef, Peer, PeerType};
@@ -1110,13 +1112,200 @@ pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
 }
 
 pub fn route_update_ipv4(peer: &mut Peer, prefix: &Ipv4Net, rib: &BgpRib, bgp: &mut ConfigRef) {
-    //
+    // Split-horizon: Don't send route back to the peer that sent it
+    if rib.ident == peer.ident {
+        return;
+    }
+
+    // IBGP to IBGP: Don't advertise IBGP-learned routes (route reflection not implemented)
+    if peer.peer_type == PeerType::IBGP && rib.typ == RouteType::IBGP {
+        return;
+    }
+
+    // Check if we should use add-path
+    let mp = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+    let use_addpath = peer.cap_map.entries.get(&mp).map_or(false, |cap| cap.send);
+
+    // Create NLRI with optional path ID
+    let nlri = Ipv4Nlri {
+        id: if use_addpath { rib.id } else { 0 },
+        prefix: *prefix,
+    };
+
+    // Build attributes
+    let mut attrs = Vec::new();
+
+    // 1. Origin (mandatory)
+    if let Some(origin) = rib.attr.origin {
+        attrs.push(Attr::Origin(origin));
+    }
+
+    // 2. AS_PATH (mandatory)
+    if let Some(ref aspath) = rib.attr.aspath {
+        let new_aspath = if peer.peer_type == PeerType::EBGP {
+            // For EBGP: prepend local AS
+            let local_as_seg = As4Segment {
+                typ: AS_SEQ,
+                asn: vec![peer.local_as],
+            };
+            let local_as_path = As4Path {
+                segs: VecDeque::from(vec![local_as_seg]),
+                length: 1,
+            };
+            local_as_path.prepend(aspath.clone())
+        } else {
+            // For IBGP: keep AS_PATH unchanged
+            aspath.clone()
+        };
+
+        attrs.push(Attr::As4Path(new_aspath));
+    } else {
+        // No AS_PATH, create one with local AS for EBGP
+        if peer.peer_type == PeerType::EBGP {
+            let local_as_seg = As4Segment {
+                typ: AS_SEQ,
+                asn: vec![peer.local_as],
+            };
+            let new_aspath = As4Path {
+                segs: VecDeque::from(vec![local_as_seg]),
+                length: 1,
+            };
+            attrs.push(Attr::As4Path(new_aspath));
+        } else {
+            let new_aspath = As4Path {
+                segs: VecDeque::new(),
+                length: 0,
+            };
+            attrs.push(Attr::As4Path(new_aspath));
+        }
+    }
+
+    // 3. Next_Hop (mandatory)
+    let nexthop = match peer.peer_type {
+        PeerType::EBGP => {
+            // For EBGP: set to local address
+            if let Some(local_addr) = peer.param.local_addr {
+                match local_addr.ip() {
+                    IpAddr::V4(addr) => addr,
+                    _ => *bgp.router_id,
+                }
+            } else {
+                *bgp.router_id
+            }
+        }
+        PeerType::IBGP => {
+            // For IBGP: keep original next-hop or use local address for originated routes
+            if rib.typ == RouteType::Origin {
+                *bgp.router_id
+            } else {
+                // Keep original next-hop
+                match &rib.attr.nexthop {
+                    Some(BgpNexthop::Ipv4(addr)) => *addr,
+                    _ => *bgp.router_id,
+                }
+            }
+        }
+    };
+    attrs.push(Attr::NextHop(NexthopAttr { nexthop }));
+
+    // 4. MED (optional, for EBGP)
+    if peer.peer_type == PeerType::EBGP {
+        if let Some(med) = rib.attr.med {
+            attrs.push(Attr::Med(Med { med }));
+        }
+    }
+
+    // 5. Local Preference (for IBGP only)
+    if peer.peer_type == PeerType::IBGP {
+        let local_pref = rib.attr.local_pref.unwrap_or(100);
+        attrs.push(Attr::LocalPref(LocalPref { local_pref }));
+    }
+
+    // 6. Atomic Aggregate
+    if rib.attr.atomic_aggregate.is_some() {
+        attrs.push(Attr::AtomicAggregate(AtomicAggregate {}));
+    }
+
+    // 7. Aggregator
+    if let Some(ref aggregator) = rib.attr.aggregator {
+        attrs.push(Attr::Aggregator(aggregator.clone()));
+    }
+
+    // 8. Community
+    if let Some(ref com) = rib.attr.com {
+        attrs.push(Attr::Community(com.clone()));
+    }
+
+    // 9. Originator ID (for IBGP)
+    if peer.peer_type == PeerType::IBGP {
+        if let Some(ref originator_id) = rib.attr.originator_id {
+            attrs.push(Attr::OriginatorId(originator_id.clone()));
+        }
+    }
+
+    // 10. Cluster List (for IBGP)
+    if peer.peer_type == PeerType::IBGP {
+        if let Some(ref cluster_list) = rib.attr.cluster_list {
+            attrs.push(Attr::ClusterList(cluster_list.clone()));
+        }
+    }
+
+    // 11. Extended Community
+    if let Some(ref ecom) = rib.attr.ecom {
+        attrs.push(Attr::ExtendedCom(ecom.clone()));
+    }
+
+    // 12. Large Community
+    if let Some(ref lcom) = rib.attr.lcom {
+        attrs.push(Attr::LargeCom(lcom.clone()));
+    }
+
+    // Create Update packet
+    let mut update = UpdatePacket::new();
+    update.attrs = attrs;
+    update.ipv4_update.push(nlri);
+
+    // Convert to bytes and send
+    let bytes: BytesMut = update.into();
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send BGP Update to {}: {}", peer.address, e);
+        } else {
+            // Update statistics
+            peer.stat.tx_inc(Afi::Ip, Safi::Unicast);
+        }
+    }
 }
 
 pub fn route_advertise_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
-    for (key, value) in bgp.lrib.routes.iter() {
-        println!("key {}", key);
-        //route_update_ipv4(peer, key, value, bgp);
+    // Collect all routes first to avoid borrow checker issues
+    let routes: Vec<(Ipv4Net, BgpRib)> = bgp
+        .lrib
+        .routes
+        .iter()
+        .map(|(prefix, rib)| (*prefix, rib.clone()))
+        .collect();
+
+    // Advertise all best paths to the peer
+    for (prefix, rib) in routes {
+        route_update_ipv4(peer, &prefix, &rib, bgp);
+    }
+
+    // Send End-of-RIB marker for IPv4 Unicast
+    send_end_of_rib_ipv4(peer);
+}
+
+/// Send End-of-RIB marker for IPv4 Unicast
+fn send_end_of_rib_ipv4(peer: &mut Peer) {
+    // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
+    let update = UpdatePacket::new();
+    let bytes: BytesMut = update.into();
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
+        }
     }
 }
 
