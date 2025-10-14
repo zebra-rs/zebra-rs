@@ -231,6 +231,8 @@ pub struct Peer {
     pub adj_rib_in: AdjRibIn,
     pub adj_rib_out: AdjRibOut,
     pub opt: ParseOption,
+    pub policy_in: Option<String>,
+    pub policy_out: Option<String>,
 }
 
 impl Peer {
@@ -269,6 +271,8 @@ impl Peer {
             adj_rib_in: AdjRibIn::new(),
             adj_rib_out: AdjRibOut::new(),
             opt: ParseOption::default(),
+            policy_out: None,
+            policy_in: None,
         };
         peer.config
             .afi_safi

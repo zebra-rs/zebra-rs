@@ -1111,15 +1111,20 @@ pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
     bgp.lrib.remove_peer_routes(peer.ident);
 }
 
-pub fn route_update_ipv4(peer: &mut Peer, prefix: &Ipv4Net, rib: &BgpRib, bgp: &mut ConfigRef) {
+pub fn route_update_ipv4(
+    peer: &mut Peer,
+    prefix: &Ipv4Net,
+    rib: &BgpRib,
+    bgp: &mut ConfigRef,
+) -> Option<(Ipv4Nlri, Vec<Attr>)> {
     // Split-horizon: Don't send route back to the peer that sent it
     if rib.ident == peer.ident {
-        return;
+        return None;
     }
 
     // IBGP to IBGP: Don't advertise IBGP-learned routes (route reflection not implemented)
     if peer.peer_type == PeerType::IBGP && rib.typ == RouteType::IBGP {
-        return;
+        return None;
     }
 
     // Check if we should use add-path
@@ -1260,7 +1265,10 @@ pub fn route_update_ipv4(peer: &mut Peer, prefix: &Ipv4Net, rib: &BgpRib, bgp: &
         attrs.push(Attr::LargeCom(lcom.clone()));
     }
 
-    // Create Update packet
+    Some((nlri, attrs))
+}
+
+pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, attrs: Vec<Attr>) {
     let mut update = UpdatePacket::new();
     update.attrs = attrs;
     update.ipv4_update.push(nlri);
@@ -1289,7 +1297,11 @@ pub fn route_advertise_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
 
     // Advertise all best paths to the peer
     for (prefix, rib) in routes {
-        route_update_ipv4(peer, &prefix, &rib, bgp);
+        let Some((nlri, attrs)) = route_update_ipv4(peer, &prefix, &rib, bgp) else {
+            continue;
+        };
+
+        route_send_ipv4(peer, nlri, attrs);
     }
 
     // Send End-of-RIB marker for IPv4 Unicast
