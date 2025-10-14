@@ -427,6 +427,12 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 writeln!(out, "    IPv6 Unicast: {}", cap.desc())?;
             }
         }
+        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
+            if cap.send || cap.recv {
+                writeln!(out, "    IPv4 MPLS VPN: {}", cap.desc())?;
+            }
+        }
         let afi = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
         if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
             if cap.send || cap.recv {

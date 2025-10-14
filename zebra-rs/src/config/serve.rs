@@ -43,7 +43,7 @@ impl ExecService {
             code: code as i32,
             candidates: Vec::new(),
             lines,
-            port: 2650,
+            port: 2666,
             paths: Vec::new(),
         };
         Ok(Response::new(reply))
@@ -59,7 +59,7 @@ impl ExecService {
             code: code as i32,
             candidates: Vec::new(),
             lines,
-            port: 2650,
+            port: 2666,
             paths,
         };
         Ok(Response::new(reply))
@@ -291,7 +291,7 @@ pub fn serve(cli: Cli) {
     let apply_service = ApplyService { tx: cli.tx.clone() };
     let apply_server = ApplyServer::new(apply_service);
 
-    let addr = "0.0.0.0:2650".parse().unwrap();
+    let addr = "0.0.0.0:2666".parse().unwrap();
 
     tokio::spawn(async move {
         Server::builder()

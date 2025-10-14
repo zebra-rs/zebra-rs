@@ -29,7 +29,7 @@ pub async fn apply(host: &String, filename: &String) -> Result<()> {
         }
     };
 
-    let client = ApplyClient::connect(format!("http://{}:{}", host, 2650)).await;
+    let client = ApplyClient::connect(format!("http://{}:{}", host, 2666)).await;
     let Ok(mut client) = client else {
         eprintln!("Can't connect to {}", host);
         exit(3);

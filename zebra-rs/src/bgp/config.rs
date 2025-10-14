@@ -75,6 +75,26 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+    let Some(peer) = bgp.peers.get_mut(&addr) else {
+        return None;
+    };
+    let policy = args.string()?;
+    if op.is_set() {
+        peer.policy_out = Some(policy);
+    } else {
+        peer.policy_out = None;
+    }
+    Some(())
+}
+
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         if let Some(addr) = args.v4addr() {
@@ -255,5 +275,8 @@ impl Bgp {
 
         // Network configuration
         self.callback_add("/routing/bgp/afi-safi/network", config_network);
+
+        // Applying policy.
+        self.callback_peer("/apply-policy/out", config_policy_out);
     }
 }

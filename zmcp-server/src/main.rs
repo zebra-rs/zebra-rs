@@ -16,7 +16,7 @@ struct Cli {
     )]
     base: String,
 
-    #[arg(short, long, help = "Show server port", default_value = "2650")]
+    #[arg(short, long, help = "Show server port", default_value = "2666")]
     port: u32,
 
     #[arg(short, long, help = "Enable debug logging")]
