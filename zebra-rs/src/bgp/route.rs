@@ -1045,6 +1045,33 @@ impl LocalRib {
 }
 
 pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
+    // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
+    // This prevents routing loops by detecting if the route has already passed through this AS
+    if let Some(ref aspath) = attr.aspath {
+        for segment in &aspath.segs {
+            if segment.asn.contains(&peer.local_as) {
+                eprintln!(
+                    "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
+                    nlri.prefix, peer.address, peer.local_as
+                );
+                return;
+            }
+        }
+    }
+
+    // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
+    // prevents routing loops in route reflection scenarios. This happens before
+    // the route store in AdjRibIn.
+    if let Some(ref originator_id) = attr.originator_id {
+        if originator_id.id == *bgp.router_id {
+            eprintln!(
+                "Dropping update for {} from peer {} - ORIGINATOR_ID {} matches local router ID",
+                nlri.prefix, peer.address, originator_id.id
+            );
+            return;
+        }
+    }
+
     let typ = if peer.peer_type == PeerType::IBGP {
         RouteType::IBGP
     } else {
@@ -1157,7 +1184,7 @@ pub fn route_update_ipv4(
                 segs: VecDeque::from(vec![local_as_seg]),
                 length: 1,
             };
-            local_as_path.prepend(aspath.clone())
+            aspath.clone().prepend(local_as_path)
         } else {
             // For IBGP: keep AS_PATH unchanged
             aspath.clone()
@@ -1286,6 +1313,14 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, attrs: Vec<Attr>) {
     }
 }
 
+pub fn route_apply_policy(
+    out: &Option<String>,
+    nlri: &Ipv4Nlri,
+    attrs: Vec<Attr>,
+) -> Option<Vec<Attr>> {
+    Some(attrs)
+}
+
 pub fn route_advertise_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
     // Collect all routes first to avoid borrow checker issues
     let routes: Vec<(Ipv4Net, BgpRib)> = bgp
@@ -1298,6 +1333,10 @@ pub fn route_advertise_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
     // Advertise all best paths to the peer
     for (prefix, rib) in routes {
         let Some((nlri, attrs)) = route_update_ipv4(peer, &prefix, &rib, bgp) else {
+            continue;
+        };
+
+        let Some(attrs) = route_apply_policy(&peer.policy_out, &nlri, attrs) else {
             continue;
         };
 
