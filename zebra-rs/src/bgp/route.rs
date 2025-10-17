@@ -1045,6 +1045,33 @@ impl LocalRib {
 }
 
 pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
+    // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
+    // This prevents routing loops by detecting if the route has already passed through this AS
+    if let Some(ref aspath) = attr.aspath {
+        for segment in &aspath.segs {
+            if segment.asn.contains(&peer.local_as) {
+                eprintln!(
+                    "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
+                    nlri.prefix, peer.address, peer.local_as
+                );
+                return;
+            }
+        }
+    }
+
+    // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
+    // prevents routing loops in route reflection scenarios. This happens before
+    // the route store in AdjRibIn.
+    if let Some(ref originator_id) = attr.originator_id {
+        if originator_id.id == *bgp.router_id {
+            eprintln!(
+                "Dropping update for {} from peer {} - ORIGINATOR_ID {} matches local router ID",
+                nlri.prefix, peer.address, originator_id.id
+            );
+            return;
+        }
+    }
+
     let typ = if peer.peer_type == PeerType::IBGP {
         RouteType::IBGP
     } else {
