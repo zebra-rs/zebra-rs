@@ -33,6 +33,7 @@ fn hexdump(data: &[u8]) {
 
         // ASCII representation
         let ascii: String = chunk
+
             .iter()
             .map(|b| {
                 if b.is_ascii_graphic() {
