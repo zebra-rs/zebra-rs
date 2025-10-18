@@ -192,6 +192,12 @@ module exec {
     container "prefix-set" {
       ext:help "Show prefix-set";
       presence "Show prefix-set";
+      list name {
+        key name;
+        leaf name {
+          type string;
+        }
+      }
     }
   }
   container cli {
