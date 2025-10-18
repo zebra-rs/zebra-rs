@@ -294,3 +294,52 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
     }
     Ok(buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::policy::PrefixSet;
+
+    use super::*;
+
+    #[test]
+    fn policy_list() {
+        use ipnet::Ipv4Net;
+        use std::str::FromStr;
+
+        // Create a prefix-set named "pset" with prefix 1.1.1.1/32
+        let mut prefix_set = PrefixSet::default();
+        let prefix = Ipv4Net::from_str("1.1.1.1/32").unwrap();
+        prefix_set.entry.insert(
+            prefix.into(),
+            super::super::prefix_set::PrefixSetEntry::default(),
+        );
+
+        // Create a policy-list with entry that matches "pset" and has action accept (permit)
+        let mut plist = PolicyList::default();
+
+        // Entry 10: match prefix-set "pset" and action accept
+        let entry = plist.entry(10);
+        entry.prefix_set = Some("pset".to_string());
+        entry.action = Some(PolicyAction::Accept);
+
+        // Verify the policy list configuration
+        assert_eq!(plist.entry.len(), 1);
+        let entry = plist.entry.get(&10).unwrap();
+        assert_eq!(entry.prefix_set, Some("pset".to_string()));
+
+        match &entry.action {
+            Some(PolicyAction::Accept) => {
+                // Test passes - action is Accept (permit)
+            }
+            _ => panic!("Expected PolicyAction::Accept"),
+        }
+
+        // Verify prefix-set contains the correct prefix
+        assert_eq!(prefix_set.entry.len(), 1);
+        assert!(prefix_set.entry.contains_key(&prefix.into()));
+
+        // Note: Default deny behavior is implicit - if no entry matches,
+        // the policy should deny by default (this would be implemented
+        // in the actual policy evaluation logic)
+    }
+}

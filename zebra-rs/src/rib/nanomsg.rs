@@ -310,7 +310,7 @@ impl Nanomsg {
             metric_style: 2,
             segment_routing: "mpls".into(),
             mpls_traffic_eng: Some(RouterId {
-                router_id: "9.9.9.9".into(),
+                router_id: "10.0.0.1".into(),
             }),
             ipv4_unicast: AddressFamily { ti_lfa: true },
         };
@@ -601,11 +601,11 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    let msg = MsgSend {
-                        method: String::from("segment-routing:update"),
-                        data: self.segment_routing_update_global(),
-                    };
-                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                    // let msg = MsgSend {
+                    //     method: String::from("segment-routing:update"),
+                    //     data: self.segment_routing_update_global(),
+                    // };
+                    // self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);

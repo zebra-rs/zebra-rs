@@ -54,7 +54,7 @@ impl Policy {
         if let Some(f) = self.show_cb.get(&path) {
             let output = match f(self, args, msg.json) {
                 Ok(result) => result,
-                Err(e) => format!("Error formatting output: {}", e),
+                Err(e) => format!("{}", e),
             };
             msg.resp.send(output).await;
         }
