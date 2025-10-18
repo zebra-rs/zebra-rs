@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Error, Result};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
@@ -10,7 +11,13 @@ use super::{PolicyConfig, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
+pub struct Message {
+    //
+}
+
 pub struct Policy {
+    pub tx: UnboundedSender<Message>,
+    pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -20,7 +27,10 @@ pub struct Policy {
 
 impl Policy {
     pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
         let mut policy = Self {
+            tx,
+            rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),

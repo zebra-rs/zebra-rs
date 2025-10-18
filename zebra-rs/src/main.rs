@@ -130,10 +130,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut rib = Rib::new()?;
 
-    let bgp = Bgp::new(rib.tx.clone());
-    rib.subscribe(bgp.redist.tx.clone(), "bgp".to_string());
-
     let policy = Policy::new();
+
+    let bgp = Bgp::new(rib.tx.clone(), policy.tx.clone());
+    rib.subscribe(bgp.redist.tx.clone(), "bgp".to_string());
 
     let config = ConfigManager::new(system_path(&arg), yang_path, rib.tx.clone())?;
     config.subscribe("rib", rib.cm.tx.clone());

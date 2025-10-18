@@ -29,8 +29,8 @@ pub fn prefix_set(policy: &Policy, _args: Args, _json: bool) -> Result<String, E
 }
 
 // Show prefix-set of the name.
-pub fn prefix_set_name(policy: &policy, mut args: args, _json: bool) -> result<string, error> {
-    let mut buf = string::new();
+pub fn prefix_set_name(policy: &Policy, mut args: Args, _json: bool) -> Result<String, Error> {
+    let mut buf = String::new();
 
     // get the prefix-set name from arguments
     let name = args.string().context("missing prefix-set name")?;
