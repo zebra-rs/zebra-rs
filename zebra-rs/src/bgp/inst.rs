@@ -6,6 +6,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 use crate::context::Task;
+use crate::policy;
 use crate::policy::com_list::CommunityListMap;
 use crate::rib;
 use crate::rib::api::{RibRx, RibRxChannel, RibTx};
@@ -74,7 +75,10 @@ pub struct Bgp {
 }
 
 impl Bgp {
-    pub fn new(rib_tx: UnboundedSender<rib::Message>) -> Self {
+    pub fn new(
+        rib_tx: UnboundedSender<rib::Message>,
+        policy_tx: UnboundedSender<policy::Message>,
+    ) -> Self {
         let chan = RibRxChannel::new();
         let msg = rib::Message::Subscribe {
             proto: "isis".into(),
