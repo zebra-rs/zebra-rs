@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{Policy, serve};
+pub use inst::{Message, Policy, serve};
 
 pub mod action;
 pub use action::Action;
@@ -13,8 +13,6 @@ pub mod com_list;
 pub mod policy_list;
 pub use policy_list::*;
 
-// pub mod prefix_set;
-// pub use prefix_set::{PrefixSet, PrefixSetConfig, *};
 pub mod prefix;
 pub use prefix::*;
 
