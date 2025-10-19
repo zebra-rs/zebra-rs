@@ -1,3 +1,17 @@
+use anyhow::Error;
+
+use crate::{config::Args, policy::Policy};
+
+// List all of prefix-set.
+pub fn prefix_set(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
+    Ok(String::from("hoge"))
+}
+
+// Show prefix-set of the name.
+pub fn prefix_set_name(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
+    Ok(String::from("name"))
+}
+
 // pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
 //     let mut buf = String::new();
 //     for (name, set) in policy.prefix_set.config.iter() {

@@ -1,9 +1,9 @@
-use anyhow::{Context, Error, Result};
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
+
+use anyhow::{Context, Error, Result};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::config::{Args, ConfigOp};
 use crate::policy::{Action, Policy};
