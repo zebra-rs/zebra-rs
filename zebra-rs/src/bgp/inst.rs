@@ -6,8 +6,8 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 use crate::context::Task;
-use crate::policy;
 use crate::policy::com_list::CommunityListMap;
+use crate::policy::{self, PolicyRxChannel};
 use crate::rib;
 use crate::rib::api::{RibRx, RibRxChannel, RibTx};
 use ipnet::Ipv4Net;
@@ -81,10 +81,17 @@ impl Bgp {
     ) -> Self {
         let chan = RibRxChannel::new();
         let msg = rib::Message::Subscribe {
-            proto: "isis".into(),
+            proto: "bgp".into(),
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
+
+        let policy_chan = PolicyRxChannel::new();
+        let msg = policy::Message::Subscribe {
+            proto: "bgp".into(),
+            tx: policy_chan.tx.clone(),
+        };
+        let _ = policy_tx.send(msg);
 
         let (tx, rx) = mpsc::unbounded_channel();
         let mut bgp = Self {

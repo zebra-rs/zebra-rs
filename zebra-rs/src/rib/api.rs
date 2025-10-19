@@ -6,7 +6,6 @@ use super::entry::RibEntry;
 use super::{Link, Rib, link::LinkAddr};
 use ipnet::{IpNet, Ipv4Net};
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RibTxChannel {
     pub tx: UnboundedSender<RibTx>,
@@ -25,7 +24,6 @@ pub struct Subscription {
 }
 
 // Message from protocol module to rib.
-#[allow(dead_code)]
 pub enum RibTx {
     Subscribe(Subscription),
     RouteAdd { prefix: IpNet, entry: RibEntry },
