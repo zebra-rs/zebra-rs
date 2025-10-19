@@ -1,15 +1,18 @@
 use super::api::{RibRx, RibTx};
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
-use super::{Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig};
+use super::{
+    BridgeBuilder, BridgeConfig, Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType,
+    StaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
+};
 
 use crate::config::{Args, path_from_command};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
-use crate::rib::RibEntries;
 use crate::rib::route::{ipv4_nexthop_sync, ipv4_route_sync};
+use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
@@ -49,6 +52,20 @@ pub enum Message {
     IlmDel {
         label: u32,
         ilm: IlmEntry,
+    },
+    BridgeAdd {
+        name: String,
+        config: BridgeConfig,
+    },
+    BridgeDel {
+        name: String,
+    },
+    VxlanAdd {
+        name: String,
+        config: VxlanConfig,
+    },
+    VxlanDel {
+        name: String,
     },
     Shutdown {
         tx: oneshot::Sender<()>,
@@ -94,6 +111,8 @@ pub struct Rib {
     pub fib_handle: FibHandle,
     pub redists: Vec<UnboundedSender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
+    pub bridges: BTreeMap<String, Bridge>,
+    pub vxlan: BTreeMap<String, Vxlan>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
@@ -102,6 +121,8 @@ pub struct Rib {
     pub static_config: StaticConfig,
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
+    pub bridge_config: BridgeBuilder,
+    pub vxlan_config: VxlanBuilder,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 }
@@ -120,6 +141,8 @@ impl Rib {
             fib_handle,
             redists: Vec::new(),
             links: BTreeMap::new(),
+            bridges: BTreeMap::new(),
+            vxlan: BTreeMap::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
@@ -128,6 +151,8 @@ impl Rib {
             static_config: StaticConfig::new(),
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
+            bridge_config: BridgeBuilder::new(),
+            vxlan_config: VxlanBuilder::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
         };
@@ -177,12 +202,55 @@ impl Rib {
             Message::IlmDel { label, ilm } => {
                 self.ilm_del(label, ilm).await;
             }
+            Message::BridgeAdd { name, config } => {
+                let bridge = Bridge {
+                    name: name.clone(),
+                    addr_gen_mode: config.addr_gen_mode,
+                    ..Default::default()
+                };
+                self.bridges.insert(name.clone(), bridge.clone());
+                self.fib_handle.bridge_add(&bridge).await;
+            }
+            Message::BridgeDel { name } => {
+                let bridge = Bridge {
+                    name: name.clone(),
+                    ..Default::default()
+                };
+                self.bridges.remove(&name);
+                self.fib_handle.bridge_del(&bridge).await;
+            }
+            Message::VxlanAdd { name, config } => {
+                let vxlan = Vxlan {
+                    name: name.clone(),
+                    vni: config.vni,
+                    local_addr: config.local_addr,
+                    dport: config.dport,
+                    addr_gen_mode: config.addr_gen_mode,
+                    ..Default::default()
+                };
+                self.vxlan.insert(name.clone(), vxlan.clone());
+                self.fib_handle.vxlan_add(&vxlan).await;
+            }
+            Message::VxlanDel { name } => {
+                let vxlan = Vxlan {
+                    name: name.clone(),
+                    ..Default::default()
+                };
+                self.vxlan.remove(&name);
+                self.fib_handle.vxlan_del(&vxlan).await;
+            }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
                 let ilms = self.ilm.clone();
 
                 for ((&label, ilm)) in ilms.iter() {
                     self.ilm_del(label, ilm.clone()).await;
+                }
+                for (_, bridge) in self.bridges.iter() {
+                    self.fib_handle.bridge_del(bridge).await;
+                }
+                for (_, vxlan) in self.vxlan.iter() {
+                    self.fib_handle.vxlan_del(vxlan).await;
                 }
                 let _ = tx.send(());
             }
@@ -195,13 +263,9 @@ impl Rib {
                 self.link_down(ifindex).await;
             }
             Message::Resolve => {
-                // self.ipv4_route_resolve(false).await;
                 self.ipv6_route_resolve().await;
             }
             Message::Subscribe { tx, proto } => {
-                // for (_, link) in self.links.iter() {
-                //     tx.send(RibRx::LinkAdd(link.clone())).unwrap();
-                // }
                 self.subscribe(tx, proto);
             }
         }
@@ -224,29 +288,15 @@ impl Rib {
                 self.link_delete(link);
             }
             FibMessage::NewAddr(addr) => {
-                // println!(
-                //     "Rib::AddrAdd {} {}",
-                //     addr.addr,
-                //     self.ifname(addr.link_index)
-                // );
                 self.addr_add(addr);
-
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
-                // println!(
-                //     "Rib::AddrDel {} {}",
-                //     addr.addr,
-                //     self.ifname(addr.link_index)
-                // );
                 self.addr_del(addr);
-
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {
@@ -276,9 +326,15 @@ impl Rib {
                 } else if path.as_str().starts_with("/interface") {
                     // let _ = self.link_config.exec(path, args, msg.op);
                     link_config_exec(self, path, args, msg.op).await;
+                } else if path.as_str().starts_with("/bridge") {
+                    let _ = self.bridge_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/vxlan") {
+                    let _ = self.vxlan_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
+                self.bridge_config.commit(self.tx.clone());
+                self.vxlan_config.commit(self.tx.clone());
                 self.link_config.commit(self.tx.clone());
                 self.static_config.commit(self.tx.clone());
                 self.mpls_config.commit(self.tx.clone());

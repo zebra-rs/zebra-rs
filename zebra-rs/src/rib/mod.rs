@@ -43,3 +43,12 @@ pub use mac_addr::*;
 
 pub mod logging;
 pub use logging::*;
+
+pub mod bridge;
+pub use bridge::*;
+
+pub mod vxlan;
+pub use vxlan::*;
+
+pub mod addr_gen_mode;
+pub use addr_gen_mode::*;
