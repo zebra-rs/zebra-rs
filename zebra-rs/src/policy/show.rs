@@ -2,7 +2,7 @@ use crate::config::Args;
 use crate::policy::Policy;
 use crate::policy::inst::ShowCallback;
 
-use super::{policy_list, prefix_set};
+use super::policy_list;
 
 impl Policy {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -11,6 +11,6 @@ impl Policy {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/policy", policy_list::show);
-        self.show_add("/show/prefix-set", prefix_set::show);
+        // self.show_add("/show/prefix-set", prefix_set::show);
     }
 }
