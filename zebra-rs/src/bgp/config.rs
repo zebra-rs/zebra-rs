@@ -1,3 +1,5 @@
+use crate::bgp::InOut;
+
 use bgp_packet::{
     Afi, AfiSafi, Safi,
     addpath::{AddPathSendReceive, AddPathValue},
@@ -95,6 +97,27 @@ fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     Some(())
 }
 
+fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+    let Some(peer) = bgp.peers.get_mut(&addr) else {
+        return None;
+    };
+    let policy = args.string()?;
+    if op.is_set() {
+        let config = peer.prefix_set.get_mut(&InOut::Out);
+        config.name = Some(policy);
+    } else {
+        // peer.policy_out = None;
+    }
+    Some(())
+}
+
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         if let Some(addr) = args.v4addr() {
@@ -179,8 +202,13 @@ fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
 fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
-        let addr: Ipv4Addr = args.v4addr()?;
-        let addr = IpAddr::V4(addr);
+        let addr = if let Some(addr) = args.v4addr() {
+            IpAddr::V4(addr)
+        } else if let Some(addr) = args.v6addr() {
+            IpAddr::V6(addr)
+        } else {
+            return None;
+        };
         let identifier: Ipv4Addr = args.v4addr()?;
         if let Some(peer) = bgp.peers.get_mut(&addr) {
             peer.local_identifier = Some(identifier);
@@ -191,8 +219,13 @@ fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 }
 
 fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = args.v4addr()?;
-    let addr = IpAddr::V4(addr);
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
     let passive = args.boolean()?;
 
     if let Some(peer) = bgp.peers.get_mut(&addr) {
@@ -278,5 +311,6 @@ impl Bgp {
 
         // Applying policy.
         self.callback_peer("/apply-policy/out", config_policy_out);
+        self.callback_peer("/prefix-list/out", config_prefix_out);
     }
 }

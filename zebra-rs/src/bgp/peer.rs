@@ -3,8 +3,9 @@ use bgp_packet::cap::CapMultiProtocol;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use serde::Serialize;
+use serde::{Serialize, de};
 use std::collections::{BTreeMap, BTreeSet};
+use std::default;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
@@ -25,12 +26,12 @@ use crate::bgp::route::{route_advertise, route_clean};
 use crate::bgp::timer;
 use crate::config::Args;
 
-use super::BGP_PORT;
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
 use super::route::{AdjRibIn, AdjRibOut, BgpLocalRibOrig, LocalRib, Route};
 use super::route::{route_from_peer, send_route_to_rib};
-use super::{BGP_HOLD_TIME, Bgp};
+use super::{BGP_HOLD_TIME, Bgp, InOuts};
+use super::{BGP_PORT, InOut, PrefixSetValue};
 use crate::context::task::*;
 use crate::rib::api::RibTx;
 use crate::{bgp_debug, bgp_debug_cat, bgp_info, rib};
@@ -233,6 +234,7 @@ pub struct Peer {
     pub opt: ParseOption,
     pub policy_in: Option<String>,
     pub policy_out: Option<String>,
+    pub prefix_set: InOuts<PrefixSetValue>,
 }
 
 impl Peer {
@@ -273,6 +275,7 @@ impl Peer {
             opt: ParseOption::default(),
             policy_out: None,
             policy_in: None,
+            prefix_set: InOuts::<PrefixSetValue>::default(),
         };
         peer.config
             .afi_safi

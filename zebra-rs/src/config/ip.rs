@@ -135,7 +135,7 @@ fn is_valid_ipv6_char(c: char, prefix: bool) -> bool {
 pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
     use State::*;
 
-    // Quickly reject on any invalid char for the mode:
+    // Quickly reject on any invalid char for the mode.
     if let Some((pos, _c)) = s
         .char_indices()
         .take_while(|&(_, c)| c != ' ')
@@ -232,11 +232,16 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
         if nums > 11 || colons > 7 {
             return (MatchType::None, i);
         }
+        if let Some(&curr) = bytes.get(i) {
+            if curr == b' ' {
+                break;
+            }
+        }
         i += 1;
     }
 
     if !prefix {
-        match Ipv6Addr::from_str(s) {
+        match Ipv6Addr::from_str(&s[0..i]) {
             Ok(_) => (MatchType::Exact, i),
             Err(_) => (MatchType::Partial, i),
         }
