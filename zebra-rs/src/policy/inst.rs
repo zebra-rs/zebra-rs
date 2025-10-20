@@ -11,8 +11,46 @@ use super::{PolicyConfig, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
-pub struct Message {
-    //
+pub enum Message {
+    Subscribe {
+        proto: String,
+        tx: UnboundedSender<PolicyRx>,
+    },
+}
+
+pub struct Subscription {
+    pub tx: UnboundedSender<PolicyRx>,
+}
+
+// Message from protocol module to policy.
+pub enum PolicyTx {
+    Subscribe(Subscription),
+    // Register { prefix: IpNet, entry: PolicyEntry },
+    // Unregister { prefix: IpNet, entry: PolicyEntry },
+}
+
+// Message from rib to protocol module.
+#[derive(Debug, PartialEq)]
+pub enum PolicyRx {
+    // LinkAdd(Link),
+    // LinkDel(Link),
+    // AddrAdd(LinkAddr),
+    // AddrDel(LinkAddr),
+    // RouterIdUpdate(Ipv4Addr),
+    EoR,
+}
+
+#[allow(dead_code)]
+pub struct PolicyRxChannel {
+    pub tx: UnboundedSender<PolicyRx>,
+    pub rx: UnboundedReceiver<PolicyRx>,
+}
+
+impl PolicyRxChannel {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self { tx, rx }
+    }
 }
 
 pub struct Policy {

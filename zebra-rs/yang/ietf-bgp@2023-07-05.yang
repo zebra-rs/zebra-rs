@@ -595,6 +595,14 @@ module ietf-bgp {
                  graceful restart with the peer";
           }
         }
+        container prefix-set {
+          leaf in {
+            type string;
+          }
+          leaf out {
+            type string;
+          }
+        }
 
         container prefix-limit {
           description
