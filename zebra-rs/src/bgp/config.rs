@@ -97,6 +97,8 @@ fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     Some(())
 }
 
+use crate::policy;
+
 fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -110,10 +112,27 @@ fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     };
     let policy = args.string()?;
     if op.is_set() {
-        let config = peer.prefix_set.get_mut(&InOut::Out);
-        config.name = Some(policy);
+        let config = peer.prefix_set.get_mut(&InOut::Output);
+        config.name = Some(policy.clone());
+
+        let msg = policy::Message::Register {
+            proto: "bgp".to_string(),
+            name: policy,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PrefixSetOut,
+        };
+        let _ = bgp.policy_tx.send(msg);
     } else {
-        // peer.policy_out = None;
+        let config = peer.prefix_set.get_mut(&InOut::Output);
+        config.name = None;
+
+        let msg = policy::Message::Unregister {
+            proto: "bgp".to_string(),
+            name: policy,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PrefixSetOut,
+        };
+        let _ = bgp.policy_tx.send(msg);
     }
     Some(())
 }
@@ -311,6 +330,6 @@ impl Bgp {
 
         // Applying policy.
         self.callback_peer("/apply-policy/out", config_policy_out);
-        self.callback_peer("/prefix-list/out", config_prefix_out);
+        self.callback_peer("/prefix-set/out", config_prefix_out);
     }
 }

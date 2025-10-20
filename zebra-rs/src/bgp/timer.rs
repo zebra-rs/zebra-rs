@@ -1,5 +1,4 @@
 use std::cmp::min;
-use std::net::{IpAddr, Ipv4Addr};
 
 use bgp_packet::OpenPacket;
 

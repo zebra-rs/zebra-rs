@@ -4,7 +4,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::entry::RibEntry;
 use super::{Link, Rib, link::LinkAddr};
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::IpNet;
 
 #[derive(Debug)]
 pub struct RibTxChannel {

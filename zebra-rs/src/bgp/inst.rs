@@ -1,5 +1,6 @@
 use super::peer::{Event, Peer, fsm};
-use super::route::{BgpLocalRibOrig, BgpRoute, LocalRib, Route};
+use super::route::{BgpLocalRibOrig, LocalRib};
+use crate::bgp::InOut;
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
 use crate::config::{
@@ -9,9 +10,7 @@ use crate::context::Task;
 use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
 use crate::rib;
-use crate::rib::api::{RibRx, RibRxChannel, RibTx};
-use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
+use crate::rib::api::{RibRx, RibRxChannel};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -72,6 +71,8 @@ pub struct Bgp {
     pub clist: CommunityListMap,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
+    pub policy_tx: UnboundedSender<policy::Message>,
+    pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
 }
 
 impl Bgp {
@@ -115,6 +116,8 @@ impl Bgp {
             listen_err: None,
             clist: CommunityListMap::new(),
             debug_flags: BgpDebugFlags::default(),
+            policy_tx,
+            policy_rx: policy_chan.rx,
         };
         bgp.callback_build();
         bgp.show_build();
@@ -250,14 +253,6 @@ impl Bgp {
             ));
         }
 
-        // Log which protocols are bound
-        // match (ipv4_bound, ipv6_bound) {
-        //     (true, true) => println!("BGP dual-stack: listening on both IPv4 and IPv6"),
-        //     (true, false) => println!("BGP IPv4-only: listening on 0.0.0.0:179"),
-        //     (false, true) => println!("BGP IPv6-only: listening on [::]:179"),
-        //     (false, false) => unreachable!(),
-        // }
-
         Ok(())
     }
 
@@ -277,6 +272,25 @@ impl Bgp {
             }
             _ => {
                 //
+            }
+        }
+    }
+
+    pub async fn process_policy_msg(&mut self, msg: policy::PolicyRx) {
+        match msg {
+            policy::PolicyRx::PrefixSet {
+                name,
+                ident,
+                policy_type,
+                prefix,
+            } => {
+                let Some(peer) = self.peers.get_mut(&ident) else {
+                    return;
+                };
+                if policy_type == policy::PolicyType::PrefixSetOut {
+                    let config = peer.prefix_set.get_mut(&InOut::Output);
+                    config.prefix = prefix;
+                }
             }
         }
     }
@@ -305,6 +319,9 @@ impl Bgp {
                 }
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
+                }
+                Some(msg) = self.policy_rx.recv() => {
+                    self.process_policy_msg(msg).await;
                 }
             }
         }

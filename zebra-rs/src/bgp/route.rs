@@ -1,24 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
-use bgp_packet::{
-    AS_SEQ, Afi, AfiSafi, Aggregator, As4Path, As4Segment, AtomicAggregate, Attr, CapMultiProtocol,
-    ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity, LocalPref, Med, NexthopAttr,
-    Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
-};
+use bgp_packet::*;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use std::collections::VecDeque;
-
-use super::Bgp;
-use super::peer::{ConfigRef, Peer, PeerType};
-use crate::rib;
-use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
-use ipnet::IpNet;
 use tokio::sync::mpsc::UnboundedSender;
+
+use super::peer::{ConfigRef, Peer, PeerType};
+use super::{Bgp, InOut};
+use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry};
 
 /// Enhanced BGP route structure for proper path selection
 #[derive(Clone, Debug)]
@@ -1313,11 +1306,21 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, attrs: Vec<Attr>) {
     }
 }
 
-pub fn route_apply_policy(
-    out: &Option<String>,
+pub fn route_apply_policy_out(
+    peer: &mut Peer,
     nlri: &Ipv4Nlri,
     attrs: Vec<Attr>,
 ) -> Option<Vec<Attr>> {
+    // Apply prefix-set out.
+    let config = peer.prefix_set.get(&InOut::Output);
+    if let Some(name) = &config.name {
+        let Some(prefix_set) = &config.prefix else {
+            return None;
+        };
+        if !prefix_set.matches(nlri.prefix) {
+            return None;
+        }
+    }
     Some(attrs)
 }
 
@@ -1336,7 +1339,7 @@ pub fn route_advertise_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             continue;
         };
 
-        let Some(attrs) = route_apply_policy(&peer.policy_out, &nlri, attrs) else {
+        let Some(attrs) = route_apply_policy_out(peer, &nlri, attrs) else {
             continue;
         };
 

@@ -45,7 +45,6 @@ impl VxlanBuilder {
                 self.config.remove(&name);
                 let _ = tx.send(Message::VxlanDel { name });
             } else {
-                println!("XXX commit config");
                 self.config.insert(name.clone(), config.clone());
                 let _ = tx.send(Message::VxlanAdd { name, config });
             }
@@ -143,7 +142,7 @@ impl ConfigBuilder {
                 s.vni = Some(vni);
                 Ok(())
             })
-            .del(|config, cache, name, args| {
+            .del(|config, cache, name, _args| {
                 let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
                 s.vni = None;
                 Ok(())

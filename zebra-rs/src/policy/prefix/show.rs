@@ -10,7 +10,7 @@ pub fn prefix_set(policy: &Policy, _args: Args, _json: bool) -> Result<String, E
     // Iterate through all prefix-sets
     for (name, set) in policy.prefix_set.config.iter() {
         writeln!(buf, "prefix-set: {}", name)?;
-        for (prefix, entry) in set.entry.iter() {
+        for (prefix, entry) in set.prefixes.iter() {
             write!(buf, "  {}", prefix)?;
             if let Some(le) = entry.le {
                 write!(buf, " le {}", le)?;
@@ -45,7 +45,7 @@ pub fn prefix_set_name(policy: &Policy, mut args: Args, _json: bool) -> Result<S
     writeln!(buf, "prefix-set: {}", name)?;
 
     // Show all prefixes in this set
-    for (prefix, entry) in set.entry.iter() {
+    for (prefix, entry) in set.prefixes.iter() {
         write!(buf, "  {}", prefix)?;
         if let Some(le) = entry.le {
             write!(buf, " le {}", le)?;

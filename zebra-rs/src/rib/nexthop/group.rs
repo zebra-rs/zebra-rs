@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use Group::*;
 use ipnet::Ipv4Net;

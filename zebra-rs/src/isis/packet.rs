@@ -13,12 +13,11 @@ use crate::isis::link::DisStatus;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::rib::MacAddr;
-use crate::{isis_database_trace, isis_event_trace, isis_info, isis_packet_trace};
+use crate::{isis_database_trace, isis_event_trace, isis_packet_trace};
 
 use super::Level;
 use super::ifsm::has_level;
 use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
-use super::link::LinkTop;
 use super::lsdb;
 use super::nfsm::{NfsmEvent, isis_nfsm};
 

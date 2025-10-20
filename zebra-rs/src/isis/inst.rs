@@ -1,46 +1,38 @@
 use std::collections::{BTreeMap, HashMap};
-use std::default;
 use std::fmt::Display;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 
 use bytes::BytesMut;
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::Ipv4Net;
 use isis_packet::neigh::{self};
-use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo, IsisSub2SidStructure};
+use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
 use prefix_trie::PrefixMap;
-use socket2::Socket;
-use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::{isis_database_trace, isis_event_trace, isis_info};
+use crate::isis_event_trace;
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::isis::addr::IsisAddr;
 use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
 use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, link_level_capable, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
-use crate::rib::link::LinkAddr;
-use crate::rib::{self, Link, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
+use crate::rib::{self, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Context,
     rib::RibRxChannel,
 };
 // use spf_rs as spf;
-use crate::context::{Timer, TimerType};
+use crate::context::Timer;
 use crate::spf;
 
 use super::config::IsisConfig;
 use super::ifsm::has_level;
-use super::link::{Afis, IsisLink, IsisLinks, LinkState, LinkTop, LinkType};
+use super::link::{Afis, IsisLinks, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
-use super::network::{read_packet, write_packet};
-use super::socket::isis_socket;
 use super::srmpls::{LabelConfig, LabelMap};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
@@ -1248,7 +1240,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
         }
     }
     let mut multi = NexthopMulti::default();
-    for ((&addr, nhop)) in ilm.nhops.iter() {
+    for (&addr, nhop) in ilm.nhops.iter() {
         let mut uni = NexthopUni {
             addr: std::net::IpAddr::V4(addr),
             ifindex: nhop.ifindex,
