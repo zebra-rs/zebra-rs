@@ -53,7 +53,7 @@ pub enum PolicyRx {
         name: String,
         ident: IpAddr,
         policy_type: PolicyType,
-        prefix: PrefixSet,
+        prefix: Option<PrefixSet>,
     },
 }
 
@@ -110,10 +110,8 @@ impl Policy {
     }
 
     async fn process_msg(&mut self, msg: Message) {
-        println!("MSG: {:?}", msg);
         match msg {
             Message::Subscribe { proto, tx } => {
-                println!("Policy: register {}", proto);
                 self.clients.insert(proto, tx);
             }
             Message::Register {
@@ -122,35 +120,29 @@ impl Policy {
                 ident,
                 policy_type,
             } => {
-                println!("Here we are");
                 match policy_type {
                     PolicyType::PrefixSetIn => {
-                        println!("set in");
+                        //
                     }
                     PolicyType::PrefixSetOut => {
-                        println!("set out");
                         // We need to lookup corresponding prefix-set.
                         if let Some(prefix) = self.prefix_set.config.get(&name) {
-                            println!("prefix-set {} found", name);
                             // Advertise.
                             if let Some(tx) = self.clients.get(&proto) {
                                 let msg = PolicyRx::PrefixSet {
                                     name: name.clone(),
                                     ident,
                                     policy_type,
-                                    prefix: prefix.clone(),
+                                    prefix: Some(prefix.clone()),
                                 };
                                 let _ = tx.send(msg);
                             }
-                        } else {
-                            println!("prefix-set {} does not exists", name);
                         }
                         let watch = PolicyWatch {
                             proto,
                             ident,
                             policy_type,
                         };
-                        println!("Register {:?}", watch);
                         self.watch_prefix.entry(name).or_default().push(watch);
                     }
                     PolicyType::PolicyListIn => {

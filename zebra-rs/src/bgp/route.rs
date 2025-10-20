@@ -9,8 +9,8 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::Bgp;
 use super::peer::{ConfigRef, Peer, PeerType};
+use super::{Bgp, InOut};
 use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry};
 
 /// Enhanced BGP route structure for proper path selection
@@ -1306,11 +1306,21 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, attrs: Vec<Attr>) {
     }
 }
 
-pub fn route_apply_policy(
-    out: &Option<String>,
+pub fn route_apply_policy_out(
+    peer: &mut Peer,
     nlri: &Ipv4Nlri,
     attrs: Vec<Attr>,
 ) -> Option<Vec<Attr>> {
+    // Apply prefix-set out.
+    let config = peer.prefix_set.get(&InOut::Output);
+    if let Some(name) = &config.name {
+        let Some(prefix_set) = &config.prefix else {
+            return None;
+        };
+        if !prefix_set.matches(nlri.prefix) {
+            return None;
+        }
+    }
     Some(attrs)
 }
 
@@ -1329,7 +1339,7 @@ pub fn route_advertise_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             continue;
         };
 
-        let Some(attrs) = route_apply_policy(&peer.policy_out, &nlri, attrs) else {
+        let Some(attrs) = route_apply_policy_out(peer, &nlri, attrs) else {
             continue;
         };
 

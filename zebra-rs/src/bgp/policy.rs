@@ -2,8 +2,8 @@ use crate::policy::PrefixSet;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InOut {
-    In,
-    Out,
+    Input,
+    Output,
 }
 
 #[derive(Default, Debug)]
@@ -15,15 +15,15 @@ pub struct InOuts<T> {
 impl<T> InOuts<T> {
     pub fn get(&self, direct: &InOut) -> &T {
         match direct {
-            InOut::In => &self.input,
-            InOut::Out => &self.output,
+            InOut::Input => &self.input,
+            InOut::Output => &self.output,
         }
     }
 
     pub fn get_mut(&mut self, direct: &InOut) -> &mut T {
         match direct {
-            InOut::In => &mut self.input,
-            InOut::Out => &mut self.output,
+            InOut::Input => &mut self.input,
+            InOut::Output => &mut self.output,
         }
     }
 }

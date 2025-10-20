@@ -11,6 +11,7 @@ use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{self, Peer, PeerCounter, PeerParam, State};
 use super::route::{BgpAttr, BgpNexthop};
+use super::{InOuts, PrefixSetValue};
 use crate::bgp::route::RouteType;
 use crate::config::Args;
 
