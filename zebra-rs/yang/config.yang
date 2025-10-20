@@ -44,9 +44,38 @@ module config {
     }
 
     list bridge {
+      ext:sort "10";
       key "name";
       leaf name {
         type string;
+      }
+      leaf address-gen-mode {
+        type enumeration {
+          enum none;
+          enum eui64;
+          enum random;
+          enum stable-secret;
+        }
+      }
+    }
+
+    list vxlan {
+      ext:sort "5";
+      key "name";
+      leaf name {
+        type string;
+      }
+      leaf local-address {
+        type union {
+          type inet:ipv4-address;
+          type inet:ipv6-address;
+        }
+      }
+      leaf vni {
+        type uint32;
+      }
+      leaf dest-port {
+        type uint16;
       }
       leaf address-gen-mode {
         type enumeration {
@@ -150,7 +179,7 @@ module config {
 
         list interface {
           // Last item in "router isis" node.
-          ext:sort "-1";
+          ext:sort "-10";
           key "if-name";
           leaf if-name {
             type string;

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc::UnboundedSender;
@@ -6,17 +7,17 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::{Args, ConfigOp};
 use crate::rib::{AddrGenMode, Message};
 
-use super::BridgeConfig;
+use super::VxlanConfig;
 
-pub struct BridgeBuilder {
-    pub config: BTreeMap<String, BridgeConfig>,
-    pub cache: BTreeMap<String, BridgeConfig>,
+pub struct VxlanBuilder {
+    pub config: BTreeMap<String, VxlanConfig>,
+    pub cache: BTreeMap<String, VxlanConfig>,
     builder: ConfigBuilder,
 }
 
-impl BridgeBuilder {
+impl VxlanBuilder {
     pub fn new() -> Self {
-        BridgeBuilder {
+        VxlanBuilder {
             config: BTreeMap::new(),
             cache: BTreeMap::new(),
             builder: ConfigBuilder::new(),
@@ -42,39 +43,39 @@ impl BridgeBuilder {
         while let Some((name, config)) = self.cache.pop_first() {
             if config.delete {
                 self.config.remove(&name);
-                let _ = tx.send(Message::BridgeDel { name });
+                let _ = tx.send(Message::VxlanDel { name });
             } else {
                 self.config.insert(name.clone(), config.clone());
-                let _ = tx.send(Message::BridgeAdd { name, config });
+                let _ = tx.send(Message::VxlanAdd { name, config });
             }
         }
     }
 }
 
 type Handler = fn(
-    config: &mut BTreeMap<String, BridgeConfig>,
-    cache: &mut BTreeMap<String, BridgeConfig>,
+    config: &mut BTreeMap<String, VxlanConfig>,
+    cache: &mut BTreeMap<String, VxlanConfig>,
     name: &String,
     args: &mut Args,
 ) -> Result<()>;
 
-fn config_get(config: &BTreeMap<String, BridgeConfig>, name: &String) -> BridgeConfig {
+fn config_get(config: &BTreeMap<String, VxlanConfig>, name: &String) -> VxlanConfig {
     let Some(entry) = config.get(name) else {
-        return BridgeConfig::default();
+        return VxlanConfig::default();
     };
     entry.clone()
 }
 
-fn config_lookup(config: &BTreeMap<String, BridgeConfig>, name: &String) -> Option<BridgeConfig> {
+fn config_lookup(config: &BTreeMap<String, VxlanConfig>, name: &String) -> Option<VxlanConfig> {
     let entry = config.get(name)?;
     Some(entry.clone())
 }
 
 fn cache_get<'a>(
-    config: &'a BTreeMap<String, BridgeConfig>,
-    cache: &'a mut BTreeMap<String, BridgeConfig>,
+    config: &'a BTreeMap<String, VxlanConfig>,
+    cache: &'a mut BTreeMap<String, VxlanConfig>,
     name: &'a String,
-) -> Option<&'a mut BridgeConfig> {
+) -> Option<&'a mut VxlanConfig> {
     if cache.get(name).is_none() {
         cache.insert(name.to_string(), config_get(config, name));
     }
@@ -82,10 +83,10 @@ fn cache_get<'a>(
 }
 
 fn cache_lookup<'a>(
-    config: &'a BTreeMap<String, BridgeConfig>,
-    cache: &'a mut BTreeMap<String, BridgeConfig>,
+    config: &'a BTreeMap<String, VxlanConfig>,
+    cache: &'a mut BTreeMap<String, VxlanConfig>,
     name: &'a String,
-) -> Option<&'a mut BridgeConfig> {
+) -> Option<&'a mut VxlanConfig> {
     if cache.get(name).is_none() {
         cache.insert(name.clone(), config_lookup(config, name)?);
     }
@@ -112,6 +113,9 @@ struct ConfigBuilder {
 impl ConfigBuilder {
     pub fn new() -> Self {
         const CONFIG_ERR: &str = "missing config";
+        const VNI_ERR: &str = "VNI format error";
+        const DPORT_ERR: &str = "destination port format error";
+        const ADDR_ERR: &str = "local address format error";
         const ADDR_GEN_MODE_ERR: &str = "address gen mode format error";
 
         ConfigBuilder::default()
@@ -128,6 +132,51 @@ impl ConfigBuilder {
                     s.delete = true;
                     cache.insert(name.clone(), s);
                 }
+                Ok(())
+            })
+            .path("/vni")
+            .set(|config, cache, name, args| {
+                let vni = args.u32().context(VNI_ERR)?;
+
+                let s = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                s.vni = Some(vni);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                s.vni = None;
+                Ok(())
+            })
+            .path("/dest-port")
+            .set(|config, cache, name, args| {
+                let dport = args.u16().context(DPORT_ERR)?;
+
+                let s = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                s.dport = Some(dport);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                s.dport = None;
+                Ok(())
+            })
+            .path("/local-address")
+            .set(|config, cache, name, args| {
+                let addr = if let Some(addr) = args.v4addr() {
+                    IpAddr::V4(addr)
+                } else if let Some(addr) = args.v6addr() {
+                    IpAddr::V6(addr)
+                } else {
+                    anyhow::bail!(ADDR_ERR);
+                };
+
+                let s = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                s.local_addr = Some(addr);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
+                s.local_addr = None;
                 Ok(())
             })
             .path("/address-gen-mode")
@@ -147,7 +196,7 @@ impl ConfigBuilder {
     }
 
     pub fn path(mut self, path: &str) -> Self {
-        let prefix = "/bridge";
+        let prefix = "/vxlan";
         self.path = format!("{prefix}{path}");
         self
     }

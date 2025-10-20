@@ -3,7 +3,7 @@ use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
     BridgeBuilder, BridgeConfig, Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType,
-    StaticConfig,
+    StaticConfig, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -60,6 +60,13 @@ pub enum Message {
     BridgeDel {
         name: String,
     },
+    VxlanAdd {
+        name: String,
+        config: VxlanConfig,
+    },
+    VxlanDel {
+        name: String,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -114,6 +121,7 @@ pub struct Rib {
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
     pub bridge_config: BridgeBuilder,
+    pub vxlan_config: VxlanBuilder,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 }
@@ -142,6 +150,7 @@ impl Rib {
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
             bridge_config: BridgeBuilder::new(),
+            vxlan_config: VxlanBuilder::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
         };
@@ -207,6 +216,12 @@ impl Rib {
                 };
                 self.bridges.remove(&name);
                 self.fib_handle.bridge_del(&bridge).await;
+            }
+            Message::VxlanAdd { name, config } => {
+                //
+            }
+            Message::VxlanDel { name } => {
+                //
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
@@ -294,6 +309,8 @@ impl Rib {
                     link_config_exec(self, path, args, msg.op).await;
                 } else if path.as_str().starts_with("/bridge") {
                     let _ = self.bridge_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/vxlan") {
+                    let _ = self.vxlan_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
