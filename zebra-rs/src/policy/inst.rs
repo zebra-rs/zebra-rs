@@ -77,7 +77,20 @@ pub trait Syncer {
 
 impl Syncer for &mut Policy {
     fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
-        // TODO.
+        // Notify all watchers of this prefix-set update
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix: Some(prefix_set.clone()),
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
     }
 
     fn prefix_set_remove(&self, name: &String) {
