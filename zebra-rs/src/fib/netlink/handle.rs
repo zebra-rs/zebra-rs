@@ -10,7 +10,8 @@ use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
-    InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
+    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo,
+    LinkLayerType, LinkMessage,
 };
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
@@ -330,6 +331,13 @@ impl FibHandle {
 
         let name = LinkAttribute::IfName(bridge.name.clone());
         msg.attributes.push(name);
+
+        if let Some(addr_gen_mode) = &bridge.addr_gen_mode {
+            let mode = LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![
+                AfSpecInet6::AddrGenMode(u8::from(addr_gen_mode.clone())),
+            ])]);
+            msg.attributes.push(mode);
+        }
 
         // let vrf = InfoVrf::TableId(vrf.id);
         // let data = InfoData::Vrf(vec![vrf]);

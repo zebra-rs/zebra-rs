@@ -190,11 +190,18 @@ impl Rib {
                 self.ilm_del(label, ilm).await;
             }
             Message::BridgeAdd { name, config } => {
-                let bridge = Bridge { name };
+                let bridge = Bridge {
+                    name,
+                    addr_gen_mode: config.addr_gen_mode,
+                    ..Default::default()
+                };
                 self.fib_handle.bridge_add(&bridge).await;
             }
             Message::BridgeDel { name } => {
-                let bridge = Bridge { name };
+                let bridge = Bridge {
+                    name,
+                    ..Default::default()
+                };
                 self.fib_handle.bridge_del(&bridge).await;
             }
             Message::Shutdown { tx } => {
