@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 
 use ipnet::IpNet;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct PrefixSet {
     pub prefixes: BTreeMap<IpNet, PrefixSetEntry>,
     pub delete: bool,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct PrefixSetEntry {
     pub le: Option<u8>,
     pub eq: Option<u8>,

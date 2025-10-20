@@ -22,12 +22,19 @@ pub enum PolicyType {
     PolicyListOut,
 }
 
+#[derive(Debug)]
 pub enum Message {
     Subscribe {
         proto: String,
         tx: UnboundedSender<PolicyRx>,
     },
     Register {
+        proto: String,
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
+    },
+    Unregister {
         proto: String,
         name: String,
         ident: IpAddr,
@@ -42,10 +49,11 @@ pub struct Subscription {
 // Message from rib to protocol module.
 #[derive(Debug, PartialEq)]
 pub enum PolicyRx {
-    Policy {
+    PrefixSet {
         name: String,
         ident: IpAddr,
         policy_type: PolicyType,
+        prefix: PrefixSet,
     },
 }
 
@@ -75,10 +83,7 @@ pub struct Policy {
     pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
 }
 
-pub enum PolicyEntity {
-    PrefixSet(PrefixSet),
-}
-
+#[derive(Debug)]
 pub struct PolicyWatch {
     pub proto: String,
     pub ident: IpAddr,
@@ -105,6 +110,7 @@ impl Policy {
     }
 
     async fn process_msg(&mut self, msg: Message) {
+        println!("MSG: {:?}", msg);
         match msg {
             Message::Subscribe { proto, tx } => {
                 println!("Policy: register {}", proto);
@@ -116,25 +122,52 @@ impl Policy {
                 ident,
                 policy_type,
             } => {
+                println!("Here we are");
                 match policy_type {
                     PolicyType::PrefixSetIn => {
+                        println!("set in");
+                    }
+                    PolicyType::PrefixSetOut => {
+                        println!("set out");
+                        // We need to lookup corresponding prefix-set.
+                        if let Some(prefix) = self.prefix_set.config.get(&name) {
+                            println!("prefix-set {} found", name);
+                            // Advertise.
+                            if let Some(tx) = self.clients.get(&proto) {
+                                let msg = PolicyRx::PrefixSet {
+                                    name: name.clone(),
+                                    ident,
+                                    policy_type,
+                                    prefix: prefix.clone(),
+                                };
+                                let _ = tx.send(msg);
+                            }
+                        } else {
+                            println!("prefix-set {} does not exists", name);
+                        }
                         let watch = PolicyWatch {
                             proto,
                             ident,
                             policy_type,
                         };
-                        self.watch_prefix.entry(name).or_insert_with(Vec::new).push(watch);
-                    }
-                    PolicyType::PrefixSetOut => {
-                        //
+                        println!("Register {:?}", watch);
+                        self.watch_prefix.entry(name).or_default().push(watch);
                     }
                     PolicyType::PolicyListIn => {
-                        //
+                        println!("policy in");
                     }
                     PolicyType::PolicyListOut => {
-                        //
+                        println!("policy in");
                     }
                 }
+            }
+            Message::Unregister {
+                proto,
+                name,
+                ident,
+                policy_type,
+            } => {
+                //
             }
         }
     }

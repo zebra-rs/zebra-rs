@@ -116,7 +116,7 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
 
         let sockaddr = link_addr((LLC_HDR.len() + buf.len()) as u16, ifindex, Some(iss));
 
-        let res = sock
+        let _res = sock
             .async_io(Interest::WRITABLE, |sock| {
                 socket::sendmsg(
                     sock.as_raw_fd(),

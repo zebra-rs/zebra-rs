@@ -70,6 +70,7 @@ pub struct Bgp {
     pub clist: CommunityListMap,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
+    pub policy_tx: UnboundedSender<policy::Message>,
 }
 
 impl Bgp {
@@ -113,6 +114,7 @@ impl Bgp {
             listen_err: None,
             clist: CommunityListMap::new(),
             debug_flags: BgpDebugFlags::default(),
+            policy_tx,
         };
         bgp.callback_build();
         bgp.show_build();

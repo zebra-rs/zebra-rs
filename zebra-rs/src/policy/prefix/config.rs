@@ -5,6 +5,8 @@ use ipnet::IpNet;
 
 use crate::config::{Args, ConfigOp};
 
+use super::PrefixSet;
+
 #[derive(Default)]
 pub struct PrefixSetConfig {
     pub config: BTreeMap<String, PrefixSet>,
@@ -45,19 +47,6 @@ impl PrefixSetConfig {
             }
         }
     }
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct PrefixSet {
-    pub entry: BTreeMap<IpNet, PrefixSetEntry>,
-    pub delete: bool,
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct PrefixSetEntry {
-    pub le: Option<u8>,
-    pub eq: Option<u8>,
-    pub ge: Option<u8>,
 }
 
 #[derive(Default)]
@@ -136,13 +125,13 @@ impl ConfigBuilder {
             .set(|config, cache, name, args| {
                 let prefix = args.net().context(PREFIX_ERR)?;
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                let _entry = set.entry.entry(prefix).or_default();
+                let _entry = set.prefixes.entry(prefix).or_default();
                 Ok(())
             })
             .del(|config, cache, name, args| {
                 let prefix = args.net().context(PREFIX_ERR)?;
                 let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                set.entry.remove(&prefix).context(CONFIG_ERR)?;
+                set.prefixes.remove(&prefix).context(CONFIG_ERR)?;
                 Ok(())
             })
             .path("/prefixes/le")
@@ -151,7 +140,7 @@ impl ConfigBuilder {
                 let le = args.u8().context(LE_ERR)?;
 
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                let entry = set.entry.entry(prefix).or_default();
+                let entry = set.prefixes.entry(prefix).or_default();
                 entry.le = Some(le);
                 Ok(())
             })
@@ -159,7 +148,7 @@ impl ConfigBuilder {
                 let prefix = args.net().context(PREFIX_ERR)?;
 
                 let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                let entry = set.entry.get_mut(&prefix).context(LE_ERR)?;
+                let entry = set.prefixes.get_mut(&prefix).context(LE_ERR)?;
                 entry.le = None;
                 Ok(())
             })
@@ -169,7 +158,7 @@ impl ConfigBuilder {
                 let eq = args.u8().context(EQ_ERR)?;
 
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                let entry = set.entry.entry(prefix).or_default();
+                let entry = set.prefixes.entry(prefix).or_default();
                 entry.eq = Some(eq);
                 Ok(())
             })
@@ -177,7 +166,7 @@ impl ConfigBuilder {
                 let prefix = args.net().context(PREFIX_ERR)?;
 
                 let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                let entry = set.entry.get_mut(&prefix).context(EQ_ERR)?;
+                let entry = set.prefixes.get_mut(&prefix).context(EQ_ERR)?;
                 entry.eq = None;
                 Ok(())
             })
@@ -187,7 +176,7 @@ impl ConfigBuilder {
                 let ge = args.u8().context(GE_ERR)?;
 
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
-                let entry = set.entry.entry(prefix).or_default();
+                let entry = set.prefixes.entry(prefix).or_default();
                 entry.ge = Some(ge);
                 Ok(())
             })
@@ -195,7 +184,7 @@ impl ConfigBuilder {
                 let prefix = args.net().context(PREFIX_ERR)?;
 
                 let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
-                let entry = set.entry.get_mut(&prefix).context(GE_ERR)?;
+                let entry = set.prefixes.get_mut(&prefix).context(GE_ERR)?;
                 entry.ge = None;
                 Ok(())
             })
