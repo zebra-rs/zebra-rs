@@ -70,6 +70,67 @@ impl PolicyRxChannel {
     }
 }
 
+pub trait Syncer {
+    fn prefix_set_remove(&self, name: &String);
+}
+
+impl Syncer for Policy {
+    fn prefix_set_remove(&self, name: &String) {
+        // Notify all watchers of this prefix-set
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
+impl Syncer for &Policy {
+    fn prefix_set_remove(&self, name: &String) {
+        // Notify all watchers of this prefix-set
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
+impl Syncer for &mut Policy {
+    fn prefix_set_remove(&self, name: &String) {
+        // Notify all watchers of this prefix-set
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
 pub struct Policy {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
@@ -175,7 +236,16 @@ impl Policy {
                 }
             }
             ConfigOp::CommitEnd => {
-                self.prefix_set.commit();
+                // Commit prefix-set changes manually to avoid double borrow
+                while let Some((name, s)) = self.prefix_set.cache.pop_first() {
+                    if s.delete {
+                        // Notify subscribed entity for prefix-set removal
+                        self.prefix_set_remove(&name);
+                        self.prefix_set.config.remove(&name);
+                    } else {
+                        self.prefix_set.config.insert(name, s);
+                    }
+                }
                 self.policy_config.commit();
             }
             _ => {}
