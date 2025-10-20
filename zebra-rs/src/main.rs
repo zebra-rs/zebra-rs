@@ -16,12 +16,8 @@ mod fib;
 mod isis;
 mod ospf;
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use daemonize::Daemonize;
-use std::io;
-use tracing::Level;
-use tracing_appender::rolling;
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

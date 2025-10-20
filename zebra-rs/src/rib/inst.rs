@@ -243,7 +243,7 @@ impl Rib {
                 self.nmap.shutdown(&self.fib_handle).await;
                 let ilms = self.ilm.clone();
 
-                for ((&label, ilm)) in ilms.iter() {
+                for (&label, ilm) in ilms.iter() {
                     self.ilm_del(label, ilm.clone()).await;
                 }
                 for (_, bridge) in self.bridges.iter() {
@@ -255,11 +255,11 @@ impl Rib {
                 let _ = tx.send(());
             }
             Message::LinkUp { ifindex } => {
-                println!("LinkUp {}", ifindex);
+                // println!("LinkUp {}", ifindex);
                 self.link_up(ifindex).await;
             }
             Message::LinkDown { ifindex } => {
-                println!("LinkDown {}", ifindex);
+                // println!("LinkDown {}", ifindex);
                 self.link_down(ifindex).await;
             }
             Message::Resolve => {

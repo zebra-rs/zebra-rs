@@ -2,10 +2,8 @@ use bgp_packet::addpath::AddPathValue;
 use bgp_packet::cap::CapMultiProtocol;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
-use serde::{Serialize, de};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::default;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
@@ -28,13 +26,12 @@ use crate::config::Args;
 
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
-use super::route::{AdjRibIn, AdjRibOut, BgpLocalRibOrig, LocalRib, Route};
+use super::route::{AdjRibIn, AdjRibOut, BgpLocalRibOrig, LocalRib};
 use super::route::{route_from_peer, send_route_to_rib};
-use super::{BGP_HOLD_TIME, Bgp, InOuts};
-use super::{BGP_PORT, InOut, PrefixSetValue};
+use super::{BGP_PORT, PrefixSetValue};
+use super::{Bgp, InOuts};
 use crate::context::task::*;
-use crate::rib::api::RibTx;
-use crate::{bgp_debug, bgp_debug_cat, bgp_info, rib};
+use crate::{bgp_debug, bgp_info, rib};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {

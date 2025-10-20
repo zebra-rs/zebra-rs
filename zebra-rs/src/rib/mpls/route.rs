@@ -1,12 +1,9 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
-use netlink_packet_route::route::MplsLabel;
-
-use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
 use crate::rib::nexthop::NexthopUni;
-use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType};
+use crate::rib::{Nexthop, NexthopMulti, RibType};
 
 #[derive(Debug, Default, Clone)]
 pub struct MplsNexthop {

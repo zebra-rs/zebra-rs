@@ -10,7 +10,6 @@ use crate::config::Args;
 use crate::context::Timer;
 use crate::rib::MacAddr;
 
-use super::link::Afis;
 use super::nfsm::{NeighborAddr4, NfsmState};
 use super::{Isis, Level, Message};
 

@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::IpAddr,
+};
 
 use anyhow::{Error, Result};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -7,14 +10,35 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixSetConfig};
+use super::{PolicyConfig, PrefixSet, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PolicyType {
+    PrefixSetIn,
+    PrefixSetOut,
+    PolicyListIn,
+    PolicyListOut,
+}
+
+#[derive(Debug)]
 pub enum Message {
     Subscribe {
         proto: String,
         tx: UnboundedSender<PolicyRx>,
+    },
+    Register {
+        proto: String,
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
+    },
+    Unregister {
+        proto: String,
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
     },
 }
 
@@ -22,22 +46,15 @@ pub struct Subscription {
     pub tx: UnboundedSender<PolicyRx>,
 }
 
-// Message from protocol module to policy.
-pub enum PolicyTx {
-    Subscribe(Subscription),
-    // Register { prefix: IpNet, entry: PolicyEntry },
-    // Unregister { prefix: IpNet, entry: PolicyEntry },
-}
-
 // Message from rib to protocol module.
 #[derive(Debug, PartialEq)]
 pub enum PolicyRx {
-    // LinkAdd(Link),
-    // LinkDel(Link),
-    // AddrAdd(LinkAddr),
-    // AddrDel(LinkAddr),
-    // RouterIdUpdate(Ipv4Addr),
-    EoR,
+    PrefixSet {
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
+        prefix: Option<PrefixSet>,
+    },
 }
 
 #[allow(dead_code)]
@@ -53,6 +70,47 @@ impl PolicyRxChannel {
     }
 }
 
+pub trait Syncer {
+    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet);
+    fn prefix_set_remove(&self, name: &String);
+}
+
+impl Syncer for &mut Policy {
+    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
+        // Notify all watchers of this prefix-set update
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix: Some(prefix_set.clone()),
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    fn prefix_set_remove(&self, name: &String) {
+        // Notify all watchers of this prefix-set
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
 pub struct Policy {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
@@ -61,6 +119,16 @@ pub struct Policy {
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
     pub prefix_set: PrefixSetConfig,
+    pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
+    pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
+    pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
+}
+
+#[derive(Debug)]
+pub struct PolicyWatch {
+    pub proto: String,
+    pub ident: IpAddr,
+    pub policy_type: PolicyType,
 }
 
 impl Policy {
@@ -74,9 +142,67 @@ impl Policy {
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
             prefix_set: PrefixSetConfig::new(),
+            clients: BTreeMap::new(),
+            watch_prefix: BTreeMap::new(),
+            watch_policy: BTreeMap::new(),
         };
         policy.show_build();
         policy
+    }
+
+    async fn process_msg(&mut self, msg: Message) {
+        match msg {
+            Message::Subscribe { proto, tx } => {
+                self.clients.insert(proto, tx);
+            }
+            Message::Register {
+                proto,
+                name,
+                ident,
+                policy_type,
+            } => {
+                match policy_type {
+                    PolicyType::PrefixSetIn => {
+                        //
+                    }
+                    PolicyType::PrefixSetOut => {
+                        // We need to lookup corresponding prefix-set.
+                        if let Some(prefix) = self.prefix_set.config.get(&name) {
+                            // Advertise.
+                            if let Some(tx) = self.clients.get(&proto) {
+                                let msg = PolicyRx::PrefixSet {
+                                    name: name.clone(),
+                                    ident,
+                                    policy_type,
+                                    prefix: Some(prefix.clone()),
+                                };
+                                let _ = tx.send(msg);
+                            }
+                        }
+                        let watch = PolicyWatch {
+                            proto,
+                            ident,
+                            policy_type,
+                        };
+                        self.watch_prefix.entry(name).or_default().push(watch);
+                    }
+                    PolicyType::PolicyListIn => {
+                        println!("policy in");
+                    }
+                    PolicyType::PolicyListOut => {
+                        println!("policy in");
+                    }
+                }
+            }
+            Message::Unregister {
+                proto,
+                name,
+                ident,
+                policy_type,
+            } => {
+                //
+            }
+        }
     }
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -90,7 +216,17 @@ impl Policy {
                 }
             }
             ConfigOp::CommitEnd => {
-                self.prefix_set.commit();
+                // Commit prefix-set changes manually to avoid double borrow
+                while let Some((name, s)) = self.prefix_set.cache.pop_first() {
+                    if s.delete {
+                        // Notify subscribed entity for prefix-set removal
+                        self.prefix_set_remove(&name);
+                        self.prefix_set.config.remove(&name);
+                    } else {
+                        self.prefix_set_update(&name, &s);
+                        self.prefix_set.config.insert(name, s);
+                    }
+                }
                 self.policy_config.commit();
             }
             _ => {}
@@ -111,6 +247,9 @@ impl Policy {
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_msg(msg).await;
+                }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg).await;
                 }

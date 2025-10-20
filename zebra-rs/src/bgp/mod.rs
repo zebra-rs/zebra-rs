@@ -14,12 +14,10 @@ pub mod cap;
 pub mod tracing;
 
 pub mod debug;
-pub use debug::BgpDebugFlags;
 
 pub mod timer;
 
 pub mod link;
-pub use link::*;
 
 pub mod policy;
 pub use policy::*;

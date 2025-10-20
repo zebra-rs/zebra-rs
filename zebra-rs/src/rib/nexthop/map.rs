@@ -1,9 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::{IpAddr, Ipv4Addr},
+    net::IpAddr,
 };
-
-use netlink_packet_route::route::MplsLabel;
 
 use crate::fib::FibHandle;
 

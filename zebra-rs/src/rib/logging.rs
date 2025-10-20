@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::io;
 
 use chrono::Utc;
-use clap::{Arg, ValueEnum};
+use clap::ValueEnum;
 use serde_json::json;
 use tracing::{Event, Level, Subscriber};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::FmtContext;
-use tracing_subscriber::fmt::format::{Format, FormatEvent, FormatFields, Writer};
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, util::SubscriberInitExt};
 
 #[derive(Debug, Clone)]
 pub enum LogFormat {

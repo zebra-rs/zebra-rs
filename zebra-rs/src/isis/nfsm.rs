@@ -2,17 +2,14 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsLevel, IsisHello, IsisNeighborId, IsisTlv};
+use isis_packet::{IsisHello, IsisNeighborId, IsisTlv};
 
 use crate::context::Timer;
-use crate::isis::Level;
-use crate::isis::link::Afi;
 use crate::rib::MacAddr;
-use crate::{isis_fsm_trace, isis_info, isis_packet_trace};
+use crate::{isis_fsm_trace, isis_packet_trace};
 
 use super::inst::NeighborTop;
-use super::link::LinkTop;
-use super::{IfsmEvent, IsisLink, LabelPool, Message};
+use super::{IfsmEvent, LabelPool, Level, Message};
 
 use super::neigh::Neighbor;
 

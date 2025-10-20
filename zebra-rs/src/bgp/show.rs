@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::CapMultiProtocol;
-use bgp_packet::{Afi, Attr, BgpType, Safi};
+use bgp_packet::{Afi, BgpType, Safi};
 use serde::Serialize;
-use serde_json::json;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{self, Peer, PeerCounter, PeerParam, State};
 use super::route::{BgpAttr, BgpNexthop};
+use super::{InOuts, PrefixSetValue};
 use crate::bgp::route::RouteType;
 use crate::config::Args;
 

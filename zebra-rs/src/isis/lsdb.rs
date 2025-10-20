@@ -1,16 +1,10 @@
-use std::{
-    collections::{
-        BTreeMap,
-        btree_map::{Iter, Values},
-    },
-    default,
-};
+use std::collections::BTreeMap;
+use std::collections::btree_map::{Iter, Values};
 
-use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{isis_database_trace, isis_info};
+use crate::isis_database_trace;
 
 use crate::context::Timer;
 use crate::isis::{

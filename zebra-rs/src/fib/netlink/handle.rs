@@ -439,6 +439,7 @@ impl FibHandle {
             vxlan_info.push(info);
         }
         let link_info = LinkInfo::Data(InfoData::Vxlan(vxlan_info));
+
         let attr = LinkAttribute::LinkInfo(vec![link_kind, link_info]);
         msg.attributes.push(attr);
 
@@ -579,7 +580,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn link_set_up(&self, ifindex: u32, flags: u32) {
+    pub async fn link_set_up(&self, ifindex: u32, _flags: u32) {
         let mut msg = LinkMessage::default();
         msg.header.index = ifindex;
         msg.header.flags = LinkFlags::Up;
@@ -596,7 +597,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn link_set_down(&self, ifindex: u32, flags: u32) {
+    pub async fn link_set_down(&self, ifindex: u32, _flags: u32) {
         let mut msg = LinkMessage::default();
         msg.header.index = ifindex;
         msg.header.flags = LinkFlags::empty();

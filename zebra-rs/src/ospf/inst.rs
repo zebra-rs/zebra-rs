@@ -22,7 +22,7 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::area::{OspfArea, OspfAreaMap};
+use super::area::OspfAreaMap;
 use super::config::OspfNetworkConfig;
 use super::ifsm::{IfsmEvent, ospf_ifsm};
 use super::link::OspfLink;

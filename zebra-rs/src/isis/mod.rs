@@ -2,7 +2,6 @@ pub mod inst;
 pub use inst::{Isis, Message};
 
 pub mod link;
-pub use link::IsisLink;
 
 pub mod addr;
 
