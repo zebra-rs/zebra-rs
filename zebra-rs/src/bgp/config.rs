@@ -114,6 +114,7 @@ fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     if op.is_set() {
         let config = peer.prefix_set.get_mut(&InOut::Output);
         config.name = Some(policy.clone());
+
         let msg = policy::Message::Register {
             proto: "bgp".to_string(),
             name: policy,
@@ -122,6 +123,9 @@ fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
         };
         let _ = bgp.policy_tx.send(msg);
     } else {
+        let config = peer.prefix_set.get_mut(&InOut::Output);
+        config.name = None;
+
         let msg = policy::Message::Unregister {
             proto: "bgp".to_string(),
             name: policy,
