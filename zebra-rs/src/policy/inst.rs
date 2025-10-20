@@ -71,48 +71,15 @@ impl PolicyRxChannel {
 }
 
 pub trait Syncer {
+    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet);
     fn prefix_set_remove(&self, name: &String);
 }
 
-impl Syncer for Policy {
-    fn prefix_set_remove(&self, name: &String) {
-        // Notify all watchers of this prefix-set
-        if let Some(watches) = self.watch_prefix.get(name) {
-            for watch in watches {
-                if let Some(tx) = self.clients.get(&watch.proto) {
-                    let msg = PolicyRx::PrefixSet {
-                        name: name.clone(),
-                        ident: watch.ident,
-                        policy_type: watch.policy_type,
-                        prefix: None,
-                    };
-                    let _ = tx.send(msg);
-                }
-            }
-        }
-    }
-}
-
-impl Syncer for &Policy {
-    fn prefix_set_remove(&self, name: &String) {
-        // Notify all watchers of this prefix-set
-        if let Some(watches) = self.watch_prefix.get(name) {
-            for watch in watches {
-                if let Some(tx) = self.clients.get(&watch.proto) {
-                    let msg = PolicyRx::PrefixSet {
-                        name: name.clone(),
-                        ident: watch.ident,
-                        policy_type: watch.policy_type,
-                        prefix: None,
-                    };
-                    let _ = tx.send(msg);
-                }
-            }
-        }
-    }
-}
-
 impl Syncer for &mut Policy {
+    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
+        // TODO.
+    }
+
     fn prefix_set_remove(&self, name: &String) {
         // Notify all watchers of this prefix-set
         if let Some(watches) = self.watch_prefix.get(name) {
@@ -243,6 +210,7 @@ impl Policy {
                         self.prefix_set_remove(&name);
                         self.prefix_set.config.remove(&name);
                     } else {
+                        self.prefix_set_update(&name, &s);
                         self.prefix_set.config.insert(name, s);
                     }
                 }

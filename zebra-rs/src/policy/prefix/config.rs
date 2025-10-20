@@ -41,17 +41,17 @@ impl PrefixSetConfig {
         handler(&mut self.config, &mut self.cache, &name, &mut args)
     }
 
-    pub fn commit(&mut self, syncer: impl Syncer) {
-        while let Some((name, s)) = self.cache.pop_first() {
-            if s.delete {
-                // Notify subscribed entity for prefix-set.
-                syncer.prefix_set_remove(&name);
-                self.config.remove(&name);
-            } else {
-                self.config.insert(name, s);
-            }
-        }
-    }
+    // pub fn commit(&mut self, syncer: impl Syncer) {
+    //     while let Some((name, s)) = self.cache.pop_first() {
+    //         if s.delete {
+    //             // Notify subscribed entity for prefix-set.
+    //             syncer.prefix_set_remove(&name);
+    //             self.config.remove(&name);
+    //         } else {
+    //             self.config.insert(name, s);
+    //         }
+    //     }
+    // }
 }
 
 #[derive(Default)]
