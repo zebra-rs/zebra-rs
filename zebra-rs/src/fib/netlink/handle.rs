@@ -32,7 +32,9 @@ use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
-use crate::rib::{Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType, link};
+use crate::rib::{
+    Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType, link,
+};
 
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
@@ -319,6 +321,58 @@ impl FibHandle {
                     gid = nexthop.gid(),
                     refcnt = nexthop.refcnt()
                 );
+            }
+        }
+    }
+
+    pub async fn bridge_add(&self, bridge: &Bridge) {
+        let mut msg = LinkMessage::default();
+
+        let name = LinkAttribute::IfName(bridge.name.clone());
+        msg.attributes.push(name);
+
+        // let vrf = InfoVrf::TableId(vrf.id);
+        // let data = InfoData::Vrf(vec![vrf]);
+        // let link_data = LinkInfo::Data(data);
+
+        let kind = InfoKind::Bridge;
+        let link_kind = LinkInfo::Kind(kind);
+
+        let link_info = LinkAttribute::LinkInfo(vec![link_kind]);
+        msg.attributes.push(link_info);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        // req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewLink error: {e}");
+            }
+        }
+    }
+
+    pub async fn bridge_del(&self, bridge: &Bridge) {
+        let mut msg = LinkMessage::default();
+
+        let name = LinkAttribute::IfName(bridge.name.clone());
+        msg.attributes.push(name);
+
+        let kind = InfoKind::Bridge;
+        let link_kind = LinkInfo::Kind(kind);
+
+        let link_info = LinkAttribute::LinkInfo(vec![link_kind]);
+        msg.attributes.push(link_info);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        println!("XXX DelLink");
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("DelLink error: {}", e);
             }
         }
     }

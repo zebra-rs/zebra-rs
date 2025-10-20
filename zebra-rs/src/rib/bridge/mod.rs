@@ -1,7 +1,10 @@
 pub mod config;
 pub use config::*;
 
-#[derive(Default, Clone)]
+pub mod builder;
+pub use builder::*;
+
+#[derive(Debug, Clone)]
 pub struct Bridge {
-    // Bridge configuration structure
+    pub name: String,
 }

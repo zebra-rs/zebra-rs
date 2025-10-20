@@ -48,6 +48,14 @@ module config {
       leaf name {
         type string;
       }
+      leaf address-gen-mode {
+        type enumeration {
+          enum none;
+          enum eui64;
+          enum random;
+          enum stable-secret;
+        }
+      }
     }
 
     container system {

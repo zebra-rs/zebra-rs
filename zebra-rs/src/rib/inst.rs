@@ -2,7 +2,8 @@ use super::api::{RibRx, RibTx};
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
-    BridgeConfig, Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig,
+    BridgeBuilder, BridgeConfig, Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType,
+    StaticConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -10,8 +11,8 @@ use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Show
 use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
-use crate::rib::RibEntries;
 use crate::rib::route::{ipv4_nexthop_sync, ipv4_route_sync};
+use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
@@ -51,6 +52,13 @@ pub enum Message {
     IlmDel {
         label: u32,
         ilm: IlmEntry,
+    },
+    BridgeAdd {
+        name: String,
+        config: BridgeConfig,
+    },
+    BridgeDel {
+        name: String,
     },
     Shutdown {
         tx: oneshot::Sender<()>,
@@ -104,7 +112,7 @@ pub struct Rib {
     pub static_config: StaticConfig,
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
-    pub bridge_config: BridgeConfig,
+    pub bridge_config: BridgeBuilder,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 }
@@ -131,7 +139,7 @@ impl Rib {
             static_config: StaticConfig::new(),
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
-            bridge_config: BridgeConfig::new(),
+            bridge_config: BridgeBuilder::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
         };
@@ -180,6 +188,14 @@ impl Rib {
             }
             Message::IlmDel { label, ilm } => {
                 self.ilm_del(label, ilm).await;
+            }
+            Message::BridgeAdd { name, config } => {
+                let bridge = Bridge { name };
+                self.fib_handle.bridge_add(&bridge).await;
+            }
+            Message::BridgeDel { name } => {
+                let bridge = Bridge { name };
+                self.fib_handle.bridge_del(&bridge).await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
@@ -281,7 +297,7 @@ impl Rib {
                     // let _ = self.link_config.exec(path, args, msg.op);
                     link_config_exec(self, path, args, msg.op).await;
                 } else if path.as_str().starts_with("/bridge") {
-                    self.bridge_config.exec(path, args, msg.op).await;
+                    let _ = self.bridge_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {

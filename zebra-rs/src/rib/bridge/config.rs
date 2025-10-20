@@ -1,34 +1,16 @@
-use std::collections::BTreeMap;
-use tokio::sync::mpsc::UnboundedSender;
-
-use super::Bridge;
-use crate::config::{Args, ConfigOp};
-use crate::rib::Message;
-
-pub struct ConfigBuilder {
-    //
-}
-
+#[derive(Default, Debug, Clone)]
 pub struct BridgeConfig {
-    pub config: BTreeMap<String, Bridge>,
-    pub cache: BTreeMap<String, Bridge>,
-    builder: ConfigBuilder,
+    // Bridge configuration structure
+    pub delete: bool,
+
+    // Address generation mode.
+    pub addr_gen_mode: Option<AddrGenMode>,
 }
 
-impl BridgeConfig {
-    pub fn new() -> Self {
-        BridgeConfig {
-            config: BTreeMap::new(),
-            cache: BTreeMap::new(),
-            builder: ConfigBuilder {},
-        }
-    }
-
-    pub async fn exec(&mut self, _path: String, _args: Args, _op: ConfigOp) {
-        // TODO: Implement bridge configuration
-    }
-
-    pub fn commit(&mut self, _tx: UnboundedSender<Message>) {
-        // TODO: Implement bridge configuration commit
-    }
+#[derive(Debug, Clone)]
+pub enum AddrGenMode {
+    None,
+    Eui64,
+    StableSecret,
+    Random,
 }
