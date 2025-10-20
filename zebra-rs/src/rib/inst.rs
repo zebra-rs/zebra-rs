@@ -1,7 +1,9 @@
 use super::api::{RibRx, RibTx};
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
-use super::{Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig};
+use super::{
+    BridgeConfig, Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType, StaticConfig,
+};
 
 use crate::config::{Args, path_from_command};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
@@ -102,6 +104,7 @@ pub struct Rib {
     pub static_config: StaticConfig,
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
+    pub bridge_config: BridgeConfig,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 }
@@ -128,6 +131,7 @@ impl Rib {
             static_config: StaticConfig::new(),
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
+            bridge_config: BridgeConfig::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
         };
@@ -276,9 +280,12 @@ impl Rib {
                 } else if path.as_str().starts_with("/interface") {
                     // let _ = self.link_config.exec(path, args, msg.op);
                     link_config_exec(self, path, args, msg.op).await;
+                } else if path.as_str().starts_with("/bridge") {
+                    self.bridge_config.exec(path, args, msg.op).await;
                 }
             }
             ConfigOp::CommitEnd => {
+                self.bridge_config.commit(self.tx.clone());
                 self.link_config.commit(self.tx.clone());
                 self.static_config.commit(self.tx.clone());
                 self.mpls_config.commit(self.tx.clone());

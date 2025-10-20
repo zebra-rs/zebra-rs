@@ -43,6 +43,13 @@ module config {
       }
     }
 
+    list bridge {
+      key "name";
+      leaf name {
+        type string;
+      }
+    }
+
     container system {
       ext:help "System configuration";
       description
