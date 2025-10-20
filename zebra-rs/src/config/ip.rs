@@ -202,7 +202,7 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
                 let seg_start = segment_start.unwrap_or(0);
                 let next = bytes.get(n);
                 if next.map_or(true, |&b| b == b':' || b == b'.' || b == b'/') {
-                    if i >= seg_start + 4 {
+                    if i > seg_start + 4 {
                         return (MatchType::None, i);
                     }
                     if bytes[seg_start..=i].contains(&b'/') {
