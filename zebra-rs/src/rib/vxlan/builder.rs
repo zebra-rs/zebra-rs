@@ -26,7 +26,7 @@ impl VxlanBuilder {
 
     pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
         const CONFIG_ERR: &str = "missing config handler";
-        const BRIDGE_ERR: &str = "missing bridge name argument";
+        const VXLAN_ERR: &str = "missing vxlan name argument";
 
         let func = self
             .builder
@@ -34,7 +34,7 @@ impl VxlanBuilder {
             .get(&(path.to_string(), op))
             .context(CONFIG_ERR)?;
 
-        let name: String = args.string().context(BRIDGE_ERR)?;
+        let name: String = args.string().context(VXLAN_ERR)?;
 
         func(&mut self.config, &mut self.cache, &name, &mut args)
     }
@@ -45,6 +45,7 @@ impl VxlanBuilder {
                 self.config.remove(&name);
                 let _ = tx.send(Message::VxlanDel { name });
             } else {
+                println!("XXX commit config");
                 self.config.insert(name.clone(), config.clone());
                 let _ = tx.send(Message::VxlanAdd { name, config });
             }

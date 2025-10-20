@@ -72,6 +72,8 @@ module config {
         }
       }
       leaf vni {
+        ext:sort "5";
+        mandatory true;
         type uint32;
       }
       leaf dest-port {

@@ -3,7 +3,7 @@ use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
     BridgeBuilder, BridgeConfig, Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType,
-    StaticConfig, VxlanBuilder, VxlanConfig,
+    StaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -112,6 +112,7 @@ pub struct Rib {
     pub redists: Vec<UnboundedSender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
+    pub vxlan: BTreeMap<String, Vxlan>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
@@ -141,6 +142,7 @@ impl Rib {
             redists: Vec::new(),
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
+            vxlan: BTreeMap::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
@@ -218,10 +220,24 @@ impl Rib {
                 self.fib_handle.bridge_del(&bridge).await;
             }
             Message::VxlanAdd { name, config } => {
-                //
+                let vxlan = Vxlan {
+                    name: name.clone(),
+                    vni: config.vni,
+                    local_addr: config.local_addr,
+                    dport: config.dport,
+                    addr_gen_mode: config.addr_gen_mode,
+                    ..Default::default()
+                };
+                self.vxlan.insert(name.clone(), vxlan.clone());
+                self.fib_handle.vxlan_add(&vxlan).await;
             }
             Message::VxlanDel { name } => {
-                //
+                let vxlan = Vxlan {
+                    name: name.clone(),
+                    ..Default::default()
+                };
+                self.vxlan.remove(&name);
+                self.fib_handle.vxlan_del(&vxlan).await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
@@ -232,6 +248,9 @@ impl Rib {
                 }
                 for (_, bridge) in self.bridges.iter() {
                     self.fib_handle.bridge_del(bridge).await;
+                }
+                for (_, vxlan) in self.vxlan.iter() {
+                    self.fib_handle.vxlan_del(vxlan).await;
                 }
                 let _ = tx.send(());
             }
@@ -315,6 +334,7 @@ impl Rib {
             }
             ConfigOp::CommitEnd => {
                 self.bridge_config.commit(self.tx.clone());
+                self.vxlan_config.commit(self.tx.clone());
                 self.link_config.commit(self.tx.clone());
                 self.static_config.commit(self.tx.clone());
                 self.mpls_config.commit(self.tx.clone());

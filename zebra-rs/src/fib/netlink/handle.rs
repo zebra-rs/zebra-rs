@@ -10,8 +10,8 @@ use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
-    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVrf, LinkAttribute, LinkFlags, LinkInfo,
-    LinkLayerType, LinkMessage,
+    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags,
+    LinkInfo, LinkLayerType, LinkMessage,
 };
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
@@ -35,7 +35,7 @@ use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
-    link,
+    Vxlan, link,
 };
 
 pub struct FibHandle {
@@ -388,6 +388,108 @@ impl FibHandle {
         msg.attributes.push(name);
 
         let kind = InfoKind::Bridge;
+        let link_kind = LinkInfo::Kind(kind);
+
+        let link_info = LinkAttribute::LinkInfo(vec![link_kind]);
+        msg.attributes.push(link_info);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("DelLink error: {}", e);
+            }
+        }
+    }
+
+    pub async fn vxlan_add(&self, vxlan: &Vxlan) {
+        // VNI.
+        let Some(vni) = vxlan.vni else {
+            return;
+        };
+
+        // First create the vxlan interface
+        let mut msg = LinkMessage::default();
+
+        let name = LinkAttribute::IfName(vxlan.name.clone());
+        msg.attributes.push(name);
+
+        // Link kind is VxLAN.
+        let kind = InfoKind::Vxlan;
+        let link_kind = LinkInfo::Kind(kind);
+
+        // VNI encode.
+        let vni = InfoVxlan::Id(vni);
+        let mut vxlan_info = vec![vni];
+
+        // Destination port.
+        if let Some(dport) = vxlan.dport {
+            let port = InfoVxlan::Port(dport);
+            vxlan_info.push(port);
+        }
+
+        // Local address.
+        if let Some(local_addr) = vxlan.local_addr {
+            let info = match local_addr {
+                IpAddr::V4(addr) => InfoVxlan::Local(addr.octets().to_vec()),
+                IpAddr::V6(addr) => InfoVxlan::Local6(addr.octets().to_vec()),
+            };
+            vxlan_info.push(info);
+        }
+        let link_info = LinkInfo::Data(InfoData::Vxlan(vxlan_info));
+        let attr = LinkAttribute::LinkInfo(vec![link_kind, link_info]);
+        msg.attributes.push(attr);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewLink vxlan error: {e}");
+                return;
+            }
+        }
+
+        // If we have addr_gen_mode, set it as a second operation
+        if let Some(addr_gen_mode) = &vxlan.addr_gen_mode {
+            self.vxlan_set_addr_gen_mode(&vxlan.name, addr_gen_mode)
+                .await;
+        }
+    }
+
+    pub async fn vxlan_set_addr_gen_mode(&self, name: &str, addr_gen_mode: &AddrGenMode) {
+        let mut msg = LinkMessage::default();
+
+        let link_name = LinkAttribute::IfName(name.to_string());
+        msg.attributes.push(link_name);
+
+        let mode =
+            LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![AfSpecInet6::AddrGenMode(
+                u8::from(addr_gen_mode.clone()),
+            )])]);
+        msg.attributes.push(mode);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("SetLink addr-gen-mode error: {e}");
+            }
+        }
+    }
+
+    pub async fn vxlan_del(&self, vxlan: &Vxlan) {
+        let mut msg = LinkMessage::default();
+
+        let name = LinkAttribute::IfName(vxlan.name.clone());
+        msg.attributes.push(name);
+
+        let kind = InfoKind::Vxlan;
         let link_kind = LinkInfo::Kind(kind);
 
         let link_info = LinkAttribute::LinkInfo(vec![link_kind]);
