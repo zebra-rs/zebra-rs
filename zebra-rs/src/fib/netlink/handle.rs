@@ -34,7 +34,8 @@ use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
 use crate::rib::{
-    Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType, link,
+    AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
+    link,
 };
 
 pub struct FibHandle {
@@ -327,21 +328,11 @@ impl FibHandle {
     }
 
     pub async fn bridge_add(&self, bridge: &Bridge) {
+        // First create the bridge interface
         let mut msg = LinkMessage::default();
 
         let name = LinkAttribute::IfName(bridge.name.clone());
         msg.attributes.push(name);
-
-        if let Some(addr_gen_mode) = &bridge.addr_gen_mode {
-            let mode = LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![
-                AfSpecInet6::AddrGenMode(u8::from(addr_gen_mode.clone())),
-            ])]);
-            msg.attributes.push(mode);
-        }
-
-        // let vrf = InfoVrf::TableId(vrf.id);
-        // let data = InfoData::Vrf(vec![vrf]);
-        // let link_data = LinkInfo::Data(data);
 
         let kind = InfoKind::Bridge;
         let link_kind = LinkInfo::Kind(kind);
@@ -350,13 +341,44 @@ impl FibHandle {
         msg.attributes.push(link_info);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-        // req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        let mut created = false;
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewLink bridge error: {e}");
+                return;
+            }
+            created = true;
+        }
+
+        // If we have addr_gen_mode, set it as a second operation
+        if created {
+            if let Some(addr_gen_mode) = &bridge.addr_gen_mode {
+                self.bridge_set_addr_gen_mode(&bridge.name, addr_gen_mode).await;
+            }
+        }
+    }
+
+    pub async fn bridge_set_addr_gen_mode(&self, name: &str, addr_gen_mode: &AddrGenMode) {
+        let mut msg = LinkMessage::default();
+
+        let link_name = LinkAttribute::IfName(name.to_string());
+        msg.attributes.push(link_name);
+
+        let mode = LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![
+            AfSpecInet6::AddrGenMode(u8::from(addr_gen_mode.clone())),
+        ])]);
+        msg.attributes.push(mode);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewLink error: {e}");
+                println!("SetLink addr-gen-mode error: {e}");
             }
         }
     }
