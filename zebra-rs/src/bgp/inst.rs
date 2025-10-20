@@ -250,14 +250,6 @@ impl Bgp {
             ));
         }
 
-        // Log which protocols are bound
-        // match (ipv4_bound, ipv6_bound) {
-        //     (true, true) => println!("BGP dual-stack: listening on both IPv4 and IPv6"),
-        //     (true, false) => println!("BGP IPv4-only: listening on 0.0.0.0:179"),
-        //     (false, true) => println!("BGP IPv6-only: listening on [::]:179"),
-        //     (false, false) => unreachable!(),
-        // }
-
         Ok(())
     }
 
