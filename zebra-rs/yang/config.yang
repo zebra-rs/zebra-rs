@@ -60,7 +60,7 @@ module config {
     }
 
     list vxlan {
-      ext:sort "5";
+      ext:sort "15";
       key "name";
       leaf name {
         type string;
@@ -602,6 +602,7 @@ module config {
       }
     }
     list interface {
+      ext:sort "20";
       key "if-name";
       leaf if-name {
         type string;
