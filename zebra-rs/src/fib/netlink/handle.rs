@@ -344,20 +344,17 @@ impl FibHandle {
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
         let mut response = self.handle.clone().request(req).unwrap();
-        let mut created = false;
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("NewLink bridge error: {e}");
                 return;
             }
-            created = true;
         }
 
         // If we have addr_gen_mode, set it as a second operation
-        if created {
-            if let Some(addr_gen_mode) = &bridge.addr_gen_mode {
-                self.bridge_set_addr_gen_mode(&bridge.name, addr_gen_mode).await;
-            }
+        if let Some(addr_gen_mode) = &bridge.addr_gen_mode {
+            self.bridge_set_addr_gen_mode(&bridge.name, addr_gen_mode)
+                .await;
         }
     }
 
@@ -367,9 +364,10 @@ impl FibHandle {
         let link_name = LinkAttribute::IfName(name.to_string());
         msg.attributes.push(link_name);
 
-        let mode = LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![
-            AfSpecInet6::AddrGenMode(u8::from(addr_gen_mode.clone())),
-        ])]);
+        let mode =
+            LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![AfSpecInet6::AddrGenMode(
+                u8::from(addr_gen_mode.clone()),
+            )])]);
         msg.attributes.push(mode);
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
