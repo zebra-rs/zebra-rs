@@ -104,6 +104,7 @@ pub struct Rib {
     pub fib_handle: FibHandle,
     pub redists: Vec<UnboundedSender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
+    pub bridges: BTreeMap<String, Bridge>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
@@ -131,6 +132,7 @@ impl Rib {
             fib_handle,
             redists: Vec::new(),
             links: BTreeMap::new(),
+            bridges: BTreeMap::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
@@ -191,17 +193,19 @@ impl Rib {
             }
             Message::BridgeAdd { name, config } => {
                 let bridge = Bridge {
-                    name,
+                    name: name.clone(),
                     addr_gen_mode: config.addr_gen_mode,
                     ..Default::default()
                 };
+                self.bridges.insert(name.clone(), bridge.clone());
                 self.fib_handle.bridge_add(&bridge).await;
             }
             Message::BridgeDel { name } => {
                 let bridge = Bridge {
-                    name,
+                    name: name.clone(),
                     ..Default::default()
                 };
+                self.bridges.remove(&name);
                 self.fib_handle.bridge_del(&bridge).await;
             }
             Message::Shutdown { tx } => {
@@ -210,6 +214,9 @@ impl Rib {
 
                 for ((&label, ilm)) in ilms.iter() {
                     self.ilm_del(label, ilm.clone()).await;
+                }
+                for (_, bridge) in self.bridges.iter() {
+                    self.fib_handle.bridge_del(bridge).await;
                 }
                 let _ = tx.send(());
             }
@@ -222,13 +229,9 @@ impl Rib {
                 self.link_down(ifindex).await;
             }
             Message::Resolve => {
-                // self.ipv4_route_resolve(false).await;
                 self.ipv6_route_resolve().await;
             }
             Message::Subscribe { tx, proto } => {
-                // for (_, link) in self.links.iter() {
-                //     tx.send(RibRx::LinkAdd(link.clone())).unwrap();
-                // }
                 self.subscribe(tx, proto);
             }
         }
@@ -251,29 +254,15 @@ impl Rib {
                 self.link_delete(link);
             }
             FibMessage::NewAddr(addr) => {
-                // println!(
-                //     "Rib::AddrAdd {} {}",
-                //     addr.addr,
-                //     self.ifname(addr.link_index)
-                // );
                 self.addr_add(addr);
-
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
-                // println!(
-                //     "Rib::AddrDel {} {}",
-                //     addr.addr,
-                //     self.ifname(addr.link_index)
-                // );
                 self.addr_del(addr);
-
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {

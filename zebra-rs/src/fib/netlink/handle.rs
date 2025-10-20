@@ -397,7 +397,6 @@ impl FibHandle {
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
 
         let mut response = self.handle.clone().request(req).unwrap();
-        println!("XXX DelLink");
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("DelLink error: {}", e);
