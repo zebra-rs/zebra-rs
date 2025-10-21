@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 

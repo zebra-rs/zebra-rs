@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use ipnet::Ipv4Net;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
-use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
 use crate::rib::{Message, RibType};
 

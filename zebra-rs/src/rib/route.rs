@@ -25,13 +25,9 @@ impl Rib {
         for addr4 in link.addr4.iter() {
             if let IpNet::V4(addr) = addr4.addr {
                 let prefix = addr.apply_mask();
-                // println!("Connected: {:?} down - removing from RIB", prefix);
                 let mut rib = RibEntry::new(RibType::Connected);
                 rib.ifindex = ifindex;
-                // let msg = Message::Ipv4Del { prefix, rib };
-                // let _ = self.tx.send(msg);
-                println!("Deleting Connected Prefix {prefix}");
-                let mut replace = rib_replace_system(&mut self.table, &prefix, rib);
+                let _ = rib_replace_system(&mut self.table, &prefix, rib);
             }
         }
         // Remove connected IPv6 route.
@@ -111,7 +107,7 @@ impl Rib {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        println!("LinkUp {} ipv4 addr count {}", link.name, link.addr4.len());
+        // println!("LinkUp {} ipv4 addr count {}", link.name, link.addr4.len());
 
         // Add connected IPv4 routes when link comes up
         for addr4 in link.addr4.iter() {

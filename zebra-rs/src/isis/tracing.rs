@@ -432,9 +432,3 @@ macro_rules! isis_sr_adjacency_trace {
         }
     };
 }
-
-// Re-export the macros for easier use within the isis module
-pub use {
-    isis_database_trace, isis_debug, isis_error, isis_event_trace, isis_fsm_trace, isis_info,
-    isis_packet_trace, isis_sr_adjacency_trace, isis_sr_prefix_trace, isis_trace, isis_warn,
-};

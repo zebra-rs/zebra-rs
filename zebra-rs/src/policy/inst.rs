@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::IpAddr,
+};
 
 use anyhow::{Error, Result};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -11,10 +14,24 @@ use super::{PolicyConfig, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PolicyType {
+    PrefixSetIn,
+    PrefixSetOut,
+    PolicyListIn,
+    PolicyListOut,
+}
+
 pub enum Message {
     Subscribe {
         proto: String,
         tx: UnboundedSender<PolicyRx>,
+    },
+    Register {
+        proto: String,
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
     },
 }
 
@@ -22,22 +39,14 @@ pub struct Subscription {
     pub tx: UnboundedSender<PolicyRx>,
 }
 
-// Message from protocol module to policy.
-pub enum PolicyTx {
-    Subscribe(Subscription),
-    // Register { prefix: IpNet, entry: PolicyEntry },
-    // Unregister { prefix: IpNet, entry: PolicyEntry },
-}
-
 // Message from rib to protocol module.
 #[derive(Debug, PartialEq)]
 pub enum PolicyRx {
-    // LinkAdd(Link),
-    // LinkDel(Link),
-    // AddrAdd(LinkAddr),
-    // AddrDel(LinkAddr),
-    // RouterIdUpdate(Ipv4Addr),
-    EoR,
+    Policy {
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
+    },
 }
 
 #[allow(dead_code)]
@@ -61,6 +70,7 @@ pub struct Policy {
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
     pub prefix_set: PrefixSetConfig,
+    pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
 }
 
 impl Policy {
@@ -74,9 +84,27 @@ impl Policy {
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
             prefix_set: PrefixSetConfig::new(),
+            clients: BTreeMap::new(),
         };
         policy.show_build();
         policy
+    }
+
+    async fn process_msg(&mut self, msg: Message) {
+        match msg {
+            Message::Subscribe { proto, tx } => {
+                println!("Policy: register {}", proto);
+                self.clients.insert(proto, tx);
+            }
+            Message::Register {
+                proto,
+                name,
+                ident,
+                policy_type,
+            } => {
+                //
+            }
+        }
     }
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -111,6 +139,9 @@ impl Policy {
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_msg(msg).await;
+                }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg).await;
                 }

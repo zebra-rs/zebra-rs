@@ -6,7 +6,7 @@ use prefix_trie::PrefixMap;
 
 use super::OspfLink;
 use super::area::OspfAreaMap;
-use super::{Ospf, addr::OspfAddr, area::OspfArea};
+use super::{Ospf, addr::OspfAddr};
 
 use crate::config::{Args, ConfigOp};
 use crate::ospf::Message;

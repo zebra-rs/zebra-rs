@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::CapMultiProtocol;
-use bgp_packet::{Afi, Attr, BgpType, Safi};
+use bgp_packet::{Afi, BgpType, Safi};
 use serde::Serialize;
-use serde_json::json;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};

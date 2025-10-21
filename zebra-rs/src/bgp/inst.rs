@@ -1,5 +1,5 @@
 use super::peer::{Event, Peer, fsm};
-use super::route::{BgpLocalRibOrig, BgpRoute, LocalRib, Route};
+use super::route::{BgpLocalRibOrig, LocalRib};
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
 use crate::config::{
@@ -9,9 +9,7 @@ use crate::context::Task;
 use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
 use crate::rib;
-use crate::rib::api::{RibRx, RibRxChannel, RibTx};
-use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
+use crate::rib::api::{RibRx, RibRxChannel};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

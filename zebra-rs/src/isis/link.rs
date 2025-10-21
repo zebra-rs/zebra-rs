@@ -2,27 +2,21 @@ use serde::Serialize;
 use socket2::Socket;
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, IterMut};
-use std::default;
 use std::fmt::Write;
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use isis_packet::{
-    IsLevel, IsisHello, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlvAreaAddr,
-    IsisTlvIpv4IfAddr, IsisTlvIsNeighbor, IsisTlvProtoSupported, IsisType, SidLabelValue,
-};
+use isis_packet::*;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::{isis_event_trace, isis_info, isis_warn};
+use crate::{isis_event_trace, isis_warn};
 
 use crate::config::{Args, ConfigOp};
-use crate::context::{Timer, TimerType};
-use crate::isis::nfsm::NfsmState;
+use crate::context::Timer;
 use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlags, MacAddr};
 
-use super::addr::IsisAddr;
 use super::config::IsisConfig;
 use super::ifsm::has_level;
 use super::inst::PacketMessage;

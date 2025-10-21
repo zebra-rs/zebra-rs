@@ -1,24 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
-use bgp_packet::{
-    AS_SEQ, Afi, AfiSafi, Aggregator, As4Path, As4Segment, AtomicAggregate, Attr, CapMultiProtocol,
-    ClusterList, Community, ExtCommunity, Ipv4Nlri, LargeCommunity, LocalPref, Med, NexthopAttr,
-    Origin, OriginatorId, PmsiTunnel, Safi, UpdatePacket, Vpnv4Net, Vpnv4Nexthop,
-};
+use bgp_packet::*;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use std::collections::VecDeque;
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::Bgp;
 use super::peer::{ConfigRef, Peer, PeerType};
-use crate::rib;
-use crate::rib::{Nexthop, NexthopUni, RibSubType, RibType, api::RibTx, entry::RibEntry};
-use ipnet::IpNet;
-use tokio::sync::mpsc::UnboundedSender;
+use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry};
 
 /// Enhanced BGP route structure for proper path selection
 #[derive(Clone, Debug)]

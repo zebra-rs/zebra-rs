@@ -2,8 +2,6 @@ use std::fmt::Display;
 
 use rand::Rng;
 
-use crate::ospf::packet::ospf_db_desc_send;
-
 use super::{Identity, IfsmEvent, Message, Neighbor, Timer, TimerType};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]

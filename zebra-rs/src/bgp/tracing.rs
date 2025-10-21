@@ -53,6 +53,3 @@ macro_rules! bgp_trace {
         tracing::trace!(proto = "bgp", $($arg)*)
     };
 }
-
-// Re-export the macros for easier use within the bgp module
-pub use {bgp_debug, bgp_debug_cat, bgp_error, bgp_info, bgp_trace, bgp_warn};

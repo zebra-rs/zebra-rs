@@ -1,12 +1,12 @@
 use std::fmt::Write;
 
-use isis_packet::{IsisHello, IsisTlv, IsisTlvProtoSupported, nlpid_str};
+use isis_packet::*;
 use serde::Serialize;
 
-use super::{Isis, inst::ShowCallback, neigh::Neighbor};
+use super::{Isis, inst::ShowCallback};
 
+use crate::config::Args;
 use crate::isis::{Level, hostname, link, neigh};
-use crate::{config::Args, rib::MacAddr};
 // use spf_rs as spf;
 use crate::spf;
 
@@ -540,5 +540,5 @@ fn show_isis_spf(
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok((String::new()))
+    Ok(String::new())
 }

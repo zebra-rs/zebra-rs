@@ -2,7 +2,6 @@ use std::io::{ErrorKind, IoSlice, IoSliceMut};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
-use anyhow::Context;
 use bytes::BytesMut;
 use nix::sys::socket::{self, LinkAddr};
 use socket2::Socket;
