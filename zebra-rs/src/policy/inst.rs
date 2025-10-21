@@ -10,7 +10,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixSetConfig};
+use super::{PolicyConfig, PrefixSet, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
@@ -71,6 +71,18 @@ pub struct Policy {
     pub policy_config: PolicyConfig,
     pub prefix_set: PrefixSetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
+    pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
+    pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
+}
+
+pub enum PolicyEntity {
+    PrefixSet(PrefixSet),
+}
+
+pub struct PolicyWatch {
+    pub proto: String,
+    pub ident: IpAddr,
+    pub policy_type: PolicyType,
 }
 
 impl Policy {
@@ -85,6 +97,8 @@ impl Policy {
             policy_config: PolicyConfig::new(),
             prefix_set: PrefixSetConfig::new(),
             clients: BTreeMap::new(),
+            watch_prefix: BTreeMap::new(),
+            watch_policy: BTreeMap::new(),
         };
         policy.show_build();
         policy
@@ -102,7 +116,25 @@ impl Policy {
                 ident,
                 policy_type,
             } => {
-                //
+                match policy_type {
+                    PolicyType::PrefixSetIn => {
+                        let watch = PolicyWatch {
+                            proto,
+                            ident,
+                            policy_type,
+                        };
+                        self.watch_prefix.entry(name).or_insert_with(Vec::new).push(watch);
+                    }
+                    PolicyType::PrefixSetOut => {
+                        //
+                    }
+                    PolicyType::PolicyListIn => {
+                        //
+                    }
+                    PolicyType::PolicyListOut => {
+                        //
+                    }
+                }
             }
         }
     }
