@@ -297,7 +297,7 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
 
 #[cfg(test)]
 mod tests {
-    use crate::policy::PrefixSet;
+    use crate::policy::{PrefixSet, PrefixSetEntry};
 
     use super::*;
 
@@ -309,10 +309,9 @@ mod tests {
         // Create a prefix-set named "pset" with prefix 1.1.1.1/32
         let mut prefix_set = PrefixSet::default();
         let prefix = Ipv4Net::from_str("1.1.1.1/32").unwrap();
-        prefix_set.entry.insert(
-            prefix.into(),
-            super::super::prefix_set::PrefixSetEntry::default(),
-        );
+        prefix_set
+            .prefixes
+            .insert(prefix.into(), PrefixSetEntry::default());
 
         // Create a policy-list with entry that matches "pset" and has action accept (permit)
         let mut plist = PolicyList::default();
@@ -335,8 +334,8 @@ mod tests {
         }
 
         // Verify prefix-set contains the correct prefix
-        assert_eq!(prefix_set.entry.len(), 1);
-        assert!(prefix_set.entry.contains_key(&prefix.into()));
+        assert_eq!(prefix_set.prefixes.len(), 1);
+        assert!(prefix_set.prefixes.contains_key(&prefix.into()));
 
         // Note: Default deny behavior is implicit - if no entry matches,
         // the policy should deny by default (this would be implemented

@@ -601,11 +601,11 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    // let msg = MsgSend {
-                    //     method: String::from("segment-routing:update"),
-                    //     data: self.segment_routing_update_global(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);

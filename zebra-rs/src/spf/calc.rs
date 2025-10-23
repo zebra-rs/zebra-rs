@@ -415,6 +415,26 @@ pub fn disp(spf: &BTreeMap<usize, Path>, full_path: bool) {
     }
 }
 
+use std::fmt::Write;
+
+pub fn disp_out(buf: &mut String, spf: &BTreeMap<usize, Path>, full_path: bool) {
+    if full_path {
+        for (node, path) in spf {
+            writeln!(buf, "node: {} nexthops: {}", node, path.paths.len());
+            for p in &path.paths {
+                writeln!(buf, "  metric {} path {:?}", path.cost, p);
+            }
+        }
+    } else {
+        for (node, nhops) in spf {
+            writeln!(buf, "node: {} nexthops: {}", node, nhops.nexthops.len());
+            for p in &nhops.nexthops {
+                writeln!(buf, "  metric {} path {:?}", nhops.cost, p);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

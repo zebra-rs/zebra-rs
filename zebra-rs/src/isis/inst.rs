@@ -64,6 +64,7 @@ pub struct Isis {
     pub global_pool: Option<LabelPool>,
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
+    pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
 }
 
 pub struct IsisTop<'a> {
@@ -79,9 +80,10 @@ pub struct IsisTop<'a> {
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
-    pub spf: &'a mut Levels<Option<Timer>>,
+    pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub local_pool: &'a mut Option<LabelPool>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
+    pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
 }
 
 pub struct NeighborTop<'a> {
@@ -127,6 +129,7 @@ impl Isis {
             global_pool: None,
             local_pool: Some(LabelPool::new(15000, Some(16000))),
             graph: Levels::<Option<spf::Graph>>::default(),
+            spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
         };
         isis.callback_build();
         isis.show_build();
@@ -471,9 +474,10 @@ impl Isis {
             ilm: &mut self.ilm,
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
-            spf: &mut self.spf,
+            spf_timer: &mut self.spf,
             local_pool: &mut self.local_pool,
             graph: &mut self.graph,
+            spf_result: &mut self.spf_result,
         };
         top
     }
@@ -862,8 +866,8 @@ pub fn spf_timer(top: &mut IsisTop, level: Level) -> Timer {
 }
 
 pub fn spf_schedule(top: &mut IsisTop, level: Level) {
-    if top.spf.get(&level).is_none() {
-        *top.spf.get_mut(&level) = Some(spf_timer(top, level));
+    if top.spf_timer.get(&level).is_none() {
+        *top.spf_timer.get_mut(&level) = Some(spf_timer(top, level));
     }
 }
 
@@ -1005,28 +1009,39 @@ fn process_neighbor_link(
 ) {
     let neighbor_lsp_id: IsisLspId = entry.neighbor_id.clone().into();
 
-    // Look up the neighbor's LSP
     if let Some(neighbor_lsa) = top.lsdb.get(&level).get(&neighbor_lsp_id) {
-        // Check the neighbor's links back to us
-        for tlv in &neighbor_lsa.lsp.tlvs {
-            if let IsisTlv::ExtIsReach(ext_reach) = tlv {
-                for neighbor_entry in &ext_reach.entries {
-                    // Skip if this is a link back to ourselves
-                    if neighbor_entry.neighbor_id.sys_id() == *from_sys_id {
-                        continue;
+        // Look up the neighbor's LSP
+        if neighbor_lsp_id.is_pseudo() {
+            // Check the neighbor's links back to us
+            for tlv in &neighbor_lsa.lsp.tlvs {
+                if let IsisTlv::ExtIsReach(ext_reach) = tlv {
+                    for neighbor_entry in &ext_reach.entries {
+                        // Skip if this is a link back to ourselves
+                        if neighbor_entry.neighbor_id.sys_id() == *from_sys_id {
+                            continue;
+                        }
+
+                        // Create link to this destination
+                        let to_sys_id = neighbor_entry.neighbor_id.sys_id();
+                        let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+
+                        links.push(spf::Link {
+                            from: from_id,
+                            to: to_id,
+                            cost: entry.metric + neighbor_entry.metric,
+                        });
                     }
-
-                    // Create link to this destination
-                    let to_sys_id = neighbor_entry.neighbor_id.sys_id();
-                    let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
-
-                    links.push(spf::Link {
-                        from: from_id,
-                        to: to_id,
-                        cost: entry.metric + neighbor_entry.metric,
-                    });
                 }
             }
+        } else {
+            let to_sys_id = neighbor_lsp_id.sys_id();
+            let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+
+            links.push(spf::Link {
+                from: from_id,
+                to: to_id,
+                cost: entry.metric,
+            });
         }
     }
 }
@@ -1510,7 +1525,7 @@ fn apply_routing_updates(
 /// Perform SPF calculation and update routing tables
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // Clear SPF timer
-    *top.spf.get_mut(&level) = None;
+    *top.spf_timer.get_mut(&level) = None;
 
     // Build graph and get source node
     let (graph, source_node, adjacency_sids) = graph(top, level);
@@ -1523,11 +1538,12 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         // Run SPF algorithm
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
 
-        // Debug print.
-        // spf::disp(&spf_result, false);
-
         // Build RIB from SPF results
         let rib = build_rib_from_spf(top, level, source, &spf_result);
+
+        // Store SPF result in the instance.
+        // spf::disp(&spf_result, false);
+        *top.spf_result.get_mut(&level) = Some(spf_result);
 
         // Add MPLS routes to ILM
         mpls_route(&rib, &mut ilm);

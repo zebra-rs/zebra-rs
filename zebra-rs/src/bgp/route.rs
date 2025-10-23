@@ -830,6 +830,8 @@ pub struct BgpRib {
     pub attr: BgpAttr,
     // Peer ID.
     pub ident: IpAddr,
+    // Peer router id.
+    pub router_id: Ipv4Addr,
     // Weight
     pub weight: u32,
     // Route type.
@@ -839,11 +841,19 @@ pub struct BgpRib {
 }
 
 impl BgpRib {
-    pub fn new(ident: IpAddr, typ: RouteType, id: u32, weight: u32, attr: &BgpAttr) -> Self {
+    pub fn new(
+        ident: IpAddr,
+        router_id: Ipv4Addr,
+        typ: RouteType,
+        id: u32,
+        weight: u32,
+        attr: &BgpAttr,
+    ) -> Self {
         BgpRib {
             id,
-            attr: attr.clone(),
             ident,
+            router_id,
+            attr: attr.clone(),
             weight,
             typ,
             best_path: false,
@@ -1070,23 +1080,14 @@ pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: 
     } else {
         RouteType::EBGP
     };
-    let rib = BgpRib::new(peer.ident, typ, nlri.id, 0, attr);
+    let rib = BgpRib::new(peer.ident, peer.router_id, typ, nlri.id, 0, attr);
 
     let (replaced, selected) = bgp.lrib.update_route(nlri.prefix, rib);
     if replaced.is_empty() {
         peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
     }
-    // if let Some(new_best) = bgp.lrib.update_route(nlri.prefix, rib) {
-    // 3. Install new best path into main RIB
-    // if let Err(e) = send_route_to_rib(&new_best, bgp.rib_tx, true) {
-    //     // eprintln!("Failed to install BGP route {} to RIB: {}", ipv4.prefix, e);
-    // } else {
-    //     // println!(
-    //     //     "Installed new best path for {}: {:?}",
-    //     //     ipv4, new_best.peer_addr
-    //     // );
-    // }
-    // }
+
+    // XXX
 }
 
 pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef) {
@@ -1376,8 +1377,16 @@ impl Bgp {
     pub fn route_add(&mut self, prefix: Ipv4Net) {
         let ident = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         let attr = BgpAttr::new();
-        let rib = BgpRib::new(ident, RouteType::Origin, 0, 32768, &attr);
-        let replaced = self.lrib.update_route(prefix, rib);
+        let rib = BgpRib::new(
+            ident,
+            Ipv4Addr::UNSPECIFIED,
+            RouteType::Origin,
+            0,
+            32768,
+            &attr,
+        );
+        let (replaced, selected) = self.lrib.update_route(prefix, rib);
+        // XXX
     }
 
     pub fn route_del(&mut self, prefix: Ipv4Net) {
