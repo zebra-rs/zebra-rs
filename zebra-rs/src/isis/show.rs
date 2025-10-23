@@ -540,5 +540,15 @@ fn show_isis_spf(
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok(String::new())
+    let mut buf = String::new();
+
+    if let Some(spf) = isis.spf_result.get(&Level::L1) {
+        writeln!(buf, "L1 SPF");
+        spf::disp_out(&mut buf, spf, false);
+    }
+    if let Some(spf) = isis.spf_result.get(&Level::L2) {
+        writeln!(buf, "L2 SPF");
+        spf::disp_out(&mut buf, spf, false);
+    }
+    Ok(buf)
 }
