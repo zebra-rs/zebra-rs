@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsisHello, IsisSysId, nlpid_str};
+use isis_packet::{IsisHello, IsisProto, IsisSysId};
+use itertools::Itertools;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -188,21 +189,17 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         top.ifname(nbr.ifindex),
         nbr.level,
         nbr.state.to_string(),
-    )
-    .unwrap();
+    )?;
 
     write!(buf, "    Circuit type: {}, Speaks:", nbr.pdu.circuit_type,)?;
-
     if let Some(proto) = &nbr.pdu.proto_tlv() {
-        for (i, nlpid) in proto.nlpids.iter().enumerate() {
-            if i != 0 {
-                write!(buf, ", {}", nlpid_str(*nlpid))?;
-            } else {
-                write!(buf, " {}", nlpid_str(*nlpid))?;
-            }
-        }
         if !proto.nlpids.is_empty() {
-            writeln!(buf, "")?;
+            let protocols = proto
+                .nlpids
+                .iter()
+                .map(|&nlpid| IsisProto::from(nlpid))
+                .join(", ");
+            writeln!(buf, " {}", protocols)?;
         }
     }
 
@@ -211,8 +208,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         "    SNPA: {}, LAN id: {}",
         show_mac(nbr.mac),
         nbr.pdu.lan_id
-    )
-    .unwrap();
+    )?;
 
     let dis = if nbr.is_dis() { "is DIS" } else { "is not DIS" };
 
@@ -257,7 +253,7 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         proto
             .nlpids
             .iter()
-            .map(|nlpid| nlpid_str(*nlpid).to_string())
+            .map(|&nlpid| IsisProto::from(nlpid).to_string())
             .collect()
     } else {
         Vec::new()
