@@ -28,6 +28,7 @@ impl Default for OspfNetworkConfig {
 
 impl Ospf {
     pub fn callback_build(&mut self) {
+        self.callback_add("/routing/ospf/router-id", config_ospf_router_id);
         self.callback_add("/routing/ospf/network/area", config_ospf_network);
     }
 }
@@ -90,4 +91,10 @@ fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<
     config_ospf_network_apply(&mut ospf.links, &ospf.table, &mut ospf.areas);
 
     Some(())
+}
+
+fn config_ospf_router_id(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let router_id = args.v4addr()?;
+    println!("XXX OSPF router_id {}", router_id);
+    None
 }

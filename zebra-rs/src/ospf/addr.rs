@@ -2,7 +2,7 @@ use ipnet::Ipv4Net;
 
 use crate::rib::link::LinkAddr;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct OspfAddr {
     pub prefix: Ipv4Net,
     pub ifindex: u32,

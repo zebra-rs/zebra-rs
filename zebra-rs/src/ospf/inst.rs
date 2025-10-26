@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net};
-use ospf_packet::{OspfType, Ospfv2Packet};
+use ospf_packet::*;
 use prefix_trie::PrefixMap;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -145,7 +145,26 @@ impl Ospf {
 
     pub fn router_lsa_originate(&mut self) {
         if let Some(area) = self.areas.get_mut(Ipv4Addr::UNSPECIFIED) {
-            //let lsa = router_lsa(area);
+            println!(
+                "Found default area for self originated router_id {}",
+                self.router_id
+            );
+
+            let lsa_header = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
+
+            let mut router_lsa = RouterLsa::default();
+
+            for (_, link) in self.links.iter() {
+                if !link.enabled {
+                    continue;
+                }
+                for addr in link.addr.iter() {
+                    println!("Addr {}", addr.prefix);
+                    let lsa_link = RouterLsaLink::new(addr.prefix, 10);
+                    router_lsa.links.push(lsa_link);
+                }
+            }
+            router_lsa.num_links = router_lsa.links.len() as u16;
             //area.lsdb.insert(lsa);
         }
     }
@@ -239,6 +258,7 @@ impl Ospf {
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
                 println!("Enabling ifindex:{} area_id:{}", ifindex, area_id);
+                self.router_lsa_originate();
                 self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
             Message::Disable(ifindex, area_id) => {
@@ -249,6 +269,7 @@ impl Ospf {
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
                 println!("Disabling ifindex:{} area_id:{}", ifindex, area_id);
+                self.router_lsa_originate();
                 self.tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
             }

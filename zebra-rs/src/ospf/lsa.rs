@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use ospf_packet::{OspfLsRequestEntry, OspfLsType, OspfLsa, OspfLsaHeader, RouterLsa};
+use ospf_packet::*;
 
 use super::area::OspfArea;
 
