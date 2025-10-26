@@ -99,6 +99,7 @@ fn show_ospf_neighbor_detail(ospf: &Ospf, _args: Args, _json: bool) -> String {
     buf
 }
 
-fn show_ospf_database(_ospf: &Ospf, _args: Args, _json: bool) -> String {
+fn show_ospf_database(ospf: &Ospf, _args: Args, _json: bool) -> String {
     String::from("show ospf database")
+    // let table = ospf.lsdb.get()
 }
