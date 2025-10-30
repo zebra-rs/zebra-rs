@@ -15,12 +15,12 @@ use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry
 
 /// BGP Adj-RIB-In - stores routes received from a specific peer before policy application
 #[derive(Debug, Default)]
-pub struct AdjRibIn {
+pub struct AdjRib {
     /// Routes received from peer (before policy application)
     pub routes: PrefixMap<Ipv4Net, Vec<BgpRib>>,
 }
 
-impl AdjRibIn {
+impl AdjRib {
     pub fn new() -> Self {
         Self {
             routes: PrefixMap::new(),
@@ -80,58 +80,6 @@ impl AdjRibIn {
     //     self.routes.clear();
     //     removed_routes
     // }
-}
-
-/// BGP Adj-RIB-Out - stores routes to be advertised to a specific peer after policy application
-#[derive(Debug, Default)]
-pub struct AdjRibOut {
-    /// Routes to be advertised to peer (after policy application)
-    pub routes: PrefixMap<Ipv4Net, BgpRib>,
-}
-
-impl AdjRibOut {
-    pub fn new() -> Self {
-        Self {
-            routes: PrefixMap::new(),
-        }
-    }
-
-    // Add a route to Adj-RIB-Out
-    // pub fn add_route(&mut self, route: BgpRib) -> Option<BgpRib> {
-    //     self.routes.insert(route.prefix.prefix, route)
-    // }
-
-    // // Remove a route from Adj-RIB-Out
-    // pub fn remove_route(&mut self, prefix: Ipv4Net) -> Option<BgpRib> {
-    //     self.routes.remove(&prefix)
-    // }
-
-    // // Get all routes to be advertised
-    // pub fn get_routes(&self) -> impl Iterator<Item = (&Ipv4Net, &BgpRib)> {
-    //     self.routes.iter()
-    // }
-
-    // // Get route count
-    // pub fn route_count(&self) -> usize {
-    //     self.routes.len()
-    // }
-
-    // // Clear all routes from Adj-RIB-Out (used when peer session goes down)
-    // pub fn clear_all_routes(&mut self) -> Vec<BgpRib> {
-    //     let removed_routes: Vec<BgpRib> =
-    //         self.routes.iter().map(|(_, route)| route.clone()).collect();
-    //     self.routes.clear();
-    //     removed_routes
-    // }
-}
-
-/// BGP Local RIB (Loc-RIB) - stores best paths selected from all Adj-RIB-In
-#[derive(Debug, Default)]
-pub struct BgpLocalRibOrig {
-    /// Best path routes per prefix
-    pub routes: PrefixMap<Ipv4Net, BgpRib>,
-    /// All candidate routes per prefix (for show commands)
-    pub entries: PrefixMap<Ipv4Net, Vec<BgpRib>>,
 }
 
 // impl BgpLocalRibOrig {
@@ -850,8 +798,9 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
 pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
     // IPv4 Unicast.
     bgp.local_rib.remove_peer_routes(peer.ident);
-    // IPv4 Unicast AdjIn.
+    // IPv4 Unicast AdjIn/AdjOut.
     peer.adj_rib_in.routes.clear();
+    peer.adj_rib_out.routes.clear();
 }
 
 pub fn route_update_ipv4(
@@ -1135,7 +1084,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         .collect();
 
     // Advertise all best paths to the peer
-    for (prefix, rib) in routes {
+    for (prefix, mut rib) in routes {
         let Some((nlri, attr)) = route_update_ipv4_rib(peer, &prefix, &rib, bgp) else {
             continue;
         };
@@ -1144,6 +1093,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             continue;
         };
 
+        // Register to AdjOut.
+        rib.attr = attr.clone();
+        peer.adj_rib_out.add_route(nlri.prefix, rib);
+
+        // Send the routes.
         route_send_ipv4(peer, nlri, attr);
     }
 

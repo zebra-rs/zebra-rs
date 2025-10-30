@@ -240,41 +240,21 @@ fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, st
     show_bgp_route(bgp, json)
 }
 
-fn show_bgp_advertised(
-    bgp: &Bgp,
-    args: Args,
+// Common helper function for displaying Adj-RIB routes
+fn show_adj_rib_routes(
+    routes: &prefix_trie::PrefixMap<ipnet::Ipv4Net, Vec<crate::bgp::route::BgpRib>>,
+    router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    // show_bgp_advertised(bgp, json)
-    Ok(String::from("advertised"))
-}
-
-fn show_bgp_received(
-    bgp: &Bgp,
-    mut args: Args,
-    json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
-    // Lookup peer from args
-    let addr = match args.addr() {
-        Some(addr) => addr,
-        None => return Ok(String::from("% No neighbor address specified")),
-    };
-
-    let peer = match bgp.peers.get(&addr) {
-        Some(peer) => peer,
-        None => return Ok(format!("% No such neighbor: {}", addr)),
-    };
-
-    // Display Adj-RIB-In routes (received routes before policy application)
     if json {
-        let mut routes: Vec<BgpRouteJson> = Vec::new();
+        let mut route_list: Vec<BgpRouteJson> = Vec::new();
 
-        for (key, value) in peer.adj_rib_in.routes.iter() {
+        for (key, value) in routes.iter() {
             for rib in value.iter() {
                 let aspath_str = show_aspath(&rib.attr);
                 let origin_str = show_origin(&rib.attr);
 
-                routes.push(BgpRouteJson {
+                route_list.push(BgpRouteJson {
                     prefix: key.to_string(),
                     valid: true,
                     best: rib.best_path,
@@ -302,7 +282,7 @@ fn show_bgp_received(
             }
         }
 
-        return Ok(serde_json::to_string_pretty(&routes)
+        return Ok(serde_json::to_string_pretty(&route_list)
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
     }
 
@@ -310,7 +290,7 @@ fn show_bgp_received(
     writeln!(
         buf,
         "BGP table version is 0, local router ID is {}",
-        bgp.router_id
+        router_id
     )?;
     writeln!(
         buf,
@@ -327,7 +307,7 @@ fn show_bgp_received(
         "   Network          Next Hop            Metric LocPrf Weight Path"
     )?;
 
-    for (key, value) in peer.adj_rib_in.routes.iter() {
+    for (key, value) in routes.iter() {
         for rib in value.iter() {
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
@@ -360,13 +340,49 @@ fn show_bgp_received(
     }
 
     writeln!(buf)?;
-    writeln!(
-        buf,
-        "Total number of prefixes {}",
-        peer.adj_rib_in.routes.len()
-    )?;
+    writeln!(buf, "Total number of prefixes {}", routes.len())?;
 
     Ok(buf)
+}
+
+fn show_bgp_advertised(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    // Lookup peer from args
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    // Display Adj-RIB-Out routes (routes to be advertised after policy application)
+    show_adj_rib_routes(&peer.adj_rib_out.routes, bgp.router_id, json)
+}
+
+fn show_bgp_received(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    // Lookup peer from args
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    // Display Adj-RIB-In routes (received routes before policy application)
+    show_adj_rib_routes(&peer.adj_rib_in.routes, bgp.router_id, json)
 }
 
 fn show_bgp_summary(
@@ -718,7 +734,7 @@ impl Bgp {
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary);
-        self.show_add("/show/ip/bgp/neighbor", show_bgp_neighbor);
+        self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor);
         self.show_add("/show/ip/bgp/neighbors/address", show_bgp_neighbor);
         self.show_add(
             "/show/ip/bgp/neighbors/address/advertised-routes",

@@ -27,7 +27,7 @@ use crate::config::Args;
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
 use super::route::route_from_peer;
-use super::route::{AdjRibIn, AdjRibOut, BgpLocalRibOrig, LocalRib};
+use super::route::{AdjRib, LocalRib};
 use super::{BGP_PORT, PrefixSetValue};
 use super::{Bgp, InOuts};
 use crate::context::task::*;
@@ -234,8 +234,8 @@ pub struct Peer {
     pub config: PeerConfig,
     pub instant: Option<Instant>,
     pub cap_map: CapAfiMap,
-    pub adj_rib_in: AdjRibIn,
-    pub adj_rib_out: AdjRibOut,
+    pub adj_rib_in: AdjRib,
+    pub adj_rib_out: AdjRib,
     pub opt: ParseOption,
     pub policy_in: Option<String>,
     pub policy_out: Option<String>,
@@ -275,8 +275,8 @@ impl Peer {
             packet_tx: None,
             instant: None,
             cap_map: CapAfiMap::new(),
-            adj_rib_in: AdjRibIn::new(),
-            adj_rib_out: AdjRibOut::new(),
+            adj_rib_in: AdjRib::new(),
+            adj_rib_out: AdjRib::new(),
             opt: ParseOption::default(),
             policy_out: None,
             policy_in: None,

@@ -1,5 +1,5 @@
 use super::peer::{Event, Peer, fsm};
-use super::route::{BgpLocalRibOrig, LocalRib};
+use super::route::LocalRib;
 use crate::bgp::InOut;
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
@@ -170,7 +170,6 @@ impl Bgp {
 
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        println!("Path: {path}");
         if let Some(f) = self.show_cb.get(&path) {
             let output = match f(self, args, msg.json) {
                 Ok(result) => result,
