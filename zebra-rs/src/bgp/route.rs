@@ -17,7 +17,7 @@ use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry
 #[derive(Debug, Default)]
 pub struct AdjRibIn {
     /// Routes received from peer (before policy application)
-    pub routes: PrefixMap<Ipv4Net, BgpRib>,
+    pub routes: PrefixMap<Ipv4Net, Vec<BgpRib>>,
 }
 
 impl AdjRibIn {
@@ -28,14 +28,40 @@ impl AdjRibIn {
     }
 
     // Add a route to Adj-RIB-In
-    // pub fn add_route(&mut self, route: BgpRib) -> Option<BgpRib> {
-    //     self.routes.insert(route.prefix.prefix, route)
-    // }
+    pub fn add_route(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
+        let candidates = self.routes.entry(prefix).or_default();
 
-    // /// Remove a route from Adj-RIB-In
-    // pub fn remove_route(&mut self, prefix: Ipv4Net) -> Option<BgpRib> {
-    //     self.routes.remove(&prefix)
-    // }
+        // Find existing route with same ID (for AddPath support)
+        if let Some(pos) = candidates.iter().position(|r| r.id == route.id) {
+            // Replace existing route with same ID and return the old one
+            let old_route = candidates[pos].clone();
+            candidates[pos] = route;
+            Some(old_route)
+        } else {
+            // No existing route with this ID, insert new route
+            candidates.push(route);
+            None
+        }
+    }
+
+    // Remove a route from Adj-RIB-In
+    pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
+        let candidates = self.routes.get_mut(&prefix)?;
+
+        // Find and remove route with matching ID
+        if let Some(pos) = candidates.iter().position(|r| r.id == id) {
+            let removed_route = candidates.remove(pos);
+
+            // Clean up empty vector
+            if candidates.is_empty() {
+                self.routes.remove(&prefix);
+            }
+
+            Some(removed_route)
+        } else {
+            None
+        }
+    }
 
     // /// Get all routes
     // pub fn get_routes(&self) -> impl Iterator<Item = (&Ipv4Net, &BgpRib)> {
@@ -730,6 +756,7 @@ impl LocalRib {
     }
 }
 
+// RIB update from peer.
 pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
     // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
     // This prevents routing loops by detecting if the route has already passed through this AS
@@ -758,22 +785,32 @@ pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: 
         }
     }
 
-    let typ = if peer.peer_type == PeerType::IBGP {
+    // Identify peer_type
+    let typ = if peer.is_ibgp() {
         BgpRibType::IBGP
     } else {
         BgpRibType::EBGP
     };
+    // Create BGP RIB with weight value 0.
     let rib = BgpRib::new(peer.ident, peer.router_id, typ, nlri.id, 0, attr);
 
+    // Register to peer's AdjRibIn.
+    peer.adj_rib_in.add_route(nlri.prefix, rib.clone());
+
+    // Perform BGP Path selection.
     let (replaced, selected) = bgp.local_rib.update_route(nlri.prefix, rib);
     if replaced.is_empty() {
         peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
     }
 
-    // XXX
+    // Need to advertise to peers.
 }
 
 pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef) {
+    // Remove from AdjRibIn.
+    peer.adj_rib_in.remove_route(nlri.prefix, nlri.id);
+
+    // BGP Path selection.
     let removed = bgp.local_rib.remove_route(nlri.prefix, nlri.id, peer.ident);
     if !removed.is_empty() {
         peer.stat.rx_dec(Afi::Ip, Safi::Unicast);
@@ -813,6 +850,8 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
 pub fn route_clean(peer: &mut Peer, bgp: &mut ConfigRef) {
     // IPv4 Unicast.
     bgp.local_rib.remove_peer_routes(peer.ident);
+    // IPv4 Unicast AdjIn.
+    peer.adj_rib_in.routes.clear();
 }
 
 pub fn route_update_ipv4(

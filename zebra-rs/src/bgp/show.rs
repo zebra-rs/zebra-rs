@@ -251,11 +251,122 @@ fn show_bgp_advertised(
 
 fn show_bgp_received(
     bgp: &Bgp,
-    args: Args,
+    mut args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    // show_bgp_advertised(bgp, json)
-    Ok(String::from("received"))
+    // Lookup peer from args
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    // Display Adj-RIB-In routes (received routes before policy application)
+    if json {
+        let mut routes: Vec<BgpRouteJson> = Vec::new();
+
+        for (key, value) in peer.adj_rib_in.routes.iter() {
+            for rib in value.iter() {
+                let aspath_str = show_aspath(&rib.attr);
+                let origin_str = show_origin(&rib.attr);
+
+                routes.push(BgpRouteJson {
+                    prefix: key.to_string(),
+                    valid: true,
+                    best: rib.best_path,
+                    internal: rib.typ == BgpRibType::IBGP,
+                    route_type: if rib.typ == BgpRibType::IBGP {
+                        "iBGP".to_string()
+                    } else {
+                        "eBGP".to_string()
+                    },
+                    next_hop: show_nexthop(&rib.attr),
+                    metric: show_med2(&rib.attr),
+                    local_pref: show_local_pref2(&rib.attr),
+                    weight: rib.weight,
+                    as_path: if aspath_str.is_empty() {
+                        None
+                    } else {
+                        Some(aspath_str)
+                    },
+                    origin: if origin_str.is_empty() {
+                        None
+                    } else {
+                        Some(origin_str)
+                    },
+                });
+            }
+        }
+
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
+
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "BGP table version is 0, local router ID is {}",
+        bgp.router_id
+    )?;
+    writeln!(
+        buf,
+        "Status codes: s suppressed, d damped, h history, * valid, > best, = multipath,"
+    )?;
+    writeln!(
+        buf,
+        "              i internal, r RIB-failure, S Stale, R Removed"
+    )?;
+    writeln!(buf, "Origin codes: i - IGP, e - EGP, ? - incomplete")?;
+    writeln!(buf)?;
+    writeln!(
+        buf,
+        "   Network          Next Hop            Metric LocPrf Weight Path"
+    )?;
+
+    for (key, value) in peer.adj_rib_in.routes.iter() {
+        for rib in value.iter() {
+            let valid = "*";
+            let best = if rib.best_path { ">" } else { " " };
+            let internal = if rib.typ == BgpRibType::IBGP {
+                "i"
+            } else {
+                " "
+            };
+            let nexthop = show_nexthop(&rib.attr);
+            let med = show_med(&rib.attr);
+            let local_pref = show_local_pref(&rib.attr);
+            let weight = rib.weight;
+            let mut aspath = show_aspath(&rib.attr);
+            if !aspath.is_empty() {
+                aspath.push(' ');
+            }
+            let origin = show_origin(&rib.attr);
+            writeln!(
+                buf,
+                "{valid}{best}{internal} {:<18} {:<18} {:>7} {:>6} {:>6} {}{}",
+                key.to_string(),
+                nexthop,
+                med,
+                local_pref,
+                weight,
+                aspath,
+                origin,
+            )?;
+        }
+    }
+
+    writeln!(buf)?;
+    writeln!(
+        buf,
+        "Total number of prefixes {}",
+        peer.adj_rib_in.routes.len()
+    )?;
+
+    Ok(buf)
 }
 
 fn show_bgp_summary(
