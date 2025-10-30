@@ -14,12 +14,14 @@ use crate::bgp::route::BgpRibType;
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
-    let mut sent: u64 = 0;
-    let mut rcvd: u64 = 0;
+    // Calculate message counters
+    let mut msg_sent: u64 = 0;
+    let mut msg_rcvd: u64 = 0;
     for counter in peer.counter.iter() {
-        sent += counter.sent;
-        rcvd += counter.rcvd;
+        msg_sent += counter.sent;
+        msg_rcvd += counter.rcvd;
     }
+
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
         peer.state.to_str().to_string()
@@ -27,10 +29,14 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
         peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
     };
 
+    // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
+    let pfx_rcvd = peer.adj_rib_in.routes.len() as u64;
+    let pfx_sent = peer.adj_rib_out.routes.len() as u64;
+
     writeln!(
         buf,
         "{:16} {:11} {:8} {:8} {:>8} {:>12} {:8}",
-        peer.address, peer.peer_as, rcvd, sent, updown, state, 0
+        peer.address, peer.peer_as, msg_rcvd, msg_sent, updown, state, pfx_sent
     )?;
     Ok(())
 }
