@@ -352,7 +352,7 @@ impl Nanomsg {
             ifname: "enp0s7".into(),
             instance_tag: "s".into(),
             ipv4_enable: true,
-            network_type: 2,
+            network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 200 }),

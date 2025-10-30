@@ -20,14 +20,14 @@ use cap::CapabilityPacket;
 use cap::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
-use crate::bgp::route::{route_advertise, route_clean};
+use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::timer;
 use crate::config::Args;
 
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
+use super::route::route_from_peer;
 use super::route::{AdjRibIn, AdjRibOut, BgpLocalRibOrig, LocalRib};
-use super::route::{route_from_peer, send_route_to_rib};
 use super::{BGP_PORT, PrefixSetValue};
 use super::{Bgp, InOuts};
 use crate::context::task::*;
@@ -124,6 +124,14 @@ pub enum PeerType {
 }
 
 impl PeerType {
+    pub fn is_ibgp(&self) -> bool {
+        *self == PeerType::IBGP
+    }
+
+    pub fn is_ebgp(&self) -> bool {
+        *self == PeerType::EBGP
+    }
+
     pub fn to_str(&self) -> &'static str {
         match self {
             Self::IBGP => "internal",
@@ -304,12 +312,19 @@ impl Peer {
             count.rcvd = 0;
         }
     }
+
+    pub fn is_ebgp(&self) -> bool {
+        self.peer_type.is_ebgp()
+    }
+
+    pub fn is_ibgp(&self) -> bool {
+        self.peer_type.is_ibgp()
+    }
 }
 
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
-    pub local_rib: &'a mut BgpLocalRibOrig,
-    pub lrib: &'a mut LocalRib,
+    pub local_rib: &'a mut LocalRib,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
@@ -325,46 +340,46 @@ fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
     }
 }
 
-fn peer_clear(bgp_ref: &mut ConfigRef, peer: &mut Peer) {
-    // Clear all routes from this peer when session goes down
-    let peer_addr = peer.address;
+// fn peer_clear(bgp_ref: &mut ConfigRef, peer: &mut Peer) {
+//     // Clear all routes from this peer when session goes down
+//     let peer_addr = peer.address;
 
-    // Clear Adj-RIB-In for this peer
-    let _removed_adj_rib_in = peer.adj_rib_in.clear_all_routes();
+//     // Clear Adj-RIB-In for this peer
+//     let _removed_adj_rib_in = peer.adj_rib_in.clear_all_routes();
 
-    // Clear Adj-RIB-Out for this peer
-    let _removed_adj_rib_out = peer.adj_rib_out.clear_all_routes();
+//     // Clear Adj-RIB-Out for this peer
+//     let _removed_adj_rib_out = peer.adj_rib_out.clear_all_routes();
 
-    // Remove all routes from Local RIB that came from this peer
-    let rib_changes = bgp_ref.local_rib.remove_peer_routes(peer_addr);
+//     // Remove all routes from Local RIB that came from this peer
+//     let rib_changes = bgp_ref.local_rib.remove_peer_routes(peer_addr);
 
-    // Process RIB changes (removals and installations)
-    for (prefix, old_best, new_best) in rib_changes {
-        // Remove old best path if it existed
-        if let Some(old_route) = old_best {
-            if let Err(e) = send_route_to_rib(&old_route, bgp_ref.rib_tx, false) {
-                //;
-            } else {
-                //;
-            }
-        }
+//     // Process RIB changes (removals and installations)
+//     for (prefix, old_best, new_best) in rib_changes {
+//         // Remove old best path if it existed
+//         if let Some(old_route) = old_best {
+//             if let Err(e) = send_route_to_rib(&old_route, bgp_ref.rib_tx, false) {
+//                 //;
+//             } else {
+//                 //;
+//             }
+//         }
 
-        // Install new best path if one was selected
-        if let Some(new_route) = new_best {
-            if let Err(e) = send_route_to_rib(&new_route, bgp_ref.rib_tx, true) {
-                //;
-            } else {
-                //;
-            }
-        }
-    }
-}
+//         // Install new best path if one was selected
+//         if let Some(new_route) = new_best {
+//             if let Err(e) = send_route_to_rib(&new_route, bgp_ref.rib_tx, true) {
+//                 //;
+//             } else {
+//                 //;
+//             }
+//         }
+//     }
+// }
 
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
+        // local_rib: &mut bgp.local_rib,
         local_rib: &mut bgp.local_rib,
-        lrib: &mut bgp.lrib,
         rib_tx: &bgp.rib_tx,
     };
     let peer = bgp.peers.get_mut(&id).unwrap();
@@ -399,7 +414,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     // Update instant when entering or leaving the Established state.
     if !prev_state.is_established() && peer.state.is_established() {
         peer.instant = Some(Instant::now());
-        route_advertise(peer, &mut bgp_ref);
+        route_sync(peer, &mut bgp_ref);
     }
 
     timer::update_timers(peer);
