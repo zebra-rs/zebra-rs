@@ -86,6 +86,7 @@ module exec {
         }
         list neighbors {
           ext:help "BGP neighbor information";
+          ext:presence "BGP all neighbor information";
           key name;
           leaf name {
             type "inet:ipv4-address";

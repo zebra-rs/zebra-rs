@@ -742,15 +742,11 @@ impl Bgp {
         self.show_add("/show/ip/bgp", show_bgp);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary);
         self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor);
-        self.show_add("/show/ip/bgp/neighbors/address", show_bgp_neighbor);
         self.show_add(
-            "/show/ip/bgp/neighbors/address/advertised-routes",
+            "/show/ip/bgp/neighbors/advertised-routes",
             show_bgp_advertised,
         );
-        self.show_add(
-            "/show/ip/bgp/neighbors/address/received-routes",
-            show_bgp_received,
-        );
+        self.show_add("/show/ip/bgp/neighbors/received-routes", show_bgp_received);
         self.show_add("/show/ip/bgp/clear", peer::clear);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         self.show_add("/show/community-list", show_community_list);
