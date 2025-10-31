@@ -22,16 +22,17 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
         msg_rcvd += counter.rcvd;
     }
 
+    // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
+    let pfx_rcvd = peer.adj_rib_in.routes.len() as u64;
+    let pfx_sent = peer.adj_rib_out.routes.len() as u64;
+
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
         peer.state.to_str().to_string()
     } else {
-        peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
+        // peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
+        pfx_rcvd.to_string()
     };
-
-    // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
-    let pfx_rcvd = peer.adj_rib_in.routes.len() as u64;
-    let pfx_sent = peer.adj_rib_out.routes.len() as u64;
 
     writeln!(
         buf,
@@ -310,7 +311,7 @@ fn show_adj_rib_routes(
     writeln!(buf)?;
     writeln!(
         buf,
-        "   Network          Next Hop            Metric LocPrf Weight Path"
+        "    Network            Next Hop            Metric LocPrf Weight Path"
     )?;
 
     for (key, value) in routes.iter() {

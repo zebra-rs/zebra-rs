@@ -971,7 +971,7 @@ pub fn route_update_ipv4_rib(
         return None;
     }
 
-    // IBGP to IBGP: Don't advertise IBGP-learned routes (route reflection not implemented)
+    // IBGP to IBGP: Don't advertise IBGP-learned routes.
     if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
         return None;
     }
@@ -993,9 +993,9 @@ pub fn route_update_ipv4_rib(
 
     // 2. AS_PATH
     if peer.is_ebgp() {
-        if let Some(ref aspath) = attrs.aspath {
+        if let Some(ref mut aspath) = attrs.aspath {
             let local_as_path = As4Path::from(vec![peer.local_as]);
-            aspath.prepend(local_as_path);
+            aspath.prepend_mut(local_as_path.clone());
         }
     }
 
