@@ -84,20 +84,17 @@ module exec {
           ext:help "BGP summary information";
           type empty;
         }
-        container neighbors {
+        list neighbors {
           ext:help "BGP neighbor information";
-          presence "all neighbor";
-          list address {
-            key name;
-            leaf name {
-              type "inet:ipv4-address";
-            }
-            leaf advertised-routes {
-              type empty;
-            }
-            leaf received-routes {
-              type empty;
-            }
+          key name;
+          leaf name {
+            type "inet:ipv4-address";
+          }
+          leaf advertised-routes {
+            type empty;
+          }
+          leaf received-routes {
+            type empty;
           }
         }
       }
