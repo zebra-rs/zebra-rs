@@ -376,9 +376,47 @@ fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
 // }
 
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
+    // Handle UpdateMsg separately to avoid borrow checker issues
+    if let Event::UpdateMsg(packet) = event {
+        let mut bgp_ref = ConfigRef {
+            router_id: &bgp.router_id,
+            local_rib: &mut bgp.local_rib,
+            rib_tx: &bgp.rib_tx,
+        };
+
+        // Take ownership temporarily to avoid double borrow
+        let mut peer_map = std::mem::take(&mut bgp.peers);
+        let prev_state = peer_map.get(&id).unwrap().state.clone();
+        let new_state = fsm_bgp_update(id, packet, &mut bgp_ref, &mut peer_map);
+        peer_map.get_mut(&id).unwrap().state = new_state.clone();
+
+        // Put the peers back
+        bgp.peers = peer_map;
+
+        if prev_state == new_state {
+            return;
+        }
+        bgp_info!("FSM: {:?} -> {:?}", prev_state, new_state);
+
+        let peer = bgp.peers.get_mut(&id).unwrap();
+        if prev_state.is_established() && !peer.state.is_established() {
+            peer.instant = Some(Instant::now());
+            route_clean(peer, &mut bgp_ref);
+            peer.stat.clear();
+        }
+
+        if !prev_state.is_established() && peer.state.is_established() {
+            peer.instant = Some(Instant::now());
+            route_sync(peer, &mut bgp_ref);
+        }
+
+        timer::update_timers(peer);
+        return;
+    }
+
+    // Handle other events normally
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
-        // local_rib: &mut bgp.local_rib,
         local_rib: &mut bgp.local_rib,
         rib_tx: &bgp.rib_tx,
     };
@@ -397,7 +435,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
         Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
         Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
-        Event::UpdateMsg(packet) => fsm_bgp_update(peer, packet, &mut bgp_ref),
+        Event::UpdateMsg(_) => unreachable!(), // Handled above
     };
     if prev_state == peer.state {
         return;
@@ -563,11 +601,14 @@ fn peer_send_update_test(peer: &mut Peer) {
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
-fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
-    peer.counter[BgpType::Update as usize].rcvd += 1;
-    timer::refresh_hold_timer(peer);
+fn fsm_bgp_update(peer_id: IpAddr, packet: UpdatePacket, bgp: &mut ConfigRef, peers: &mut BTreeMap<IpAddr, Peer>) -> State {
+    {
+        let peer = peers.get_mut(&peer_id).unwrap();
+        peer.counter[BgpType::Update as usize].rcvd += 1;
+        timer::refresh_hold_timer(peer);
+    }
 
-    route_from_peer(peer, packet, bgp);
+    route_from_peer(peer_id, packet, bgp, peers);
 
     // peer_send_update_test(peer);
 

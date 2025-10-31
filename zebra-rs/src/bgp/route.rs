@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
@@ -705,67 +705,207 @@ impl LocalRib {
 }
 
 // RIB update from peer.
-pub fn route_ipv4_update(peer: &mut Peer, nlri: &Ipv4Nlri, attr: &BgpAttr, bgp: &mut ConfigRef) {
-    // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
-    // This prevents routing loops by detecting if the route has already passed through this AS
-    if let Some(ref aspath) = attr.aspath {
-        for segment in &aspath.segs {
-            if segment.asn.contains(&peer.local_as) {
+pub fn route_ipv4_update(
+    peer_id: IpAddr,
+    nlri: &Ipv4Nlri,
+    attr: &BgpAttr,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+) {
+    // Validate and extract peer information in a separate scope to release the borrow
+    let (peer_ident, peer_router_id, typ, should_process) = {
+        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+
+        // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
+        // This prevents routing loops by detecting if the route has already passed through this AS
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    eprintln!(
+                        "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
+                        nlri.prefix, peer.address, peer.local_as
+                    );
+                    return;
+                }
+            }
+        }
+
+        // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
+        // prevents routing loops in route reflection scenarios. This happens before
+        // the route store in AdjRibIn.
+        if let Some(ref originator_id) = attr.originator_id {
+            if originator_id.id == *bgp.router_id {
                 eprintln!(
-                    "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
-                    nlri.prefix, peer.address, peer.local_as
+                    "Dropping update for {} from peer {} - ORIGINATOR_ID {} matches local router ID",
+                    nlri.prefix, peer.address, originator_id.id
                 );
                 return;
             }
         }
-    }
 
-    // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
-    // prevents routing loops in route reflection scenarios. This happens before
-    // the route store in AdjRibIn.
-    if let Some(ref originator_id) = attr.originator_id {
-        if originator_id.id == *bgp.router_id {
-            eprintln!(
-                "Dropping update for {} from peer {} - ORIGINATOR_ID {} matches local router ID",
-                nlri.prefix, peer.address, originator_id.id
-            );
-            return;
-        }
-    }
+        // Identify peer_type
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
 
-    // Identify peer_type
-    let typ = if peer.is_ibgp() {
-        BgpRibType::IBGP
-    } else {
-        BgpRibType::EBGP
+        (peer.ident, peer.router_id, typ, true)
     };
-    // Create BGP RIB with weight value 0.
-    let rib = BgpRib::new(peer.ident, peer.router_id, typ, nlri.id, 0, attr);
 
-    // Register to peer's AdjRibIn.
-    peer.adj_rib_in.add_route(nlri.prefix, rib.clone());
+    if !should_process {
+        return;
+    }
+
+    // Create BGP RIB with weight value 0.
+    let rib = BgpRib::new(peer_ident, peer_router_id, typ, nlri.id, 0, attr);
+
+    // Register to peer's AdjRibIn and update stats
+    {
+        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+        peer.adj_rib_in.add_route(nlri.prefix, rib.clone());
+    }
 
     // Perform BGP Path selection.
     let (replaced, selected) = bgp.local_rib.update_route(nlri.prefix, rib);
-    if replaced.is_empty() {
-        peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
+
+    {
+        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+        if replaced.is_empty() {
+            peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
+        }
     }
 
-    // Need to advertise to peers.
-}
-
-pub fn route_ipv4_withdraw(peer: &mut Peer, nlri: &Ipv4Nlri, bgp: &mut ConfigRef) {
-    // Remove from AdjRibIn.
-    peer.adj_rib_in.remove_route(nlri.prefix, nlri.id);
-
-    // BGP Path selection.
-    let removed = bgp.local_rib.remove_route(nlri.prefix, nlri.id, peer.ident);
-    if !removed.is_empty() {
-        peer.stat.rx_dec(Afi::Ip, Safi::Unicast);
+    // Advertise to peers if best path changed.
+    if !selected.is_empty() {
+        route_advertise_to_peers(nlri.prefix, &selected, peer_ident, bgp, peers);
     }
 }
 
-pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) {
+/// Advertise route changes to all appropriate peers
+fn route_advertise_to_peers(
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+    source_peer: IpAddr,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+) {
+    // Get the new best path (last entry in selected vector)
+    let new_best = selected.last();
+
+    // Collect peer addresses that need updates to avoid borrow checker issues
+    let peer_addrs: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    for peer_addr in peer_addrs {
+        // Build the update/withdrawal for this peer
+        let (nlri_opt, attr_opt) = {
+            let peer = peers.get_mut(&peer_addr).expect("peer exists");
+
+            if let Some(best) = new_best {
+                // Try to advertise the new best path
+                if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, best, bgp) {
+                    // Apply outbound policy
+                    if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
+                        (Some(nlri), Some(attr))
+                    } else {
+                        (Some(nlri), None)  // Policy denied - will send withdrawal
+                    }
+                } else {
+                    (None, None)  // Filtered by split-horizon, etc.
+                }
+            } else {
+                (None, None)  // No best path
+            }
+        };
+
+        // Now apply the update/withdrawal
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+
+        match (nlri_opt, attr_opt) {
+            (Some(nlri), Some(attr)) => {
+                // Send update
+                if let Some(best) = new_best {
+                    let mut rib = best.clone();
+                    rib.attr = attr.clone();
+                    peer.adj_rib_out.add_route(nlri.prefix, rib);
+                }
+                route_send_ipv4(peer, nlri, attr);
+            }
+            _ => {
+                // Send withdrawal if we had previously advertised
+                if peer.adj_rib_out.routes.contains_key(&prefix) {
+                    route_withdraw_ipv4(peer, prefix, 0);
+                    peer.adj_rib_out.remove_route(prefix, 0);
+                }
+            }
+        }
+    }
+}
+
+/// Send BGP withdrawal for a prefix
+fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
+    let mut update = UpdatePacket::new();
+
+    // Check if we should use add-path
+    let mp = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+    let use_addpath = peer.cap_map.entries.get(&mp).map_or(false, |cap| cap.send);
+
+    let nlri = Ipv4Nlri {
+        id: if use_addpath { id } else { 0 },
+        prefix,
+    };
+    update.ipv4_withdraw.push(nlri);
+
+    // Convert to bytes and send
+    let bytes: BytesMut = update.into();
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send BGP Withdrawal to {}: {}", peer.address, e);
+        }
+    }
+}
+
+pub fn route_ipv4_withdraw(
+    peer_id: IpAddr,
+    nlri: &Ipv4Nlri,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+) {
+    let peer_ident = {
+        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+        // Remove from AdjRibIn.
+        peer.adj_rib_in.remove_route(nlri.prefix, nlri.id);
+        peer.ident
+    };
+
+    // BGP Path selection - this may select a new best path
+    let removed = bgp.local_rib.remove_route(nlri.prefix, nlri.id, peer_ident);
+
+    {
+        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+        if !removed.is_empty() {
+            peer.stat.rx_dec(Afi::Ip, Safi::Unicast);
+        }
+    }
+
+    // Re-run best path selection and advertise changes
+    let selected = bgp.local_rib.select_best_path(nlri.prefix);
+    if !selected.is_empty() || !removed.is_empty() {
+        route_advertise_to_peers(nlri.prefix, &selected, peer_ident, bgp, peers);
+    }
+}
+
+pub fn route_from_peer(
+    peer_id: IpAddr,
+    packet: UpdatePacket,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+) {
     // Convert UpdatePacket to BgpAttr.
     let attr = BgpAttr::from(&packet.attrs);
     // print!("{}", attr);
@@ -782,11 +922,11 @@ pub fn route_from_peer(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRe
             }
             for update in nlri.update.iter() {
                 println!("IPv4 Update: {}", update.prefix);
-                route_ipv4_update(peer, update, &attr, bgp);
+                route_ipv4_update(peer_id, update, &attr, bgp, peers);
             }
             for withdraw in nlri.withdraw.iter() {
                 println!("IPv4 Withdraw: {}", withdraw.prefix);
-                route_ipv4_withdraw(peer, withdraw, bgp);
+                route_ipv4_withdraw(peer_id, withdraw, bgp, peers);
             }
         }
         _ => {
