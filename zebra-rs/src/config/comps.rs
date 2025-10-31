@@ -192,7 +192,13 @@ fn comps_as_leaf(comps: &mut Vec<Completion>, entry: &Rc<Entry>) {
     comps.push(comps_as_key(entry));
 }
 
-pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<Entry>, s: &State) {
+pub fn comps_add_all(
+    comps: &mut Vec<Completion>,
+    ymatch: YangMatch,
+    entry: &Rc<Entry>,
+    s: &State,
+    list_presence: bool,
+) {
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched => {
             for entry in entry.dir.borrow().iter() {
@@ -233,7 +239,7 @@ pub fn comps_add_all(comps: &mut Vec<Completion>, ymatch: YangMatch, entry: &Rc<
     }
     comps.sort_by(|a, b| a.name.cmp(&b.name));
 
-    if ymatch_complete(ymatch) {
+    if ymatch_complete(ymatch, list_presence) {
         comps_add_cr(comps);
     }
 }

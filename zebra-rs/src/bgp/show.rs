@@ -3,36 +3,41 @@ use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use bgp_packet::CapMultiProtocol;
-use bgp_packet::{Afi, BgpType, Safi};
+use bgp_packet::*;
 use serde::Serialize;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{self, Peer, PeerCounter, PeerParam, State};
-use super::route::{BgpAttr, BgpNexthop};
 use super::{InOuts, PrefixSetValue};
-use crate::bgp::route::RouteType;
+use crate::bgp::route::BgpRibType;
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
-    let mut sent: u64 = 0;
-    let mut rcvd: u64 = 0;
+    // Calculate message counters
+    let mut msg_sent: u64 = 0;
+    let mut msg_rcvd: u64 = 0;
     for counter in peer.counter.iter() {
-        sent += counter.sent;
-        rcvd += counter.rcvd;
+        msg_sent += counter.sent;
+        msg_rcvd += counter.rcvd;
     }
+
+    // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
+    let pfx_rcvd = peer.adj_rib_in.routes.len() as u64;
+    let pfx_sent = peer.adj_rib_out.routes.len() as u64;
+
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
         peer.state.to_str().to_string()
     } else {
-        peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
+        // peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
+        pfx_rcvd.to_string()
     };
 
     writeln!(
         buf,
         "{:16} {:11} {:8} {:8} {:>8} {:>12} {:8}",
-        peer.address, peer.peer_as, rcvd, sent, updown, state, 0
+        peer.address, peer.peer_as, msg_rcvd, msg_sent, updown, state, pfx_sent
     )?;
     Ok(())
 }
@@ -82,7 +87,7 @@ RPKI validation codes: V valid, I invalid, N Not found
 "#;
 
 fn show_med(attr: &BgpAttr) -> String {
-    if let Some(med) = attr.med {
+    if let Some(med) = &attr.med {
         med.to_string()
     } else {
         "".to_string()
@@ -90,10 +95,26 @@ fn show_med(attr: &BgpAttr) -> String {
 }
 
 fn show_local_pref(attr: &BgpAttr) -> String {
-    if let Some(local_pref) = attr.local_pref {
+    if let Some(local_pref) = &attr.local_pref {
         local_pref.to_string()
     } else {
         "".to_string()
+    }
+}
+
+fn show_med2(attr: &BgpAttr) -> Option<u32> {
+    if let Some(attr) = &attr.med {
+        Some(attr.med)
+    } else {
+        None
+    }
+}
+
+fn show_local_pref2(attr: &BgpAttr) -> Option<u32> {
+    if let Some(attr) = &attr.local_pref {
+        Some(attr.local_pref)
+    } else {
+        None
     }
 }
 
@@ -147,7 +168,7 @@ fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt
     if json {
         let mut routes: Vec<BgpRouteJson> = Vec::new();
 
-        for (key, value) in bgp.lrib.entries.iter() {
+        for (key, value) in bgp.local_rib.entries.iter() {
             for rib in value.iter() {
                 let aspath_str = show_aspath(&rib.attr);
                 let origin_str = show_origin(&rib.attr);
@@ -156,15 +177,15 @@ fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt
                     prefix: key.to_string(),
                     valid: true,
                     best: true,
-                    internal: rib.typ == RouteType::IBGP,
-                    route_type: if rib.typ == RouteType::IBGP {
+                    internal: rib.typ == BgpRibType::IBGP,
+                    route_type: if rib.typ == BgpRibType::IBGP {
                         "iBGP".to_string()
                     } else {
                         "eBGP".to_string()
                     },
                     next_hop: show_nexthop(&rib.attr),
-                    metric: rib.attr.med,
-                    local_pref: rib.attr.local_pref,
+                    metric: show_med2(&rib.attr),
+                    local_pref: show_local_pref2(&rib.attr),
                     weight: rib.weight,
                     as_path: if aspath_str.is_empty() {
                         None
@@ -188,11 +209,15 @@ fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, value) in bgp.lrib.entries.iter() {
+    for (key, value) in bgp.local_rib.entries.iter() {
         for (i, rib) in value.iter().enumerate() {
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
-            let internal = if rib.typ == RouteType::IBGP { "i" } else { " " };
+            let internal = if rib.typ == BgpRibType::IBGP {
+                "i"
+            } else {
+                " "
+            };
             let nexthop = show_nexthop(&rib.attr);
             let med = show_med(&rib.attr);
             let local_pref = show_local_pref(&rib.attr);
@@ -220,6 +245,151 @@ fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt
 
 fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     show_bgp_route(bgp, json)
+}
+
+// Common helper function for displaying Adj-RIB routes
+fn show_adj_rib_routes(
+    routes: &prefix_trie::PrefixMap<ipnet::Ipv4Net, Vec<crate::bgp::route::BgpRib>>,
+    router_id: Ipv4Addr,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut route_list: Vec<BgpRouteJson> = Vec::new();
+
+        for (key, value) in routes.iter() {
+            for rib in value.iter() {
+                let aspath_str = show_aspath(&rib.attr);
+                let origin_str = show_origin(&rib.attr);
+
+                route_list.push(BgpRouteJson {
+                    prefix: key.to_string(),
+                    valid: true,
+                    best: rib.best_path,
+                    internal: rib.typ == BgpRibType::IBGP,
+                    route_type: if rib.typ == BgpRibType::IBGP {
+                        "iBGP".to_string()
+                    } else {
+                        "eBGP".to_string()
+                    },
+                    next_hop: show_nexthop(&rib.attr),
+                    metric: show_med2(&rib.attr),
+                    local_pref: show_local_pref2(&rib.attr),
+                    weight: rib.weight,
+                    as_path: if aspath_str.is_empty() {
+                        None
+                    } else {
+                        Some(aspath_str)
+                    },
+                    origin: if origin_str.is_empty() {
+                        None
+                    } else {
+                        Some(origin_str)
+                    },
+                });
+            }
+        }
+
+        return Ok(serde_json::to_string_pretty(&route_list)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
+
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "BGP table version is 0, local router ID is {}",
+        router_id
+    )?;
+    writeln!(
+        buf,
+        "Status codes: s suppressed, d damped, h history, * valid, > best, = multipath,"
+    )?;
+    writeln!(
+        buf,
+        "              i internal, r RIB-failure, S Stale, R Removed"
+    )?;
+    writeln!(buf, "Origin codes: i - IGP, e - EGP, ? - incomplete")?;
+    writeln!(buf)?;
+    writeln!(
+        buf,
+        "    Network            Next Hop            Metric LocPrf Weight Path"
+    )?;
+
+    for (key, value) in routes.iter() {
+        for rib in value.iter() {
+            let valid = "*";
+            let best = if rib.best_path { ">" } else { " " };
+            let internal = if rib.typ == BgpRibType::IBGP {
+                "i"
+            } else {
+                " "
+            };
+            let nexthop = show_nexthop(&rib.attr);
+            let med = show_med(&rib.attr);
+            let local_pref = show_local_pref(&rib.attr);
+            let weight = rib.weight;
+            let mut aspath = show_aspath(&rib.attr);
+            if !aspath.is_empty() {
+                aspath.push(' ');
+            }
+            let origin = show_origin(&rib.attr);
+            writeln!(
+                buf,
+                "{valid}{best}{internal} {:<18} {:<18} {:>7} {:>6} {:>6} {}{}",
+                key.to_string(),
+                nexthop,
+                med,
+                local_pref,
+                weight,
+                aspath,
+                origin,
+            )?;
+        }
+    }
+
+    writeln!(buf)?;
+    writeln!(buf, "Total number of prefixes {}", routes.len())?;
+
+    Ok(buf)
+}
+
+fn show_bgp_advertised(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    // Lookup peer from args
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    // Display Adj-RIB-Out routes (routes to be advertised after policy application)
+    show_adj_rib_routes(&peer.adj_rib_out.routes, bgp.router_id, json)
+}
+
+fn show_bgp_received(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    // Lookup peer from args
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    // Display Adj-RIB-In routes (received routes before policy application)
+    show_adj_rib_routes(&peer.adj_rib_in.routes, bgp.router_id, json)
 }
 
 fn show_bgp_summary(
@@ -498,7 +668,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
 
 fn show_bgp_neighbor(
     bgp: &Bgp,
-    args: Args,
+    mut args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
@@ -511,9 +681,17 @@ fn show_bgp_neighbor(
         for neighbor in neighbors.iter() {
             render(&mut out, neighbor)?;
         }
-        // out = serde_json::to_string(&neighbors).unwrap();
     } else {
-        // Specific neighbor.
+        if let Some(addr) = args.addr() {
+            if let Some(peer) = bgp.peers.get(&addr) {
+                let neighbor = fetch(peer);
+                render(&mut out, &neighbor)?;
+            } else {
+                writeln!(out, "% No such neighbor: {}", addr)?;
+            }
+        } else {
+            writeln!(out, "% Invalid address specified")?;
+        }
     }
     Ok(out)
 }
@@ -563,7 +741,12 @@ impl Bgp {
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary);
-        self.show_add("/show/ip/bgp/neighbor", show_bgp_neighbor);
+        self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor);
+        self.show_add(
+            "/show/ip/bgp/neighbors/advertised-routes",
+            show_bgp_advertised,
+        );
+        self.show_add("/show/ip/bgp/neighbors/received-routes", show_bgp_received);
         self.show_add("/show/ip/bgp/clear", peer::clear);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         self.show_add("/show/community-list", show_community_list);
