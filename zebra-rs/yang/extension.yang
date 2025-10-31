@@ -13,4 +13,9 @@ module extension {
     description "sort";
     argument "sort";
   }
+
+  extension presence {
+    description "presence";
+    argument "presence";
+  }
 }
