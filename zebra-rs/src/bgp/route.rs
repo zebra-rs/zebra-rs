@@ -62,349 +62,6 @@ impl AdjRib {
             None
         }
     }
-
-    // /// Get all routes
-    // pub fn get_routes(&self) -> impl Iterator<Item = (&Ipv4Net, &BgpRib)> {
-    //     self.routes.iter()
-    // }
-
-    // /// Get route count
-    // pub fn route_count(&self) -> usize {
-    //     self.routes.len()
-    // }
-
-    // /// Clear all routes from Adj-RIB-In (used when peer session goes down)
-    // pub fn clear_all_routes(&mut self) -> Vec<BgpRib> {
-    //     let removed_routes: Vec<BgpRib> =
-    //         self.routes.iter().map(|(_, route)| route.clone()).collect();
-    //     self.routes.clear();
-    //     removed_routes
-    // }
-}
-
-// impl BgpLocalRibOrig {
-//     pub fn new() -> Self {
-//         Self {
-//             routes: PrefixMap::new(),
-//             entries: PrefixMap::new(),
-//         }
-//     }
-
-//     /// Add or update a route in the Local RIB and perform best path selection
-//     pub fn update_route(&mut self, route: BgpRib) -> Option<BgpRib> {
-//         let prefix = route.prefix.prefix;
-
-//         // Add to candidates
-//         let candidates = self.entries.entry(prefix).or_default();
-
-//         // Remove existing route from same peer if present
-//         candidates.retain(|r| r.peer_addr != route.peer_addr);
-//         candidates.push(route.clone());
-
-//         // Perform best path selection
-//         self.select_best_path(prefix)
-//     }
-
-//     /// Remove a route from the Local RIB
-//     pub fn remove_route(&mut self, prefix: Ipv4Net, peer_addr: IpAddr) -> Option<BgpRib> {
-//         let mut removed_best = false;
-
-//         // Remove from candidates
-//         if let Some(candidates) = self.entries.get_mut(&prefix) {
-//             let original_len = candidates.len();
-//             candidates.retain(|r| r.peer_addr != peer_addr);
-
-//             if candidates.is_empty() {
-//                 self.entries.remove(&prefix);
-//                 removed_best = self.routes.remove(&prefix).is_some();
-//                 return if removed_best {
-//                     Some(BgpRib::new(
-//                         peer_addr,
-//                         0,
-//                         0,
-//                         Ipv4Nlri { id: 0, prefix },
-//                         vec![],
-//                     ))
-//                 } else {
-//                     None
-//                 };
-//             } else if original_len != candidates.len() {
-//                 // Check if we removed the current best path
-//                 if let Some(current_best) = self.routes.get(&prefix) {
-//                     if current_best.peer_addr == peer_addr {
-//                         removed_best = true;
-//                     }
-//                 }
-//             }
-//         }
-
-//         // If we removed the best path, reselect
-//         if removed_best {
-//             self.select_best_path(prefix)
-//         } else {
-//             None
-//         }
-//     }
-
-//     /// BGP best path selection algorithm per RFC 4271
-//     pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Option<BgpRib> {
-//         // First, find the best route index
-//         let (best_idx, should_update) = {
-//             let candidates = match self.entries.get(&prefix) {
-//                 Some(candidates) if !candidates.is_empty() => candidates,
-//                 _ => {
-//                     self.routes.remove(&prefix);
-//                     return None;
-//                 }
-//             };
-
-//             // If only one candidate, it's the best
-//             if candidates.len() == 1 {
-//                 (0, true)
-//             } else {
-//                 // BGP best path selection algorithm
-//                 let mut best_idx = 0;
-//                 let mut best = &candidates[0];
-
-//                 for (idx, candidate) in candidates.iter().enumerate().skip(1) {
-//                     if std::ptr::eq(self.compare_routes(best, candidate), candidate) {
-//                         best = candidate;
-//                         best_idx = idx;
-//                     }
-//                 }
-//                 (best_idx, true)
-//             }
-//         };
-
-//         // Now update the candidates with mutable access
-//         if should_update {
-//             let candidates = self.entries.get_mut(&prefix).unwrap();
-
-//             // Clear best_path flag for all candidates
-//             for candidate in candidates.iter_mut() {
-//                 candidate.best_path = false;
-//             }
-
-//             // Mark the best route
-//             candidates[best_idx].best_path = true;
-//             let best_route = candidates[best_idx].clone();
-
-//             let old_best = self.routes.insert(prefix, best_route.clone());
-
-//             // Return the new best path if it changed
-//             if old_best.is_none() || old_best.as_ref().unwrap().peer_addr != best_route.peer_addr {
-//                 Some(best_route)
-//             } else {
-//                 None
-//             }
-//         } else {
-//             None
-//         }
-//     }
-
-//     /// Compare two BGP routes according to RFC 4271 best path selection
-//     fn compare_routes<'a>(&self, route1: &'a BgpRib, route2: &'a BgpRib) -> &'a BgpRib {
-//         // 1. Prefer route with higher weight (Cisco-specific)
-//         if route1.weight != route2.weight {
-//             return if route1.weight > route2.weight {
-//                 route1
-//             } else {
-//                 route2
-//             };
-//         }
-
-//         // 2. Prefer route with higher local preference
-//         let lp1 = route1.local_pref.unwrap_or(100);
-//         let lp2 = route2.local_pref.unwrap_or(100);
-//         if lp1 != lp2 {
-//             return if lp1 > lp2 { route1 } else { route2 };
-//         }
-
-//         // 3. Prefer locally originated routes (not implemented yet)
-
-//         // 4. Prefer route with shorter AS path
-//         if route1.as_path_len != route2.as_path_len {
-//             return if route1.as_path_len < route2.as_path_len {
-//                 route1
-//             } else {
-//                 route2
-//             };
-//         }
-
-//         // 5. Prefer route with lower origin (IGP < EGP < Incomplete)
-//         if route1.origin != route2.origin {
-//             return if route1.origin < route2.origin {
-//                 route1
-//             } else {
-//                 route2
-//             };
-//         }
-
-//         // 6. Prefer route with lower MED (only compare if from same AS)
-//         if route1.peer_as == route2.peer_as {
-//             let med1 = route1.med.unwrap_or(0);
-//             let med2 = route2.med.unwrap_or(0);
-//             if med1 != med2 {
-//                 return if med1 < med2 { route1 } else { route2 };
-//             }
-//         }
-
-//         // 7. Prefer EBGP over IBGP
-//         // match (&route1.peer_type, &route2.peer_type) {
-//         //     (PeerType::EBGP, PeerType::IBGP) => return route1,
-//         //     (PeerType::IBGP, PeerType::EBGP) => return route2,
-//         //     _ => {}
-//         // }
-
-//         // 8. Prefer route with lower IGP metric to next hop (not implemented)
-
-//         // 9. Prefer older route (route1 installed first if times are equal)
-//         if route1.installed != route2.installed {
-//             return if route1.installed < route2.installed {
-//                 route1
-//             } else {
-//                 route2
-//             };
-//         }
-
-//         // 10. Prefer route from peer with lower router ID
-//         route1 // Default to first route
-//     }
-
-//     /// Get the best path for a prefix
-//     pub fn get_best_path(&self, prefix: &Ipv4Net) -> Option<&BgpRib> {
-//         self.routes.get(prefix)
-//     }
-
-//     /// Get all candidate routes for a prefix
-//     pub fn get_candidates(&self, prefix: &Ipv4Net) -> Option<&Vec<BgpRib>> {
-//         self.entries.get(prefix)
-//     }
-
-//     /// Get all best paths
-//     pub fn get_all_best_paths(&self) -> impl Iterator<Item = (&Ipv4Net, &BgpRib)> {
-//         self.routes.iter()
-//     }
-
-//     /// Get total number of routes in Local RIB
-//     pub fn route_count(&self) -> usize {
-//         self.routes.len()
-//     }
-
-//     /// Remove all routes from a specific peer (used when peer session goes down)
-//     /// Returns list of prefixes that had their best path removed and need main RIB updates
-//     pub fn remove_peer_routes(
-//         &mut self,
-//         peer_addr: IpAddr,
-//     ) -> Vec<(Ipv4Net, Option<BgpRib>, Option<BgpRib>)> {
-//         let mut rib_changes = Vec::new();
-//         let mut prefixes_to_remove = Vec::new();
-//         let mut prefixes_to_reselect = Vec::new();
-
-//         // Find all prefixes that have routes from this peer
-//         for (prefix, candidates) in self.entries.iter_mut() {
-//             let original_len = candidates.len();
-
-//             // Get current best path before removing routes
-//             let old_best = self.routes.get(prefix).cloned();
-//             let was_best_from_peer = old_best
-//                 .as_ref()
-//                 .map_or(false, |route| route.peer_addr == peer_addr);
-
-//             // Remove routes from this peer
-//             candidates.retain(|r| r.peer_addr != peer_addr);
-
-//             if candidates.is_empty() {
-//                 // No more candidates for this prefix
-//                 prefixes_to_remove.push(*prefix);
-//                 if let Some(removed_best) = self.routes.remove(prefix) {
-//                     // Prefix completely removed: (prefix, old_best, None)
-//                     rib_changes.push((*prefix, Some(removed_best), None));
-//                 }
-//             } else if original_len != candidates.len() && was_best_from_peer {
-//                 // We removed route(s) from this peer and it was the best path
-//                 // Need to reselect best path after the iteration
-//                 prefixes_to_reselect.push((*prefix, old_best));
-//             }
-//         }
-
-//         // Remove empty candidate entries
-//         for prefix in prefixes_to_remove {
-//             self.entries.remove(&prefix);
-//         }
-
-//         // Reselect best paths for affected prefixes
-//         for (prefix, old_best) in prefixes_to_reselect {
-//             if let Some(new_best) = self.select_best_path(prefix) {
-//                 // Best path changed: (prefix, old_best, new_best)
-//                 rib_changes.push((prefix, old_best, Some(new_best)));
-//             } else if let Some(old) = old_best {
-//                 // Only removal: (prefix, old_best, None)
-//                 rib_changes.push((prefix, Some(old), None));
-//             }
-//         }
-
-//         rib_changes
-//     }
-// }
-
-/// Send a BGP route to the main RIB for installation
-// pub fn send_route_to_rib(
-//     bgp_route: &BgpRib,
-//     rib_tx: &UnboundedSender<rib::Message>,
-//     install: bool,
-// ) -> Result<(), anyhow::Error> {
-//     // Create RIB entry for BGP route
-//     let mut rib_entry = RibEntry::new(RibType::Bgp);
-//     rib_entry.rsubtype = RibSubType::Default;
-//     rib_entry.valid = bgp_route.valid;
-//     rib_entry.selected = bgp_route.best_path;
-//     rib_entry.distance = 20; // BGP administrative distance
-//     rib_entry.metric = bgp_route.med.unwrap_or(0);
-
-//     // Create nexthop - convert IPv4 nexthop to IpAddr
-//     let nexthop_uni = NexthopUni {
-//         addr: IpAddr::V4(bgp_route.nexthop),
-//         metric: bgp_route.med.unwrap_or(0),
-//         weight: bgp_route.weight as u8,
-//         ifindex: 0, // TODO: Resolve interface index from nexthop
-//         valid: true,
-//         mpls: Vec::new(),
-//         mpls_label: Vec::new(),
-//         gid: 0, // Will be assigned by RIB
-//     };
-//     rib_entry.nexthop = Nexthop::Uni(nexthop_uni);
-
-//     // Convert prefix to IpNet
-//     let prefix = bgp_route.prefix.clone();
-
-//     // Send appropriate message to RIB
-//     let msg = if install {
-//         rib::Message::Ipv4Add {
-//             prefix: prefix.prefix,
-//             rib: rib_entry,
-//         }
-//     } else {
-//         rib::Message::Ipv4Del {
-//             prefix: prefix.prefix,
-//             rib: rib_entry,
-//         }
-//     };
-
-//     rib_tx
-//         .send(msg)
-//         .map_err(|e| anyhow::anyhow!("Failed to send route to RIB: {}", e))?;
-//     Ok(())
-// }
-
-// Maintain backward compatibility
-#[allow(dead_code)]
-pub struct Route {
-    pub from: IpAddr,
-    pub attrs: Vec<Attr>,
-    pub origin: u8,
-    pub typ: PeerType,
-    pub selected: bool,
 }
 
 #[derive(Default)]
@@ -554,16 +211,13 @@ impl LocalRib {
         all_removed
     }
 
+    // Return selected best path, not the change history.
     pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
-        let mut changes = Vec::new();
-        let old_best = self.routes.get(&prefix).cloned();
+        let mut selected = Vec::new();
 
         if !self.entries.contains_key(&prefix) {
-            if let Some(mut removed_best) = self.routes.remove(&prefix) {
-                removed_best.best_path = false;
-                changes.push(removed_best);
-            }
-            return changes;
+            self.routes.remove(&prefix);
+            return selected;
         }
 
         let is_empty = self
@@ -574,11 +228,8 @@ impl LocalRib {
 
         if is_empty {
             self.entries.remove(&prefix);
-            if let Some(mut removed_best) = self.routes.remove(&prefix) {
-                removed_best.best_path = false;
-                changes.push(removed_best);
-            }
-            return changes;
+            self.routes.remove(&prefix);
+            return selected;
         }
 
         let best = {
@@ -598,23 +249,10 @@ impl LocalRib {
             candidates[best_index].clone()
         };
 
-        let changed = match &old_best {
-            Some(old) => old.ident != best.ident || old.id != best.id,
-            None => true,
-        };
+        self.routes.insert(prefix, best.clone());
+        selected.push(best);
 
-        if changed {
-            if let Some(mut previous) = old_best {
-                previous.best_path = false;
-                changes.push(previous);
-            }
-            self.routes.insert(prefix, best.clone());
-            changes.push(best);
-        } else {
-            self.routes.insert(prefix, best);
-        }
-
-        changes
+        selected
     }
 
     fn is_better(candidate: &BgpRib, incumbent: &BgpRib) -> bool {
@@ -769,13 +407,6 @@ pub fn route_ipv4_update(
     // Perform BGP Path selection.
     let (replaced, selected) = bgp.local_rib.update_route(nlri.prefix, rib);
 
-    {
-        let peer = peers.get_mut(&peer_id).expect("peer must exist");
-        if replaced.is_empty() {
-            peer.stat.rx_inc(Afi::Ip, Safi::Unicast);
-        }
-    }
-
     // Advertise to peers if best path changed.
     if !selected.is_empty() {
         route_advertise_to_peers(nlri.prefix, &selected, peer_ident, bgp, peers);
@@ -812,13 +443,13 @@ fn route_advertise_to_peers(
                     if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
                         (Some(nlri), Some(attr))
                     } else {
-                        (Some(nlri), None)  // Policy denied - will send withdrawal
+                        (Some(nlri), None) // Policy denied - will send withdrawal
                     }
                 } else {
-                    (None, None)  // Filtered by split-horizon, etc.
+                    (None, None) // Filtered by split-horizon, etc.
                 }
             } else {
-                (None, None)  // No best path
+                (None, None) // No best path
             }
         };
 
@@ -886,13 +517,6 @@ pub fn route_ipv4_withdraw(
     // BGP Path selection - this may select a new best path
     let removed = bgp.local_rib.remove_route(nlri.prefix, nlri.id, peer_ident);
 
-    {
-        let peer = peers.get_mut(&peer_id).expect("peer must exist");
-        if !removed.is_empty() {
-            peer.stat.rx_dec(Afi::Ip, Safi::Unicast);
-        }
-    }
-
     // Re-run best path selection and advertise changes
     let selected = bgp.local_rib.select_best_path(nlri.prefix);
     if !selected.is_empty() || !removed.is_empty() {
@@ -908,7 +532,6 @@ pub fn route_from_peer(
 ) {
     // Convert UpdatePacket to BgpAttr.
     let attr = BgpAttr::from(&packet.attrs);
-    // print!("{}", attr);
 
     // Convert UpdatePacket to BgpNlri.
     let nlri = BgpNlri::from(&packet);
@@ -1003,14 +626,14 @@ pub fn route_update_ipv4(
         }
     }
 
-    // // 9. Originator ID (for IBGP)
+    // 6. Originator ID (for IBGP)
     // if peer.peer_type == PeerType::IBGP {
     //     if let Some(ref originator_id) = rib.attr.originator_id {
     //         attrs.push(Attr::OriginatorId(originator_id.clone()));
     //     }
     // }
 
-    // // 10. Cluster List (for IBGP)
+    // 7. Cluster List (for IBGP)
     // if peer.peer_type == PeerType::IBGP {
     //     if let Some(ref cluster_list) = rib.attr.cluster_list {
     //         attrs.push(Attr::ClusterList(cluster_list.clone()));
@@ -1032,9 +655,6 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
     if let Some(ref packet_tx) = peer.packet_tx {
         if let Err(e) = packet_tx.send(bytes) {
             eprintln!("Failed to send BGP Update to {}: {}", peer.address, e);
-        } else {
-            // Update statistics
-            peer.stat.tx_inc(Afi::Ip, Safi::Unicast);
         }
     }
 }
@@ -1131,11 +751,36 @@ impl Bgp {
             &attr,
         );
         let (replaced, selected) = self.local_rib.update_route(prefix, rib);
-        // XXX
+
+        let mut bgp_ref = ConfigRef {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            rib_tx: &self.rib_tx,
+        };
+
+        if !selected.is_empty() {
+            let mut peer_map = std::mem::take(&mut self.peers);
+            route_advertise_to_peers(prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
+            self.peers = peer_map;
+        }
     }
 
     pub fn route_del(&mut self, prefix: Ipv4Net) {
         let ident = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
-        let removed = self.local_rib.remove_route(prefix, 0, ident);
+        let id = 0;
+        let removed = self.local_rib.remove_route(prefix, id, ident);
+
+        let mut bgp_ref = ConfigRef {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            rib_tx: &self.rib_tx,
+        };
+
+        let selected = bgp_ref.local_rib.select_best_path(prefix);
+        if !selected.is_empty() || !removed.is_empty() {
+            let mut peer_map = std::mem::take(&mut self.peers);
+            route_advertise_to_peers(prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
+            self.peers = peer_map;
+        }
     }
 }
