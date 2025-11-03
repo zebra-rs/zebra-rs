@@ -18,4 +18,9 @@ module extension {
     description "presence";
     argument "presence";
   }
+
+  extension dynamic {
+    description "dyanamic completion";
+    argument "dynamic";
+  }
 }

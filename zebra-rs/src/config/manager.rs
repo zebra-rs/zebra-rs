@@ -326,11 +326,19 @@ impl ConfigManager {
         }
     }
 
-    pub async fn comps_dynamic(&self) -> Vec<String> {
-        if let Some(tx) = self.cm_clients.borrow().get("rib") {
+    pub async fn comps_dynamic(&self, dynamic: String) -> Vec<String> {
+        // Parse dynamic.
+        let mut dynamics: Vec<&str> = dynamic.as_str().split(':').collect();
+
+        if dynamics.len() != 2 {
+            return Vec::new();
+        }
+        let Some(proto) = dynamics.first() else {
+            return Vec::new();
+        };
+        if let Some(tx) = self.cm_clients.borrow().get(&proto.to_string()) {
             let (comp_tx, comp_rx) = oneshot::channel();
             let req = ConfigRequest {
-                // input: "".to_string(),
                 paths: Vec::new(),
                 op: ConfigOp::Completion,
                 resp: Some(comp_tx),
@@ -344,9 +352,9 @@ impl ConfigManager {
 
     pub async fn completion(&self, mode: &Mode, input: &str) -> (ExecCode, Vec<Completion>) {
         let mut state = State::new();
-        // Temporary workaround for interface completion.
-        if has_interfaces(input) {
-            state.links = self.comps_dynamic().await;
+        if let Some(dynamic) = has_dynamic(input) {
+            let comps = self.comps_dynamic(dynamic.clone()).await;
+            state.dynamic.insert(dynamic, comps);
         }
         let (code, comps, _state) = parse(
             input,
@@ -538,7 +546,12 @@ pub async fn event_loop(mut config: ConfigManager) {
     }
 }
 
-fn has_interfaces(input: &str) -> bool {
-    input.split_whitespace().any(|s| s == "interface")
-        | input.split_whitespace().any(|s| s == "neighbors")
+fn has_dynamic(input: &str) -> Option<String> {
+    if input.split_whitespace().any(|s| s == "interface") {
+        Some(String::from("rib:interface"))
+    } else if input.split_whitespace().any(|s| s == "neighbors") {
+        Some(String::from("bgp:neighbor"))
+    } else {
+        None
+    }
 }
