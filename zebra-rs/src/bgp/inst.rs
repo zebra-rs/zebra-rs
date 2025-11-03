@@ -159,12 +159,32 @@ impl Bgp {
         }
     }
 
+    pub fn peer_comps(&self) -> Vec<String> {
+        self.peers
+            .keys()
+            .map(|addr| addr.to_string().clone())
+            .collect()
+    }
+
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
-        let (path, args) = path_from_command(&msg.paths);
-        if let Some(f) = self.callbacks.get(&path) {
-            f(self, args, msg.op);
-        } else if let Some(f) = self.pcallbacks.get(&path) {
-            f(&mut self.clist, args, msg.op);
+        match msg.op {
+            ConfigOp::CommitStart => {
+                //
+            }
+            ConfigOp::Set | ConfigOp::Delete => {
+                let (path, args) = path_from_command(&msg.paths);
+                if let Some(f) = self.callbacks.get(&path) {
+                    f(self, args, msg.op);
+                } else if let Some(f) = self.pcallbacks.get(&path) {
+                    f(&mut self.clist, args, msg.op);
+                }
+            }
+            ConfigOp::CommitEnd => {
+                //
+            }
+            ConfigOp::Completion => {
+                msg.resp.unwrap().send(self.peer_comps()).unwrap();
+            }
         }
     }
 

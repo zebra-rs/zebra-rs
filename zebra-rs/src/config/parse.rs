@@ -21,6 +21,7 @@ pub struct State {
     pub show: bool,
     pub paths: Vec<CommandPath>,
     pub links: Vec<String>,
+    pub dynamic: HashMap<String, Vec<String>>,
     pub choice_states: HashMap<String, String>, // choice_name -> active_case_name
 }
 
@@ -34,6 +35,7 @@ impl State {
             paths: Vec::new(),
             index: 0usize,
             links: Vec::new(),
+            dynamic: HashMap::new(),
             choice_states: HashMap::new(),
         }
     }
@@ -242,27 +244,27 @@ fn match_builder() -> MatchMap {
         })
         .kind(YangType::Ipv4Addr)
         .exec(|m, entry, input, _node| {
-            m.process(entry, match_ipv4_addr(input), cname("A.B.C.D"));
+            m.process(entry, match_ipv4_addr(input), cname("<A.B.C.D>"));
         })
         .kind(YangType::Ipv4Prefix)
         .exec(|m, entry, input, _node| {
-            m.process(entry, match_ipv4_net(input), cname("A.B.C.D/M"));
+            m.process(entry, match_ipv4_net(input), cname("<A.B.C.D/M>"));
         })
         .kind(YangType::Ipv6Addr)
         .exec(|m, entry, input, _node| {
-            m.process(entry, match_ipv6_addr(input), cname("X:X::X:X"));
+            m.process(entry, match_ipv6_addr(input), cname("<X:X::X:X>"));
         })
         .kind(YangType::Ipv6Prefix)
         .exec(|m, entry, input, _node| {
-            m.process(entry, match_ipv6_net(input), cname("X:X::X:X/M"));
+            m.process(entry, match_ipv6_net(input), cname("<X:X::X:X/M>"));
         })
         .kind(YangType::MacAddr)
         .exec(|m, entry, input, _node| {
-            m.process(entry, match_mac_addr(input), cname("XX:XX:XX:XX:XX:XX"));
+            m.process(entry, match_mac_addr(input), cname("<XX:XX:XX:XX:XX:XX>"));
         })
         .kind(YangType::NsapAddr)
         .exec(|m, entry, input, _node| {
-            m.process(entry, match_nsap_addr(input), cname("XX.XXXX..XXXX.XX"));
+            m.process(entry, match_nsap_addr(input), cname("<XX.XXXX..XXXX.XX>"));
         })
         .kind(YangType::Enumeration)
         .exec(|m, entry, input, node| {
@@ -335,13 +337,16 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State
         }
     }
 
-    if entry.name == "if-name" || entry.name == "if-name-brief" {
-        for link in s.links.iter() {
-            m.match_keyword(entry, input, link);
+    if let Some(dynamics) = entry.extension.get("ext:dynamic") {
+        if let Some(candidates) = s.dynamic.get(dynamics) {
+            for candidate in candidates.iter() {
+                m.match_keyword(entry, input, candidate);
+            }
         }
-        if entry.name == "if-name-brief" {
-            m.match_keyword(entry, input, "brief");
-        }
+    }
+
+    if entry.name == "if-name-brief" {
+        m.match_keyword(entry, input, "brief");
     }
 }
 

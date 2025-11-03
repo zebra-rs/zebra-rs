@@ -47,6 +47,7 @@ module exec {
       ext:presence "Show presence";
       key "if-name-brief";
       leaf if-name-brief {
+        ext:dynamic "rib:interface";
         type string;
       }
       leaf detail {
@@ -89,6 +90,7 @@ module exec {
           ext:presence "BGP all neighbor information";
           key name;
           leaf name {
+            ext:dynamic "bgp:neighbor";
             type "inet:ipv4-address";
           }
           leaf advertised-routes {

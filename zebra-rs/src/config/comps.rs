@@ -68,12 +68,12 @@ fn ytype_str(ytype: &YangType) -> &'static str {
         YangType::Leafref => "leafref",
         YangType::Identityref => "identityref",
         YangType::Path => "path",
-        YangType::Ipv4Addr => "A.B.C.D",
-        YangType::Ipv4Prefix => "A.B.C.D/M",
-        YangType::Ipv6Addr => "X:X::X:X",
-        YangType::Ipv6Prefix => "X:X::X:X/M",
-        YangType::MacAddr => "XX:XX:XX:XX:XX:XX",
-        YangType::NsapAddr => "XX.XXXX..XXXX.XX",
+        YangType::Ipv4Addr => "<A.B.C.D>",
+        YangType::Ipv4Prefix => "<A.B.C.D/M>",
+        YangType::Ipv6Addr => "<X:X::X:X>",
+        YangType::Ipv6Prefix => "<X:X::X:X/M>",
+        YangType::MacAddr => "<XX:XX:XX:XX:XX:XX>",
+        YangType::NsapAddr => "<XX.XXXX..XXXX.XX>",
     }
 }
 
@@ -214,19 +214,21 @@ pub fn comps_add_all(
         }
         YangMatch::Key => {
             for key in entry.key.iter() {
-                for entry in entry.dir.borrow().iter() {
-                    if &entry.name == key {
-                        comps_as_leaf(comps, entry);
-                        if entry.name == "if-name" || entry.name == "if-name-brief" {
-                            for link in s.links.iter() {
-                                comps.push(Completion::new_name(link));
+                for subent in entry.dir.borrow().iter() {
+                    if &subent.name == key {
+                        comps_as_leaf(comps, subent);
+                        if let Some(dynamic) = subent.extension.get("ext:dynamic") {
+                            if let Some(candidates) = s.dynamic.get(dynamic) {
+                                for cand in candidates.iter() {
+                                    comps.push(Completion::new_name(cand));
+                                }
                             }
-                            if entry.name == "if-name-brief" {
-                                comps.push(Completion::new(
-                                    "brief",
-                                    "Interface status and configuration summary",
-                                ));
-                            }
+                        }
+                        if subent.name == "if-name-brief" {
+                            comps.push(Completion::new(
+                                "brief",
+                                "Interface status and configuration summary",
+                            ));
                         }
                     }
                 }

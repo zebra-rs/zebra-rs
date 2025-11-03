@@ -56,7 +56,7 @@ pub fn match_ipv4_addr(src: &str) -> (MatchType, usize) {
     if nums < 4 || dots < 3 {
         return (MatchType::Incomplete, pos);
     }
-    (MatchType::Exact, pos)
+    (MatchType::Partial, pos)
 }
 
 pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
@@ -75,7 +75,7 @@ pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
     let _ = first.split_off(pos);
 
     let (m, pos) = match_ipv4_addr(&first);
-    if m != MatchType::Exact {
+    if m != MatchType::Partial {
         return (m, pos);
     }
 
@@ -104,7 +104,7 @@ pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
         return (MatchType::Incomplete, pos);
     }
 
-    (MatchType::Exact, pos)
+    (MatchType::Partial, pos)
 }
 
 // Allowed characters for normal IPv6 addresses and IPv6 prefixes with masks:
@@ -242,7 +242,7 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
 
     if !prefix {
         match Ipv6Addr::from_str(&s[0..i]) {
-            Ok(_) => (MatchType::Exact, i),
+            Ok(_) => (MatchType::Partial, i),
             Err(_) => (MatchType::Partial, i),
         }
     } else {
@@ -271,7 +271,7 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
         if !nums_seen {
             return (MatchType::Incomplete, i);
         }
-        (MatchType::Exact, i)
+        (MatchType::Partial, i)
     }
 }
 

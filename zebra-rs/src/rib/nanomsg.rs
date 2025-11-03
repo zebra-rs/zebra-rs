@@ -146,8 +146,8 @@ struct IsisIf {
     prefix_sid: Option<PrefixSid>,
     #[serde(rename = "adjacency-sid", skip_serializing_if = "Option::is_none")]
     adjacency_sid: Option<PrefixSid>,
-    #[serde(rename = "srlg-group")]
-    srlg_group: String,
+    #[serde(rename = "srlg-group", skip_serializing_if = "Option::is_none")]
+    srlg_group: Option<Vec<String>>,
     #[serde(rename = "l2-config")]
     l2_config: Option<IsisIfLevel>,
 }
@@ -326,7 +326,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 100 }),
-            srlg_group: "group-1".into(),
+            srlg_group: Some(vec!["hoge".to_string()]),
             l2_config: Some(IsisIfLevel { metric: 20 }),
         };
         MsgEnum::IsisIf(msg)
@@ -341,7 +341,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: None,
-            srlg_group: "group-1".into(),
+            srlg_group: Some(vec!["hoge".to_string()]),
             l2_config: Some(IsisIfLevel { metric: 20 }),
         };
         MsgEnum::IsisIf(msg)
@@ -356,7 +356,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: Some(PrefixSid { index: 200 }),
-            srlg_group: "group-1".into(),
+            srlg_group: Some(vec!["hoge".to_string()]),
             l2_config: Some(IsisIfLevel { metric: 20 }),
         };
         MsgEnum::IsisIf(msg)
@@ -371,7 +371,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: Some(PrefixSid { index: 100 }),
             adjacency_sid: None,
-            srlg_group: "".into(),
+            srlg_group: None,
             l2_config: None,
         };
         MsgEnum::IsisIf(msg)
@@ -386,7 +386,7 @@ impl Nanomsg {
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: None,
-            srlg_group: "".into(),
+            srlg_group: None,
             l2_config: None,
         };
         MsgEnum::IsisIf(msg)
