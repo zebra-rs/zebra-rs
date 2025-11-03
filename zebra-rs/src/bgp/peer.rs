@@ -1,12 +1,11 @@
-use bgp_packet::addpath::AddPathValue;
-use bgp_packet::cap::CapMultiProtocol;
-use bytes::BytesMut;
-use ipnet::Ipv4Net;
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
+
+use bytes::BytesMut;
+use ipnet::Ipv4Net;
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -23,6 +22,8 @@ use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::timer;
 use crate::config::Args;
+use crate::context::task::*;
+use crate::{bgp_debug, bgp_info, rib};
 
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
@@ -30,8 +31,6 @@ use super::route::route_from_peer;
 use super::route::{AdjRib, LocalRib};
 use super::{BGP_PORT, PrefixSetValue};
 use super::{Bgp, InOuts};
-use crate::context::task::*;
-use crate::{bgp_debug, bgp_info, rib};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum State {
@@ -229,7 +228,7 @@ pub struct Peer {
     pub param_tx: PeerParam,
     pub param_rx: PeerParam,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
-    pub stat: PeerStat,
+    // pub stat: PeerStat,
     pub tx: UnboundedSender<Message>,
     pub config: PeerConfig,
     pub instant: Option<Instant>,
@@ -271,7 +270,7 @@ impl Peer {
             param: PeerParam::default(),
             param_tx: PeerParam::default(),
             param_rx: PeerParam::default(),
-            stat: PeerStat::default(),
+            // stat: PeerStat::default(),
             packet_tx: None,
             instant: None,
             cap_map: CapAfiMap::new(),
@@ -340,45 +339,48 @@ fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
     }
 }
 
-// fn peer_clear(bgp_ref: &mut ConfigRef, peer: &mut Peer) {
-//     // Clear all routes from this peer when session goes down
-//     let peer_addr = peer.address;
-
-//     // Clear Adj-RIB-In for this peer
-//     let _removed_adj_rib_in = peer.adj_rib_in.clear_all_routes();
-
-//     // Clear Adj-RIB-Out for this peer
-//     let _removed_adj_rib_out = peer.adj_rib_out.clear_all_routes();
-
-//     // Remove all routes from Local RIB that came from this peer
-//     let rib_changes = bgp_ref.local_rib.remove_peer_routes(peer_addr);
-
-//     // Process RIB changes (removals and installations)
-//     for (prefix, old_best, new_best) in rib_changes {
-//         // Remove old best path if it existed
-//         if let Some(old_route) = old_best {
-//             if let Err(e) = send_route_to_rib(&old_route, bgp_ref.rib_tx, false) {
-//                 //;
-//             } else {
-//                 //;
-//             }
-//         }
-
-//         // Install new best path if one was selected
-//         if let Some(new_route) = new_best {
-//             if let Err(e) = send_route_to_rib(&new_route, bgp_ref.rib_tx, true) {
-//                 //;
-//             } else {
-//                 //;
-//             }
-//         }
-//     }
-// }
-
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
+    // Handle UpdateMsg separately to avoid borrow checker issues
+    if let Event::UpdateMsg(packet) = event {
+        let mut bgp_ref = ConfigRef {
+            router_id: &bgp.router_id,
+            local_rib: &mut bgp.local_rib,
+            rib_tx: &bgp.rib_tx,
+        };
+
+        // Take ownership temporarily to avoid double borrow
+        let mut peer_map = std::mem::take(&mut bgp.peers);
+        let prev_state = peer_map.get(&id).unwrap().state.clone();
+        let new_state = fsm_bgp_update(id, packet, &mut bgp_ref, &mut peer_map);
+        peer_map.get_mut(&id).unwrap().state = new_state.clone();
+
+        // Put the peers back
+        bgp.peers = peer_map;
+
+        if prev_state == new_state {
+            return;
+        }
+        bgp_info!("FSM: {:?} -> {:?}", prev_state, new_state);
+
+        let peer = bgp.peers.get_mut(&id).unwrap();
+        if prev_state.is_established() && !peer.state.is_established() {
+            peer.instant = Some(Instant::now());
+            route_clean(peer, &mut bgp_ref);
+            // peer.stat.clear();
+        }
+
+        if !prev_state.is_established() && peer.state.is_established() {
+            peer.instant = Some(Instant::now());
+            route_sync(peer, &mut bgp_ref);
+        }
+
+        timer::update_timers(peer);
+        return;
+    }
+
+    // Handle other events normally
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
-        // local_rib: &mut bgp.local_rib,
         local_rib: &mut bgp.local_rib,
         rib_tx: &bgp.rib_tx,
     };
@@ -397,7 +399,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
         Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
         Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
-        Event::UpdateMsg(packet) => fsm_bgp_update(peer, packet, &mut bgp_ref),
+        Event::UpdateMsg(_) => unreachable!(), // Handled above
     };
     if prev_state == peer.state {
         return;
@@ -408,7 +410,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         peer.instant = Some(Instant::now());
 
         route_clean(peer, &mut bgp_ref);
-        peer.stat.clear();
+        // peer.stat.clear();
     }
 
     // Update instant when entering or leaving the Established state.
@@ -563,11 +565,19 @@ fn peer_send_update_test(peer: &mut Peer) {
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
-fn fsm_bgp_update(peer: &mut Peer, packet: UpdatePacket, bgp: &mut ConfigRef) -> State {
-    peer.counter[BgpType::Update as usize].rcvd += 1;
-    timer::refresh_hold_timer(peer);
+fn fsm_bgp_update(
+    peer_id: IpAddr,
+    packet: UpdatePacket,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+) -> State {
+    {
+        let peer = peers.get_mut(&peer_id).unwrap();
+        peer.counter[BgpType::Update as usize].rcvd += 1;
+        timer::refresh_hold_timer(peer);
+    }
 
-    route_from_peer(peer, packet, bgp);
+    route_from_peer(peer_id, packet, bgp, peers);
 
     // peer_send_update_test(peer);
 
