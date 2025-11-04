@@ -111,6 +111,28 @@ impl BgpNlri {
             };
             return BgpNlri::Ipv4(withdraw);
         }
+        // IPv4 MPLS VPN.
+        for attr in packet.attrs.iter() {
+            match attr {
+                Attr::MpReachNlri(mp_update) => {
+                    let update = Vpnv4NlriVec {
+                        update: mp_update.vpnv4_prefix.clone(),
+                        ..Default::default()
+                    };
+                    return BgpNlri::Vpnv4(update);
+                }
+                Attr::MpUnreachNlri(mp_withdraw) => {
+                    let withdraw = Vpnv4NlriVec {
+                        withdraw: mp_withdraw.vpnv4_prefix.clone(),
+                        ..Default::default()
+                    };
+                    return BgpNlri::Vpnv4(withdraw);
+                }
+                _ => {
+                    //
+                }
+            }
+        }
         BgpNlri::Empty
     }
 }
@@ -361,6 +383,7 @@ impl LocalRib {
 pub fn route_ipv4_update(
     peer_id: IpAddr,
     nlri: &Ipv4Nlri,
+    rd: Option<RouteDistinguisher>,
     attr: &BgpAttr,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
@@ -533,6 +556,7 @@ fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
 pub fn route_ipv4_withdraw(
     peer_id: IpAddr,
     nlri: &Ipv4Nlri,
+    rd: Option<RouteDistinguisher>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
@@ -574,11 +598,37 @@ pub fn route_from_peer(
             }
             for update in nlri.update.iter() {
                 println!("IPv4 Update: {}", update.prefix);
-                route_ipv4_update(peer_id, update, &attr, bgp, peers);
+                route_ipv4_update(peer_id, update, None, &attr, bgp, peers);
             }
             for withdraw in nlri.withdraw.iter() {
                 println!("IPv4 Withdraw: {}", withdraw.prefix);
-                route_ipv4_withdraw(peer_id, withdraw, bgp, peers);
+                route_ipv4_withdraw(peer_id, withdraw, None, bgp, peers);
+            }
+        }
+        Vpnv4(nlri) => {
+            for update in nlri.update.iter() {
+                println!("IPv4 VPN update: {}:{}", update.rd, update.nlri.prefix);
+                route_ipv4_update(
+                    peer_id,
+                    &update.nlri,
+                    Some(update.rd.clone()),
+                    &attr,
+                    bgp,
+                    peers,
+                );
+            }
+            for withdraw in nlri.withdraw.iter() {
+                println!(
+                    "IPv4 VPN withdraw: {}:{}",
+                    withdraw.rd, withdraw.nlri.prefix
+                );
+                route_ipv4_withdraw(
+                    peer_id,
+                    &withdraw.nlri,
+                    Some(withdraw.rd.clone()),
+                    bgp,
+                    peers,
+                );
             }
         }
         _ => {
