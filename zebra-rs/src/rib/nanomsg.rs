@@ -52,6 +52,7 @@ enum MsgEnum {
     BgpNeighbor(BgpNeighbor),
     BgpNetwork(BgpNetwork),
     Vrf(Vrf),
+    Srlg(Srlg),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -258,6 +259,12 @@ pub struct Vrf {
     vrf_name: String,
     #[serde(rename = "route-distinguisher")]
     rd: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Srlg {
+    name: String,
+    value: u32,
 }
 
 use std::io::Write;
@@ -507,6 +514,14 @@ impl Nanomsg {
         MsgEnum::Vrf(msg)
     }
 
+    fn srlg_add(&self) -> MsgEnum {
+        let msg = Srlg {
+            name: "hoge".to_string(),
+            value: 100,
+        };
+        MsgEnum::Srlg(msg)
+    }
+
     pub fn parse(&mut self, text: &str) -> anyhow::Result<()> {
         let value: Result<Msg, serde_json::Error> = serde_json::from_str(text);
         thread::sleep(Duration::from_millis(100));
@@ -635,6 +650,13 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("interface:add"),
                         data: MsgEnum::Interface(intf_msg),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                }
+                if msg.method == "config:srlg-group-request" {
+                    let msg = MsgSend {
+                        method: String::from("config:srlg-group-add"),
+                        data: self.srlg_add(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }

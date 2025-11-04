@@ -77,6 +77,10 @@ module exec {
       container bgp {
         ext:help "BGP commands";
         presence "BGP RIB";
+        leaf route {
+          ext:help "BGP RIB";
+          type inet:ipv4-address;
+        }
         leaf clear {
           ext:help "Temporary command for BGP clear";
           type empty;

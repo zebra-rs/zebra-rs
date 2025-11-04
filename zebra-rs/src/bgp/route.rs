@@ -111,6 +111,28 @@ impl BgpNlri {
             };
             return BgpNlri::Ipv4(withdraw);
         }
+        // IPv4 MPLS VPN.
+        for attr in packet.attrs.iter() {
+            match attr {
+                Attr::MpReachNlri(mp_update) => {
+                    let update = Vpnv4NlriVec {
+                        update: mp_update.vpnv4_prefix.clone(),
+                        ..Default::default()
+                    };
+                    return BgpNlri::Vpnv4(update);
+                }
+                Attr::MpUnreachNlri(mp_withdraw) => {
+                    let withdraw = Vpnv4NlriVec {
+                        withdraw: mp_withdraw.vpnv4_prefix.clone(),
+                        ..Default::default()
+                    };
+                    return BgpNlri::Vpnv4(withdraw);
+                }
+                _ => {
+                    //
+                }
+            }
+        }
         BgpNlri::Empty
     }
 }
@@ -266,6 +288,21 @@ impl LocalRib {
             return candidate_lp > incumbent_lp;
         }
 
+        // RFC 4456: Prefer path with shorter CLUSTER_LIST length (fewer route reflector hops)
+        // let candidate_cluster_len = candidate
+        //     .attr
+        //     .cluster_list
+        //     .as_ref()
+        //     .map_or(0, |cl| cl.list.len());
+        // let incumbent_cluster_len = incumbent
+        //     .attr
+        //     .cluster_list
+        //     .as_ref()
+        //     .map_or(0, |cl| cl.list.len());
+        // if candidate_cluster_len != incumbent_cluster_len {
+        //     return candidate_cluster_len < incumbent_cluster_len;
+        // }
+
         let candidate_local = matches!(candidate.typ, BgpRibType::Originated);
         let incumbent_local = matches!(incumbent.typ, BgpRibType::Originated);
         if candidate_local != incumbent_local {
@@ -346,6 +383,7 @@ impl LocalRib {
 pub fn route_ipv4_update(
     peer_id: IpAddr,
     nlri: &Ipv4Nlri,
+    rd: Option<RouteDistinguisher>,
     attr: &BgpAttr,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
@@ -381,6 +419,19 @@ pub fn route_ipv4_update(
             }
         }
 
+        // RFC 4456: Drop update if local router ID is in CLUSTER_LIST. This
+        // prevents routing loops in route reflection scenarios when the route
+        // has already passed through this route reflector.
+        if let Some(ref cluster_list) = attr.cluster_list {
+            if cluster_list.list.contains(&bgp.router_id) {
+                eprintln!(
+                    "Dropping update for {} from peer {} - local router ID {} found in CLUSTER_LIST",
+                    nlri.prefix, peer.address, bgp.router_id
+                );
+                return;
+            }
+        }
+
         // Identify peer_type
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
@@ -388,7 +439,7 @@ pub fn route_ipv4_update(
             BgpRibType::EBGP
         };
 
-        (peer.ident, peer.router_id, typ, true)
+        (peer.ident, peer.remote_id, typ, true)
     };
 
     if !should_process {
@@ -428,6 +479,7 @@ fn route_advertise_to_peers(
     let peer_addrs: Vec<IpAddr> = peers
         .iter()
         .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(Afi::Ip, Safi::Unicast))
         .map(|(addr, _)| *addr)
         .collect();
 
@@ -504,6 +556,7 @@ fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
 pub fn route_ipv4_withdraw(
     peer_id: IpAddr,
     nlri: &Ipv4Nlri,
+    rd: Option<RouteDistinguisher>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
@@ -545,11 +598,37 @@ pub fn route_from_peer(
             }
             for update in nlri.update.iter() {
                 println!("IPv4 Update: {}", update.prefix);
-                route_ipv4_update(peer_id, update, &attr, bgp, peers);
+                route_ipv4_update(peer_id, update, None, &attr, bgp, peers);
             }
             for withdraw in nlri.withdraw.iter() {
                 println!("IPv4 Withdraw: {}", withdraw.prefix);
-                route_ipv4_withdraw(peer_id, withdraw, bgp, peers);
+                route_ipv4_withdraw(peer_id, withdraw, None, bgp, peers);
+            }
+        }
+        Vpnv4(nlri) => {
+            for update in nlri.update.iter() {
+                println!("IPv4 VPN update: {}:{}", update.rd, update.nlri.prefix);
+                route_ipv4_update(
+                    peer_id,
+                    &update.nlri,
+                    Some(update.rd.clone()),
+                    &attr,
+                    bgp,
+                    peers,
+                );
+            }
+            for withdraw in nlri.withdraw.iter() {
+                println!(
+                    "IPv4 VPN withdraw: {}:{}",
+                    withdraw.rd, withdraw.nlri.prefix
+                );
+                route_ipv4_withdraw(
+                    peer_id,
+                    &withdraw.nlri,
+                    Some(withdraw.rd.clone()),
+                    bgp,
+                    peers,
+                );
             }
         }
         _ => {
@@ -577,8 +656,12 @@ pub fn route_update_ipv4(
         return None;
     }
 
-    // IBGP to IBGP: Don't advertise IBGP-learned routes.
-    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+    // iBGP to iBGP: Don't advertise iBGP-learned routes except the peer is
+    // route reflector client.
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && !peer.is_reflector_client()
+    {
         return None;
     }
 
@@ -626,19 +709,32 @@ pub fn route_update_ipv4(
         }
     }
 
-    // 6. Originator ID (for IBGP)
-    // if peer.peer_type == PeerType::IBGP {
-    //     if let Some(ref originator_id) = rib.attr.originator_id {
-    //         attrs.push(Attr::OriginatorId(originator_id.clone()));
-    //     }
-    // }
+    // 6. Originator ID (for IBGP route reflection)
+    // RFC 4456: A route reflector SHOULD NOT create an ORIGINATOR_ID if one already
+    // exists. ORIGINATOR_ID is set only once by the first route reflector and preserved
+    // thereafter to identify the original route source within the AS.
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        if attrs.originator_id.is_none() {
+            // Set ORIGINATOR_ID to the router ID of the peer that originated this route
+            attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+        }
+        // If ORIGINATOR_ID already exists, preserve it (don't overwrite)
+    }
 
-    // 7. Cluster List (for IBGP)
-    // if peer.peer_type == PeerType::IBGP {
-    //     if let Some(ref cluster_list) = rib.attr.cluster_list {
-    //         attrs.push(Attr::ClusterList(cluster_list.clone()));
-    //     }
-    // }
+    // 7. Cluster List (for IBGP route reflection)
+    // RFC 4456: When a route reflector reflects a route, it must prepend the local
+    // CLUSTER_ID to the CLUSTER_LIST. By default, the CLUSTER_ID is the router ID.
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        if let Some(ref mut cluster_list) = attrs.cluster_list {
+            // Prepend local router ID to existing cluster list
+            cluster_list.list.insert(0, *bgp.router_id);
+        } else {
+            // Create new cluster list with local router ID
+            let mut cluster_list = ClusterList::new();
+            cluster_list.list.push(*bgp.router_id);
+            attrs.cluster_list = Some(cluster_list);
+        }
+    }
 
     Some((nlri, attrs))
 }
@@ -724,17 +820,11 @@ fn send_eor_ipv4_unicast(peer: &mut Peer) {
 // Called when peer has been established.
 pub fn route_sync(peer: &mut Peer, bgp: &mut ConfigRef) {
     // Advertize.
-    let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
-    if let Some(cap) = peer.cap_map.entries.get(&afi) {
-        if cap.send && cap.recv {
-            route_sync_ipv4(peer, bgp);
-        }
+    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
+        route_sync_ipv4(peer, bgp);
     }
-    let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
-    if let Some(cap) = peer.cap_map.entries.get(&afi) {
-        if cap.send && cap.recv {
-            // route_sync_vpnv4(peer, bgp);
-        }
+    if peer.is_afi_safi(Afi::Ip, Safi::MplsVpn) {
+        // route_sync_vpnv4(peer, bgp);
     }
 }
 
