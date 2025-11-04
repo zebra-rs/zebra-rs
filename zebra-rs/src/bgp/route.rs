@@ -578,7 +578,10 @@ pub fn route_update_ipv4(
     }
 
     // IBGP to IBGP: Don't advertise IBGP-learned routes.
-    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && !peer.is_reflector_client()
+    {
         return None;
     }
 
@@ -627,11 +630,9 @@ pub fn route_update_ipv4(
     }
 
     // 6. Originator ID (for IBGP)
-    // if peer.peer_type == PeerType::IBGP {
-    //     if let Some(ref originator_id) = rib.attr.originator_id {
-    //         attrs.push(Attr::OriginatorId(originator_id.clone()));
-    //     }
-    // }
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+    }
 
     // 7. Cluster List (for IBGP)
     // if peer.peer_type == PeerType::IBGP {

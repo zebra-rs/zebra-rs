@@ -415,6 +415,7 @@ struct Neighbor<'a> {
     timer_recv: PeerParam,
     cap_map: CapAfiMap,
     count: HashMap<&'a str, PeerCounter>,
+    reflector_client: bool,
 }
 
 const ONE_DAY_SECOND: u64 = 60 * 60 * 24;
@@ -524,6 +525,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         timer_recv: peer.param_rx.clone(),
         cap_map: peer.cap_map.clone(),
         count: HashMap::default(),
+        reflector_client: peer.reflector_client,
     };
 
     // Timers.
@@ -662,6 +664,9 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.count.get("total").map(|c| c.sent).unwrap_or(0),
         neighbor.count.get("total").map(|c| c.rcvd).unwrap_or(0),
     )?;
+    if neighbor.reflector_client {
+        writeln!(out, "  Route-Reflector Client");
+    }
 
     Ok(())
 }
