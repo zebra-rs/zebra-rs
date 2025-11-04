@@ -85,6 +85,11 @@ impl AdjRib {
         self.v4.remove_route(prefix, id)
     }
 
+    // Check table has prefix.
+    pub fn contains_key(&self, prefix: &Ipv4Net) -> bool {
+        self.v4.0.contains_key(prefix)
+    }
+
     // Add a route to Adj-RIB-In
     pub fn add_route_vpn(
         &mut self,
@@ -110,6 +115,15 @@ impl AdjRib {
             .or_default()
             .remove_route(prefix, id)
     }
+
+    // Check table has prefix.
+    pub fn contains_key_vpn(&mut self, rd: &RouteDistinguisher, prefix: &Ipv4Net) -> bool {
+        self.v4vpn
+            .entry(rd.clone())
+            .or_default()
+            .0
+            .contains_key(prefix)
+    }
 }
 
 #[derive(Default)]
@@ -122,8 +136,8 @@ struct Ipv4NlriVec {
 #[derive(Default)]
 struct Vpnv4NlriVec {
     pub eor: bool,
-    pub update: Vec<Vpnv4Net>,
-    pub withdraw: Vec<Vpnv4Net>,
+    pub update: Vec<Vpnv4Nlri>,
+    pub withdraw: Vec<Vpnv4Nlri>,
 }
 
 enum BgpNlri {
@@ -200,7 +214,7 @@ impl BgpRibType {
 
 #[derive(Debug, Clone)]
 pub struct BgpRib {
-    // AddPath ID.
+    // AddPath ID from peer.
     pub id: u32,
     // BGP Attribute.
     pub attr: BgpAttr,
@@ -214,6 +228,8 @@ pub struct BgpRib {
     pub typ: BgpRibType,
     // Whether this candidate is currently the best path.
     pub best_path: bool,
+    // Label.
+    pub label: Option<Label>,
 }
 
 impl BgpRib {
@@ -224,6 +240,7 @@ impl BgpRib {
         id: u32,
         weight: u32,
         attr: &BgpAttr,
+        label: Option<Label>,
     ) -> Self {
         BgpRib {
             id,
@@ -233,6 +250,7 @@ impl BgpRib {
             weight,
             typ: rib_type,
             best_path: false,
+            label,
         }
     }
 
@@ -461,6 +479,31 @@ impl LocalRib {
             .or_default()
             .update_route(prefix, rib)
     }
+
+    pub fn remove_route_vpn(
+        &mut self,
+        rd: &RouteDistinguisher,
+        prefix: Ipv4Net,
+        id: u32,
+        ident: IpAddr,
+    ) -> Vec<BgpRib> {
+        self.v4vpn
+            .entry(rd.clone())
+            .or_default()
+            .remove_route(prefix, id, ident)
+    }
+
+    // Return selected best path, not the change history.
+    pub fn select_best_path_vpn(
+        &mut self,
+        rd: &RouteDistinguisher,
+        prefix: Ipv4Net,
+    ) -> Vec<BgpRib> {
+        self.v4vpn
+            .entry(rd.clone())
+            .or_default()
+            .select_best_path(prefix)
+    }
 }
 
 // RIB update from peer.
@@ -468,6 +511,7 @@ pub fn route_ipv4_update(
     peer_id: IpAddr,
     nlri: &Ipv4Nlri,
     rd: Option<RouteDistinguisher>,
+    label: Option<Label>,
     attr: &BgpAttr,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
@@ -531,7 +575,7 @@ pub fn route_ipv4_update(
     }
 
     // Create BGP RIB with weight value 0.
-    let rib = BgpRib::new(peer_ident, peer_router_id, typ, nlri.id, 0, attr);
+    let rib = BgpRib::new(peer_ident, peer_router_id, typ, nlri.id, 0, attr, label);
 
     // Register to peer's AdjRibIn and update stats
     {
@@ -551,13 +595,14 @@ pub fn route_ipv4_update(
     };
 
     // Advertise to peers if best path changed.
-    if !selected.is_empty() && rd.is_none() {
-        route_advertise_to_peers(nlri.prefix, &selected, peer_ident, bgp, peers);
+    if !selected.is_empty() {
+        route_advertise_to_peers(rd, nlri.prefix, &selected, peer_ident, bgp, peers);
     }
 }
 
 /// Advertise route changes to all appropriate peers
 fn route_advertise_to_peers(
+    rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     selected: &[BgpRib],
     source_peer: IpAddr,
@@ -568,10 +613,16 @@ fn route_advertise_to_peers(
     let new_best = selected.last();
 
     // Collect peer addresses that need updates to avoid borrow checker issues
+    let (afi, safi) = if rd.is_some() {
+        (Afi::Ip, Safi::MplsVpn)
+    } else {
+        (Afi::Ip, Safi::Unicast)
+    };
+
     let peer_addrs: Vec<IpAddr> = peers
         .iter()
         .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(Afi::Ip, Safi::Unicast))
+        .filter(|(_, p)| p.is_afi_safi(afi, safi))
         .map(|(addr, _)| *addr)
         .collect();
 
@@ -606,22 +657,42 @@ fn route_advertise_to_peers(
                 if let Some(best) = new_best {
                     let mut rib = best.clone();
                     rib.attr = attr.clone();
-                    peer.adj_rib_out.add_route(nlri.prefix, rib);
+                    if let Some(ref rd) = rd {
+                        peer.adj_rib_out.add_route_vpn(rd, nlri.prefix, rib);
+                    } else {
+                        peer.adj_rib_out.add_route(nlri.prefix, rib);
+                    }
                 }
-                route_send_ipv4(peer, nlri, attr);
+                if let Some(ref rd) = rd {
+                    let vpnv4_nlri = Vpnv4Nlri {
+                        label: Label::default(),
+                        rd: rd.clone(),
+                        nlri,
+                    };
+                    route_send_vpnv4(peer, vpnv4_nlri, attr);
+                } else {
+                    route_send_ipv4(peer, nlri, attr);
+                }
             }
             _ => {
                 // Send withdrawal if we had previously advertised
-                if peer.adj_rib_out.v4.0.contains_key(&prefix) {
-                    route_withdraw_ipv4(peer, prefix, 0);
-                    peer.adj_rib_out.remove_route(prefix, 0);
+                if let Some(ref rd) = rd {
+                    if peer.adj_rib_out.contains_key_vpn(rd, &prefix) {
+                        route_withdraw_vpnv4(peer, rd, prefix, 0);
+                        peer.adj_rib_out.remove_route_vpn(rd, prefix, 0);
+                    }
+                } else {
+                    if peer.adj_rib_out.contains_key(&prefix) {
+                        route_withdraw_ipv4(peer, prefix, 0);
+                        peer.adj_rib_out.remove_route(prefix, 0);
+                    }
                 }
             }
         }
     }
 }
 
-/// Send BGP withdrawal for a prefix
+// Send BGP withdrawal for a prefix
 fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
     let mut update = UpdatePacket::new();
 
@@ -645,27 +716,66 @@ fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
     }
 }
 
+// Send BGP withdrawal for a prefix
+fn route_withdraw_vpnv4(peer: &mut Peer, rd: &RouteDistinguisher, prefix: Ipv4Net, id: u32) {
+    let mut update = UpdatePacket::new();
+
+    // Check if we should use add-path
+    let mp = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+    let use_addpath = peer.cap_map.entries.get(&mp).map_or(false, |cap| cap.send);
+
+    let vpnv4_nlri = Vpnv4Nlri {
+        label: Label::default(),
+        rd: rd.clone(),
+        nlri: Ipv4Nlri { id, prefix },
+    };
+    update.vpnv4_withdraw.push(vpnv4_nlri);
+
+    // Convert to bytes and send
+    let bytes: BytesMut = update.into();
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send BGP Withdrawal to {}: {}", peer.address, e);
+        }
+    }
+}
+
 pub fn route_ipv4_withdraw(
     peer_id: IpAddr,
     nlri: &Ipv4Nlri,
     rd: Option<RouteDistinguisher>,
+    label: Option<Label>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
     let peer_ident = {
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
         // Remove from AdjRibIn.
-        peer.adj_rib_in.remove_route(nlri.prefix, nlri.id);
+        if let Some(ref rd) = rd {
+            peer.adj_rib_in.remove_route_vpn(rd, nlri.prefix, nlri.id);
+        } else {
+            peer.adj_rib_in.remove_route(nlri.prefix, nlri.id);
+        }
         peer.ident
     };
 
     // BGP Path selection - this may select a new best path
-    let removed = bgp.local_rib.remove_route(nlri.prefix, nlri.id, peer_ident);
+    let removed = if let Some(ref rd) = rd {
+        bgp.local_rib
+            .remove_route_vpn(rd, nlri.prefix, nlri.id, peer_ident)
+    } else {
+        bgp.local_rib.remove_route(nlri.prefix, nlri.id, peer_ident)
+    };
 
     // Re-run best path selection and advertise changes
-    let selected = bgp.local_rib.select_best_path(nlri.prefix);
+    let selected = if let Some(ref rd) = rd {
+        bgp.local_rib.select_best_path_vpn(rd, nlri.prefix)
+    } else {
+        bgp.local_rib.select_best_path(nlri.prefix)
+    };
     if !selected.is_empty() || !removed.is_empty() {
-        route_advertise_to_peers(nlri.prefix, &selected, peer_ident, bgp, peers);
+        route_advertise_to_peers(rd, nlri.prefix, &selected, peer_ident, bgp, peers);
     }
 }
 
@@ -690,11 +800,11 @@ pub fn route_from_peer(
             }
             for update in nlri.update.iter() {
                 println!("IPv4 Update: {}", update.prefix);
-                route_ipv4_update(peer_id, update, None, &attr, bgp, peers);
+                route_ipv4_update(peer_id, update, None, None, &attr, bgp, peers);
             }
             for withdraw in nlri.withdraw.iter() {
                 println!("IPv4 Withdraw: {}", withdraw.prefix);
-                route_ipv4_withdraw(peer_id, withdraw, None, bgp, peers);
+                route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers);
             }
         }
         Vpnv4(nlri) => {
@@ -704,6 +814,7 @@ pub fn route_from_peer(
                     peer_id,
                     &update.nlri,
                     Some(update.rd.clone()),
+                    Some(update.label),
                     &attr,
                     bgp,
                     peers,
@@ -718,6 +829,7 @@ pub fn route_from_peer(
                     peer_id,
                     &withdraw.nlri,
                     Some(withdraw.rd.clone()),
+                    Some(withdraw.label),
                     bgp,
                     peers,
                 );
@@ -850,6 +962,24 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
     }
 }
 
+pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
+    let mut update = UpdatePacket::new();
+    let attrs = bgp_attr.to();
+    update.attrs = attrs;
+    update.vpnv4_update.push(nlri);
+
+    // Convert to bytes and send
+    let bytes: BytesMut = update.into();
+
+    //
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send BGP Update to {}: {}", peer.address, e);
+        }
+    }
+}
+
 pub fn route_apply_policy_out(
     peer: &mut Peer,
     nlri: &Ipv4Nlri,
@@ -931,8 +1061,14 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             rib.attr = attr.clone();
             peer.adj_rib_out.add_route_vpn(&rd, nlri.prefix, rib);
 
+            let vpnv4_nlri = Vpnv4Nlri {
+                label: Label::default(),
+                rd: rd.clone(),
+                nlri,
+            };
+
             // Send the routes.
-            route_send_ipv4(peer, nlri, attr);
+            route_send_vpnv4(peer, vpnv4_nlri, attr);
         }
     }
     // Send End-of-RIB marker for IPv4 VPN
@@ -974,6 +1110,7 @@ impl Bgp {
             0,
             32768,
             &attr,
+            None,
         );
         let (replaced, selected) = self.local_rib.update_route(prefix, rib);
 
@@ -985,7 +1122,7 @@ impl Bgp {
 
         if !selected.is_empty() {
             let mut peer_map = std::mem::take(&mut self.peers);
-            route_advertise_to_peers(prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
+            route_advertise_to_peers(None, prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
             self.peers = peer_map;
         }
     }
@@ -1004,7 +1141,7 @@ impl Bgp {
         let selected = bgp_ref.local_rib.select_best_path(prefix);
         if !selected.is_empty() || !removed.is_empty() {
             let mut peer_map = std::mem::take(&mut self.peers);
-            route_advertise_to_peers(prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
+            route_advertise_to_peers(None, prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
             self.peers = peer_map;
         }
     }
