@@ -266,6 +266,21 @@ impl LocalRib {
             return candidate_lp > incumbent_lp;
         }
 
+        // RFC 4456: Prefer path with shorter CLUSTER_LIST length (fewer route reflector hops)
+        let candidate_cluster_len = candidate
+            .attr
+            .cluster_list
+            .as_ref()
+            .map_or(0, |cl| cl.list.len());
+        let incumbent_cluster_len = incumbent
+            .attr
+            .cluster_list
+            .as_ref()
+            .map_or(0, |cl| cl.list.len());
+        if candidate_cluster_len != incumbent_cluster_len {
+            return candidate_cluster_len < incumbent_cluster_len;
+        }
+
         let candidate_local = matches!(candidate.typ, BgpRibType::Originated);
         let incumbent_local = matches!(incumbent.typ, BgpRibType::Originated);
         if candidate_local != incumbent_local {

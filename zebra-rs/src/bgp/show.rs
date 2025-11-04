@@ -254,19 +254,90 @@ fn show_bgp_route_entry(
     mut args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    let mut out = String::new();
+
     let addr = match args.v4addr() {
         Some(addr) => addr,
         None => return Ok(String::from("% No BGP route exists")),
     };
     let host = addr.to_host_prefix();
     if let Some(ribs) = bgp.local_rib.entries.get_lpm(&host) {
-        println!("XX {}", ribs.0);
+        writeln!(out, "BGP routing table entry for {}", ribs.0)?;
+        writeln!(out, "Paths: ({} available)", ribs.1.len())?;
         for rib in ribs.1.iter() {
-            println!(" -> RouterID: {}", rib.router_id);
+            // Display path identifier and router ID
+            let best_marker = if rib.best_path { " best" } else { "" };
+            let internal_marker = if rib.typ == BgpRibType::IBGP {
+                "internal"
+            } else {
+                "external"
+            };
+
+            writeln!(
+                out,
+                "  {} ({}), ({}{}) from {}",
+                show_nexthop(&rib.attr),
+                rib.router_id,
+                internal_marker,
+                best_marker,
+                rib.ident
+            )?;
+
+            // Display origin
+            let origin_str = if let Some(origin) = &rib.attr.origin {
+                match origin {
+                    Origin::Igp => "IGP",
+                    Origin::Egp => "EGP",
+                    Origin::Incomplete => "incomplete",
+                }
+            } else {
+                "incomplete"
+            };
+
+            // Build attribute line
+            let mut attr_parts = vec![format!("Origin {}", origin_str)];
+
+            if let Some(med) = &rib.attr.med {
+                attr_parts.push(format!("metric {}", med.med));
+            }
+
+            if let Some(local_pref) = &rib.attr.local_pref {
+                attr_parts.push(format!("localpref {}", local_pref.local_pref));
+            }
+
+            writeln!(out, "    {}", attr_parts.join(", "))?;
+
+            // Display AS path if present
+            if let Some(aspath) = &rib.attr.aspath {
+                if !aspath.segs.is_empty() {
+                    writeln!(out, "    AS path: {}", aspath)?;
+                }
+            }
+
+            // Display route reflection attributes if present (RFC 4456)
+            if let Some(originator_id) = &rib.attr.originator_id {
+                write!(out, "    Originator: {}", originator_id.id)?;
+
+                if let Some(cluster_list) = &rib.attr.cluster_list {
+                    write!(out, ", Cluster list: ")?;
+                    let cluster_ids: Vec<String> =
+                        cluster_list.list.iter().map(|id| id.to_string()).collect();
+                    write!(out, "{}", cluster_ids.join(" "))?;
+                }
+                writeln!(out)?;
+            } else if let Some(cluster_list) = &rib.attr.cluster_list {
+                // Cluster list without originator (shouldn't normally happen, but handle it)
+                write!(out, "    Cluster list: ")?;
+                let cluster_ids: Vec<String> =
+                    cluster_list.list.iter().map(|id| id.to_string()).collect();
+                writeln!(out, "{}", cluster_ids.join(" "))?;
+            }
+
+            writeln!(out)?;
         }
     }
 
-    Ok(String::new())
+    Ok(out)
 }
 
 // Common helper function for displaying Adj-RIB routes
