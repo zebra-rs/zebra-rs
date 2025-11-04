@@ -239,6 +239,7 @@ pub struct Peer {
     pub policy_in: Option<String>,
     pub policy_out: Option<String>,
     pub prefix_set: InOuts<PrefixSetValue>,
+    pub reflector_client: bool,
 }
 
 impl Peer {
@@ -280,6 +281,7 @@ impl Peer {
             policy_out: None,
             policy_in: None,
             prefix_set: InOuts::<PrefixSetValue>::default(),
+            reflector_client: false,
         };
         peer.config
             .afi_safi
@@ -318,6 +320,20 @@ impl Peer {
 
     pub fn is_ibgp(&self) -> bool {
         self.peer_type.is_ibgp()
+    }
+
+    pub fn is_reflector_client(&self) -> bool {
+        self.reflector_client
+    }
+
+    pub fn is_afi_safi(&self, afi: Afi, safi: Safi) -> bool {
+        let afi = CapMultiProtocol::new(&afi, &safi);
+        if let Some(cap) = self.cap_map.entries.get(&afi) {
+            if cap.send && cap.recv {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -517,52 +533,6 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     peer.counter[BgpType::Keepalive as usize].rcvd += 1;
     timer::refresh_hold_timer(peer);
     State::Established
-}
-
-fn peer_send_update_test(peer: &mut Peer) {
-    let mut update: UpdatePacket = UpdatePacket::new();
-
-    let origin = Origin::Igp;
-    update.attrs.push(Attr::Origin(origin));
-
-    let aspath: As4Path = As4Path::from_str("100").unwrap();
-    update.attrs.push(Attr::As4Path(aspath));
-
-    let nexthop = NexthopAttr {
-        nexthop: [10, 211, 55, 2].into(),
-    };
-    update.attrs.push(Attr::NextHop(nexthop));
-
-    let med: Med = Med::new(123);
-    update.attrs.push(Attr::Med(med));
-
-    let lpref: LocalPref = LocalPref::new(100u32);
-    update.attrs.push(Attr::LocalPref(lpref));
-
-    let atomic = AtomicAggregate::new();
-    update.attrs.push(Attr::AtomicAggregate(atomic));
-
-    let aggregator = Aggregator::new(1, Ipv4Addr::new(10, 211, 55, 2));
-    update.attrs.push(Attr::Aggregator(aggregator));
-
-    let com = Community::from_str("100:10 100:20").unwrap();
-    update.attrs.push(Attr::Community(com));
-
-    let ecom = ExtCommunity::from_str("rt 123:100 soo 1.1.1.1:12").unwrap();
-    update.attrs.push(Attr::ExtendedCom(ecom));
-
-    // let ecom6_val = ExtIpv6CommunityValue::new();
-    // let ecom6 = ExtIpv6Community(vec![ecom6_val]);
-    // update.attrs.push(Attribute::ExtIpv6Community(ecom6));
-
-    let prefix: Ipv4Net = "1.1.1.1/32".parse().unwrap();
-    let ipv4nlri = Ipv4Nlri { id: 0, prefix };
-    update.ipv4_update.push(ipv4nlri);
-
-    let bytes: BytesMut = update.into();
-
-    // Send update.
-    let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
 }
 
 fn fsm_bgp_update(

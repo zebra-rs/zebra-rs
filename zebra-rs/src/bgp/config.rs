@@ -137,6 +137,22 @@ fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     Some(())
 }
 
+fn config_route_reflector(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let flag = args.boolean()?;
+
+    let Some(peer) = bgp.peers.get_mut(&addr) else {
+        return None;
+    };
+
+    if op.is_set() && flag {
+        peer.reflector_client = true;
+    } else {
+        peer.reflector_client = false;
+    }
+    None
+}
+
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         if let Some(addr) = args.v4addr() {
@@ -331,5 +347,8 @@ impl Bgp {
         // Applying policy.
         self.callback_peer("/apply-policy/out", config_policy_out);
         self.callback_peer("/prefix-set/out", config_prefix_out);
+
+        // Route Reflector.
+        self.callback_peer("/route-reflector/client", config_route_reflector);
     }
 }
