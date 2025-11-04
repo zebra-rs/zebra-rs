@@ -643,9 +643,16 @@ pub fn route_update_ipv4(
         }
     }
 
-    // 6. Originator ID (for IBGP)
+    // 6. Originator ID (for IBGP route reflection)
+    // RFC 4456: A route reflector SHOULD NOT create an ORIGINATOR_ID if one already
+    // exists. ORIGINATOR_ID is set only once by the first route reflector and preserved
+    // thereafter to identify the original route source within the AS.
     if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
-        attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+        if attrs.originator_id.is_none() {
+            // Set ORIGINATOR_ID to the router ID of the peer that originated this route
+            attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+        }
+        // If ORIGINATOR_ID already exists, preserve it (don't overwrite)
     }
 
     // 7. Cluster List (for IBGP route reflection)
