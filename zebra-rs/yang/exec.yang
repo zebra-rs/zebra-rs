@@ -81,6 +81,11 @@ module exec {
           ext:help "BGP RIB";
           type inet:ipv4-address;
         }
+        container ipv4 {
+          leaf vpn {
+            type empty;
+          }
+        }
         leaf clear {
           ext:help "Temporary command for BGP clear";
           type empty;

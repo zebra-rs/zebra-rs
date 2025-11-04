@@ -141,10 +141,10 @@ impl Bgp {
                         println!("{:#?}", msg);
                     }
                     Event::KeepAliveMsg => {
-                        println!("KeepAlive:");
+                        // println!("KeepAlive:");
                     }
                     _ => {
-                        println!("Message::Event: {:?}", event);
+                        // println!("Message::Event: {:?}", event);
                     }
                 }
                 fsm(self, peer, event);
