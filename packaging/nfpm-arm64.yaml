@@ -9,7 +9,7 @@
 name: "zebra-rs"
 arch: "arm64"
 platform: "linux"
-version: "0.8.1"
+version: "0.8.2"
 section: "default"
 priority: "extra"
 replaces:
