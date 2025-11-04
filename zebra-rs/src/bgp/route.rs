@@ -900,6 +900,45 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
     send_eor_ipv4_unicast(peer);
 }
 
+pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
+    // Collect all VPNv4 routes first to avoid borrow checker issues
+    let all_routes: Vec<(RouteDistinguisher, Vec<(Ipv4Net, BgpRib)>)> = bgp
+        .local_rib
+        .v4vpn
+        .iter()
+        .map(|(rd, table)| {
+            let routes: Vec<(Ipv4Net, BgpRib)> = table
+                .1
+                .iter()
+                .map(|(prefix, rib)| (*prefix, rib.clone()))
+                .collect();
+            (rd.clone(), routes)
+        })
+        .collect();
+
+    // Advertise all best paths to the peer
+    for (rd, routes) in all_routes {
+        for (prefix, mut rib) in routes {
+            let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp) else {
+                continue;
+            };
+
+            let Some(attr) = route_apply_policy_out(peer, &nlri, attr) else {
+                continue;
+            };
+
+            // Register to AdjOut.
+            rib.attr = attr.clone();
+            peer.adj_rib_out.add_route_vpn(&rd, nlri.prefix, rib);
+
+            // Send the routes.
+            route_send_ipv4(peer, nlri, attr);
+        }
+    }
+    // Send End-of-RIB marker for IPv4 VPN
+    send_eor_ipv4_unicast(peer);
+}
+
 /// Send End-of-RIB marker for IPv4 Unicast
 fn send_eor_ipv4_unicast(peer: &mut Peer) {
     // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
@@ -920,7 +959,7 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut ConfigRef) {
         route_sync_ipv4(peer, bgp);
     }
     if peer.is_afi_safi(Afi::Ip, Safi::MplsVpn) {
-        // route_sync_vpnv4(peer, bgp);
+        route_sync_vpnv4(peer, bgp);
     }
 }
 
