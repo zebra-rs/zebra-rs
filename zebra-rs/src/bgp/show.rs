@@ -23,8 +23,8 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
     }
 
     // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
-    let pfx_rcvd = peer.adj_rib_in.routes.len() as u64;
-    let pfx_sent = peer.adj_rib_out.routes.len() as u64;
+    let pfx_rcvd = peer.adj_rib_in.v4.0.len() as u64;
+    let pfx_sent = peer.adj_rib_out.v4.0.len() as u64;
 
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
@@ -145,6 +145,14 @@ fn show_nexthop(attr: &BgpAttr) -> String {
     }
 }
 
+fn show_ecom(attr: &BgpAttr) -> String {
+    if let Some(ecom) = &attr.ecom {
+        ecom.to_string()
+    } else {
+        "".to_string()
+    }
+}
+
 #[derive(Serialize)]
 struct BgpRouteJson {
     prefix: String,
@@ -164,11 +172,11 @@ struct BgpRouteJson {
     origin: Option<String>,
 }
 
-fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt::Error> {
+fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut routes: Vec<BgpRouteJson> = Vec::new();
 
-        for (key, value) in bgp.local_rib.entries.iter() {
+        for (key, value) in bgp.local_rib.v4.0.iter() {
             for rib in value.iter() {
                 let aspath_str = show_aspath(&rib.attr);
                 let origin_str = show_origin(&rib.attr);
@@ -209,7 +217,7 @@ fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, value) in bgp.local_rib.entries.iter() {
+    for (key, value) in bgp.local_rib.v4.0.iter() {
         for (i, rib) in value.iter().enumerate() {
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
@@ -243,8 +251,56 @@ fn show_bgp_route(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt
     Ok(buf)
 }
 
-fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
-    show_bgp_route(bgp, json)
+fn show_bgp_ipv4_vpn(
+    bgp: &Bgp,
+    args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+
+    writeln!(
+        buf,
+        "     Network          Next Hop            Metric LocPrf Weight Path"
+    );
+    for (key, value) in bgp.local_rib.v4vpn.iter() {
+        if value.0.len() > 0 {
+            writeln!(buf, "Route Distinguisher: {}", key)?;
+        }
+        for (k, v) in value.0.iter() {
+            for (i, rib) in v.iter().enumerate() {
+                let valid = "*";
+                let best = if rib.best_path { ">" } else { " " };
+                let internal = if rib.typ == BgpRibType::IBGP {
+                    "i"
+                } else {
+                    " "
+                };
+                let nexthop = show_nexthop(&rib.attr);
+                let med = show_med(&rib.attr);
+                let local_pref = show_local_pref(&rib.attr);
+                let weight = rib.weight;
+                let mut aspath = show_aspath(&rib.attr);
+                if !aspath.is_empty() {
+                    aspath.push(' ');
+                }
+                let origin = show_origin(&rib.attr);
+                writeln!(
+                    buf,
+                    " {valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    k.to_string(),
+                    nexthop,
+                    med,
+                    local_pref,
+                    weight,
+                    aspath,
+                    origin,
+                )?;
+                let ecom = show_ecom(&rib.attr);
+                writeln!(buf, "     {} label=0", ecom)?;
+            }
+        }
+    }
+    Ok(buf)
 }
 
 use crate::rib::util::IpAddrExt;
@@ -261,7 +317,7 @@ fn show_bgp_route_entry(
         None => return Ok(String::from("% No BGP route exists")),
     };
     let host = addr.to_host_prefix();
-    if let Some(ribs) = bgp.local_rib.entries.get_lpm(&host) {
+    if let Some(ribs) = bgp.local_rib.v4.0.get_lpm(&host) {
         writeln!(out, "BGP routing table entry for {}", ribs.0)?;
         writeln!(out, "Paths: ({} available)", ribs.1.len())?;
         for rib in ribs.1.iter() {
@@ -462,7 +518,7 @@ fn show_bgp_advertised(
     };
 
     // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes(&peer.adj_rib_out.routes, bgp.router_id, json)
+    show_adj_rib_routes(&peer.adj_rib_out.v4.0, bgp.router_id, json)
 }
 
 fn show_bgp_received(
@@ -482,7 +538,7 @@ fn show_bgp_received(
     };
 
     // Display Adj-RIB-In routes (received routes before policy application)
-    show_adj_rib_routes(&peer.adj_rib_in.routes, bgp.router_id, json)
+    show_adj_rib_routes(&peer.adj_rib_in.v4.0, bgp.router_id, json)
 }
 
 fn show_bgp_summary(
@@ -838,6 +894,7 @@ impl Bgp {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp);
+        self.show_add("/show/ip/bgp/ipv4/vpn", show_bgp_ipv4_vpn);
         self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary);
         self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor);
