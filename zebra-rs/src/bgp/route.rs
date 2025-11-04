@@ -426,8 +426,9 @@ impl LocalRibTable {
 
 #[derive(Debug, Default)]
 pub struct LocalRib {
-    // Best path routes per prefix
     pub v4: LocalRibTable,
+
+    pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable>,
 }
 
 impl LocalRib {
@@ -446,6 +447,19 @@ impl LocalRib {
     // Return selected best path, not the change history.
     pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
         self.v4.select_best_path(prefix)
+    }
+
+    // VRF update.
+    pub fn update_route_vpn(
+        &mut self,
+        rd: &RouteDistinguisher,
+        prefix: Ipv4Net,
+        rib: BgpRib,
+    ) -> (Vec<BgpRib>, Vec<BgpRib>) {
+        self.v4vpn
+            .entry(rd.clone())
+            .or_default()
+            .update_route(prefix, rib)
     }
 }
 
@@ -530,10 +544,14 @@ pub fn route_ipv4_update(
     }
 
     // Perform BGP Path selection.
-    let (replaced, selected) = bgp.local_rib.update_route(nlri.prefix, rib);
+    let (replaced, selected) = if let Some(ref rd) = rd {
+        bgp.local_rib.update_route_vpn(rd, nlri.prefix, rib)
+    } else {
+        bgp.local_rib.update_route(nlri.prefix, rib)
+    };
 
     // Advertise to peers if best path changed.
-    if !selected.is_empty() {
+    if !selected.is_empty() && rd.is_none() {
         route_advertise_to_peers(nlri.prefix, &selected, peer_ident, bgp, peers);
     }
 }
