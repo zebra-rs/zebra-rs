@@ -456,6 +456,7 @@ fn route_advertise_to_peers(
     let peer_addrs: Vec<IpAddr> = peers
         .iter()
         .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(Afi::Ip, Safi::Unicast))
         .map(|(addr, _)| *addr)
         .collect();
 
@@ -769,17 +770,11 @@ fn send_eor_ipv4_unicast(peer: &mut Peer) {
 // Called when peer has been established.
 pub fn route_sync(peer: &mut Peer, bgp: &mut ConfigRef) {
     // Advertize.
-    let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
-    if let Some(cap) = peer.cap_map.entries.get(&afi) {
-        if cap.send && cap.recv {
-            route_sync_ipv4(peer, bgp);
-        }
+    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
+        route_sync_ipv4(peer, bgp);
     }
-    let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
-    if let Some(cap) = peer.cap_map.entries.get(&afi) {
-        if cap.send && cap.recv {
-            // route_sync_vpnv4(peer, bgp);
-        }
+    if peer.is_afi_safi(Afi::Ip, Safi::MplsVpn) {
+        // route_sync_vpnv4(peer, bgp);
     }
 }
 
