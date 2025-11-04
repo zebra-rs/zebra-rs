@@ -381,6 +381,19 @@ pub fn route_ipv4_update(
             }
         }
 
+        // RFC 4456: Drop update if local router ID is in CLUSTER_LIST. This
+        // prevents routing loops in route reflection scenarios when the route
+        // has already passed through this route reflector.
+        if let Some(ref cluster_list) = attr.cluster_list {
+            if cluster_list.list.contains(&bgp.router_id) {
+                eprintln!(
+                    "Dropping update for {} from peer {} - local router ID {} found in CLUSTER_LIST",
+                    nlri.prefix, peer.address, bgp.router_id
+                );
+                return;
+            }
+        }
+
         // Identify peer_type
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
