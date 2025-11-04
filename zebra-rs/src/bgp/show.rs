@@ -247,6 +247,28 @@ fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, st
     show_bgp_route(bgp, json)
 }
 
+use crate::rib::util::IpAddrExt;
+
+fn show_bgp_route_entry(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let addr = match args.v4addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No BGP route exists")),
+    };
+    let host = addr.to_host_prefix();
+    if let Some(ribs) = bgp.local_rib.entries.get_lpm(&host) {
+        println!("XX {}", ribs.0);
+        for rib in ribs.1.iter() {
+            println!(" -> RouterID: {}", rib.router_id);
+        }
+    }
+
+    Ok(String::new())
+}
+
 // Common helper function for displaying Adj-RIB routes
 fn show_adj_rib_routes(
     routes: &prefix_trie::PrefixMap<ipnet::Ipv4Net, Vec<crate::bgp::route::BgpRib>>,
@@ -745,6 +767,7 @@ impl Bgp {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp);
+        self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary);
         self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor);
         self.show_add(

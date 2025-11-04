@@ -388,7 +388,7 @@ pub fn route_ipv4_update(
             BgpRibType::EBGP
         };
 
-        (peer.ident, peer.router_id, typ, true)
+        (peer.ident, peer.remote_id, typ, true)
     };
 
     if !should_process {
