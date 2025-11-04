@@ -590,7 +590,8 @@ pub fn route_update_ipv4(
         return None;
     }
 
-    // IBGP to IBGP: Don't advertise IBGP-learned routes.
+    // iBGP to iBGP: Don't advertise iBGP-learned routes except the peer is
+    // route reflector client.
     if peer.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
@@ -647,12 +648,20 @@ pub fn route_update_ipv4(
         attrs.originator_id = Some(OriginatorId::new(rib.router_id));
     }
 
-    // 7. Cluster List (for IBGP)
-    // if peer.peer_type == PeerType::IBGP {
-    //     if let Some(ref cluster_list) = rib.attr.cluster_list {
-    //         attrs.push(Attr::ClusterList(cluster_list.clone()));
-    //     }
-    // }
+    // 7. Cluster List (for IBGP route reflection)
+    // RFC 4456: When a route reflector reflects a route, it must prepend the local
+    // CLUSTER_ID to the CLUSTER_LIST. By default, the CLUSTER_ID is the router ID.
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        if let Some(ref mut cluster_list) = attrs.cluster_list {
+            // Prepend local router ID to existing cluster list
+            cluster_list.list.insert(0, *bgp.router_id);
+        } else {
+            // Create new cluster list with local router ID
+            let mut cluster_list = ClusterList::new();
+            cluster_list.list.push(*bgp.router_id);
+            attrs.cluster_list = Some(cluster_list);
+        }
+    }
 
     Some((nlri, attrs))
 }
