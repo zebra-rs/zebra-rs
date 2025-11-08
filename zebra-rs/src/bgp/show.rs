@@ -317,8 +317,51 @@ fn show_adj_rib_routes_vpnv4(
     router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    //
-    Ok(String::from("show neighbor vpnv4"))
+    let mut buf = String::new();
+
+    writeln!(
+        buf,
+        "     Network          Next Hop            Metric LocPrf Weight Path"
+    );
+    for (key, value) in routes.iter() {
+        if value.0.len() > 0 {
+            writeln!(buf, "Route Distinguisher: {}", key)?;
+        }
+        for (k, v) in value.0.iter() {
+            for (i, rib) in v.iter().enumerate() {
+                let valid = "*";
+                let best = if rib.best_path { ">" } else { " " };
+                let internal = if rib.typ == BgpRibType::IBGP {
+                    "i"
+                } else {
+                    " "
+                };
+                let nexthop = show_nexthop_vpn(&rib.nexthop);
+                let med = show_med(&rib.attr);
+                let local_pref = show_local_pref(&rib.attr);
+                let weight = rib.weight;
+                let mut aspath = show_aspath(&rib.attr);
+                if !aspath.is_empty() {
+                    aspath.push(' ');
+                }
+                let origin = show_origin(&rib.attr);
+                writeln!(
+                    buf,
+                    " {valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    k.to_string(),
+                    nexthop,
+                    med,
+                    local_pref,
+                    weight,
+                    aspath,
+                    origin,
+                )?;
+                let ecom = show_ecom(&rib.attr);
+                writeln!(buf, "     {} label=0", ecom)?;
+            }
+        }
+    }
+    Ok(buf)
 }
 
 fn show_bgp_advertised_vpnv4(
