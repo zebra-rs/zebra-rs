@@ -1012,7 +1012,6 @@ impl Bgp {
             "/show/ip/bgp/neighbors/received-routes/vpnv4",
             show_bgp_received_vpnv4,
         );
-        self.show_add("/show/ip/bgp/clear", peer::clear);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);

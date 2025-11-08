@@ -1,8 +1,8 @@
 use super::peer::{Event, Peer, fsm};
 use super::route::LocalRib;
-use crate::bgp::InOut;
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
+use crate::bgp::{InOut, peer};
 use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
@@ -184,6 +184,17 @@ impl Bgp {
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.peer_comps()).unwrap();
+            }
+            ConfigOp::Clear => {
+                let (path, mut args) = path_from_command(&msg.paths);
+                match path.as_str() {
+                    "/clear/ip/bgp/neighbors" => {
+                        peer::clear(self, &mut args);
+                    }
+                    _ => {
+                        //
+                    }
+                }
             }
         }
     }

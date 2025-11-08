@@ -16,6 +16,7 @@ pub enum ConfigOp {
     Set,
     Delete,
     Completion,
+    Clear,
 }
 
 impl ConfigOp {
