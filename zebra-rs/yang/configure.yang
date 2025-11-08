@@ -95,4 +95,19 @@ module configure {
     ext:help "List config from file";
     type empty;
   }
+
+  container clear {
+    container ip {
+      container bgp {
+        list neighbors {
+          ext:presence "BGP all neighbor information";
+          key name;
+          leaf name {
+            ext:dynamic "bgp:neighbor";
+            type "inet:ipv4-address";
+          }
+        }
+      }
+    }
+  }
 }
