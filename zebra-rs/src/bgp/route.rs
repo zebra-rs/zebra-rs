@@ -130,6 +130,7 @@ impl AdjRib {
 struct Ipv4NlriVec {
     pub eor: bool,
     pub update: Vec<Ipv4Nlri>,
+    pub nexthop: Option<Ipv4Addr>,
     pub withdraw: Vec<Ipv4Nlri>,
 }
 
@@ -137,6 +138,7 @@ struct Ipv4NlriVec {
 struct Vpnv4NlriVec {
     pub eor: bool,
     pub update: Vec<Vpnv4Nlri>,
+    pub nexthop: Option<Vpnv4Nexthop>,
     pub withdraw: Vec<Vpnv4Nlri>,
 }
 
@@ -160,6 +162,7 @@ impl BgpNlri {
         }
         // IPv4 updates.
         if !packet.ipv4_update.is_empty() {
+            // XXX need to pass nexthop.
             let update = Ipv4NlriVec {
                 update: packet.ipv4_update.clone(),
                 ..Default::default()
@@ -179,6 +182,7 @@ impl BgpNlri {
                 Attr::MpReachNlri(mp_update) => {
                     let update = Vpnv4NlriVec {
                         update: mp_update.vpnv4_prefix.clone(),
+                        nexthop: mp_update.vpnv4_nexthop.clone(),
                         ..Default::default()
                     };
                     return BgpNlri::Vpnv4(update);
@@ -230,6 +234,8 @@ pub struct BgpRib {
     pub best_path: bool,
     // Label.
     pub label: Option<Label>,
+    // Nexthop.
+    pub nexthop: Option<Vpnv4Nexthop>,
 }
 
 impl BgpRib {
@@ -241,6 +247,7 @@ impl BgpRib {
         weight: u32,
         attr: &BgpAttr,
         label: Option<Label>,
+        nexthop: Option<Vpnv4Nexthop>,
     ) -> Self {
         BgpRib {
             id,
@@ -251,6 +258,7 @@ impl BgpRib {
             typ: rib_type,
             best_path: false,
             label,
+            nexthop,
         }
     }
 
@@ -513,6 +521,7 @@ pub fn route_ipv4_update(
     rd: Option<RouteDistinguisher>,
     label: Option<Label>,
     attr: &BgpAttr,
+    nexthop: Option<Vpnv4Nexthop>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
@@ -574,8 +583,18 @@ pub fn route_ipv4_update(
         return;
     }
 
-    // Create BGP RIB with weight value 0.
-    let rib = BgpRib::new(peer_ident, peer_router_id, typ, nlri.id, 0, attr, label);
+    // Create BGP RIB with weight value 0. XXX We are going to include
+    // BgpNexthop as part of BgpAttr. Since we want to consolidate BGP updates.
+    let rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        nlri.id,
+        0,
+        attr,
+        label,
+        nexthop,
+    );
 
     // Register to peer's AdjRibIn and update stats
     {
@@ -749,6 +768,7 @@ pub fn route_ipv4_withdraw(
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
+    // TODO: fill in data.
     let peer_ident = {
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
         // Remove from AdjRibIn.
@@ -800,7 +820,7 @@ pub fn route_from_peer(
             }
             for update in nlri.update.iter() {
                 println!("IPv4 Update: {}", update.prefix);
-                route_ipv4_update(peer_id, update, None, None, &attr, bgp, peers);
+                route_ipv4_update(peer_id, update, None, None, &attr, None, bgp, peers);
             }
             for withdraw in nlri.withdraw.iter() {
                 println!("IPv4 Withdraw: {}", withdraw.prefix);
@@ -816,6 +836,7 @@ pub fn route_from_peer(
                     Some(update.rd.clone()),
                     Some(update.label),
                     &attr,
+                    nlri.nexthop.clone(),
                     bgp,
                     peers,
                 );
@@ -968,10 +989,12 @@ pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
     update.attrs = attrs;
     update.vpnv4_update.push(nlri);
 
+    if let Some(BgpNexthop::Vpnv4(vpnv4_nexthop)) = bgp_attr.nexthop.as_ref() {
+        update.vpnv4_nexthop = Some(vpnv4_nexthop.clone());
+    }
+
     // Convert to bytes and send
     let bytes: BytesMut = update.into();
-
-    //
 
     if let Some(ref packet_tx) = peer.packet_tx {
         if let Err(e) = packet_tx.send(bytes) {
@@ -1110,6 +1133,7 @@ impl Bgp {
             0,
             32768,
             &attr,
+            None,
             None,
         );
         let (replaced, selected) = self.local_rib.update_route(prefix, rib);
