@@ -675,13 +675,15 @@ fn route_advertise_to_peers(
         .collect();
 
     for peer_addr in peer_addrs {
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+
+        let add_path = peer.opt.is_add_path_send(afi, safi);
+
         // Build the update/withdrawal for this peer
         let (nlri_opt, attr_opt) = {
-            let peer = peers.get_mut(&peer_addr).expect("peer exists");
-
             if let Some(best) = new_best {
                 // Try to advertise the new best path
-                if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, best, bgp) {
+                if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, best, bgp, add_path) {
                     // Apply outbound policy
                     if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
                         (Some(nlri), Some(attr))
@@ -697,8 +699,6 @@ fn route_advertise_to_peers(
         };
 
         // Now apply the update/withdrawal
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
-
         match (nlri_opt, attr_opt) {
             (Some(nlri), Some(attr)) => {
                 // Send update
@@ -744,14 +744,7 @@ fn route_advertise_to_peers(
 fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
     let mut update = UpdatePacket::new();
 
-    // Check if we should use add-path
-    let mp = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
-    let use_addpath = peer.cap_map.entries.get(&mp).map_or(false, |cap| cap.send);
-
-    let nlri = Ipv4Nlri {
-        id: if use_addpath { id } else { 0 },
-        prefix,
-    };
+    let nlri = Ipv4Nlri { id, prefix };
     update.ipv4_withdraw.push(nlri);
 
     // Convert to bytes and send
@@ -767,10 +760,6 @@ fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
 // Send BGP withdrawal for a prefix
 fn route_withdraw_vpnv4(peer: &mut Peer, rd: &RouteDistinguisher, prefix: Ipv4Net, id: u32) {
     let mut update = UpdatePacket::new();
-
-    // Check if we should use add-path
-    let mp = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
-    let use_addpath = peer.cap_map.entries.get(&mp).map_or(false, |cap| cap.send);
 
     let vpnv4_nlri = Vpnv4Nlri {
         label: Label::default(),
@@ -958,6 +947,7 @@ pub fn route_update_ipv4(
     prefix: &Ipv4Net,
     rib: &BgpRib,
     bgp: &mut ConfigRef,
+    add_path: bool,
 ) -> Option<(Ipv4Nlri, BgpAttr)> {
     // Split-horizon: Don't send route back to the peer that sent it
     if rib.ident == peer.ident {
@@ -973,13 +963,9 @@ pub fn route_update_ipv4(
         return None;
     }
 
-    // Check if we should use add-path
-    let mp = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
-    let use_addpath = peer.cap_map.entries.get(&mp).map_or(false, |cap| cap.send);
-
     // Create NLRI with optional path ID
     let nlri = Ipv4Nlri {
-        id: if use_addpath { rib.id } else { 0 },
+        id: if add_path { rib.local_id } else { 0 },
         prefix: *prefix,
     };
 
@@ -1111,9 +1097,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         .map(|(prefix, rib)| (*prefix, rib.clone()))
         .collect();
 
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+
     // Advertise all best paths to the peer
     for (prefix, mut rib) in routes {
-        let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp) else {
+        let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
             continue;
         };
 
@@ -1149,10 +1137,12 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         })
         .collect();
 
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsVpn);
+
     // Advertise all best paths to the peer
     for (rd, routes) in all_routes {
         for (prefix, mut rib) in routes {
-            let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp) else {
+            let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
                 continue;
             };
 
