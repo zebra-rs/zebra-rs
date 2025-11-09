@@ -84,16 +84,10 @@ pub fn cap_addpath_recv(
             for cap in caps.values.iter() {
                 for config in configs.iter() {
                     if cap.afi == config.afi && cap.safi == config.safi {
-                        if config.send_receive.is_receive() || cap.send_receive.is_send() {
-                            let afi_safi = AfiSafi::new(cap.afi, cap.safi);
-                            cap_map.add_path.insert(
-                                afi_safi,
-                                Direct {
-                                    recv: true,
-                                    send: false,
-                                },
-                            );
-                        }
+                        let send = cap.send_receive.is_receive() && config.send_receive.is_send();
+                        let recv = cap.send_receive.is_send() && config.send_receive.is_receive();
+                        let afi_safi = AfiSafi::new(cap.afi, cap.safi);
+                        cap_map.add_path.insert(afi_safi, Direct { recv, send });
                     }
                 }
             }

@@ -292,10 +292,16 @@ fn show_bgp_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
+                let add_path = if rib.id != 0 {
+                    format!("{}:", rib.id)
+                } else {
+                    format!("")
+                };
                 let origin = show_origin(&rib.attr);
                 writeln!(
                     buf,
-                    " {valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    " {valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    add_path,
                     k.to_string(),
                     nexthop,
                     med,
@@ -344,10 +350,16 @@ fn show_adj_rib_routes_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
+                let add_path = if rib.id != 0 {
+                    format!("{}:", rib.id)
+                } else {
+                    format!("")
+                };
                 let origin = show_origin(&rib.attr);
                 writeln!(
                     buf,
-                    " {valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    " {valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    add_path,
                     k.to_string(),
                     nexthop,
                     med,
