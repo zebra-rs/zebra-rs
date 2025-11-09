@@ -293,9 +293,9 @@ fn show_bgp_vpnv4(
                     aspath.push(' ');
                 }
                 let add_path = if rib.id != 0 {
-                    format!("{}:", rib.id)
+                    format!("[{}] ", rib.local_id)
                 } else {
-                    format!("")
+                    format!("[{}] ", rib.local_id)
                 };
                 let origin = show_origin(&rib.attr);
                 writeln!(
@@ -351,9 +351,9 @@ fn show_adj_rib_routes_vpnv4(
                     aspath.push(' ');
                 }
                 let add_path = if rib.id != 0 {
-                    format!("{}:", rib.id)
+                    format!("[{}] ", rib.local_id)
                 } else {
-                    format!("")
+                    format!("[{}] ", rib.local_id)
                 };
                 let origin = show_origin(&rib.attr);
                 writeln!(
