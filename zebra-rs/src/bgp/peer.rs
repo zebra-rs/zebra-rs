@@ -765,7 +765,6 @@ pub fn peer_send_open(peer: &mut Peer) {
     }
     for (afi_safi, sub) in peer.config.sub.iter() {
         if let Some(restart_time) = sub.graceful_restart {
-            println!("XXX Restart {:?} {}", afi_safi, restart_time);
             let cap = CapabilityGracefulRestart::new(restart_time);
             caps.push(CapabilityPacket::GracefulRestart(cap));
         }
@@ -773,7 +772,6 @@ pub fn peer_send_open(peer: &mut Peer) {
             let llgr = LLGRValue::new(afi_safi.afi, afi_safi.safi, llgr_time);
             let cap = CapabilityLlgr { values: vec![llgr] };
             caps.push(CapabilityPacket::Llgr(cap));
-            println!("XXX LLGR {:?} {}", afi_safi, llgr_time);
         }
     }
 
