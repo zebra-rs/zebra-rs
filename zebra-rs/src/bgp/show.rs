@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -9,6 +9,7 @@ use serde::Serialize;
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{self, Peer, PeerCounter, PeerParam, State};
+use super::route::AdjRibTable;
 use super::{InOuts, PrefixSetValue};
 use crate::bgp::route::BgpRibType;
 use crate::config::Args;
@@ -145,6 +146,14 @@ fn show_nexthop(attr: &BgpAttr) -> String {
     }
 }
 
+fn show_nexthop_vpn(nexthop: &Option<Vpnv4Nexthop>) -> String {
+    if let Some(nexthop) = nexthop {
+        nexthop.nhop.to_string()
+    } else {
+        "0.0.0.0".to_string()
+    }
+}
+
 fn show_ecom(attr: &BgpAttr) -> String {
     if let Some(ecom) = &attr.ecom {
         ecom.to_string()
@@ -251,7 +260,7 @@ fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, st
     Ok(buf)
 }
 
-fn show_bgp_ipv4_vpn(
+fn show_bgp_vpnv4(
     bgp: &Bgp,
     args: Args,
     json: bool,
@@ -275,7 +284,7 @@ fn show_bgp_ipv4_vpn(
                 } else {
                     " "
                 };
-                let nexthop = show_nexthop(&rib.attr);
+                let nexthop = show_nexthop_vpn(&rib.nexthop);
                 let med = show_med(&rib.attr);
                 let local_pref = show_local_pref(&rib.attr);
                 let weight = rib.weight;
@@ -301,6 +310,55 @@ fn show_bgp_ipv4_vpn(
         }
     }
     Ok(buf)
+}
+
+fn show_adj_rib_routes_vpnv4(
+    routes: &BTreeMap<RouteDistinguisher, AdjRibTable>,
+    router_id: Ipv4Addr,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    //
+    Ok(String::from("show neighbor vpnv4"))
+}
+
+fn show_bgp_advertised_vpnv4(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    // Lookup peer from args
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    // Display Adj-RIB-Out routes (routes to be advertised after policy application)
+    show_adj_rib_routes_vpnv4(&peer.adj_rib_out.v4vpn, bgp.router_id, json)
+}
+
+fn show_bgp_received_vpnv4(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    // Lookup peer from args
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    // Display Adj-RIB-Out routes (routes to be advertised after policy application)
+    show_adj_rib_routes_vpnv4(&peer.adj_rib_in.v4vpn, bgp.router_id, json)
 }
 
 use crate::rib::util::IpAddrExt;
@@ -894,7 +952,7 @@ impl Bgp {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp);
-        self.show_add("/show/ip/bgp/ipv4/vpn", show_bgp_ipv4_vpn);
+        self.show_add("/show/ip/bgp/vpnv4", show_bgp_vpnv4);
         self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary);
         self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor);
@@ -902,7 +960,15 @@ impl Bgp {
             "/show/ip/bgp/neighbors/advertised-routes",
             show_bgp_advertised,
         );
+        self.show_add(
+            "/show/ip/bgp/neighbors/advertised-routes/vpnv4",
+            show_bgp_advertised_vpnv4,
+        );
         self.show_add("/show/ip/bgp/neighbors/received-routes", show_bgp_received);
+        self.show_add(
+            "/show/ip/bgp/neighbors/received-routes/vpnv4",
+            show_bgp_received_vpnv4,
+        );
         self.show_add("/show/ip/bgp/clear", peer::clear);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         self.show_add("/show/community-list", show_community_list);

@@ -368,6 +368,9 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         let mut peer_map = std::mem::take(&mut bgp.peers);
         let prev_state = peer_map.get(&id).unwrap().state.clone();
         let new_state = fsm_bgp_update(id, packet, &mut bgp_ref, &mut peer_map);
+        if prev_state.is_established() && !new_state.is_established() {
+            route_clean(id, &mut bgp_ref, &mut peer_map);
+        }
         peer_map.get_mut(&id).unwrap().state = new_state.clone();
 
         // Put the peers back
@@ -381,8 +384,6 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         let peer = bgp.peers.get_mut(&id).unwrap();
         if prev_state.is_established() && !peer.state.is_established() {
             peer.instant = Some(Instant::now());
-            route_clean(peer, &mut bgp_ref);
-            // peer.stat.clear();
         }
 
         if !prev_state.is_established() && peer.state.is_established() {
@@ -400,42 +401,49 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         local_rib: &mut bgp.local_rib,
         rib_tx: &bgp.rib_tx,
     };
-    let peer = bgp.peers.get_mut(&id).unwrap();
-    let prev_state = peer.state.clone();
-    peer.state = match event {
-        Event::ConfigUpdate => fsm_config_update(&bgp_ref, peer),
-        Event::Start => fsm_start(peer),
-        Event::Stop => fsm_stop(peer),
-        Event::ConnRetryTimerExpires => fsm_conn_retry_expires(peer),
-        Event::HoldTimerExpires => fsm_holdtimer_expires(peer),
-        Event::KeepaliveTimerExpires => fsm_keepalive_expires(peer),
-        Event::IdleHoldTimerExpires => fsm_idle_hold_timer_expires(peer),
-        Event::Connected(stream) => fsm_connected(peer, stream),
-        Event::ConnFail => fsm_conn_fail(peer),
-        Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
-        Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
-        Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
-        Event::UpdateMsg(_) => unreachable!(), // Handled above
-    };
-    if prev_state == peer.state {
-        return;
+    let mut need_clean = false;
+    {
+        let peer = bgp.peers.get_mut(&id).unwrap();
+        let prev_state = peer.state.clone();
+        peer.state = match event {
+            Event::ConfigUpdate => fsm_config_update(&bgp_ref, peer),
+            Event::Start => fsm_start(peer),
+            Event::Stop => fsm_stop(peer),
+            Event::ConnRetryTimerExpires => fsm_conn_retry_expires(peer),
+            Event::HoldTimerExpires => fsm_holdtimer_expires(peer),
+            Event::KeepaliveTimerExpires => fsm_keepalive_expires(peer),
+            Event::IdleHoldTimerExpires => fsm_idle_hold_timer_expires(peer),
+            Event::Connected(stream) => fsm_connected(peer, stream),
+            Event::ConnFail => fsm_conn_fail(peer),
+            Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
+            Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
+            Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
+            Event::UpdateMsg(_) => unreachable!(), // Handled above
+        };
+        if prev_state == peer.state {
+            return;
+        }
+        bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
+
+        if prev_state.is_established() && !peer.state.is_established() {
+            peer.instant = Some(Instant::now());
+            need_clean = true;
+        }
+
+        // Update instant when entering or leaving the Established state.
+        if !prev_state.is_established() && peer.state.is_established() {
+            peer.instant = Some(Instant::now());
+            route_sync(peer, &mut bgp_ref);
+        }
+
+        timer::update_timers(peer);
     }
-    bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
 
-    if prev_state.is_established() && !peer.state.is_established() {
-        peer.instant = Some(Instant::now());
-
-        route_clean(peer, &mut bgp_ref);
-        // peer.stat.clear();
+    let mut peer_map = std::mem::take(&mut bgp.peers);
+    if need_clean {
+        route_clean(id, &mut bgp_ref, &mut peer_map);
     }
-
-    // Update instant when entering or leaving the Established state.
-    if !prev_state.is_established() && peer.state.is_established() {
-        peer.instant = Some(Instant::now());
-        route_sync(peer, &mut bgp_ref);
-    }
-
-    timer::update_timers(peer);
+    bgp.peers = peer_map;
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {

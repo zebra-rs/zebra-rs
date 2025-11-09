@@ -81,10 +81,8 @@ module exec {
           ext:help "BGP RIB";
           type inet:ipv4-address;
         }
-        container ipv4 {
-          leaf vpn {
-            type empty;
-          }
+        leaf vpnv4 {
+          type empty;
         }
         leaf clear {
           ext:help "Temporary command for BGP clear";
@@ -102,11 +100,17 @@ module exec {
             ext:dynamic "bgp:neighbor";
             type "inet:ipv4-address";
           }
-          leaf advertised-routes {
-            type empty;
+          container advertised-routes {
+            presence "";
+            leaf vpnv4 {
+              type empty;
+            }
           }
-          leaf received-routes {
-            type empty;
+          container received-routes {
+            presence "";
+            leaf vpnv4 {
+              type empty;
+            }
           }
         }
       }
