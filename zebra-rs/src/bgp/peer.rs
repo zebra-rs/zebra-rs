@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
 
+use bgp_packet::llgr::LLGRValue;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use serde::Serialize;
@@ -114,6 +115,13 @@ pub struct PeerConfig {
     pub graceful_restart: Option<u32>,
     pub received: Vec<CapabilityPacket>,
     pub timer: timer::Config,
+    pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct PeerSubConfig {
+    pub graceful_restart: Option<u32>,
+    pub llgr: Option<u32>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -228,7 +236,6 @@ pub struct Peer {
     pub param_tx: PeerParam,
     pub param_rx: PeerParam,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
-    // pub stat: PeerStat,
     pub tx: UnboundedSender<Message>,
     pub config: PeerConfig,
     pub instant: Option<Instant>,
@@ -529,6 +536,9 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     // Register add path caps.
     cap_addpath_recv(&packet.caps, &mut peer.opt, &peer.config.add_path);
 
+    // Register graceful restart.
+    // cap_restart_recv(&packet.caps, &mut peer.restart, &peer.config);
+
     State::Established
 }
 
@@ -556,8 +566,6 @@ fn fsm_bgp_update(
     }
 
     route_from_peer(peer_id, packet, bgp, peers);
-
-    // peer_send_update_test(peer);
 
     State::Established
 }
@@ -754,6 +762,19 @@ pub fn peer_send_open(peer: &mut Peer) {
         let mut cap = CapabilityAddPath::default();
         cap.values.push(add_path.clone());
         caps.push(CapabilityPacket::AddPath(cap));
+    }
+    for (afi_safi, sub) in peer.config.sub.iter() {
+        if let Some(restart_time) = sub.graceful_restart {
+            println!("XXX Restart {:?} {}", afi_safi, restart_time);
+            let cap = CapabilityGracefulRestart::new(restart_time);
+            caps.push(CapabilityPacket::GracefulRestart(cap));
+        }
+        if let Some(llgr_time) = sub.llgr {
+            let llgr = LLGRValue::new(afi_safi.afi, afi_safi.safi, llgr_time);
+            let cap = CapabilityLlgr { values: vec![llgr] };
+            caps.push(CapabilityPacket::Llgr(cap));
+            println!("XXX LLGR {:?} {}", afi_safi, llgr_time);
+        }
     }
 
     cap_register_send(&caps, &mut peer.cap_map);
