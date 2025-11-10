@@ -235,6 +235,53 @@ fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+fn config_restart(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.graceful_restart = Some(1);
+    } else {
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.graceful_restart = None;
+    }
+    Some(())
+}
+
+fn config_llgr(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.llgr = Some(1);
+    } else {
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.llgr = None;
+    }
+    Some(())
+}
+
+fn config_llgr_restart_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    let time = args.u32()?;
+
+    if op.is_set() {
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.llgr = Some(time);
+    } else {
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.llgr = Some(1);
+    }
+
+    Some(())
+}
+
 fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         let addr = if let Some(addr) = args.v4addr() {
@@ -325,6 +372,12 @@ impl Bgp {
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
+        self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);
+        self.callback_peer("/afi-safi/long-lived-graceful-restart/enabled", config_llgr);
+        self.callback_peer(
+            "/afi-safi/long-lived-graceful-restart/restart-time",
+            config_llgr_restart_time,
+        );
 
         // Timer configuration.
         self.timer("/hold-time", timer::config::hold_time);
