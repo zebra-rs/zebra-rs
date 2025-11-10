@@ -1146,13 +1146,27 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         }
     }
     // Send End-of-RIB marker for IPv4 VPN
-    send_eor_ipv4_unicast(peer);
+    send_eor_vpnv4_unicast(peer);
 }
 
-/// Send End-of-RIB marker for IPv4 Unicast
+// Send End-of-RIB marker for IPv4 Unicast
 fn send_eor_ipv4_unicast(peer: &mut Peer) {
     // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
     let update = UpdatePacket::new();
+    let bytes: BytesMut = update.into();
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
+        }
+    }
+}
+
+// Send End-of-RIB marker for VPNv4 Unicast
+fn send_eor_vpnv4_unicast(peer: &mut Peer) {
+    // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
+    let mut update = UpdatePacket::new();
+    update.vpnv4_eor = true;
     let bytes: BytesMut = update.into();
 
     if let Some(ref packet_tx) = peer.packet_tx {
