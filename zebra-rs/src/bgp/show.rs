@@ -292,10 +292,16 @@ fn show_bgp_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
+                let add_path = if rib.id != 0 {
+                    format!("{}:", rib.id)
+                } else {
+                    format!("")
+                };
                 let origin = show_origin(&rib.attr);
                 writeln!(
                     buf,
-                    " {valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    " {valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    add_path,
                     k.to_string(),
                     nexthop,
                     med,
@@ -344,10 +350,16 @@ fn show_adj_rib_routes_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
+                let add_path = if rib.id != 0 {
+                    format!("{}:", rib.id)
+                } else {
+                    format!("")
+                };
                 let origin = show_origin(&rib.attr);
                 writeln!(
                     buf,
-                    " {valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    " {valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    add_path,
                     k.to_string(),
                     nexthop,
                     med,
@@ -1012,7 +1024,6 @@ impl Bgp {
             "/show/ip/bgp/neighbors/received-routes/vpnv4",
             show_bgp_received_vpnv4,
         );
-        self.show_add("/show/ip/bgp/clear", peer::clear);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);

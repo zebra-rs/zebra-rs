@@ -285,6 +285,13 @@ impl ConfigManager {
         std::fs::write(&self.config_path, output).expect("Unable to write file");
     }
 
+    pub fn clear(&self, paths: &Vec<CommandPath>) {
+        for (_, tx) in self.cm_clients.borrow().iter() {
+            tx.send(ConfigRequest::new(paths.clone(), ConfigOp::Clear))
+                .unwrap();
+        }
+    }
+
     pub fn execute(&self, mode: &Mode, input: &str) -> (ExecCode, String, Vec<CommandPath>) {
         let state = State::new();
 
@@ -307,6 +314,12 @@ impl ConfigManager {
         if state.delete {
             let paths = path_try_trim("delete", state.paths.clone());
             delete(paths, candidate);
+            return (ExecCode::Show, String::new(), state.paths);
+        }
+
+        // Handle "clear"
+        if state.clear {
+            self.clear(&state.paths);
             return (ExecCode::Show, String::new(), state.paths);
         }
 

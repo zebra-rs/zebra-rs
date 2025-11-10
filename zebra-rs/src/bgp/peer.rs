@@ -846,9 +846,15 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
     }
 }
 
-pub fn clear(bgp: &Bgp, args: Args, _json: bool) -> std::result::Result<String, std::fmt::Error> {
-    for (addr, peer) in bgp.peers.iter() {
-        let _ = bgp.tx.send(Message::Event(peer.ident, Event::Stop));
-    }
-    Ok(String::from("clear bgp"))
+pub fn clear(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt::Error> {
+    let Some(addr) = args.addr() else {
+        return Ok("peer not found".to_string());
+    };
+
+    let Some(peer) = bgp.peers.get(&addr) else {
+        return Ok("peer not found".to_string());
+    };
+
+    let _ = bgp.tx.send(Message::Event(peer.ident, Event::Stop));
+    Ok(format!("%% peer {} is cleared", addr))
 }

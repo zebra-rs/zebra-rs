@@ -19,6 +19,7 @@ pub struct State {
     pub set: bool,
     pub delete: bool,
     pub show: bool,
+    pub clear: bool,
     pub paths: Vec<CommandPath>,
     pub links: Vec<String>,
     pub dynamic: HashMap<String, Vec<String>>,
@@ -32,6 +33,7 @@ impl State {
             set: false,
             delete: false,
             show: false,
+            clear: false,
             paths: Vec::new(),
             index: 0usize,
             links: Vec::new(),
@@ -592,6 +594,9 @@ pub fn parse(
     }
     if path.name == "show" {
         s.show = true;
+    }
+    if path.name == "clear" {
+        s.clear = true;
     }
     s.paths.push(path);
 
