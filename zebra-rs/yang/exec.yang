@@ -84,10 +84,6 @@ module exec {
         leaf vpnv4 {
           type empty;
         }
-        leaf clear {
-          ext:help "Temporary command for BGP clear";
-          type empty;
-        }
         leaf summary {
           ext:help "BGP summary information";
           type empty;

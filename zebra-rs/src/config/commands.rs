@@ -53,6 +53,7 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/diff"), diff);
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
+    mode.install_func(String::from("/clear/ip/bgp/neighbor"), clear_bgp);
     mode
 }
 
@@ -170,5 +171,10 @@ fn save(config: &ConfigManager) -> (ExecCode, String) {
 fn list(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.candidate.borrow().list(&mut output);
+    (ExecCode::Show, output)
+}
+
+fn clear_bgp(config: &ConfigManager) -> (ExecCode, String) {
+    let output = String::from("clear ip bgp");
     (ExecCode::Show, output)
 }

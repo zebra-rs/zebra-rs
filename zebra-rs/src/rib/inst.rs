@@ -342,6 +342,9 @@ impl Rib {
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
             }
+            ConfigOp::Clear => {
+                //
+            }
         }
     }
 
