@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
@@ -220,6 +220,8 @@ impl BgpRibType {
 pub struct BgpRib {
     // AddPath ID from peer.
     pub id: u32,
+    // AddPath ID from peer.
+    pub local_id: u32,
     // BGP Attribute.
     pub attr: BgpAttr,
     // Peer ID.
@@ -251,6 +253,7 @@ impl BgpRib {
     ) -> Self {
         BgpRib {
             id,
+            local_id: 0, // Will be assigned in LocalRibTable::update_route()
             ident,
             router_id,
             attr: attr.clone(),
@@ -276,10 +279,36 @@ pub struct LocalRibTable(
 impl LocalRibTable {
     pub fn update_route(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>) {
         let candidates = self.0.entry(prefix).or_default();
+
+        // Find if we're replacing an existing route (same peer ident and path ID)
+        let existing_local_id = candidates
+            .iter()
+            .find(|r| r.ident == rib.ident && r.id == rib.id)
+            .map(|r| r.local_id);
+
+        // Extract routes being replaced
         let replaced: Vec<BgpRib> = candidates
             .extract_if(.., |r| r.ident == rib.ident && r.id == rib.id)
             .collect();
-        candidates.push(rib.clone());
+
+        // Allocate local_id for the new/updated rib
+        let mut new_rib = rib.clone();
+        if let Some(local_id) = existing_local_id {
+            // Reuse the local_id from the replaced route
+            new_rib.local_id = local_id;
+        } else {
+            // Allocate a new local_id - find smallest unused positive integer
+            let used_ids: std::collections::HashSet<u32> =
+                candidates.iter().map(|r| r.local_id).collect();
+
+            let mut next_id = 1u32;
+            while used_ids.contains(&next_id) {
+                next_id += 1;
+            }
+            new_rib.local_id = next_id;
+        }
+
+        candidates.push(new_rib);
 
         let selected = self.select_best_path(prefix);
 
