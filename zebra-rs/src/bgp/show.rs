@@ -181,6 +181,31 @@ struct BgpRouteJson {
     origin: Option<String>,
 }
 
+#[derive(Serialize)]
+struct BgpVpnv4RouteJson {
+    route_distinguisher: String,
+    prefix: String,
+    valid: bool,
+    best: bool,
+    internal: bool,
+    route_type: String,
+    next_hop: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metric: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_pref: Option<u32>,
+    weight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extended_community: Option<String>,
+    path_id: u32,
+    local_path_id: u32,
+    label: u32,
+}
+
 fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut routes: Vec<BgpRouteJson> = Vec::new();
@@ -265,6 +290,58 @@ fn show_bgp_vpnv4(
     args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut routes: Vec<BgpVpnv4RouteJson> = Vec::new();
+
+        for (rd, value) in bgp.local_rib.v4vpn.iter() {
+            for (prefix, ribs) in value.0.iter() {
+                for rib in ribs.iter() {
+                    let aspath_str = show_aspath(&rib.attr);
+                    let origin_str = show_origin(&rib.attr);
+                    let ecom_str = show_ecom(&rib.attr);
+
+                    routes.push(BgpVpnv4RouteJson {
+                        route_distinguisher: rd.to_string(),
+                        prefix: prefix.to_string(),
+                        valid: true,
+                        best: rib.best_path,
+                        internal: rib.typ == BgpRibType::IBGP,
+                        route_type: if rib.typ == BgpRibType::IBGP {
+                            "iBGP".to_string()
+                        } else {
+                            "eBGP".to_string()
+                        },
+                        next_hop: show_nexthop_vpn(&rib.nexthop),
+                        metric: show_med2(&rib.attr),
+                        local_pref: show_local_pref2(&rib.attr),
+                        weight: rib.weight,
+                        as_path: if aspath_str.is_empty() {
+                            None
+                        } else {
+                            Some(aspath_str)
+                        },
+                        origin: if origin_str.is_empty() {
+                            None
+                        } else {
+                            Some(origin_str)
+                        },
+                        extended_community: if ecom_str.is_empty() {
+                            None
+                        } else {
+                            Some(ecom_str)
+                        },
+                        path_id: rib.id,
+                        local_path_id: rib.local_id,
+                        label: 0, // TODO: Get actual label from rib.label
+                    });
+                }
+            }
+        }
+
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
+
     let mut buf = String::new();
 
     writeln!(
@@ -323,6 +400,58 @@ fn show_adj_rib_routes_vpnv4(
     router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut route_list: Vec<BgpVpnv4RouteJson> = Vec::new();
+
+        for (rd, value) in routes.iter() {
+            for (prefix, ribs) in value.0.iter() {
+                for rib in ribs.iter() {
+                    let aspath_str = show_aspath(&rib.attr);
+                    let origin_str = show_origin(&rib.attr);
+                    let ecom_str = show_ecom(&rib.attr);
+
+                    route_list.push(BgpVpnv4RouteJson {
+                        route_distinguisher: rd.to_string(),
+                        prefix: prefix.to_string(),
+                        valid: true,
+                        best: rib.best_path,
+                        internal: rib.typ == BgpRibType::IBGP,
+                        route_type: if rib.typ == BgpRibType::IBGP {
+                            "iBGP".to_string()
+                        } else {
+                            "eBGP".to_string()
+                        },
+                        next_hop: show_nexthop_vpn(&rib.nexthop),
+                        metric: show_med2(&rib.attr),
+                        local_pref: show_local_pref2(&rib.attr),
+                        weight: rib.weight,
+                        as_path: if aspath_str.is_empty() {
+                            None
+                        } else {
+                            Some(aspath_str)
+                        },
+                        origin: if origin_str.is_empty() {
+                            None
+                        } else {
+                            Some(origin_str)
+                        },
+                        extended_community: if ecom_str.is_empty() {
+                            None
+                        } else {
+                            Some(ecom_str)
+                        },
+                        path_id: rib.id,
+                        local_path_id: rib.local_id,
+                        label: 0, // TODO: Get actual label from rib.label
+                    });
+                }
+            }
+        }
+
+        return Ok(serde_json::to_string_pretty(&route_list)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
+
     let mut buf = String::new();
 
     writeln!(
