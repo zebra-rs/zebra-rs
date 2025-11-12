@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
 
+use bgp_packet::graceful::GracefulRestartValue;
 use bgp_packet::llgr::LLGRValue;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
@@ -112,7 +113,7 @@ pub struct PeerConfig {
     pub add_path: BTreeSet<AddPathValue>,
     pub four_octet: bool,
     pub route_refresh: bool,
-    pub graceful_restart: Option<u32>,
+    pub graceful_restart: Option<u16>,
     pub received: Vec<CapabilityPacket>,
     pub timer: timer::Config,
     pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
@@ -755,7 +756,9 @@ pub fn peer_send_open(peer: &mut Peer) {
         // caps.push(CapabilityPacket::RouteRefresh(cap));
     }
     if let Some(restart_time) = peer.config.graceful_restart {
-        let cap = CapabilityGracefulRestart::new(restart_time);
+        let restart = GracefulRestartValue::new(restart_time, Afi::Ip, Safi::Unicast);
+        let mut cap = CapabilityGracefulRestart::default();
+        cap.values.push(restart);
         caps.push(CapabilityPacket::GracefulRestart(cap));
     }
     for add_path in peer.config.add_path.iter() {
@@ -765,7 +768,9 @@ pub fn peer_send_open(peer: &mut Peer) {
     }
     for (afi_safi, sub) in peer.config.sub.iter() {
         if let Some(restart_time) = sub.graceful_restart {
-            let cap = CapabilityGracefulRestart::new(restart_time);
+            let restart = GracefulRestartValue::new(1, afi_safi.afi, afi_safi.safi);
+            let mut cap = CapabilityGracefulRestart::default();
+            cap.values.push(restart);
             caps.push(CapabilityPacket::GracefulRestart(cap));
         }
         if let Some(llgr_time) = sub.llgr {

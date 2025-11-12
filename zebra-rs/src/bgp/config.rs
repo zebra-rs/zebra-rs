@@ -184,6 +184,21 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+fn config_rtc(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::Rtc);
+    if let Some(peer) = bgp.peers.get_mut(&addr) {
+        if op.is_set() {
+            if !peer.config.afi_safi.has(&afi_safi) {
+                peer.config.afi_safi.push(afi_safi);
+            }
+        } else {
+            peer.config.afi_safi.remove(&afi_safi);
+        }
+    }
+    Some(())
+}
+
 fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     let network = args.v4net()?;
@@ -378,6 +393,7 @@ impl Bgp {
             "/afi-safi/long-lived-graceful-restart/restart-time",
             config_llgr_restart_time,
         );
+        // self.callback_peer("/rtc", config_rtc);
 
         // Timer configuration.
         self.timer("/hold-time", timer::config::hold_time);
