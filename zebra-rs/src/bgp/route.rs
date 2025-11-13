@@ -110,6 +110,11 @@ impl AdjRib {
         }
     }
 
+    // Count all v4vpn len for AdjRibTable.
+    pub fn count_v4vpn(&self) -> usize {
+        self.v4vpn.values().map(|table| table.0.len()).sum()
+    }
+
     // Add a route to Adj-RIB-In
     pub fn add_route(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
         self.v4.add_route(prefix, route)
