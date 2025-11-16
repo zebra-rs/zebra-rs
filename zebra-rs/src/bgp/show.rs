@@ -142,6 +142,7 @@ fn show_nexthop(attr: &BgpAttr) -> String {
         match nexthop {
             BgpNexthop::Ipv4(v) => v.to_string(),
             BgpNexthop::Vpnv4(v) => v.to_string(),
+            BgpNexthop::Evpn(v) => v.to_string(),
         }
     } else {
         "0.0.0.0".to_string()
