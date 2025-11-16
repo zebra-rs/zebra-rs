@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use bgp_packet::{
-    Afi, AfiSafi, CapMultiProtocol, Direct, ParseOption, Safi, addpath::AddPathValue,
+    Afi, AfiSafi, BgpCap, CapMultiProtocol, Direct, ParseOption, Safi, addpath::AddPathValue,
     caps::CapabilityPacket,
 };
 use serde::Serialize;
@@ -53,43 +53,30 @@ impl CapAfiMap {
     }
 }
 
-pub fn cap_register_send(caps: &[CapabilityPacket], cap_map: &mut CapAfiMap) {
-    for cap in caps {
-        if let CapabilityPacket::MultiProtocol(mp) = cap {
-            if let Some(entry) = cap_map.get_mut(mp) {
-                entry.send = true;
-            }
+pub fn cap_register_send(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
+    for (_, mp) in bgp_cap.mp.iter() {
+        if let Some(entry) = cap_map.get_mut(mp) {
+            entry.send = true;
         }
     }
 }
 
-pub fn cap_register_recv(caps: &[CapabilityPacket], cap_map: &mut CapAfiMap) {
-    for cap in caps {
-        if let CapabilityPacket::MultiProtocol(mp) = cap {
-            if let Some(entry) = cap_map.get_mut(mp) {
-                entry.recv = true;
-            }
+pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
+    for (_, mp) in bgp_cap.mp.iter() {
+        if let Some(entry) = cap_map.get_mut(mp) {
+            entry.recv = true;
         }
     }
 }
 
-pub fn cap_addpath_recv(
-    caps: &[CapabilityPacket],
-    cap_map: &mut ParseOption,
-    configs: &BTreeSet<AddPathValue>,
-) {
-    cap_map.clear();
-    for cap in caps {
-        if let CapabilityPacket::AddPath(caps) = cap {
-            for cap in caps.values.iter() {
-                for config in configs.iter() {
-                    if cap.afi == config.afi && cap.safi == config.safi {
-                        let send = cap.send_receive.is_receive() && config.send_receive.is_send();
-                        let recv = cap.send_receive.is_send() && config.send_receive.is_receive();
-                        let afi_safi = AfiSafi::new(cap.afi, cap.safi);
-                        cap_map.add_path.insert(afi_safi, Direct { recv, send });
-                    }
-                }
+pub fn cap_addpath_recv(bgp_cap: &BgpCap, opt: &mut ParseOption, configs: &BTreeSet<AddPathValue>) {
+    for (_, cap) in bgp_cap.addpath.iter() {
+        for config in configs.iter() {
+            if cap.afi == config.afi && cap.safi == config.safi {
+                let send = cap.send_receive.is_receive() && config.send_receive.is_send();
+                let recv = cap.send_receive.is_send() && config.send_receive.is_receive();
+                let afi_safi = AfiSafi::new(cap.afi, cap.safi);
+                opt.add_path.insert(afi_safi, Direct { recv, send });
             }
         }
     }

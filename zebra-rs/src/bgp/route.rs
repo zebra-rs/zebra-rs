@@ -8,7 +8,9 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::UnboundedSender;
+use tonic::service::LayerExt;
 
+use super::cap::CapAfiMap;
 use super::peer::{ConfigRef, Peer, PeerType};
 use super::{Bgp, InOut};
 use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry};
@@ -1110,6 +1112,9 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
     let peer = peers.get_mut(&peer_id).expect("peer must exist");
     peer.adj_rib_in.v4vpn.clear();
     peer.adj_rib_out.v4vpn.clear();
+
+    peer.cap_map = CapAfiMap::new();
+    peer.opt.clear();
 }
 
 pub fn route_update_ipv4(
