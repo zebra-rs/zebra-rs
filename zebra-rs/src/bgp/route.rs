@@ -226,49 +226,49 @@ struct BgpNlriAttr {
     pub mp_withdraw: Option<MpNlriUnreachAttr>,
 }
 
-impl BgpNlriAttr {
-    fn from(packet: &UpdatePacket) -> Self {
-        if packet.attrs.is_empty()
-            && packet.ipv4_update.is_empty()
-            && packet.ipv4_withdraw.is_empty()
-        {
-            return Self {
-                mp_withdraw: Some(MpNlriUnreachAttr::Ipv4Eor),
-                ..Default::default()
-            };
-        }
+// impl BgpNlriAttr {
+//     fn from(packet: &UpdatePacket) -> Self {
+//         if packet.attrs.is_empty()
+//             && packet.ipv4_update.is_empty()
+//             && packet.ipv4_withdraw.is_empty()
+//         {
+//             return Self {
+//                 mp_withdraw: Some(MpNlriUnreachAttr::Ipv4Eor),
+//                 ..Default::default()
+//             };
+//         }
 
-        if !packet.ipv4_update.is_empty() {
-            return Self {
-                updates: packet.ipv4_update.clone(),
-                ..Default::default()
-            };
-        }
+//         if !packet.ipv4_update.is_empty() {
+//             return Self {
+//                 updates: packet.ipv4_update.clone(),
+//                 ..Default::default()
+//             };
+//         }
 
-        if !packet.ipv4_withdraw.is_empty() {
-            return Self {
-                withdraw: packet.ipv4_withdraw.clone(),
-                ..Default::default()
-            };
-        }
+//         if !packet.ipv4_withdraw.is_empty() {
+//             return Self {
+//                 withdraw: packet.ipv4_withdraw.clone(),
+//                 ..Default::default()
+//             };
+//         }
 
-        packet
-            .attrs
-            .iter()
-            .find_map(|attr| match attr {
-                Attr::MpReachNlri(nlri) => Some(Self {
-                    mp_updates: Some(nlri.clone()),
-                    ..Default::default()
-                }),
-                Attr::MpUnreachNlri(nlri) => Some(Self {
-                    mp_withdraw: Some(nlri.clone()),
-                    ..Default::default()
-                }),
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-}
+//         packet
+//             .attrs
+//             .iter()
+//             .find_map(|attr| match attr {
+//                 Attr::MpReachNlri(nlri) => Some(Self {
+//                     mp_updates: Some(nlri.clone()),
+//                     ..Default::default()
+//                 }),
+//                 Attr::MpUnreachNlri(nlri) => Some(Self {
+//                     mp_withdraw: Some(nlri.clone()),
+//                     ..Default::default()
+//                 }),
+//                 _ => None,
+//             })
+//             .unwrap_or_default()
+//     }
+// }
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BgpRibType {
@@ -927,7 +927,8 @@ fn route_withdraw_vpnv4(peer: &mut Peer, rd: &RouteDistinguisher, prefix: Ipv4Ne
         rd: rd.clone(),
         nlri: Ipv4Nlri { id, prefix },
     };
-    update.vpnv4_withdraw.push(vpnv4_nlri);
+    let mp_withdraw = MpNlriUnreachAttr::Vpnv4(vec![vpnv4_nlri]);
+    update.mp_withdraw = Some(mp_withdraw);
 
     // Convert to bytes and send
     let bytes: BytesMut = update.into();
@@ -988,18 +989,22 @@ pub fn route_from_peer(
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
     // Convert UpdatePacket to BgpAttr.
-    let attr = BgpAttr::from(&packet.attrs);
+    // let attr = BgpAttr::from(&packet.attrs);
 
     // Convert UpdatePacket to BgpNlri.
-    let nlri = BgpNlriAttr::from(&packet);
-
-    for update in nlri.updates.iter() {
-        route_ipv4_update(peer_id, update, None, None, &attr, None, bgp, peers);
+    // let nlri = BgpNlriAttr::from(&packet);
+    if let Some(bgp_attr) = &packet.bgp_attr {
+        for update in packet.ipv4_update.iter() {
+            route_ipv4_update(peer_id, update, None, None, bgp_attr, None, bgp, peers);
+        }
     }
-    for withdraw in nlri.withdraw.iter() {
+
+    for withdraw in packet.ipv4_withdraw.iter() {
         route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers);
     }
-    if let Some(mp_updates) = nlri.mp_updates {
+    if let Some(mp_updates) = packet.mp_update
+        && let Some(bgp_attr) = &packet.bgp_attr
+    {
         match mp_updates {
             MpNlriReachAttr::Vpnv4 {
                 snpa,
@@ -1012,7 +1017,7 @@ pub fn route_from_peer(
                         &update.nlri,
                         Some(update.rd.clone()),
                         Some(update.label),
-                        &attr,
+                        bgp_attr,
                         Some(nhop.clone()),
                         bgp,
                         peers,
@@ -1024,7 +1029,7 @@ pub fn route_from_peer(
             }
         }
     }
-    if let Some(mp_withdrawals) = nlri.mp_withdraw {
+    if let Some(mp_withdrawals) = packet.mp_withdraw {
         match mp_withdrawals {
             MpNlriUnreachAttr::Vpnv4(withdrawals) => {
                 for withdraw in withdrawals.iter() {
@@ -1200,8 +1205,8 @@ pub fn route_update_ipv4(
 
 pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
     let mut update = UpdatePacket::new();
-    let attrs = bgp_attr.to();
-    update.attrs = attrs;
+    // let attrs = bgp_attr.to();
+    update.bgp_attr = Some(bgp_attr);
     update.ipv4_update.push(nlri);
 
     // Convert to bytes and send
@@ -1216,13 +1221,15 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
 
 pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
     let mut update = UpdatePacket::new();
-    let attrs = bgp_attr.to();
-    update.attrs = attrs;
-    update.vpnv4_update.push(nlri);
-
-    if let Some(BgpNexthop::Vpnv4(vpnv4_nexthop)) = bgp_attr.nexthop.as_ref() {
-        update.vpnv4_nexthop = Some(vpnv4_nexthop.clone());
+    if let Some(BgpNexthop::Vpnv4(nhop)) = bgp_attr.nexthop.as_ref() {
+        let mp_update = MpNlriReachAttr::Vpnv4 {
+            snpa: 0,
+            nhop: nhop.clone(),
+            updates: vec![nlri],
+        };
+        update.mp_update = Some(mp_update);
     }
+    update.bgp_attr = Some(bgp_attr);
 
     // Convert to bytes and send
     let bytes: BytesMut = update.into();
@@ -1350,7 +1357,8 @@ fn send_eor_ipv4_unicast(peer: &mut Peer) {
 fn send_eor_vpnv4_unicast(peer: &mut Peer) {
     // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
     let mut update = UpdatePacket::new();
-    update.vpnv4_eor = true;
+    let mp_withdraw = MpNlriUnreachAttr::Vpnv4Eor;
+    update.mp_withdraw = Some(mp_withdraw);
     let bytes: BytesMut = update.into();
 
     if let Some(ref packet_tx) = peer.packet_tx {
