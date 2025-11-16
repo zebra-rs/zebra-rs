@@ -3,8 +3,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Instant;
 
-use bgp_packet::graceful::GracefulRestartValue;
-use bgp_packet::llgr::LLGRValue;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use serde::Serialize;
@@ -15,10 +13,10 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
 
-use caps::CapabilityAs4;
-use caps::CapabilityGracefulRestart;
+use caps::CapAs4;
+use caps::CapRefresh;
+use caps::CapRestart;
 use caps::CapabilityPacket;
-use caps::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
@@ -114,7 +112,8 @@ pub struct PeerConfig {
     pub four_octet: bool,
     pub route_refresh: bool,
     pub graceful_restart: Option<u16>,
-    pub received: Vec<CapabilityPacket>,
+    pub cap_send: BgpCap,
+    pub cap_recv: BgpCap,
     pub timer: timer::Config,
     pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
 }
@@ -351,18 +350,6 @@ pub struct ConfigRef<'a> {
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
-// fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
-//     if !update.ipv4_withdraw.is_empty() {
-//         //;
-//     }
-//     if !update.attrs.is_empty() {
-//         //;
-//     }
-//     if !update.ipv4_update.is_empty() {
-//         //;
-//     }
-// }
-
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     // Handle UpdateMsg separately to avoid borrow checker issues
     if let Event::UpdateMsg(packet) = event {
@@ -478,9 +465,8 @@ pub fn capability_as4(caps: &[CapabilityPacket]) -> Option<u32> {
 }
 
 pub fn open_asn(packet: &OpenPacket) -> u32 {
-    let asn = capability_as4(&packet.caps);
-    if let Some(asn) = asn {
-        asn
+    if let Some(as4) = &packet.bgp_cap.as4 {
+        as4.asn
     } else {
         packet.asn as u32
     }
@@ -532,10 +518,10 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     timer::update_open_timers(peer, &packet);
 
     // Register recv caps.
-    cap_register_recv(&packet.caps, &mut peer.cap_map);
+    cap_register_recv(&packet.bgp_cap, &mut peer.cap_map);
 
     // Register add path caps.
-    cap_addpath_recv(&packet.caps, &mut peer.opt, &peer.config.add_path);
+    cap_addpath_recv(&packet.bgp_cap, &mut peer.opt, &peer.config.add_path);
 
     // Register graceful restart.
     // cap_restart_recv(&packet.caps, &mut peer.restart, &peer.config);
@@ -621,15 +607,13 @@ pub fn peer_packet_parse(
     config: &mut PeerConfig,
     opt: &mut ParseOption,
 ) -> Result<(), String> {
-    let as4 = !config.received.is_empty();
-
-    match BgpPacket::parse_packet(rx, as4, Some(opt.clone())) {
+    match BgpPacket::parse_packet(rx, true, Some(opt.clone())) {
         Ok((_, p)) => {
             match p {
                 BgpPacket::Open(p) => {
-                    config.received = p.caps.clone();
-                    cap_addpath_recv(&p.caps, opt, &config.add_path);
-                    let _ = tx.send(Message::Event(ident, Event::BGPOpen(p)));
+                    config.cap_recv = p.bgp_cap.clone();
+                    cap_addpath_recv(&p.bgp_cap, opt, &config.add_path);
+                    let _ = tx.send(Message::Event(ident, Event::BGPOpen(*p)));
                 }
                 BgpPacket::Keepalive(_) => {
                     let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
@@ -740,54 +724,49 @@ pub fn peer_send_open(peer: &mut Peer) {
     } else {
         peer.router_id
     };
-    let mut caps = Vec::new();
+    let mut bgp_cap = BgpCap::default();
+
     for afi_safi in peer.config.afi_safi.0.iter() {
         let cap = CapMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
-        caps.push(CapabilityPacket::MultiProtocol(cap));
+        bgp_cap.mp.insert(afi_safi.clone(), cap);
     }
     if peer.config.four_octet {
-        let cap = CapabilityAs4::new(peer.local_as);
-        caps.push(CapabilityPacket::As4(cap));
+        let cap = CapAs4::new(peer.local_as);
+        bgp_cap.as4 = Some(cap);
     }
     if peer.config.route_refresh {
-        let cap = CapabilityRouteRefresh::default();
-        caps.push(CapabilityPacket::RouteRefresh(cap));
-        // let cap = CapabilityRouteRefresh::new(CapabilityCode::RouteRefreshCisco);
-        // caps.push(CapabilityPacket::RouteRefresh(cap));
+        let cap = CapRefresh::default();
+        bgp_cap.refresh = Some(cap);
     }
     if let Some(restart_time) = peer.config.graceful_restart {
-        let restart = GracefulRestartValue::new(restart_time, Afi::Ip, Safi::Unicast);
-        let mut cap = CapabilityGracefulRestart::default();
-        cap.values.push(restart);
-        caps.push(CapabilityPacket::GracefulRestart(cap));
+        let restart = RestartValue::new(restart_time, Afi::Ip, Safi::Unicast);
+        let key = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        bgp_cap.restart.insert(key, restart);
     }
-    for add_path in peer.config.add_path.iter() {
-        let mut cap = CapabilityAddPath::default();
-        cap.values.push(add_path.clone());
-        caps.push(CapabilityPacket::AddPath(cap));
+    for addpath in peer.config.add_path.iter() {
+        let key = AfiSafi::new(addpath.afi, addpath.safi);
+        bgp_cap.addpath.insert(key, addpath.clone());
     }
-    for (afi_safi, sub) in peer.config.sub.iter() {
+    for (key, sub) in peer.config.sub.iter() {
         if let Some(restart_time) = sub.graceful_restart {
-            let restart = GracefulRestartValue::new(1, afi_safi.afi, afi_safi.safi);
-            let mut cap = CapabilityGracefulRestart::default();
-            cap.values.push(restart);
-            caps.push(CapabilityPacket::GracefulRestart(cap));
+            let restart = RestartValue::new(1, key.afi, key.safi);
+            bgp_cap.restart.insert(key.clone(), restart);
         }
         if let Some(llgr_time) = sub.llgr {
-            let llgr = LLGRValue::new(afi_safi.afi, afi_safi.safi, llgr_time);
-            let cap = CapabilityLlgr { values: vec![llgr] };
-            caps.push(CapabilityPacket::Llgr(cap));
+            let llgr = LLGRValue::new(key.afi, key.safi, llgr_time);
+            bgp_cap.llgr.insert(key.clone(), llgr);
         }
     }
 
-    cap_register_send(&caps, &mut peer.cap_map);
+    cap_register_send(&bgp_cap, &mut peer.cap_map);
+    peer.config.cap_send = bgp_cap.clone();
 
     // Remmeber sent hold time.
     let hold_time = peer.config.timer.hold_time() as u16;
     peer.param_tx.hold_time = hold_time;
     peer.param_tx.keepalive = hold_time / 3;
 
-    let open = OpenPacket::new(header, peer.local_as as u16, hold_time, &router_id, caps);
+    let open = OpenPacket::new(header, peer.local_as as u16, hold_time, &router_id, bgp_cap);
     let bytes: BytesMut = open.into();
     peer.counter[BgpType::Open as usize].sent += 1;
     let _ = peer.packet_tx.as_ref().unwrap().send(bytes);
