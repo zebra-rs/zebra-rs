@@ -15,10 +15,10 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
 
-use cap::CapabilityAs4;
-use cap::CapabilityGracefulRestart;
-use cap::CapabilityPacket;
-use cap::CapabilityRouteRefresh;
+use caps::CapabilityAs4;
+use caps::CapabilityGracefulRestart;
+use caps::CapabilityPacket;
+use caps::CapabilityRouteRefresh;
 
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
@@ -351,17 +351,17 @@ pub struct ConfigRef<'a> {
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
-fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
-    if !update.ipv4_withdraw.is_empty() {
-        //;
-    }
-    if !update.attrs.is_empty() {
-        //;
-    }
-    if !update.ipv4_update.is_empty() {
-        //;
-    }
-}
+// fn update_rib(bgp: &mut Bgp, id: &Ipv4Addr, update: &UpdatePacket) {
+//     if !update.ipv4_withdraw.is_empty() {
+//         //;
+//     }
+//     if !update.attrs.is_empty() {
+//         //;
+//     }
+//     if !update.ipv4_update.is_empty() {
+//         //;
+//     }
+// }
 
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     // Handle UpdateMsg separately to avoid borrow checker issues
@@ -623,7 +623,7 @@ pub fn peer_packet_parse(
 ) -> Result<(), String> {
     let as4 = !config.received.is_empty();
 
-    match parse_bgp_packet(rx, as4, Some(opt.clone())) {
+    match BgpPacket::parse_packet(rx, as4, Some(opt.clone())) {
         Ok((_, p)) => {
             match p {
                 BgpPacket::Open(p) => {
@@ -639,7 +639,7 @@ pub fn peer_packet_parse(
                     let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
                 }
                 BgpPacket::Update(p) => {
-                    let _ = tx.send(Message::Event(ident, Event::UpdateMsg(p)));
+                    let _ = tx.send(Message::Event(ident, Event::UpdateMsg(*p)));
                 }
             }
             Ok(())
