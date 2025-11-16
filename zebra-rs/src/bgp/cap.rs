@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use bgp_packet::{
     Afi, AfiSafi, CapMultiProtocol, Direct, ParseOption, Safi, addpath::AddPathValue,
-    cap::CapabilityPacket,
+    caps::CapabilityPacket,
 };
 use serde::Serialize;
 
