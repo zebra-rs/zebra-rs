@@ -339,15 +339,15 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
-    fn isis_if_add_enp0s7(&self) -> MsgEnum {
+    fn isis_if_add_enp0s6_none(&self) -> MsgEnum {
         let msg = IsisIf {
-            ifname: "enp0s7".into(),
+            ifname: "enp0s6".into(),
             instance_tag: "s".into(),
             ipv4_enable: true,
             network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
-            adjacency_sid: Some(PrefixSid { index: 200 }),
+            adjacency_sid: None,
             srlg_group: Some(vec!["hoge".to_string()]),
             l2_config: Some(IsisIfLevel { metric: 20 }),
         };
@@ -369,15 +369,15 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
-    fn isis_if_add_enp0s6_none(&self) -> MsgEnum {
+    fn isis_if_add_enp0s7(&self) -> MsgEnum {
         let msg = IsisIf {
-            ifname: "enp0s6".into(),
+            ifname: "enp0s7".into(),
             instance_tag: "s".into(),
             ipv4_enable: true,
             network_type: 1,
             circuit_type: 2,
             prefix_sid: None,
-            adjacency_sid: None,
+            adjacency_sid: Some(PrefixSid { index: 200 }),
             srlg_group: Some(vec!["hoge".to_string()]),
             l2_config: Some(IsisIfLevel { metric: 20 }),
         };
@@ -640,13 +640,13 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    // thread::sleep(Duration::from_secs(5));
+                    thread::sleep(Duration::from_secs(5));
 
-                    // let msg = MsgSend {
-                    //     method: String::from("isis-if:add"),
-                    //     data: self.isis_if_add_enp0s6(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
+                    let msg = MsgSend {
+                        method: String::from("isis-if:add"),
+                        data: self.isis_if_add_enp0s6_none(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);
