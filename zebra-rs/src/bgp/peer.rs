@@ -107,7 +107,7 @@ pub struct PeerTransportConfig {
 #[derive(Debug, Default, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
-    pub afi_safi: AfiSafis,
+    pub afi_safi: AfiSafis<bool>,
     pub add_path: BTreeSet<AddPathValue>,
     pub four_octet: bool,
     pub route_refresh: bool,
@@ -292,7 +292,7 @@ impl Peer {
         };
         peer.config
             .afi_safi
-            .push(AfiSafi::new(Afi::Ip, Safi::Unicast));
+            .set(AfiSafi::new(Afi::Ip, Safi::Unicast), true);
         peer.config.four_octet = true;
         peer.config.route_refresh = true;
         // peer.config.graceful_restart = Some(65535);
@@ -525,6 +525,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
 
     // Register graceful restart.
     // cap_restart_recv(&packet.caps, &mut peer.restart, &peer.config);
+    peer.config.cap_recv = packet.bgp_cap;
 
     State::Established
 }
@@ -726,7 +727,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     };
     let mut bgp_cap = BgpCap::default();
 
-    for afi_safi in peer.config.afi_safi.0.iter() {
+    for (afi_safi, _) in peer.config.afi_safi.0.iter() {
         let cap = CapMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
         bgp_cap.mp.insert(afi_safi.clone(), cap);
     }

@@ -905,6 +905,8 @@ fn uptime(instant: &Option<Instant>) -> String {
 }
 
 fn fetch(peer: &Peer) -> Neighbor<'_> {
+    println!("{}", peer.config.cap_send);
+    println!("{}", peer.config.cap_recv);
     let mut n = Neighbor {
         address: peer.address,
         remote_as: peer.peer_as,
@@ -1003,6 +1005,12 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
             if cap.send || cap.recv {
                 writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
+            }
+        }
+        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Rtc);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
+            if cap.send || cap.recv {
+                writeln!(out, "    IPv4 RTC: {}", cap.desc())?;
             }
         }
         writeln!(out, "")?;
