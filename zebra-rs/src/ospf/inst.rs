@@ -144,13 +144,14 @@ impl Ospf {
     }
 
     pub fn router_lsa_originate(&mut self) {
-        if let Some(area) = self.areas.get_mut(Ipv4Addr::UNSPECIFIED) {
+        if let Some(_area) = self.areas.get_mut(Ipv4Addr::UNSPECIFIED) {
             println!(
                 "Found default area for self originated router_id {}",
                 self.router_id
             );
 
-            let lsa_header = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
+            let _lsa_header =
+                OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
 
             let mut router_lsa = RouterLsa::default();
 
@@ -210,9 +211,9 @@ impl Ospf {
         &mut self,
         packet: Ospfv2Packet,
         src: Ipv4Addr,
-        from: Ipv4Addr,
+        _from: Ipv4Addr,
         index: u32,
-        dest: Ipv4Addr,
+        _dest: Ipv4Addr,
     ) {
         match packet.typ {
             OspfType::Hello => {
@@ -223,14 +224,14 @@ impl Ospf {
             }
             OspfType::DbDesc => {
                 println!("DB_DESC: ifindex {}, nbr src {}", index, src);
-                if let Some((mut ltop, mut nbr)) = self.ospf_interface(index, &src) {
+                if let Some((mut ltop, nbr)) = self.ospf_interface(index, &src) {
                     ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
                 } else {
                     println!("DB_DESC: Pakcet from unknown neighbor {}", src);
                 }
             }
             OspfType::LsRequest => {
-                let Some(link) = self.links.get_mut(&index) else {
+                let Some(_link) = self.links.get_mut(&index) else {
                     return;
                 };
                 println!("LS_REQ: {}", packet);

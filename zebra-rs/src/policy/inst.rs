@@ -195,10 +195,10 @@ impl Policy {
                 }
             }
             Message::Unregister {
-                proto,
-                name,
-                ident,
-                policy_type,
+                proto: _,
+                name: _,
+                ident: _,
+                policy_type: _,
             } => {
                 //
             }

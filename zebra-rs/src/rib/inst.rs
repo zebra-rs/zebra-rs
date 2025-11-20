@@ -160,7 +160,7 @@ impl Rib {
         Ok(rib)
     }
 
-    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, proto: String) {
+    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, _proto: String) {
         // Link dump.
         for (_, link) in self.links.iter() {
             let msg = RibRx::LinkAdd(link.clone());

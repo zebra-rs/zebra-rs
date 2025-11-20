@@ -110,6 +110,7 @@ pub fn match_ipv4_net(src: &str) -> (MatchType, usize) {
 // Allowed characters for normal IPv6 addresses and IPv6 prefixes with masks:
 const IPV6_ADDR_STR: &str = "0123456789abcdefABCDEF:.";
 const IPV6_PREFIX_STR: &str = "0123456789abcdefABCDEF:./";
+#[allow(dead_code)]
 const IPV6_MAX_BITLEN: i32 = 128;
 
 // State machine for parsing IPv6

@@ -339,12 +339,57 @@ impl Nanomsg {
         MsgEnum::IsisIf(msg)
     }
 
+    fn isis_if_add_enp0s6_101(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "enp0s6".into(),
+            instance_tag: "s".into(),
+            ipv4_enable: true,
+            network_type: 1,
+            circuit_type: 2,
+            prefix_sid: None,
+            adjacency_sid: Some(PrefixSid { index: 101 }),
+            srlg_group: Some(vec!["hoge".to_string()]),
+            l2_config: Some(IsisIfLevel { metric: 20 }),
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
     fn isis_if_add_enp0s6_none(&self) -> MsgEnum {
         let msg = IsisIf {
             ifname: "enp0s6".into(),
             instance_tag: "s".into(),
             ipv4_enable: true,
             network_type: 1,
+            circuit_type: 2,
+            prefix_sid: None,
+            adjacency_sid: None,
+            srlg_group: Some(vec!["hoge".to_string()]),
+            l2_config: Some(IsisIfLevel { metric: 20 }),
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
+    fn isis_if_add_enp0s6_ptp(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "enp0s6".into(),
+            instance_tag: "s".into(),
+            ipv4_enable: true,
+            network_type: 2,
+            circuit_type: 2,
+            prefix_sid: None,
+            adjacency_sid: Some(PrefixSid { index: 100 }),
+            srlg_group: Some(vec!["hoge".to_string()]),
+            l2_config: Some(IsisIfLevel { metric: 20 }),
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
+    fn isis_if_add_enp0s6_ptp_none(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "enp0s6".into(),
+            instance_tag: "s".into(),
+            ipv4_enable: true,
+            network_type: 2,
             circuit_type: 2,
             prefix_sid: None,
             adjacency_sid: None,
@@ -377,6 +422,21 @@ impl Nanomsg {
             network_type: 1,
             circuit_type: 2,
             prefix_sid: Some(PrefixSid { index: 100 }),
+            adjacency_sid: None,
+            srlg_group: None,
+            l2_config: None,
+        };
+        MsgEnum::IsisIf(msg)
+    }
+
+    fn isis_if_add_lo_101(&self) -> MsgEnum {
+        let msg = IsisIf {
+            ifname: "lo".into(),
+            instance_tag: "s".into(),
+            ipv4_enable: true,
+            network_type: 1,
+            circuit_type: 2,
+            prefix_sid: Some(PrefixSid { index: 101 }),
             adjacency_sid: None,
             srlg_group: None,
             l2_config: None,
@@ -570,7 +630,7 @@ impl Nanomsg {
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "isis-global:request" {
-                    thread::sleep(Duration::from_secs(1));
+                    // thread::sleep(Duration::from_secs(1));
                     // isis-global:update
                     let msg = MsgSend {
                         method: String::from("isis-global:update"),
@@ -594,7 +654,7 @@ impl Nanomsg {
 
                     let msg = MsgSend {
                         method: String::from("isis-if:add"),
-                        data: self.isis_if_add_enp0s6(),
+                        data: self.isis_if_add_enp0s6_ptp(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
@@ -604,23 +664,20 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    let msg = MsgSend {
-                        method: String::from("isis-instance:add"),
-                        data: self.isis_instance_add2(),
-                    };
-                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                    // let msg = MsgSend {
+                    //     method: String::from("segment-routing:update"),
+                    //     data: self.segment_routing_update(),
+                    // };
+                    // self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    let msg = MsgSend {
-                        method: String::from("segment-routing:update"),
-                        data: self.segment_routing_update(),
-                    };
-                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                    // thread::sleep(Duration::from_secs(10));
+                    // println!("sent");
 
-                    let msg = MsgSend {
-                        method: String::from("segment-routing:update"),
-                        data: self.segment_routing_update(),
-                    };
-                    self.socket.write_all(to_string(&msg)?.as_bytes());
+                    // let msg = MsgSend {
+                    //     method: String::from("isis-if:add"),
+                    //     data: self.isis_if_add_enp0s6_ptp_none(),
+                    // };
+                    // self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "router-id:request" {
                     println!("{}", msg.data);

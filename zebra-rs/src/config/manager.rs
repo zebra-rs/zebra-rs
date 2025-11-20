@@ -341,7 +341,7 @@ impl ConfigManager {
 
     pub async fn comps_dynamic(&self, dynamic: String) -> Vec<String> {
         // Parse dynamic.
-        let mut dynamics: Vec<&str> = dynamic.as_str().split(':').collect();
+        let dynamics: Vec<&str> = dynamic.as_str().split(':').collect();
 
         if dynamics.len() != 2 {
             return Vec::new();
@@ -486,7 +486,7 @@ impl ConfigManager {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 3 && parts[0] == "logging" && parts[1] == "output" {
             let output_type = parts[2];
-            let logging_output = match output_type {
+            let _logging_output = match output_type {
                 "stdout" => crate::rib::LoggingOutput::Stdout,
                 "syslog" => crate::rib::LoggingOutput::Syslog,
                 "file" => {

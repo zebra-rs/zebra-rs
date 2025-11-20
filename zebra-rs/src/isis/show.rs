@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use isis_packet::*;
+//use isis_packet::*;
 use serde::Serialize;
 
 use super::{Isis, inst::ShowCallback};
@@ -35,7 +35,7 @@ impl Isis {
 }
 
 fn show_isis(
-    isis: &Isis,
+    _isis: &Isis,
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
@@ -538,7 +538,7 @@ fn show_isis_adjacency(
 fn show_isis_spf(
     isis: &Isis,
     _args: Args,
-    json: bool,
+    _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 

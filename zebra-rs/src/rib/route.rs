@@ -459,7 +459,7 @@ fn nexthop_uni_resolve(nhop: &mut NexthopUni, nmap: &NexthopMap) {
     }
 }
 
-fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, ifdown: bool) {
+fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, _ifdown: bool) {
     match &mut entry.nexthop {
         Nexthop::Link(iflink) => {
             tracing::info!("Nexthop::Link({}): this won't happen", iflink);
@@ -725,7 +725,7 @@ fn rib_next(ribs: &RibEntries) -> Option<usize> {
 // IPv6 helper functions
 
 async fn ipv6_entry_selection(
-    prefix: &Ipv6Net,
+    _prefix: &Ipv6Net,
     entries: &mut RibEntries,
     replace: Option<RibEntry>,
     nmap: &mut NexthopMap,

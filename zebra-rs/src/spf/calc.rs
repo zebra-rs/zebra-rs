@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -7,10 +8,11 @@ pub type Graph = BTreeMap<usize, Node>;
 pub struct SpfOpt {
     pub full_path: bool,
     pub path_max: Option<usize>,
-    pub srmpls: bool,
-    pub srv6: bool,
+    pub _srmpls: bool,
+    pub _srv6: bool,
 }
 
+#[allow(dead_code)]
 impl SpfOpt {
     pub fn new() -> Self {
         Self::default()
@@ -32,6 +34,7 @@ pub struct Node {
     pub ilinks: Vec<Link>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum SpfDirect {
     Normal,
@@ -39,6 +42,7 @@ pub enum SpfDirect {
 }
 
 impl Node {
+    #[allow(dead_code)]
     pub fn new(name: &str, id: usize) -> Self {
         Self {
             id,
@@ -57,6 +61,7 @@ impl Node {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_disabled(&self) -> bool {
         false
     }
@@ -70,6 +75,7 @@ pub struct Link {
 }
 
 impl Link {
+    #[allow(dead_code)]
     pub fn new(from: usize, to: usize, cost: u32) -> Self {
         Self { from, to, cost }
     }
@@ -95,6 +101,7 @@ impl PartialOrd for Path {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq, Clone)] // Added Clone for easier conversion
 pub enum Paths {
     Full(Vec<Vec<usize>>),

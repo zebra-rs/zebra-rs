@@ -1,12 +1,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use ipnet::IpNet;
 
-use crate::{
-    config::{Args, ConfigOp},
-    policy::Syncer,
-};
+use crate::config::{Args, ConfigOp};
 
 use super::PrefixSet;
 

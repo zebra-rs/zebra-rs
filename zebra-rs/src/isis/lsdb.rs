@@ -316,7 +316,7 @@ pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> O
 
 pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key) {
-        if let Some(tlv) = lsa.lsp.hostname_tlv() {
+        if let Some(_tlv) = lsa.lsp.hostname_tlv() {
             top.hostname.get_mut(&level).remove(&key.sys_id());
         }
     }
