@@ -19,7 +19,7 @@ use caps::CapRestart;
 use caps::CapabilityPacket;
 
 use crate::bgp::cap::cap_register_recv;
-use crate::bgp::route::{route_clean, route_sync};
+use crate::bgp::route::{route_clean, route_sync, In, Out};
 use crate::bgp::timer;
 use crate::config::Args;
 use crate::context::task::*;
@@ -240,8 +240,8 @@ pub struct Peer {
     pub config: PeerConfig,
     pub instant: Option<Instant>,
     pub cap_map: CapAfiMap,
-    pub adj_rib_in: AdjRib,
-    pub adj_rib_out: AdjRib,
+    pub adj_rib_in: AdjRib<In>,
+    pub adj_rib_out: AdjRib<Out>,
     pub opt: ParseOption,
     pub policy_in: Option<String>,
     pub policy_out: Option<String>,

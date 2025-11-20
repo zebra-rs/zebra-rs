@@ -11,7 +11,7 @@ use super::inst::{Bgp, ShowCallback};
 use super::peer::{self, Peer, PeerCounter, PeerParam, State};
 use super::route::AdjRibTable;
 use super::{InOuts, PrefixSetValue};
-use crate::bgp::route::BgpRibType;
+use crate::bgp::route::{BgpRibType, RibDirection};
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
@@ -398,8 +398,8 @@ fn show_bgp_vpnv4(
     Ok(buf)
 }
 
-fn show_adj_rib_routes_vpnv4(
-    routes: &BTreeMap<RouteDistinguisher, AdjRibTable>,
+fn show_adj_rib_routes_vpnv4<D: RibDirection>(
+    routes: &BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
     router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {

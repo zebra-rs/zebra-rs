@@ -106,30 +106,41 @@ impl<D: RibDirection> AdjRibTable<D> {
     }
 }
 
-// Default implementation for AdjRibTable<In>
-impl Default for AdjRibTable<In> {
+// BGP Adj-RIB - stores routes with direction-specific ID handling
+#[derive(Debug)]
+pub struct AdjRib<D: RibDirection = In> {
+    // IPv4 unicast
+    pub v4: AdjRibTable<D>,
+    // IPv4 VPN
+    pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
+    _phantom: PhantomData<D>,
+}
+
+impl<D: RibDirection> AdjRib<D> {
+    pub fn new() -> Self {
+        Self {
+            v4: AdjRibTable::new(),
+            v4vpn: BTreeMap::new(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+// Default implementation for AdjRib<In>
+impl Default for AdjRib<In> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// BGP Adj-RIB-In - stores routes received from a specific peer before policy application
-#[derive(Debug, Default)]
-pub struct AdjRib {
-    // IPv4 unicast
-    pub v4: AdjRibTable<In>,
-    // IPv4 VPN
-    pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<In>>,
+// Default implementation for AdjRibTable<D> - needed for or_default()
+impl<D: RibDirection> Default for AdjRibTable<D> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl AdjRib {
-    pub fn new() -> Self {
-        Self {
-            v4: AdjRibTable::default(),
-            v4vpn: BTreeMap::new(),
-        }
-    }
-
+impl<D: RibDirection> AdjRib<D> {
     // Count all v4vpn len for AdjRibTable.
     pub fn count_v4vpn(&self) -> usize {
         self.v4vpn.values().map(|table| table.0.len()).sum()
