@@ -1035,7 +1035,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         }
 
         if !neighbor.cap_send.restart.is_empty() || !neighbor.cap_recv.restart.is_empty() {
-            writeln!(out, "    Graceful Restart Capability:")?;
+            writeln!(out, "    Graceful Restart:")?;
 
             // Collect all AFI/SAFI pairs from both send and recv
             let mut all_afi_safis = std::collections::BTreeSet::new();
@@ -1091,7 +1091,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         }
 
         if !neighbor.cap_send.llgr.is_empty() || !neighbor.cap_recv.llgr.is_empty() {
-            writeln!(out, "    Long-Lived Graceful Restart Capability:")?;
+            writeln!(out, "    Long-Lived Graceful Restart:")?;
 
             // Collect all AFI/SAFI pairs from both send and recv
             let mut all_afi_safis = std::collections::BTreeSet::new();
@@ -1139,7 +1139,50 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         }
 
         if !neighbor.cap_send.path_limit.is_empty() || !neighbor.cap_recv.path_limit.is_empty() {
-            //
+            writeln!(out, "    Paths Limit:")?;
+
+            let mut all_afi_safis = std::collections::BTreeSet::new();
+            for key in neighbor.cap_send.path_limit.keys() {
+                all_afi_safis.insert(key);
+            }
+            for key in neighbor.cap_recv.path_limit.keys() {
+                all_afi_safis.insert(key);
+            }
+
+            for afi_safi in all_afi_safis {
+                let afi_safi_str = match (afi_safi.afi, afi_safi.safi) {
+                    (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
+                    (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
+                    (Afi::Ip, Safi::Flowspec) => "IPv4/FlowSpec",
+                    (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::Ip6, Safi::MplsVpn) => "IPv6/MPLS VPN",
+                    (Afi::Ip6, Safi::Flowspec) => "IPv6/FlowSpec",
+                    (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
+                    _ => continue,
+                };
+
+                write!(out, "      {}: ", afi_safi_str)?;
+
+                let send_val = neighbor.cap_send.path_limit.get(afi_safi);
+                let recv_val = neighbor.cap_recv.path_limit.get(afi_safi);
+
+                match (send_val, recv_val) {
+                    (Some(send), Some(recv)) => {
+                        writeln!(
+                            out,
+                            "advertised(path limit:{}) and received(path limit:{})",
+                            send.path_limit, recv.path_limit
+                        )?;
+                    }
+                    (Some(send), None) => {
+                        writeln!(out, "advertised(path limit:{})", send.path_limit)?;
+                    }
+                    (None, Some(recv)) => {
+                        writeln!(out, "received(path limit:{})", recv.path_limit)?;
+                    }
+                    (None, None) => {} // Should not happen
+                }
+            }
         }
 
         if neighbor.cap_send.extended.is_some() || neighbor.cap_recv.extended.is_some() {
