@@ -806,6 +806,10 @@ struct Neighbor<'a> {
     timer: PeerParam,
     timer_sent: PeerParam,
     timer_recv: PeerParam,
+    #[serde(skip_serializing)]
+    cap_send: BgpCap,
+    #[serde(skip_serializing)]
+    cap_recv: BgpCap,
     cap_map: CapAfiMap,
     count: HashMap<&'a str, PeerCounter>,
     reflector_client: bool,
@@ -904,8 +908,8 @@ fn uptime(instant: &Option<Instant>) -> String {
 }
 
 fn fetch(peer: &Peer) -> Neighbor<'_> {
-    println!("{}", peer.config.cap_send);
-    println!("{}", peer.config.cap_recv);
+    println!("{}", peer.cap_send);
+    println!("{}", peer.cap_recv);
     let mut n = Neighbor {
         address: peer.address,
         remote_as: peer.peer_as,
@@ -918,6 +922,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         timer: peer.param.clone(),
         timer_sent: peer.param_tx.clone(),
         timer_recv: peer.param_rx.clone(),
+        cap_send: peer.cap_send.clone(),
+        cap_recv: peer.cap_recv.clone(),
         cap_map: peer.cap_map.clone(),
         count: HashMap::default(),
         reflector_client: peer.reflector_client,

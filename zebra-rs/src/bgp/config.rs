@@ -164,15 +164,15 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
     if op.is_set() {
         if enabled {
-            peer.config.afi_safi.set(key, true);
+            peer.config.mp.set(key, true);
         } else {
-            peer.config.afi_safi.remove(&key);
+            peer.config.mp.remove(&key);
         }
     } else {
         if ipv4_unicast {
-            peer.config.afi_safi.set(key, true);
+            peer.config.mp.set(key, true);
         } else {
-            peer.config.afi_safi.remove(&key);
+            peer.config.mp.remove(&key);
         }
     }
     Some(())
@@ -184,9 +184,9 @@ fn config_rtc(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Rtc);
     if let Some(peer) = bgp.peers.get_mut(&addr) {
         if op.is_set() {
-            peer.config.afi_safi.set(afi_safi, true);
+            peer.config.mp.set(afi_safi, true);
         } else {
-            peer.config.afi_safi.remove(&afi_safi);
+            peer.config.mp.remove(&afi_safi);
         }
     }
     Some(())

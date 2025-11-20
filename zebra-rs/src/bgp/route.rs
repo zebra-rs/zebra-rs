@@ -963,7 +963,7 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
     peer.adj_out.v4vpn.clear();
 
     peer.cap_map = CapAfiMap::new();
-    peer.config.cap_recv = BgpCap::default();
+    peer.cap_recv = BgpCap::default();
     peer.opt.clear();
 }
 

@@ -102,18 +102,39 @@ pub struct PeerTransportConfig {
     pub passive: bool,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
-    pub afi_safi: AfiSafis<bool>,
-    pub add_path: BTreeSet<AddPathValue>,
     pub four_octet: bool,
-    pub route_refresh: bool,
+    pub mp: AfiSafis<bool>,
+    pub restart: AfiSafis<RestartValue>,
+    pub llgr: AfiSafis<LLGRValue>,
+    pub addpath: AfiSafis<AddPathValue>,
+    // XXX Legacy
     pub graceful_restart: Option<u16>,
-    pub cap_send: BgpCap,
-    pub cap_recv: BgpCap,
+    pub add_path: BTreeSet<AddPathValue>,
+    // XXX Legacy
+    pub route_refresh: bool,
     pub timer: timer::Config,
     pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            transport: Default::default(),
+            four_octet: Default::default(),
+            mp: Default::default(),
+            restart: AfiSafis::new(),
+            llgr: AfiSafis::new(),
+            addpath: AfiSafis::new(),
+            graceful_restart: Default::default(),
+            add_path: Default::default(),
+            route_refresh: Default::default(),
+            timer: Default::default(),
+            sub: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -236,7 +257,8 @@ pub struct Peer {
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
     pub tx: UnboundedSender<Message>,
     pub config: PeerConfig,
-    pub instant: Option<Instant>,
+    pub cap_send: BgpCap,
+    pub cap_recv: BgpCap,
     pub cap_map: CapAfiMap,
     pub adj_in: AdjRib<In>,
     pub adj_out: AdjRib<Out>,
@@ -245,6 +267,7 @@ pub struct Peer {
     pub policy_out: Option<String>,
     pub prefix_set: InOuts<PrefixSetValue>,
     pub reflector_client: bool,
+    pub instant: Option<Instant>,
 }
 
 impl Peer {
@@ -278,7 +301,8 @@ impl Peer {
             param_rx: PeerParam::default(),
             // stat: PeerStat::default(),
             packet_tx: None,
-            instant: None,
+            cap_send: BgpCap::default(),
+            cap_recv: BgpCap::default(),
             cap_map: CapAfiMap::new(),
             adj_in: AdjRib::new(),
             adj_out: AdjRib::new(),
@@ -287,9 +311,10 @@ impl Peer {
             policy_in: None,
             prefix_set: InOuts::<PrefixSetValue>::default(),
             reflector_client: false,
+            instant: None,
         };
         peer.config
-            .afi_safi
+            .mp
             .set(AfiSafi::new(Afi::Ip, Safi::Unicast), true);
         peer.config.four_octet = true;
         peer.config.route_refresh = true;
@@ -523,7 +548,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
 
     // Register graceful restart.
     // cap_restart_recv(&packet.caps, &mut peer.restart, &peer.config);
-    peer.config.cap_recv = packet.bgp_cap;
+    peer.cap_recv = packet.bgp_cap;
 
     State::Established
 }
@@ -610,7 +635,7 @@ pub fn peer_packet_parse(
         Ok((_, p)) => {
             match p {
                 BgpPacket::Open(p) => {
-                    config.cap_recv = p.bgp_cap.clone();
+                    // config.cap_recv = p.bgp_cap.clone();
                     cap_addpath_recv(&p.bgp_cap, opt, &config.add_path);
                     let _ = tx.send(Message::Event(ident, Event::BGPOpen(*p)));
                 }
@@ -725,7 +750,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     };
     let mut bgp_cap = BgpCap::default();
 
-    for (afi_safi, _) in peer.config.afi_safi.0.iter() {
+    for (afi_safi, _) in peer.config.mp.0.iter() {
         let cap = CapMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
         bgp_cap.mp.insert(afi_safi.clone(), cap);
     }
@@ -758,7 +783,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     }
 
     cap_register_send(&bgp_cap, &mut peer.cap_map);
-    peer.config.cap_send = bgp_cap.clone();
+    peer.cap_send = bgp_cap.clone();
 
     // Remmeber sent hold time.
     let hold_time = peer.config.timer.hold_time() as u16;
