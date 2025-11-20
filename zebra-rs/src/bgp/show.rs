@@ -26,8 +26,8 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
     // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
     // let pfx_rcvd = peer.adj_rib_in.v4.0.len() as u64;
     // let pfx_sent = peer.adj_rib_out.v4.0.len() as u64;
-    let pfx_rcvd = peer.adj_rib_in.count_v4vpn() as u64;
-    let pfx_sent = peer.adj_rib_out.count_v4vpn() as u64;
+    let pfx_rcvd = peer.adj_in.count_v4vpn() as u64;
+    let pfx_sent = peer.adj_out.count_v4vpn() as u64;
 
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
@@ -525,7 +525,7 @@ fn show_bgp_advertised_vpnv4(
     };
 
     // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes_vpnv4(&peer.adj_rib_out.v4vpn, bgp.router_id, json)
+    show_adj_rib_routes_vpnv4(&peer.adj_out.v4vpn, bgp.router_id, json)
 }
 
 fn show_bgp_received_vpnv4(
@@ -545,7 +545,7 @@ fn show_bgp_received_vpnv4(
     };
 
     // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes_vpnv4(&peer.adj_rib_in.v4vpn, bgp.router_id, json)
+    show_adj_rib_routes_vpnv4(&peer.adj_in.v4vpn, bgp.router_id, json)
 }
 
 use crate::rib::util::IpAddrExt;
@@ -763,7 +763,7 @@ fn show_bgp_advertised(
     };
 
     // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes(&peer.adj_rib_out.v4.0, bgp.router_id, json)
+    show_adj_rib_routes(&peer.adj_out.v4.0, bgp.router_id, json)
 }
 
 fn show_bgp_received(
@@ -783,7 +783,7 @@ fn show_bgp_received(
     };
 
     // Display Adj-RIB-In routes (received routes before policy application)
-    show_adj_rib_routes(&peer.adj_rib_in.v4.0, bgp.router_id, json)
+    show_adj_rib_routes(&peer.adj_in.v4.0, bgp.router_id, json)
 }
 
 fn show_bgp_summary(

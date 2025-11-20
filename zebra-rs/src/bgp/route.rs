@@ -161,30 +161,6 @@ impl<D: RibDirection> AdjRib<D> {
     }
 }
 
-#[derive(Default)]
-struct Ipv4NlriVec {
-    pub eor: bool,
-    pub update: Vec<Ipv4Nlri>,
-    pub nexthop: Option<Ipv4Addr>,
-    pub withdraw: Vec<Ipv4Nlri>,
-}
-
-#[derive(Default)]
-struct Vpnv4NlriVec {
-    pub eor: bool,
-    pub update: Vec<Vpnv4Nlri>,
-    pub nexthop: Option<Vpnv4Nexthop>,
-    pub withdraw: Vec<Vpnv4Nlri>,
-}
-
-#[derive(Default)]
-struct BgpNlriAttr {
-    pub updates: Vec<Ipv4Nlri>,
-    pub withdraw: Vec<Ipv4Nlri>,
-    pub mp_updates: Option<MpNlriReachAttr>,
-    pub mp_withdraw: Option<MpNlriUnreachAttr>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BgpRibType {
     IBGP,
@@ -618,7 +594,7 @@ pub fn route_ipv4_update(
     // Register to peer's AdjRibIn and update stats
     {
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
-        peer.adj_rib_in.add(rd, nlri.prefix, rib.clone());
+        peer.adj_in.add(rd, nlri.prefix, rib.clone());
     }
 
     // Perform BGP Path selection.
@@ -666,7 +642,7 @@ fn route_advertise_to_addpath(
                 let mut rib = rib.clone();
                 rib.attr = attr.clone();
 
-                peer.adj_rib_out.add(rd, nlri.prefix, rib);
+                peer.adj_out.add(rd, nlri.prefix, rib);
                 if let Some(ref rd) = rd {
                     let vpnv4_nlri = Vpnv4Nlri {
                         label: Label::default(),
@@ -712,7 +688,7 @@ fn route_withdraw_from_addpath(
         } else {
             route_withdraw_ipv4(peer, prefix, removed.local_id);
         }
-        peer.adj_rib_out.remove(rd, prefix, removed.local_id);
+        peer.adj_out.remove(rd, prefix, removed.local_id);
     }
 }
 
@@ -774,7 +750,7 @@ fn route_advertise_to_peers(
                 if let Some(best) = new_best {
                     let mut rib = best.clone();
                     rib.attr = attr.clone();
-                    peer.adj_rib_out.add(rd, nlri.prefix, rib);
+                    peer.adj_out.add(rd, nlri.prefix, rib);
                 }
                 if let Some(ref rd) = rd {
                     let vpnv4_nlri = Vpnv4Nlri {
@@ -790,14 +766,14 @@ fn route_advertise_to_peers(
             _ => {
                 // Send withdrawal if we had previously advertised
                 if let Some(ref rd) = rd {
-                    if peer.adj_rib_out.contains_key_vpn(rd, &prefix) {
+                    if peer.adj_out.contains_key_vpn(rd, &prefix) {
                         route_withdraw_vpnv4(peer, rd, prefix, 0);
-                        peer.adj_rib_out.remove(Some(rd.clone()), prefix, 0);
+                        peer.adj_out.remove(Some(rd.clone()), prefix, 0);
                     }
                 } else {
-                    if peer.adj_rib_out.contains_key(&prefix) {
+                    if peer.adj_out.contains_key(&prefix) {
                         route_withdraw_ipv4(peer, prefix, 0);
-                        peer.adj_rib_out.remove(None, prefix, 0);
+                        peer.adj_out.remove(None, prefix, 0);
                     }
                 }
             }
@@ -855,7 +831,7 @@ pub fn route_ipv4_withdraw(
     // TODO: fill in data.
     let peer_ident = {
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
-        peer.adj_rib_in.remove(rd, nlri.prefix, nlri.id);
+        peer.adj_in.remove(rd, nlri.prefix, nlri.id);
         peer.ident
     };
 
@@ -955,7 +931,7 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
         let mut withdrawn: Vec<Ipv4Nlri> = vec![];
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
 
-        for (prefix, ribs) in peer.adj_rib_in.v4.0.iter() {
+        for (prefix, ribs) in peer.adj_in.v4.0.iter() {
             for rib in ribs.iter() {
                 let withdraw = Ipv4Nlri {
                     id: rib.remote_id,
@@ -970,15 +946,15 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
         route_ipv4_withdraw(peer_id, &withdraw, None, None, bgp, peers);
     }
     let peer = peers.get_mut(&peer_id).expect("peer must exist");
-    peer.adj_rib_in.v4.0.clear();
-    peer.adj_rib_out.v4.0.clear();
+    peer.adj_in.v4.0.clear();
+    peer.adj_out.v4.0.clear();
 
     // IPv4 VPN.
     let withdrawn = {
         let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
 
-        for (rd, table) in peer.adj_rib_in.v4vpn.iter() {
+        for (rd, table) in peer.adj_in.v4vpn.iter() {
             for (prefix, ribs) in table.0.iter() {
                 for rib in ribs.iter() {
                     let withdraw = Vpnv4Nlri {
@@ -1007,8 +983,8 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
     }
 
     let peer = peers.get_mut(&peer_id).expect("peer must exist");
-    peer.adj_rib_in.v4vpn.clear();
-    peer.adj_rib_out.v4vpn.clear();
+    peer.adj_in.v4vpn.clear();
+    peer.adj_out.v4vpn.clear();
 
     peer.cap_map = CapAfiMap::new();
     peer.config.cap_recv = BgpCap::default();
@@ -1186,7 +1162,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
 
         // Register to AdjOut.
         rib.attr = attr.clone();
-        peer.adj_rib_out.add(None, nlri.prefix, rib);
+        peer.adj_out.add(None, nlri.prefix, rib);
 
         // Send the routes.
         route_send_ipv4(peer, nlri, attr);
@@ -1227,7 +1203,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
 
             // Register to AdjOut.
             rib.attr = attr.clone();
-            peer.adj_rib_out.add(Some(rd.clone()), nlri.prefix, rib);
+            peer.adj_out.add(Some(rd.clone()), nlri.prefix, rib);
 
             let vpnv4_nlri = Vpnv4Nlri {
                 label: Label::default(),
