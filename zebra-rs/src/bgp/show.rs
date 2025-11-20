@@ -333,7 +333,7 @@ fn show_bgp_vpnv4(
                         } else {
                             Some(ecom_str)
                         },
-                        path_id: rib.id,
+                        path_id: rib.remote_id,
                         local_path_id: rib.local_id,
                         label: 0, // TODO: Get actual label from rib.label
                     });
@@ -372,7 +372,7 @@ fn show_bgp_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
-                let add_path = if rib.id != 0 {
+                let add_path = if rib.remote_id != 0 {
                     format!("[{}] ", rib.local_id)
                 } else {
                     format!("[{}] ", rib.local_id)
@@ -443,7 +443,7 @@ fn show_adj_rib_routes_vpnv4(
                         } else {
                             Some(ecom_str)
                         },
-                        path_id: rib.id,
+                        path_id: rib.remote_id,
                         local_path_id: rib.local_id,
                         label: 0, // TODO: Get actual label from rib.label
                     });
@@ -482,7 +482,7 @@ fn show_adj_rib_routes_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
-                let add_path = if rib.id != 0 {
+                let add_path = if rib.remote_id != 0 {
                     format!("[{}] ", rib.local_id)
                 } else {
                     format!("[{}] ", rib.local_id)

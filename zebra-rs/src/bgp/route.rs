@@ -28,7 +28,10 @@ impl AdjRibTable {
         let candidates = self.0.entry(prefix).or_default();
 
         // Find existing route with same ID (for AddPath support)
-        if let Some(pos) = candidates.iter().position(|r| r.id == route.id) {
+        if let Some(pos) = candidates
+            .iter()
+            .position(|r| r.remote_id == route.remote_id)
+        {
             // Replace existing route with same ID and return the old one
             let old_route = candidates[pos].clone();
             candidates[pos] = route;
@@ -45,7 +48,7 @@ impl AdjRibTable {
         let candidates = self.0.get_mut(&prefix)?;
 
         // Find and remove route with matching ID
-        if let Some(pos) = candidates.iter().position(|r| r.id == id) {
+        if let Some(pos) = candidates.iter().position(|r| r.remote_id == id) {
             let removed_route = candidates.remove(pos);
 
             // Clean up empty vector
@@ -245,50 +248,6 @@ struct BgpNlriAttr {
     pub mp_withdraw: Option<MpNlriUnreachAttr>,
 }
 
-// impl BgpNlriAttr {
-//     fn from(packet: &UpdatePacket) -> Self {
-//         if packet.attrs.is_empty()
-//             && packet.ipv4_update.is_empty()
-//             && packet.ipv4_withdraw.is_empty()
-//         {
-//             return Self {
-//                 mp_withdraw: Some(MpNlriUnreachAttr::Ipv4Eor),
-//                 ..Default::default()
-//             };
-//         }
-
-//         if !packet.ipv4_update.is_empty() {
-//             return Self {
-//                 updates: packet.ipv4_update.clone(),
-//                 ..Default::default()
-//             };
-//         }
-
-//         if !packet.ipv4_withdraw.is_empty() {
-//             return Self {
-//                 withdraw: packet.ipv4_withdraw.clone(),
-//                 ..Default::default()
-//             };
-//         }
-
-//         packet
-//             .attrs
-//             .iter()
-//             .find_map(|attr| match attr {
-//                 Attr::MpReachNlri(nlri) => Some(Self {
-//                     mp_updates: Some(nlri.clone()),
-//                     ..Default::default()
-//                 }),
-//                 Attr::MpUnreachNlri(nlri) => Some(Self {
-//                     mp_withdraw: Some(nlri.clone()),
-//                     ..Default::default()
-//                 }),
-//                 _ => None,
-//             })
-//             .unwrap_or_default()
-//     }
-// }
-
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BgpRibType {
     IBGP,
@@ -305,7 +264,7 @@ impl BgpRibType {
 #[derive(Debug, Clone)]
 pub struct BgpRib {
     // AddPath ID from peer.
-    pub id: u32,
+    pub remote_id: u32,
     // AddPath ID from peer.
     pub local_id: u32,
     // BGP Attribute.
@@ -338,7 +297,7 @@ impl BgpRib {
         nexthop: Option<Vpnv4Nexthop>,
     ) -> Self {
         BgpRib {
-            id,
+            remote_id: id,
             local_id: 0, // Will be assigned in LocalRibTable::update_route()
             ident,
             router_id,
@@ -373,12 +332,12 @@ impl LocalRibTable {
         // Find if we're replacing an existing route (same peer ident and path ID)
         let existing_local_id = candidates
             .iter()
-            .find(|r| r.ident == rib.ident && r.id == rib.id)
+            .find(|r| r.ident == rib.ident && r.remote_id == rib.remote_id)
             .map(|r| r.local_id);
 
         // Extract routes being replaced
         let replaced: Vec<BgpRib> = candidates
-            .extract_if(.., |r| r.ident == rib.ident && r.id == rib.id)
+            .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
             .collect();
 
         // Allocate local_id for the new/updated rib
@@ -408,7 +367,7 @@ impl LocalRibTable {
     pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
         let candidates = self.0.entry(prefix).or_default();
         let removed: Vec<BgpRib> = candidates
-            .extract_if(.., |r| r.ident == ident && r.id == id)
+            .extract_if(.., |r| r.ident == ident && r.remote_id == id)
             .collect();
         removed
     }
@@ -529,8 +488,8 @@ impl LocalRibTable {
             return candidate.ident < incumbent.ident;
         }
 
-        if candidate.id != incumbent.id {
-            return candidate.id < incumbent.id;
+        if candidate.remote_id != incumbent.remote_id {
+            return candidate.remote_id < incumbent.remote_id;
         }
 
         false
@@ -1080,7 +1039,7 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
         for (prefix, ribs) in peer.adj_rib_in.v4.0.iter() {
             for rib in ribs.iter() {
                 let withdraw = Ipv4Nlri {
-                    id: rib.id,
+                    id: rib.remote_id,
                     prefix: *prefix,
                 };
                 withdrawn.push(withdraw);
@@ -1107,7 +1066,7 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
                         label: rib.label.unwrap_or(Label::default()),
                         rd: rd.clone(),
                         nlri: Ipv4Nlri {
-                            id: rib.id,
+                            id: rib.remote_id,
                             prefix: *prefix,
                         },
                     };
