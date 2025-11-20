@@ -1091,7 +1091,51 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         }
 
         if !neighbor.cap_send.llgr.is_empty() || !neighbor.cap_recv.llgr.is_empty() {
-            //
+            writeln!(out, "    Long-Lived Graceful Restart Capability:")?;
+
+            // Collect all AFI/SAFI pairs from both send and recv
+            let mut all_afi_safis = std::collections::BTreeSet::new();
+            for key in neighbor.cap_send.llgr.keys() {
+                all_afi_safis.insert(key);
+            }
+            for key in neighbor.cap_recv.llgr.keys() {
+                all_afi_safis.insert(key);
+            }
+
+            // Display each AFI/SAFI pair
+            for afi_safi in all_afi_safis {
+                let afi_safi_str = match (afi_safi.afi, afi_safi.safi) {
+                    (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
+                    (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
+                    (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
+                    (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    _ => continue, // Skip unknown combinations
+                };
+
+                let send_val = neighbor.cap_send.llgr.get(afi_safi);
+                let recv_val = neighbor.cap_recv.llgr.get(afi_safi);
+
+                write!(out, "      {}: ", afi_safi_str)?;
+
+                match (send_val, recv_val) {
+                    (Some(send), Some(recv)) => {
+                        writeln!(
+                            out,
+                            "advertised(stale time:{}) and received(stale time:{})",
+                            send.stale_time(),
+                            recv.stale_time()
+                        )?;
+                    }
+                    (Some(send), None) => {
+                        writeln!(out, "advertised(stale time:{})", send.stale_time())?;
+                    }
+                    (None, Some(recv)) => {
+                        writeln!(out, "received(stale time:{})", recv.stale_time())?;
+                    }
+                    (None, None) => {} // Should not happen
+                }
+            }
         }
 
         if !neighbor.cap_send.path_limit.is_empty() || !neighbor.cap_recv.path_limit.is_empty() {
