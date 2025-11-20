@@ -67,7 +67,7 @@ pub type NfsmFunc =
     fn(&mut NeighborTop, &mut Neighbor, &Option<MacAddr>, Level) -> Option<NfsmState>;
 
 impl NfsmState {
-    pub fn fsm(&self, ev: NfsmEvent, level: Level) -> (NfsmFunc, Option<Self>) {
+    pub fn fsm(&self, ev: NfsmEvent, _level: Level) -> (NfsmFunc, Option<Self>) {
         use NfsmEvent::*;
         use NfsmState::*;
 
@@ -254,7 +254,7 @@ pub fn nfsm_hello_received(
 }
 
 pub fn nfsm_hold_timer_expire(
-    ntop: &mut NeighborTop,
+    _ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
     _mac: &Option<MacAddr>,
     level: Level,
@@ -361,7 +361,7 @@ pub fn isis_nfsm(
                 }
 
                 // Release adjacency SID if it has been allocated.
-                for (key, value) in nbr.naddr4.iter_mut() {
+                for (_key, value) in nbr.naddr4.iter_mut() {
                     if let Some(label) = value.label {
                         if let Some(local_pool) = ntop.local_pool {
                             local_pool.release(label as usize);
@@ -375,7 +375,7 @@ pub fn isis_nfsm(
             if nbr.state == NfsmState::Up {
                 if let Some(local_pool) = ntop.local_pool {
                     // Allocate adjacency SID when it is not yet.
-                    for (key, value) in nbr.naddr4.iter_mut() {
+                    for (_key, value) in nbr.naddr4.iter_mut() {
                         if value.label.is_none() {
                             if let Some(label) = local_pool.allocate() {
                                 value.label = Some(label as u32);

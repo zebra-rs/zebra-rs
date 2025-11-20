@@ -288,14 +288,14 @@ impl Bgp {
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
-            RibRx::LinkAdd(link) => {
+            RibRx::LinkAdd(_link) => {
                 //self.link_add(link);
             }
-            RibRx::AddrAdd(addr) => {
+            RibRx::AddrAdd(_addr) => {
                 // isis_info!("Isis::AddrAdd {}", addr.addr);
                 // self.addr_add(addr);
             }
-            RibRx::AddrDel(addr) => {
+            RibRx::AddrDel(_addr) => {
                 // isis_info!("Isis::AddrDel {}", addr.addr);
                 // self.addr_del(addr);
             }
@@ -308,7 +308,7 @@ impl Bgp {
     pub async fn process_policy_msg(&mut self, msg: policy::PolicyRx) {
         match msg {
             policy::PolicyRx::PrefixSet {
-                name,
+                name: _,
                 ident,
                 policy_type,
                 prefix,

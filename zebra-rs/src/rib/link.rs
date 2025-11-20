@@ -624,7 +624,7 @@ impl LinkConfig {
         const LINK_ERR: &str = "missing interface name";
         const IPV4_ADDR_ERR: &str = "missing ipv4 address";
 
-        let ifname = args.string().context(LINK_ERR)?;
+        let _ifname = args.string().context(LINK_ERR)?;
 
         // let func = self.builder.map.get()
         if path == "/interface/ipv4/address" {
@@ -649,7 +649,7 @@ impl LinkConfig {
         Ok(())
     }
 
-    pub fn commit(&mut self, tx: UnboundedSender<Message>) {
+    pub fn commit(&mut self, _tx: UnboundedSender<Message>) {
         //
     }
 }

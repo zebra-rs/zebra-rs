@@ -8,10 +8,9 @@ use serde::Serialize;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
-use super::peer::{self, Peer, PeerCounter, PeerParam, State};
+use super::peer::{Peer, PeerCounter, PeerParam, State};
 use super::route::AdjRibTable;
-use super::{InOuts, PrefixSetValue};
-use crate::bgp::route::BgpRibType;
+use crate::bgp::route::{BgpRibType, RibDirection};
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
@@ -26,8 +25,8 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
     // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
     // let pfx_rcvd = peer.adj_rib_in.v4.0.len() as u64;
     // let pfx_sent = peer.adj_rib_out.v4.0.len() as u64;
-    let pfx_rcvd = peer.adj_rib_in.count_v4vpn() as u64;
-    let pfx_sent = peer.adj_rib_out.count_v4vpn() as u64;
+    let pfx_rcvd = peer.adj_in.count(Afi::Ip, Safi::MplsVpn) as u64;
+    let pfx_sent = peer.adj_out.count(Afi::Ip, Safi::MplsVpn) as u64;
 
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
@@ -209,7 +208,7 @@ struct BgpVpnv4RouteJson {
     label: u32,
 }
 
-fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
+fn show_bgp(bgp: &Bgp, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut routes: Vec<BgpRouteJson> = Vec::new();
 
@@ -255,7 +254,7 @@ fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, st
     buf.push_str(SHOW_BGP_HEADER);
 
     for (key, value) in bgp.local_rib.v4.0.iter() {
-        for (i, rib) in value.iter().enumerate() {
+        for (_i, rib) in value.iter().enumerate() {
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
             let internal = if rib.typ == BgpRibType::IBGP {
@@ -290,7 +289,7 @@ fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, st
 
 fn show_bgp_vpnv4(
     bgp: &Bgp,
-    args: Args,
+    _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
@@ -333,7 +332,7 @@ fn show_bgp_vpnv4(
                         } else {
                             Some(ecom_str)
                         },
-                        path_id: rib.id,
+                        path_id: rib.remote_id,
                         local_path_id: rib.local_id,
                         label: 0, // TODO: Get actual label from rib.label
                     });
@@ -356,7 +355,7 @@ fn show_bgp_vpnv4(
             writeln!(buf, "Route Distinguisher: {}", key)?;
         }
         for (k, v) in value.0.iter() {
-            for (i, rib) in v.iter().enumerate() {
+            for (_i, rib) in v.iter().enumerate() {
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
                 let internal = if rib.typ == BgpRibType::IBGP {
@@ -372,7 +371,7 @@ fn show_bgp_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
-                let add_path = if rib.id != 0 {
+                let add_path = if rib.remote_id != 0 {
                     format!("[{}] ", rib.local_id)
                 } else {
                     format!("[{}] ", rib.local_id)
@@ -398,9 +397,9 @@ fn show_bgp_vpnv4(
     Ok(buf)
 }
 
-fn show_adj_rib_routes_vpnv4(
-    routes: &BTreeMap<RouteDistinguisher, AdjRibTable>,
-    router_id: Ipv4Addr,
+fn show_adj_rib_routes_vpnv4<D: RibDirection>(
+    routes: &BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
+    _router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
@@ -443,7 +442,7 @@ fn show_adj_rib_routes_vpnv4(
                         } else {
                             Some(ecom_str)
                         },
-                        path_id: rib.id,
+                        path_id: rib.remote_id,
                         local_path_id: rib.local_id,
                         label: 0, // TODO: Get actual label from rib.label
                     });
@@ -460,13 +459,13 @@ fn show_adj_rib_routes_vpnv4(
     writeln!(
         buf,
         "     Network          Next Hop            Metric LocPrf Weight Path"
-    );
+    )?;
     for (key, value) in routes.iter() {
         if value.0.len() > 0 {
             writeln!(buf, "Route Distinguisher: {}", key)?;
         }
         for (k, v) in value.0.iter() {
-            for (i, rib) in v.iter().enumerate() {
+            for (_i, rib) in v.iter().enumerate() {
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
                 let internal = if rib.typ == BgpRibType::IBGP {
@@ -482,7 +481,7 @@ fn show_adj_rib_routes_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
-                let add_path = if rib.id != 0 {
+                let add_path = if rib.remote_id != 0 {
                     format!("[{}] ", rib.local_id)
                 } else {
                     format!("[{}] ", rib.local_id)
@@ -525,7 +524,7 @@ fn show_bgp_advertised_vpnv4(
     };
 
     // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes_vpnv4(&peer.adj_rib_out.v4vpn, bgp.router_id, json)
+    show_adj_rib_routes_vpnv4(&peer.adj_out.v4vpn, bgp.router_id, json)
 }
 
 fn show_bgp_received_vpnv4(
@@ -545,7 +544,7 @@ fn show_bgp_received_vpnv4(
     };
 
     // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes_vpnv4(&peer.adj_rib_in.v4vpn, bgp.router_id, json)
+    show_adj_rib_routes_vpnv4(&peer.adj_in.v4vpn, bgp.router_id, json)
 }
 
 use crate::rib::util::IpAddrExt;
@@ -553,7 +552,7 @@ use crate::rib::util::IpAddrExt;
 fn show_bgp_route_entry(
     bgp: &Bgp,
     mut args: Args,
-    json: bool,
+    _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
 
@@ -763,7 +762,7 @@ fn show_bgp_advertised(
     };
 
     // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes(&peer.adj_rib_out.v4.0, bgp.router_id, json)
+    show_adj_rib_routes(&peer.adj_out.v4.0, bgp.router_id, json)
 }
 
 fn show_bgp_received(
@@ -783,12 +782,12 @@ fn show_bgp_received(
     };
 
     // Display Adj-RIB-In routes (received routes before policy application)
-    show_adj_rib_routes(&peer.adj_rib_in.v4.0, bgp.router_id, json)
+    show_adj_rib_routes(&peer.adj_in.v4.0, bgp.router_id, json)
 }
 
 fn show_bgp_summary(
     bgp: &Bgp,
-    args: Args,
+    _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     show_bgp_instance(bgp)
@@ -807,6 +806,10 @@ struct Neighbor<'a> {
     timer: PeerParam,
     timer_sent: PeerParam,
     timer_recv: PeerParam,
+    #[serde(skip_serializing)]
+    cap_send: BgpCap,
+    #[serde(skip_serializing)]
+    cap_recv: BgpCap,
     cap_map: CapAfiMap,
     count: HashMap<&'a str, PeerCounter>,
     reflector_client: bool,
@@ -905,6 +908,8 @@ fn uptime(instant: &Option<Instant>) -> String {
 }
 
 fn fetch(peer: &Peer) -> Neighbor<'_> {
+    println!("{}", peer.cap_send);
+    println!("{}", peer.cap_recv);
     let mut n = Neighbor {
         address: peer.address,
         remote_as: peer.peer_as,
@@ -917,6 +922,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         timer: peer.param.clone(),
         timer_sent: peer.param_tx.clone(),
         timer_recv: peer.param_rx.clone(),
+        cap_send: peer.cap_send.clone(),
+        cap_recv: peer.cap_recv.clone(),
         cap_map: peer.cap_map.clone(),
         count: HashMap::default(),
         reflector_client: peer.reflector_client,
@@ -979,8 +986,23 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.timer_recv.hold_time,
         neighbor.timer_recv.keepalive,
     )?;
+
     if neighbor.state == "Established" {
         writeln!(out, "  Neighbor Capabilities:")?;
+
+        if neighbor.cap_send.as4.is_some() || neighbor.cap_recv.as4.is_some() {
+            write!(out, "    4 Octet AS:")?;
+            if neighbor.cap_send.as4.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.as4.is_some() {
+                if neighbor.cap_send.as4.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
         if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
             if cap.send || cap.recv {
@@ -1005,6 +1027,241 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
             }
         }
+        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Rtc);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
+            if cap.send || cap.recv {
+                writeln!(out, "    IPv4 RTC: {}", cap.desc())?;
+            }
+        }
+
+        if !neighbor.cap_send.restart.is_empty() || !neighbor.cap_recv.restart.is_empty() {
+            writeln!(out, "    Graceful Restart:")?;
+
+            // Collect all AFI/SAFI pairs from both send and recv
+            let mut all_afi_safis = std::collections::BTreeSet::new();
+            for key in neighbor.cap_send.restart.keys() {
+                all_afi_safis.insert(key);
+            }
+            for key in neighbor.cap_recv.restart.keys() {
+                all_afi_safis.insert(key);
+            }
+
+            // Display each AFI/SAFI pair
+            for afi_safi in all_afi_safis {
+                let afi_safi_str = match (afi_safi.afi, afi_safi.safi) {
+                    (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
+                    (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
+                    (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
+                    (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    _ => continue, // Skip unknown combinations
+                };
+
+                let send_val = neighbor.cap_send.restart.get(afi_safi);
+                let recv_val = neighbor.cap_recv.restart.get(afi_safi);
+
+                write!(out, "      {}: ", afi_safi_str)?;
+
+                match (send_val, recv_val) {
+                    (Some(send), Some(recv)) => {
+                        writeln!(
+                            out,
+                            "advertised(restart time:{}) and received(restart time:{})",
+                            send.flag_time.restart_time(),
+                            recv.flag_time.restart_time()
+                        )?;
+                    }
+                    (Some(send), None) => {
+                        writeln!(
+                            out,
+                            "advertised(restart time:{})",
+                            send.flag_time.restart_time()
+                        )?;
+                    }
+                    (None, Some(recv)) => {
+                        writeln!(
+                            out,
+                            "received(restart time:{})",
+                            recv.flag_time.restart_time()
+                        )?;
+                    }
+                    (None, None) => {} // Should not happen
+                }
+            }
+        }
+
+        if !neighbor.cap_send.llgr.is_empty() || !neighbor.cap_recv.llgr.is_empty() {
+            writeln!(out, "    Long-Lived Graceful Restart:")?;
+
+            // Collect all AFI/SAFI pairs from both send and recv
+            let mut all_afi_safis = std::collections::BTreeSet::new();
+            for key in neighbor.cap_send.llgr.keys() {
+                all_afi_safis.insert(key);
+            }
+            for key in neighbor.cap_recv.llgr.keys() {
+                all_afi_safis.insert(key);
+            }
+
+            // Display each AFI/SAFI pair
+            for afi_safi in all_afi_safis {
+                let afi_safi_str = match (afi_safi.afi, afi_safi.safi) {
+                    (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
+                    (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
+                    (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
+                    (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    _ => continue, // Skip unknown combinations
+                };
+
+                let send_val = neighbor.cap_send.llgr.get(afi_safi);
+                let recv_val = neighbor.cap_recv.llgr.get(afi_safi);
+
+                write!(out, "      {}: ", afi_safi_str)?;
+
+                match (send_val, recv_val) {
+                    (Some(send), Some(recv)) => {
+                        writeln!(
+                            out,
+                            "advertised(stale time:{}) and received(stale time:{})",
+                            send.stale_time(),
+                            recv.stale_time()
+                        )?;
+                    }
+                    (Some(send), None) => {
+                        writeln!(out, "advertised(stale time:{})", send.stale_time())?;
+                    }
+                    (None, Some(recv)) => {
+                        writeln!(out, "received(stale time:{})", recv.stale_time())?;
+                    }
+                    (None, None) => {} // Should not happen
+                }
+            }
+        }
+
+        if !neighbor.cap_send.path_limit.is_empty() || !neighbor.cap_recv.path_limit.is_empty() {
+            writeln!(out, "    Paths Limit:")?;
+
+            let mut all_afi_safis = std::collections::BTreeSet::new();
+            for key in neighbor.cap_send.path_limit.keys() {
+                all_afi_safis.insert(key);
+            }
+            for key in neighbor.cap_recv.path_limit.keys() {
+                all_afi_safis.insert(key);
+            }
+
+            for afi_safi in all_afi_safis {
+                let afi_safi_str = match (afi_safi.afi, afi_safi.safi) {
+                    (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
+                    (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
+                    (Afi::Ip, Safi::Flowspec) => "IPv4/FlowSpec",
+                    (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::Ip6, Safi::MplsVpn) => "IPv6/MPLS VPN",
+                    (Afi::Ip6, Safi::Flowspec) => "IPv6/FlowSpec",
+                    (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
+                    _ => continue,
+                };
+
+                write!(out, "      {}: ", afi_safi_str)?;
+
+                let send_val = neighbor.cap_send.path_limit.get(afi_safi);
+                let recv_val = neighbor.cap_recv.path_limit.get(afi_safi);
+
+                match (send_val, recv_val) {
+                    (Some(send), Some(recv)) => {
+                        writeln!(
+                            out,
+                            "advertised(path limit:{}) and received(path limit:{})",
+                            send.path_limit, recv.path_limit
+                        )?;
+                    }
+                    (Some(send), None) => {
+                        writeln!(out, "advertised(path limit:{})", send.path_limit)?;
+                    }
+                    (None, Some(recv)) => {
+                        writeln!(out, "received(path limit:{})", recv.path_limit)?;
+                    }
+                    (None, None) => {} // Should not happen
+                }
+            }
+        }
+
+        if neighbor.cap_send.extended.is_some() || neighbor.cap_recv.extended.is_some() {
+            write!(out, "    Extended Message:")?;
+            if neighbor.cap_send.extended.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.extended.is_some() {
+                if neighbor.cap_send.extended.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.refresh.is_some() || neighbor.cap_recv.refresh.is_some() {
+            write!(out, "    Route Refresh:")?;
+            if neighbor.cap_send.refresh.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.refresh.is_some() {
+                if neighbor.cap_send.refresh.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.enhanced_refresh.is_some()
+            || neighbor.cap_recv.enhanced_refresh.is_some()
+        {
+            write!(out, "    Enhanced Route Refresh:")?;
+            if neighbor.cap_send.enhanced_refresh.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.enhanced_refresh.is_some() {
+                if neighbor.cap_send.enhanced_refresh.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.fqdn.is_some() || neighbor.cap_recv.fqdn.is_some() {
+            write!(out, "    Hostname Capability:")?;
+            if let Some(v) = &neighbor.cap_send.fqdn {
+                write!(
+                    out,
+                    " advertised (name:{}, domain:{})",
+                    v.hostname(),
+                    v.domain()
+                )?;
+            } else if let Some(v) = &neighbor.cap_recv.fqdn {
+                if neighbor.cap_send.fqdn.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(
+                    out,
+                    " received (name:{}, domain:{})",
+                    v.hostname(),
+                    v.domain()
+                )?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.version.is_some() || neighbor.cap_recv.version.is_some() {
+            write!(out, "    Version Capability:")?;
+            if let Some(v) = &neighbor.cap_send.version {
+                write!(out, " advertised ({})", v.version())?;
+            } else if let Some(v) = &neighbor.cap_recv.version {
+                if neighbor.cap_send.version.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received ({})", v.version(),)?;
+            }
+            writeln!(out, "")?;
+        }
+
         writeln!(out, "")?;
     }
     writeln!(
@@ -1115,20 +1372,20 @@ fn show_community_list(
 }
 
 fn show_bgp_l2vpn_evpn(
-    bgp: &Bgp,
-    args: Args,
+    _bgp: &Bgp,
+    _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let mut out = String::new();
+    let out = String::new();
     Ok(out)
 }
 
 fn show_evpn_vni_all(
-    bgp: &Bgp,
+    _bgp: &Bgp,
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let mut out = String::from("EVPN output here");
+    let out = String::from("EVPN output here");
     Ok(out)
 }
 

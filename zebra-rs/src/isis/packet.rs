@@ -495,7 +495,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         // println!("LSP myown DIS hold_time {}", lsp.hold_time);
                     } else {
                         // tracing::info!("CSNP: Self LSP {}", lsp.lsp_id);
-                        if let Some(local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
+                        if let Some(_local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
                             // tracing::info!(
                             //     " Local Seq 0x{:04x} Remote Seq 0x{:04x}",
                             //     local.lsp.seq_number,
@@ -545,7 +545,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         );
                         top.tx.send(msg);
                     }
-                    Some(&seq_number) if lsp.hold_time == 0 => {
+                    Some(&_seq_number) if lsp.hold_time == 0 => {
                         // purge_local() set srm();
                     }
                     _ => {
@@ -569,7 +569,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         );
         isis_event_trace!(top.tracing, Flooding, &level, "---------");
 
-        for (key, flag) in lsdb_locals.iter() {
+        for (key, _flag) in lsdb_locals.iter() {
             // Flood.
             isis_event_trace!(top.tracing, Flooding, &level, "{}", key);
             let lsa = top.lsdb.get(&level).get(key);
@@ -671,7 +671,7 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     }
 }
 
-pub fn unknown_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
+pub fn unknown_recv(top: &mut IsisTop, _packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(_link) = top.links.get_mut(&ifindex) else {
         println!("Link not found {}", ifindex);
         return;

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// Version information module containing package and git details
 use std::fmt;
 
@@ -30,7 +31,7 @@ impl VersionInfo {
 
     /// Get a formatted version string for display
     pub fn format_version(&self) -> String {
-        let dirty_indicator = if self.git_dirty { " (dirty)" } else { "" };
+        let _dirty_indicator = if self.git_dirty { " (dirty)" } else { "" };
         format!(
             "{} version {} ({})\nBuild Date: {}",
             self.package_name, self.package_version, self.git_hash, self.build_date

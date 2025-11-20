@@ -585,7 +585,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
     // Fetch current sequence number if LSP exists.
-    let mut seq_number = top
+    let seq_number = top
         .lsdb
         .get(&level)
         .get(&lsp_id)
@@ -720,7 +720,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         };
         // Neighbor
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
-            for (key, value) in nbr.naddr4.iter() {
+            for (_key, value) in nbr.naddr4.iter() {
                 if let Some(label) = value.label {
                     let sub = IsisSubLanAdjSid {
                         flags: AdjSidFlags::lan_adj_flag_ipv4(),
@@ -1327,14 +1327,14 @@ impl Display for Message {
             Message::Srm(lsp_id, level, _) => {
                 write!(f, "[Message::Srm({}, {})]", lsp_id, level)
             }
-            Message::Recv(isis_packet, _, mac_addr) => {
+            Message::Recv(isis_packet, _, _mac_addr) => {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
             }
-            Message::Ifsm(ifsm_event, _, level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
-            Message::Nfsm(nfsm_event, _, isis_sys_id, level) => {
+            Message::Ifsm(ifsm_event, _, _level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
+            Message::Nfsm(nfsm_event, _, _isis_sys_id, _level) => {
                 write!(f, "[Message::Nfsm({:?})]", nfsm_event)
             }
-            Message::Lsdb(lsdb_event, level, isis_lsp_id) => {
+            Message::Lsdb(lsdb_event, _level, _isis_lsp_id) => {
                 write!(f, "[Message::Lsdb({:?})]", lsdb_event)
             }
             Message::LspOriginate(level) => write!(f, "[Message::LspOriginate({})]", level),
@@ -1554,7 +1554,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
 }
 
 pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, SpfIlm>) {
-    for (prefix, route) in rib.iter() {
+    for (_prefix, route) in rib.iter() {
         if let Some(sid) = route.sid {
             // Calculate prefix index from SID (assuming 16000 is base)
             let pfx_index = if sid >= 16000 && sid < 24000 {

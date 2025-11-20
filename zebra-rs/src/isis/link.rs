@@ -447,7 +447,7 @@ impl Isis {
         if let Some(_link) = self.links.get_mut(&link.index) {
             //
         } else {
-            let mut link = IsisLink::from(link, self.tx.clone());
+            let link = IsisLink::from(link, self.tx.clone());
             self.links.insert(link.state.ifindex, link);
         }
     }
@@ -521,7 +521,7 @@ impl Isis {
     }
 }
 
-pub fn config_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_priority(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let priority = args.u8()?;
 
@@ -574,7 +574,7 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     Some(())
 }
 
-pub fn config_ipv4_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_ipv4_enable(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
     config_afi_enable(isis, args, op, Afi::Ip)
 }
 
@@ -614,7 +614,7 @@ pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-pub fn config_ipv6_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_ipv6_enable(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
     config_afi_enable(isis, args, op, Afi::Ip6)
 }
 
@@ -642,7 +642,7 @@ pub fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
     }
 }
 
-pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_circuit_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let circuit_type = args.string()?.parse::<IsLevel>().ok()?;
 
@@ -655,7 +655,7 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
-pub fn config_link_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_link_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let link_type = args.string()?.parse::<LinkType>().ok()?;
 
@@ -667,7 +667,7 @@ pub fn config_link_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
     Some(())
 }
 
-pub fn config_hello_padding(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_hello_padding(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let hello_padding = args.string()?.parse::<HelloPaddingPolicy>().ok()?;
 
@@ -710,7 +710,7 @@ struct LinkInfo {
 pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut links = Vec::new();
-        for (ifindex, link) in isis.links.iter() {
+        for (_ifindex, link) in isis.links.iter() {
             if link.config.enabled() {
                 links.push(LinkInfo {
                     name: link.state.name.clone(),
@@ -724,7 +724,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
         return Ok(serde_json::to_string_pretty(&links).unwrap());
     }
     let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
-    for (ifindex, link) in isis.links.iter() {
+    for (_ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
             let dis_status = if link.state.level == IsLevel::L2 {
                 match link.state.dis_status.get(&Level::L2) {
@@ -881,7 +881,7 @@ pub fn show_detail(
         // JSON output
         let mut interfaces = Vec::new();
 
-        for (ifindex, link) in isis.links.iter() {
+        for (_ifindex, link) in isis.links.iter() {
             if link.config.enabled() {
                 let mut interface_detail = InterfaceDetailJson {
                     interface: link.state.name.clone(),
@@ -921,7 +921,7 @@ pub fn show_detail(
     } else {
         // Text output (existing implementation)
         let mut buf = String::new();
-        for (ifindex, link) in isis.links.iter() {
+        for (_ifindex, link) in isis.links.iter() {
             if link.config.enabled() {
                 let link_state = if link.state.is_up() { "Up" } else { "Down" };
                 writeln!(
@@ -1021,7 +1021,7 @@ fn format_time_ago(timestamp: std::time::SystemTime) -> String {
 
 pub fn show_dis_statistics(
     isis: &Isis,
-    mut args: Args,
+    _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     use serde::Serialize;

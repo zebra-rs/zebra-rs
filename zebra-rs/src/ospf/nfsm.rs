@@ -390,7 +390,7 @@ pub fn ospf_nfsm_ll_down(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmSt
     ospf_nfsm_kill_nbr(nbr, oident)
 }
 
-fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identity) {
+fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, _oident: &Identity) {
     use NfsmState::*;
 
     nbr.ostate = nbr.state;

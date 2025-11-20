@@ -1,0 +1,1063 @@
+﻿
+
+
+
+Internet Engineering Task Force (IETF)                       L. Ginsberg
+Request for Comments: 8919                                     P. Psenak
+Category: Standards Track                                  Cisco Systems
+ISSN: 2070-1721                                               S. Previdi
+                                                     Huawei Technologies
+                                                           W. Henderickx
+                                                                   Nokia
+                                                                J. Drake
+                                                        Juniper Networks
+                                                            October 2020
+
+
+               IS-IS Application-Specific Link Attributes
+
+Abstract
+
+   Existing traffic-engineering-related link attribute advertisements
+   have been defined and are used in RSVP-TE deployments.  Since the
+   original RSVP-TE use case was defined, additional applications (e.g.,
+   Segment Routing Policy and Loop-Free Alternates) that also make use
+   of the link attribute advertisements have been defined.  In cases
+   where multiple applications wish to make use of these link
+   attributes, the current advertisements do not support application-
+   specific values for a given attribute, nor do they support indication
+   of which applications are using the advertised value for a given
+   link.  This document introduces new link attribute advertisements
+   that address both of these shortcomings.
+
+Status of This Memo
+
+   This is an Internet Standards Track document.
+
+   This document is a product of the Internet Engineering Task Force
+   (IETF).  It represents the consensus of the IETF community.  It has
+   received public review and has been approved for publication by the
+   Internet Engineering Steering Group (IESG).  Further information on
+   Internet Standards is available in Section 2 of RFC 7841.
+
+   Information about the current status of this document, any errata,
+   and how to provide feedback on it may be obtained at
+   https://www.rfc-editor.org/info/rfc8919.
+
+Copyright Notice
+
+   Copyright (c) 2020 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (https://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+Table of Contents
+
+   1.  Introduction
+     1.1.  Requirements Language
+   2.  Requirements Discussion
+   3.  Legacy Advertisements
+     3.1.  Legacy Sub-TLVs
+     3.2.  Legacy SRLG Advertisements
+   4.  Advertising Application-Specific Link Attributes
+     4.1.  Application Identifier Bit Mask
+     4.2.  Application-Specific Link Attributes Sub-TLV
+       4.2.1.  Special Considerations for Maximum Link Bandwidth
+       4.2.2.  Special Considerations for Reservable/Unreserved
+               Bandwidth
+       4.2.3.  Considerations for Extended TE Metrics
+     4.3.  Application-Specific SRLG TLV
+   5.  Attribute Advertisements and Enablement
+   6.  Deployment Considerations
+     6.1.  Use of Legacy Advertisements
+     6.2.  Use of Zero-Length Application Identifier Bit Masks
+     6.3.  Interoperability, Backwards Compatibility, and Migration
+           Concerns
+       6.3.1.  Multiple Applications: Common Attributes with RSVP-TE
+       6.3.2.  Multiple Applications: All Attributes Not Shared with
+               RSVP-TE
+       6.3.3.  Interoperability with Legacy Routers
+       6.3.4.  Use of Application-Specific Advertisements for RSVP-TE
+   7.  IANA Considerations
+     7.1.  Application-Specific Link Attributes Sub-TLV
+     7.2.  Application-Specific SRLG TLV
+     7.3.  Sub-sub-TLV Codepoints for Application-Specific Link
+           Attributes Registry
+     7.4.  Link Attribute Application Identifiers Registry
+     7.5.  Sub-TLVs for TLV 238 Registry
+   8.  Security Considerations
+   9.  References
+     9.1.  Normative References
+     9.2.  Informative References
+   Acknowledgements
+   Authors' Addresses
+
+1.  Introduction
+
+   Advertisement of link attributes by the Intermediate System to
+   Intermediate System (IS-IS) protocol in support of traffic
+   engineering (TE) was introduced by [RFC5305] and extended by
+   [RFC5307], [RFC6119], [RFC7308], and [RFC8570].  Use of these
+   extensions has been associated with deployments supporting Traffic
+   Engineering over Multiprotocol Label Switching (MPLS) in the presence
+   of the Resource Reservation Protocol (RSVP), more succinctly referred
+   to as RSVP-TE [RFC3209].
+
+   For the purposes of this document, an application is a technology
+   that makes use of link attribute advertisements, examples of which
+   are listed in Section 3.
+
+   In recent years, new applications that have use cases for many of the
+   link attributes historically used by RSVP-TE have been introduced.
+   Such applications include Segment Routing (SR) Policy
+   [SEGMENT-ROUTING] and Loop-Free Alternates (LFAs) [RFC5286].  This
+   has introduced ambiguity in that if a deployment includes a mix of
+   RSVP-TE support and SR Policy support, for example, it is not
+   possible to unambiguously indicate which advertisements are to be
+   used by RSVP-TE and which advertisements are to be used by SR Policy.
+   If the topologies are fully congruent, this may not be an issue, but
+   any incongruence leads to ambiguity.
+
+   An example of where this ambiguity causes a problem is a network
+   where RSVP-TE is enabled only on a subset of its links.  A link
+   attribute is advertised for the purpose of another application (e.g.,
+   SR Policy) for a link that is not enabled for RSVP-TE.  As soon as
+   the router that is an RSVP-TE head end sees the link attribute being
+   advertised for that link, it assumes RSVP-TE is enabled on that link,
+   even though it is not.  If such an RSVP-TE head-end router tries to
+   set up an RSVP-TE path via that link, it will result in a path setup
+   failure.
+
+   An additional issue arises in cases where both applications are
+   supported on a link but the link attribute values associated with
+   each application differ.  Current advertisements do not support
+   advertising application-specific values for the same attribute on a
+   specific link.
+
+   This document defines extensions that address these issues.  Also, as
+   evolution of use cases for link attributes can be expected to
+   continue in the years to come, this document defines a solution that
+   is easily extensible to the introduction of new applications and new
+   use cases.
+
+1.1.  Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+2.  Requirements Discussion
+
+   As stated previously, evolution of use cases for link attributes can
+   be expected to continue.  Therefore, any discussion of existing use
+   cases is limited to requirements that are known at the time of this
+   writing.  However, in order to determine the functionality required
+   beyond what already exists in IS-IS, it is only necessary to discuss
+   use cases that justify the key points identified in the introduction,
+   which are:
+
+   1.  Support for indicating which applications are using the link
+       attribute advertisements on a link
+
+   2.  Support for advertising application-specific values for the same
+       attribute on a link
+
+   [RFC7855] discusses use cases and requirements for Segment Routing
+   (SR).  Included among these use cases is SR Policy, which is defined
+   in [SEGMENT-ROUTING].  If both RSVP-TE and SR Policy are deployed in
+   a network, link attribute advertisements can be used by one or both
+   of these applications.  There is no requirement for the link
+   attributes advertised on a given link used by SR Policy to be
+   identical to the link attributes advertised on that same link used by
+   RSVP-TE; thus, there is a clear requirement to indicate independently
+   which link attribute advertisements are to be used by each
+   application.
+
+   As the number of applications that may wish to utilize link
+   attributes may grow in the future, an additional requirement is that
+   the extensions defined allow the association of additional
+   applications to link attributes without altering the format of the
+   advertisements or introducing new backwards-compatibility issues.
+
+   Finally, there may still be many cases where a single attribute value
+   can be shared among multiple applications, so the solution must
+   minimize advertising duplicate link/attribute pairs whenever
+   possible.
+
+3.  Legacy Advertisements
+
+   Existing advertisements used in support of RSVP-TE include sub-TLVs
+   for TLVs 22, 23, 25, 141, 222, and 223 and TLVs for Shared Risk Link
+   Group (SRLG) advertisement.
+
+   Sub-TLV values are defined in the "Sub-TLVs for TLVs 22, 23, 25, 141,
+   222, and 223" registry.
+
+   TLVs are defined in the "TLV Codepoints Registry".
+
+3.1.  Legacy Sub-TLVs
+
+   +======+====================================+
+   | Type | Description                        |
+   +======+====================================+
+   | 3    | Administrative group (color)       |
+   +------+------------------------------------+
+   | 9    | Maximum link bandwidth             |
+   +------+------------------------------------+
+   | 10   | Maximum reservable link bandwidth  |
+   +------+------------------------------------+
+   | 11   | Unreserved bandwidth               |
+   +------+------------------------------------+
+   | 14   | Extended Administrative Group      |
+   +------+------------------------------------+
+   | 18   | TE Default Metric                  |
+   +------+------------------------------------+
+   | 33   | Unidirectional Link Delay          |
+   +------+------------------------------------+
+   | 34   | Min/Max Unidirectional Link Delay  |
+   +------+------------------------------------+
+   | 35   | Unidirectional Delay Variation     |
+   +------+------------------------------------+
+   | 36   | Unidirectional Link Loss           |
+   +------+------------------------------------+
+   | 37   | Unidirectional Residual Bandwidth  |
+   +------+------------------------------------+
+   | 38   | Unidirectional Available Bandwidth |
+   +------+------------------------------------+
+   | 39   | Unidirectional Utilized Bandwidth  |
+   +------+------------------------------------+
+
+       Table 1: Sub-TLVs for TLVs 22, 23, 25,
+                 141, 222, and 223
+
+3.2.  Legacy SRLG Advertisements
+
+   TLV 138 (GMPLS-SRLG):
+      Supports links identified by IPv4 addresses and unnumbered links.
+
+   TLV 139 (IPv6 SRLG):
+      Supports links identified by IPv6 addresses.
+
+   Note that [RFC6119] prohibits the use of TLV 139 when it is possible
+   to use TLV 138.
+
+4.  Advertising Application-Specific Link Attributes
+
+   Two new codepoints are defined to support Application-Specific Link
+   Attribute (ASLA) advertisements:
+
+   1)  Application-Specific Link Attributes sub-TLV for TLVs 22, 23, 25,
+       141, 222, and 223 (defined in Section 4.2).
+
+   2)  Application-Specific Shared Risk Link Group (SRLG) TLV (defined
+       in Section 4.3).
+
+   To support these new advertisements, an application identifier bit
+   mask is defined to identify the application(s) associated with a
+   given advertisement (defined in Section 4.1).
+
+   In addition to supporting the advertisement of link attributes used
+   by standardized applications, link attributes can also be advertised
+   for use by user-defined applications.  Such applications are not
+   subject to standardization and are outside the scope of this
+   document.
+
+   The following sections define the format of these new advertisements.
+
+4.1.  Application Identifier Bit Mask
+
+   Identification of the set of applications associated with link
+   attribute advertisements utilizes two bit masks.  One bit mask is for
+   standard applications where the definition of each bit is defined in
+   a new IANA-controlled registry (see Section 7.4).  A second bit mask
+   is for non-standard user-defined applications (UDAs).
+
+   The encoding defined below is used by both the Application-Specific
+   Link Attributes sub-TLV and the Application-Specific SRLG TLV.
+
+    0  1  2  3  4  5  6  7
+   +--+--+--+--+--+--+--+--+
+   | SABM Length + Flag    |  1 octet
+   +--+--+--+--+--+--+--+--+
+   | UDABM Length + Flag   |  1 octet
+   +--+--+--+--+--+--+--+--+
+   |   SABM         ...       0 - 8 octets
+   +--+--+--+--+--+--+--+--+
+   |   UDABM        ...       0 - 8 octets
+   +--+--+--+--+--+--+--+--+
+
+   SABM Length + Flag (1 octet):  Standard Application Identifier Bit
+      Mask Length + Flag
+
+                0 1 2 3 4 5 6 7
+               +-+-+-+-+-+-+-+-+
+               |L| SABM Length |
+               +-+-+-+-+-+-+-+-+
+
+      L-flag:  Legacy Flag.  See Section 4.2 for a description of how
+         this flag is used.
+
+      SABM Length:  Indicates the length in octets (0-8) of the Standard
+         Application Identifier Bit Mask.  The length SHOULD be the
+         minimum required to send all bits that are set.
+
+   UDABM Length + Flag (1 octet):  User-Defined Application Identifier
+      Bit Mask Length + Flag
+
+                0 1 2 3 4 5 6 7
+               +-+-+-+-+-+-+-+-+
+               |R| UDABM Length|
+               +-+-+-+-+-+-+-+-+
+
+      R:  Reserved.  SHOULD be transmitted as 0 and MUST be ignored on
+         receipt.
+
+      UDABM Length:  Indicates the length in octets (0-8) of the User-
+         Defined Application Identifier Bit Mask.  The length SHOULD be
+         the minimum required to send all bits that are set.
+
+   SABM (variable length):  Standard Application Identifier Bit Mask
+
+      (SABM Length * 8) bits
+
+      This field is omitted if SABM Length is 0.
+
+                0 1 2 3 4 5 6 7 ...
+               +-+-+-+-+-+-+-+-+...
+               |R|S|F|          ...
+               +-+-+-+-+-+-+-+-+...
+
+      R-bit:  Set to specify RSVP-TE.
+
+      S-bit:  Set to specify Segment Routing Policy.
+
+      F-bit:  Set to specify Loop-Free Alternate (LFA) (includes all LFA
+         types).
+
+   UDABM (variable length):  User-Defined Application Identifier Bit
+      Mask
+
+      (UDABM Length * 8) bits
+
+                0 1 2 3 4 5 6 7 ...
+               +-+-+-+-+-+-+-+-+...
+               |                ...
+               +-+-+-+-+-+-+-+-+...
+
+      This field is omitted if UDABM Length is 0.
+
+      |  Note: SABM/UDABM Length is arbitrarily limited to 8 octets in
+      |  order to ensure that sufficient space is left to advertise link
+      |  attributes without overrunning the maximum length of a sub-TLV.
+
+   Standard Application Identifier Bits are defined and sent starting
+   with bit 0.
+
+   User-Defined Application Identifier Bits have no relationship to
+   Standard Application Identifier Bits and are not managed by IANA or
+   any other standards body.  It is recommended that bits be used
+   starting with bit 0 so as to minimize the number of octets required
+   to advertise all UDAs.
+
+   For both SABM and UDABM, the following rules apply:
+
+   *  Undefined bits that are transmitted MUST be transmitted as 0 and
+      MUST be ignored on receipt.
+
+   *  Bits that are not transmitted MUST be treated as if they are set
+      to 0 on receipt.
+
+   *  Bits that are not supported by an implementation MUST be ignored
+      on receipt.
+
+4.2.  Application-Specific Link Attributes Sub-TLV
+
+   A new sub-TLV for TLVs 22, 23, 25, 141, 222, and 223 is defined that
+   supports specification of the applications and application-specific
+   attribute values.
+
+   Type:  16
+
+   Length:  Variable (1 octet)
+
+   Value:
+         Application Identifier Bit Mask (as defined in Section 4.1)
+
+         Link Attribute sub-sub-TLVs -- format matches the existing
+         formats defined in [RFC5305], [RFC7308], and [RFC8570]
+
+   If the SABM or UDABM Length in the Application Identifier Bit Mask is
+   greater than 8, the entire sub-TLV MUST be ignored.
+
+   When the L-flag is set in the Application Identifier Bit Mask, all of
+   the applications specified in the bit mask MUST use the legacy
+   advertisements for the corresponding link found in TLVs 22, 23, 25,
+   141, 222, and 223, in TLV 138, or in TLV 139 as appropriate.  Link
+   attribute sub-sub-TLVs for the corresponding link attributes MUST NOT
+   be advertised for the set of applications specified in the Standard
+   or User-Defined Application Identifier Bit Masks, and all such
+   advertisements MUST be ignored on receipt.
+
+   Multiple Application-Specific Link Attributes sub-TLVs for the same
+   link MAY be advertised.  When multiple sub-TLVs for the same link are
+   advertised, they SHOULD advertise non-conflicting application/
+   attribute pairs.  A conflict exists when the same application is
+   associated with two different values for the same link attribute for
+   a given link.  In cases where conflicting values for the same
+   application/attribute/link are advertised, the first advertisement
+   received in the lowest-numbered LSP SHOULD be used, and subsequent
+   advertisements of the same attribute SHOULD be ignored.
+
+   For a given application, the setting of the L-flag MUST be the same
+   in all sub-TLVs for a given link.  In cases where this constraint is
+   violated, the L-flag MUST be considered set for this application.
+
+   If link attributes are advertised associated with zero-length
+   Application Identifier Bit Masks for both standard applications and
+   user-defined applications, then any standard application and/or any
+   user-defined application is permitted to use that set of link
+   attributes so long as there is not another set of attributes
+   advertised on that same link that is associated with a non-zero-
+   length Application Identifier Bit Mask with a matching Application
+   Identifier Bit set.
+
+   IANA has created a new registry of sub-sub-TLVs to define the link
+   attribute sub-sub-TLV codepoints (see Section 7.3).  This document
+   defines a sub-sub-TLV for each of the existing sub-TLVs listed in
+   Section 3.1, except as noted below.  The format of the sub-sub-TLVs
+   matches the format of the corresponding legacy sub-TLV, and IANA has
+   assigned the legacy sub-TLV identifier to the corresponding sub-sub-
+   TLV.
+
+4.2.1.  Special Considerations for Maximum Link Bandwidth
+
+   Maximum link bandwidth is an application-independent attribute of the
+   link.  When advertised using the Application-Specific Link Attributes
+   sub-TLV, multiple values for the same link MUST NOT be advertised.
+   This can be accomplished most efficiently by having a single
+   advertisement for a given link where the Application Identifier Bit
+   Mask identifies all the applications that are making use of the value
+   for that link.
+
+   It is also possible to advertise the same value for a given link
+   multiple times with disjoint sets of applications specified in the
+   Application Identifier Bit Mask.  This is less efficient but still
+   valid.
+
+   It is also possible to advertise a single advertisement with zero-
+   length SABM and UDABM so long as the constraints discussed in
+   Sections 4.2 and 6.2 are acceptable.
+
+   If different values for maximum link bandwidth for a given link are
+   advertised, all values MUST be ignored.
+
+4.2.2.  Special Considerations for Reservable/Unreserved Bandwidth
+
+   Maximum reservable link bandwidth and unreserved bandwidth are
+   attributes specific to RSVP-TE.  When advertised using the
+   Application-Specific Link Attributes sub-TLV, bits other than the
+   RSVP-TE (R-bit) MUST NOT be set in the Application Identifier Bit
+   Mask.  If an advertisement of maximum reservable link bandwidth or
+   unreserved bandwidth is received with bits other than the RSVP-TE bit
+   set, the advertisement MUST be ignored.
+
+4.2.3.  Considerations for Extended TE Metrics
+
+   [RFC8570] defines a number of dynamic performance metrics associated
+   with a link.  It is conceivable that such metrics could be measured
+   specific to traffic associated with a specific application.
+   Therefore, this document includes support for advertising these link
+   attributes specific to a given application.  However, in practice, it
+   may well be more practical to have these metrics reflect the
+   performance of all traffic on the link regardless of application.  In
+   such cases, advertisements for these attributes will be associated
+   with all of the applications utilizing that link.  This can be done
+   either by explicitly specifying the applications in the Application
+   Identifier Bit Mask or by using a zero-length Application Identifier
+   Bit Mask.
+
+4.3.  Application-Specific SRLG TLV
+
+   A new TLV is defined to advertise application-specific SRLGs for a
+   given link.  Although similar in functionality to TLV 138 [RFC5307]
+   and TLV 139 [RFC6119], a single TLV provides support for IPv4, IPv6,
+   and unnumbered identifiers for a link.  Unlike TLVs 138 and 139, it
+   utilizes sub-TLVs to encode the link identifiers in order to provide
+   the flexible formatting required to support multiple link identifier
+   types.
+
+   Type:  238
+
+   Length:  Number of octets in the value field (1 octet)
+
+   Value:
+         Neighbor System-ID + pseudonode ID (7 octets)
+
+         Application Identifier Bit Mask (as defined in Section 4.1)
+
+         Length of sub-TLVs (1 octet)
+
+         Link Identifier sub-TLVs (variable)
+
+         0 or more SRLG values (each value is 4 octets)
+
+   The following Link Identifier sub-TLVs are defined.  The values
+   chosen intentionally match the equivalent sub-TLVs from [RFC5305],
+   [RFC5307], and [RFC6119].
+
+            +======+=========================================+
+            | Type | Description                             |
+            +======+=========================================+
+            | 4    | Link Local/Remote Identifiers [RFC5307] |
+            +------+-----------------------------------------+
+            | 6    | IPv4 interface address [RFC5305]        |
+            +------+-----------------------------------------+
+            | 8    | IPv4 neighbor address [RFC5305]         |
+            +------+-----------------------------------------+
+            | 12   | IPv6 Interface Address [RFC6119]        |
+            +------+-----------------------------------------+
+            | 13   | IPv6 Neighbor Address [RFC6119]         |
+            +------+-----------------------------------------+
+
+                                 Table 2
+
+   At least one set of link identifiers (IPv4, IPv6, or Link Local/
+   Remote) MUST be present.  Multiple occurrences of the same identifier
+   type MUST NOT be present.  TLVs that do not meet this requirement
+   MUST be ignored.
+
+   Multiple TLVs for the same link MAY be advertised.
+
+   When the L-flag is set in the Application Identifier Bit Mask, SRLG
+   values MUST NOT be included in the TLV.  Any SRLG values that are
+   advertised MUST be ignored.  Based on the link identifiers
+   advertised, the corresponding legacy TLV (see Section 3.2) can be
+   identified, and the SRLG values advertised in the legacy TLV MUST be
+   used by the set of applications specified in the Application
+   Identifier Bit Mask.
+
+   For a given application, the setting of the L-flag MUST be the same
+   in all TLVs for a given link.  In cases where this constraint is
+   violated, the L-flag MUST be considered set for this application.
+
+5.  Attribute Advertisements and Enablement
+
+   This document defines extensions to support the advertisement of
+   application-specific link attributes.
+
+   Whether the presence of link attribute advertisements for a given
+   application indicates that the application is enabled on that link
+   depends upon the application.  Similarly, whether the absence of link
+   attribute advertisements indicates that the application is not
+   enabled depends upon the application.
+
+   In the case of RSVP-TE, the advertisement of application-specific
+   link attributes implies that RSVP is enabled on that link.  The
+   absence of RSVP-TE application-specific link attributes in
+   combination with the absence of legacy advertisements implies that
+   RSVP is not enabled on that link.
+
+   In the case of SR Policy, the advertisement of application-specific
+   link attributes does not indicate enablement of SR Policy on that
+   link.  The advertisements are only used to support constraints that
+   may be applied when specifying an explicit path.  SR Policy is
+   implicitly enabled on all links that are part of the SR-enabled
+   topology independent of the existence of link attribute
+   advertisements.
+
+   In the case of LFA, the advertisement of application-specific link
+   attributes does not indicate enablement of LFA on that link.
+   Enablement is controlled by local configuration.
+
+   In the future, if additional standard applications are defined to use
+   this mechanism, the specification defining this use MUST define the
+   relationship between application-specific link attribute
+   advertisements and enablement for that application.
+
+   This document allows the advertisement of application-specific link
+   attributes with no application identifiers, i.e., both the Standard
+   Application Identifier Bit Mask and the User-Defined Application
+   Identifier Bit Mask are not present (see Section 4.1).  This supports
+   the use of the link attribute by any application.  In the presence of
+   an application where the advertisement of link attribute
+   advertisements is used to infer the enablement of an application on
+   that link (e.g., RSVP-TE), the absence of the application identifier
+   leaves ambiguous whether that application is enabled on such a link.
+   This needs to be considered when making use of the "any application"
+   encoding.
+
+6.  Deployment Considerations
+
+   This section discusses deployment considerations associated with the
+   use of application-specific link attribute advertisements.
+
+6.1.  Use of Legacy Advertisements
+
+   Bit identifiers for standard applications are defined in Section 4.1.
+   All of the identifiers defined in this document are associated with
+   applications that were already deployed in some networks prior to the
+   writing of this document.  Therefore, such applications have been
+   deployed using the legacy advertisements.  The standard applications
+   defined in this document may continue to use legacy advertisements
+   for a given link so long as at least one of the following conditions
+   is true:
+
+   *  The application is RSVP-TE.
+
+   *  The application is SR Policy or LFA, and RSVP-TE is not deployed
+      anywhere in the network.
+
+   *  The application is SR Policy or LFA, RSVP-TE is deployed in the
+      network, and both the set of links on which SR Policy and/or LFA
+      advertisements are required and the attribute values used by SR
+      Policy and/or LFA on all such links are fully congruent with the
+      links and attribute values used by RSVP-TE.
+
+   Under the conditions defined above, implementations that support the
+   extensions defined in this document have the choice of using legacy
+   advertisements or application-specific advertisements in support of
+   SR Policy and/or LFA.  This will require implementations to provide
+   controls specifying which types of advertisements are to be sent and
+   processed on receipt for these applications.  Further discussion of
+   the associated issues can be found in Section 6.3.
+
+   New applications that future documents define to make use of the
+   advertisements defined in this document MUST NOT make use of legacy
+   advertisements.  This simplifies deployment of new applications by
+   eliminating the need to support multiple ways to advertise attributes
+   for the new applications.
+
+6.2.  Use of Zero-Length Application Identifier Bit Masks
+
+   Link attribute advertisements associated with zero-length Application
+   Identifier Bit Masks for both standard applications and user-defined
+   applications are usable by any application, subject to the
+   restrictions specified in Section 4.2.  If support for a new
+   application is introduced on any node in a network in the presence of
+   such advertisements, these advertisements are permitted to be used by
+   the new application.  If this is not what is intended, then existing
+   advertisements MUST be readvertised with an explicit set of
+   applications specified before a new application is introduced.
+
+6.3.  Interoperability, Backwards Compatibility, and Migration Concerns
+
+   Existing deployments of RSVP-TE, SR Policy, and/or LFA utilize the
+   legacy advertisements listed in Section 3.  Routers that do not
+   support the extensions defined in this document will only process
+   legacy advertisements and are likely to infer that RSVP-TE is enabled
+   on the links for which legacy advertisements exist.  It is expected
+   that deployments using the legacy advertisements will persist for a
+   significant period of time.  Therefore, deployments using the
+   extensions defined in this document in the presence of routers that
+   do not support these extensions need to be able to interoperate with
+   the use of legacy advertisements by the legacy routers.  The
+   following subsections discuss interoperability and backwards-
+   compatibility concerns for a number of deployment scenarios.
+
+6.3.1.  Multiple Applications: Common Attributes with RSVP-TE
+
+   In cases where multiple applications are utilizing a given link, one
+   of the applications is RSVP-TE, and all link attributes for a given
+   link are common to the set of applications utilizing that link,
+   interoperability is achieved by using legacy advertisements and
+   sending application-specific advertisements with the L-flag set and
+   no link attribute values.  This avoids duplication of link attribute
+   advertisements.
+
+6.3.2.  Multiple Applications: All Attributes Not Shared with RSVP-TE
+
+   In cases where one or more applications other than RSVP-TE are
+   utilizing a given link and one or more link attribute values are not
+   shared with RSVP-TE, it is necessary to use application-specific
+   advertisements as defined in this document.  Attributes for
+   applications other than RSVP-TE MUST be advertised using application-
+   specific advertisements that have the L-flag clear.  In cases where
+   some link attributes are shared with RSVP-TE, this requires duplicate
+   advertisements for those attributes.
+
+   These guidelines apply to cases where RSVP-TE is not using any
+   advertised attributes on a link and to cases where RSVP-TE is using
+   some link attribute advertisements on the link but some link
+   attributes cannot be shared with RSVP-TE.
+
+6.3.3.  Interoperability with Legacy Routers
+
+   For the applications defined in this document, routers that do not
+   support the extensions defined in this document will send and receive
+   only legacy link attribute advertisements.  So long as there is any
+   legacy router in the network that has any of the applications
+   enabled, all routers MUST continue to advertise link attributes using
+   legacy advertisements.  In addition, the link attribute values
+   associated with the set of applications supported by legacy routers
+   (RSVP-TE, SR Policy, and/or LFA) are always shared since legacy
+   routers have no way of advertising or processing application-specific
+   values.  Once all legacy routers have been upgraded, migration from
+   legacy advertisements to ASLA advertisements can be achieved via the
+   following steps:
+
+   1)  Send ASLA advertisements while continuing to advertise using
+       legacy (all advertisements are then duplicated).  Receiving
+       routers continue to use legacy advertisements.
+
+   2)  Enable the use of the ASLA advertisements on all routers.
+
+   3)  Remove legacy advertisements.
+
+   When the migration is complete, it then becomes possible to advertise
+   incongruent values per application on a given link.
+
+   Note that the use of the L-flag is of no value in the migration.
+
+   Documents defining new applications that make use of the application-
+   specific advertisements defined in this document MUST discuss
+   interoperability and backwards-compatibility issues that could occur
+   in the presence of routers that do not support the new application.
+
+6.3.4.  Use of Application-Specific Advertisements for RSVP-TE
+
+   The extensions defined in this document include RSVP-TE as one of the
+   applications.  It is therefore possible, in the future, for
+   implementations to migrate to the use of application-specific
+   advertisements in support of RSVP-TE.  This could be done in the
+   following stepwise manner:
+
+   1)  Upgrade all routers to support the extensions in this document.
+
+   2)  Advertise all legacy link attributes using ASLA advertisements
+       with the L-flag clear and R-bit set.  At this point, both legacy
+       and application-specific advertisements are being sent.
+
+   3)  Remove legacy advertisements.
+
+7.  IANA Considerations
+
+   This section lists the protocol codepoint changes introduced by this
+   document and the related updates made by IANA.
+
+   For the new registries defined under the "IS-IS TLV Codepoints"
+   registry with the "Expert Review" registration procedure (see
+   Sections 7.3 and 7.5), guidance for designated experts can be found
+   in [RFC7370].
+
+7.1.  Application-Specific Link Attributes Sub-TLV
+
+   IANA has registered the new sub-TLV defined in Section 4.2 in the
+   "Sub-TLVs for TLVs 22, 23, 25, 141, 222, and 223" registry.
+
+    +======+======================+====+====+======+=====+=====+=====+
+    | Type | Description          | 22 | 23 | 25   | 141 | 222 | 223 |
+    +======+======================+====+====+======+=====+=====+=====+
+    | 16   | Application-Specific | y  | y  | y(s) | y   | y   | y   |
+    |      | Link Attributes      |    |    |      |     |     |     |
+    +------+----------------------+----+----+------+-----+-----+-----+
+
+                                 Table 3
+
+
+7.2.  Application-Specific SRLG TLV
+
+   IANA has registered the new TLV defined in Section 4.3 in the IS-IS
+   "TLV Codepoints Registry".
+
+      +=======+===========================+=====+=====+=====+=======+
+      | Value | Description               | IIH | LSP | SNP | Purge |
+      +=======+===========================+=====+=====+=====+=======+
+      | 238   | Application-Specific SRLG | n   | y   | n   | n     |
+      +-------+---------------------------+-----+-----+-----+-------+
+
+                                  Table 4
+
+7.3.  Sub-sub-TLV Codepoints for Application-Specific Link Attributes
+      Registry
+
+   IANA has created a new registry titled "Sub-sub-TLV Codepoints for
+   Application-Specific Link Attributes" under the "IS-IS TLV
+   Codepoints" registry to control the assignment of sub-sub-TLV
+   codepoints for the Application-Specific Link Attributes sub-TLV
+   defined in Section 7.1.  The registration procedure is "Expert
+   Review" as defined in [RFC8126].  The initial contents of this
+   registry are as follows:
+
+        +========+====================================+===========+
+        | Type   | Description                        | Reference |
+        +========+====================================+===========+
+        | 0-2    | Unassigned                         |           |
+        +--------+------------------------------------+-----------+
+        | 3      | Administrative group (color)       | [RFC5305] |
+        +--------+------------------------------------+-----------+
+        | 4-8    | Unassigned                         |           |
+        +--------+------------------------------------+-----------+
+        | 9      | Maximum link bandwidth             | [RFC5305] |
+        +--------+------------------------------------+-----------+
+        | 10     | Maximum reservable link bandwidth  | [RFC5305] |
+        +--------+------------------------------------+-----------+
+        | 11     | Unreserved bandwidth               | [RFC5305] |
+        +--------+------------------------------------+-----------+
+        | 12-13  | Unassigned                         |           |
+        +--------+------------------------------------+-----------+
+        | 14     | Extended Administrative Group      | [RFC7308] |
+        +--------+------------------------------------+-----------+
+        | 15-17  | Unassigned                         |           |
+        +--------+------------------------------------+-----------+
+        | 18     | TE Default Metric                  | [RFC5305] |
+        +--------+------------------------------------+-----------+
+        | 19-32  | Unassigned                         |           |
+        +--------+------------------------------------+-----------+
+        | 33     | Unidirectional Link Delay          | [RFC8570] |
+        +--------+------------------------------------+-----------+
+        | 34     | Min/Max Unidirectional Link Delay  | [RFC8570] |
+        +--------+------------------------------------+-----------+
+        | 35     | Unidirectional Delay Variation     | [RFC8570] |
+        +--------+------------------------------------+-----------+
+        | 36     | Unidirectional Link Loss           | [RFC8570] |
+        +--------+------------------------------------+-----------+
+        | 37     | Unidirectional Residual Bandwidth  | [RFC8570] |
+        +--------+------------------------------------+-----------+
+        | 38     | Unidirectional Available Bandwidth | [RFC8570] |
+        +--------+------------------------------------+-----------+
+        | 39     | Unidirectional Utilized Bandwidth  | [RFC8570] |
+        +--------+------------------------------------+-----------+
+        | 40-255 | Unassigned                         |           |
+        +--------+------------------------------------+-----------+
+
+                                  Table 5
+
+   IANA has also added the following notes to this registry:
+
+      Note: For future codepoints, in cases where the document that
+      defines the encoding is different from the document that assigns
+      the codepoint, the encoding reference MUST be to the document that
+      defines the encoding.
+
+      Note: If a link attribute can be advertised both as a sub-TLV of
+      TLVs 22, 23, 25, 141, 222, and 223 and as a sub-sub-TLV of the
+      Application-Specific Link Attributes sub-TLV defined in RFC 8919,
+      then the same numerical code should be assigned to the link
+      attribute whenever possible.
+
+7.4.  Link Attribute Application Identifiers Registry
+
+   IANA has created a new registry titled "Link Attribute Application
+   Identifiers" under the "Interior Gateway Protocol (IGP) Parameters"
+   registry to control the assignment of Application Identifier Bits.
+   The registration policy for this registry is "Expert Review" as
+   defined in [RFC8126].  Bit definitions SHOULD be assigned such that
+   all bits in the lowest available octet are allocated before assigning
+   bits in the next octet.  This minimizes the number of octets that
+   will need to be transmitted.  The initial contents of this registry
+   are as follows:
+
+                +=======+================================+
+                | Bit # | Name                           |
+                +=======+================================+
+                | 0     | RSVP-TE (R-bit)                |
+                +-------+--------------------------------+
+                | 1     | Segment Routing Policy (S-bit) |
+                +-------+--------------------------------+
+                | 2     | Loop-Free Alternate (F-bit)    |
+                +-------+--------------------------------+
+                | 3-63  | Unassigned                     |
+                +-------+--------------------------------+
+
+                                 Table 6
+
+7.5.  Sub-TLVs for TLV 238 Registry
+
+   IANA has created a new registry titled "Sub-TLVs for TLV 238" under
+   the "IS-IS TLV Codepoints" registry to control the assignment of sub-
+   TLV types for the Application-Specific SRLG TLV.  The registration
+   procedure is "Expert Review" as defined in [RFC8126].  The initial
+   contents of this registry are as follows:
+
+          +========+===============================+===========+
+          | Value  | Description                   | Reference |
+          +========+===============================+===========+
+          | 0-3    | Unassigned                    |           |
+          +--------+-------------------------------+-----------+
+          | 4      | Link Local/Remote Identifiers | [RFC5307] |
+          +--------+-------------------------------+-----------+
+          | 5      | Unassigned                    |           |
+          +--------+-------------------------------+-----------+
+          | 6      | IPv4 interface address        | [RFC5305] |
+          +--------+-------------------------------+-----------+
+          | 7      | Unassigned                    |           |
+          +--------+-------------------------------+-----------+
+          | 8      | IPv4 neighbor address         | [RFC5305] |
+          +--------+-------------------------------+-----------+
+          | 9-11   | Unassigned                    |           |
+          +--------+-------------------------------+-----------+
+          | 12     | IPv6 Interface Address        | [RFC6119] |
+          +--------+-------------------------------+-----------+
+          | 13     | IPv6 Neighbor Address         | [RFC6119] |
+          +--------+-------------------------------+-----------+
+          | 14-255 | Unassigned                    |           |
+          +--------+-------------------------------+-----------+
+
+                                 Table 7
+
+   IANA has also added the following note to this registry:
+
+      Note: For future codepoints, in cases where the document that
+      defines the encoding is different from the document that assigns
+      the codepoint, the encoding reference MUST be to the document that
+      defines the encoding.
+
+8.  Security Considerations
+
+   Security concerns for IS-IS are addressed in [ISO10589], [RFC5304],
+   and [RFC5310].  While IS-IS is deployed under a single administrative
+   domain, there can be deployments where potential attackers have
+   access to one or more networks in the IS-IS routing domain.  In these
+   deployments, the stronger authentication mechanisms defined in the
+   aforementioned documents SHOULD be used.
+
+   This document defines a new way to advertise link attributes.
+   Tampering with the information defined in this document may have an
+   effect on applications using it, including impacting traffic
+   engineering as discussed in [RFC8570].  As the advertisements defined
+   in this document limit the scope to specific applications, the impact
+   of tampering is similarly limited in scope.
+
+9.  References
+
+9.1.  Normative References
+
+   [ISO10589] International Organization for Standardization,
+              "Information technology - Telecommunications and
+              information exchange between systems - Intermediate System
+              to Intermediate System intra-domain routing information
+              exchange protocol for use in conjunction with the protocol
+              for providing the connectionless-mode network service (ISO
+              8473)", ISO/IEC 10589:2002, Second Edition, November 2002.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/info/rfc2119>.
+
+   [RFC5304]  Li, T. and R. Atkinson, "IS-IS Cryptographic
+              Authentication", RFC 5304, DOI 10.17487/RFC5304, October
+              2008, <https://www.rfc-editor.org/info/rfc5304>.
+
+   [RFC5305]  Li, T. and H. Smit, "IS-IS Extensions for Traffic
+              Engineering", RFC 5305, DOI 10.17487/RFC5305, October
+              2008, <https://www.rfc-editor.org/info/rfc5305>.
+
+   [RFC5307]  Kompella, K., Ed. and Y. Rekhter, Ed., "IS-IS Extensions
+              in Support of Generalized Multi-Protocol Label Switching
+              (GMPLS)", RFC 5307, DOI 10.17487/RFC5307, October 2008,
+              <https://www.rfc-editor.org/info/rfc5307>.
+
+   [RFC5310]  Bhatia, M., Manral, V., Li, T., Atkinson, R., White, R.,
+              and M. Fanto, "IS-IS Generic Cryptographic
+              Authentication", RFC 5310, DOI 10.17487/RFC5310, February
+              2009, <https://www.rfc-editor.org/info/rfc5310>.
+
+   [RFC6119]  Harrison, J., Berger, J., and M. Bartlett, "IPv6 Traffic
+              Engineering in IS-IS", RFC 6119, DOI 10.17487/RFC6119,
+              February 2011, <https://www.rfc-editor.org/info/rfc6119>.
+
+   [RFC7308]  Osborne, E., "Extended Administrative Groups in MPLS
+              Traffic Engineering (MPLS-TE)", RFC 7308,
+              DOI 10.17487/RFC7308, July 2014,
+              <https://www.rfc-editor.org/info/rfc7308>.
+
+   [RFC7370]  Ginsberg, L., "Updates to the IS-IS TLV Codepoints
+              Registry", RFC 7370, DOI 10.17487/RFC7370, September 2014,
+              <https://www.rfc-editor.org/info/rfc7370>.
+
+   [RFC8126]  Cotton, M., Leiba, B., and T. Narten, "Guidelines for
+              Writing an IANA Considerations Section in RFCs", BCP 26,
+              RFC 8126, DOI 10.17487/RFC8126, June 2017,
+              <https://www.rfc-editor.org/info/rfc8126>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/info/rfc8174>.
+
+   [RFC8570]  Ginsberg, L., Ed., Previdi, S., Ed., Giacalone, S., Ward,
+              D., Drake, J., and Q. Wu, "IS-IS Traffic Engineering (TE)
+              Metric Extensions", RFC 8570, DOI 10.17487/RFC8570, March
+              2019, <https://www.rfc-editor.org/info/rfc8570>.
+
+9.2.  Informative References
+
+   [RFC3209]  Awduche, D., Berger, L., Gan, D., Li, T., Srinivasan, V.,
+              and G. Swallow, "RSVP-TE: Extensions to RSVP for LSP
+              Tunnels", RFC 3209, DOI 10.17487/RFC3209, December 2001,
+              <https://www.rfc-editor.org/info/rfc3209>.
+
+   [RFC5286]  Atlas, A., Ed. and A. Zinin, Ed., "Basic Specification for
+              IP Fast Reroute: Loop-Free Alternates", RFC 5286,
+              DOI 10.17487/RFC5286, September 2008,
+              <https://www.rfc-editor.org/info/rfc5286>.
+
+   [RFC7855]  Previdi, S., Ed., Filsfils, C., Ed., Decraene, B.,
+              Litkowski, S., Horneffer, M., and R. Shakir, "Source
+              Packet Routing in Networking (SPRING) Problem Statement
+              and Requirements", RFC 7855, DOI 10.17487/RFC7855, May
+              2016, <https://www.rfc-editor.org/info/rfc7855>.
+
+   [SEGMENT-ROUTING]
+              Filsfils, C., Talaulikar, K., Voyer, D., Bogdanov, A., and
+              P. Mattes, "Segment Routing Policy Architecture", Work in
+              Progress, Internet-Draft, draft-ietf-spring-segment-
+              routing-policy-08, 8 July 2020,
+              <https://tools.ietf.org/html/draft-ietf-spring-segment-
+              routing-policy-08>.
+
+Acknowledgements
+
+   The authors would like to thank Eric Rosen and Acee Lindem for their
+   careful review and content suggestions.
+
+Authors' Addresses
+
+   Les Ginsberg
+   Cisco Systems
+   821 Alder Drive
+   Milpitas, CA 95035
+   United States of America
+
+   Email: ginsberg@cisco.com
+
+
+   Peter Psenak
+   Cisco Systems
+   Apollo Business Center
+   Mlynske nivy 43
+   821 09 Bratislava
+   Slovakia
+
+   Email: ppsenak@cisco.com
+
+
+   Stefano Previdi
+   Huawei Technologies
+
+   Email: stefano@previdi.net
+
+
+   Wim Henderickx
+   Nokia
+   Copernicuslaan 50
+   2018 94089 Antwerp
+   Belgium
+
+   Email: wim.henderickx@nokia.com
+
+
+   John Drake
+   Juniper Networks
+
+   Email: jdrake@juniper.net

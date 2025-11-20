@@ -220,19 +220,20 @@ impl Show for ShowService {
 
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
-    pub show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
+    pub _show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
 }
 
 impl Cli {
     pub fn new(config_tx: Sender<Message>) -> Self {
         Self {
             tx: config_tx,
-            show_clients: HashMap::new(),
+            _show_clients: HashMap::new(),
         }
     }
 
+    #[allow(dead_code)]
     pub fn subscribe(&mut self, name: &str, tx: UnboundedSender<DisplayRequest>) {
-        self.show_clients.insert(name.to_string(), tx);
+        self._show_clients.insert(name.to_string(), tx);
     }
 }
 

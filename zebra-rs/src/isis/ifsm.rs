@@ -83,7 +83,7 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     hello
 }
 
-pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisHello {
+pub fn hello_p2p_generate(ltop: &LinkTop, _level: Level) -> IsisHello {
     let source_id = ltop.up_config.net.sys_id();
 
     // P2P Hello doesn't use LAN ID
@@ -551,6 +551,6 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     hello_originate(ltop, level);
 }
 
-pub fn drop_dis(ltop: &mut LinkTop, level: Level) {
+pub fn drop_dis(_ltop: &mut LinkTop, _level: Level) {
     //
 }

@@ -120,11 +120,11 @@ impl ConfigBuilder {
 
         ConfigBuilder::default()
             .path("")
-            .set(|config, cache, name, args| {
+            .set(|config, cache, name, _args| {
                 let _ = cache_get(config, cache, name).context(CONFIG_ERR)?;
                 Ok(())
             })
-            .del(|config, cache, name, args| {
+            .del(|config, cache, name, _args| {
                 if let Some(s) = cache.get_mut(name) {
                     s.delete = true;
                 } else {
@@ -155,7 +155,7 @@ impl ConfigBuilder {
                 s.dport = Some(dport);
                 Ok(())
             })
-            .del(|config, cache, name, args| {
+            .del(|config, cache, name, _args| {
                 let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
                 s.dport = None;
                 Ok(())
@@ -174,7 +174,7 @@ impl ConfigBuilder {
                 s.local_addr = Some(addr);
                 Ok(())
             })
-            .del(|config, cache, name, args| {
+            .del(|config, cache, name, _args| {
                 let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
                 s.local_addr = None;
                 Ok(())
@@ -188,7 +188,7 @@ impl ConfigBuilder {
                 s.addr_gen_mode = Some(mode);
                 Ok(())
             })
-            .del(|config, cache, name, args| {
+            .del(|config, cache, name, _args| {
                 let s = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
                 s.addr_gen_mode = None;
                 Ok(())

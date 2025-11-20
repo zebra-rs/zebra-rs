@@ -4,9 +4,9 @@ use ospf_packet::*;
 
 use super::area::OspfArea;
 
-pub fn router_lsa_new(router_id: Ipv4Addr, area: &OspfArea) -> Option<OspfLsa> {
-    let router_lsa = RouterLsa::default();
-    let lsa_header = OspfLsaHeader::new(OspfLsType::Router, router_id, router_id);
+pub fn router_lsa_new(router_id: Ipv4Addr, _area: &OspfArea) -> Option<OspfLsa> {
+    let _router_lsa = RouterLsa::default();
+    let _lsa_header = OspfLsaHeader::new(OspfLsType::Router, router_id, router_id);
     None
 }
 
