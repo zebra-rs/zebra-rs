@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
+use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
@@ -15,86 +16,100 @@ use super::peer::{ConfigRef, Peer, PeerType};
 use super::{Bgp, InOut};
 use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry};
 
-#[derive(Debug, Default)]
-pub struct AdjRibTable(pub PrefixMap<Ipv4Net, Vec<BgpRib>>);
+// Direction marker types for compile-time type safety
+#[derive(Debug, Clone, Copy)]
+pub struct In;
 
-impl AdjRibTable {
+#[derive(Debug, Clone, Copy)]
+pub struct Out;
+
+// Trait to specify which ID field to use based on direction
+pub trait RibDirection {
+    fn get_id(rib: &BgpRib) -> u32;
+}
+
+impl RibDirection for In {
+    fn get_id(rib: &BgpRib) -> u32 {
+        rib.remote_id
+    }
+}
+
+impl RibDirection for Out {
+    fn get_id(rib: &BgpRib) -> u32 {
+        rib.local_id
+    }
+}
+
+#[derive(Debug)]
+pub struct AdjRibTable<D: RibDirection = In>(pub PrefixMap<Ipv4Net, Vec<BgpRib>>, PhantomData<D>);
+
+impl<D: RibDirection> AdjRibTable<D> {
     pub fn new() -> Self {
-        Self(PrefixMap::new())
+        Self(PrefixMap::new(), PhantomData)
     }
 
-    // Add a route to Adj-RIB-In
+    // Add a route using the direction-specific ID field
+    pub fn add_route(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
+        let candidates = self.0.entry(prefix).or_default();
+
+        let route_id = D::get_id(&route);
+        // Find existing route with same ID (for AddPath support)
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == route_id) {
+            // Replace existing route with same ID and return the old one
+            let old_route = candidates[pos].clone();
+            candidates[pos] = route;
+            Some(old_route)
+        } else {
+            // No existing route with this ID, insert new route
+            candidates.push(route);
+            None
+        }
+    }
+
+    // Remove a route using the direction-specific ID field
+    pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
+        let candidates = self.0.get_mut(&prefix)?;
+
+        // Find and remove route with matching ID
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == id) {
+            let removed_route = candidates.remove(pos);
+
+            // Clean up empty vector
+            if candidates.is_empty() {
+                self.0.remove(&prefix);
+            }
+
+            Some(removed_route)
+        } else {
+            None
+        }
+    }
+
+    // Backward compatibility: add_route_in for Adj-RIB-In (when D=In)
     pub fn add_route_in(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
-        let candidates = self.0.entry(prefix).or_default();
-
-        // Find existing route with same ID (for AddPath support)
-        if let Some(pos) = candidates
-            .iter()
-            .position(|r| r.remote_id == route.remote_id)
-        {
-            // Replace existing route with same ID and return the old one
-            let old_route = candidates[pos].clone();
-            candidates[pos] = route;
-            Some(old_route)
-        } else {
-            // No existing route with this ID, insert new route
-            candidates.push(route);
-            None
-        }
+        self.add_route(prefix, route)
     }
 
-    // Remove a route from Adj-RIB-In
-    pub fn remove_route_in(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
-        let candidates = self.0.get_mut(&prefix)?;
-
-        // Find and remove route with matching ID
-        if let Some(pos) = candidates.iter().position(|r| r.remote_id == id) {
-            let removed_route = candidates.remove(pos);
-
-            // Clean up empty vector
-            if candidates.is_empty() {
-                self.0.remove(&prefix);
-            }
-
-            Some(removed_route)
-        } else {
-            None
-        }
-    }
-
-    // Add a route to Adj-RIB-In
+    // Backward compatibility: add_route_out for Adj-RIB-Out (when D=Out)
     pub fn add_route_out(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
-        let candidates = self.0.entry(prefix).or_default();
-
-        // Find existing route with same ID (for AddPath support)
-        if let Some(pos) = candidates.iter().position(|r| r.local_id == route.local_id) {
-            // Replace existing route with same ID and return the old one
-            let old_route = candidates[pos].clone();
-            candidates[pos] = route;
-            Some(old_route)
-        } else {
-            // No existing route with this ID, insert new route
-            candidates.push(route);
-            None
-        }
+        self.add_route(prefix, route)
     }
 
-    pub fn remove_route_out(&mut self, prefix: Ipv4Net, local_id: u32) -> Option<BgpRib> {
-        let candidates = self.0.get_mut(&prefix)?;
+    // Backward compatibility: remove_route_in for Adj-RIB-In (when D=In)
+    pub fn remove_route_in(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
+        self.remove_route(prefix, id)
+    }
 
-        // Find and remove route with matching ID
-        if let Some(pos) = candidates.iter().position(|r| r.local_id == local_id) {
-            let removed_route = candidates.remove(pos);
+    // Backward compatibility: remove_route_out for Adj-RIB-Out (when D=Out)
+    pub fn remove_route_out(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
+        self.remove_route(prefix, id)
+    }
+}
 
-            // Clean up empty vector
-            if candidates.is_empty() {
-                self.0.remove(&prefix);
-            }
-
-            Some(removed_route)
-        } else {
-            None
-        }
+// Default implementation for AdjRibTable<In>
+impl Default for AdjRibTable<In> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -102,9 +117,9 @@ impl AdjRibTable {
 #[derive(Debug, Default)]
 pub struct AdjRib {
     // IPv4 unicast
-    pub v4: AdjRibTable,
+    pub v4: AdjRibTable<In>,
     // IPv4 VPN
-    pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable>,
+    pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<In>>,
 }
 
 impl AdjRib {
