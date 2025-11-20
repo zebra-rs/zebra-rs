@@ -84,26 +84,6 @@ impl<D: RibDirection> AdjRibTable<D> {
             None
         }
     }
-
-    // Backward compatibility: add_route_in for Adj-RIB-In (when D=In)
-    pub fn add_route_in(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
-        self.add_route(prefix, route)
-    }
-
-    // Backward compatibility: add_route_out for Adj-RIB-Out (when D=Out)
-    pub fn add_route_out(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
-        self.add_route(prefix, route)
-    }
-
-    // Backward compatibility: remove_route_in for Adj-RIB-In (when D=In)
-    pub fn remove_route_in(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
-        self.remove_route(prefix, id)
-    }
-
-    // Backward compatibility: remove_route_out for Adj-RIB-Out (when D=Out)
-    pub fn remove_route_out(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
-        self.remove_route(prefix, id)
-    }
 }
 
 // BGP Adj-RIB - stores routes with direction-specific ID handling
@@ -113,6 +93,7 @@ pub struct AdjRib<D: RibDirection> {
     pub v4: AdjRibTable<D>,
     // IPv4 VPN
     pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
+    // Phantom data for direction.
     _phantom: PhantomData<D>,
 }
 
@@ -140,23 +121,13 @@ impl<D: RibDirection> AdjRib<D> {
     }
 
     // Add a route to Adj-RIB-In
-    pub fn add_route_in(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
-        self.v4.add_route(prefix, route)
-    }
-
-    // Add a route to Adj-RIB-In
-    pub fn add_route_out(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
+    pub fn add_route(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
         self.v4.add_route(prefix, route)
     }
 
     // Remove a route from Adj-RIB-In
-    pub fn remove_route_in(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
+    pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
         self.v4.remove_route(prefix, id)
-    }
-
-    // Remove a route from Adj-RIB-Out
-    pub fn remove_route_out(&mut self, prefix: Ipv4Net, local_id: u32) -> Option<BgpRib> {
-        self.v4.remove_route(prefix, local_id)
     }
 
     // Check table has prefix.
@@ -165,7 +136,7 @@ impl<D: RibDirection> AdjRib<D> {
     }
 
     // Add a route to Adj-RIB-In
-    pub fn add_route_vpn_in(
+    pub fn add_route_vpn(
         &mut self,
         rd: &RouteDistinguisher,
         prefix: Ipv4Net,
@@ -178,24 +149,7 @@ impl<D: RibDirection> AdjRib<D> {
     }
 
     // Add a route to Adj-RIB-In
-    pub fn add_in(
-        &mut self,
-        rd: &Option<RouteDistinguisher>,
-        prefix: Ipv4Net,
-        route: BgpRib,
-    ) -> Option<BgpRib> {
-        if let Some(rd) = rd {
-            self.v4vpn
-                .entry(rd.clone())
-                .or_default()
-                .add_route(prefix, route)
-        } else {
-            self.v4.add_route(prefix, route)
-        }
-    }
-
-    // Add a route to Adj-RIB-In
-    pub fn remove_route_vpn_in(
+    pub fn remove_route_vpn(
         &mut self,
         rd: &RouteDistinguisher,
         prefix: Ipv4Net,
@@ -205,32 +159,6 @@ impl<D: RibDirection> AdjRib<D> {
             .entry(rd.clone())
             .or_default()
             .remove_route(prefix, id)
-    }
-
-    // Add a route to Adj-RIB-In
-    pub fn add_route_out_vpn(
-        &mut self,
-        rd: &RouteDistinguisher,
-        prefix: Ipv4Net,
-        route: BgpRib,
-    ) -> Option<BgpRib> {
-        self.v4vpn
-            .entry(rd.clone())
-            .or_default()
-            .add_route(prefix, route)
-    }
-
-    // Add a route to Adj-RIB-In
-    pub fn remove_route_out_vpn(
-        &mut self,
-        rd: &RouteDistinguisher,
-        prefix: Ipv4Net,
-        local_id: u32,
-    ) -> Option<BgpRib> {
-        self.v4vpn
-            .entry(rd.clone())
-            .or_default()
-            .remove_route(prefix, local_id)
     }
 
     // Check table has prefix.
@@ -701,10 +629,9 @@ pub fn route_ipv4_update(
     {
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
         if let Some(ref rd) = rd {
-            peer.adj_rib_in
-                .add_route_vpn_in(rd, nlri.prefix, rib.clone());
+            peer.adj_rib_in.add_route_vpn(rd, nlri.prefix, rib.clone());
         } else {
-            peer.adj_rib_in.add_route_in(nlri.prefix, rib.clone());
+            peer.adj_rib_in.add_route(nlri.prefix, rib.clone());
         }
     }
 
@@ -754,7 +681,7 @@ fn route_advertise_to_addpath(
                 rib.attr = attr.clone();
 
                 if let Some(ref rd) = rd {
-                    peer.adj_rib_out.add_route_out_vpn(rd, nlri.prefix, rib);
+                    peer.adj_rib_out.add_route_vpn(rd, nlri.prefix, rib);
                     let vpnv4_nlri = Vpnv4Nlri {
                         label: Label::default(),
                         rd: rd.clone(),
@@ -762,7 +689,7 @@ fn route_advertise_to_addpath(
                     };
                     route_send_vpnv4(peer, vpnv4_nlri, attr);
                 } else {
-                    peer.adj_rib_out.add_route_out(nlri.prefix, rib);
+                    peer.adj_rib_out.add_route(nlri.prefix, rib);
                     route_send_ipv4(peer, nlri, attr);
                 }
             }
@@ -798,10 +725,10 @@ fn route_withdraw_from_addpath(
         if let Some(ref rd) = rd {
             route_withdraw_vpnv4(peer, rd, prefix, removed.local_id);
             peer.adj_rib_out
-                .remove_route_out_vpn(rd, prefix, removed.local_id);
+                .remove_route_vpn(rd, prefix, removed.local_id);
         } else {
             route_withdraw_ipv4(peer, prefix, removed.local_id);
-            peer.adj_rib_out.remove_route_out(prefix, removed.local_id);
+            peer.adj_rib_out.remove_route(prefix, removed.local_id);
         }
     }
 }
@@ -865,9 +792,9 @@ fn route_advertise_to_peers(
                     let mut rib = best.clone();
                     rib.attr = attr.clone();
                     if let Some(ref rd) = rd {
-                        peer.adj_rib_out.add_route_out_vpn(rd, nlri.prefix, rib);
+                        peer.adj_rib_out.add_route_vpn(rd, nlri.prefix, rib);
                     } else {
-                        peer.adj_rib_out.add_route_out(nlri.prefix, rib);
+                        peer.adj_rib_out.add_route(nlri.prefix, rib);
                     }
                 }
                 if let Some(ref rd) = rd {
@@ -886,12 +813,12 @@ fn route_advertise_to_peers(
                 if let Some(ref rd) = rd {
                     if peer.adj_rib_out.contains_key_vpn(rd, &prefix) {
                         route_withdraw_vpnv4(peer, rd, prefix, 0);
-                        peer.adj_rib_out.remove_route_out_vpn(rd, prefix, 0);
+                        peer.adj_rib_out.remove_route_vpn(rd, prefix, 0);
                     }
                 } else {
                     if peer.adj_rib_out.contains_key(&prefix) {
                         route_withdraw_ipv4(peer, prefix, 0);
-                        peer.adj_rib_out.remove_route_out(prefix, 0);
+                        peer.adj_rib_out.remove_route(prefix, 0);
                     }
                 }
             }
@@ -951,10 +878,9 @@ pub fn route_ipv4_withdraw(
         let peer = peers.get_mut(&peer_id).expect("peer must exist");
         // Remove from AdjRibIn.
         if let Some(ref rd) = rd {
-            peer.adj_rib_in
-                .remove_route_vpn_in(rd, nlri.prefix, nlri.id);
+            peer.adj_rib_in.remove_route_vpn(rd, nlri.prefix, nlri.id);
         } else {
-            peer.adj_rib_in.remove_route_in(nlri.prefix, nlri.id);
+            peer.adj_rib_in.remove_route(nlri.prefix, nlri.id);
         }
         peer.ident
     };
@@ -1286,7 +1212,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
 
         // Register to AdjOut.
         rib.attr = attr.clone();
-        peer.adj_rib_out.add_route_in(nlri.prefix, rib);
+        peer.adj_rib_out.add_route(nlri.prefix, rib);
 
         // Send the routes.
         route_send_ipv4(peer, nlri, attr);
@@ -1327,7 +1253,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
 
             // Register to AdjOut.
             rib.attr = attr.clone();
-            peer.adj_rib_out.add_route_vpn_in(&rd, nlri.prefix, rib);
+            peer.adj_rib_out.add_route_vpn(&rd, nlri.prefix, rib);
 
             let vpnv4_nlri = Vpnv4Nlri {
                 label: Label::default(),
