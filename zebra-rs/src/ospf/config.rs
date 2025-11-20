@@ -36,7 +36,7 @@ impl Ospf {
 fn config_ospf_network_apply(
     links: &mut BTreeMap<u32, OspfLink>,
     table: &PrefixMap<Ipv4Net, OspfNetworkConfig>,
-    areas: &mut OspfAreaMap,
+    _areas: &mut OspfAreaMap,
 ) {
     for (_, link) in links.iter() {
         let curr = link.enabled;
@@ -93,7 +93,7 @@ fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
-fn config_ospf_router_id(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
     let router_id = args.v4addr()?;
     println!("XXX OSPF router_id {}", router_id);
     None

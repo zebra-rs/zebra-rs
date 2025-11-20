@@ -1,20 +1,15 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::fmt;
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Instant;
 
 use bgp_packet::*;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
-use tokio::sync::mpsc::UnboundedSender;
-use tonic::service::LayerExt;
 
 use super::cap::CapAfiMap;
 use super::peer::{ConfigRef, Peer, PeerType};
 use super::{Bgp, InOut};
-use crate::rib::{self, Nexthop, NexthopUni, RibSubType, RibType, entry::RibEntry};
 
 // Direction marker types for compile-time type safety
 #[derive(Debug, Clone, Copy)]
@@ -284,7 +279,7 @@ impl LocalRibTable {
 
     pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRib> {
         let mut all_removed: Vec<BgpRib> = Vec::new();
-        for (prefix, candidates) in self.0.iter_mut() {
+        for (_prefix, candidates) in self.0.iter_mut() {
             let mut removed: Vec<BgpRib> =
                 candidates.extract_if(.., |r| r.ident == ident).collect();
             all_removed.append(&mut removed);
@@ -595,7 +590,7 @@ pub fn route_ipv4_update(
     }
 
     // Perform BGP Path selection.
-    let (replaced, selected, next_id) = if let Some(ref rd) = rd {
+    let (_replaced, selected, next_id) = if let Some(ref rd) = rd {
         bgp.local_rib.update_route_vpn(rd, nlri.prefix, rib.clone())
     } else {
         bgp.local_rib.update_route(nlri.prefix, rib.clone())
@@ -613,7 +608,7 @@ fn route_advertise_to_addpath(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     rib: &BgpRib,
-    source_peer: IpAddr,
+    _source_peer: IpAddr,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
@@ -659,8 +654,8 @@ fn route_withdraw_from_addpath(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     removed: &BgpRib,
-    source_peer: IpAddr,
-    bgp: &mut ConfigRef,
+    _source_peer: IpAddr,
+    _bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
     let (afi, safi) = if rd.is_some() {
@@ -694,7 +689,7 @@ fn route_advertise_to_peers(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     selected: &[BgpRib],
-    source_peer: IpAddr,
+    _source_peer: IpAddr,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
@@ -805,7 +800,7 @@ pub fn route_ipv4_withdraw(
     peer_id: IpAddr,
     nlri: &Ipv4Nlri,
     rd: Option<RouteDistinguisher>,
-    label: Option<Label>,
+    _label: Option<Label>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
@@ -863,7 +858,7 @@ pub fn route_from_peer(
     {
         match mp_updates {
             MpNlriReachAttr::Vpnv4 {
-                snpa,
+                snpa: _,
                 nhop,
                 updates,
             } => {
@@ -1108,7 +1103,7 @@ pub fn route_apply_policy_out(
 ) -> Option<BgpAttr> {
     // Apply prefix-set out.
     let config = peer.prefix_set.get(&InOut::Output);
-    if let Some(name) = &config.name {
+    if let Some(_name) = &config.name {
         let Some(prefix_set) = &config.prefix else {
             return None;
         };
@@ -1253,7 +1248,7 @@ impl Bgp {
             None,
             None,
         );
-        let (replaced, selected, next_id) = self.local_rib.update_route(prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.local_rib.update_route(prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = ConfigRef {

@@ -21,7 +21,7 @@ pub struct State {
     pub show: bool,
     pub clear: bool,
     pub paths: Vec<CommandPath>,
-    pub links: Vec<String>,
+    pub _links: Vec<String>,
     pub dynamic: HashMap<String, Vec<String>>,
     pub choice_states: HashMap<String, String>, // choice_name -> active_case_name
 }
@@ -36,7 +36,7 @@ impl State {
             clear: false,
             paths: Vec::new(),
             index: 0usize,
-            links: Vec::new(),
+            _links: Vec::new(),
             dynamic: HashMap::new(),
             choice_states: HashMap::new(),
         }

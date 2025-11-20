@@ -69,6 +69,7 @@ fn show_version(_config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, version_info.format_version())
 }
 
+#[allow(dead_code)]
 fn show_ip_route_prefix(_config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, String::from("show ip route prefix"))
 }
@@ -174,7 +175,7 @@ fn list(config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, output)
 }
 
-fn clear_bgp(config: &ConfigManager) -> (ExecCode, String) {
+fn clear_bgp(_config: &ConfigManager) -> (ExecCode, String) {
     let output = String::from("clear ip bgp");
     (ExecCode::Show, output)
 }

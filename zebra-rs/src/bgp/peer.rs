@@ -1,10 +1,9 @@
+#![allow(dead_code)]
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::str::FromStr;
 use std::time::Instant;
 
 use bytes::BytesMut;
-use ipnet::Ipv4Net;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -15,7 +14,6 @@ use bgp_packet::*;
 
 use caps::CapAs4;
 use caps::CapRefresh;
-use caps::CapRestart;
 use caps::CapabilityPacket;
 
 use crate::bgp::cap::cap_register_recv;
@@ -446,7 +444,7 @@ pub fn fsm_start(peer: &mut Peer) -> State {
     State::Connect
 }
 
-pub fn fsm_stop(peer: &mut Peer) -> State {
+pub fn fsm_stop(_peer: &mut Peer) -> State {
     State::Idle
 }
 
@@ -749,7 +747,7 @@ pub fn peer_send_open(peer: &mut Peer) {
         bgp_cap.addpath.insert(key, addpath.clone());
     }
     for (key, sub) in peer.config.sub.iter() {
-        if let Some(restart_time) = sub.graceful_restart {
+        if let Some(_restart_time) = sub.graceful_restart {
             let restart = RestartValue::new(1, key.afi, key.safi);
             bgp_cap.restart.insert(key.clone(), restart);
         }

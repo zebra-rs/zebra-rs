@@ -1,5 +1,5 @@
 pub mod set;
-pub use set::{PrefixSet, PrefixSetEntry};
+pub use set::PrefixSet;
 
 pub mod config;
 pub use config::PrefixSetConfig;

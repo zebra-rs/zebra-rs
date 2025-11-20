@@ -218,7 +218,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     if !nbr.naddr4.is_empty() {
         writeln!(buf, "    IP Prefixes")?;
     }
-    for (key, value) in &nbr.naddr4 {
+    for (_key, value) in &nbr.naddr4 {
         write!(buf, "      {}", value.addr)?;
         if let Some(label) = value.label {
             write!(buf, " ({})", label);

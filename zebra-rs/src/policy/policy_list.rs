@@ -142,11 +142,11 @@ impl ConfigBuilder {
 
         ConfigBuilder::default()
             .path("")
-            .set(|policy, cache, name, seq, args| {
+            .set(|policy, cache, name, _seq, _args| {
                 let _ = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 Ok(())
             })
-            .del(|policy, cache, name, seq, _args| {
+            .del(|policy, cache, name, _seq, _args| {
                 if let Some(list) = cache.get_mut(&name) {
                     list.delete = true;
                 } else {
@@ -157,7 +157,7 @@ impl ConfigBuilder {
                 Ok(())
             })
             .path("/entry")
-            .set(|policy, cache, name, seq, args| {
+            .set(|policy, cache, name, _seq, _args| {
                 let _ = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 Ok(())
             })

@@ -178,6 +178,7 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+#[allow(dead_code)]
 fn config_rtc(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Rtc);
@@ -361,13 +362,14 @@ impl Bgp {
         self.callbacks.insert(neighbor_prefix + path, cb);
     }
 
+    #[allow(dead_code)]
     fn callback_afi_safi(&mut self, path: &str, cb: Callback) {
         let neighbor_prefix = String::from("/routing/bgp/neighbor");
         self.callbacks.insert(neighbor_prefix + path, cb);
     }
 
-    fn timer(&mut self, path: &str, cb: Callback) {
-        let prefix = String::from("/routing/bgp/neighbor/timers");
+    fn timer(&mut self, _path: &str, _cb: Callback) {
+        let _prefix = String::from("/routing/bgp/neighbor/timers");
     }
 
     pub fn callback_build(&mut self) {

@@ -8,9 +8,8 @@ use serde::Serialize;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
-use super::peer::{self, Peer, PeerCounter, PeerParam, State};
+use super::peer::{Peer, PeerCounter, PeerParam, State};
 use super::route::AdjRibTable;
-use super::{InOuts, PrefixSetValue};
 use crate::bgp::route::{BgpRibType, RibDirection};
 use crate::config::Args;
 
@@ -209,7 +208,7 @@ struct BgpVpnv4RouteJson {
     label: u32,
 }
 
-fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
+fn show_bgp(bgp: &Bgp, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut routes: Vec<BgpRouteJson> = Vec::new();
 
@@ -255,7 +254,7 @@ fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, st
     buf.push_str(SHOW_BGP_HEADER);
 
     for (key, value) in bgp.local_rib.v4.0.iter() {
-        for (i, rib) in value.iter().enumerate() {
+        for (_i, rib) in value.iter().enumerate() {
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
             let internal = if rib.typ == BgpRibType::IBGP {
@@ -290,7 +289,7 @@ fn show_bgp(bgp: &Bgp, args: Args, json: bool) -> std::result::Result<String, st
 
 fn show_bgp_vpnv4(
     bgp: &Bgp,
-    args: Args,
+    _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
@@ -356,7 +355,7 @@ fn show_bgp_vpnv4(
             writeln!(buf, "Route Distinguisher: {}", key)?;
         }
         for (k, v) in value.0.iter() {
-            for (i, rib) in v.iter().enumerate() {
+            for (_i, rib) in v.iter().enumerate() {
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
                 let internal = if rib.typ == BgpRibType::IBGP {
@@ -400,7 +399,7 @@ fn show_bgp_vpnv4(
 
 fn show_adj_rib_routes_vpnv4<D: RibDirection>(
     routes: &BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
-    router_id: Ipv4Addr,
+    _router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
@@ -460,13 +459,13 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
     writeln!(
         buf,
         "     Network          Next Hop            Metric LocPrf Weight Path"
-    );
+    )?;
     for (key, value) in routes.iter() {
         if value.0.len() > 0 {
             writeln!(buf, "Route Distinguisher: {}", key)?;
         }
         for (k, v) in value.0.iter() {
-            for (i, rib) in v.iter().enumerate() {
+            for (_i, rib) in v.iter().enumerate() {
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
                 let internal = if rib.typ == BgpRibType::IBGP {
@@ -553,7 +552,7 @@ use crate::rib::util::IpAddrExt;
 fn show_bgp_route_entry(
     bgp: &Bgp,
     mut args: Args,
-    json: bool,
+    _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
 
@@ -788,7 +787,7 @@ fn show_bgp_received(
 
 fn show_bgp_summary(
     bgp: &Bgp,
-    args: Args,
+    _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     show_bgp_instance(bgp)
@@ -1123,20 +1122,20 @@ fn show_community_list(
 }
 
 fn show_bgp_l2vpn_evpn(
-    bgp: &Bgp,
-    args: Args,
+    _bgp: &Bgp,
+    _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let mut out = String::new();
+    let out = String::new();
     Ok(out)
 }
 
 fn show_evpn_vni_all(
-    bgp: &Bgp,
+    _bgp: &Bgp,
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let mut out = String::from("EVPN output here");
+    let out = String::from("EVPN output here");
     Ok(out)
 }
 
