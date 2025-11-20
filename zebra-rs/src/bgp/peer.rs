@@ -17,16 +17,17 @@ use caps::CapRefresh;
 use caps::CapabilityPacket;
 
 use crate::bgp::cap::cap_register_recv;
-use crate::bgp::route::{In, Out, route_clean, route_sync};
+use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::timer;
+use crate::bgp::{AdjRib, In, Out};
 use crate::config::Args;
 use crate::context::task::*;
 use crate::{bgp_debug, bgp_info, rib};
 
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
+use super::route::LocalRib;
 use super::route::route_from_peer;
-use super::route::{AdjRib, LocalRib};
 use super::{BGP_PORT, PrefixSetValue};
 use super::{Bgp, InOuts};
 
@@ -108,7 +109,7 @@ pub struct PeerConfig {
     pub four_octet: bool,
     pub mp: AfiSafis<bool>,
     pub restart: AfiSafis<RestartValue>,
-    pub llgr: AfiSafis<LLGRValue>,
+    pub llgr: AfiSafis<LlgrValue>,
     pub addpath: AfiSafis<AddPathValue>,
     // XXX Legacy
     pub graceful_restart: Option<u16>,
@@ -777,7 +778,7 @@ pub fn peer_send_open(peer: &mut Peer) {
             bgp_cap.restart.insert(key.clone(), restart);
         }
         if let Some(llgr_time) = sub.llgr {
-            let llgr = LLGRValue::new(key.afi, key.safi, llgr_time);
+            let llgr = LlgrValue::new(key.afi, key.safi, llgr_time);
             bgp_cap.llgr.insert(key.clone(), llgr);
         }
     }
