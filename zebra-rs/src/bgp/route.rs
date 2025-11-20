@@ -41,7 +41,7 @@ impl RibDirection for Out {
 }
 
 #[derive(Debug)]
-pub struct AdjRibTable<D: RibDirection = In>(pub PrefixMap<Ipv4Net, Vec<BgpRib>>, PhantomData<D>);
+pub struct AdjRibTable<D: RibDirection>(pub PrefixMap<Ipv4Net, Vec<BgpRib>>, PhantomData<D>);
 
 impl<D: RibDirection> AdjRibTable<D> {
     pub fn new() -> Self {
@@ -108,7 +108,7 @@ impl<D: RibDirection> AdjRibTable<D> {
 
 // BGP Adj-RIB - stores routes with direction-specific ID handling
 #[derive(Debug)]
-pub struct AdjRib<D: RibDirection = In> {
+pub struct AdjRib<D: RibDirection> {
     // IPv4 unicast
     pub v4: AdjRibTable<D>,
     // IPv4 VPN
@@ -123,13 +123,6 @@ impl<D: RibDirection> AdjRib<D> {
             v4vpn: BTreeMap::new(),
             _phantom: PhantomData,
         }
-    }
-}
-
-// Default implementation for AdjRib<In>
-impl Default for AdjRib<In> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -148,22 +141,22 @@ impl<D: RibDirection> AdjRib<D> {
 
     // Add a route to Adj-RIB-In
     pub fn add_route_in(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
-        self.v4.add_route_in(prefix, route)
+        self.v4.add_route(prefix, route)
     }
 
     // Add a route to Adj-RIB-In
     pub fn add_route_out(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
-        self.v4.add_route_out(prefix, route)
+        self.v4.add_route(prefix, route)
     }
 
     // Remove a route from Adj-RIB-In
     pub fn remove_route_in(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
-        self.v4.remove_route_in(prefix, id)
+        self.v4.remove_route(prefix, id)
     }
 
     // Remove a route from Adj-RIB-Out
     pub fn remove_route_out(&mut self, prefix: Ipv4Net, local_id: u32) -> Option<BgpRib> {
-        self.v4.remove_route_out(prefix, local_id)
+        self.v4.remove_route(prefix, local_id)
     }
 
     // Check table has prefix.
@@ -181,7 +174,7 @@ impl<D: RibDirection> AdjRib<D> {
         self.v4vpn
             .entry(rd.clone())
             .or_default()
-            .add_route_in(prefix, route)
+            .add_route(prefix, route)
     }
 
     // Add a route to Adj-RIB-In
@@ -195,9 +188,9 @@ impl<D: RibDirection> AdjRib<D> {
             self.v4vpn
                 .entry(rd.clone())
                 .or_default()
-                .add_route_in(prefix, route)
+                .add_route(prefix, route)
         } else {
-            self.v4.add_route_in(prefix, route)
+            self.v4.add_route(prefix, route)
         }
     }
 
@@ -211,7 +204,7 @@ impl<D: RibDirection> AdjRib<D> {
         self.v4vpn
             .entry(rd.clone())
             .or_default()
-            .remove_route_in(prefix, id)
+            .remove_route(prefix, id)
     }
 
     // Add a route to Adj-RIB-In
@@ -224,7 +217,7 @@ impl<D: RibDirection> AdjRib<D> {
         self.v4vpn
             .entry(rd.clone())
             .or_default()
-            .add_route_out(prefix, route)
+            .add_route(prefix, route)
     }
 
     // Add a route to Adj-RIB-In
@@ -237,7 +230,7 @@ impl<D: RibDirection> AdjRib<D> {
         self.v4vpn
             .entry(rd.clone())
             .or_default()
-            .remove_route_out(prefix, local_id)
+            .remove_route(prefix, local_id)
     }
 
     // Check table has prefix.

@@ -19,7 +19,7 @@ use caps::CapRestart;
 use caps::CapabilityPacket;
 
 use crate::bgp::cap::cap_register_recv;
-use crate::bgp::route::{route_clean, route_sync, In, Out};
+use crate::bgp::route::{In, Out, route_clean, route_sync};
 use crate::bgp::timer;
 use crate::config::Args;
 use crate::context::task::*;
