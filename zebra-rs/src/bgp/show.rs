@@ -986,8 +986,23 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.timer_recv.hold_time,
         neighbor.timer_recv.keepalive,
     )?;
+
     if neighbor.state == "Established" {
         writeln!(out, "  Neighbor Capabilities:")?;
+
+        if neighbor.cap_send.as4.is_some() || neighbor.cap_recv.as4.is_some() {
+            write!(out, "    4 Octet AS:")?;
+            if neighbor.cap_send.as4.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.as4.is_some() {
+                if neighbor.cap_send.as4.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
         if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
             if cap.send || cap.recv {
@@ -1018,6 +1033,148 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 writeln!(out, "    IPv4 RTC: {}", cap.desc())?;
             }
         }
+
+        if !neighbor.cap_send.restart.is_empty() || !neighbor.cap_recv.restart.is_empty() {
+            writeln!(out, "    Graceful Restart Capability:")?;
+
+            // Collect all AFI/SAFI pairs from both send and recv
+            let mut all_afi_safis = std::collections::BTreeSet::new();
+            for key in neighbor.cap_send.restart.keys() {
+                all_afi_safis.insert(key);
+            }
+            for key in neighbor.cap_recv.restart.keys() {
+                all_afi_safis.insert(key);
+            }
+
+            // Display each AFI/SAFI pair
+            for afi_safi in all_afi_safis {
+                let afi_safi_str = match (afi_safi.afi, afi_safi.safi) {
+                    (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
+                    (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
+                    (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
+                    (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    _ => continue, // Skip unknown combinations
+                };
+
+                let send_val = neighbor.cap_send.restart.get(afi_safi);
+                let recv_val = neighbor.cap_recv.restart.get(afi_safi);
+
+                write!(out, "      {}: ", afi_safi_str)?;
+
+                match (send_val, recv_val) {
+                    (Some(send), Some(recv)) => {
+                        writeln!(
+                            out,
+                            "advertised(restart time:{}) and received(restart time:{})",
+                            send.flag_time.restart_time(),
+                            recv.flag_time.restart_time()
+                        )?;
+                    }
+                    (Some(send), None) => {
+                        writeln!(
+                            out,
+                            "advertised(restart time:{})",
+                            send.flag_time.restart_time()
+                        )?;
+                    }
+                    (None, Some(recv)) => {
+                        writeln!(
+                            out,
+                            "received(restart time:{})",
+                            recv.flag_time.restart_time()
+                        )?;
+                    }
+                    (None, None) => {} // Should not happen
+                }
+            }
+        }
+
+        if !neighbor.cap_send.llgr.is_empty() || !neighbor.cap_recv.llgr.is_empty() {
+            //
+        }
+
+        if !neighbor.cap_send.path_limit.is_empty() || !neighbor.cap_recv.path_limit.is_empty() {
+            //
+        }
+
+        if neighbor.cap_send.extended.is_some() || neighbor.cap_recv.extended.is_some() {
+            write!(out, "    Extended Message:")?;
+            if neighbor.cap_send.extended.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.extended.is_some() {
+                if neighbor.cap_send.extended.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.refresh.is_some() || neighbor.cap_recv.refresh.is_some() {
+            write!(out, "    Route Refresh:")?;
+            if neighbor.cap_send.refresh.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.refresh.is_some() {
+                if neighbor.cap_send.refresh.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.enhanced_refresh.is_some()
+            || neighbor.cap_recv.enhanced_refresh.is_some()
+        {
+            write!(out, "    Enhanced Route Refresh:")?;
+            if neighbor.cap_send.enhanced_refresh.is_some() {
+                write!(out, " advertised")?;
+            } else if neighbor.cap_recv.enhanced_refresh.is_some() {
+                if neighbor.cap_send.enhanced_refresh.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received")?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.fqdn.is_some() || neighbor.cap_recv.fqdn.is_some() {
+            write!(out, "    Hostname Capability:")?;
+            if let Some(v) = &neighbor.cap_send.fqdn {
+                write!(
+                    out,
+                    " advertised (name:{}, domain:{})",
+                    v.hostname(),
+                    v.domain()
+                )?;
+            } else if let Some(v) = &neighbor.cap_recv.fqdn {
+                if neighbor.cap_send.fqdn.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(
+                    out,
+                    " received (name:{}, domain:{})",
+                    v.hostname(),
+                    v.domain()
+                )?;
+            }
+            writeln!(out, "")?;
+        }
+
+        if neighbor.cap_send.version.is_some() || neighbor.cap_recv.version.is_some() {
+            write!(out, "    Version Capability:")?;
+            if let Some(v) = &neighbor.cap_send.version {
+                write!(out, " advertised ({})", v.version())?;
+            } else if let Some(v) = &neighbor.cap_recv.version {
+                if neighbor.cap_send.version.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received ({})", v.version(),)?;
+            }
+            writeln!(out, "")?;
+        }
+
         writeln!(out, "")?;
     }
     writeln!(
