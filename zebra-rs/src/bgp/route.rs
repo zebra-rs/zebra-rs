@@ -141,23 +141,20 @@ impl<D: RibDirection> AdjRib<D> {
         }
     }
 
-    // Count all v4vpn len for AdjRibTable.
-    pub fn count_v4vpn(&self) -> usize {
-        self.v4vpn.values().map(|table| table.0.len()).sum()
+    pub fn count(&self, afi: Afi, safi: Safi) -> usize {
+        match (afi, safi) {
+            (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
+            (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
+            (_, _) => 0,
+        }
     }
 
     // Check table has prefix.
-    pub fn contains_key(&self, prefix: &Ipv4Net) -> bool {
-        self.v4.0.contains_key(prefix)
-    }
-
-    // Check table has prefix.
-    pub fn contains_key_vpn(&mut self, rd: &RouteDistinguisher, prefix: &Ipv4Net) -> bool {
-        self.v4vpn
-            .entry(rd.clone())
-            .or_default()
-            .0
-            .contains_key(prefix)
+    pub fn contains_key(&mut self, rd: Option<RouteDistinguisher>, prefix: &Ipv4Net) -> bool {
+        match rd {
+            Some(rd) => self.v4vpn.entry(rd).or_default().0.contains_key(prefix),
+            None => self.v4.0.contains_key(prefix),
+        }
     }
 }
 
@@ -684,9 +681,9 @@ fn route_withdraw_from_addpath(
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
         if let Some(ref rd) = rd {
-            route_withdraw_vpnv4(peer, rd, prefix, removed.local_id);
+            route_withdraw_ipv4(peer, Some(rd.clone()), prefix, removed.local_id);
         } else {
-            route_withdraw_ipv4(peer, prefix, removed.local_id);
+            route_withdraw_ipv4(peer, None, prefix, removed.local_id);
         }
         peer.adj_out.remove(rd, prefix, removed.local_id);
     }
@@ -765,16 +762,9 @@ fn route_advertise_to_peers(
             }
             _ => {
                 // Send withdrawal if we had previously advertised
-                if let Some(ref rd) = rd {
-                    if peer.adj_out.contains_key_vpn(rd, &prefix) {
-                        route_withdraw_vpnv4(peer, rd, prefix, 0);
-                        peer.adj_out.remove(Some(rd.clone()), prefix, 0);
-                    }
-                } else {
-                    if peer.adj_out.contains_key(&prefix) {
-                        route_withdraw_ipv4(peer, prefix, 0);
-                        peer.adj_out.remove(None, prefix, 0);
-                    }
+                if peer.adj_out.contains_key(rd, &prefix) {
+                    route_withdraw_ipv4(peer, rd, prefix, 0);
+                    peer.adj_out.remove(rd, prefix, 0);
                 }
             }
         }
@@ -782,33 +772,24 @@ fn route_advertise_to_peers(
 }
 
 // Send BGP withdrawal for a prefix
-fn route_withdraw_ipv4(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
+fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: Ipv4Net, id: u32) {
     let mut update = UpdatePacket::new();
 
-    let nlri = Ipv4Nlri { id, prefix };
-    update.ipv4_withdraw.push(nlri);
-
-    // Convert to bytes and send
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send BGP Withdrawal to {}: {}", peer.address, e);
+    match rd {
+        Some(rd) => {
+            let vpnv4_nlri = Vpnv4Nlri {
+                label: Label::default(),
+                rd,
+                nlri: Ipv4Nlri { id, prefix },
+            };
+            let mp_withdraw = MpNlriUnreachAttr::Vpnv4(vec![vpnv4_nlri]);
+            update.mp_withdraw = Some(mp_withdraw);
+        }
+        None => {
+            let nlri = Ipv4Nlri { id, prefix };
+            update.ipv4_withdraw.push(nlri);
         }
     }
-}
-
-// Send BGP withdrawal for a prefix
-fn route_withdraw_vpnv4(peer: &mut Peer, rd: &RouteDistinguisher, prefix: Ipv4Net, id: u32) {
-    let mut update = UpdatePacket::new();
-
-    let vpnv4_nlri = Vpnv4Nlri {
-        label: Label::default(),
-        rd: rd.clone(),
-        nlri: Ipv4Nlri { id, prefix },
-    };
-    let mp_withdraw = MpNlriUnreachAttr::Vpnv4(vec![vpnv4_nlri]);
-    update.mp_withdraw = Some(mp_withdraw);
 
     // Convert to bytes and send
     let bytes: BytesMut = update.into();

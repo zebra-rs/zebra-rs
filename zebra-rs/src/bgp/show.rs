@@ -26,8 +26,8 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
     // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
     // let pfx_rcvd = peer.adj_rib_in.v4.0.len() as u64;
     // let pfx_sent = peer.adj_rib_out.v4.0.len() as u64;
-    let pfx_rcvd = peer.adj_in.count_v4vpn() as u64;
-    let pfx_sent = peer.adj_out.count_v4vpn() as u64;
+    let pfx_rcvd = peer.adj_in.count(Afi::Ip, Safi::MplsVpn) as u64;
+    let pfx_sent = peer.adj_out.count(Afi::Ip, Safi::MplsVpn) as u64;
 
     let updown = uptime(&peer.instant);
     let state = if peer.state != State::Established {
