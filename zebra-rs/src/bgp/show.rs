@@ -9,8 +9,7 @@ use serde::Serialize;
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{Peer, PeerCounter, PeerParam, State};
-use super::route::AdjRibTable;
-use crate::bgp::route::{BgpRibType, RibDirection};
+use crate::bgp::{AdjRibTable, BgpRibType, RibDirection};
 use crate::config::Args;
 
 fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
