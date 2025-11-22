@@ -1,0 +1,6 @@
+.*.swp
+/.vscode
+/target
+Cargo.lock
+CLAUDE.md
+.claude

@@ -1,0 +1,40 @@
+[package]
+name = "isis-packet"
+version = "0.6.3"
+description = "Parser for the IS-IS protocol"
+license = "MIT/Apache-2.0"
+keywords = ["IS-IS","routing","protocol","parser","nom"]
+homepage = "https://github.com/zebra-rs/isis-packet"
+repository = "https://github.com/zebra-rs/isis-packet.git"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
+categories = ["parser-implementations"]
+readme = "README.md"
+edition = "2024"
+
+include = [
+  "LICENSE-*",
+  "README.md",
+  ".gitignore",
+  "Cargo.toml",
+  "src/*.rs",
+  "tests/*.rs",
+]
+
+[dependencies]
+bitfield-struct = "0.11"
+byteorder = "1.5"
+bytes = "1.9"
+fletcher = "1.0.0"
+hex = "0.4.3"
+ipnet = { version = "2.10", features = ["serde"] }
+itertools = "0.14.0"
+nom = "8"
+nom-derive = { git = "https://github.com/rust-bakery/nom-derive", branch = "master" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+strum = "0.27.2"
+strum_macros = "0.27.2"
+thiserror = "1.0"
+
+[dev-dependencies]
+hex-literal = "1.0"

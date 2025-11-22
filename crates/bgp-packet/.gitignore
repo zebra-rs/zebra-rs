@@ -1,0 +1,17 @@
+.*.swp
+/.vscode
+/target
+Cargo.lock
+
+# macOS
+.DS_Store
+
+# CLAUDE CODE
+CLAUDE.md
+.claude
+
+# OpenAI Codex
+AGENTS.md
+
+# IntelliJ
+.idea
