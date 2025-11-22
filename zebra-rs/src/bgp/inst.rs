@@ -318,7 +318,7 @@ impl Bgp {
                 };
                 if policy_type == policy::PolicyType::PrefixSetOut {
                     let config = peer.prefix_set.get_mut(&InOut::Output);
-                    config.prefix = prefix;
+                    config.prefix_set = prefix;
                 }
             }
         }

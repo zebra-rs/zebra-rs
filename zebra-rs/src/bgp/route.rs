@@ -7,6 +7,8 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
+use crate::policy::PolicyList;
+
 use super::cap::CapAfiMap;
 use super::peer::{ConfigRef, Peer, PeerType};
 use super::{Bgp, InOut};
@@ -85,11 +87,7 @@ pub struct LocalRibTable(
 );
 
 impl LocalRibTable {
-    pub fn update_route(
-        &mut self,
-        prefix: Ipv4Net,
-        rib: BgpRib,
-    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+    pub fn update(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
         let candidates = self.0.entry(prefix).or_default();
 
         // Find if we're replacing an existing route (same peer ident and path ID)
@@ -127,7 +125,7 @@ impl LocalRibTable {
         (replaced, selected, next_id)
     }
 
-    pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
+    pub fn remove(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
         let candidates = self.0.entry(prefix).or_default();
         let removed: Vec<BgpRib> = candidates
             .extract_if(.., |r| r.ident == ident && r.remote_id == id)
@@ -299,16 +297,30 @@ pub struct LocalRib {
 }
 
 impl LocalRib {
-    pub fn update_route(
+    // Update LocalRIB route.
+    pub fn update(
         &mut self,
+        rd: Option<RouteDistinguisher>,
         prefix: Ipv4Net,
         rib: BgpRib,
     ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.v4.update_route(prefix, rib)
+        match rd {
+            Some(rd) => self.v4vpn.entry(rd).or_default().update(prefix, rib),
+            None => self.v4.update(prefix, rib),
+        }
     }
 
-    pub fn remove_route(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
-        self.v4.remove_route(prefix, id, ident)
+    pub fn remove(
+        &mut self,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        id: u32,
+        ident: IpAddr,
+    ) -> Vec<BgpRib> {
+        match rd {
+            Some(rd) => self.v4vpn.entry(rd).or_default().remove(prefix, id, ident),
+            None => self.v4.remove(prefix, id, ident),
+        }
     }
 
     pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRib> {
@@ -318,32 +330,6 @@ impl LocalRib {
     // Return selected best path, not the change history.
     pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
         self.v4.select_best_path(prefix)
-    }
-
-    // VRF update.
-    pub fn update_route_vpn(
-        &mut self,
-        rd: &RouteDistinguisher,
-        prefix: Ipv4Net,
-        rib: BgpRib,
-    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.v4vpn
-            .entry(rd.clone())
-            .or_default()
-            .update_route(prefix, rib)
-    }
-
-    pub fn remove_route_vpn(
-        &mut self,
-        rd: &RouteDistinguisher,
-        prefix: Ipv4Net,
-        id: u32,
-        ident: IpAddr,
-    ) -> Vec<BgpRib> {
-        self.v4vpn
-            .entry(rd.clone())
-            .or_default()
-            .remove_route(prefix, id, ident)
     }
 
     // Return selected best path, not the change history.
@@ -448,15 +434,11 @@ pub fn route_ipv4_update(
     }
 
     // Perform BGP Path selection.
-    let (_replaced, selected, next_id) = if let Some(ref rd) = rd {
-        bgp.local_rib.update_route_vpn(rd, nlri.prefix, rib.clone())
-    } else {
-        bgp.local_rib.update_route(nlri.prefix, rib.clone())
-    };
+    let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
     // Advertise to peers if best path changed.
     if !selected.is_empty() {
-        route_advertise_to_peers(rd.clone(), nlri.prefix, &selected, peer_ident, bgp, peers);
+        route_advertise_to_peers(rd, nlri.prefix, &selected, peer_ident, bgp, peers);
     }
     rib.local_id = next_id;
     route_advertise_to_addpath(rd, nlri.prefix, &rib, peer_ident, bgp, peers);
@@ -655,27 +637,20 @@ fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: 
 }
 
 pub fn route_ipv4_withdraw(
-    peer_id: IpAddr,
+    ident: IpAddr,
     nlri: &Ipv4Nlri,
     rd: Option<RouteDistinguisher>,
     _label: Option<Label>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
-    // TODO: fill in data.
-    let peer_ident = {
-        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+    {
+        let peer = peers.get_mut(&ident).expect("peer must exist");
         peer.adj_in.remove(rd, nlri.prefix, nlri.id);
-        peer.ident
-    };
+    }
 
     // BGP Path selection - this may select a new best path
-    let mut removed = if let Some(ref rd) = rd {
-        bgp.local_rib
-            .remove_route_vpn(rd, nlri.prefix, nlri.id, peer_ident)
-    } else {
-        bgp.local_rib.remove_route(nlri.prefix, nlri.id, peer_ident)
-    };
+    let mut removed = bgp.local_rib.remove(rd, nlri.prefix, nlri.id, ident);
 
     // Re-run best path selection and advertise changes
     let selected = if let Some(ref rd) = rd {
@@ -684,10 +659,10 @@ pub fn route_ipv4_withdraw(
         bgp.local_rib.select_best_path(nlri.prefix)
     };
     if !selected.is_empty() || !removed.is_empty() {
-        route_advertise_to_peers(rd.clone(), nlri.prefix, &selected, peer_ident, bgp, peers);
+        route_advertise_to_peers(rd.clone(), nlri.prefix, &selected, ident, bgp, peers);
     }
     if let Some(removed) = removed.pop() {
-        route_withdraw_from_addpath(rd, nlri.prefix, &removed, peer_ident, bgp, peers);
+        route_withdraw_from_addpath(rd, nlri.prefix, &removed, ident, bgp, peers);
     }
 }
 
@@ -954,6 +929,57 @@ pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
     }
 }
 
+pub fn policy_list_apply(
+    policy_list: &PolicyList,
+    nlri: &Ipv4Nlri,
+    mut bgp_attr: BgpAttr,
+) -> Option<BgpAttr> {
+    let mut matched: Option<bool> = None;
+    for (_, entry) in policy_list.entry.iter() {
+        if let Some(prefix_set) = &entry.prefix_set {
+            if prefix_set.matches(nlri.prefix) {
+                matched = Some(true);
+            } else {
+                matched = Some(false);
+            }
+        }
+        // If we matched to the statement or no match statement at all.
+        match matched {
+            None | Some(true) => {
+                if let Some(med) = &entry.med {
+                    bgp_attr.med = Some(Med { med: *med });
+                }
+            }
+            Some(false) => {
+                //
+            }
+        }
+    }
+    None
+}
+
+pub fn route_apply_policy_in(
+    peer: &mut Peer,
+    nlri: &Ipv4Nlri,
+    bgp_attr: BgpAttr,
+) -> Option<BgpAttr> {
+    let config = peer.prefix_set.get(&InOut::Input);
+    if config.name.is_some()
+        && let Some(prefix_set) = &config.prefix_set
+    {
+        if !prefix_set.matches(nlri.prefix) {
+            return None;
+        }
+    }
+    let config = peer.policy_list.get(&InOut::Input);
+    if config.name.is_some()
+        && let Some(policy_list) = &config.policy_list
+    {
+        return policy_list_apply(policy_list, nlri, bgp_attr);
+    }
+    Some(bgp_attr)
+}
+
 pub fn route_apply_policy_out(
     peer: &mut Peer,
     nlri: &Ipv4Nlri,
@@ -962,7 +988,7 @@ pub fn route_apply_policy_out(
     // Apply prefix-set out.
     let config = peer.prefix_set.get(&InOut::Output);
     if let Some(_name) = &config.name {
-        let Some(prefix_set) = &config.prefix else {
+        let Some(prefix_set) = &config.prefix_set else {
             return None;
         };
         if !prefix_set.matches(nlri.prefix) {
@@ -1106,7 +1132,7 @@ impl Bgp {
             None,
             None,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update_route(prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = ConfigRef {
@@ -1125,7 +1151,7 @@ impl Bgp {
     pub fn route_del(&mut self, prefix: Ipv4Net) {
         let ident = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         let id = 0;
-        let removed = self.local_rib.remove_route(prefix, id, ident);
+        let removed = self.local_rib.remove(None, prefix, id, ident);
 
         let mut bgp_ref = ConfigRef {
             router_id: &self.router_id,
