@@ -1,0 +1,34 @@
+[package]
+name = "ospf-packet"
+version = "0.5.4"
+description = "Parser for the OSPFv2 and OSPFv3 protocol"
+license = "MIT/Apache-2.0"
+keywords = ["OSPF","routing","protocol","parser","nom"]
+homepage = "https://github.com/zebra-rs/ospf-packet"
+repository = "https://github.com/zebra-rs/ospf-packet.git"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
+categories = ["parser-implementations"]
+readme = "README.md"
+edition = "2018"
+
+include = [
+  "LICENSE-*",
+  "README.md",
+  ".gitignore",
+  "Cargo.toml",
+  "src/*.rs",
+  "tests/*.rs",
+]
+
+
+[dependencies]
+bitfield-struct = "0.11.0"
+byteorder = "1.5"
+bytes = "1.9"
+internet-checksum = "0.2.1"
+ipnet = "2.10"
+nom = "8"
+nom-derive = { git = "https://github.com/rust-bakery/nom-derive", branch = "master" }
+
+[dev-dependencies]
+hex-literal = "1.0"

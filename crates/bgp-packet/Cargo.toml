@@ -1,0 +1,42 @@
+[package]
+name = "bgp-packet"
+version = "0.8.3"
+description = "Parser for the BGP protocol"
+license = "MIT/Apache-2.0"
+keywords = ["BGP","routing","protocol","parser","nom"]
+homepage = "https://github.com/zebra-rs/bgp-packet"
+repository = "https://github.com/zebra-rs/bgp-packet.git"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
+categories = ["parser-implementations"]
+readme = "README.md"
+edition = "2024"
+
+include = [
+  "LICENSE-*",
+  "README.md",
+  ".gitignore",
+  "Cargo.toml",
+  "src/*.rs",
+  "tests/*.rs",
+]
+
+
+[dependencies]
+bitfield-struct = "0.11.0"
+bitflags = "2.6.0"
+byteorder = "1.5"
+bytes = "1.9"
+ipnet = { version = "2.10", features = ["serde"] }
+itertools = "0.14.0"
+nom = "8"
+nom-derive = { git = "https://github.com/rust-bakery/nom-derive", branch = "master" }
+num_enum = "0.7.5"
+regex = "1.11.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+strum = "0.27.2"
+strum_macros = "0.27.2"
+thiserror = "1.0"
+
+[dev-dependencies]
+hex-literal = "1.0"
