@@ -361,7 +361,7 @@ pub fn route_apply_policy_in(
             return None;
         }
     }
-    let config = peer.policy_list.get(&InOut::Output);
+    let config = peer.policy_list.get(&InOut::Input);
     if config.name.is_some() {
         let Some(policy_list) = &config.policy_list else {
             return None;
@@ -439,8 +439,8 @@ pub fn route_ipv4_update(
         return;
     }
 
-    // Create BGP RIB with weight value 0. XXX We are going to include
-    // BgpNexthop as part of BgpAttr. Since we want to consolidate BGP updates.
+    // Create BGP RIB with weight value 0. We are going to include BgpNexthop as
+    // part of BgpAttr. Since we want to consolidate BGP updates.
     let mut rib = BgpRib::new(
         peer_ident,
         peer_router_id,

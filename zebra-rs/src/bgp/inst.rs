@@ -316,7 +316,10 @@ impl Bgp {
                 let Some(peer) = self.peers.get_mut(&ident) else {
                     return;
                 };
-                if policy_type == policy::PolicyType::PrefixSetOut {
+                if policy_type == policy::PolicyType::PrefixSetIn {
+                    let config = peer.prefix_set.get_mut(&InOut::Input);
+                    config.prefix_set = prefix_set;
+                } else if policy_type == policy::PolicyType::PrefixSetOut {
                     let config = peer.prefix_set.get_mut(&InOut::Output);
                     config.prefix_set = prefix_set;
                 }
@@ -332,6 +335,9 @@ impl Bgp {
                 };
                 if policy_type == policy::PolicyType::PolicyListIn {
                     let config = peer.policy_list.get_mut(&InOut::Input);
+                    config.policy_list = policy_list;
+                } else if policy_type == policy::PolicyType::PolicyListOut {
+                    let config = peer.policy_list.get_mut(&InOut::Output);
                     config.policy_list = policy_list;
                 }
             }
