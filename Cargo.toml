@@ -5,6 +5,9 @@ members = [
   "zctl",
   "cli-helper",
   "zmcp-server",
+  "crates/bgp-packet",
+  "crates/isis-packet",
+  "crates/ospf-packet",
 ]
 
 [workspace.package]
