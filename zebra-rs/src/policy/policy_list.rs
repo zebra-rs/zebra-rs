@@ -8,7 +8,7 @@ use crate::config::{Args, ConfigOp};
 
 use super::{Policy, PrefixSet};
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyList {
     pub entry: BTreeMap<u32, PolicyEntry>,
     pub default_action: Option<PolicyAction>,
@@ -25,7 +25,7 @@ impl PolicyList {
     }
 }
 
-#[derive(EnumString, Clone, Debug)]
+#[derive(EnumString, Clone, Debug, PartialEq)]
 pub enum PolicyAction {
     #[strum(serialize = "accept")]
     Accept,
@@ -35,7 +35,7 @@ pub enum PolicyAction {
     Reject,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyEntry {
     // Match.
     pub prefix_set_name: Option<String>,

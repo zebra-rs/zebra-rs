@@ -346,8 +346,33 @@ impl LocalRib {
 }
 
 // RIB update from peer.
+pub fn route_apply_policy_in(
+    peer: &mut Peer,
+    nlri: &Ipv4Nlri,
+    bgp_attr: BgpAttr,
+) -> Option<BgpAttr> {
+    // Apply prefix-set out.
+    let config = peer.prefix_set.get(&InOut::Input);
+    if config.name.is_some() {
+        let Some(prefix_set) = &config.prefix_set else {
+            return None;
+        };
+        if !prefix_set.matches(nlri.prefix) {
+            return None;
+        }
+    }
+    let config = peer.policy_list.get(&InOut::Output);
+    if config.name.is_some() {
+        let Some(policy_list) = &config.policy_list else {
+            return None;
+        };
+        return policy_list_apply(policy_list, nlri, bgp_attr);
+    }
+    Some(bgp_attr)
+}
+
 pub fn route_ipv4_update(
-    peer_id: IpAddr,
+    ident: IpAddr,
     nlri: &Ipv4Nlri,
     rd: Option<RouteDistinguisher>,
     label: Option<Label>,
@@ -358,7 +383,7 @@ pub fn route_ipv4_update(
 ) {
     // Validate and extract peer information in a separate scope to release the borrow
     let (peer_ident, peer_router_id, typ, should_process) = {
-        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+        let peer = peers.get_mut(&ident).expect("peer must exist");
 
         // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
         // This prevents routing loops by detecting if the route has already passed through this AS
@@ -428,12 +453,20 @@ pub fn route_ipv4_update(
     );
 
     // Register to peer's AdjRibIn and update stats
-    {
-        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+    let attr = {
+        let peer = peers.get_mut(&ident).expect("peer must exist");
         peer.adj_in.add(rd, nlri.prefix, rib.clone());
-    }
+
+        // Apply policy.
+        route_apply_policy_in(peer, nlri, attr.clone())
+    };
 
     // Perform BGP Path selection.
+    let Some(attr) = attr else {
+        route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers);
+        return;
+    };
+    rib.attr = attr;
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
     // Advertise to peers if best path changed.
@@ -949,6 +982,7 @@ pub fn policy_list_apply(
                 if let Some(med) = &entry.med {
                     bgp_attr.med = Some(Med { med: *med });
                 }
+                return Some(bgp_attr);
             }
             Some(false) => {
                 //
@@ -956,28 +990,6 @@ pub fn policy_list_apply(
         }
     }
     None
-}
-
-pub fn route_apply_policy_in(
-    peer: &mut Peer,
-    nlri: &Ipv4Nlri,
-    bgp_attr: BgpAttr,
-) -> Option<BgpAttr> {
-    let config = peer.prefix_set.get(&InOut::Input);
-    if config.name.is_some()
-        && let Some(prefix_set) = &config.prefix_set
-    {
-        if !prefix_set.matches(nlri.prefix) {
-            return None;
-        }
-    }
-    let config = peer.policy_list.get(&InOut::Input);
-    if config.name.is_some()
-        && let Some(policy_list) = &config.policy_list
-    {
-        return policy_list_apply(policy_list, nlri, bgp_attr);
-    }
-    Some(bgp_attr)
 }
 
 pub fn route_apply_policy_out(

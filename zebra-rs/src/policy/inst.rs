@@ -10,7 +10,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixSet, PrefixSetConfig};
+use super::{PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
@@ -53,7 +53,13 @@ pub enum PolicyRx {
         name: String,
         ident: IpAddr,
         policy_type: PolicyType,
-        prefix: Option<PrefixSet>,
+        prefix_set: Option<PrefixSet>,
+    },
+    PolicyList {
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
+        policy_list: Option<PolicyList>,
     },
 }
 
@@ -85,7 +91,7 @@ impl Syncer for &mut Policy {
                         name: name.clone(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
-                        prefix: Some(prefix_set.clone()),
+                        prefix_set: Some(prefix_set.clone()),
                     };
                     let _ = tx.send(msg);
                 }
@@ -102,7 +108,7 @@ impl Syncer for &mut Policy {
                         name: name.clone(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
-                        prefix: None,
+                        prefix_set: None,
                     };
                     let _ = tx.send(msg);
                 }
@@ -167,14 +173,14 @@ impl Policy {
                     }
                     PolicyType::PrefixSetOut => {
                         // We need to lookup corresponding prefix-set.
-                        if let Some(prefix) = self.prefix_set.config.get(&name) {
+                        if let Some(prefix_list) = self.prefix_set.config.get(&name) {
                             // Advertise.
                             if let Some(tx) = self.clients.get(&proto) {
                                 let msg = PolicyRx::PrefixSet {
                                     name: name.clone(),
                                     ident,
                                     policy_type,
-                                    prefix: Some(prefix.clone()),
+                                    prefix_set: Some(prefix_list.clone()),
                                 };
                                 let _ = tx.send(msg);
                             }
@@ -187,7 +193,18 @@ impl Policy {
                         self.watch_prefix.entry(name).or_default().push(watch);
                     }
                     PolicyType::PolicyListIn => {
-                        println!("policy in");
+                        if let Some(policy_list) = self.policy_config.config.get(&name) {
+                            println!("XXX policy_list {name} found in policy");
+                            if let Some(tx) = self.clients.get(&proto) {
+                                let msg = PolicyRx::PolicyList {
+                                    name: name.clone(),
+                                    ident,
+                                    policy_type,
+                                    policy_list: Some(policy_list.clone()),
+                                };
+                                let _ = tx.send(msg);
+                            }
+                        }
                     }
                     PolicyType::PolicyListOut => {
                         println!("policy in");
