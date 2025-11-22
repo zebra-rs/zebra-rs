@@ -634,7 +634,15 @@ module config {
         leaf "name" {
           type string;
         }
+        leaf "default-action" {
+          ext:sort "10";
+          type enumeration {
+            enum accept;
+            enum reject;
+          }
+        }
         list entry {
+          ext:sort "5";
           key "number";
           leaf "number" {
             type uint32;
@@ -647,10 +655,6 @@ module config {
             leaf "community-set" {
               type string;
             }
-          }
-          leaf "apply" {
-            ext:sort "5";
-            type string;
           }
           container "set" {
             ext:sort "3";
@@ -672,7 +676,6 @@ module config {
               enum pass;
             }
           }
-
         }
       }
     }

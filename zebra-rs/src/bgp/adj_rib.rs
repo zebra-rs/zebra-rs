@@ -88,8 +88,6 @@ pub struct AdjRib<D: RibDirection> {
     pub v4: AdjRibTable<D>,
     // IPv4 VPN
     pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
-    // Phantom data for direction.
-    _phantom: PhantomData<D>,
 }
 
 impl<D: RibDirection> AdjRib<D> {
@@ -97,7 +95,6 @@ impl<D: RibDirection> AdjRib<D> {
         Self {
             v4: AdjRibTable::new(),
             v4vpn: BTreeMap::new(),
-            _phantom: PhantomData,
         }
     }
 }
