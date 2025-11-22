@@ -11,6 +11,7 @@ use super::Policy;
 #[derive(Default, Clone)]
 pub struct PolicyList {
     entry: BTreeMap<u32, PolicyEntry>,
+    default_action: Option<PolicyAction>,
     pub delete: bool,
 }
 
@@ -38,7 +39,6 @@ pub enum PolicyAction {
 pub struct PolicyEntry {
     prefix_set: Option<String>,
     community_set: Option<String>,
-    apply: Option<String>,
     local_pref: Option<u32>,
     med: Option<u32>,
     action: Option<PolicyAction>,
@@ -71,9 +71,12 @@ impl PolicyConfig {
             .context(CONFIG_ERR)?;
 
         let name = args.string().context(POLICY_NAME_ERR)?;
-        let seq = args.u32().context(ENTRY_SEQ_ERR)?;
-
-        handler(&mut self.config, &mut self.cache, name, seq, &mut args)
+        if !path.starts_with("/entry") {
+            handler(&mut self.config, &mut self.cache, name, 0, &mut args)
+        } else {
+            let seq = args.u32().context(ENTRY_SEQ_ERR)?;
+            handler(&mut self.config, &mut self.cache, name, seq, &mut args)
+        }
     }
 
     pub fn commit(&mut self) {
@@ -198,22 +201,6 @@ impl ConfigBuilder {
                 entry.community_set = None;
                 Ok(())
             })
-            .path("/entry/apply")
-            .set(|policy, cache, name, seq, args| {
-                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
-                let entry = list.entry(seq);
-
-                let apply = args.string().context(ARG_ERR)?;
-                entry.apply = Some(apply);
-
-                Ok(())
-            })
-            .del(|policy, cache, name, seq, _args| {
-                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
-                let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.apply = None;
-                Ok(())
-            })
             .path("/entry/set/local-preference")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -253,6 +240,20 @@ impl ConfigBuilder {
 
                 let action: PolicyAction = args.string().context(ARG_ERR)?.parse()?;
                 entry.action = Some(action);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.action = None;
+                Ok(())
+            })
+            .path("/default-action")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let default_action = args.string().context(ARG_ERR)?;
+                println!("Default-action for {name} => {default_action}");
 
                 Ok(())
             })
