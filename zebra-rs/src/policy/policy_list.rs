@@ -37,10 +37,13 @@ pub enum PolicyAction {
 
 #[derive(Default, Clone)]
 pub struct PolicyEntry {
+    // Match.
     prefix_set: Option<String>,
     community_set: Option<String>,
+    // Set.
     local_pref: Option<u32>,
     med: Option<u32>,
+    // Action.
     action: Option<PolicyAction>,
 }
 
