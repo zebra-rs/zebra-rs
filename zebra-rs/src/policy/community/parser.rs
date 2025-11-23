@@ -64,11 +64,8 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
         )));
     }
     if input.starts_with("rt:") {
-        let value_str = &input[3..]; // Skip "rt:" prefix
-
         // Try to parse as exact route target (e.g., "rt:100:200" or "rt:1.2.3.4:100")
-        // Note: from_str expects old format "rt 100:200" but to_string returns "rt:100:200"
-        if let Ok(ext_com) = ExtCommunity::from_str(&format!("rt {}", value_str)) {
+        if let Ok(ext_com) = ExtCommunity::from_str(input) {
             // Successfully parsed as exact extended community
             if let Some(first) = ext_com.0.first() {
                 return Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(
@@ -78,6 +75,7 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
         }
 
         // If exact parse failed, treat as regex pattern (e.g., "rt:^62692:.*$")
+        let value_str = &input[3..]; // Skip "rt:" prefix for regex pattern
         return Some(CommunityMatcher::Extended(ExtendedMatcher::Regex(
             ExtCommunitySubType::RouteTarget,
             value_str.to_string(),
@@ -85,11 +83,8 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
     }
 
     if input.starts_with("soo:") {
-        let value_str = &input[4..]; // Skip "soo:" prefix
-
-        // Try to parse as exact site of origin
-        // Note: from_str expects old format "soo 100:200" but to_string returns "soo:100:200"
-        if let Ok(ext_com) = ExtCommunity::from_str(&format!("soo {}", value_str)) {
+        // Try to parse as exact site of origin (e.g., "soo:100:200")
+        if let Ok(ext_com) = ExtCommunity::from_str(input) {
             if let Some(first) = ext_com.0.first() {
                 return Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(
                     first.clone(),
@@ -98,6 +93,7 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
         }
 
         // If exact parse failed, treat as regex pattern
+        let value_str = &input[4..]; // Skip "soo:" prefix for regex pattern
         return Some(CommunityMatcher::Extended(ExtendedMatcher::Regex(
             ExtCommunitySubType::RouteOrigin,
             value_str.to_string(),

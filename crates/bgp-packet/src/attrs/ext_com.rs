@@ -178,13 +178,21 @@ mod tests {
 
     #[test]
     fn parse() {
+        // Test new colon-prefixed format
+        let ecom: ExtCommunity = ExtCommunity::from_str("rt:100:200").unwrap();
+        assert_eq!(ecom.to_string(), "rt:100:200");
+
+        let ecom: ExtCommunity = ExtCommunity::from_str("soo:1.2.3.4:200").unwrap();
+        assert_eq!(ecom.to_string(), "soo:1.2.3.4:200");
+
+        let ecom: ExtCommunity = ExtCommunity::from_str("rt:1.2.3.4:100 soo:10:100").unwrap();
+        assert_eq!(ecom.to_string(), "rt:1.2.3.4:100 soo:10:100");
+
+        // Test backward compatibility with old space-separated format
         let ecom: ExtCommunity = ExtCommunity::from_str("rt 100:200").unwrap();
         assert_eq!(ecom.to_string(), "rt:100:200");
 
         let ecom: ExtCommunity = ExtCommunity::from_str("soo 1.2.3.4:200").unwrap();
         assert_eq!(ecom.to_string(), "soo:1.2.3.4:200");
-
-        let ecom: ExtCommunity = ExtCommunity::from_str("rt 1.2.3.4:100 soo 10:100").unwrap();
-        assert_eq!(ecom.to_string(), "rt:1.2.3.4:100 soo:10:100");
     }
 }
