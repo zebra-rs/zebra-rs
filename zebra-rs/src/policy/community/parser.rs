@@ -1,39 +1,62 @@
-// We are going to implement policy configuration for "community-set".
-// The community-set can be matched to either Community or ExtCommunity.
+// BGP Community Matcher Implementation
 //
-// Below is a matching for route-target of BGP extended community attribute.
+// This module provides parsing and matching functionality for BGP community-set
+// policy configuration. Community-sets can match either standard BGP communities
+// or extended communities (route-target, site-of-origin).
 //
-// community-set TENANT-A-REGEX {
-//   member {
-//     rt:^62692:.*$;
-//   };
-// }
+// # Supported Formats
 //
+// ## Extended Community Matching
+//
+// Route Target (exact match):
+// ```
 // community-set TENANT-A {
 //   member {
-//     soo:62692:100;
+//     rt:62692:100;        // ASN:value format
+//     rt:1.2.3.4:100;      // IP:value format
 //   };
 // }
+// ```
 //
-// BGP Extended community attribute, The prefix could be "rt:" or "soo:" or "opaque:".
+// Route Target (regex match):
+// ```
+// community-set TENANT-A-REGEX {
+//   member {
+//     rt:^62692:.*$;       // Match all communities from AS 62692
+//     rt:62692:.*0$;       // Match communities ending with 0
+//   };
+// }
+// ```
 //
-// Below is a example of Community match.
+// Site of Origin:
+// ```
+// community-set TENANT-B {
+//   member {
+//     soo:62692:100;       // Exact match
+//     soo:^100:.*$;        // Regex match
+//   };
+// }
+// ```
 //
+// ## Standard Community Matching
+//
+// Well-known communities:
+// ```
 // community-set TENANT-A-COM {
 //   member {
-//     62692:100;
+//     no-export;           // Well-known community value
 //   };
 // }
+// ```
 //
-// Community can have wellknown community value such as "no-export". We can have
-// multiple of member value. In that case,
+// Note: Standard community exact/regex matching (e.g., 62692:100) is not yet implemented.
 //
-// community-set TENANT-A-COM {
-//   member {
-//     62692:100;
-//     no-export;
-//   };
-// }
+// # Implementation Details
+//
+// - Extended communities support both exact and regex pattern matching
+// - Regex patterns are applied to the value portion after the prefix (rt:/soo:)
+// - Subtype filtering ensures rt: patterns only match route-target communities
+// - Invalid regex patterns return false without panicking
 
 use std::str::FromStr;
 
