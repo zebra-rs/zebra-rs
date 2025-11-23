@@ -337,6 +337,26 @@ mod tests {
         // Test that soo regex doesn't match rt values
         let matcher = parse_community_set("soo:62692:.*").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
+
+        // Test that rt regex matches with $.
+        let matcher = parse_community_set("rt:62692:.*$").unwrap();
+        assert!(match_community_set(&matcher, &bgp_attr));
+
+        // Test that rt regex matches with $.
+        let matcher = parse_community_set("rt:62692:.*0$").unwrap();
+        assert!(match_community_set(&matcher, &bgp_attr));
+
+        // Test that rt regex matches with $.
+        let matcher = parse_community_set("rt:62692:.*1$").unwrap();
+        assert!(!match_community_set(&matcher, &bgp_attr));
+
+        // Test that rt regex matches with $.
+        let matcher = parse_community_set("rt:692:.*$").unwrap();
+        assert!(match_community_set(&matcher, &bgp_attr));
+
+        // Test that rt regex matches with $.
+        let matcher = parse_community_set("rt:^692:.*$").unwrap();
+        assert!(!match_community_set(&matcher, &bgp_attr));
     }
 
     #[test]
