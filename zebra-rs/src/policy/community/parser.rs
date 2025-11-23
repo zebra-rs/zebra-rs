@@ -67,6 +67,7 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
         let value_str = &input[3..]; // Skip "rt:" prefix
 
         // Try to parse as exact route target (e.g., "rt:100:200" or "rt:1.2.3.4:100")
+        // Note: from_str expects old format "rt 100:200" but to_string returns "rt:100:200"
         if let Ok(ext_com) = ExtCommunity::from_str(&format!("rt {}", value_str)) {
             // Successfully parsed as exact extended community
             if let Some(first) = ext_com.0.first() {
@@ -87,6 +88,7 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
         let value_str = &input[4..]; // Skip "soo:" prefix
 
         // Try to parse as exact site of origin
+        // Note: from_str expects old format "soo 100:200" but to_string returns "soo:100:200"
         if let Ok(ext_com) = ExtCommunity::from_str(&format!("soo {}", value_str)) {
             if let Some(first) = ext_com.0.first() {
                 return Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(
