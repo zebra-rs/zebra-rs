@@ -169,8 +169,12 @@ pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bo
                         // Only match communities of the correct subtype
                         if ext_com_val.low_type == target_low_type {
                             let ext_com_str = ext_com_val.to_string();
-                            if re.is_match(&ext_com_str) {
-                                return true;
+                            // Remove the prefix (e.g., "rt:" or "soo:") before matching
+                            // The to_string() produces "rt:100:200", but pattern is "^100:.*"
+                            if let Some(value_part) = ext_com_str.split_once(':') {
+                                if re.is_match(value_part.1) {
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -323,7 +327,7 @@ mod tests {
         bgp_attr.ecom = Some(ecom);
 
         // Test regex match - pattern should match rt:62692:*
-        let matcher = parse_community_set("rt:62692:.*").unwrap();
+        let matcher = parse_community_set("rt:^62692:.*").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test regex no match - different ASN pattern
