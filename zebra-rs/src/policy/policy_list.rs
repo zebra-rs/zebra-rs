@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use anyhow::{Context, Error, Result};
-use strum_macros::EnumString;
+use strum_macros::{Display, EnumString};
 
 use crate::config::{Args, ConfigOp};
 
@@ -25,7 +25,7 @@ impl PolicyList {
     }
 }
 
-#[derive(EnumString, Clone, Debug, PartialEq)]
+#[derive(EnumString, Display, Clone, Debug, PartialEq)]
 pub enum PolicyAction {
     #[strum(serialize = "accept")]
     Accept,
@@ -296,9 +296,15 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(prefix_set) = &entry.prefix_set_name {
                 writeln!(buf, "  match: prefix_set {}", prefix_set);
             }
+            if let Some(local_pref) = &entry.local_pref {
+                writeln!(buf, "  set: local-pref {}", local_pref);
+            }
             if let Some(med) = &entry.med {
                 writeln!(buf, "  set: med {}", med);
             }
+        }
+        if let Some(default_action) = &policy.default_action {
+            writeln!(buf, " default-action: {}", default_action);
         }
     }
     Ok(buf)
