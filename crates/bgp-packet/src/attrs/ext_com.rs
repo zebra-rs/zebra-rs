@@ -122,7 +122,7 @@ impl FromStr for ExtCommunity {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut ecom = ExtCommunity::default();
-        let tokens = tokenizer(String::from(s)).unwrap();
+        let tokens = tokenizer(String::from(s)).map_err(|_| ())?;
         let mut state = State::Unspec;
 
         for token in tokens.into_iter() {
