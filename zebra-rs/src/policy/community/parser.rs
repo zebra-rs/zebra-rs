@@ -103,6 +103,84 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
     None
 }
 
+pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bool {
+    match matcher {
+        CommunityMatcher::Standard(standard_matcher) => {
+            // Check standard community attribute
+            let Some(ref community) = bgp_attr.com else {
+                return false;
+            };
+
+            match standard_matcher {
+                StandardMatcher::Exact(target_value) => {
+                    // Check if the community list contains the exact value
+                    community.contains(&target_value.0)
+                }
+                StandardMatcher::Regex(pattern) => {
+                    // Convert all communities to strings and check against regex
+                    use regex::Regex;
+                    let Ok(re) = Regex::new(pattern) else {
+                        return false;
+                    };
+
+                    for &com_val in &community.0 {
+                        let com_str = CommunityValue(com_val).to_str();
+                        if re.is_match(&com_str) {
+                            return true;
+                        }
+                    }
+                    false
+                }
+            }
+        }
+        CommunityMatcher::Extended(extended_matcher) => {
+            // Check extended community attribute
+            let Some(ref ecom) = bgp_attr.ecom else {
+                return false;
+            };
+
+            match extended_matcher {
+                ExtendedMatcher::Exact(target_value) => {
+                    // Check if any extended community matches exactly
+                    for ext_com_val in &ecom.0 {
+                        if ext_com_val.high_type == target_value.high_type
+                            && ext_com_val.low_type == target_value.low_type
+                            && ext_com_val.val == target_value.val
+                        {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                ExtendedMatcher::Regex(sub_type, pattern) => {
+                    // Filter by subtype and match against regex
+                    use regex::Regex;
+                    let Ok(re) = Regex::new(pattern) else {
+                        return false;
+                    };
+
+                    let target_low_type: u8 = match sub_type {
+                        ExtCommunitySubType::RouteTarget => 0x02,
+                        ExtCommunitySubType::RouteOrigin => 0x03,
+                        ExtCommunitySubType::Opaque => 0x0c,
+                    };
+
+                    for ext_com_val in &ecom.0 {
+                        // Only match communities of the correct subtype
+                        if ext_com_val.low_type == target_low_type {
+                            let ext_com_str = ext_com_val.to_string();
+                            if re.is_match(&ext_com_str) {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
