@@ -159,11 +159,8 @@ pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bo
                         return false;
                     };
 
-                    let target_low_type: u8 = match sub_type {
-                        ExtCommunitySubType::RouteTarget => 0x02,
-                        ExtCommunitySubType::RouteOrigin => 0x03,
-                        ExtCommunitySubType::Opaque => 0x0c,
-                    };
+                    // Use IntoPrimitive derive to convert ExtCommunitySubType to u8
+                    let target_low_type: u8 = (*sub_type).into();
 
                     for ext_com_val in &ecom.0 {
                         // Only match communities of the correct subtype
