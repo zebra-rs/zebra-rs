@@ -42,14 +42,33 @@
 //
 // Well-known communities:
 // ```
-// community-set TENANT-A-COM {
+// community-set WELL-KNOWN {
 //   member {
 //     no-export;           // Well-known community value
+//     no-advertise;        // Another well-known value
 //   };
 // }
 // ```
 //
-// Note: Standard community exact/regex matching (e.g., 62692:100) is not yet implemented.
+// Standard community exact match:
+// ```
+// community-set TENANT-A-COM {
+//   member {
+//     100:200;             // Exact match for AS:value format
+//     65000:100;           // Another exact match
+//   };
+// }
+// ```
+//
+// Standard community regex match:
+// ```
+// community-set TENANT-A-REGEX {
+//   member {
+//     ^100:.*$;            // Match all communities from AS 100
+//     .*:200$;             // Match all communities with value 200
+//   };
+// }
+// ```
 //
 // # Implementation Details
 //
@@ -62,30 +81,25 @@ use std::str::FromStr;
 
 use bgp_packet::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub enum StandardMatcher {
     Exact(CommunityValue),
     Regex(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub enum ExtendedMatcher {
     Exact(ExtCommunityValue),
     Regex(ExtCommunitySubType, String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub enum CommunityMatcher {
     Standard(StandardMatcher),
     Extended(ExtendedMatcher),
 }
 
 pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
-    if input == "no-export" {
-        return Some(CommunityMatcher::Standard(StandardMatcher::Exact(
-            CommunityValue::NO_EXPORT,
-        )));
-    }
     if input.starts_with("rt:") {
         // Try to parse as exact route target (e.g., "rt:100:200" or "rt:1.2.3.4:100")
         if let Ok(ext_com) = ExtCommunity::from_str(input) {
@@ -123,7 +137,35 @@ pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
         )));
     }
 
-    None
+    // Check if input looks like a regex pattern (contains special regex chars)
+    let has_regex_chars = input.contains('^')
+        || input.contains('$')
+        || input.contains('*')
+        || input.contains('.')
+        || input.contains('[')
+        || input.contains(']')
+        || input.contains('(')
+        || input.contains(')')
+        || input.contains('|')
+        || input.contains('+')
+        || input.contains('?');
+
+    if has_regex_chars {
+        // Definitely a regex pattern
+        return Some(CommunityMatcher::Standard(StandardMatcher::Regex(
+            input.to_string(),
+        )));
+    }
+
+    // Try to parse as standard community (e.g., "100:200")
+    if let Some(com_val) = CommunityValue::from_readable_str(input) {
+        return Some(CommunityMatcher::Standard(StandardMatcher::Exact(com_val)));
+    }
+
+    // If it doesn't parse as exact value and no regex chars, treat as simple regex
+    Some(CommunityMatcher::Standard(StandardMatcher::Regex(
+        input.to_string(),
+    )))
 }
 
 pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bool {
@@ -290,8 +332,16 @@ mod tests {
         ]));
 
         // Test exact match - should find 100:200
-        let matcher = parse_community_set("100:200");
-        assert!(matcher.is_none()); // Note: standard community parsing not yet implemented
+        let matcher = parse_community_set("100:200").unwrap();
+        assert!(match_community_set(&matcher, &bgp_attr));
+
+        // Test exact match - should find 300:400
+        let matcher = parse_community_set("300:400").unwrap();
+        assert!(match_community_set(&matcher, &bgp_attr));
+
+        // Test no match - different value
+        let matcher = parse_community_set("500:600").unwrap();
+        assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test with no-export
         let matcher = parse_community_set("no-export").unwrap();
@@ -301,6 +351,34 @@ mod tests {
 
         // Test no match
         assert!(!match_community_set(&matcher, &bgp_attr));
+    }
+
+    #[test]
+    fn test_match_standard_community_regex() {
+        // Create a BGP attribute with standard communities
+        let mut bgp_attr = BgpAttr::new();
+        bgp_attr.com = Some(Community(vec![
+            CommunityValue::from_readable_str("100:200").unwrap().0,
+            CommunityValue::from_readable_str("100:300").unwrap().0,
+            CommunityValue::from_readable_str("200:400").unwrap().0,
+        ]));
+
+        // Test regex match - should match 100:*
+        let matcher = parse_community_set("^100:.*").unwrap();
+        assert!(match_community_set(&matcher, &bgp_attr));
+
+        // Test regex match with end anchor
+        let matcher = parse_community_set("100:.*0$").unwrap();
+        assert!(match_community_set(&matcher, &bgp_attr));
+
+        // Test regex no match
+        let matcher = parse_community_set("^300:.*").unwrap();
+        assert!(!match_community_set(&matcher, &bgp_attr));
+
+        // Test regex partial match (without anchors) - matches substring
+        let matcher = parse_community_set(":200").unwrap();
+        // This should match "100:200" because it contains ":200"
+        assert!(match_community_set(&matcher, &bgp_attr));
     }
 
     #[test]

@@ -1,11 +1,14 @@
 // CommunitySet
 
+use std::collections::BTreeSet;
+
 use bgp_packet::BgpAttr;
 
 use super::{CommunityMatcher, match_community_set};
 
+#[derive(Default)]
 pub struct CommunitySet {
-    pub vals: Vec<CommunityMatcher>,
+    pub vals: BTreeSet<CommunityMatcher>,
     pub delete: bool,
 }
 

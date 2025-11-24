@@ -311,7 +311,7 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
 
 #[cfg(test)]
 mod tests {
-    use crate::policy::set::{PrefixSet, PrefixSetEntry};
+    use crate::policy::prefix::set::{PrefixSet, PrefixSetEntry};
 
     use super::*;
 

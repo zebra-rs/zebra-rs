@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 
@@ -64,7 +64,7 @@ type Handler = fn(
 fn config_get(clist: &BTreeMap<String, CommunitySet>, name: &String) -> CommunitySet {
     let Some(entry) = clist.get(name) else {
         return CommunitySet {
-            vals: Vec::new(),
+            vals: BTreeSet::new(),
             delete: false,
         };
     };
@@ -128,12 +128,13 @@ impl ConfigBuilder {
             })
             .path("/member")
             .set(|config, cache, name, args| {
-                let member_str = args.string().context(MEMBER_ERR)?;
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                while let Some(member_str) = args.string() {
+                    // Parse the community member string (e.g., "rt:100:200", "no-export", etc.)
+                    let matcher = parse_community_set(&member_str).context(MEMBER_ERR)?;
+                    set.vals.insert(matcher);
+                }
 
-                // Parse the community member string (e.g., "rt:100:200", "no-export", etc.)
-                let matcher = parse_community_set(&member_str).context(MEMBER_ERR)?;
-                set.vals.push(matcher);
                 Ok(())
             })
             .del(|config, cache, name, args| {

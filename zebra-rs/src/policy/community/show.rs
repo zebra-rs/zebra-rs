@@ -1,14 +1,14 @@
 use anyhow::{Context, Error};
 use std::fmt::Write;
 
+use super::{CommunityMatcher, ExtendedMatcher, StandardMatcher};
 use crate::{config::Args, policy::Policy};
-use super::{CommunityMatcher, StandardMatcher, ExtendedMatcher};
 
 pub fn community_set(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
     let mut buf = String::new();
 
     for (name, set) in policy.community_config.config.iter() {
-        writeln!(buf, "community-set: {}", name)?;
+        writeln!(buf, "community-set: {} len: {}", name, set.vals.len())?;
         for matcher in &set.vals {
             writeln!(buf, "  {}", format_community_matcher(matcher))?;
         }
