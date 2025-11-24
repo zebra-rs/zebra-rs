@@ -4,10 +4,10 @@ use itertools::Itertools;
 
 use crate::{
     Algo, IsLevel, IsisCsnp, IsisHello, IsisLsp, IsisLspEntry, IsisLspId, IsisNeighborId,
-    IsisPacket, IsisPdu, IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvHostname,
-    IsisTlvIpv4IfAddr, IsisTlvIpv6GlobalIfAddr, IsisTlvIpv6IfAddr, IsisTlvIpv6TeRouterId,
-    IsisTlvIsNeighbor, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding, IsisTlvProtoSupported,
-    IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
+    IsisP2pHello, IsisPacket, IsisPdu, IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr,
+    IsisTlvHostname, IsisTlvIpv4IfAddr, IsisTlvIpv6GlobalIfAddr, IsisTlvIpv6IfAddr,
+    IsisTlvIpv6TeRouterId, IsisTlvIsNeighbor, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding,
+    IsisTlvProtoSupported, IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
 };
 
 impl Display for IsisPacket {
@@ -42,6 +42,7 @@ impl Display for IsisPdu {
         match self {
             L1Hello(v) => write!(f, "{}", v),
             L2Hello(v) => write!(f, "{}", v),
+            P2pHello(v) => write!(f, "{}", v),
             L1Lsp(v) => write!(f, "{}", v),
             L2Lsp(v) => write!(f, "{}", v),
             L1Csnp(v) => write!(f, "{}", v),
@@ -112,6 +113,24 @@ impl Display for IsisHello {
             self.pdu_len,
             self.priority,
             self.lan_id
+        )?;
+        for tlv in self.tlvs.iter() {
+            write!(f, "\n{}", tlv)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for IsisP2pHello {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            r#" Circuit type: {}
+ Source ID: {}
+ Holding timer: {}
+ PDU length: {}
+ Local Circuit ID: {}"#,
+            self.circuit_type, self.source_id, self.hold_time, self.pdu_len, self.circuit_id,
         )?;
         for tlv in self.tlvs.iter() {
             write!(f, "\n{}", tlv)?;
@@ -391,8 +410,8 @@ impl Display for IsisTlvP2p3Way {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(
             f,
-            "  Three-Way Handshake : State:{}, Local circuit ID:{}, Neighbor:{}, Neighbor circuit ID:{}",
-            self.state, self.circuit_id, self.neighbor_id, self.neighbor_circuit_id
+            "  Three-Way Handshake : State:{}, Local circuit ID:{}",
+            self.state, self.circuit_id
         )
     }
 }

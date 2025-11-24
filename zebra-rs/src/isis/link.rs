@@ -18,7 +18,7 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlags, MacAddr};
 
 use super::config::IsisConfig;
-use super::ifsm::has_level;
+use super::ifsm::{self, has_level};
 use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::network::{read_packet, write_packet};
@@ -375,7 +375,7 @@ pub struct LinkState {
 
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
-    pub hello: Levels<Option<IsisHello>>,
+    pub hello: Levels<Option<IsisPdu>>,
 }
 
 impl LinkState {
@@ -659,10 +659,16 @@ pub fn config_link_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Optio
     let name = args.string()?;
     let link_type = args.string()?.parse::<LinkType>().ok()?;
 
-    let link = isis.links.get_mut_by_name(&name)?;
-    link.config.link_type = Some(link_type);
+    let ifindex = {
+        let link = isis.links.get_mut_by_name(&name)?;
+        link.config.link_type = Some(link_type);
+        link.state.ifindex
+    };
 
-    // TODO: need to reset link.
+    if let Some(mut top) = isis.link_top(ifindex) {
+        ifsm::hello_originate(&mut top, Level::L1);
+        ifsm::hello_originate(&mut top, Level::L2);
+    }
 
     Some(())
 }

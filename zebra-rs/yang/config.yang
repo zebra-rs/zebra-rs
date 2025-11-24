@@ -184,6 +184,7 @@ module config {
           ext:sort "-10";
           key "if-name";
           leaf if-name {
+            ext:dynamic "rib:interface";
             type string;
           }
 

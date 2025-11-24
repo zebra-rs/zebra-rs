@@ -83,17 +83,16 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     hello
 }
 
-pub fn hello_p2p_generate(ltop: &LinkTop, _level: Level) -> IsisHello {
+pub fn hello_p2p_generate(ltop: &LinkTop, _level: Level) -> IsisP2pHello {
     let source_id = ltop.up_config.net.sys_id();
 
     // P2P Hello doesn't use LAN ID
-    let mut hello = IsisHello {
+    let mut hello = IsisP2pHello {
         circuit_type: ltop.state.level(),
         source_id,
         hold_time: ltop.config.hold_time(),
         pdu_len: 0,
-        priority: 0,                       // Priority is not used in P2P
-        lan_id: IsisNeighborId::default(), // Empty for P2P
+        circuit_id: 0,
         tlvs: Vec::new(),
     };
 
@@ -121,6 +120,7 @@ pub fn hello_p2p_generate(ltop: &LinkTop, _level: Level) -> IsisHello {
 
     if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(ltop.state.mtu as usize);
+        println!("{}", hello);
     }
     hello
 }
@@ -141,15 +141,17 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
 pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     let hello = ltop.state.hello.get(&level).as_ref().context("")?;
 
-    let packet = if ltop.config.link_type() == LinkType::P2p {
-        // For P2P interfaces, use P2P Hello packet type but with same PDU structure
-        IsisPacket::from(IsisType::P2PHello, IsisPdu::L1Hello(hello.clone()))
-    } else {
-        // For LAN interfaces, use level-specific Hello packet types
-        match level {
-            Level::L1 => IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
-            Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
+    let packet = match hello {
+        IsisPdu::P2pHello(hello) => {
+            IsisPacket::from(IsisType::P2pHello, IsisPdu::P2pHello(hello.clone()))
         }
+        IsisPdu::L1Hello(hello) => {
+            IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone()))
+        }
+        IsisPdu::L2Hello(hello) => {
+            IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone()))
+        }
+        _ => return Ok(()),
     };
 
     let ifindex = ltop.state.ifindex;
@@ -244,9 +246,12 @@ pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
         );
 
         let hello = if ltop.config.link_type() == LinkType::P2p {
-            hello_p2p_generate(ltop, level)
+            IsisPdu::P2pHello(hello_p2p_generate(ltop, level))
         } else {
-            hello_generate(ltop, level)
+            match level {
+                Level::L1 => IsisPdu::L1Hello(hello_generate(ltop, level)),
+                Level::L2 => IsisPdu::L2Hello(hello_generate(ltop, level)),
+            }
         };
 
         *ltop.state.hello.get_mut(&level) = Some(hello);

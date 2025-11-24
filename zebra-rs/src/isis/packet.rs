@@ -700,7 +700,7 @@ pub fn process_packet(
     let link = top.links.get_mut(&ifindex).context("Interface not found")?;
 
     match packet.pdu_type {
-        IsisType::P2PHello => link.state.stats.rx.p2p_hello += 1,
+        IsisType::P2pHello => link.state.stats.rx.p2p_hello += 1,
         IsisType::L1Hello => link.state.stats.rx.hello.l1 += 1,
         IsisType::L2Hello => link.state.stats.rx.hello.l2 += 1,
         IsisType::L1Lsp => link.state.stats.rx.lsp.l1 += 1,
@@ -716,7 +716,7 @@ pub fn process_packet(
         IsisType::L1Hello | IsisType::L2Hello => {
             hello_recv(top, packet, ifindex, mac);
         }
-        IsisType::P2PHello => {
+        IsisType::P2pHello => {
             hello_p2p_recv(top, packet, ifindex, mac);
         }
         IsisType::L1Lsp | IsisType::L2Lsp => {
