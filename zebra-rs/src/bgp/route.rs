@@ -995,24 +995,32 @@ pub fn policy_list_apply(
     nlri: &Ipv4Nlri,
     mut bgp_attr: BgpAttr,
 ) -> Option<BgpAttr> {
-    let mut matched: Option<bool> = None;
     for (_, entry) in policy_list.entry.iter() {
+        let mut prefix_matched: Option<bool> = None;
         if let Some(prefix_set) = &entry.prefix_set {
             if prefix_set.matches(nlri.prefix) {
-                matched = Some(true);
+                prefix_matched = Some(true);
             } else {
-                matched = Some(false);
+                prefix_matched = Some(false);
+            }
+        }
+        let mut community_matched: Option<bool> = None;
+        if let Some(community_set) = &entry.community_set {
+            if community_set.matches(&bgp_attr) {
+                community_matched = Some(true);
+            } else {
+                community_matched = Some(false);
             }
         }
         // If we matched to the statement or no match statement at all.
-        match matched {
-            None | Some(true) => {
+        match (prefix_matched, community_matched) {
+            (None | Some(true), None | Some(true)) => {
                 if let Some(med) = &entry.med {
                     bgp_attr.med = Some(Med { med: *med });
                 }
                 return Some(bgp_attr);
             }
-            Some(false) => {
+            (_, _) => {
                 //
             }
         }
