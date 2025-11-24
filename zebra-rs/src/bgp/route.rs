@@ -463,7 +463,7 @@ pub fn route_ipv4_update(
 
     // Perform BGP Path selection.
     let Some(attr) = attr else {
-        route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers);
+        route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers, false);
         return;
     };
     rib.attr = attr;
@@ -676,10 +676,13 @@ pub fn route_ipv4_withdraw(
     _label: Option<Label>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
+    rib_in: bool,
 ) {
     {
-        let peer = peers.get_mut(&ident).expect("peer must exist");
-        peer.adj_in.remove(rd, nlri.prefix, nlri.id);
+        if rib_in {
+            let peer = peers.get_mut(&ident).expect("peer must exist");
+            peer.adj_in.remove(rd, nlri.prefix, nlri.id);
+        }
     }
 
     // BGP Path selection - this may select a new best path
@@ -717,7 +720,7 @@ pub fn route_from_peer(
     }
 
     for withdraw in packet.ipv4_withdraw.iter() {
-        route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers);
+        route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, true);
     }
     if let Some(mp_updates) = packet.mp_update
         && let Some(bgp_attr) = &packet.bgp_attr
@@ -757,6 +760,7 @@ pub fn route_from_peer(
                         Some(withdraw.label),
                         bgp,
                         peers,
+                        true,
                     );
                 }
             }
@@ -785,7 +789,7 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
         withdrawn
     };
     for withdraw in withdrawn.iter() {
-        route_ipv4_withdraw(peer_id, &withdraw, None, None, bgp, peers);
+        route_ipv4_withdraw(peer_id, &withdraw, None, None, bgp, peers, true);
     }
     let peer = peers.get_mut(&peer_id).expect("peer must exist");
     peer.adj_in.v4.0.clear();
@@ -821,6 +825,7 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
             Some(withdraw.label),
             bgp,
             peers,
+            true,
         );
     }
 
