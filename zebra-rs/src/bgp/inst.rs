@@ -67,7 +67,7 @@ pub struct Bgp {
     pub listen_task: Option<Task<()>>,
     pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
-    pub clist: CommunityListMap,
+    // pub clist: CommunityListMap,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
@@ -112,7 +112,7 @@ impl Bgp {
             listen_task: None,
             listen_task6: None,
             listen_err: None,
-            clist: CommunityListMap::new(),
+            // clist: CommunityListMap::new(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
@@ -175,9 +175,10 @@ impl Bgp {
                 let (path, args) = path_from_command(&msg.paths);
                 if let Some(f) = self.callbacks.get(&path) {
                     f(self, args, msg.op);
-                } else if let Some(f) = self.pcallbacks.get(&path) {
-                    f(&mut self.clist, args, msg.op);
                 }
+                // else if let Some(f) = self.pcallbacks.get(&path) {
+                //                    f(&mut self.clist, args, msg.op);
+                //                }
             }
             ConfigOp::CommitEnd => {
                 //
