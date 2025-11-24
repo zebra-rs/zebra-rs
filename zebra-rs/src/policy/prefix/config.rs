@@ -37,6 +37,7 @@ impl PrefixSetConfig {
         handler(&mut self.config, &mut self.cache, &name, &mut args)
     }
 
+    // TODO: can we move the code to here?
     // pub fn commit(&mut self, syncer: impl Syncer) {
     //     while let Some((name, s)) = self.cache.pop_first() {
     //         if s.delete {

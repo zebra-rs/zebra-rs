@@ -10,7 +10,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig};
+use super::{CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
@@ -125,6 +125,7 @@ pub struct Policy {
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
     pub prefix_set: PrefixSetConfig,
+    pub community_set: CommunitySetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
     pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
     pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
@@ -148,6 +149,7 @@ impl Policy {
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
             prefix_set: PrefixSetConfig::new(),
+            community_set: CommunitySetConfig::new(),
             clients: BTreeMap::new(),
             watch_prefix: BTreeMap::new(),
             watch_policy: BTreeMap::new(),
@@ -233,7 +235,7 @@ impl Policy {
                 }
             }
             ConfigOp::CommitEnd => {
-                // Commit prefix-set changes manually to avoid double borrow
+                // TODO: move this code to @zebra-rs/src/policy/prefix/config.rs
                 while let Some((name, s)) = self.prefix_set.cache.pop_first() {
                     if s.delete {
                         // Notify subscribed entity for prefix-set removal
