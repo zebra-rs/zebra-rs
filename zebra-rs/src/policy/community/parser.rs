@@ -62,19 +62,19 @@ use std::str::FromStr;
 
 use bgp_packet::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StandardMatcher {
     Exact(CommunityValue),
     Regex(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ExtendedMatcher {
     Exact(ExtCommunityValue),
     Regex(ExtCommunitySubType, String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CommunityMatcher {
     Standard(StandardMatcher),
     Extended(ExtendedMatcher),
