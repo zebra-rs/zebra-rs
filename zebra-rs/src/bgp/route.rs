@@ -351,7 +351,6 @@ pub fn route_apply_policy_in(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
 ) -> Option<BgpAttr> {
-    // Apply prefix-set out.
     let config = peer.prefix_set.get(&InOut::Input);
     if config.name.is_some() {
         let Some(prefix_set) = &config.prefix_set else {
@@ -361,13 +360,37 @@ pub fn route_apply_policy_in(
             return None;
         }
     }
-    let config = peer.policy_list.get(&InOut::Input);
+    // let config = peer.policy_list.get(&InOut::Input);
+    // if config.name.is_some() {
+    //     let Some(policy_list) = &config.policy_list else {
+    //         return None;
+    //     };
+    //     return policy_list_apply(policy_list, nlri, bgp_attr);
+    // }
+    Some(bgp_attr)
+}
+
+pub fn route_apply_policy_out(
+    peer: &mut Peer,
+    nlri: &Ipv4Nlri,
+    bgp_attr: BgpAttr,
+) -> Option<BgpAttr> {
+    let config = peer.prefix_set.get(&InOut::Output);
     if config.name.is_some() {
-        let Some(policy_list) = &config.policy_list else {
+        let Some(prefix_set) = &config.prefix_set else {
             return None;
         };
-        return policy_list_apply(policy_list, nlri, bgp_attr);
+        if !prefix_set.matches(nlri.prefix) {
+            return None;
+        }
     }
+    // let config = peer.policy_list.get(&InOut::Output);
+    // if config.name.is_some() {
+    //     let Some(policy_list) = &config.policy_list else {
+    //         return None;
+    //     };
+    //     return policy_list_apply(policy_list, nlri, bgp_attr);
+    // }
     Some(bgp_attr)
 }
 
@@ -995,24 +1018,6 @@ pub fn policy_list_apply(
         }
     }
     None
-}
-
-pub fn route_apply_policy_out(
-    peer: &mut Peer,
-    nlri: &Ipv4Nlri,
-    bgp_attr: BgpAttr,
-) -> Option<BgpAttr> {
-    // Apply prefix-set out.
-    let config = peer.prefix_set.get(&InOut::Output);
-    if let Some(_name) = &config.name {
-        let Some(prefix_set) = &config.prefix_set else {
-            return None;
-        };
-        if !prefix_set.matches(nlri.prefix) {
-            return None;
-        }
-    }
-    Some(bgp_attr)
 }
 
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
