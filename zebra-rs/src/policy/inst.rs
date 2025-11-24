@@ -165,8 +165,8 @@ pub struct Policy {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
-    pub prefix_set: PrefixSetConfig,
-    pub community_set: CommunitySetConfig,
+    pub prefix_config: PrefixSetConfig,
+    pub community_config: CommunitySetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
     pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
     pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
@@ -189,8 +189,8 @@ impl Policy {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
-            prefix_set: PrefixSetConfig::new(),
-            community_set: CommunitySetConfig::new(),
+            prefix_config: PrefixSetConfig::new(),
+            community_config: CommunitySetConfig::new(),
             clients: BTreeMap::new(),
             watch_prefix: BTreeMap::new(),
             watch_policy: BTreeMap::new(),
@@ -212,7 +212,7 @@ impl Policy {
             } => {
                 match policy_type {
                     PolicyType::PrefixSetIn | PolicyType::PrefixSetOut => {
-                        if let Some(prefix_set) = self.prefix_set.config.get(&name) {
+                        if let Some(prefix_set) = self.prefix_config.config.get(&name) {
                             // Advertise.
                             if let Some(tx) = self.clients.get(&proto) {
                                 let msg = PolicyRx::PrefixSet {
@@ -264,7 +264,9 @@ impl Policy {
                 if path.as_str().starts_with("/policy-options") {
                     self.policy_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/prefix-set") {
-                    self.prefix_set.exec(path, args, msg.op);
+                    self.prefix_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/community-set") {
+                    self.community_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -274,11 +276,14 @@ impl Policy {
                     clients: &self.clients,
                 };
                 PrefixSetConfig::commit(
-                    &mut self.prefix_set.config,
-                    &mut self.prefix_set.cache,
+                    &mut self.prefix_config.config,
+                    &mut self.prefix_config.cache,
                     syncer,
                 );
                 self.policy_config.commit();
+
+                // No need of sync with protocol.
+                self.community_config.commit();
             }
             _ => {}
         }
