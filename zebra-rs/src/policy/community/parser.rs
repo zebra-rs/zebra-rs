@@ -99,73 +99,77 @@ pub enum CommunityMatcher {
     Extended(ExtendedMatcher),
 }
 
-pub fn parse_community_set(input: &str) -> Option<CommunityMatcher> {
-    if input.starts_with("rt:") {
-        // Try to parse as exact route target (e.g., "rt:100:200" or "rt:1.2.3.4:100")
-        if let Ok(ext_com) = ExtCommunity::from_str(input) {
-            // Successfully parsed as exact extended community
-            if let Some(first) = ext_com.0.first() {
-                return Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(
-                    first.clone(),
-                )));
+impl FromStr for CommunityMatcher {
+    type Err = ();
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if input.starts_with("rt:") {
+            // Try to parse as exact route target (e.g., "rt:100:200" or "rt:1.2.3.4:100")
+            if let Ok(ext_com) = ExtCommunity::from_str(input) {
+                // Successfully parsed as exact extended community
+                if let Some(first) = ext_com.0.first() {
+                    return Ok(CommunityMatcher::Extended(ExtendedMatcher::Exact(
+                        first.clone(),
+                    )));
+                }
             }
+
+            // If exact parse failed, treat as regex pattern (e.g., "rt:^62692:.*$")
+            let value_str = &input[3..]; // Skip "rt:" prefix for regex pattern
+            return Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(
+                ExtCommunitySubType::RouteTarget,
+                value_str.to_string(),
+            )));
         }
 
-        // If exact parse failed, treat as regex pattern (e.g., "rt:^62692:.*$")
-        let value_str = &input[3..]; // Skip "rt:" prefix for regex pattern
-        return Some(CommunityMatcher::Extended(ExtendedMatcher::Regex(
-            ExtCommunitySubType::RouteTarget,
-            value_str.to_string(),
-        )));
-    }
-
-    if input.starts_with("soo:") {
-        // Try to parse as exact site of origin (e.g., "soo:100:200")
-        if let Ok(ext_com) = ExtCommunity::from_str(input) {
-            if let Some(first) = ext_com.0.first() {
-                return Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(
-                    first.clone(),
-                )));
+        if input.starts_with("soo:") {
+            // Try to parse as exact site of origin (e.g., "soo:100:200")
+            if let Ok(ext_com) = ExtCommunity::from_str(input) {
+                if let Some(first) = ext_com.0.first() {
+                    return Ok(CommunityMatcher::Extended(ExtendedMatcher::Exact(
+                        first.clone(),
+                    )));
+                }
             }
+
+            // If exact parse failed, treat as regex pattern
+            let value_str = &input[4..]; // Skip "soo:" prefix for regex pattern
+            return Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(
+                ExtCommunitySubType::RouteOrigin,
+                value_str.to_string(),
+            )));
         }
 
-        // If exact parse failed, treat as regex pattern
-        let value_str = &input[4..]; // Skip "soo:" prefix for regex pattern
-        return Some(CommunityMatcher::Extended(ExtendedMatcher::Regex(
-            ExtCommunitySubType::RouteOrigin,
-            value_str.to_string(),
-        )));
-    }
+        // Check if input looks like a regex pattern (contains special regex chars)
+        let has_regex_chars = input.contains('^')
+            || input.contains('$')
+            || input.contains('*')
+            || input.contains('.')
+            || input.contains('[')
+            || input.contains(']')
+            || input.contains('(')
+            || input.contains(')')
+            || input.contains('|')
+            || input.contains('+')
+            || input.contains('?');
 
-    // Check if input looks like a regex pattern (contains special regex chars)
-    let has_regex_chars = input.contains('^')
-        || input.contains('$')
-        || input.contains('*')
-        || input.contains('.')
-        || input.contains('[')
-        || input.contains(']')
-        || input.contains('(')
-        || input.contains(')')
-        || input.contains('|')
-        || input.contains('+')
-        || input.contains('?');
+        if has_regex_chars {
+            // Definitely a regex pattern
+            return Ok(CommunityMatcher::Standard(StandardMatcher::Regex(
+                input.to_string(),
+            )));
+        }
 
-    if has_regex_chars {
-        // Definitely a regex pattern
-        return Some(CommunityMatcher::Standard(StandardMatcher::Regex(
+        // Try to parse as standard community (e.g., "100:200")
+        if let Some(com_val) = CommunityValue::from_readable_str(input) {
+            return Ok(CommunityMatcher::Standard(StandardMatcher::Exact(com_val)));
+        }
+
+        // If it doesn't parse as exact value and no regex chars, treat as simple regex
+        Ok(CommunityMatcher::Standard(StandardMatcher::Regex(
             input.to_string(),
-        )));
+        )))
     }
-
-    // Try to parse as standard community (e.g., "100:200")
-    if let Some(com_val) = CommunityValue::from_readable_str(input) {
-        return Some(CommunityMatcher::Standard(StandardMatcher::Exact(com_val)));
-    }
-
-    // If it doesn't parse as exact value and no regex chars, treat as simple regex
-    Some(CommunityMatcher::Standard(StandardMatcher::Regex(
-        input.to_string(),
-    )))
 }
 
 pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bool {
@@ -254,9 +258,9 @@ mod tests {
 
     #[test]
     fn test_parse_no_export() {
-        let result = parse_community_set("no-export");
-        assert!(result.is_some());
-        if let Some(CommunityMatcher::Standard(StandardMatcher::Exact(val))) = result {
+        let result = CommunityMatcher::from_str("no-export");
+        assert!(result.is_ok());
+        if let Ok(CommunityMatcher::Standard(StandardMatcher::Exact(val))) = result {
             assert_eq!(val, CommunityValue::NO_EXPORT);
         } else {
             panic!("Expected Standard exact match for no-export");
@@ -265,9 +269,9 @@ mod tests {
 
     #[test]
     fn test_parse_rt_exact_asn() {
-        let result = parse_community_set("rt:100:200");
-        assert!(result.is_some());
-        if let Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(val))) = result {
+        let result = CommunityMatcher::from_str("rt:100:200");
+        assert!(result.is_ok());
+        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Exact(val))) = result {
             assert_eq!(val.low_type, 0x02); // Route Target
         } else {
             panic!("Expected Extended exact match for rt:100:200");
@@ -276,9 +280,9 @@ mod tests {
 
     #[test]
     fn test_parse_rt_exact_ip() {
-        let result = parse_community_set("rt:1.2.3.4:100");
-        assert!(result.is_some());
-        if let Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(val))) = result {
+        let result = CommunityMatcher::from_str("rt:1.2.3.4:100");
+        assert!(result.is_ok());
+        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Exact(val))) = result {
             assert_eq!(val.low_type, 0x02); // Route Target
         } else {
             panic!("Expected Extended exact match for rt:1.2.3.4:100");
@@ -287,10 +291,9 @@ mod tests {
 
     #[test]
     fn test_parse_rt_regex() {
-        let result = parse_community_set("rt:62692:.*");
-        assert!(result.is_some());
-        if let Some(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, pattern))) = result
-        {
+        let result = CommunityMatcher::from_str("rt:62692:.*");
+        assert!(result.is_ok());
+        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, pattern))) = result {
             assert_eq!(sub_type, ExtCommunitySubType::RouteTarget);
             assert_eq!(pattern, "62692:.*");
         } else {
@@ -300,9 +303,9 @@ mod tests {
 
     #[test]
     fn test_parse_soo_exact() {
-        let result = parse_community_set("soo:62692:100");
-        assert!(result.is_some());
-        if let Some(CommunityMatcher::Extended(ExtendedMatcher::Exact(val))) = result {
+        let result = CommunityMatcher::from_str("soo:62692:100");
+        assert!(result.is_ok());
+        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Exact(val))) = result {
             assert_eq!(val.low_type, 0x03); // Site of Origin
         } else {
             panic!("Expected Extended exact match for soo:62692:100");
@@ -311,10 +314,9 @@ mod tests {
 
     #[test]
     fn test_parse_soo_regex() {
-        let result = parse_community_set("soo:100:.*");
-        assert!(result.is_some());
-        if let Some(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, pattern))) = result
-        {
+        let result = CommunityMatcher::from_str("soo:100:.*");
+        assert!(result.is_ok());
+        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, pattern))) = result {
             assert_eq!(sub_type, ExtCommunitySubType::RouteOrigin);
             assert_eq!(pattern, "100:.*");
         } else {
@@ -332,19 +334,19 @@ mod tests {
         ]));
 
         // Test exact match - should find 100:200
-        let matcher = parse_community_set("100:200").unwrap();
+        let matcher = CommunityMatcher::from_str("100:200").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test exact match - should find 300:400
-        let matcher = parse_community_set("300:400").unwrap();
+        let matcher = CommunityMatcher::from_str("300:400").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test no match - different value
-        let matcher = parse_community_set("500:600").unwrap();
+        let matcher = CommunityMatcher::from_str("500:600").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test with no-export
-        let matcher = parse_community_set("no-export").unwrap();
+        let matcher = CommunityMatcher::from_str("no-export").unwrap();
         let mut bgp_attr_export = BgpAttr::new();
         bgp_attr_export.com = Some(Community(vec![CommunityValue::NO_EXPORT.0]));
         assert!(match_community_set(&matcher, &bgp_attr_export));
@@ -364,19 +366,19 @@ mod tests {
         ]));
 
         // Test regex match - should match 100:*
-        let matcher = parse_community_set("^100:.*").unwrap();
+        let matcher = CommunityMatcher::from_str("^100:.*").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test regex match with end anchor
-        let matcher = parse_community_set("100:.*0$").unwrap();
+        let matcher = CommunityMatcher::from_str("100:.*0$").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test regex no match
-        let matcher = parse_community_set("^300:.*").unwrap();
+        let matcher = CommunityMatcher::from_str("^300:.*").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test regex partial match (without anchors) - matches substring
-        let matcher = parse_community_set(":200").unwrap();
+        let matcher = CommunityMatcher::from_str(":200").unwrap();
         // This should match "100:200" because it contains ":200"
         assert!(match_community_set(&matcher, &bgp_attr));
     }
@@ -389,15 +391,15 @@ mod tests {
         bgp_attr.ecom = Some(ecom);
 
         // Test exact match - should find rt:100:200
-        let matcher = parse_community_set("rt:100:200").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:100:200").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test no match - different value
-        let matcher = parse_community_set("rt:100:300").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:100:300").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test no match - different type (soo instead of rt)
-        let matcher = parse_community_set("soo:100:200").unwrap();
+        let matcher = CommunityMatcher::from_str("soo:100:200").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
     }
 
@@ -409,11 +411,11 @@ mod tests {
         bgp_attr.ecom = Some(ecom);
 
         // Test exact match
-        let matcher = parse_community_set("rt:1.2.3.4:100").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:1.2.3.4:100").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test no match - different IP
-        let matcher = parse_community_set("rt:1.2.3.5:100").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:1.2.3.5:100").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
     }
 
@@ -425,35 +427,35 @@ mod tests {
         bgp_attr.ecom = Some(ecom);
 
         // Test regex match - pattern should match rt:62692:*
-        let matcher = parse_community_set("rt:^62692:.*").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:^62692:.*").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test regex no match - different ASN pattern
-        let matcher = parse_community_set("rt:99999:.*").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:99999:.*").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test that soo regex doesn't match rt values
-        let matcher = parse_community_set("soo:62692:.*").unwrap();
+        let matcher = CommunityMatcher::from_str("soo:62692:.*").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test that rt regex matches with $.
-        let matcher = parse_community_set("rt:62692:.*$").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:62692:.*$").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test that rt regex matches with $.
-        let matcher = parse_community_set("rt:62692:.*0$").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:62692:.*0$").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test that rt regex matches with $.
-        let matcher = parse_community_set("rt:62692:.*1$").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:62692:.*1$").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test that rt regex matches with $.
-        let matcher = parse_community_set("rt:692:.*$").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:692:.*$").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test that rt regex matches with $.
-        let matcher = parse_community_set("rt:^692:.*$").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:^692:.*$").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
     }
 
@@ -465,11 +467,11 @@ mod tests {
         bgp_attr.ecom = Some(ecom);
 
         // Test regex match - pattern should match soo:100:*
-        let matcher = parse_community_set("soo:100:.*").unwrap();
+        let matcher = CommunityMatcher::from_str("soo:100:.*").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Test regex no match
-        let matcher = parse_community_set("soo:200:.*").unwrap();
+        let matcher = CommunityMatcher::from_str("soo:200:.*").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
     }
 
@@ -479,11 +481,11 @@ mod tests {
         let bgp_attr = BgpAttr::new();
 
         // Test standard community matcher - should return false
-        let matcher = parse_community_set("no-export").unwrap();
+        let matcher = CommunityMatcher::from_str("no-export").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
 
         // Test extended community matcher - should return false
-        let matcher = parse_community_set("rt:100:200").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:100:200").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
     }
 
@@ -495,19 +497,19 @@ mod tests {
         bgp_attr.ecom = Some(ecom);
 
         // Should match first rt
-        let matcher = parse_community_set("rt:100:200").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:100:200").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Should match second rt (IP-based)
-        let matcher = parse_community_set("rt:1.2.3.4:300").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:1.2.3.4:300").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Should match soo
-        let matcher = parse_community_set("soo:400:500").unwrap();
+        let matcher = CommunityMatcher::from_str("soo:400:500").unwrap();
         assert!(match_community_set(&matcher, &bgp_attr));
 
         // Should not match non-existent value
-        let matcher = parse_community_set("rt:999:999").unwrap();
+        let matcher = CommunityMatcher::from_str("rt:999:999").unwrap();
         assert!(!match_community_set(&matcher, &bgp_attr));
     }
 

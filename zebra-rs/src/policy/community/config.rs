@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::config::{Args, ConfigOp};
+use crate::{
+    config::{Args, ConfigOp},
+    policy::CommunityMatcher,
+};
 
-use super::{CommunitySet, parse_community_set};
+use super::CommunitySet;
 
 #[derive(Default)]
 pub struct CommunitySetConfig {
@@ -131,8 +135,9 @@ impl ConfigBuilder {
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
                 while let Some(member_str) = args.string() {
                     // Parse the community member string (e.g., "rt:100:200", "no-export", etc.)
-                    let matcher = parse_community_set(&member_str).context(MEMBER_ERR)?;
-                    set.vals.insert(matcher);
+                    if let Ok(matcher) = CommunityMatcher::from_str(&member_str) {
+                        set.vals.insert(matcher);
+                    }
                 }
 
                 Ok(())
@@ -142,7 +147,7 @@ impl ConfigBuilder {
                 let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
 
                 // Parse the community member to find and remove it
-                if let Some(matcher) = parse_community_set(&member_str) {
+                if let Ok(matcher) = CommunityMatcher::from_str(&member_str) {
                     // Find and remove the matching member
                     // Note: We need to compare by debug representation since CommunityMatcher
                     // doesn't implement PartialEq
