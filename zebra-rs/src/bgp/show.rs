@@ -1351,24 +1351,24 @@ fn show_bgp_neighbor(
     Ok(out)
 }
 
-fn show_community_list(
-    bgp: &Bgp,
-    _args: Args,
-    _json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
-    let mut out = String::from("community-list");
-    for (name, clist) in bgp.clist.0.iter() {
-        writeln!(out, "name: {:?}", name)?;
-        for (seq, entry) in clist.entry.iter() {
-            writeln!(out, " seq: {}", seq)?;
-            if let Some(action) = &entry.action {
-                writeln!(out, " action: {:?}", action)?;
-            }
-        }
-    }
+// fn show_community_list(
+//     bgp: &Bgp,
+//     _args: Args,
+//     _json: bool,
+// ) -> std::result::Result<String, std::fmt::Error> {
+//     let mut out = String::from("community-list");
+//     for (name, clist) in bgp.clist.0.iter() {
+//         writeln!(out, "name: {:?}", name)?;
+//         for (seq, entry) in clist.entry.iter() {
+//             writeln!(out, " seq: {}", seq)?;
+//             if let Some(action) = &entry.action {
+//                 writeln!(out, " action: {:?}", action)?;
+//             }
+//         }
+//     }
 
-    Ok(out)
-}
+//     Ok(out)
+// }
 
 fn show_bgp_l2vpn_evpn(
     _bgp: &Bgp,
@@ -1413,7 +1413,7 @@ impl Bgp {
             show_bgp_received_vpnv4,
         );
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
-        self.show_add("/show/community-list", show_community_list);
+        // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
     }
 }

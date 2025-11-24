@@ -23,7 +23,7 @@ pub mod dynamic;
 pub use dynamic::CapDynamic;
 
 pub mod addpath;
-pub use addpath::{AddPathValue, CapAddPath};
+pub use addpath::{AddPathSendReceive, AddPathValue, CapAddPath};
 
 pub mod llgr;
 pub use llgr::{CapLlgr, LlgrValue};

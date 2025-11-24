@@ -10,7 +10,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{PolicyConfig, PrefixSet, PrefixSetConfig};
+use super::{CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
@@ -53,7 +53,13 @@ pub enum PolicyRx {
         name: String,
         ident: IpAddr,
         policy_type: PolicyType,
-        prefix: Option<PrefixSet>,
+        prefix_set: Option<PrefixSet>,
+    },
+    PolicyList {
+        name: String,
+        ident: IpAddr,
+        policy_type: PolicyType,
+        policy_list: Option<PolicyList>,
     },
 }
 
@@ -75,7 +81,12 @@ pub trait Syncer {
     fn prefix_set_remove(&self, name: &String);
 }
 
-impl Syncer for &mut Policy {
+pub struct PolicySyncer<'a> {
+    watch_prefix: &'a BTreeMap<String, Vec<PolicyWatch>>,
+    clients: &'a BTreeMap<String, UnboundedSender<PolicyRx>>,
+}
+
+impl<'a> Syncer for PolicySyncer<'a> {
     fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
         // Notify all watchers of this prefix-set update
         if let Some(watches) = self.watch_prefix.get(name) {
@@ -85,7 +96,7 @@ impl Syncer for &mut Policy {
                         name: name.clone(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
-                        prefix: Some(prefix_set.clone()),
+                        prefix_set: Some(prefix_set.clone()),
                     };
                     let _ = tx.send(msg);
                 }
@@ -102,7 +113,43 @@ impl Syncer for &mut Policy {
                         name: name.clone(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
-                        prefix: None,
+                        prefix_set: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
+impl Syncer for &mut Policy {
+    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
+        // Notify all watchers of this prefix-set update
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix_set: Some(prefix_set.clone()),
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    fn prefix_set_remove(&self, name: &String) {
+        // Notify all watchers of this prefix-set
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix_set: None,
                     };
                     let _ = tx.send(msg);
                 }
@@ -119,6 +166,7 @@ pub struct Policy {
     pub show_cb: HashMap<String, ShowCallback>,
     pub policy_config: PolicyConfig,
     pub prefix_set: PrefixSetConfig,
+    pub community_set: CommunitySetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
     pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
     pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
@@ -142,6 +190,7 @@ impl Policy {
             show_cb: HashMap::new(),
             policy_config: PolicyConfig::new(),
             prefix_set: PrefixSetConfig::new(),
+            community_set: CommunitySetConfig::new(),
             clients: BTreeMap::new(),
             watch_prefix: BTreeMap::new(),
             watch_policy: BTreeMap::new(),
@@ -162,19 +211,15 @@ impl Policy {
                 policy_type,
             } => {
                 match policy_type {
-                    PolicyType::PrefixSetIn => {
-                        //
-                    }
-                    PolicyType::PrefixSetOut => {
-                        // We need to lookup corresponding prefix-set.
-                        if let Some(prefix) = self.prefix_set.config.get(&name) {
+                    PolicyType::PrefixSetIn | PolicyType::PrefixSetOut => {
+                        if let Some(prefix_set) = self.prefix_set.config.get(&name) {
                             // Advertise.
                             if let Some(tx) = self.clients.get(&proto) {
                                 let msg = PolicyRx::PrefixSet {
                                     name: name.clone(),
                                     ident,
                                     policy_type,
-                                    prefix: Some(prefix.clone()),
+                                    prefix_set: Some(prefix_set.clone()),
                                 };
                                 let _ = tx.send(msg);
                             }
@@ -186,11 +231,18 @@ impl Policy {
                         };
                         self.watch_prefix.entry(name).or_default().push(watch);
                     }
-                    PolicyType::PolicyListIn => {
-                        println!("policy in");
-                    }
-                    PolicyType::PolicyListOut => {
-                        println!("policy in");
+                    PolicyType::PolicyListIn | PolicyType::PolicyListOut => {
+                        if let Some(policy_list) = self.policy_config.config.get(&name) {
+                            if let Some(tx) = self.clients.get(&proto) {
+                                let msg = PolicyRx::PolicyList {
+                                    name: name.clone(),
+                                    ident,
+                                    policy_type,
+                                    policy_list: Some(policy_list.clone()),
+                                };
+                                let _ = tx.send(msg);
+                            }
+                        }
                     }
                 }
             }
@@ -216,17 +268,16 @@ impl Policy {
                 }
             }
             ConfigOp::CommitEnd => {
-                // Commit prefix-set changes manually to avoid double borrow
-                while let Some((name, s)) = self.prefix_set.cache.pop_first() {
-                    if s.delete {
-                        // Notify subscribed entity for prefix-set removal
-                        self.prefix_set_remove(&name);
-                        self.prefix_set.config.remove(&name);
-                    } else {
-                        self.prefix_set_update(&name, &s);
-                        self.prefix_set.config.insert(name, s);
-                    }
-                }
+                // Create a syncer struct to avoid borrowing issues
+                let syncer = PolicySyncer {
+                    watch_prefix: &self.watch_prefix,
+                    clients: &self.clients,
+                };
+                PrefixSetConfig::commit(
+                    &mut self.prefix_set.config,
+                    &mut self.prefix_set.cache,
+                    syncer,
+                );
                 self.policy_config.commit();
             }
             _ => {}

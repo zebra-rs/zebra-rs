@@ -28,7 +28,7 @@ use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
 use super::route::LocalRib;
 use super::route::route_from_peer;
-use super::{BGP_PORT, PrefixSetValue};
+use super::{BGP_PORT, PolicyListValue, PrefixSetValue};
 use super::{Bgp, InOuts};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -264,8 +264,7 @@ pub struct Peer {
     pub adj_in: AdjRib<In>,
     pub adj_out: AdjRib<Out>,
     pub opt: ParseOption,
-    pub policy_in: Option<String>,
-    pub policy_out: Option<String>,
+    pub policy_list: InOuts<PolicyListValue>,
     pub prefix_set: InOuts<PrefixSetValue>,
     pub reflector_client: bool,
     pub instant: Option<Instant>,
@@ -308,8 +307,7 @@ impl Peer {
             adj_in: AdjRib::new(),
             adj_out: AdjRib::new(),
             opt: ParseOption::default(),
-            policy_out: None,
-            policy_in: None,
+            policy_list: InOuts::<PolicyListValue>::default(),
             prefix_set: InOuts::<PrefixSetValue>::default(),
             reflector_client: false,
             instant: None,

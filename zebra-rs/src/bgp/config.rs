@@ -1,9 +1,11 @@
-use crate::bgp::InOut;
+use std::net::{IpAddr, Ipv4Addr};
 
-use bgp_packet::{
-    Afi, AfiSafi, Safi,
-    addpath::{AddPathSendReceive, AddPathValue},
-};
+use bgp_packet::*;
+
+use crate::bgp::InOut;
+use crate::config::{Args, ConfigOp};
+use crate::policy;
+use crate::policy::com_list::*;
 
 use super::{
     Bgp,
@@ -12,10 +14,6 @@ use super::{
     timer,
 };
 
-use crate::config::{Args, ConfigOp};
-use crate::policy::com_list::*;
-use std::net::{IpAddr, Ipv4Addr};
-
 fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set && !args.is_empty() {
         let asn = args.u32()?;
@@ -23,6 +21,7 @@ fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     }
     Some(())
 }
+
 fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         let router_id = args.v4addr()?;
@@ -77,39 +76,99 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = if let Some(addr) = args.v4addr() {
-        IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
-    } else {
-        return None;
-    };
-    let Some(peer) = bgp.peers.get_mut(&addr) else {
-        return None;
-    };
-    let policy = args.string()?;
+fn config_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    let policy_name = args.string()?;
     if op.is_set() {
-        peer.policy_out = Some(policy);
+        let config = peer.policy_list.get_mut(&InOut::Input);
+        config.name = Some(policy_name.clone());
+
+        let msg = policy::Message::Register {
+            proto: "bgp".to_string(),
+            name: policy_name,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PolicyListIn,
+        };
+        let _ = bgp.policy_tx.send(msg);
     } else {
-        peer.policy_out = None;
+        let config = peer.policy_list.get_mut(&InOut::Input);
+        config.name = None;
+
+        let msg = policy::Message::Unregister {
+            proto: "bgp".to_string(),
+            name: policy_name,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PolicyListIn,
+        };
+        let _ = bgp.policy_tx.send(msg);
     }
     Some(())
 }
 
-use crate::policy;
+fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    let policy_name = args.string()?;
+    if op.is_set() {
+        let config = peer.policy_list.get_mut(&InOut::Output);
+        config.name = Some(policy_name.clone());
+
+        let msg = policy::Message::Register {
+            proto: "bgp".to_string(),
+            name: policy_name,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PolicyListOut,
+        };
+        let _ = bgp.policy_tx.send(msg);
+    } else {
+        let config = peer.policy_list.get_mut(&InOut::Output);
+        config.name = None;
+
+        let msg = policy::Message::Unregister {
+            proto: "bgp".to_string(),
+            name: policy_name,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PolicyListOut,
+        };
+        let _ = bgp.policy_tx.send(msg);
+    }
+    Some(())
+}
+
+fn config_prefix_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    let policy = args.string()?;
+    if op.is_set() {
+        let config = peer.prefix_set.get_mut(&InOut::Input);
+        config.name = Some(policy.clone());
+
+        let msg = policy::Message::Register {
+            proto: "bgp".to_string(),
+            name: policy,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PrefixSetIn,
+        };
+        let _ = bgp.policy_tx.send(msg);
+    } else {
+        let config = peer.prefix_set.get_mut(&InOut::Input);
+        config.name = None;
+
+        let msg = policy::Message::Unregister {
+            proto: "bgp".to_string(),
+            name: policy,
+            ident: peer.ident,
+            policy_type: policy::PolicyType::PrefixSetIn,
+        };
+        let _ = bgp.policy_tx.send(msg);
+    }
+    Some(())
+}
 
 fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = if let Some(addr) = args.v4addr() {
-        IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
-    } else {
-        return None;
-    };
-    let Some(peer) = bgp.peers.get_mut(&addr) else {
-        return None;
-    };
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
     let policy = args.string()?;
     if op.is_set() {
         let config = peer.prefix_set.get_mut(&InOut::Output);
@@ -408,7 +467,9 @@ impl Bgp {
         self.callback_add("/routing/bgp/afi-safi/network", config_network);
 
         // Applying policy.
+        self.callback_peer("/apply-policy/in", config_policy_in);
         self.callback_peer("/apply-policy/out", config_policy_out);
+        self.callback_peer("/prefix-set/in", config_prefix_in);
         self.callback_peer("/prefix-set/out", config_prefix_out);
 
         // Route Reflector.

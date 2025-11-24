@@ -67,7 +67,6 @@ pub struct Bgp {
     pub listen_task: Option<Task<()>>,
     pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
-    pub clist: CommunityListMap,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
@@ -112,7 +111,6 @@ impl Bgp {
             listen_task: None,
             listen_task6: None,
             listen_err: None,
-            clist: CommunityListMap::new(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
@@ -175,8 +173,6 @@ impl Bgp {
                 let (path, args) = path_from_command(&msg.paths);
                 if let Some(f) = self.callbacks.get(&path) {
                     f(self, args, msg.op);
-                } else if let Some(f) = self.pcallbacks.get(&path) {
-                    f(&mut self.clist, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -311,14 +307,40 @@ impl Bgp {
                 name: _,
                 ident,
                 policy_type,
-                prefix,
+                prefix_set,
             } => {
                 let Some(peer) = self.peers.get_mut(&ident) else {
                     return;
                 };
-                if policy_type == policy::PolicyType::PrefixSetOut {
+                if policy_type == policy::PolicyType::PrefixSetIn {
+                    let config = peer.prefix_set.get_mut(&InOut::Input);
+                    config.prefix_set = prefix_set;
+                } else if policy_type == policy::PolicyType::PrefixSetOut {
                     let config = peer.prefix_set.get_mut(&InOut::Output);
-                    config.prefix = prefix;
+                    config.prefix_set = prefix_set;
+                }
+            }
+            policy::PolicyRx::PolicyList {
+                name,
+                ident,
+                policy_type,
+                policy_list,
+            } => {
+                let Some(peer) = self.peers.get_mut(&ident) else {
+                    return;
+                };
+                match policy_type {
+                    policy::PolicyType::PolicyListIn => {
+                        let config = peer.policy_list.get_mut(&InOut::Input);
+                        config.policy_list = policy_list;
+                    }
+                    policy::PolicyType::PolicyListOut => {
+                        let config = peer.policy_list.get_mut(&InOut::Output);
+                        config.policy_list = policy_list;
+                    }
+                    _ => {
+                        //
+                    }
                 }
             }
         }
