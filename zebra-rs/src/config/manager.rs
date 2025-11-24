@@ -511,9 +511,7 @@ impl ConfigManager {
 }
 
 fn is_bgp(paths: &[CommandPath]) -> bool {
-    paths
-        .iter()
-        .any(|x| x.name == "bgp" || x.name == "community-list" || x.name == "evpn")
+    paths.iter().any(|x| x.name == "bgp" || x.name == "evpn")
 }
 
 fn is_ospf(paths: &[CommandPath]) -> bool {
@@ -527,7 +525,7 @@ fn is_isis(paths: &[CommandPath]) -> bool {
 fn is_policy(paths: &[CommandPath]) -> bool {
     paths
         .iter()
-        .any(|x| x.name == "prefix-set" || x.name == "policy")
+        .any(|x| x.name == "prefix-set" || x.name == "community-set" || x.name == "policy")
 }
 
 fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {

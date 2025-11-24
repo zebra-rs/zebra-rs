@@ -351,7 +351,6 @@ pub fn route_apply_policy_in(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
 ) -> Option<BgpAttr> {
-    // Apply prefix-set out.
     let config = peer.prefix_set.get(&InOut::Input);
     if config.name.is_some() {
         let Some(prefix_set) = &config.prefix_set else {
@@ -362,6 +361,30 @@ pub fn route_apply_policy_in(
         }
     }
     let config = peer.policy_list.get(&InOut::Input);
+    if config.name.is_some() {
+        let Some(policy_list) = &config.policy_list else {
+            return None;
+        };
+        return policy_list_apply(policy_list, nlri, bgp_attr);
+    }
+    Some(bgp_attr)
+}
+
+pub fn route_apply_policy_out(
+    peer: &mut Peer,
+    nlri: &Ipv4Nlri,
+    bgp_attr: BgpAttr,
+) -> Option<BgpAttr> {
+    let config = peer.prefix_set.get(&InOut::Output);
+    if config.name.is_some() {
+        let Some(prefix_set) = &config.prefix_set else {
+            return None;
+        };
+        if !prefix_set.matches(nlri.prefix) {
+            return None;
+        }
+    }
+    let config = peer.policy_list.get(&InOut::Output);
     if config.name.is_some() {
         let Some(policy_list) = &config.policy_list else {
             return None;
@@ -972,47 +995,37 @@ pub fn policy_list_apply(
     nlri: &Ipv4Nlri,
     mut bgp_attr: BgpAttr,
 ) -> Option<BgpAttr> {
-    let mut matched: Option<bool> = None;
     for (_, entry) in policy_list.entry.iter() {
+        let mut prefix_matched: Option<bool> = None;
         if let Some(prefix_set) = &entry.prefix_set {
             if prefix_set.matches(nlri.prefix) {
-                matched = Some(true);
+                prefix_matched = Some(true);
             } else {
-                matched = Some(false);
+                prefix_matched = Some(false);
+            }
+        }
+        let mut community_matched: Option<bool> = None;
+        if let Some(community_set) = &entry.community_set {
+            if community_set.matches(&bgp_attr) {
+                community_matched = Some(true);
+            } else {
+                community_matched = Some(false);
             }
         }
         // If we matched to the statement or no match statement at all.
-        match matched {
-            None | Some(true) => {
+        match (prefix_matched, community_matched) {
+            (None | Some(true), None | Some(true)) => {
                 if let Some(med) = &entry.med {
                     bgp_attr.med = Some(Med { med: *med });
                 }
                 return Some(bgp_attr);
             }
-            Some(false) => {
+            (_, _) => {
                 //
             }
         }
     }
     None
-}
-
-pub fn route_apply_policy_out(
-    peer: &mut Peer,
-    nlri: &Ipv4Nlri,
-    bgp_attr: BgpAttr,
-) -> Option<BgpAttr> {
-    // Apply prefix-set out.
-    let config = peer.prefix_set.get(&InOut::Output);
-    if let Some(_name) = &config.name {
-        let Some(prefix_set) = &config.prefix_set else {
-            return None;
-        };
-        if !prefix_set.matches(nlri.prefix) {
-            return None;
-        }
-    }
-    Some(bgp_attr)
 }
 
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
