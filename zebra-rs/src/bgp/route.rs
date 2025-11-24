@@ -360,13 +360,13 @@ pub fn route_apply_policy_in(
             return None;
         }
     }
-    // let config = peer.policy_list.get(&InOut::Input);
-    // if config.name.is_some() {
-    //     let Some(policy_list) = &config.policy_list else {
-    //         return None;
-    //     };
-    //     return policy_list_apply(policy_list, nlri, bgp_attr);
-    // }
+    let config = peer.policy_list.get(&InOut::Input);
+    if config.name.is_some() {
+        let Some(policy_list) = &config.policy_list else {
+            return None;
+        };
+        return policy_list_apply(policy_list, nlri, bgp_attr);
+    }
     Some(bgp_attr)
 }
 
@@ -384,13 +384,13 @@ pub fn route_apply_policy_out(
             return None;
         }
     }
-    // let config = peer.policy_list.get(&InOut::Output);
-    // if config.name.is_some() {
-    //     let Some(policy_list) = &config.policy_list else {
-    //         return None;
-    //     };
-    //     return policy_list_apply(policy_list, nlri, bgp_attr);
-    // }
+    let config = peer.policy_list.get(&InOut::Output);
+    if config.name.is_some() {
+        let Some(policy_list) = &config.policy_list else {
+            return None;
+        };
+        return policy_list_apply(policy_list, nlri, bgp_attr);
+    }
     Some(bgp_attr)
 }
 

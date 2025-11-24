@@ -328,6 +328,9 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(prefix_set) = &entry.prefix_set_name {
                 writeln!(buf, "  match: prefix_set {}", prefix_set);
             }
+            if let Some(community_set) = &entry.community_set_name {
+                writeln!(buf, "  match: community_set {}", community_set);
+            }
             if let Some(local_pref) = &entry.local_pref {
                 writeln!(buf, "  set: local-pref {}", local_pref);
             }
