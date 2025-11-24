@@ -38,7 +38,7 @@ impl fmt::Display for ExtCommunityValue {
             let val = u32::from_be_bytes([self.val[2], self.val[3], self.val[4], self.val[5]]);
             write!(
                 f,
-                "{} {asn}:{val}",
+                "{}:{asn}:{val}",
                 ExtCommunitySubType::display(self.low_type)
             )
         } else if self.high_type == TransOpaque as u8 {
@@ -47,14 +47,14 @@ impl fmt::Display for ExtCommunityValue {
             if let Ok(tunnel_type) = TunnelType::try_from(val) {
                 write!(
                     f,
-                    "{} {}",
+                    "{}:{}",
                     ExtCommunitySubType::display(self.low_type),
                     tunnel_type
                 )
             } else {
                 write!(
                     f,
-                    "{} {ip}:{val}",
+                    "{}:{ip}:{val}",
                     ExtCommunitySubType::display(self.low_type)
                 )
             }
@@ -63,7 +63,7 @@ impl fmt::Display for ExtCommunityValue {
             let val = u16::from_be_bytes([self.val[4], self.val[5]]);
             write!(
                 f,
-                "{} {ip}:{val}",
+                "{}:{ip}:{val}",
                 ExtCommunitySubType::display(self.low_type)
             )
         }
@@ -122,7 +122,7 @@ impl FromStr for ExtCommunity {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut ecom = ExtCommunity::default();
-        let tokens = tokenizer(String::from(s)).unwrap();
+        let tokens = tokenizer(String::from(s)).map_err(|_| ())?;
         let mut state = State::Unspec;
 
         for token in tokens.into_iter() {
@@ -178,13 +178,21 @@ mod tests {
 
     #[test]
     fn parse() {
+        // Test new colon-prefixed format
+        let ecom: ExtCommunity = ExtCommunity::from_str("rt:100:200").unwrap();
+        assert_eq!(ecom.to_string(), "rt:100:200");
+
+        let ecom: ExtCommunity = ExtCommunity::from_str("soo:1.2.3.4:200").unwrap();
+        assert_eq!(ecom.to_string(), "soo:1.2.3.4:200");
+
+        let ecom: ExtCommunity = ExtCommunity::from_str("rt:1.2.3.4:100 soo:10:100").unwrap();
+        assert_eq!(ecom.to_string(), "rt:1.2.3.4:100 soo:10:100");
+
+        // Test backward compatibility with old space-separated format
         let ecom: ExtCommunity = ExtCommunity::from_str("rt 100:200").unwrap();
-        assert_eq!(ecom.to_string(), "rt 100:200");
+        assert_eq!(ecom.to_string(), "rt:100:200");
 
         let ecom: ExtCommunity = ExtCommunity::from_str("soo 1.2.3.4:200").unwrap();
-        assert_eq!(ecom.to_string(), "soo 1.2.3.4:200");
-
-        let ecom: ExtCommunity = ExtCommunity::from_str("rt 1.2.3.4:100 soo 10:100").unwrap();
-        assert_eq!(ecom.to_string(), "rt 1.2.3.4:100 soo 10:100");
+        assert_eq!(ecom.to_string(), "soo:1.2.3.4:200");
     }
 }

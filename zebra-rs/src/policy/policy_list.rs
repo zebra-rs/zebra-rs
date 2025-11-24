@@ -2,16 +2,16 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use anyhow::{Context, Error, Result};
-use strum_macros::EnumString;
+use strum_macros::{Display, EnumString};
 
 use crate::config::{Args, ConfigOp};
 
-use super::Policy;
+use super::{Policy, PrefixSet};
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyList {
-    entry: BTreeMap<u32, PolicyEntry>,
-    default_action: Option<PolicyAction>,
+    pub entry: BTreeMap<u32, PolicyEntry>,
+    pub default_action: Option<PolicyAction>,
     pub delete: bool,
 }
 
@@ -25,7 +25,7 @@ impl PolicyList {
     }
 }
 
-#[derive(EnumString, Clone)]
+#[derive(EnumString, Display, Clone, Debug, PartialEq)]
 pub enum PolicyAction {
     #[strum(serialize = "accept")]
     Accept,
@@ -35,16 +35,17 @@ pub enum PolicyAction {
     Reject,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyEntry {
     // Match.
-    prefix_set: Option<String>,
-    community_set: Option<String>,
+    pub prefix_set_name: Option<String>,
+    pub prefix_set: Option<PrefixSet>,
+    pub community_set_name: Option<String>,
     // Set.
-    local_pref: Option<u32>,
-    med: Option<u32>,
+    pub local_pref: Option<u32>,
+    pub med: Option<u32>,
     // Action.
-    action: Option<PolicyAction>,
+    pub action: Option<PolicyAction>,
 }
 
 pub struct PolicyConfig {
@@ -74,7 +75,7 @@ impl PolicyConfig {
             .context(CONFIG_ERR)?;
 
         let name = args.string().context(POLICY_NAME_ERR)?;
-        if !path.starts_with("/entry") {
+        if !path.starts_with("/policy-options/policy/entry") {
             handler(&mut self.config, &mut self.cache, name, 0, &mut args)
         } else {
             let seq = args.u32().context(ENTRY_SEQ_ERR)?;
@@ -163,8 +164,9 @@ impl ConfigBuilder {
                 Ok(())
             })
             .path("/entry")
-            .set(|policy, cache, name, _seq, _args| {
-                let _ = cache_get(policy, cache, &name).context(ARG_ERR)?;
+            .set(|policy, cache, name, seq, _args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let _ = list.entry(seq);
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
@@ -178,14 +180,14 @@ impl ConfigBuilder {
                 let entry = list.entry(seq);
 
                 let prefix_set = args.string().context(ARG_ERR)?;
-                entry.prefix_set = Some(prefix_set);
+                entry.prefix_set_name = Some(prefix_set);
 
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.prefix_set = None;
+                entry.prefix_set_name = None;
                 Ok(())
             })
             .path("/entry/match/community-set")
@@ -194,14 +196,14 @@ impl ConfigBuilder {
                 let entry = list.entry(seq);
 
                 let community_set = args.string().context(ARG_ERR)?;
-                entry.community_set = Some(community_set);
+                entry.community_set_name = Some(community_set);
 
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.community_set = None;
+                entry.community_set_name = None;
                 Ok(())
             })
             .path("/entry/set/local-preference")
@@ -256,7 +258,6 @@ impl ConfigBuilder {
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let default_action = args.string().context(ARG_ERR)?;
-                println!("Default-action for {name} => {default_action}");
 
                 Ok(())
             })
@@ -291,9 +292,18 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
         writeln!(buf, "policy-list: {}", name);
         for (seq, entry) in policy.entry.iter() {
             writeln!(buf, " entry: {}", seq);
-            if let Some(prefix_set) = &entry.prefix_set {
+            if let Some(prefix_set) = &entry.prefix_set_name {
                 writeln!(buf, "  match: prefix_set {}", prefix_set);
             }
+            if let Some(local_pref) = &entry.local_pref {
+                writeln!(buf, "  set: local-pref {}", local_pref);
+            }
+            if let Some(med) = &entry.med {
+                writeln!(buf, "  set: med {}", med);
+            }
+        }
+        if let Some(default_action) = &policy.default_action {
+            writeln!(buf, " default-action: {}", default_action);
         }
     }
     Ok(buf)
@@ -301,7 +311,7 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
 
 #[cfg(test)]
 mod tests {
-    use crate::policy::{PrefixSet, PrefixSetEntry};
+    use crate::policy::set::{PrefixSet, PrefixSetEntry};
 
     use super::*;
 
@@ -322,13 +332,13 @@ mod tests {
 
         // Entry 10: match prefix-set "pset" and action accept
         let entry = plist.entry(10);
-        entry.prefix_set = Some("pset".to_string());
+        entry.prefix_set_name = Some("pset".to_string());
         entry.action = Some(PolicyAction::Accept);
 
         // Verify the policy list configuration
         assert_eq!(plist.entry.len(), 1);
         let entry = plist.entry.get(&10).unwrap();
-        assert_eq!(entry.prefix_set, Some("pset".to_string()));
+        assert_eq!(entry.prefix_set_name, Some("pset".to_string()));
 
         match &entry.action {
             Some(PolicyAction::Accept) => {

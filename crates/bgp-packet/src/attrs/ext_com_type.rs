@@ -9,7 +9,7 @@ pub enum ExtCommunityType {
     TransOpaque = 0x03,
 }
 
-#[derive(TryFromPrimitive, IntoPrimitive, EnumString, Display)]
+#[derive(Debug, Clone, Copy, PartialEq, TryFromPrimitive, IntoPrimitive, EnumString, Display)]
 #[repr(u8)]
 pub enum ExtCommunitySubType {
     #[strum(serialize = "rt")]
@@ -19,16 +19,6 @@ pub enum ExtCommunitySubType {
     #[strum(serialize = "opqque")]
     Opaque = 0x0c,
 }
-
-// impl fmt::Display for ExtCommunitySubType {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         match self {
-//             Self::RouteTarget => write!(f, "rt"),
-//             Self::RouteOrigin => write!(f, "soo"),
-//             Self::Opaque => write!(f, "opaque"),
-//         }
-//     }
-// }
 
 impl ExtCommunitySubType {
     pub fn display(val: u8) -> String {
@@ -54,15 +44,3 @@ pub enum TunnelType {
     #[strum(serialize = "MPLS-in-GRE")]
     MplsGre = 11,
 }
-
-// impl fmt::Display for TunnelType {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         match self {
-//             Self::L2tpv3 => write!(f, "L2TPv3"),
-//             Self::Gre => write!(f, "GRE"),
-//             Self::Vxlan => write!(f, "VXLAN"),
-//             Self::Nvgre => write!(f, "NVGRE"),
-//             Self::MplsGre => write!(f, "MPLS-in-GRE"),
-//         }
-//     }
-// }

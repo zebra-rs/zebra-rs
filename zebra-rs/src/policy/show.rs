@@ -1,6 +1,7 @@
 use crate::policy::Policy;
 use crate::policy::inst::ShowCallback;
 
+use super::community;
 use super::policy_list;
 use super::prefix;
 
@@ -13,5 +14,10 @@ impl Policy {
         self.show_add("/show/policy", policy_list::show);
         self.show_add("/show/prefix-set", prefix::show::prefix_set);
         self.show_add("/show/prefix-set/name", prefix::show::prefix_set_name);
+        self.show_add("/show/community-set", community::show::community_set);
+        self.show_add(
+            "/show/community-set/name",
+            community::show::community_set_name,
+        );
     }
 }

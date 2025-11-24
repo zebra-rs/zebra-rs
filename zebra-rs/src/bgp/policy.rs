@@ -1,4 +1,4 @@
-use crate::policy::PrefixSet;
+use crate::policy::{PolicyList, PrefixSet};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InOut {
@@ -31,5 +31,11 @@ impl<T> InOuts<T> {
 #[derive(Default, Debug)]
 pub struct PrefixSetValue {
     pub name: Option<String>,
-    pub prefix: Option<PrefixSet>,
+    pub prefix_set: Option<PrefixSet>,
+}
+
+#[derive(Default, Debug)]
+pub struct PolicyListValue {
+    pub name: Option<String>,
+    pub policy_list: Option<PolicyList>,
 }
