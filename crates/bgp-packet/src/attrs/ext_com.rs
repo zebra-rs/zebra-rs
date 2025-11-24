@@ -15,7 +15,7 @@ use super::ext_com_token::{Token, tokenizer};
 #[derive(Clone, Default, NomBE)]
 pub struct ExtCommunity(pub Vec<ExtCommunityValue>);
 
-#[derive(Clone, Debug, Default, NomBE)]
+#[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExtCommunityValue {
     pub high_type: u8,
     pub low_type: u8,

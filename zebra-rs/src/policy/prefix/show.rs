@@ -8,7 +8,7 @@ pub fn prefix_set(policy: &Policy, _args: Args, _json: bool) -> Result<String, E
     let mut buf = String::new();
 
     // Iterate through all prefix-sets
-    for (name, set) in policy.prefix_set.config.iter() {
+    for (name, set) in policy.prefix_config.config.iter() {
         writeln!(buf, "prefix-set: {}", name)?;
         for (prefix, entry) in set.prefixes.iter() {
             write!(buf, "  {}", prefix)?;
@@ -37,7 +37,7 @@ pub fn prefix_set_name(policy: &Policy, mut args: Args, _json: bool) -> Result<S
 
     // Look up the prefix-set by name
     let set = policy
-        .prefix_set
+        .prefix_config
         .config
         .get(&name)
         .context(format!("prefix-set '{}' not found", name))?;

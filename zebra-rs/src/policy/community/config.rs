@@ -1,10 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::config::{Args, ConfigOp};
+use crate::{
+    config::{Args, ConfigOp},
+    policy::CommunityMatcher,
+};
 
-use super::{CommunitySet, parse_community_set};
+use super::CommunitySet;
 
 #[derive(Default)]
 pub struct CommunitySetConfig {
@@ -37,17 +41,15 @@ impl CommunitySetConfig {
         handler(&mut self.config, &mut self.cache, &name, &mut args)
     }
 
-    // pub fn commit(&mut self, syncer: impl Syncer) {
-    //     while let Some((name, s)) = self.cache.pop_first() {
-    //         if s.delete {
-    //             // Notify subscribed entity for community-set.
-    //             syncer.community_set_remove(&name);
-    //             self.config.remove(&name);
-    //         } else {
-    //             self.config.insert(name, s);
-    //         }
-    //     }
-    // }
+    pub fn commit(&mut self) {
+        while let Some((name, s)) = self.cache.pop_first() {
+            if s.delete {
+                self.config.remove(&name);
+            } else {
+                self.config.insert(name, s);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -66,7 +68,7 @@ type Handler = fn(
 fn config_get(clist: &BTreeMap<String, CommunitySet>, name: &String) -> CommunitySet {
     let Some(entry) = clist.get(name) else {
         return CommunitySet {
-            vals: Vec::new(),
+            vals: BTreeSet::new(),
             delete: false,
         };
     };
@@ -130,12 +132,14 @@ impl ConfigBuilder {
             })
             .path("/member")
             .set(|config, cache, name, args| {
-                let member_str = args.string().context(MEMBER_ERR)?;
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
+                while let Some(member_str) = args.string() {
+                    // Parse the community member string (e.g., "rt:100:200", "no-export", etc.)
+                    if let Ok(matcher) = CommunityMatcher::from_str(&member_str) {
+                        set.vals.insert(matcher);
+                    }
+                }
 
-                // Parse the community member string (e.g., "rt:100:200", "no-export", etc.)
-                let matcher = parse_community_set(&member_str).context(MEMBER_ERR)?;
-                set.vals.push(matcher);
                 Ok(())
             })
             .del(|config, cache, name, args| {
@@ -143,7 +147,7 @@ impl ConfigBuilder {
                 let set = cache_lookup(config, cache, name).context(CONFIG_ERR)?;
 
                 // Parse the community member to find and remove it
-                if let Some(matcher) = parse_community_set(&member_str) {
+                if let Ok(matcher) = CommunityMatcher::from_str(&member_str) {
                     // Find and remove the matching member
                     // Note: We need to compare by debug representation since CommunityMatcher
                     // doesn't implement PartialEq

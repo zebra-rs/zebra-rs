@@ -38,8 +38,8 @@ module exec {
       ext:help "Show nexthop group";
       type empty;
     }
-    leaf community-list {
-      ext:help "Show community-list";
+    leaf community-set {
+      ext:help "Show community-set";
       type empty;
     }
     list interface {

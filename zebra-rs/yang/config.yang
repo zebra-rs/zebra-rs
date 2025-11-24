@@ -560,6 +560,7 @@ module config {
     }
 
     list community-set {
+      ext:sort "5";
       key "name";
       leaf name {
         type string;
@@ -572,6 +573,7 @@ module config {
     }
 
     list prefix-set {
+      ext:sort "6";
       key "name";
       leaf name {
         type string;
@@ -629,6 +631,7 @@ module config {
       }
     }
     container policy-options {
+      ext:sort "4";
       list policy {
         key "name";
         leaf "name" {

@@ -9,7 +9,19 @@ pub enum ExtCommunityType {
     TransOpaque = 0x03,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, TryFromPrimitive, IntoPrimitive, EnumString, Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    TryFromPrimitive,
+    IntoPrimitive,
+    EnumString,
+    Display,
+    PartialOrd,
+    Ord,
+    PartialEq,
+    Eq,
+)]
 #[repr(u8)]
 pub enum ExtCommunitySubType {
     #[strum(serialize = "rt")]
