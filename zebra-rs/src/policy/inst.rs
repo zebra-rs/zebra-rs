@@ -211,19 +211,15 @@ impl Policy {
                 policy_type,
             } => {
                 match policy_type {
-                    PolicyType::PrefixSetIn => {
-                        //
-                    }
-                    PolicyType::PrefixSetOut => {
-                        // We need to lookup corresponding prefix-set.
-                        if let Some(prefix_list) = self.prefix_set.config.get(&name) {
+                    PolicyType::PrefixSetIn | PolicyType::PrefixSetOut => {
+                        if let Some(prefix_set) = self.prefix_set.config.get(&name) {
                             // Advertise.
                             if let Some(tx) = self.clients.get(&proto) {
                                 let msg = PolicyRx::PrefixSet {
                                     name: name.clone(),
                                     ident,
                                     policy_type,
-                                    prefix_set: Some(prefix_list.clone()),
+                                    prefix_set: Some(prefix_set.clone()),
                                 };
                                 let _ = tx.send(msg);
                             }
@@ -235,9 +231,8 @@ impl Policy {
                         };
                         self.watch_prefix.entry(name).or_default().push(watch);
                     }
-                    PolicyType::PolicyListIn => {
+                    PolicyType::PolicyListIn | PolicyType::PolicyListOut => {
                         if let Some(policy_list) = self.policy_config.config.get(&name) {
-                            println!("XXX policy_list {name} found in policy");
                             if let Some(tx) = self.clients.get(&proto) {
                                 let msg = PolicyRx::PolicyList {
                                     name: name.clone(),
@@ -248,9 +243,6 @@ impl Policy {
                                 let _ = tx.send(msg);
                             }
                         }
-                    }
-                    PolicyType::PolicyListOut => {
-                        println!("policy in");
                     }
                 }
             }

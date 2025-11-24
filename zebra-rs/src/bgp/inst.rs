@@ -67,7 +67,6 @@ pub struct Bgp {
     pub listen_task: Option<Task<()>>,
     pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
-    // pub clist: CommunityListMap,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
@@ -112,7 +111,6 @@ impl Bgp {
             listen_task: None,
             listen_task6: None,
             listen_err: None,
-            // clist: CommunityListMap::new(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
@@ -176,9 +174,6 @@ impl Bgp {
                 if let Some(f) = self.callbacks.get(&path) {
                     f(self, args, msg.op);
                 }
-                // else if let Some(f) = self.pcallbacks.get(&path) {
-                //                    f(&mut self.clist, args, msg.op);
-                //                }
             }
             ConfigOp::CommitEnd => {
                 //
@@ -326,7 +321,7 @@ impl Bgp {
                 }
             }
             policy::PolicyRx::PolicyList {
-                name: _,
+                name,
                 ident,
                 policy_type,
                 policy_list,
@@ -334,12 +329,18 @@ impl Bgp {
                 let Some(peer) = self.peers.get_mut(&ident) else {
                     return;
                 };
-                if policy_type == policy::PolicyType::PolicyListIn {
-                    let config = peer.policy_list.get_mut(&InOut::Input);
-                    config.policy_list = policy_list;
-                } else if policy_type == policy::PolicyType::PolicyListOut {
-                    let config = peer.policy_list.get_mut(&InOut::Output);
-                    config.policy_list = policy_list;
+                match policy_type {
+                    policy::PolicyType::PolicyListIn => {
+                        let config = peer.policy_list.get_mut(&InOut::Input);
+                        config.policy_list = policy_list;
+                    }
+                    policy::PolicyType::PolicyListOut => {
+                        let config = peer.policy_list.get_mut(&InOut::Output);
+                        config.policy_list = policy_list;
+                    }
+                    _ => {
+                        //
+                    }
                 }
             }
         }

@@ -258,7 +258,6 @@ impl ConfigBuilder {
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let default_action = args.string().context(ARG_ERR)?;
-                println!("Default-action for {name} => {default_action}");
 
                 Ok(())
             })
