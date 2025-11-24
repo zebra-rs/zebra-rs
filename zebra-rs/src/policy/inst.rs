@@ -81,6 +81,47 @@ pub trait Syncer {
     fn prefix_set_remove(&self, name: &String);
 }
 
+pub struct PolicySyncer<'a> {
+    watch_prefix: &'a BTreeMap<String, Vec<PolicyWatch>>,
+    clients: &'a BTreeMap<String, UnboundedSender<PolicyRx>>,
+}
+
+impl<'a> Syncer for PolicySyncer<'a> {
+    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
+        // Notify all watchers of this prefix-set update
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix_set: Some(prefix_set.clone()),
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    fn prefix_set_remove(&self, name: &String) {
+        // Notify all watchers of this prefix-set
+        if let Some(watches) = self.watch_prefix.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PrefixSet {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        prefix_set: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
 impl Syncer for &mut Policy {
     fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
         // Notify all watchers of this prefix-set update
@@ -235,17 +276,16 @@ impl Policy {
                 }
             }
             ConfigOp::CommitEnd => {
-                // TODO: move this code to @zebra-rs/src/policy/prefix/config.rs
-                while let Some((name, s)) = self.prefix_set.cache.pop_first() {
-                    if s.delete {
-                        // Notify subscribed entity for prefix-set removal
-                        self.prefix_set_remove(&name);
-                        self.prefix_set.config.remove(&name);
-                    } else {
-                        self.prefix_set_update(&name, &s);
-                        self.prefix_set.config.insert(name, s);
-                    }
-                }
+                // Create a syncer struct to avoid borrowing issues
+                let syncer = PolicySyncer {
+                    watch_prefix: &self.watch_prefix,
+                    clients: &self.clients,
+                };
+                PrefixSetConfig::commit(
+                    &mut self.prefix_set.config,
+                    &mut self.prefix_set.cache,
+                    syncer,
+                );
                 self.policy_config.commit();
             }
             _ => {}

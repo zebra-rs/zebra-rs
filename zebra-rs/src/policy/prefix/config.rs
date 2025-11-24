@@ -37,18 +37,23 @@ impl PrefixSetConfig {
         handler(&mut self.config, &mut self.cache, &name, &mut args)
     }
 
-    // TODO: can we move the code to here?
-    // pub fn commit(&mut self, syncer: impl Syncer) {
-    //     while let Some((name, s)) = self.cache.pop_first() {
-    //         if s.delete {
-    //             // Notify subscribed entity for prefix-set.
-    //             syncer.prefix_set_remove(&name);
-    //             self.config.remove(&name);
-    //         } else {
-    //             self.config.insert(name, s);
-    //         }
-    //     }
-    // }
+    pub fn commit<S: crate::policy::Syncer>(
+        config: &mut BTreeMap<String, PrefixSet>,
+        cache: &mut BTreeMap<String, PrefixSet>,
+        syncer: S,
+    ) {
+        while let Some((name, s)) = cache.pop_first() {
+            if s.delete {
+                // Notify subscribed entity for prefix-set removal
+                syncer.prefix_set_remove(&name);
+                config.remove(&name);
+            } else {
+                // Notify subscribed entity for prefix-set update
+                syncer.prefix_set_update(&name, &s);
+                config.insert(name, s);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
