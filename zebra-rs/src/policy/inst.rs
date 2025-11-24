@@ -10,7 +10,9 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig};
+use super::{
+    CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig, policy_entry_sync,
+};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
@@ -87,42 +89,6 @@ pub struct PolicySyncer<'a> {
 }
 
 impl<'a> Syncer for PolicySyncer<'a> {
-    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
-        // Notify all watchers of this prefix-set update
-        if let Some(watches) = self.watch_prefix.get(name) {
-            for watch in watches {
-                if let Some(tx) = self.clients.get(&watch.proto) {
-                    let msg = PolicyRx::PrefixSet {
-                        name: name.clone(),
-                        ident: watch.ident,
-                        policy_type: watch.policy_type,
-                        prefix_set: Some(prefix_set.clone()),
-                    };
-                    let _ = tx.send(msg);
-                }
-            }
-        }
-    }
-
-    fn prefix_set_remove(&self, name: &String) {
-        // Notify all watchers of this prefix-set
-        if let Some(watches) = self.watch_prefix.get(name) {
-            for watch in watches {
-                if let Some(tx) = self.clients.get(&watch.proto) {
-                    let msg = PolicyRx::PrefixSet {
-                        name: name.clone(),
-                        ident: watch.ident,
-                        policy_type: watch.policy_type,
-                        prefix_set: None,
-                    };
-                    let _ = tx.send(msg);
-                }
-            }
-        }
-    }
-}
-
-impl Syncer for &mut Policy {
     fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
         // Notify all watchers of this prefix-set update
         if let Some(watches) = self.watch_prefix.get(name) {
@@ -280,10 +246,22 @@ impl Policy {
                     &mut self.prefix_config.cache,
                     syncer,
                 );
-                self.policy_config.commit();
-
                 // No need of sync with protocol.
                 self.community_config.commit();
+
+                // Sync.
+                self.policy_config.commit();
+
+                while let Some((name, mut s)) = self.policy_config.cache.pop_first() {
+                    if s.delete {
+                        self.policy_config.config.remove(&name);
+                        //
+                    } else {
+                        policy_entry_sync(&mut s, &self.prefix_config, &self.community_config);
+                        self.policy_config.config.insert(name, s);
+                        //
+                    }
+                }
             }
             _ => {}
         }

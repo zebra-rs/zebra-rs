@@ -6,7 +6,7 @@ use strum_macros::{Display, EnumString};
 
 use crate::config::{Args, ConfigOp};
 
-use super::{Policy, PrefixSet};
+use super::{CommunitySet, CommunitySetConfig, Policy, PrefixSet, PrefixSetConfig};
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyList {
@@ -41,11 +41,35 @@ pub struct PolicyEntry {
     pub prefix_set_name: Option<String>,
     pub prefix_set: Option<PrefixSet>,
     pub community_set_name: Option<String>,
+    pub community_set: Option<CommunitySet>,
     // Set.
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
     // Action.
     pub action: Option<PolicyAction>,
+}
+
+pub fn policy_entry_sync(
+    policy_list: &mut PolicyList,
+    prefix_set: &PrefixSetConfig,
+    community_set: &CommunitySetConfig,
+) {
+    for (_, policy) in policy_list.entry.iter_mut() {
+        if let Some(name) = &policy.prefix_set_name {
+            if let Some(prefix_set) = prefix_set.config.get(name) {
+                policy.prefix_set = Some(prefix_set.clone());
+            } else {
+                policy.prefix_set = None;
+            }
+        }
+        if let Some(name) = &policy.community_set_name {
+            if let Some(community_set) = community_set.config.get(name) {
+                policy.community_set = Some(community_set.clone());
+            } else {
+                policy.community_set = None;
+            }
+        }
+    }
 }
 
 pub struct PolicyConfig {
