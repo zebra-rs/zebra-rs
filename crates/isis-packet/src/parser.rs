@@ -948,20 +948,22 @@ impl ParseBe<IsisTlvP2p3Way> for IsisTlvP2p3Way {
         let (input, state) = be_u8(input)?;
         let (input, circuit_id) = be_u32(input)?;
         let (input, neighbor_id) = if input.len() >= 6 {
-            IsisSysId::parse_be(input)?
+            let (input, neighbor_id) = IsisSysId::parse_be(input)?;
+            (input, Some(neighbor_id))
         } else {
-            (input, IsisSysId::default())
+            (input, None)
         };
         let (input, neighbor_circuit_id) = if input.len() >= 4 {
-            be_u32(input)?
+            let (input, neighbor_circuit_id) = be_u32(input)?;
+            (input, Some(neighbor_circuit_id))
         } else {
-            (input, 0)
+            (input, None)
         };
         let tlv = Self {
             state,
             circuit_id,
-            neighbor_id: Some(neighbor_id),
-            neighbor_circuit_id: Some(neighbor_circuit_id),
+            neighbor_id,
+            neighbor_circuit_id,
         };
         Ok((input, tlv))
     }
@@ -986,8 +988,12 @@ impl TlvEmitter for IsisTlvP2p3Way {
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.state);
         buf.put_u32(self.circuit_id);
-        // buf.put(&self.neighbor_id.id[..]);
-        // buf.put_u32(self.neighbor_circuit_id);
+        if let Some(neighbor_id) = &self.neighbor_id {
+            buf.put(&neighbor_id.id[..]);
+        }
+        if let Some(neighbor_circuit_id) = self.neighbor_circuit_id {
+            buf.put_u32(neighbor_circuit_id);
+        }
     }
 }
 
