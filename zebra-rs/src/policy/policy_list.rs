@@ -107,12 +107,21 @@ impl PolicyConfig {
         }
     }
 
-    pub fn commit(&mut self) {
-        while let Some((name, s)) = self.cache.pop_first() {
+    pub fn commit<S: crate::policy::Syncer>(
+        config: &mut BTreeMap<String, PolicyList>,
+        cache: &mut BTreeMap<String, PolicyList>,
+        prefix_config: &PrefixSetConfig,
+        community_config: &CommunitySetConfig,
+        syncer: S,
+    ) {
+        while let Some((name, mut s)) = cache.pop_first() {
             if s.delete {
-                self.config.remove(&name);
+                syncer.policy_list_remove(&name);
+                config.remove(&name);
             } else {
-                self.config.insert(name, s);
+                policy_entry_sync(&mut s, prefix_config, community_config);
+                syncer.policy_list_update(&name, &s);
+                config.insert(name, s);
             }
         }
     }

@@ -81,17 +81,19 @@ impl PolicyRxChannel {
 pub trait Syncer {
     fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet);
     fn prefix_set_remove(&self, name: &String);
+    fn policy_list_update(&self, name: &String, policy_list: &PolicyList);
+    fn policy_list_remove(&self, name: &String);
 }
 
 pub struct PolicySyncer<'a> {
-    watch_prefix: &'a BTreeMap<String, Vec<PolicyWatch>>,
+    watch_map: &'a BTreeMap<String, Vec<PolicyWatch>>,
     clients: &'a BTreeMap<String, UnboundedSender<PolicyRx>>,
 }
 
 impl<'a> Syncer for PolicySyncer<'a> {
     fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
         // Notify all watchers of this prefix-set update
-        if let Some(watches) = self.watch_prefix.get(name) {
+        if let Some(watches) = self.watch_map.get(name) {
             for watch in watches {
                 if let Some(tx) = self.clients.get(&watch.proto) {
                     let msg = PolicyRx::PrefixSet {
@@ -107,8 +109,7 @@ impl<'a> Syncer for PolicySyncer<'a> {
     }
 
     fn prefix_set_remove(&self, name: &String) {
-        // Notify all watchers of this prefix-set
-        if let Some(watches) = self.watch_prefix.get(name) {
+        if let Some(watches) = self.watch_map.get(name) {
             for watch in watches {
                 if let Some(tx) = self.clients.get(&watch.proto) {
                     let msg = PolicyRx::PrefixSet {
@@ -116,6 +117,38 @@ impl<'a> Syncer for PolicySyncer<'a> {
                         ident: watch.ident,
                         policy_type: watch.policy_type,
                         prefix_set: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    fn policy_list_update(&self, name: &String, policy_list: &PolicyList) {
+        if let Some(watches) = self.watch_map.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PolicyList {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        policy_list: Some(policy_list.clone()),
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    fn policy_list_remove(&self, name: &String) {
+        if let Some(watches) = self.watch_map.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::PolicyList {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        policy_list: None,
                     };
                     let _ = tx.send(msg);
                 }
@@ -236,9 +269,9 @@ impl Policy {
                 }
             }
             ConfigOp::CommitEnd => {
-                // Create a syncer struct to avoid borrowing issues
+                // Sync prefix-set.
                 let syncer = PolicySyncer {
-                    watch_prefix: &self.watch_prefix,
+                    watch_map: &self.watch_prefix,
                     clients: &self.clients,
                 };
                 PrefixSetConfig::commit(
@@ -246,22 +279,21 @@ impl Policy {
                     &mut self.prefix_config.cache,
                     syncer,
                 );
-                // No need of sync with protocol.
+                // Sync community-set.
                 self.community_config.commit();
 
-                // Sync.
-                self.policy_config.commit();
-
-                while let Some((name, mut s)) = self.policy_config.cache.pop_first() {
-                    if s.delete {
-                        self.policy_config.config.remove(&name);
-                        //
-                    } else {
-                        policy_entry_sync(&mut s, &self.prefix_config, &self.community_config);
-                        self.policy_config.config.insert(name, s);
-                        //
-                    }
-                }
+                // Sync policy-list.
+                let syncer = PolicySyncer {
+                    watch_map: &self.watch_policy,
+                    clients: &self.clients,
+                };
+                PolicyConfig::commit(
+                    &mut self.policy_config.config,
+                    &mut self.policy_config.cache,
+                    &self.prefix_config,
+                    &self.community_config,
+                    syncer,
+                );
             }
             _ => {}
         }
