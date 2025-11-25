@@ -65,6 +65,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         ));
 
     nbr.hold_time = pdu.hold_time;
+    nbr.tlvs = pdu.tlvs.clone();
     nbr.hello = pdu;
 
     let mut ntop = NeighborTop {
@@ -135,6 +136,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
         // Update neighbor's Hello PDU
         nbr.hello_p2p = pdu.clone();
         nbr.hold_time = pdu.hold_time;
+        nbr.tlvs = pdu.tlvs.clone();
 
         // For P2P interfaces, we use a simplified neighbor state machine
         // Skip the MAC address validation that LAN interfaces require

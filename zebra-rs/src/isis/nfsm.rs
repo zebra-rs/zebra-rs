@@ -119,7 +119,7 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
     let mut addr6 = vec![];
     let mut laddr6 = vec![];
 
-    for tlv in &nbr.hello.tlvs {
+    for tlv in &nbr.tlvs {
         match tlv {
             IsisTlv::Ipv4IfAddr(ifaddr) => {
                 naddr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
@@ -260,6 +260,7 @@ pub fn nfsm_p2p_hello_received(
     }
 
     // Update interface addresses from Hello
+    //
     nfsm_ifaddr_update(nbr, ntop.local_pool);
 
     // Reset hold timer

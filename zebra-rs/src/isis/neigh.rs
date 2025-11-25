@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsisHello, IsisP2pHello, IsisProto, IsisSysId};
+use isis_packet::{IsisHello, IsisP2pHello, IsisProto, IsisSysId, IsisTlv};
 use itertools::Itertools;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -36,6 +36,7 @@ pub struct Neighbor {
     // P2P adjacency state TLV: Extended local circuit ID.
     pub circuit_id: Option<u32>,
     pub hold_time: u16,
+    pub tlvs: Vec<IsisTlv>,
 }
 
 impl Neighbor {
@@ -66,6 +67,7 @@ impl Neighbor {
             dis: false,
             circuit_id: None,
             hold_time: 0,
+            tlvs: vec![],
         }
     }
 
@@ -132,13 +134,12 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
     for (_, link) in top.links.iter() {
         for (_key, nbr) in &link.state.nbrs.l1 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
-            let system_id = if let Some((hostname, _)) =
-                top.hostname.get(&Level::L1).get(&nbr.hello.source_id)
-            {
-                hostname.clone()
-            } else {
-                nbr.sys_id.to_string()
-            };
+            let system_id =
+                if let Some((hostname, _)) = top.hostname.get(&Level::L1).get(&nbr.sys_id) {
+                    hostname.clone()
+                } else {
+                    nbr.sys_id.to_string()
+                };
             nbrs.push(NeighborBrief {
                 system_id,
                 interface: top.ifname(nbr.ifindex),
@@ -150,13 +151,12 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
         }
         for (_key, nbr) in &link.state.nbrs.l2 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
-            let system_id = if let Some((hostname, _)) =
-                top.hostname.get(&Level::L2).get(&nbr.hello.source_id)
-            {
-                hostname.clone()
-            } else {
-                nbr.sys_id.to_string()
-            };
+            let system_id =
+                if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.sys_id) {
+                    hostname.clone()
+                } else {
+                    nbr.sys_id.to_string()
+                };
             nbrs.push(NeighborBrief {
                 system_id,
                 interface: top.ifname(nbr.ifindex),
@@ -188,11 +188,10 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
 }
 
 fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std::fmt::Result {
-    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.hello.source_id)
-    {
+    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.sys_id) {
         hostname.clone()
     } else {
-        nbr.hello.source_id.to_string()
+        nbr.sys_id.to_string()
     };
     writeln!(buf, " {}", system_id)?;
 
@@ -226,6 +225,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     let dis = if nbr.is_dis() { "is DIS" } else { "is not DIS" };
 
     // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 4m1s ago
+    // XXX
     writeln!(buf, "    LAN Priority: {}, {}", nbr.hello.priority, dis)?;
 
     if !nbr.naddr4.is_empty() {
@@ -256,11 +256,10 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
 }
 
 fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetail {
-    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.hello.source_id)
-    {
+    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.sys_id) {
         hostname.clone()
     } else {
-        nbr.hello.source_id.to_string()
+        nbr.sys_id.to_string()
     };
 
     let speaks = if let Some(proto) = &nbr.hello.proto_tlv() {
