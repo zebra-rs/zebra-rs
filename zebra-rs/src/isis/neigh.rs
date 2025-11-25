@@ -19,8 +19,10 @@ use super::{Isis, Level, Message};
 pub struct Neighbor {
     pub tx: UnboundedSender<Message>,
     pub sys_id: IsisSysId,
+    //
     pub hello: IsisHello,
     pub hello_p2p: IsisP2pHello,
+    //
     pub ifindex: u32,
     pub prev: NfsmState,
     pub state: NfsmState,
@@ -31,6 +33,9 @@ pub struct Neighbor {
     pub mac: Option<MacAddr>,
     pub hold_timer: Option<Timer>,
     pub dis: bool,
+    // P2P adjacency state TLV: Extended local circuit ID.
+    pub circuit_id: Option<u32>,
+    pub hold_time: u16,
 }
 
 impl Neighbor {
@@ -59,6 +64,8 @@ impl Neighbor {
             mac,
             hold_timer: None,
             dis: false,
+            circuit_id: None,
+            hold_time: 0,
         }
     }
 
@@ -123,14 +130,14 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
     for (_, link) in top.links.iter() {
-        for (_, nbr) in &link.state.nbrs.l1 {
+        for (_key, nbr) in &link.state.nbrs.l1 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id = if let Some((hostname, _)) =
                 top.hostname.get(&Level::L1).get(&nbr.hello.source_id)
             {
                 hostname.clone()
             } else {
-                nbr.hello.source_id.to_string()
+                nbr.sys_id.to_string()
             };
             nbrs.push(NeighborBrief {
                 system_id,
@@ -141,14 +148,14 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
                 snpa: show_mac(nbr.mac),
             });
         }
-        for (_, nbr) in &link.state.nbrs.l2 {
+        for (_key, nbr) in &link.state.nbrs.l2 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id = if let Some((hostname, _)) =
                 top.hostname.get(&Level::L2).get(&nbr.hello.source_id)
             {
                 hostname.clone()
             } else {
-                nbr.hello.source_id.to_string()
+                nbr.sys_id.to_string()
             };
             nbrs.push(NeighborBrief {
                 system_id,

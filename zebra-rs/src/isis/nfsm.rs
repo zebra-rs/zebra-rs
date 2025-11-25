@@ -76,13 +76,13 @@ fn nfsm_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
     false
 }
 
-pub fn nfsm_hold_timer(adj: &Neighbor, level: Level) -> Timer {
-    let tx = adj.tx.clone();
-    let sysid = adj.hello.source_id.clone();
-    let ifindex = adj.ifindex;
-    Timer::once(adj.hello.hold_time as u64, move || {
+pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
+    let tx = nbr.tx.clone();
+    let sys_id = nbr.sys_id.clone();
+    let ifindex = nbr.ifindex;
+    Timer::once(nbr.hold_time as u64, move || {
         let tx = tx.clone();
-        let sysid = sysid.clone();
+        let sysid = sys_id.clone();
         async move {
             use NfsmEvent::*;
             tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level))
@@ -220,6 +220,58 @@ pub fn nfsm_hello_received(
     }
 }
 
+pub fn nfsm_p2p_hello_received(
+    ntop: &mut NeighborTop,
+    nbr: &mut Neighbor,
+    _mac: &Option<MacAddr>,
+    level: Level,
+) -> Option<NfsmState> {
+    use IfsmEvent::*;
+
+    let mut state = nbr.state;
+
+    isis_packet_trace!(
+        ntop.tracing,
+        Hello,
+        Receive,
+        &level,
+        "P2P Hello received on {} from {}",
+        nbr.ifindex,
+        nbr.sys_id
+    );
+
+    // Lookup three way handshake TLV.
+    let three_way = p2ptlv(nbr);
+    if let Some(tlv) = &three_way {
+        nbr.circuit_id = Some(tlv.circuit_id);
+    }
+
+    // When it is three way handshake.
+    if state == NfsmState::Down {
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        state = NfsmState::Init;
+    }
+
+    // Fall down from previous.
+    if state == NfsmState::Init {
+        if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
+            state = NfsmState::Up;
+        }
+    }
+
+    // Update interface addresses from Hello
+    nfsm_ifaddr_update(nbr, ntop.local_pool);
+
+    // Reset hold timer
+    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+    if state != nbr.state {
+        Some(state)
+    } else {
+        None
+    }
+}
+
 pub fn nfsm_hold_timer_expire(
     _ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
@@ -254,7 +306,6 @@ fn nfsm_p2ptlv_has_me(tlv: Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
     let sys_id = nsap.sys_id();
 
     if let Some(tlv) = tlv {
-        println!("XX {tlv} <=> {sys_id}");
         if let Some(neighbor_id) = tlv.neighbor_id {
             if sys_id == neighbor_id {
                 return true;
@@ -262,74 +313,6 @@ fn nfsm_p2ptlv_has_me(tlv: Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
         }
     }
     false
-}
-
-pub fn nfsm_p2p_hello_received(
-    ntop: &mut NeighborTop,
-    nbr: &mut Neighbor,
-    _mac: &Option<MacAddr>,
-    level: Level,
-) -> Option<NfsmState> {
-    use IfsmEvent::*;
-
-    let mut state = nbr.state;
-
-    isis_packet_trace!(
-        ntop.tracing,
-        Hello,
-        Receive,
-        &level,
-        "P2P Hello received on {} from {}",
-        nbr.ifindex,
-        nbr.sys_id
-    );
-
-    // Lookup three way handshake TLV.
-    let three_way = p2ptlv(nbr);
-
-    // When it is three way handshake.
-    if state == NfsmState::Down {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        state = NfsmState::Init;
-    }
-
-    // Fall down from previous.
-    if state == NfsmState::Init {
-        if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
-            state = NfsmState::Up;
-        }
-    } else {
-        // if !nfsm_hello_has_mac(&nbr.hello, mac) {
-        //     nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
-        //     state = NfsmState::Init;
-        // }
-    }
-
-    // match state {
-    //     NfsmState::Down => {
-    //         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-    //         state = NfsmState::Up;
-
-    //         // Set adjacency for P2P link - convert sys_id to neighbor_id
-    //         *ntop.adj.get_mut(&level) = Some(IsisNeighborId::from_sys_id(&nbr.hello.source_id, 0));
-    //     }
-    //     NfsmState::Init | NfsmState::Up => {
-    //         // Already have adjacency, just refresh
-    //         // P2P links maintain simple adjacency without complex state changes
-    //     }
-    // }
-
-    // Update interface addresses from Hello
-    nfsm_ifaddr_update(nbr, ntop.local_pool);
-
-    // Reset hold timer
-    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
-
-    if state != nbr.state {
-        Some(state)
-    } else {
-        None
-    }
 }
 
 pub fn isis_nfsm(

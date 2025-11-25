@@ -115,28 +115,26 @@ pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisP2pHello {
         );
     }
 
-    // Perform three way handshake.
-    if let Some((_, nbr)) = ltop.state.nbrs.get(&level).first_key_value() {
-        let tlv = IsisTlvP2p3Way {
+    // Three way handshake.
+    let tlv = if let Some((_, nbr)) = ltop.state.nbrs.get(&level).first_key_value() {
+        IsisTlvP2p3Way {
             state: nbr.state.into(),
-            circuit_id: 0,
+            circuit_id: ltop.state.ifindex,
             neighbor_id: Some(nbr.sys_id.clone()),
-            neighbor_circuit_id: Some(1),
-        };
-        hello.tlvs.push(tlv.into());
+            neighbor_circuit_id: nbr.circuit_id,
+        }
     } else {
-        let tlv = IsisTlvP2p3Way {
+        IsisTlvP2p3Way {
             state: NfsmState::Down.into(),
-            circuit_id: 0,
+            circuit_id: ltop.state.ifindex,
             neighbor_id: None,
             neighbor_circuit_id: None,
-        };
-        hello.tlvs.push(tlv.into());
-    }
+        }
+    };
+    hello.tlvs.push(tlv.into());
 
     if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(ltop.state.mtu as usize);
-        // println!("{}", hello);
     }
     hello
 }
@@ -169,7 +167,6 @@ pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
         }
         _ => return Ok(()),
     };
-    println!("{packet}");
 
     let ifindex = ltop.state.ifindex;
     ltop.ptx

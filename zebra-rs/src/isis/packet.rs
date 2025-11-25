@@ -64,6 +64,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
             link.tx.clone(),
         ));
 
+    nbr.hold_time = pdu.hold_time;
     nbr.hello = pdu;
 
     let mut ntop = NeighborTop {
@@ -97,17 +98,16 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
     }
 
     // Extract P2P Hello PDU.
-    let hello = match packet.pdu {
+    let pdu = match packet.pdu {
         IsisPdu::P2pHello(pdu) => pdu,
         _ => return,
     };
-    // println!("{hello}");
 
     // Check what levels this interface supports
     let interface_level = link.state.level();
 
     // P2P Hello contains circuit_type indicating what levels the sender supports
-    let sender_level = hello.circuit_type;
+    let sender_level = pdu.circuit_type;
 
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
@@ -121,19 +121,20 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
             .state
             .nbrs
             .get_mut(&level)
-            .entry(hello.source_id.clone())
+            .entry(pdu.source_id.clone())
             .or_insert(Neighbor::new(
                 level,
-                hello.source_id.clone(),
+                pdu.source_id.clone(),
                 IsisHello::default(),
-                hello.clone(),
+                pdu.clone(),
                 ifindex,
                 mac,
                 link.tx.clone(),
             ));
 
         // Update neighbor's Hello PDU
-        nbr.hello_p2p = hello.clone();
+        nbr.hello_p2p = pdu.clone();
+        nbr.hold_time = pdu.hold_time;
 
         // For P2P interfaces, we use a simplified neighbor state machine
         // Skip the MAC address validation that LAN interfaces require
