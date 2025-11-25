@@ -410,8 +410,14 @@ impl Display for IsisTlvP2p3Way {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(
             f,
-            "  Three-Way Handshake : State:{}, Local circuit ID:{}",
-            self.state, self.circuit_id
+            "  Three-Way Handshake : State:{}, Local circuit ID:{}, Neighbor System ID:{}",
+            self.state,
+            self.circuit_id,
+            if let Some(neighbor_id) = &self.neighbor_id {
+                neighbor_id.to_string()
+            } else {
+                "".to_string()
+            }
         )
     }
 }

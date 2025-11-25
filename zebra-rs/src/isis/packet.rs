@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Error};
 use bytes::BytesMut;
 use isis_packet::{
-    IsLevel, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv,
-    IsisTlvLspEntries, IsisType,
+    IsLevel, IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisP2pHello, IsisPacket, IsisPdu,
+    IsisPsnp, IsisTlv, IsisTlvLspEntries, IsisType,
 };
 
 use crate::isis::Message;
@@ -58,12 +58,13 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
             level,
             pdu.source_id.clone(),
             pdu.clone(),
+            IsisP2pHello::default(),
             ifindex,
             mac,
             link.tx.clone(),
         ));
 
-    nbr.pdu = pdu;
+    nbr.hello = pdu;
 
     let mut ntop = NeighborTop {
         tx: &mut link.tx,
@@ -72,6 +73,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         adj: &mut link.state.adj,
         tracing: &top.tracing,
         local_pool: &mut top.local_pool,
+        up_config: &top.config,
     };
 
     isis_nfsm(
@@ -84,20 +86,22 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
 }
 
 pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
+    // Link must exists.
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
     };
 
+    // Packet has been received but link is not configured.
     if !link.config.enabled() {
         return;
     }
 
-    // Extract P2P Hello PDU - P2P Hello uses the same structure as LAN Hello
-    // but comes as P2PHello packet type, needs to extract as L1Hello/L2Hello
+    // Extract P2P Hello PDU.
     let hello = match packet.pdu {
-        IsisPdu::L1Hello(pdu) | IsisPdu::L2Hello(pdu) => pdu,
+        IsisPdu::P2pHello(pdu) => pdu,
         _ => return,
     };
+    // println!("{hello}");
 
     // Check what levels this interface supports
     let interface_level = link.state.level();
@@ -121,6 +125,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
             .or_insert(Neighbor::new(
                 level,
                 hello.source_id.clone(),
+                IsisHello::default(),
                 hello.clone(),
                 ifindex,
                 mac,
@@ -128,7 +133,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
             ));
 
         // Update neighbor's Hello PDU
-        nbr.pdu = hello.clone();
+        nbr.hello_p2p = hello.clone();
 
         // For P2P interfaces, we use a simplified neighbor state machine
         // Skip the MAC address validation that LAN interfaces require
@@ -139,6 +144,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
             adj: &mut link.state.adj,
             tracing: &top.tracing,
             local_pool: &mut top.local_pool,
+            up_config: &top.config,
         };
 
         // Use P2P-specific neighbor state machine event

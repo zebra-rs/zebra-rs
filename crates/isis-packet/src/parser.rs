@@ -405,7 +405,7 @@ impl ParseBe<IsLevel> for IsLevel {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize)]
 pub struct IsisHello {
     pub circuit_type: IsLevel,
     pub source_id: IsisSysId,
@@ -442,7 +442,7 @@ impl IsisHello {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize)]
 pub struct IsisP2pHello {
     pub circuit_type: IsLevel,
     pub source_id: IsisSysId,

@@ -732,7 +732,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
     let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
     for (_ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
-            let dis_status = if link.state.level == IsLevel::L2 {
+            let mut dis_status = if link.state.level == IsLevel::L2 {
                 match link.state.dis_status.get(&Level::L2) {
                     DisStatus::NotSelected => "no DIS is selected",
                     DisStatus::Other => "is not DIS",
@@ -745,6 +745,9 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
                     DisStatus::Myself => "is DIS",
                 }
             };
+            if link.config.link_type() != LinkType::Lan {
+                dis_status = "";
+            }
             let link_state = if link.state.is_up() { "Up" } else { "Down" };
             writeln!(
                 buf,
@@ -858,12 +861,16 @@ fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
         "no".to_string()
     };
 
-    let dis_status = match link.state.dis_status.get(&level) {
-        DisStatus::NotSelected => "no DIS is selected",
-        DisStatus::Other => "is not DIS",
-        DisStatus::Myself => "is DIS",
-    }
-    .to_string();
+    let dis_status = if link.config.link_type() == LinkType::Lan {
+        match link.state.dis_status.get(&level) {
+            DisStatus::NotSelected => "no DIS is selected",
+            DisStatus::Other => "is not DIS",
+            DisStatus::Myself => "is DIS",
+        }
+        .to_string()
+    } else {
+        String::new()
+    };
 
     LevelInfo {
         metric: link.config.metric(),

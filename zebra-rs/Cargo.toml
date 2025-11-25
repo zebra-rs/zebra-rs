@@ -55,6 +55,7 @@ daemonize = "0.5"
 hex = "0.4.3"
 strum = "0.27"
 strum_macros = "0.27"
+num_enum = "0.7.5"
 nanomsg = "0.7.2"
 itertools = "0.14.0"
 
