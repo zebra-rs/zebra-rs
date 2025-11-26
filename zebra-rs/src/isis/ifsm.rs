@@ -83,17 +83,16 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     hello
 }
 
-pub fn hello_p2p_generate(ltop: &LinkTop, _level: Level) -> IsisHello {
+pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisP2pHello {
     let source_id = ltop.up_config.net.sys_id();
 
     // P2P Hello doesn't use LAN ID
-    let mut hello = IsisHello {
+    let mut hello = IsisP2pHello {
         circuit_type: ltop.state.level(),
         source_id,
         hold_time: ltop.config.hold_time(),
         pdu_len: 0,
-        priority: 0,                       // Priority is not used in P2P
-        lan_id: IsisNeighborId::default(), // Empty for P2P
+        circuit_id: 0,
         tlvs: Vec::new(),
     };
 
@@ -116,8 +115,23 @@ pub fn hello_p2p_generate(ltop: &LinkTop, _level: Level) -> IsisHello {
         );
     }
 
-    // P2P doesn't need IS Neighbor TLV (no MAC addresses)
-    // P2P adjacency is identified by the system ID directly
+    // Three way handshake.
+    let tlv = if let Some((_, nbr)) = ltop.state.nbrs.get(&level).first_key_value() {
+        IsisTlvP2p3Way {
+            state: nbr.state.into(),
+            circuit_id: ltop.state.ifindex,
+            neighbor_id: Some(nbr.sys_id.clone()),
+            neighbor_circuit_id: nbr.circuit_id,
+        }
+    } else {
+        IsisTlvP2p3Way {
+            state: NfsmState::Down.into(),
+            circuit_id: ltop.state.ifindex,
+            neighbor_id: None,
+            neighbor_circuit_id: None,
+        }
+    };
+    hello.tlvs.push(tlv.into());
 
     if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(ltop.state.mtu as usize);
@@ -141,15 +155,17 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
 pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
     let hello = ltop.state.hello.get(&level).as_ref().context("")?;
 
-    let packet = if ltop.config.link_type() == LinkType::P2p {
-        // For P2P interfaces, use P2P Hello packet type but with same PDU structure
-        IsisPacket::from(IsisType::P2PHello, IsisPdu::L1Hello(hello.clone()))
-    } else {
-        // For LAN interfaces, use level-specific Hello packet types
-        match level {
-            Level::L1 => IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
-            Level::L2 => IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
+    let packet = match hello {
+        IsisPdu::P2pHello(hello) => {
+            IsisPacket::from(IsisType::P2pHello, IsisPdu::P2pHello(hello.clone()))
         }
+        IsisPdu::L1Hello(hello) => {
+            IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone()))
+        }
+        IsisPdu::L2Hello(hello) => {
+            IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone()))
+        }
+        _ => return Ok(()),
     };
 
     let ifindex = ltop.state.ifindex;
@@ -244,9 +260,12 @@ pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
         );
 
         let hello = if ltop.config.link_type() == LinkType::P2p {
-            hello_p2p_generate(ltop, level)
+            IsisPdu::P2pHello(hello_p2p_generate(ltop, level))
         } else {
-            hello_generate(ltop, level)
+            match level {
+                Level::L1 => IsisPdu::L1Hello(hello_generate(ltop, level)),
+                Level::L2 => IsisPdu::L2Hello(hello_generate(ltop, level)),
+            }
         };
 
         *ltop.state.hello.get_mut(&level) = Some(hello);
@@ -319,8 +338,8 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
     }
 
     fn is_better(nbr: &Neighbor, curr_priority: u8, curr_mac: &Option<MacAddr>) -> bool {
-        nbr.pdu.priority > curr_priority
-            || (nbr.pdu.priority == curr_priority
+        nbr.hello.priority > curr_priority
+            || (nbr.hello.priority == curr_priority
                 && match (&nbr.mac, curr_mac) {
                     (Some(n_mac), Some(c_mac)) => n_mac > c_mac,
                     _ => false,
@@ -355,7 +374,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             continue;
         }
         if is_better(nbr, best_priority, &best_mac) {
-            best_priority = nbr.pdu.priority;
+            best_priority = nbr.hello.priority;
             best_mac = nbr.mac.clone();
             best_key = Some(key.clone());
         }
@@ -379,7 +398,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
             };
             let reason = format!(
                 "Neighbor {} elected (priority: {}, mac: {})",
-                nbr.sys_id, nbr.pdu.priority, mac_str,
+                nbr.sys_id, nbr.hello.priority, mac_str,
             );
 
             isis_event_trace!(
@@ -389,7 +408,7 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
                 "DIS selection: {} on {} (priority: {}, neighbors: {})",
                 nbr.sys_id,
                 ltop.state.name,
-                nbr.pdu.priority,
+                nbr.hello.priority,
                 nbrs_up
             );
 
@@ -407,15 +426,15 @@ pub fn dis_selection(ltop: &mut LinkTop, level: Level) {
 
             if ltop.state.lan_id.get(&level).is_none() {
                 use IfsmEvent::*;
-                if !nbr.pdu.lan_id.is_empty() {
+                if !nbr.hello.lan_id.is_empty() {
                     isis_event_trace!(
                         ltop.tracing,
                         Dis,
                         &level,
                         "DIS lan_id {} received in Hello packet",
-                        nbr.pdu.lan_id
+                        nbr.hello.lan_id
                     );
-                    *ltop.state.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
+                    *ltop.state.lan_id.get_mut(&level) = Some(nbr.hello.lan_id.clone());
                     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
                 } else {
                     isis_debug!("DIS waiting for LAN Id in Hello packet");

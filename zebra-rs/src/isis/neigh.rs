@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsisHello, IsisProto, IsisSysId};
+use isis_packet::{IsisHello, IsisP2pHello, IsisProto, IsisSysId, IsisTlv};
 use itertools::Itertools;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -19,7 +19,10 @@ use super::{Isis, Level, Message};
 pub struct Neighbor {
     pub tx: UnboundedSender<Message>,
     pub sys_id: IsisSysId,
-    pub pdu: IsisHello,
+    //
+    pub hello: IsisHello,
+    pub hello_p2p: IsisP2pHello,
+    //
     pub ifindex: u32,
     pub prev: NfsmState,
     pub state: NfsmState,
@@ -30,13 +33,18 @@ pub struct Neighbor {
     pub mac: Option<MacAddr>,
     pub hold_timer: Option<Timer>,
     pub dis: bool,
+    // P2P adjacency state TLV: Extended local circuit ID.
+    pub circuit_id: Option<u32>,
+    pub hold_time: u16,
+    pub tlvs: Vec<IsisTlv>,
 }
 
 impl Neighbor {
     pub fn new(
         level: Level,
         sys_id: IsisSysId,
-        pdu: IsisHello,
+        hello: IsisHello,
+        hello_p2p: IsisP2pHello,
         ifindex: u32,
         mac: Option<MacAddr>,
         tx: UnboundedSender<Message>,
@@ -44,7 +52,8 @@ impl Neighbor {
         Self {
             tx,
             sys_id,
-            pdu,
+            hello,
+            hello_p2p,
             ifindex,
             prev: NfsmState::Down,
             state: NfsmState::Down,
@@ -56,6 +65,9 @@ impl Neighbor {
             mac,
             hold_timer: None,
             dis: false,
+            circuit_id: None,
+            hold_time: 0,
+            tlvs: vec![],
         }
     }
 
@@ -120,13 +132,13 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
     for (_, link) in top.links.iter() {
-        for (_, nbr) in &link.state.nbrs.l1 {
+        for (_key, nbr) in &link.state.nbrs.l1 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id =
-                if let Some((hostname, _)) = top.hostname.get(&Level::L1).get(&nbr.pdu.source_id) {
+                if let Some((hostname, _)) = top.hostname.get(&Level::L1).get(&nbr.sys_id) {
                     hostname.clone()
                 } else {
-                    nbr.pdu.source_id.to_string()
+                    nbr.sys_id.to_string()
                 };
             nbrs.push(NeighborBrief {
                 system_id,
@@ -137,13 +149,13 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
                 snpa: show_mac(nbr.mac),
             });
         }
-        for (_, nbr) in &link.state.nbrs.l2 {
+        for (_key, nbr) in &link.state.nbrs.l2 {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id =
-                if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.pdu.source_id) {
+                if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.sys_id) {
                     hostname.clone()
                 } else {
-                    nbr.pdu.source_id.to_string()
+                    nbr.sys_id.to_string()
                 };
             nbrs.push(NeighborBrief {
                 system_id,
@@ -176,10 +188,10 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
 }
 
 fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std::fmt::Result {
-    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.pdu.source_id) {
+    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.sys_id) {
         hostname.clone()
     } else {
-        nbr.pdu.source_id.to_string()
+        nbr.sys_id.to_string()
     };
     writeln!(buf, " {}", system_id)?;
 
@@ -191,8 +203,8 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         nbr.state.to_string(),
     )?;
 
-    write!(buf, "    Circuit type: {}, Speaks:", nbr.pdu.circuit_type,)?;
-    if let Some(proto) = &nbr.pdu.proto_tlv() {
+    write!(buf, "    Circuit type: {}, Speaks:", nbr.hello.circuit_type,)?;
+    if let Some(proto) = &nbr.hello.proto_tlv() {
         if !proto.nlpids.is_empty() {
             let protocols = proto
                 .nlpids
@@ -207,13 +219,14 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         buf,
         "    SNPA: {}, LAN id: {}",
         show_mac(nbr.mac),
-        nbr.pdu.lan_id
+        nbr.hello.lan_id
     )?;
 
     let dis = if nbr.is_dis() { "is DIS" } else { "is not DIS" };
 
     // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 4m1s ago
-    writeln!(buf, "    LAN Priority: {}, {}", nbr.pdu.priority, dis)?;
+    // XXX
+    writeln!(buf, "    LAN Priority: {}, {}", nbr.hello.priority, dis)?;
 
     if !nbr.naddr4.is_empty() {
         writeln!(buf, "    IP Prefixes")?;
@@ -243,13 +256,13 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
 }
 
 fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetail {
-    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.pdu.source_id) {
+    let system_id = if let Some((hostname, _)) = top.hostname.get(&level).get(&nbr.sys_id) {
         hostname.clone()
     } else {
-        nbr.pdu.source_id.to_string()
+        nbr.sys_id.to_string()
     };
 
-    let speaks = if let Some(proto) = &nbr.pdu.proto_tlv() {
+    let speaks = if let Some(proto) = &nbr.hello.proto_tlv() {
         proto
             .nlpids
             .iter()
@@ -276,11 +289,11 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         interface: top.ifname(nbr.ifindex),
         level: nbr.level.digit(),
         state: nbr.state.to_string(),
-        circuit_type: nbr.pdu.circuit_type.into(),
+        circuit_type: nbr.hello.circuit_type.into(),
         speaks,
         snpa: show_mac(nbr.mac),
-        lan_id: nbr.pdu.lan_id.to_string(),
-        lan_priority: nbr.pdu.priority,
+        lan_id: nbr.hello.lan_id.to_string(),
+        lan_priority: nbr.hello.priority,
         is_dis: nbr.is_dis(),
         ip_prefixes,
         ipv6_link_locals,

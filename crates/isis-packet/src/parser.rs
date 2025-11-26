@@ -46,7 +46,7 @@ pub fn length_indicator(pdu_type: IsisType) -> u8 {
     match pdu_type {
         L1Hello => 27,
         L2Hello => 27,
-        P2PHello => 27,
+        P2pHello => 20,
         L1Lsp => 27,
         L2Lsp => 27,
         L1Csnp => 33,
@@ -86,6 +86,7 @@ impl IsisPacket {
         match &self.pdu {
             L1Hello(v) => v.emit(buf),
             L2Hello(v) => v.emit(buf),
+            P2pHello(v) => v.emit(buf),
             L1Lsp(v) => v.emit(buf),
             L2Lsp(v) => v.emit(buf),
             L1Csnp(v) => v.emit(buf),
@@ -109,6 +110,8 @@ pub enum IsisPdu {
     L1Hello(IsisHello),
     #[nom(Selector = "IsisType::L2Hello")]
     L2Hello(IsisHello),
+    #[nom(Selector = "IsisType::P2pHello")]
+    P2pHello(IsisP2pHello),
     #[nom(Selector = "IsisType::L1Lsp")]
     L1Lsp(IsisLsp),
     #[nom(Selector = "IsisType::L2Lsp")]
@@ -402,7 +405,7 @@ impl ParseBe<IsLevel> for IsLevel {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize)]
 pub struct IsisHello {
     pub circuit_type: IsLevel,
     pub source_id: IsisSysId,
@@ -423,6 +426,41 @@ impl IsisHello {
         buf.put_u16(self.pdu_len);
         buf.put_u8(self.priority);
         buf.put(&self.lan_id.id[..]);
+        self.tlvs.iter().for_each(|tlv| tlv.emit(buf));
+        let pdu_len: u16 = buf.len() as u16;
+        BigEndian::write_u16(&mut buf[pp..pp + 2], pdu_len);
+    }
+
+    pub fn proto_tlv(&self) -> Option<&IsisTlvProtoSupported> {
+        self.tlvs.iter().find_map(|tlv| {
+            if let IsisTlv::ProtoSupported(tlv) = tlv {
+                Some(tlv)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+#[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize)]
+pub struct IsisP2pHello {
+    pub circuit_type: IsLevel,
+    pub source_id: IsisSysId,
+    pub hold_time: u16,
+    pub pdu_len: u16,
+    pub circuit_id: u8,
+    #[nom(Parse = "IsisTlv::parse_tlvs")]
+    pub tlvs: Vec<IsisTlv>,
+}
+
+impl IsisP2pHello {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.circuit_type.into());
+        buf.put(&self.source_id.id[..]);
+        buf.put_u16(self.hold_time);
+        let pp = buf.len();
+        buf.put_u16(self.pdu_len);
+        buf.put_u8(self.circuit_id);
         self.tlvs.iter().for_each(|tlv| tlv.emit(buf));
         let pdu_len: u16 = buf.len() as u16;
         BigEndian::write_u16(&mut buf[pp..pp + 2], pdu_len);
@@ -897,12 +935,38 @@ impl From<IsisTlvIpv6GlobalIfAddr> for IsisTlv {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvP2p3Way {
     pub state: u8,
     pub circuit_id: u32,
-    pub neighbor_id: IsisNeighborId,
-    pub neighbor_circuit_id: u32,
+    pub neighbor_id: Option<IsisSysId>,
+    pub neighbor_circuit_id: Option<u32>,
+}
+
+impl ParseBe<IsisTlvP2p3Way> for IsisTlvP2p3Way {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, state) = be_u8(input)?;
+        let (input, circuit_id) = be_u32(input)?;
+        let (input, neighbor_id) = if input.len() >= 6 {
+            let (input, neighbor_id) = IsisSysId::parse_be(input)?;
+            (input, Some(neighbor_id))
+        } else {
+            (input, None)
+        };
+        let (input, neighbor_circuit_id) = if input.len() >= 4 {
+            let (input, neighbor_circuit_id) = be_u32(input)?;
+            (input, Some(neighbor_circuit_id))
+        } else {
+            (input, None)
+        };
+        let tlv = Self {
+            state,
+            circuit_id,
+            neighbor_id,
+            neighbor_circuit_id,
+        };
+        Ok((input, tlv))
+    }
 }
 
 impl TlvEmitter for IsisTlvP2p3Way {
@@ -911,14 +975,25 @@ impl TlvEmitter for IsisTlvP2p3Way {
     }
 
     fn len(&self) -> u8 {
-        1 + 4 + 7 + 4
+        let mut len = 1 + 4;
+        if self.neighbor_id.is_some() {
+            len += 6;
+        }
+        if self.neighbor_circuit_id.is_some() {
+            len += 4;
+        }
+        len
     }
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.state);
         buf.put_u32(self.circuit_id);
-        buf.put(&self.neighbor_id.id[..]);
-        buf.put_u32(self.neighbor_circuit_id);
+        if let Some(neighbor_id) = &self.neighbor_id {
+            buf.put(&neighbor_id.id[..]);
+        }
+        if let Some(neighbor_circuit_id) = self.neighbor_circuit_id {
+            buf.put_u32(neighbor_circuit_id);
+        }
     }
 }
 

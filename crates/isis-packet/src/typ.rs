@@ -12,7 +12,7 @@ pub enum IsisType {
     #[default]
     L1Hello = 0x0f,
     L2Hello = 0x10,
-    P2PHello = 0x11,
+    P2pHello = 0x11,
     L1Lsp = 0x12,
     L2Lsp = 0x14,
     L1Csnp = 0x18,
@@ -28,7 +28,7 @@ impl Display for IsisType {
         let str = match self {
             L1Hello => "L1 LAN Hello",
             L2Hello => "L2 LAN Hello",
-            P2PHello => "P2P LAN Hello",
+            P2pHello => "P2P LAN Hello",
             L1Lsp => "L1 LSP",
             L2Lsp => "L2 LSP",
             L1Csnp => "L1 CSNP",
@@ -47,7 +47,7 @@ impl From<IsisType> for u8 {
         match typ {
             L1Hello => 0x0f,
             L2Hello => 0x10,
-            P2PHello => 0x11,
+            P2pHello => 0x11,
             L1Lsp => 0x12,
             L2Lsp => 0x14,
             L1Csnp => 0x18,
@@ -65,7 +65,7 @@ impl From<u8> for IsisType {
         match typ {
             0x0f => L1Hello,
             0x10 => L2Hello,
-            0x11 => P2PHello,
+            0x11 => P2pHello,
             0x12 => L1Lsp,
             0x14 => L2Lsp,
             0x18 => L1Csnp,
