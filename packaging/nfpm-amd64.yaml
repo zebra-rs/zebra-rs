@@ -9,7 +9,7 @@
 name: "zebra-rs"
 arch: "amd64"
 platform: "linux"
-version: "0.8.3"
+version: "0.8.4"
 section: "default"
 priority: "extra"
 replaces:
@@ -29,7 +29,7 @@ contents:
     dst: /usr/bin/zctl
   - src: ../target/release/zmcp-server
     dst: /usr/bin/zmcp-server
-  - src: ../cli/cli
+  - src: ../vty/vty
     dst: /usr/bin/vty
   - src: ../target/release/cli-helper
     dst: /usr/bin/cli-helper

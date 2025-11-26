@@ -1,5 +1,5 @@
 [package]
-name = "cli-helper"
+name = "vtyhelper"
 version.workspace = true
 edition.workspace = true
 
