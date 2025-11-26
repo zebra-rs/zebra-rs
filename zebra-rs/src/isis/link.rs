@@ -18,7 +18,7 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlags, MacAddr};
 
 use super::config::IsisConfig;
-use super::ifsm::has_level;
+use super::ifsm::{self, has_level};
 use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::network::{read_packet, write_packet};
@@ -375,7 +375,7 @@ pub struct LinkState {
 
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
-    pub hello: Levels<Option<IsisHello>>,
+    pub hello: Levels<Option<IsisPdu>>,
 }
 
 impl LinkState {
@@ -659,10 +659,16 @@ pub fn config_link_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Optio
     let name = args.string()?;
     let link_type = args.string()?.parse::<LinkType>().ok()?;
 
-    let link = isis.links.get_mut_by_name(&name)?;
-    link.config.link_type = Some(link_type);
+    let ifindex = {
+        let link = isis.links.get_mut_by_name(&name)?;
+        link.config.link_type = Some(link_type);
+        link.state.ifindex
+    };
 
-    // TODO: need to reset link.
+    if let Some(mut top) = isis.link_top(ifindex) {
+        ifsm::hello_originate(&mut top, Level::L1);
+        ifsm::hello_originate(&mut top, Level::L2);
+    }
 
     Some(())
 }
@@ -726,7 +732,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
     let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
     for (_ifindex, link) in isis.links.iter() {
         if link.config.enabled() {
-            let dis_status = if link.state.level == IsLevel::L2 {
+            let mut dis_status = if link.state.level == IsLevel::L2 {
                 match link.state.dis_status.get(&Level::L2) {
                     DisStatus::NotSelected => "no DIS is selected",
                     DisStatus::Other => "is not DIS",
@@ -739,6 +745,9 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
                     DisStatus::Myself => "is DIS",
                 }
             };
+            if link.config.link_type() != LinkType::Lan {
+                dis_status = "";
+            }
             let link_state = if link.state.is_up() { "Up" } else { "Down" };
             writeln!(
                 buf,
@@ -852,12 +861,16 @@ fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
         "no".to_string()
     };
 
-    let dis_status = match link.state.dis_status.get(&level) {
-        DisStatus::NotSelected => "no DIS is selected",
-        DisStatus::Other => "is not DIS",
-        DisStatus::Myself => "is DIS",
-    }
-    .to_string();
+    let dis_status = if link.config.link_type() == LinkType::Lan {
+        match link.state.dis_status.get(&level) {
+            DisStatus::NotSelected => "no DIS is selected",
+            DisStatus::Other => "is not DIS",
+            DisStatus::Myself => "is DIS",
+        }
+        .to_string()
+    } else {
+        String::new()
+    };
 
     LevelInfo {
         metric: link.config.metric(),

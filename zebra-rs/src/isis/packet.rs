@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Error};
 use bytes::BytesMut;
 use isis_packet::{
-    IsLevel, IsisLsp, IsisLspId, IsisNeighborId, IsisPacket, IsisPdu, IsisPsnp, IsisTlv,
-    IsisTlvLspEntries, IsisType,
+    IsLevel, IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisP2pHello, IsisPacket, IsisPdu,
+    IsisPsnp, IsisTlv, IsisTlvLspEntries, IsisType,
 };
 
 use crate::isis::Message;
@@ -58,12 +58,15 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
             level,
             pdu.source_id.clone(),
             pdu.clone(),
+            IsisP2pHello::default(),
             ifindex,
             mac,
             link.tx.clone(),
         ));
 
-    nbr.pdu = pdu;
+    nbr.hold_time = pdu.hold_time;
+    nbr.tlvs = pdu.tlvs.clone();
+    nbr.hello = pdu;
 
     let mut ntop = NeighborTop {
         tx: &mut link.tx,
@@ -72,6 +75,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         adj: &mut link.state.adj,
         tracing: &top.tracing,
         local_pool: &mut top.local_pool,
+        up_config: &top.config,
     };
 
     isis_nfsm(
@@ -84,18 +88,19 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
 }
 
 pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
+    // Link must exists.
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
     };
 
+    // Packet has been received but link is not configured.
     if !link.config.enabled() {
         return;
     }
 
-    // Extract P2P Hello PDU - P2P Hello uses the same structure as LAN Hello
-    // but comes as P2PHello packet type, needs to extract as L1Hello/L2Hello
-    let hello = match packet.pdu {
-        IsisPdu::L1Hello(pdu) | IsisPdu::L2Hello(pdu) => pdu,
+    // Extract P2P Hello PDU.
+    let pdu = match packet.pdu {
+        IsisPdu::P2pHello(pdu) => pdu,
         _ => return,
     };
 
@@ -103,7 +108,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
     let interface_level = link.state.level();
 
     // P2P Hello contains circuit_type indicating what levels the sender supports
-    let sender_level = hello.circuit_type;
+    let sender_level = pdu.circuit_type;
 
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
@@ -117,18 +122,21 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
             .state
             .nbrs
             .get_mut(&level)
-            .entry(hello.source_id.clone())
+            .entry(pdu.source_id.clone())
             .or_insert(Neighbor::new(
                 level,
-                hello.source_id.clone(),
-                hello.clone(),
+                pdu.source_id.clone(),
+                IsisHello::default(),
+                pdu.clone(),
                 ifindex,
                 mac,
                 link.tx.clone(),
             ));
 
         // Update neighbor's Hello PDU
-        nbr.pdu = hello.clone();
+        nbr.hello_p2p = pdu.clone();
+        nbr.hold_time = pdu.hold_time;
+        nbr.tlvs = pdu.tlvs.clone();
 
         // For P2P interfaces, we use a simplified neighbor state machine
         // Skip the MAC address validation that LAN interfaces require
@@ -139,6 +147,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
             adj: &mut link.state.adj,
             tracing: &top.tracing,
             local_pool: &mut top.local_pool,
+            up_config: &top.config,
         };
 
         // Use P2P-specific neighbor state machine event
@@ -700,7 +709,7 @@ pub fn process_packet(
     let link = top.links.get_mut(&ifindex).context("Interface not found")?;
 
     match packet.pdu_type {
-        IsisType::P2PHello => link.state.stats.rx.p2p_hello += 1,
+        IsisType::P2pHello => link.state.stats.rx.p2p_hello += 1,
         IsisType::L1Hello => link.state.stats.rx.hello.l1 += 1,
         IsisType::L2Hello => link.state.stats.rx.hello.l2 += 1,
         IsisType::L1Lsp => link.state.stats.rx.lsp.l1 += 1,
@@ -716,7 +725,7 @@ pub fn process_packet(
         IsisType::L1Hello | IsisType::L2Hello => {
             hello_recv(top, packet, ifindex, mac);
         }
-        IsisType::P2PHello => {
+        IsisType::P2pHello => {
             hello_p2p_recv(top, packet, ifindex, mac);
         }
         IsisType::L1Lsp | IsisType::L2Lsp => {

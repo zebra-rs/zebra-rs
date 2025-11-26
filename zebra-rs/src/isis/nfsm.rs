@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsisHello, IsisNeighborId, IsisTlv};
+use isis_packet::{IsisHello, IsisNeighborId, IsisTlv, IsisTlvP2p3Way, Nsap};
+use num_enum::IntoPrimitive;
+use strum_macros::{Display, EnumString};
 
 use crate::context::Timer;
 use crate::rib::MacAddr;
@@ -13,54 +15,33 @@ use super::{IfsmEvent, LabelPool, Level, Message};
 
 use super::neigh::Neighbor;
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
+// Neighbor state. The value corresponds to P2P Hello three way handshke TLV's
+// state value.
+#[repr(u8)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Display, EnumString, IntoPrimitive)]
 pub enum NfsmState {
-    Down,
-    Init,
-    Up,
+    #[strum(serialize = "Up")]
+    Up = 0,
+    #[strum(serialize = "Init")]
+    Init = 1,
+    #[strum(serialize = "Down")]
+    Down = 2,
 }
 
 impl NfsmState {
-    fn as_str(&self) -> &'static str {
-        match self {
-            NfsmState::Down => "Down",
-            NfsmState::Init => "Init",
-            NfsmState::Up => "Up",
-        }
-    }
-
     pub fn is_up(&self) -> bool {
         *self == NfsmState::Up
     }
 }
 
-impl Display for NfsmState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Display, EnumString)]
 pub enum NfsmEvent {
+    #[strum(serialize = "HelloReceived")]
     HelloReceived,
+    #[strum(serialize = "P2pHelloReceived")]
     P2pHelloReceived,
+    #[strum(serialize = "HoldTimerExpire")]
     HoldTimerExpire,
-}
-
-impl NfsmEvent {
-    fn as_str(&self) -> &'static str {
-        match self {
-            NfsmEvent::HelloReceived => "HelloReceived",
-            NfsmEvent::P2pHelloReceived => "P2pHelloReceived",
-            NfsmEvent::HoldTimerExpire => "HoldTimerExpire",
-        }
-    }
-}
-
-impl Display for NfsmEvent {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        f.write_str(self.as_str())
-    }
 }
 
 pub type NfsmFunc =
@@ -69,24 +50,10 @@ pub type NfsmFunc =
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent, _level: Level) -> (NfsmFunc, Option<Self>) {
         use NfsmEvent::*;
-        use NfsmState::*;
-
-        match self {
-            Down => match ev {
-                HelloReceived => (nfsm_hello_received, None),
-                P2pHelloReceived => (nfsm_p2p_hello_received, None),
-                HoldTimerExpire => (nfsm_hold_timer_expire, None),
-            },
-            Init => match ev {
-                HelloReceived => (nfsm_hello_received, None),
-                P2pHelloReceived => (nfsm_p2p_hello_received, None),
-                HoldTimerExpire => (nfsm_hold_timer_expire, None),
-            },
-            Up => match ev {
-                HelloReceived => (nfsm_hello_received, None),
-                P2pHelloReceived => (nfsm_p2p_hello_received, None),
-                HoldTimerExpire => (nfsm_hold_timer_expire, None),
-            },
+        match ev {
+            HelloReceived => (nfsm_hello_received, None),
+            P2pHelloReceived => (nfsm_p2p_hello_received, None),
+            HoldTimerExpire => (nfsm_hold_timer_expire, None),
         }
     }
 }
@@ -109,13 +76,13 @@ fn nfsm_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
     false
 }
 
-pub fn nfsm_hold_timer(adj: &Neighbor, level: Level) -> Timer {
-    let tx = adj.tx.clone();
-    let sysid = adj.pdu.source_id.clone();
-    let ifindex = adj.ifindex;
-    Timer::once(adj.pdu.hold_time as u64, move || {
+pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
+    let tx = nbr.tx.clone();
+    let sys_id = nbr.sys_id.clone();
+    let ifindex = nbr.ifindex;
+    Timer::once(nbr.hold_time as u64, move || {
         let tx = tx.clone();
-        let sysid = sysid.clone();
+        let sysid = sys_id.clone();
         async move {
             use NfsmEvent::*;
             tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level))
@@ -152,7 +119,7 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
     let mut addr6 = vec![];
     let mut laddr6 = vec![];
 
-    for tlv in &nbr.pdu.tlvs {
+    for tlv in &nbr.tlvs {
         match tlv {
             IsisTlv::Ipv4IfAddr(ifaddr) => {
                 naddr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
@@ -213,12 +180,12 @@ pub fn nfsm_hello_received(
     }
 
     if state == NfsmState::Init {
-        if nfsm_hello_has_mac(&nbr.pdu, mac) {
+        if nfsm_hello_has_mac(&nbr.hello, mac) {
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Up;
         }
     } else {
-        if !nfsm_hello_has_mac(&nbr.pdu, mac) {
+        if !nfsm_hello_has_mac(&nbr.hello, mac) {
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Init;
         }
@@ -226,17 +193,17 @@ pub fn nfsm_hello_received(
 
     if state == NfsmState::Up
         && nbr.is_dis()
-        && !nbr.pdu.lan_id.is_empty()
+        && !nbr.hello.lan_id.is_empty()
         && ntop.dis.get(&level).is_some()
         && ntop.lan_id.get(&level).is_none()
     {
-        *ntop.lan_id.get_mut(&level) = Some(nbr.pdu.lan_id.clone());
+        *ntop.lan_id.get_mut(&level) = Some(nbr.hello.lan_id.clone());
         isis_fsm_trace!(
             ntop.tracing,
             Nfsm,
             true,
             "DIS LAN ID is set in Hello {} on level {}",
-            nbr.pdu.lan_id,
+            nbr.hello.lan_id,
             level
         );
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -244,6 +211,59 @@ pub fn nfsm_hello_received(
 
     nfsm_ifaddr_update(nbr, ntop.local_pool);
 
+    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+    if state != nbr.state {
+        Some(state)
+    } else {
+        None
+    }
+}
+
+pub fn nfsm_p2p_hello_received(
+    ntop: &mut NeighborTop,
+    nbr: &mut Neighbor,
+    _mac: &Option<MacAddr>,
+    level: Level,
+) -> Option<NfsmState> {
+    use IfsmEvent::*;
+
+    let mut state = nbr.state;
+
+    isis_packet_trace!(
+        ntop.tracing,
+        Hello,
+        Receive,
+        &level,
+        "P2P Hello received on {} from {}",
+        nbr.ifindex,
+        nbr.sys_id
+    );
+
+    // Lookup three way handshake TLV.
+    let three_way = p2ptlv(nbr);
+    if let Some(tlv) = &three_way {
+        nbr.circuit_id = Some(tlv.circuit_id);
+    }
+
+    // When it is three way handshake.
+    if state == NfsmState::Down {
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        state = NfsmState::Init;
+    }
+
+    // Fall down from previous.
+    if state == NfsmState::Init {
+        if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
+            state = NfsmState::Up;
+        }
+    }
+
+    // Update interface addresses from Hello
+    //
+    nfsm_ifaddr_update(nbr, ntop.local_pool);
+
+    // Reset hold timer
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
     if state != nbr.state {
@@ -274,56 +294,26 @@ pub fn nfsm_hold_timer_expire(
     Some(NfsmState::Down)
 }
 
-pub fn nfsm_p2p_hello_received(
-    ntop: &mut NeighborTop,
-    nbr: &mut Neighbor,
-    _mac: &Option<MacAddr>,
-    level: Level,
-) -> Option<NfsmState> {
-    use IfsmEvent::*;
-
-    let mut state = nbr.state;
-
-    isis_packet_trace!(
-        ntop.tracing,
-        Hello,
-        Receive,
-        &level,
-        "P2P Hello received on {} from {}",
-        nbr.ifindex,
-        nbr.sys_id
-    );
-
-    // P2P adjacency formation is simpler than LAN:
-    // - No DIS election needed
-    // - No MAC address validation required
-    // - Direct transition from Down to Up
-    match state {
-        NfsmState::Down => {
-            // Start Hello origination and go directly to Up
-            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-            state = NfsmState::Up;
-
-            // Set adjacency for P2P link - convert sys_id to neighbor_id
-            *ntop.adj.get_mut(&level) = Some(IsisNeighborId::from_sys_id(&nbr.pdu.source_id, 0));
-        }
-        NfsmState::Init | NfsmState::Up => {
-            // Already have adjacency, just refresh
-            // P2P links maintain simple adjacency without complex state changes
+fn p2ptlv(nbr: &Neighbor) -> Option<IsisTlvP2p3Way> {
+    for tlv in nbr.hello_p2p.tlvs.iter() {
+        if let IsisTlv::P2p3Way(tlv) = tlv {
+            return Some(tlv.clone());
         }
     }
+    None
+}
 
-    // Update interface addresses from Hello
-    nfsm_ifaddr_update(nbr, ntop.local_pool);
+fn nfsm_p2ptlv_has_me(tlv: Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
+    let sys_id = nsap.sys_id();
 
-    // Reset hold timer
-    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
-
-    if state != nbr.state {
-        Some(state)
-    } else {
-        None
+    if let Some(tlv) = tlv {
+        if let Some(neighbor_id) = tlv.neighbor_id {
+            if sys_id == neighbor_id {
+                return true;
+            }
+        }
     }
+    false
 }
 
 pub fn isis_nfsm(

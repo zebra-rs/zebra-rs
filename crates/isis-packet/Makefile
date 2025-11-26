@@ -24,3 +24,6 @@ sid:
 
 srv6:
 	@cargo test --quiet srv6 -- --nocapture
+
+p2p:
+	@cargo test --quiet parse_p2p_hello -- --nocapture

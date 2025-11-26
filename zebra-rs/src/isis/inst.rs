@@ -93,6 +93,7 @@ pub struct NeighborTop<'a> {
     pub adj: &'a mut Levels<Option<IsisNeighborId>>,
     pub tracing: &'a IsisTracing,
     pub local_pool: &'a mut Option<LabelPool>,
+    pub up_config: &'a IsisConfig,
 }
 
 impl Isis {
@@ -408,6 +409,7 @@ impl Isis {
             adj: &mut ltop.state.adj,
             tracing: &ltop.tracing,
             local_pool: &mut ltop.local_pool,
+            up_config: &ltop.up_config,
         };
         let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
             return;
@@ -1366,7 +1368,7 @@ fn build_adjacency_ilm(
 
         for (ifindex, link) in top.links.iter() {
             if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                for tlv in nbr.pdu.tlvs.iter() {
+                for tlv in nbr.hello.tlvs.iter() {
                     if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                         let nhop = SpfNexthop {
                             ifindex: *ifindex,
@@ -1421,7 +1423,7 @@ fn build_rib_from_spf(
                     // Find nhop from links
                     for (ifindex, link) in top.links.iter() {
                         if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                            for tlv in nbr.pdu.tlvs.iter() {
+                            for tlv in nbr.hello.tlvs.iter() {
                                 if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                                     let nhop = SpfNexthop {
                                         ifindex: *ifindex,
