@@ -256,6 +256,7 @@ pub fn nfsm_p2p_hello_received(
     // Fall down from previous.
     if state == NfsmState::Init {
         if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
+            println!("XX Init -> Up LSP originate");
             nbr.event(Message::LspOriginate(level));
             state = NfsmState::Up;
         }
@@ -371,17 +372,17 @@ pub fn isis_nfsm(
                         // Start DB exchange.
                         if nbr.sys_id < ntop.up_config.net.sys_id() {
                             // Master
-                            // println!(
-                            //     "Master nbr {} self {}",
-                            //     nbr.sys_id,
-                            //     ntop.up_config.net.sys_id()
-                            // );
+                            println!(
+                                "Master nbr {} self {}",
+                                nbr.sys_id,
+                                ntop.up_config.net.sys_id()
+                            );
                         } else {
-                            // println!(
-                            //     "Slave nbr {} self {}",
-                            //     nbr.sys_id,
-                            //     ntop.up_config.net.sys_id()
-                            // );
+                            println!(
+                                "Slave nbr {} self {}",
+                                nbr.sys_id,
+                                ntop.up_config.net.sys_id()
+                            );
                         }
                     }
                     // Allocate adjacency SID when it is not yet.

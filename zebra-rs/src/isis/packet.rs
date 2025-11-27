@@ -45,6 +45,15 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         _ => return,
     };
 
+    isis_packet_trace!(
+        top.tracing,
+        Hello,
+        Receive,
+        &level,
+        "[Hello] recv on link {}",
+        link.state.name
+    );
+
     // Check link capability for the PDU type.
     if !link_level_capable(&link.state.level(), &level) {
         return;
@@ -118,6 +127,15 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
         if !has_level(interface_level, level) || !has_level(sender_level, level) {
             continue;
         }
+
+        isis_packet_trace!(
+            top.tracing,
+            Hello,
+            Receive,
+            &level,
+            "[P2P Hello] recv on link {}",
+            link.state.name
+        );
 
         // Create or update neighbor for this level
         let nbr = link
@@ -209,7 +227,12 @@ pub fn lsp_same(src: &IsisLsp, dest: &IsisLsp) -> bool {
     }
     for (i, (src_tlv, dest_tlv)) in src.tlvs.iter().zip(dest.tlvs.iter()).enumerate() {
         if src_tlv != dest_tlv {
-            tracing::debug!("TLV mismatch at index {}: src={}, dest={}", i, src_tlv, dest_tlv);
+            tracing::debug!(
+                "TLV mismatch at index {}: src={}, dest={}",
+                i,
+                src_tlv,
+                dest_tlv
+            );
             return false;
         }
     }
