@@ -12,7 +12,7 @@ pub struct IsisTracing {
     pub all: bool,
     /// Packet tracing configuration
     pub packet: PacketTracing,
-    /// Event tracing configuration  
+    /// Event tracing configuration
     pub event: EventTracing,
     /// FSM tracing configuration
     pub fsm: FsmTracing,
