@@ -25,14 +25,12 @@ changelog: "changelog.yaml"
 contents:
   - src: ../target/release/zebra-rs
     dst: /usr/bin/zebra-rs
-  - src: ../target/release/vtyctl
-    dst: /usr/bin/vtyctl
-  - src: ../target/release/zmcp-server
-    dst: /usr/bin/zmcp-server
   - src: ../vty/vty
     dst: /usr/bin/vty
   - src: ../target/release/vtyhelper
     dst: /usr/bin/vtyhelper
+  - src: ../target/release/vtyctl
+    dst: /usr/bin/vtyctl
   - src: ../zebra-rs/yang
     dst: /etc/zebra-rs/yang
   - src: ./modules-load.d/zebra-rs.conf
