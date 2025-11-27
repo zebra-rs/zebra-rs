@@ -1,5 +1,5 @@
 [package]
-name = "zctl"
+name = "vtyhelper"
 version.workspace = true
 edition.workspace = true
 

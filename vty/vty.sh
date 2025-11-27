@@ -34,7 +34,7 @@ _cli_interactive_setup
 # fi
 
 # CLI command tool name.
-cli_command=cli-helper
+cli_command=vtyhelper
 
 declare -x CLI_MODE="exec"
 declare -x CLI_MODE_STR="Exec"

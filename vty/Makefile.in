@@ -109,10 +109,10 @@ EXEEXT = @EXEEXT@
 OBJEXT = @OBJEXT@
 
 # The name of this program and some version information.
-VERSPROG = cliversion$(EXEEXT)
-VERSOBJ = cliversion.$(OBJEXT)
+VERSPROG = vtyversion$(EXEEXT)
+VERSOBJ = vtyversion.$(OBJEXT)
 
-Program = cli$(EXEEXT)
+Program = vty$(EXEEXT)
 Version = @BASHVERS@
 PatchLevel = `$(BUILD_DIR)/$(VERSPROG) -p`
 RELSTATUS = @RELSTATUS@
@@ -599,7 +599,7 @@ $(Program): $(OBJECTS) $(BUILTINS_DEP) $(LIBDEP) .build
 	ls -l $(Program)
 	-$(SIZE) $(Program)
 
-.build:	$(SOURCES) config.h Makefile $(DEFDIR)/builtext.h version.h $(VERSPROG) cli.c
+.build:	$(SOURCES) config.h Makefile $(DEFDIR)/builtext.h version.h $(VERSPROG) vty.c
 	@echo
 	@echo "	  ***********************************************************"
 	@echo "	  *                                                         *"
@@ -641,12 +641,12 @@ version.h:  $(SOURCES) config.h Makefile patchlevel.h
 	$(SHELL) $(SUPPORT_SRC)mkversion.sh -b -S ${topdir} -s $(RELSTATUS) -d $(Version) -o newversion.h \
 		&& mv newversion.h version.h
 
-cli.c: cli.sh
-	xxd -i cli.sh >cli.c
+vty.c: vty.sh
+	xxd -i vty.sh >vty.c
 
-vtysh.o: cli.c
+vtysh.o: vty.c
 
-cliversion$(EXEEXT): buildversion.o $(SUPPORT_SRC)bashversion.c
+vtyversion$(EXEEXT): buildversion.o $(SUPPORT_SRC)bashversion.c
 	$(CC_FOR_BUILD) $(CCFLAGS_FOR_BUILD) ${LDFLAGS_FOR_BUILD} -o $@ $(SUPPORT_SRC)bashversion.c buildversion.o ${LIBS_FOR_BUILD}
 
 buildversion.o: $(srcdir)/version.c

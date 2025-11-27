@@ -3,7 +3,7 @@
 Cargo.lock
 
 # Binary
-cli/cli
+vty/vty
 
 # Logging
 zebra-rs.log

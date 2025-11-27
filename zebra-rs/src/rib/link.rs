@@ -140,6 +140,10 @@ impl LinkFlags {
     pub fn is_loopback(&self) -> bool {
         (self.0 & IFF_LOOPBACK) == IFF_LOOPBACK
     }
+
+    pub fn is_p2p(&self) -> bool {
+        (self.0 & IFF_POINTOPOINT) == IFF_POINTOPOINT
+    }
 }
 
 impl fmt::Display for LinkFlags {

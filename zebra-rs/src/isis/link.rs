@@ -1,21 +1,21 @@
-use serde::Serialize;
-use socket2::Socket;
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, IterMut};
 use std::fmt::Write;
 use std::sync::Arc;
-use tokio::io::unix::AsyncFd;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::*;
+use serde::Serialize;
+use socket2::Socket;
+use strum_macros::{Display, EnumString};
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedSender};
-
-use crate::{isis_event_trace, isis_warn};
 
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
 use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlags, MacAddr};
+use crate::{isis_event_trace, isis_warn};
 
 use super::config::IsisConfig;
 use super::ifsm::{self, has_level};
@@ -150,52 +150,25 @@ pub struct LinkConfig {
     pub prefix_sid: Option<SidLabelValue>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, EnumString, Display)]
 pub enum LinkType {
+    #[strum(serialize = "loopback")]
+    Loopback,
+    #[strum(serialize = "lan")]
     Lan,
+    #[strum(serialize = "point-to-point", to_string = "p2p")]
     P2p,
 }
 
-impl std::fmt::Display for LinkType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LinkType::Lan => write!(f, "lan"),
-            LinkType::P2p => write!(f, "p2p"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ParseLinkTypeError;
-
-impl Display for ParseLinkTypeError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "invalid link type")
-    }
-}
-
-impl FromStr for LinkType {
-    type Err = ParseLinkTypeError;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "lan" => Ok(LinkType::Lan),
-            "point-to-point" => Ok(LinkType::P2p),
-            _ => Err(ParseLinkTypeError),
-        }
-    }
-}
-
-// Default priority is 64.
-const DEFAULT_PRIORITY: u8 = 64;
-const DEFAULT_HOLD_TIME: u16 = 30;
-const DEFAULT_HELLO_INTERVAL: u16 = 3;
-const DEFAULT_METRIC: u32 = 10;
-const DEFAULT_HOLDDOWN_COUNT: u32 = 10;
-const DEFAULT_PSNP_INTERVAL: u32 = 2;
-const DEFAULT_CSNP_INTERVAL: u32 = 10;
-
 impl LinkConfig {
+    const DEFAULT_PRIORITY: u8 = 64;
+    const DEFAULT_HOLD_TIME: u16 = 30;
+    const DEFAULT_HELLO_INTERVAL: u16 = 3;
+    const DEFAULT_METRIC: u32 = 10;
+    const DEFAULT_HOLDDOWN_COUNT: u32 = 10;
+    const DEFAULT_PSNP_INTERVAL: u32 = 2;
+    const DEFAULT_CSNP_INTERVAL: u32 = 10;
+
     pub fn circuit_type(&self) -> IsLevel {
         self.circuit_type.unwrap_or(IsLevel::L1L2)
     }
@@ -205,34 +178,34 @@ impl LinkConfig {
     }
 
     pub fn metric(&self) -> u32 {
-        self.metric.unwrap_or(DEFAULT_METRIC)
+        self.metric.unwrap_or(Self::DEFAULT_METRIC)
     }
 
     pub fn priority(&self) -> u8 {
-        self.priority.unwrap_or(DEFAULT_PRIORITY)
+        self.priority.unwrap_or(Self::DEFAULT_PRIORITY)
     }
 
     pub fn hold_time(&self) -> u16 {
-        self.hold_time.unwrap_or(DEFAULT_HOLD_TIME)
+        self.hold_time.unwrap_or(Self::DEFAULT_HOLD_TIME)
     }
 
     pub fn hello_interval(&self) -> u64 {
-        self.hello_interval.unwrap_or(DEFAULT_HELLO_INTERVAL) as u64
+        self.hello_interval.unwrap_or(Self::DEFAULT_HELLO_INTERVAL) as u64
     }
 
     pub fn hello_padding(&self) -> HelloPaddingPolicy {
         self.hello_padding.unwrap_or(HelloPaddingPolicy::Always)
     }
     pub fn holddown_count(&self) -> u32 {
-        self.holddown_count.unwrap_or(DEFAULT_HOLDDOWN_COUNT) as u32
+        self.holddown_count.unwrap_or(Self::DEFAULT_HOLDDOWN_COUNT) as u32
     }
 
     pub fn psnp_interval(&self) -> u64 {
-        self.psnp_interval.unwrap_or(DEFAULT_PSNP_INTERVAL) as u64
+        self.psnp_interval.unwrap_or(Self::DEFAULT_PSNP_INTERVAL) as u64
     }
 
     pub fn csnp_interval(&self) -> u64 {
-        self.csnp_interval.unwrap_or(DEFAULT_CSNP_INTERVAL) as u64
+        self.csnp_interval.unwrap_or(Self::DEFAULT_CSNP_INTERVAL) as u64
     }
 
     pub fn enabled(&self) -> bool {
@@ -438,6 +411,15 @@ impl IsisLink {
         });
 
         is_link
+    }
+
+    pub fn is_p2p(&self) -> bool {
+        // When we have user configuration.
+        if let Some(link_type) = self.config.link_type {
+            return link_type == LinkType::P2p;
+        }
+        // Otherwise check interface flags.
+        self.flags.is_p2p()
     }
 }
 

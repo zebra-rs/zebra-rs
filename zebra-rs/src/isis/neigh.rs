@@ -11,6 +11,7 @@ use crate::config::Args;
 use crate::context::Timer;
 use crate::rib::MacAddr;
 
+use super::link::LinkType;
 use super::nfsm::{NeighborAddr4, NfsmState};
 use super::{Isis, Level, Message};
 
@@ -33,6 +34,7 @@ pub struct Neighbor {
     pub mac: Option<MacAddr>,
     pub hold_timer: Option<Timer>,
     pub dis: bool,
+    pub link_type: LinkType,
     // P2P adjacency state TLV: Extended local circuit ID.
     pub circuit_id: Option<u32>,
     pub hold_time: u16,
@@ -48,6 +50,7 @@ impl Neighbor {
         ifindex: u32,
         mac: Option<MacAddr>,
         tx: UnboundedSender<Message>,
+        link_type: LinkType,
     ) -> Self {
         Self {
             tx,
@@ -68,6 +71,7 @@ impl Neighbor {
             circuit_id: None,
             hold_time: 0,
             tlvs: vec![],
+            link_type,
         }
     }
 
