@@ -1,36 +1,19 @@
+pub mod client;
+pub mod server;
+pub mod tools;
+
 use anyhow::Result;
-use clap::Parser;
 use tracing::{debug, error};
 use tracing_subscriber::{self, Registry};
 
-use zmcp_server::ZmcpServer;
+use server::ZmcpServer;
 
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[arg(
-        short,
-        long,
-        help = "Base URL of zebra-rs server",
-        default_value = "http://127.0.0.1"
-    )]
-    base: String,
-
-    #[arg(short, long, help = "Show server port", default_value = "2666")]
-    port: u32,
-
-    #[arg(short, long, help = "Enable debug logging")]
-    debug: bool,
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
+/// Run the MCP server
+pub async fn run(host: &str, port: u32, debug_mode: bool) -> Result<()> {
     // Initialize tracing - disable all terminal output for MCP compatibility
     // Only enable logging if explicitly requested via RUST_LOG environment variable
-    if std::env::var("RUST_LOG").is_ok() || cli.debug {
-        let log_level = if cli.debug {
+    if std::env::var("RUST_LOG").is_ok() || debug_mode {
+        let log_level = if debug_mode {
             "debug".to_string()
         } else {
             std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string())
@@ -44,10 +27,16 @@ async fn main() -> Result<()> {
         tracing::subscriber::set_global_default(Registry::default())?;
     }
 
-    debug!("Starting zmcp-server v{}", env!("CARGO_PKG_VERSION"));
-    debug!("Connecting to zebra-rs at {}:{}", cli.base, cli.port);
+    debug!("Starting vtyctl mcp server v{}", env!("CARGO_PKG_VERSION"));
+    debug!("Connecting to zebra-rs at {}:{}", host, port);
 
-    let server = ZmcpServer::new(cli.base, cli.port);
+    let base_url = if host.starts_with("http://") || host.starts_with("https://") {
+        host.to_string()
+    } else {
+        format!("http://{}", host)
+    };
+
+    let server = ZmcpServer::new(base_url, port);
 
     // Test connection to zebra-rs
     if let Err(e) = server.zebra_client().test_connection().await {

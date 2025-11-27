@@ -5,6 +5,7 @@ pub mod vtysh {
     tonic::include_proto!("vtysh");
 }
 pub mod apply;
+pub mod mcp;
 pub mod show;
 
 #[derive(Parser)]
@@ -35,14 +36,26 @@ enum Commands {
         #[arg(help = "Show command to execute")]
         command: String,
     },
+    /// Start MCP (Model Context Protocol) server for AI assistant integration
+    Mcp {
+        #[arg(short = 'H', long, default_value = "127.0.0.1")]
+        host: String,
+
+        #[arg(short, long, help = "gRPC server port", default_value = "2666")]
+        port: u32,
+
+        #[arg(short, long, help = "Enable debug logging")]
+        debug: bool,
+    },
 }
 
 fn print_help() {
-    eprintln!("`zctl' controls zebra-rs configuration and show commands.");
+    eprintln!("`vtyctl' controls zebra-rs configuration and show commands.");
     eprintln!("");
     eprintln!("Basic Commands:");
     eprintln!("  apply       Apply configuration.");
     eprintln!("  show        Show commands.");
+    eprintln!("  mcp         Start MCP server for AI assistant integration.");
 }
 
 #[tokio::main]
@@ -59,6 +72,9 @@ async fn main() -> Result<()> {
             command,
         }) => {
             show::show(host, command, *json).await?;
+        }
+        Some(Commands::Mcp { host, port, debug }) => {
+            mcp::run(host, *port, *debug).await?;
         }
         None => {
             print_help();

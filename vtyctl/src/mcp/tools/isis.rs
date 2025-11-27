@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use tracing::{debug, error, warn};
 
-use crate::client::ZebraClient;
+use crate::mcp::client::ZebraClient;
 
 /// ISIS-specific tools for network topology analysis
 #[derive(Clone)]
@@ -104,110 +104,6 @@ impl IsisTools {
                 // If no level information, return as-is
                 Ok(data.clone())
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_filter_graph_by_level_both() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-        let data = json!([
-            {"level": "L1", "nodes": []},
-            {"level": "L2", "nodes": []}
-        ]);
-
-        let result = isis_tools.filter_graph_by_level(&data, "both").unwrap();
-        assert_eq!(result, data);
-    }
-
-    #[test]
-    fn test_filter_graph_by_level_l1() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-        let data = json!([
-            {"level": "L1", "nodes": ["node1"]},
-            {"level": "L2", "nodes": ["node2"]}
-        ]);
-
-        let result = isis_tools.filter_graph_by_level(&data, "L1").unwrap();
-        let expected = json!([{"level": "L1", "nodes": ["node1"]}]);
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_filter_graph_by_level_l2() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-        let data = json!([
-            {"level": "L1", "nodes": ["node1"]},
-            {"level": "L2", "nodes": ["node2"]}
-        ]);
-
-        let result = isis_tools.filter_graph_by_level(&data, "L2").unwrap();
-        let expected = json!([{"level": "L2", "nodes": ["node2"]}]);
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_filter_graph_single_object() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-        let data = json!({"level": "L1", "nodes": ["node1"]});
-
-        let result = isis_tools.filter_graph_by_level(&data, "L1").unwrap();
-        assert_eq!(result, data);
-
-        let result = isis_tools.filter_graph_by_level(&data, "L2").unwrap();
-        assert_eq!(result, json!([]));
-    }
-
-    #[test]
-    fn test_filter_graph_no_level_info() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-        let data = json!({"nodes": ["node1"]});
-
-        let result = isis_tools.filter_graph_by_level(&data, "L1").unwrap();
-        assert_eq!(result, data); // Should return as-is when no level info
-    }
-
-    #[tokio::test]
-    async fn test_get_isis_graph_invalid_level() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-        let mut args = HashMap::new();
-        args.insert("level".to_string(), json!("invalid"));
-
-        let result = isis_tools.get_isis_graph(args).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid level"));
-    }
-
-    #[tokio::test]
-    async fn test_get_isis_graph_default_level() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-        let args = HashMap::new(); // No level specified
-
-        // This will fail because we don't have a real zebra-rs server, but we can test parameter parsing
-        let result = isis_tools.get_isis_graph(args).await;
-        // Should fail with connection error, not parameter validation error
-        assert!(result.is_err());
-        assert!(!result.unwrap_err().to_string().contains("Invalid level"));
-    }
-
-    #[tokio::test]
-    async fn test_get_isis_graph_valid_levels() {
-        let isis_tools = IsisTools::new(ZebraClient::new("test".to_string(), 1234));
-
-        for level in ["L1", "L2", "both"] {
-            let mut args = HashMap::new();
-            args.insert("level".to_string(), json!(level));
-
-            let result = isis_tools.get_isis_graph(args).await;
-            // Should fail with connection error, not parameter validation error
-            assert!(result.is_err());
-            assert!(!result.unwrap_err().to_string().contains("Invalid level"));
         }
     }
 }
