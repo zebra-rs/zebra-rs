@@ -17,6 +17,7 @@ impl Isis {
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.callback_add("/routing/isis/tracing/event", config_tracing_event);
+        self.callback_add("/routing/isis/tracing/packet", config_tracing_packet);
         self.callback_add("/routing/isis/tracing/database", config_tracing_database);
         self.callback_add(
             "/routing/isis/interface/circuit-type",
@@ -178,6 +179,37 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
                 println!("Trace on {} (not implemented)", ev);
             } else {
                 println!("Trace off {} (not implemented)", ev);
+            }
+        }
+    }
+
+    Some(())
+}
+
+fn config_tracing_packet(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let typ = args.string()?;
+    println!("XX packet type {}", typ);
+
+    match typ.as_str() {
+        // "all" => {
+        //     if op.is_set() {
+        //         isis.tracing.event.dis.enabled = true;
+        //     } else {
+        //         isis.tracing.event.dis.enabled = false;
+        //     }
+        // }
+        "hello" => {
+            if op.is_set() {
+                isis.tracing.packet.hello.enabled = true;
+            } else {
+                isis.tracing.packet.hello.enabled = false;
+            }
+        }
+        _ => {
+            if op.is_set() {
+                println!("Trace on {} (not implemented)", typ);
+            } else {
+                println!("Trace off {} (not implemented)", typ);
             }
         }
     }
