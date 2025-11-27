@@ -7,6 +7,7 @@ use num_enum::IntoPrimitive;
 use strum_macros::{Display, EnumString};
 
 use crate::context::Timer;
+use crate::isis::link::LinkType;
 use crate::rib::MacAddr;
 use crate::{isis_fsm_trace, isis_packet_trace};
 
@@ -255,6 +256,7 @@ pub fn nfsm_p2p_hello_received(
     // Fall down from previous.
     if state == NfsmState::Init {
         if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
+            nbr.event(Message::LspOriginate(level));
             state = NfsmState::Up;
         }
     }
@@ -364,6 +366,24 @@ pub fn isis_nfsm(
             // Neighbor comes up.
             if nbr.state == NfsmState::Up {
                 if let Some(local_pool) = ntop.local_pool {
+                    // On P2P interface, start DB exchange.
+                    if nbr.link_type == LinkType::P2p {
+                        // Start DB exchange.
+                        if nbr.sys_id < ntop.up_config.net.sys_id() {
+                            // Master
+                            // println!(
+                            //     "Master nbr {} self {}",
+                            //     nbr.sys_id,
+                            //     ntop.up_config.net.sys_id()
+                            // );
+                        } else {
+                            // println!(
+                            //     "Slave nbr {} self {}",
+                            //     nbr.sys_id,
+                            //     ntop.up_config.net.sys_id()
+                            // );
+                        }
+                    }
                     // Allocate adjacency SID when it is not yet.
                     for (_key, value) in nbr.naddr4.iter_mut() {
                         if value.label.is_none() {

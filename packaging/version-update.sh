@@ -1,6 +1,9 @@
 #! /bin/bash
 
-for file in ../Cargo.toml
+for file in ../Cargo.toml \
+                ../crates/bgp-packet/Cargo.toml \
+                ../crates/ospf-packet/Cargo.toml \
+                ../crates/isis-packet/Cargo.toml
 do
     sed -i "s/^version = .*/version = \"$(cat ../version)\"/" ${file}
 done

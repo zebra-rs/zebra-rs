@@ -7,6 +7,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 use crate::context::Task;
+use crate::isis::link::LinkType;
 use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
 use crate::rib;

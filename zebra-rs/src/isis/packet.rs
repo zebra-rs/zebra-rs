@@ -18,6 +18,7 @@ use crate::{isis_database_trace, isis_event_trace, isis_packet_trace};
 use super::Level;
 use super::ifsm::has_level;
 use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
+use super::link::LinkType;
 use super::lsdb;
 use super::nfsm::{NfsmEvent, isis_nfsm};
 
@@ -62,6 +63,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
             ifindex,
             mac,
             link.tx.clone(),
+            LinkType::Lan,
         ));
 
     nbr.hold_time = pdu.hold_time;
@@ -131,6 +133,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
                 ifindex,
                 mac,
                 link.tx.clone(),
+                LinkType::P2p,
             ));
 
         // Update neighbor's Hello PDU
@@ -200,6 +203,20 @@ pub fn lsp_self_purged(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
     }
 }
 
+pub fn lsp_same(src: &IsisLsp, dest: &IsisLsp) -> bool {
+    if src.tlvs.len() != dest.tlvs.len() {
+        return false;
+    }
+    for (i, (src_tlv, dest_tlv)) in src.tlvs.iter().zip(dest.tlvs.iter()).enumerate() {
+        if src_tlv != dest_tlv {
+            tracing::debug!("TLV mismatch at index {}: src={}, dest={}", i, src_tlv, dest_tlv);
+            return false;
+        }
+    }
+    true
+}
+
+// Self originated LSP has been received from neighbor.
 pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
     isis_database_trace!(
         top.tracing,
@@ -218,6 +235,9 @@ pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
                         &level,
                         "Self originated LSP is insert into LSDB"
                     );
+                    if !lsp_same(&originated.lsp, &lsp) {
+                        top.tx.send(Message::LspOriginate(level));
+                    }
                     insert_self_originate(top, level, lsp);
                 }
                 std::cmp::Ordering::Equal => {
@@ -237,7 +257,7 @@ pub fn lsp_self_updated(top: &mut IsisTop, level: Level, lsp: IsisLsp) {
             }
         }
         None => {
-            println!("XXX Self LSP {} is not in LSDB", lsp.lsp_id);
+            tracing::debug!("Self LSP {} is not in LSDB", lsp.lsp_id);
         }
     }
 }
@@ -434,6 +454,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => (pdu, Level::L2),
         _ => return,
     };
+    // println!("CSNP {}", pdu);
 
     isis_packet_trace!(
         top.tracing,
@@ -629,6 +650,8 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         (IsisType::L2Psnp, IsisPdu::L2Psnp(pdu)) => (pdu, Level::L2),
         _ => return,
     };
+
+    // println!("PSNP {}", pdu);
 
     isis_packet_trace!(top.tracing, Psnp, Receive, &level, "PSNP recv");
 

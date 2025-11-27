@@ -19,6 +19,7 @@ use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, link_level_capable, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
+use crate::rib::util::IpNetExt;
 use crate::rib::{self, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType};
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
@@ -583,6 +584,7 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
 }
 
 pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
+    println!("LSP generate is called");
     // LSP ID with no pseudo id and no fragmentation.
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
@@ -743,8 +745,9 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     let mut ext_ip_reach = IsisTlvExtIpReach::default();
     for (_, link) in top.links.iter() {
         if link.config.enable.v4 && has_level(link.state.level(), level) {
-            for v4addr in link.state.v4addr.iter() {
-                if !v4addr.addr().is_loopback() {
+            for ifaddr in link.state.v4addr.iter() {
+                let prefix = ifaddr.apply_mask();
+                if !prefix.addr().is_loopback() {
                     let sub_tlv = if let Some(sid) = &link.config.prefix_sid {
                         let prefix_sid = IsisSubPrefixSid {
                             flags: 0.into(),
@@ -756,14 +759,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                         None
                     };
                     let flags = Ipv4ControlInfo::new()
-                        .with_prefixlen(v4addr.prefix_len() as usize)
+                        .with_prefixlen(prefix.prefix_len() as usize)
                         .with_sub_tlv(sub_tlv.is_some())
                         .with_distribution(false);
                     let mut entry = IsisTlvExtIpReachEntry {
                         metric: 10,
                         flags,
-                        prefix: v4addr.clone(),
-                        subs: Vec::new(),
+                        prefix,
+                        subs: vec![],
                     };
                     if let Some(sub_tlv) = sub_tlv {
                         entry.subs.push(sub_tlv);
@@ -839,12 +842,20 @@ pub fn lsp_flood(top: &mut IsisTop, level: Level, buf: &BytesMut) {
 
     for (_, link) in top.links.iter() {
         if link.state.level().capable(&pdu_type) {
-            if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
+            if link.is_p2p() {
                 link.ptx.send(PacketMessage::Send(
                     Packet::Bytes(buf.clone()),
                     link.state.ifindex,
                     level,
                 ));
+            } else {
+                if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
+                    link.ptx.send(PacketMessage::Send(
+                        Packet::Bytes(buf.clone()),
+                        link.state.ifindex,
+                        level,
+                    ));
+                }
             }
         }
     }

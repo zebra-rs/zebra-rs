@@ -28,8 +28,8 @@
 #include "builtins/common.h"
 #include "bashhist.h"
 
-/* xxd -i cli.sh >cli.c */
-#include "cli.c"
+/* xxd -i vty.sh >vty.c */
+#include "vty.c"
 
 int
 cli_mode ()
@@ -43,9 +43,9 @@ cli_mode ()
 void
 cli_execute_startup_string()
 {
-  char *str = malloc(cli_sh_len + 1);
-  memcpy(str, cli_sh, cli_sh_len);
-  str[cli_sh_len] = '\0';
+  char *str = malloc(vty_sh_len + 1);
+  memcpy(str, vty_sh, vty_sh_len);
+  str[vty_sh_len] = '\0';
 
   enable_history_list = 0;
   bash_history_disable();

@@ -9,7 +9,7 @@
 name: "zebra-rs"
 arch: "arm64"
 platform: "linux"
-version: "0.8.3"
+version: "0.8.4"
 section: "default"
 priority: "extra"
 replaces:
@@ -25,14 +25,14 @@ changelog: "changelog.yaml"
 contents:
   - src: ../target/release/zebra-rs
     dst: /usr/bin/zebra-rs
-  - src: ../target/release/zctl
-    dst: /usr/bin/zctl
+  - src: ../target/release/vtyctl
+    dst: /usr/bin/vtyctl
   - src: ../target/release/zmcp-server
     dst: /usr/bin/zmcp-server
-  - src: ../cli/cli
-    dst: /usr/bin/cli
-  - src: ../target/release/cli-helper
-    dst: /usr/bin/cli-helper
+  - src: ../vty/vty
+    dst: /usr/bin/vty
+  - src: ../target/release/vtyhelper
+    dst: /usr/bin/vtyhelper
   - src: ../zebra-rs/yang
     dst: /etc/zebra-rs/yang
   - src: ./modules-load.d/zebra-rs.conf
