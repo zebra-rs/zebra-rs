@@ -14,6 +14,7 @@ zebra-rs.log
 # CLAUDE CODE
 CLAUDE.md
 .claude
+.serena/
 
 # OpenAI Codex
 AGENTS.md

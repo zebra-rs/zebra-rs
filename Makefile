@@ -53,10 +53,6 @@ run:
 format:
 	cargo fmt --all
 
-mcp:
-	cargo build --release
-	cp target/release/zmcp-server ~/bin
-
 allclean:
 	rm -rf ${HOME}/.cargo/git
 	rm -rf target

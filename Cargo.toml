@@ -4,7 +4,6 @@ members = [
   "zebra-rs",
   "vtyctl",
   "vtyhelper",
-  "zmcp-server",
   "crates/bgp-packet",
   "crates/isis-packet",
   "crates/ospf-packet",
