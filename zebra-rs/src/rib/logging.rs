@@ -251,8 +251,8 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                 .json()
                 .with_target(false)
                 .with_thread_ids(false)
-                .with_file(false)
-                .with_line_number(false)
+                .with_file(true)
+                .with_line_number(true)
                 .init();
         }
         (LoggingOutput::Stdout, LogFormat::Elasticsearch) => {
@@ -266,8 +266,8 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                 .with_env_filter(filter)
                 .with_target(false)
                 .with_thread_ids(false)
-                .with_file(false)
-                .with_line_number(false)
+                .with_file(true)
+                .with_line_number(true)
                 .init();
         }
         (LoggingOutput::Syslog, LogFormat::Elasticsearch) => {
@@ -375,8 +375,8 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                     .with_writer(Mutex::new(syslog_writer))
                     .with_target(false)
                     .with_thread_ids(false)
-                    .with_file(false)
-                    .with_line_number(false)
+                    .with_file(true)
+                    .with_line_number(true)
                     .with_ansi(false)
                     .init();
             }
@@ -434,8 +434,8 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                     .with_writer(Mutex::new(syslog_writer))
                     .with_target(false)
                     .with_thread_ids(false)
-                    .with_file(false)
-                    .with_line_number(false)
+                    .with_file(true)
+                    .with_line_number(true)
                     .with_ansi(false)
                     .init();
             }
@@ -614,8 +614,8 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                 .with_writer(writer)
                 .with_target(false)
                 .with_thread_ids(false)
-                .with_file(false)
-                .with_line_number(false)
+                .with_file(true)
+                .with_line_number(true)
                 .with_ansi(false)
                 .init();
         }
@@ -705,8 +705,8 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                 .with_writer(writer)
                 .with_target(false)
                 .with_thread_ids(false)
-                .with_file(false)
-                .with_line_number(false)
+                .with_file(true)
+                .with_line_number(true)
                 .with_ansi(false)
                 .init();
         }

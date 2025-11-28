@@ -79,6 +79,9 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
     nbr.tlvs = pdu.tlvs.clone();
     nbr.hello = pdu;
 
+    // Hello recv.
+    // top.tx.send(Message::Nfsm::(, ifindex, sysid, level));
+
     let mut ntop = NeighborTop {
         tx: &mut link.tx,
         dis: &mut link.state.dis,
@@ -477,49 +480,52 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => (pdu, Level::L2),
         _ => return,
     };
-    // println!("CSNP {}", pdu);
 
     isis_packet_trace!(
         top.tracing,
         Csnp,
         Receive,
         &level,
-        "CSNP Recv on {}",
+        "[CSNP] Recv on {}",
         link.state.name
     );
-    isis_packet_trace!(top.tracing, Csnp, Receive, &level, "---------");
 
     // Check link capability for the PDU type.
     if !link_level_capable(&link.state.level(), &level) {
         return;
     }
 
+    isis_packet_trace!(top.tracing, Csnp, Receive, &level, "[CSNP] ----");
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
             for lsp in &lsps.entries {
-                isis_database_trace!(top.tracing, Lsdb, &level, "{}", lsp.lsp_id);
+                isis_packet_trace!(top.tracing, Csnp, Receive, &level, "[CSNP] {}", lsp.lsp_id);
             }
         }
     }
-    isis_packet_trace!(top.tracing, Csnp, Receive, &level, "---------");
+    isis_packet_trace!(top.tracing, Csnp, Receive, &level, "[CSNP] ----");
 
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
-    let Some(dis) = &link.state.dis.get(&level) else {
-        isis_event_trace!(top.tracing, Dis, &level, "CSNP DIS was yet not selected");
-        return;
-    };
+    if link.is_p2p() {
+        // TODO.  Find adjacency neighbor and check Exchange or Full.
+    } else {
+        let Some(dis) = &link.state.dis.get(&level) else {
+            isis_event_trace!(top.tracing, Dis, &level, "CSNP DIS was yet not selected");
+            return;
+        };
 
-    if pdu.source_id != *dis {
-        isis_event_trace!(
-            top.tracing,
-            Dis,
-            &level,
-            "CSNP came from {} non DIS neighbor {}",
-            pdu.source_id,
-            *dis
-        );
-        return;
+        if pdu.source_id != *dis {
+            isis_event_trace!(
+                top.tracing,
+                Dis,
+                &level,
+                "CSNP came from {} non DIS neighbor {}",
+                pdu.source_id,
+                *dis
+            );
+            return;
+        }
     }
 
     // Local cache for LSDB.
@@ -536,13 +542,13 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         "PSNP plan on {}",
         link.state.name
     );
-    isis_packet_trace!(top.tracing, Psnp, Send, &level, "---------");
     let mut req = IsisTlvLspEntries::default();
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
             for lsp in &lsps.entries {
                 // If LSP_ID is my own.
                 if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
+                    tracing::info!("[CSNP] {} Self LSP", lsp.lsp_id);
                     if lsp.lsp_id.is_pseudo() {
                         // tracing::info!("CSNP: Self DIS {}", lsp.lsp_id);
                         // println!("LSP myown DIS hold_time {}", lsp.hold_time);
@@ -560,9 +566,11 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 }
 
                 // Need to check sequence number.
+                tracing::info!("[CSNP] {} Processing", lsp.lsp_id);
                 match lsdb_locals.get(&lsp.lsp_id) {
                     None => {
                         // set_ssn();
+                        tracing::info!("[CSNP] {} None: HoleTime: {}", lsp.lsp_id, lsp.hold_time);
                         if lsp.hold_time != 0 {
                             // println!("LSP REQ New: {}", lsp.lsp_id);
                             isis_database_trace!(top.tracing, Lsdb, &level, "Req: {}", lsp.lsp_id);
@@ -574,6 +582,11 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         }
                     }
                     Some(&seq_number) if seq_number < lsp.seq_number => {
+                        tracing::info!(
+                            "[CSNP] {} seq: {} < exiting seq: ",
+                            seq_number,
+                            lsp.seq_number
+                        );
                         // When local sequence number is smaller than remote.
                         // set_ssn();
                         isis_database_trace!(top.tracing, Lsdb, &level, "Upd: {}", lsp.lsp_id);
@@ -582,6 +595,11 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         req.entries.push(psnp);
                     }
                     Some(&seq_number) if seq_number > lsp.seq_number => {
+                        tracing::info!(
+                            "[CSNP] {} seq: {} > exiting seq: ",
+                            seq_number,
+                            lsp.seq_number
+                        );
                         isis_database_trace!(
                             top.tracing,
                             Lsdb,
@@ -599,28 +617,33 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         top.tx.send(msg);
                     }
                     Some(&_seq_number) if lsp.hold_time == 0 => {
+                        tracing::info!("[CSNP] {} Purge: HoleTime: {}", lsp.lsp_id, lsp.hold_time);
                         // purge_local() set srm();
                     }
                     _ => {
                         // Identical, nothing to do.
+                        tracing::info!(
+                            "[CSNP] {} Identical: HoleTime: {}",
+                            lsp.lsp_id,
+                            lsp.hold_time
+                        );
                     }
                 }
                 lsdb_locals.remove(&lsp.lsp_id);
             }
         }
     }
-    isis_packet_trace!(top.tracing, Csnp, Receive, &level, "---------");
 
     if !lsdb_locals.is_empty() {
         // Local need to flood.
-        isis_event_trace!(
-            top.tracing,
-            Flooding,
-            &level,
-            "Flood plan on {}",
-            link.state.name
-        );
-        isis_event_trace!(top.tracing, Flooding, &level, "---------");
+        // isis_event_trace!(
+        //     top.tracing,
+        //     Flooding,
+        //     &level,
+        //     "Flood plan on {}",
+        //     link.state.name
+        // );
+        // isis_event_trace!(top.tracing, Flooding, &level, "---------");
 
         for (key, _flag) in lsdb_locals.iter() {
             // Flood.
@@ -642,7 +665,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 }
             }
         }
-        isis_event_trace!(top.tracing, Flooding, &level, "---------");
+        // isis_event_trace!(top.tracing, Flooding, &level, "---------");
     }
     if !req.entries.is_empty() {
         // Send PSNP.
@@ -652,8 +675,12 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
             source_id_curcuit: 1,
             tlvs: Vec::new(),
         };
+        for e in req.entries.iter() {
+            tracing::info!("[PSNP] {} will be sent", e.lsp_id,);
+        }
         psnp.tlvs.push(req.into());
         isis_packet_trace!(top.tracing, Psnp, Send, &level, "Send PSNP");
+
         isis_psnp_send(top, ifindex, level, psnp);
     }
 }

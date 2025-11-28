@@ -17,6 +17,7 @@ impl Isis {
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.callback_add("/routing/isis/tracing/event", config_tracing_event);
+        self.callback_add("/routing/isis/tracing/fsm", config_tracing_fsm);
         self.callback_add("/routing/isis/tracing/packet", config_tracing_packet);
         self.callback_add("/routing/isis/tracing/database", config_tracing_database);
         self.callback_add(
@@ -176,10 +177,36 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
         }
         _ => {
             if op.is_set() {
-                println!("Trace on {} (not implemented)", ev);
+                // println!("Trace on {} (not implemented)", ev);
             } else {
-                println!("Trace off {} (not implemented)", ev);
+                //println!("Trace off {} (not implemented)", ev);
             }
+        }
+    }
+
+    Some(())
+}
+
+fn config_tracing_fsm(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let typ = args.string()?;
+
+    match typ.as_str() {
+        "nfsm" => {
+            if op.is_set() {
+                isis.tracing.fsm.nfsm.enabled = true;
+            } else {
+                isis.tracing.fsm.nfsm.enabled = false;
+            }
+        }
+        "ifsm" => {
+            if op.is_set() {
+                isis.tracing.fsm.ifsm.enabled = true;
+            } else {
+                isis.tracing.fsm.ifsm.enabled = false;
+            }
+        }
+        _ => {
+            //
         }
     }
 
@@ -188,7 +215,6 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
 
 fn config_tracing_packet(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let typ = args.string()?;
-    println!("XX packet type {}", typ);
 
     match typ.as_str() {
         // "all" => {
@@ -203,6 +229,27 @@ fn config_tracing_packet(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Optio
                 isis.tracing.packet.hello.enabled = true;
             } else {
                 isis.tracing.packet.hello.enabled = false;
+            }
+        }
+        "lsp" => {
+            if op.is_set() {
+                isis.tracing.packet.lsp.enabled = true;
+            } else {
+                isis.tracing.packet.lsp.enabled = false;
+            }
+        }
+        "csnp" => {
+            if op.is_set() {
+                isis.tracing.packet.csnp.enabled = true;
+            } else {
+                isis.tracing.packet.csnp.enabled = false;
+            }
+        }
+        "psnp" => {
+            if op.is_set() {
+                isis.tracing.packet.psnp.enabled = true;
+            } else {
+                isis.tracing.packet.psnp.enabled = false;
             }
         }
         _ => {

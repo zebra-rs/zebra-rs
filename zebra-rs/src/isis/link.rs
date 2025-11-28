@@ -160,6 +160,12 @@ pub enum LinkType {
     P2p,
 }
 
+impl LinkType {
+    pub fn is_p2p(&self) -> bool {
+        *self == Self::P2p
+    }
+}
+
 impl LinkConfig {
     const DEFAULT_PRIORITY: u8 = 64;
     const DEFAULT_HOLD_TIME: u16 = 30;
