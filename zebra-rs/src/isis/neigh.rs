@@ -15,6 +15,14 @@ use super::link::LinkType;
 use super::nfsm::{NeighborAddr4, NfsmState};
 use super::{Isis, Level, Message};
 
+#[derive(Default, Debug)]
+pub enum NfsmP2pState {
+    #[default]
+    None,
+    Exchange,
+    Full,
+}
+
 // IS-IS Neighbor
 #[derive(Debug)]
 pub struct Neighbor {
@@ -27,6 +35,8 @@ pub struct Neighbor {
     pub ifindex: u32,
     pub prev: NfsmState,
     pub state: NfsmState,
+    // P2P state.
+    pub p2p: NfsmP2pState,
     pub level: Level,
     pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
@@ -60,8 +70,8 @@ impl Neighbor {
             ifindex,
             prev: NfsmState::Down,
             state: NfsmState::Down,
+            p2p: NfsmP2pState::None,
             level,
-            // addr4: Vec::new(),
             naddr4: BTreeMap::new(),
             addr6: Vec::new(),
             laddr6: Vec::new(),

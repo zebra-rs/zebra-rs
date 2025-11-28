@@ -32,7 +32,7 @@ use crate::spf;
 
 use super::config::IsisConfig;
 use super::ifsm::has_level;
-use super::link::{Afis, IsisLinks, LinkTop, LinkType};
+use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::srmpls::{LabelConfig, LabelMap};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
@@ -399,8 +399,7 @@ impl Isis {
     }
 
     fn process_nfsm(&mut self, ev: NfsmEvent, ifindex: u32, sysid: IsisSysId, level: Level) {
-        let ltop = self.link_top(ifindex);
-        let Some(mut ltop) = ltop else {
+        let Some(mut ltop) = self.link_top(ifindex) else {
             return;
         };
         let mut ntop = NeighborTop {
