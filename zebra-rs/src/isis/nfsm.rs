@@ -47,7 +47,7 @@ pub enum NfsmEvent {
 }
 
 pub type NfsmFunc =
-    fn(&mut NeighborTop, &mut Neighbor, &Option<MacAddr>, Level) -> Option<NfsmState>;
+    fn(&mut NeighborTop, &mut Neighbor, Option<MacAddr>, Level) -> Option<NfsmState>;
 
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent, _level: Level) -> (NfsmFunc, Option<Self>) {
@@ -60,7 +60,7 @@ impl NfsmState {
     }
 }
 
-fn nfsm_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
+fn nfsm_hello_has_mac(pdu: &IsisHello, mac: Option<MacAddr>) -> bool {
     let Some(addr) = mac else {
         return false;
     };
@@ -87,7 +87,7 @@ pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
         let sysid = sys_id.clone();
         async move {
             use NfsmEvent::*;
-            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level))
+            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level, None))
                 .unwrap();
         }
     })
@@ -159,7 +159,7 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
 pub fn nfsm_hello_received(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
-    mac: &Option<MacAddr>,
+    mac: Option<MacAddr>,
     level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
@@ -183,6 +183,7 @@ pub fn nfsm_hello_received(
 
     if state == NfsmState::Init {
         if nfsm_hello_has_mac(&nbr.hello, mac) {
+            println!("===== DIS =====");
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Up;
         }
@@ -225,7 +226,7 @@ pub fn nfsm_hello_received(
 pub fn nfsm_p2p_hello_received(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
-    _mac: &Option<MacAddr>,
+    _mac: Option<MacAddr>,
     level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
@@ -269,10 +270,12 @@ pub fn nfsm_p2p_hello_received(
     // Fall down from previous.
     if state == NfsmState::Init {
         if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
-            // *ntop.up_state.adj.get_mut(&level) = Some(nbr.sys_id.neighbor_id());
-
             let next = NfsmState::Up;
+
+            *ntop.adj.get_mut(&level) = Some(IsisNeighborId::from_sys_id(&nbr.sys_id, 0));
+
             nbr.event(Message::LspOriginate(level));
+
             isis_fsm_trace!(
                 ntop.tracing,
                 Nfsm,
@@ -282,8 +285,10 @@ pub fn nfsm_p2p_hello_received(
                 next,
                 level
             );
+
             state = next;
             let p2p = NfsmP2pState::Exchange;
+
             isis_fsm_trace!(
                 ntop.tracing,
                 Nfsm,
@@ -293,6 +298,7 @@ pub fn nfsm_p2p_hello_received(
                 p2p,
                 level
             );
+
             nbr.p2p = p2p;
             nbr.event(Message::LspOriginate(level));
         }
@@ -315,7 +321,7 @@ pub fn nfsm_p2p_hello_received(
 pub fn nfsm_hold_timer_expire(
     _ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
-    _mac: &Option<MacAddr>,
+    _mac: Option<MacAddr>,
     level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
@@ -359,7 +365,7 @@ pub fn isis_nfsm(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
     event: NfsmEvent,
-    mac: &Option<MacAddr>,
+    mac: Option<MacAddr>,
     level: Level,
 ) {
     // println!("NFSM {}, {}, {}", nbr.sys_id, level, event);

@@ -68,11 +68,10 @@ pub struct IsisConfig {
     pub distribute: IsisDistribute,
 }
 
-// Default refresh time: 15 min.
-const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
-const DEFAULT_HOLD_TIME: u16 = 1200;
-
 impl IsisConfig {
+    const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
+    const DEFAULT_HOLD_TIME: u16 = 1200;
+
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
     }
@@ -82,11 +81,11 @@ impl IsisConfig {
     }
 
     pub fn refresh_time(&self) -> u16 {
-        self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
+        self.refresh_time.unwrap_or(Self::DEFAULT_REFRESH_TIME)
     }
 
     pub fn hold_time(&self) -> u16 {
-        self.hold_time.unwrap_or(DEFAULT_HOLD_TIME)
+        self.hold_time.unwrap_or(Self::DEFAULT_HOLD_TIME)
     }
 }
 
