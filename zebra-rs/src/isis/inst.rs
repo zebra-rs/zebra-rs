@@ -16,7 +16,7 @@ use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
 use crate::isis::tracing::IsisTracing;
-use crate::isis::{ifsm, link_level_capable, lsdb};
+use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::util::IpNetExt;
@@ -228,7 +228,7 @@ impl Isis {
                 link.state.name,
                 reason
             );
-            if !link_level_capable(&link.state.level(), &level) {
+            if !has_level(link.state.level(), level) {
                 isis_event_trace!(
                     self.tracing,
                     Flooding,
@@ -251,7 +251,7 @@ impl Isis {
             }
 
             if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
-                if lsa.ifindex == link.state.ifindex {
+                if lsa.ifindex == link.ifindex {
                     isis_event_trace!(
                         self.tracing,
                         Flooding,
@@ -277,11 +277,8 @@ impl Isis {
                         lsp_id
                     );
 
-                    link.ptx.send(PacketMessage::Send(
-                        Packet::Bytes(buf),
-                        link.state.ifindex,
-                        level,
-                    ));
+                    link.ptx
+                        .send(PacketMessage::Send(Packet::Bytes(buf), link.ifindex, level));
                 } else {
                     isis_event_trace!(
                         self.tracing,
@@ -499,6 +496,7 @@ impl Isis {
 
     pub fn link_top<'a>(&'a mut self, ifindex: u32) -> Option<LinkTop<'a>> {
         self.links.get_mut(&ifindex).map(|link| LinkTop {
+            ifindex: link.ifindex,
             tx: &self.tx,
             ptx: &link.ptx,
             up_config: &self.config,
@@ -871,14 +869,14 @@ pub fn lsp_flood(top: &mut IsisTop, level: Level, buf: &BytesMut) {
             if link.is_p2p() {
                 link.ptx.send(PacketMessage::Send(
                     Packet::Bytes(buf.clone()),
-                    link.state.ifindex,
+                    link.ifindex,
                     level,
                 ));
             } else {
                 if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
                     link.ptx.send(PacketMessage::Send(
                         Packet::Bytes(buf.clone()),
-                        link.state.ifindex,
+                        link.ifindex,
                         level,
                     ));
                 }
@@ -1405,7 +1403,7 @@ fn build_adjacency_ilm(
 
         for (ifindex, link) in top.links.iter() {
             if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                for tlv in nbr.hello.tlvs.iter() {
+                for tlv in nbr.tlvs.iter() {
                     if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                         let nhop = SpfNexthop {
                             ifindex: *ifindex,
@@ -1460,7 +1458,7 @@ fn build_rib_from_spf(
                     // Find nhop from links
                     for (ifindex, link) in top.links.iter() {
                         if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                            for tlv in nbr.hello.tlvs.iter() {
+                            for tlv in nbr.tlvs.iter() {
                                 if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                                     let nhop = SpfNexthop {
                                         ifindex: *ifindex,

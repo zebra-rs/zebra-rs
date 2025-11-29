@@ -128,7 +128,9 @@ pub enum IsisPdu {
     Unknown(IsisUnknown),
 }
 
-#[derive(Debug, Default, NomBE, PartialOrd, Ord, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, NomBE, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Serialize, Deserialize,
+)]
 pub struct IsisSysId {
     pub id: [u8; 6],
 }
@@ -139,7 +141,7 @@ impl IsisSysId {
     }
 }
 
-#[derive(Debug, Default, NomBE, PartialOrd, Ord, PartialEq, Eq, Clone, Deserialize)]
+#[derive(Debug, Default, NomBE, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Deserialize)]
 pub struct IsisNeighborId {
     pub id: [u8; 7],
 }
@@ -431,16 +433,6 @@ impl IsisHello {
         let pdu_len: u16 = buf.len() as u16;
         BigEndian::write_u16(&mut buf[pp..pp + 2], pdu_len);
     }
-
-    pub fn proto_tlv(&self) -> Option<&IsisTlvProtoSupported> {
-        self.tlvs.iter().find_map(|tlv| {
-            if let IsisTlv::ProtoSupported(tlv) = tlv {
-                Some(tlv)
-            } else {
-                None
-            }
-        })
-    }
 }
 
 #[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize)]
@@ -465,16 +457,6 @@ impl IsisP2pHello {
         self.tlvs.iter().for_each(|tlv| tlv.emit(buf));
         let pdu_len: u16 = buf.len() as u16;
         BigEndian::write_u16(&mut buf[pp..pp + 2], pdu_len);
-    }
-
-    pub fn proto_tlv(&self) -> Option<&IsisTlvProtoSupported> {
-        self.tlvs.iter().find_map(|tlv| {
-            if let IsisTlv::ProtoSupported(tlv) = tlv {
-                Some(tlv)
-            } else {
-                None
-            }
-        })
     }
 }
 

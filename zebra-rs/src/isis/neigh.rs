@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsisHello, IsisP2pHello, IsisProto, IsisSysId, IsisTlv};
+use isis_packet::*;
 use itertools::Itertools;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -27,51 +27,54 @@ pub enum NfsmP2pState {
 #[derive(Debug)]
 pub struct Neighbor {
     pub tx: UnboundedSender<Message>,
+    //
     pub sys_id: IsisSysId,
-    //
-    pub hello: IsisHello,
-    pub hello_p2p: IsisP2pHello,
-    //
+    // Unchange.
     pub ifindex: u32,
+    // Params.
+    pub priority: u8,            // LAN
+    pub lan_id: IsisNeighborId,  // LAN
+    pub circuit_type: IsLevel,   // LAN & P2P
+    pub circuit_id: Option<u32>, // P2P
+    // State
     pub prev: NfsmState,
     pub state: NfsmState,
-    // P2P state.
     pub p2p: NfsmP2pState,
-    pub level: Level,
+    // IP Addrs
     pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
     pub laddr6: Vec<Ipv6Addr>,
+    // MAC
     pub mac: Option<MacAddr>,
-    pub hold_timer: Option<Timer>,
+    //
     pub dis: bool,
     pub link_type: LinkType,
     // P2P adjacency state TLV: Extended local circuit ID.
-    pub circuit_id: Option<u32>,
+    // P2P end.
     pub hold_time: u16,
+    pub hold_timer: Option<Timer>,
     pub tlvs: Vec<IsisTlv>,
 }
 
 impl Neighbor {
     pub fn new(
-        level: Level,
-        sys_id: IsisSysId,
-        hello: IsisHello,
-        hello_p2p: IsisP2pHello,
-        ifindex: u32,
-        mac: Option<MacAddr>,
         tx: UnboundedSender<Message>,
+        ifindex: u32,
         link_type: LinkType,
+        sys_id: IsisSysId,
+        mac: Option<MacAddr>,
     ) -> Self {
         Self {
             tx,
             sys_id,
-            hello,
-            hello_p2p,
+            priority: 0,
+            lan_id: IsisNeighborId::default(),
+            circuit_type: IsLevel::default(),
             ifindex,
             prev: NfsmState::Down,
             state: NfsmState::Down,
             p2p: NfsmP2pState::None,
-            level,
+            // level,
             naddr4: BTreeMap::new(),
             addr6: Vec::new(),
             laddr6: Vec::new(),
@@ -91,6 +94,16 @@ impl Neighbor {
 
     pub fn event(&self, message: Message) {
         self.tx.send(message).unwrap();
+    }
+
+    pub fn proto_tlv(&self) -> Option<&IsisTlvProtoSupported> {
+        self.tlvs.iter().find_map(|tlv| {
+            if let IsisTlv::ProtoSupported(tlv) = tlv {
+                Some(tlv)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -157,7 +170,7 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
             nbrs.push(NeighborBrief {
                 system_id,
                 interface: top.ifname(nbr.ifindex),
-                level: nbr.level.digit(),
+                level: 1,
                 state: nbr.state.to_string(),
                 hold_time: rem,
                 snpa: show_mac(nbr.mac),
@@ -174,7 +187,7 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
             nbrs.push(NeighborBrief {
                 system_id,
                 interface: top.ifname(nbr.ifindex),
-                level: nbr.level.digit(),
+                level: 2,
                 state: nbr.state.to_string(),
                 hold_time: rem,
                 snpa: show_mac(nbr.mac),
@@ -213,12 +226,12 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         buf,
         "    Interface: {}, Level: {}, State: {}",
         top.ifname(nbr.ifindex),
-        nbr.level,
+        level,
         nbr.state.to_string(),
     )?;
 
-    write!(buf, "    Circuit type: {}, Speaks:", nbr.hello.circuit_type,)?;
-    if let Some(proto) = &nbr.hello.proto_tlv() {
+    write!(buf, "    Circuit type: {}, Speaks:", nbr.circuit_type)?;
+    if let Some(proto) = &nbr.proto_tlv() {
         if !proto.nlpids.is_empty() {
             let protocols = proto
                 .nlpids
@@ -233,14 +246,14 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         buf,
         "    SNPA: {}, LAN id: {}",
         show_mac(nbr.mac),
-        nbr.hello.lan_id
+        nbr.lan_id
     )?;
 
     let dis = if nbr.is_dis() { "is DIS" } else { "is not DIS" };
 
     // LAN Priority: 63, is not DIS, DIS flaps: 1, Last: 4m1s ago
     // XXX
-    writeln!(buf, "    LAN Priority: {}, {}", nbr.hello.priority, dis)?;
+    writeln!(buf, "    LAN Priority: {}, {}", nbr.priority, dis)?;
 
     if !nbr.naddr4.is_empty() {
         writeln!(buf, "    IP Prefixes")?;
@@ -276,7 +289,7 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         nbr.sys_id.to_string()
     };
 
-    let speaks = if let Some(proto) = &nbr.hello.proto_tlv() {
+    let speaks = if let Some(proto) = &nbr.proto_tlv() {
         proto
             .nlpids
             .iter()
@@ -301,13 +314,13 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
     NeighborDetail {
         system_id,
         interface: top.ifname(nbr.ifindex),
-        level: nbr.level.digit(),
+        level: level.digit(),
         state: nbr.state.to_string(),
-        circuit_type: nbr.hello.circuit_type.into(),
+        circuit_type: nbr.circuit_type.into(),
         speaks,
         snpa: show_mac(nbr.mac),
-        lan_id: nbr.hello.lan_id.to_string(),
-        lan_priority: nbr.hello.priority,
+        lan_id: nbr.lan_id.to_string(),
+        lan_priority: nbr.priority,
         is_dis: nbr.is_dis(),
         ip_prefixes,
         ipv6_link_locals,
