@@ -17,6 +17,7 @@ impl Isis {
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.callback_add("/routing/isis/tracing/event", config_tracing_event);
+        self.callback_add("/routing/isis/tracing/fsm", config_tracing_fsm);
         self.callback_add("/routing/isis/tracing/packet", config_tracing_packet);
         self.callback_add("/routing/isis/tracing/database", config_tracing_database);
         self.callback_add(
@@ -67,11 +68,10 @@ pub struct IsisConfig {
     pub distribute: IsisDistribute,
 }
 
-// Default refresh time: 15 min.
-const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
-const DEFAULT_HOLD_TIME: u16 = 1200;
-
 impl IsisConfig {
+    const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
+    const DEFAULT_HOLD_TIME: u16 = 1200;
+
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
     }
@@ -81,11 +81,11 @@ impl IsisConfig {
     }
 
     pub fn refresh_time(&self) -> u16 {
-        self.refresh_time.unwrap_or(DEFAULT_REFRESH_TIME)
+        self.refresh_time.unwrap_or(Self::DEFAULT_REFRESH_TIME)
     }
 
     pub fn hold_time(&self) -> u16 {
-        self.hold_time.unwrap_or(DEFAULT_HOLD_TIME)
+        self.hold_time.unwrap_or(Self::DEFAULT_HOLD_TIME)
     }
 }
 
@@ -176,10 +176,36 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
         }
         _ => {
             if op.is_set() {
-                println!("Trace on {} (not implemented)", ev);
+                // println!("Trace on {} (not implemented)", ev);
             } else {
-                println!("Trace off {} (not implemented)", ev);
+                //println!("Trace off {} (not implemented)", ev);
             }
+        }
+    }
+
+    Some(())
+}
+
+fn config_tracing_fsm(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let typ = args.string()?;
+
+    match typ.as_str() {
+        "nfsm" => {
+            if op.is_set() {
+                isis.tracing.fsm.nfsm.enabled = true;
+            } else {
+                isis.tracing.fsm.nfsm.enabled = false;
+            }
+        }
+        "ifsm" => {
+            if op.is_set() {
+                isis.tracing.fsm.ifsm.enabled = true;
+            } else {
+                isis.tracing.fsm.ifsm.enabled = false;
+            }
+        }
+        _ => {
+            //
         }
     }
 
@@ -188,7 +214,6 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
 
 fn config_tracing_packet(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let typ = args.string()?;
-    println!("XX packet type {}", typ);
 
     match typ.as_str() {
         // "all" => {
@@ -203,6 +228,27 @@ fn config_tracing_packet(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Optio
                 isis.tracing.packet.hello.enabled = true;
             } else {
                 isis.tracing.packet.hello.enabled = false;
+            }
+        }
+        "lsp" => {
+            if op.is_set() {
+                isis.tracing.packet.lsp.enabled = true;
+            } else {
+                isis.tracing.packet.lsp.enabled = false;
+            }
+        }
+        "csnp" => {
+            if op.is_set() {
+                isis.tracing.packet.csnp.enabled = true;
+            } else {
+                isis.tracing.packet.csnp.enabled = false;
+            }
+        }
+        "psnp" => {
+            if op.is_set() {
+                isis.tracing.packet.psnp.enabled = true;
+            } else {
+                isis.tracing.packet.psnp.enabled = false;
             }
         }
         _ => {

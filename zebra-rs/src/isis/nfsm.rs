@@ -8,6 +8,7 @@ use strum_macros::{Display, EnumString};
 
 use crate::context::Timer;
 use crate::isis::link::LinkType;
+use crate::isis::neigh::NfsmP2pState;
 use crate::rib::MacAddr;
 use crate::{isis_fsm_trace, isis_packet_trace};
 
@@ -46,7 +47,7 @@ pub enum NfsmEvent {
 }
 
 pub type NfsmFunc =
-    fn(&mut NeighborTop, &mut Neighbor, &Option<MacAddr>, Level) -> Option<NfsmState>;
+    fn(&mut NeighborTop, &mut Neighbor, Option<MacAddr>, Level) -> Option<NfsmState>;
 
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent, _level: Level) -> (NfsmFunc, Option<Self>) {
@@ -59,7 +60,7 @@ impl NfsmState {
     }
 }
 
-fn nfsm_hello_has_mac(pdu: &IsisHello, mac: &Option<MacAddr>) -> bool {
+fn nfsm_hello_has_mac(pdu: &IsisHello, mac: Option<MacAddr>) -> bool {
     let Some(addr) = mac else {
         return false;
     };
@@ -86,7 +87,7 @@ pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
         let sysid = sys_id.clone();
         async move {
             use NfsmEvent::*;
-            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level))
+            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level, None))
                 .unwrap();
         }
     })
@@ -158,22 +159,22 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
 pub fn nfsm_hello_received(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
-    mac: &Option<MacAddr>,
+    mac: Option<MacAddr>,
     level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
 
     let mut state = nbr.state;
 
-    isis_packet_trace!(
-        ntop.tracing,
-        Hello,
-        Receive,
-        &level,
-        "NBR Hello received on {} from {}",
-        nbr.ifindex,
-        nbr.sys_id
-    );
+    // isis_packet_trace!(
+    //     ntop.tracing,
+    //     Hello,
+    //     Receive,
+    //     &level,
+    //     "NBR Hello received on {} from {}",
+    //     nbr.ifindex,
+    //     nbr.sys_id
+    // );
 
     if state == NfsmState::Down {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -182,6 +183,7 @@ pub fn nfsm_hello_received(
 
     if state == NfsmState::Init {
         if nfsm_hello_has_mac(&nbr.hello, mac) {
+            println!("===== DIS =====");
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Up;
         }
@@ -224,22 +226,22 @@ pub fn nfsm_hello_received(
 pub fn nfsm_p2p_hello_received(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
-    _mac: &Option<MacAddr>,
+    _mac: Option<MacAddr>,
     level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
 
     let mut state = nbr.state;
 
-    isis_packet_trace!(
-        ntop.tracing,
-        Hello,
-        Receive,
-        &level,
-        "P2P Hello received on {} from {}",
-        nbr.ifindex,
-        nbr.sys_id
-    );
+    // isis_packet_trace!(
+    //     ntop.tracing,
+    //     Hello,
+    //     Receive,
+    //     &level,
+    //     "P2P Hello received on {} from {}",
+    //     nbr.ifindex,
+    //     nbr.sys_id
+    // );
 
     // Lookup three way handshake TLV.
     let three_way = p2ptlv(nbr);
@@ -249,16 +251,56 @@ pub fn nfsm_p2p_hello_received(
 
     // When it is three way handshake.
     if state == NfsmState::Down {
+        let next = NfsmState::Init;
+        isis_fsm_trace!(
+            ntop.tracing,
+            Nfsm,
+            false,
+            "[NFSM] {:?} -> {:?} on level {}",
+            state,
+            next,
+            level
+        );
+        state = next;
+
+        // Need to originate Hello for updating three way handshake.
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        state = NfsmState::Init;
     }
 
     // Fall down from previous.
     if state == NfsmState::Init {
         if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
-            println!("XX Init -> Up LSP originate");
+            let next = NfsmState::Up;
+
+            *ntop.adj.get_mut(&level) = Some(IsisNeighborId::from_sys_id(&nbr.sys_id, 0));
+
             nbr.event(Message::LspOriginate(level));
-            state = NfsmState::Up;
+
+            isis_fsm_trace!(
+                ntop.tracing,
+                Nfsm,
+                false,
+                "[NFSM] {:?} -> {:?} on level {}",
+                state,
+                next,
+                level
+            );
+
+            state = next;
+            let p2p = NfsmP2pState::Exchange;
+
+            isis_fsm_trace!(
+                ntop.tracing,
+                Nfsm,
+                false,
+                "[NFSM:P2P] {:?} -> {:?} level {}",
+                nbr.p2p,
+                p2p,
+                level
+            );
+
+            nbr.p2p = p2p;
+            nbr.event(Message::LspOriginate(level));
         }
     }
 
@@ -279,7 +321,7 @@ pub fn nfsm_p2p_hello_received(
 pub fn nfsm_hold_timer_expire(
     _ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
-    _mac: &Option<MacAddr>,
+    _mac: Option<MacAddr>,
     level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
@@ -323,7 +365,7 @@ pub fn isis_nfsm(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
     event: NfsmEvent,
-    mac: &Option<MacAddr>,
+    mac: Option<MacAddr>,
     level: Level,
 ) {
     // println!("NFSM {}, {}, {}", nbr.sys_id, level, event);
@@ -332,15 +374,15 @@ pub fn isis_nfsm(
     let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
 
     if let Some(new_state) = next_state {
-        isis_fsm_trace!(
-            ntop.tracing,
-            Nfsm,
-            false,
-            "NFSM State Transition {:?} -> {:?} on level {}",
-            nbr.state,
-            new_state,
-            level
-        );
+        // isis_fsm_trace!(
+        //     ntop.tracing,
+        //     Nfsm,
+        //     false,
+        //     "NFSM State Transition {:?} -> {:?} on level {}",
+        //     nbr.state,
+        //     new_state,
+        //     level
+        // );
         if new_state != nbr.state {
             nbr.prev = nbr.state;
             nbr.state = new_state;
