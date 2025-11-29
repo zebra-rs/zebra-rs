@@ -495,7 +495,7 @@ macro_rules! isis_pkt_trace {
 /// Simplified packet tracing macro that uses the context defined by `isis_pdu_handler!`.
 /// Must be used after `isis_pdu_handler!` in the same scope.
 #[macro_export]
-macro_rules! isis_pkt_trace_top {
+macro_rules! isis_pdu_trace {
     ($tracing:expr, $level:expr, $($arg:tt)*) => {
         if $tracing.tracing.should_trace_packet(_ISIS_PKT_TYPE, _ISIS_PKT_DIR, $level) {
             tracing::info!(
