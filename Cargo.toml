@@ -6,6 +6,7 @@ members = [
   "vtyhelper",
   "crates/bgp-packet",
   "crates/isis-packet",
+  "crates/isis-macros",
   "crates/ospf-packet",
 ]
 
