@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
-use isis_packet::neigh::{self};
+use isis_packet::neigh::{self, IsisSubAdjSid};
 use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
 use prefix_trie::PrefixMap;
@@ -206,8 +206,8 @@ impl Isis {
             Message::Ifsm(ev, ifindex, level) => {
                 self.process_ifsm(ev, ifindex, level);
             }
-            Message::Nfsm(ev, ifindex, sysid, level) => {
-                self.process_nfsm(ev, ifindex, sysid, level);
+            Message::Nfsm(ev, ifindex, sysid, level, mac) => {
+                self.process_nfsm(ev, ifindex, sysid, level, mac);
             }
             Message::Lsdb(ev, level, key) => {
                 self.process_lsdb(ev, level, key);
@@ -295,6 +295,7 @@ impl Isis {
     fn process_lsp_originate(&mut self, level: Level) {
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
+        tracing::info!("IsisLsp originate");
         let buf = lsp_emit(&mut lsp, level);
         lsp_flood(&mut top, level, &buf);
         insert_self_originate(&mut top, level, lsp);
@@ -327,6 +328,7 @@ impl Isis {
         };
 
         // Emit and flood the purged LSP
+        tracing::info!("IsisLsp purge");
         let buf = lsp_emit(&mut purged_lsp, level);
         lsp_flood(&mut top, level, &buf);
 
@@ -346,6 +348,7 @@ impl Isis {
     fn process_dis_originate(&mut self, level: Level, ifindex: u32, base: Option<u32>) {
         let mut top = self.top();
         let mut lsp = dis_generate(&mut top, level, ifindex, base);
+        tracing::info!("IsisLsp dis originate");
         let buf = lsp_emit(&mut lsp, level);
         lsp_flood(&mut top, level, &buf);
         insert_self_originate(&mut top, level, lsp);
@@ -398,7 +401,14 @@ impl Isis {
         }
     }
 
-    fn process_nfsm(&mut self, ev: NfsmEvent, ifindex: u32, sysid: IsisSysId, level: Level) {
+    fn process_nfsm(
+        &mut self,
+        ev: NfsmEvent,
+        ifindex: u32,
+        sysid: IsisSysId,
+        level: Level,
+        mac: Option<MacAddr>,
+    ) {
         let Some(mut ltop) = self.link_top(ifindex) else {
             return;
         };
@@ -415,7 +425,7 @@ impl Isis {
             return;
         };
 
-        isis_nfsm(&mut ntop, nbr, ev, &None, level);
+        isis_nfsm(&mut ntop, nbr, ev, mac, level);
 
         if nbr.state == NfsmState::Down {
             ltop.state.nbrs.get_mut(&level).remove(&sysid);
@@ -429,6 +439,7 @@ impl Isis {
         let mut top = self.top();
         match ev {
             RefreshTimerExpire => {
+                tracing::info!("IsisLsp refresh_lsp");
                 lsdb::refresh_lsp(&mut top, level, key);
             }
             HoldTimerExpire => {
@@ -692,7 +703,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         };
 
         // Determine the correct neighbor ID
-        let neighbor_id = if link.config.link_type() == LinkType::Lan {
+        let neighbor_id = if !link.is_p2p() {
             // On LAN, check if we're DIS or not
             match link.state.dis_status.get(&level) {
                 DisStatus::Myself => {
@@ -711,6 +722,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             }
         } else {
             // Point-to-point link, always use direct adjacency
+            println!("XXX {adj}");
             adj.clone()
         };
 
@@ -725,13 +737,22 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
             for (_key, value) in nbr.naddr4.iter() {
                 if let Some(label) = value.label {
-                    let sub = IsisSubLanAdjSid {
-                        flags: AdjSidFlags::lan_adj_flag_ipv4(),
-                        weight: 0,
-                        system_id: nbr.sys_id.clone(),
-                        sid: SidLabelValue::Label(label),
-                    };
-                    is_reach.subs.push(neigh::IsisSubTlv::LanAdjSid(sub));
+                    if nbr.link_type.is_p2p() {
+                        let sub = IsisSubAdjSid {
+                            flags: AdjSidFlags::lan_adj_flag_ipv4(),
+                            weight: 0,
+                            sid: SidLabelValue::Label(label),
+                        };
+                        is_reach.subs.push(neigh::IsisSubTlv::AdjSid(sub));
+                    } else {
+                        let sub = IsisSubLanAdjSid {
+                            flags: AdjSidFlags::lan_adj_flag_ipv4(),
+                            weight: 0,
+                            system_id: nbr.sys_id.clone(),
+                            sid: SidLabelValue::Label(label),
+                        };
+                        is_reach.subs.push(neigh::IsisSubTlv::LanAdjSid(sub));
+                    }
                 }
             }
         }
@@ -1324,7 +1345,7 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
 pub enum Message {
     Recv(IsisPacket, u32, Option<MacAddr>),
     Ifsm(IfsmEvent, u32, Option<Level>),
-    Nfsm(NfsmEvent, u32, IsisSysId, Level),
+    Nfsm(NfsmEvent, u32, IsisSysId, Level, Option<MacAddr>),
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
     LspPurge(Level, IsisLspId),
@@ -1343,7 +1364,7 @@ impl Display for Message {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
             }
             Message::Ifsm(ifsm_event, _, _level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
-            Message::Nfsm(nfsm_event, _, _isis_sys_id, _level) => {
+            Message::Nfsm(nfsm_event, _, _isis_sys_id, _level, _mac) => {
                 write!(f, "[Message::Nfsm({:?})]", nfsm_event)
             }
             Message::Lsdb(lsdb_event, _level, _isis_lsp_id) => {
