@@ -1,6 +1,6 @@
 [package]
 name = "bgp-packet"
-version = "0.8.4"
+version = "0.8.5"
 description = "Parser for the BGP protocol"
 license = "MIT/Apache-2.0"
 keywords = ["BGP","routing","protocol","parser","nom"]

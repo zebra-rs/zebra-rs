@@ -12,6 +12,7 @@ use crate::isis::{
     srmpls::{LabelBlock, LabelConfig},
 };
 
+use super::link::LinkTop;
 use super::{
     Level,
     inst::{IsisTop, lsp_emit, lsp_flood, spf_schedule},
@@ -185,7 +186,7 @@ pub struct LspCapView<'a> {
     pub srv6: Option<&'a IsisSubSrv6>,
 }
 
-fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
+fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     if let Some(prev) = top.lsdb.get(&level).get(&key) {
         if prev.lsp.tlvs == lsp.tlvs {
             // println!("LSP is same as prev one");
@@ -238,7 +239,7 @@ fn update_lsp(top: &mut IsisTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
 }
 
 pub fn insert_lsp(
-    top: &mut IsisTop,
+    top: &mut LinkTop,
     level: Level,
     lsp: IsisLsp,
     bytes: Vec<u8>,
@@ -246,7 +247,7 @@ pub fn insert_lsp(
 ) -> Option<Lsa> {
     let key = lsp.lsp_id.clone();
 
-    if top.config.net.sys_id() == key.sys_id() {
+    if top.up_config.net.sys_id() == key.sys_id() {
         isis_database_trace!(top.tracing, Lsdb, &level, "Self originated LSP?");
         return None;
     }
@@ -314,7 +315,43 @@ pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> O
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
+pub fn insert_self_originate_link(top: &mut LinkTop, level: Level, lsp: IsisLsp) -> Option<Lsa> {
+    let key = lsp.lsp_id.clone();
+    let mut lsa = Lsa::new(lsp);
+    lsa.originated = true;
+
+    lsa.hold_timer = Some(hold_timer(top.tx, level, key, lsa.lsp.hold_time));
+
+    let mut refresh_time = top.up_config.refresh_time();
+
+    const ZERO_AGE_LIFETIME: u16 = 60;
+    const MIN_LSP_TRANS_INTERVAL: u16 = 5;
+    const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
+
+    // Remaining lifetime.
+    let rl = lsa.lsp.hold_time;
+    let safety_margin = ZERO_AGE_LIFETIME + MIN_LSP_TRANS_INTERVAL;
+    if rl < DEFAULT_REFRESH_TIME {
+        if rl > safety_margin {
+            refresh_time = rl - safety_margin;
+        } else {
+            refresh_time = 1;
+        }
+    }
+
+    lsa.refresh_timer = Some(refresh_timer(top.tx, level, key, refresh_time));
+    top.lsdb.get_mut(&level).map.insert(key, lsa)
+}
+
 pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
+    if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key) {
+        if let Some(_tlv) = lsa.lsp.hostname_tlv() {
+            top.hostname.get_mut(&level).remove(&key.sys_id());
+        }
+    }
+}
+
+pub fn remove_lsp_link(top: &mut LinkTop, level: Level, key: IsisLspId) {
     if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key) {
         if let Some(_tlv) = lsa.lsp.hostname_tlv() {
             top.hostname.get_mut(&level).remove(&key.sys_id());
