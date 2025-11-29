@@ -249,15 +249,15 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
     if has_level(ltop.state.level(), level) {
-        isis_packet_trace!(
-            ltop.tracing,
-            Hello,
-            Send,
-            &level,
-            "Hello originate {} on {}",
-            level,
-            ltop.state.name
-        );
+        // isis_packet_trace!(
+        //     ltop.tracing,
+        //     Hello,
+        //     Send,
+        //     &level,
+        //     "Hello originate {} on {}",
+        //     level,
+        //     ltop.state.name
+        // );
 
         let hello = if ltop.config.link_type() == LinkType::P2p {
             IsisPdu::P2pHello(hello_p2p_generate(ltop, level))

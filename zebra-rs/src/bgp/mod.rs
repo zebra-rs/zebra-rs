@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{Bgp, serve};
+pub use inst::{Bgp, Message, serve};
 
 pub mod constant;
 pub use constant::*;
