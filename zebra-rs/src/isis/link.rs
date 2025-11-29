@@ -19,12 +19,13 @@ use crate::{isis_event_trace, isis_warn};
 
 use super::config::IsisConfig;
 use super::ifsm::{self, has_level};
-use super::inst::PacketMessage;
+use super::inst::{PacketMessage, ReachMap};
 use super::neigh::Neighbor;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
+use super::srmpls::LabelMap;
 use super::tracing::IsisTracing;
-use super::{IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
+use super::{Hostname, IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
@@ -112,7 +113,7 @@ pub struct IsisLink {
 pub struct LinkTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub ptx: &'a UnboundedSender<PacketMessage>,
-    pub lsdb: &'a Levels<Lsdb>,
+    pub lsdb: &'a mut Levels<Lsdb>,
     pub flags: &'a LinkFlags,
     pub up_config: &'a IsisConfig,
     pub tracing: &'a IsisTracing,
@@ -120,6 +121,10 @@ pub struct LinkTop<'a> {
     pub state: &'a mut LinkState,
     pub timer: &'a mut LinkTimer,
     pub local_pool: &'a mut Option<LabelPool>,
+    pub hostname: &'a mut Levels<Hostname>,
+    pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub label_map: &'a mut Levels<LabelMap>,
+    pub spf_timer: &'a mut Levels<Option<Timer>>,
 }
 
 #[derive(Default, Debug)]

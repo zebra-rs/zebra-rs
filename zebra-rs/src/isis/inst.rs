@@ -61,7 +61,7 @@ pub struct Isis {
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
-    pub spf: Levels<Option<Timer>>,
+    pub spf_timer: Levels<Option<Timer>>,
     pub global_pool: Option<LabelPool>,
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
@@ -127,7 +127,7 @@ impl Isis {
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
-            spf: Levels::<Option<Timer>>::default(),
+            spf_timer: Levels::<Option<Timer>>::default(),
             global_pool: None,
             local_pool: Some(LabelPool::new(15000, Some(16000))),
             graph: Levels::<Option<spf::Graph>>::default(),
@@ -191,7 +191,9 @@ impl Isis {
                 perform_spf_calculation(&mut top, level);
             }
             Message::Recv(packet, ifindex, mac) => {
-                let mut top = self.top();
+                let Some(mut top) = self.link_top(ifindex) else {
+                    return;
+                };
                 process_packet(&mut top, packet, ifindex, mac);
             }
             Message::LspOriginate(level) => {
@@ -487,7 +489,7 @@ impl Isis {
             ilm: &mut self.ilm,
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
-            spf_timer: &mut self.spf,
+            spf_timer: &mut self.spf_timer,
             local_pool: &mut self.local_pool,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
@@ -501,12 +503,16 @@ impl Isis {
             ptx: &link.ptx,
             up_config: &self.config,
             tracing: &self.tracing,
-            lsdb: &self.lsdb,
+            lsdb: &mut self.lsdb,
             flags: &link.flags,
             config: &mut link.config,
             state: &mut link.state,
             timer: &mut link.timer,
             local_pool: &mut self.local_pool,
+            hostname: &mut self.hostname,
+            reach_map: &mut self.reach_map,
+            label_map: &mut self.label_map,
+            spf_timer: &mut self.spf_timer,
         })
     }
 
@@ -887,8 +893,8 @@ pub fn serve(mut isis: Isis) {
     });
 }
 
-pub fn spf_timer(top: &mut IsisTop, level: Level) -> Timer {
-    let tx = top.tx.clone();
+pub fn spf_timer(tx: &UnboundedSender<Message>, level: Level) -> Timer {
+    let tx = tx.clone();
     Timer::once(1, move || {
         let tx = tx.clone();
         async move {
@@ -898,9 +904,9 @@ pub fn spf_timer(top: &mut IsisTop, level: Level) -> Timer {
     })
 }
 
-pub fn spf_schedule(top: &mut IsisTop, level: Level) {
+pub fn spf_schedule(top: &mut LinkTop, level: Level) {
     if top.spf_timer.get(&level).is_none() {
-        *top.spf_timer.get_mut(&level) = Some(spf_timer(top, level));
+        *top.spf_timer.get_mut(&level) = Some(spf_timer(top.tx, level));
     }
 }
 
