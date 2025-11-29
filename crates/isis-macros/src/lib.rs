@@ -10,14 +10,14 @@ use syn::{ItemFn, Token, parse_macro_input};
 /// # Usage
 ///
 /// ```ignore
-/// #[isis_packet_handler(Hello, Receive)]
+/// #[isis_pdu_handler(Hello, Receive)]
 /// pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
 ///     // _ISIS_PKT_TYPE and _ISIS_PKT_DIR are now available
 ///     isis_pkt_trace!(top.tracing, &level, "[P2P Hello] recv on link {}", link.state.name);
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn isis_packet_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn isis_pdu_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr with parse_handler_args);
     let mut input_fn = parse_macro_input!(item as ItemFn);
 
