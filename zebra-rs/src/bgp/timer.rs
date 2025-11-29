@@ -14,7 +14,7 @@ pub struct Config {
     pub delay_open_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub connect_retry_time: Option<u16>,
-    pub adv_interval: Option<u16>,
+    pub min_adv_interval: Option<u16>,
     pub orig_interval: Option<u16>,
 }
 
@@ -59,7 +59,7 @@ impl Config {
     }
 
     pub fn min_adv_interval(&self) -> u64 {
-        if let Some(adv_interval) = self.adv_interval {
+        if let Some(adv_interval) = self.min_adv_interval {
             adv_interval as u64
         } else {
             Self::DEFAULT_MIN_ADV_INTERVAL
@@ -115,18 +115,18 @@ fn start_hold_timer(peer: &Peer) -> Timer {
     start_timer!(peer, peer.param.hold_time as u64, Event::HoldTimerExpires)
 }
 
-pub fn refresh_hold_timer(peer: &Peer) {
-    if let Some(hold_timer) = peer.timer.hold_timer.as_ref() {
-        hold_timer.refresh();
-    }
-}
-
 fn start_keepalive_timer(peer: &Peer) -> Timer {
     start_repeater!(
         peer,
         peer.param.keepalive as u64,
         Event::KeepaliveTimerExpires
     )
+}
+
+pub fn refresh_hold_timer(peer: &Peer) {
+    if let Some(hold_timer) = peer.timer.hold_timer.as_ref() {
+        hold_timer.refresh();
+    }
 }
 
 pub fn update_open_timers(peer: &mut Peer, packet: &OpenPacket) {
@@ -272,9 +272,9 @@ pub mod config {
         let peer = bgp.peers.get_mut(&addr)?;
 
         if op.is_set() {
-            peer.config.timer.adv_interval = Some(adv_interval);
+            peer.config.timer.min_adv_interval = Some(adv_interval);
         } else {
-            peer.config.timer.adv_interval = None;
+            peer.config.timer.min_adv_interval = None;
         }
         Some(())
     }
