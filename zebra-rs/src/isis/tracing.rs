@@ -41,12 +41,22 @@ pub struct PacketConfig {
 }
 
 /// Packet direction filter
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum PacketDirection {
     Send,
     Receive,
     #[default]
     Both,
+}
+
+impl PacketDirection {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PacketDirection::Send => "Send",
+            PacketDirection::Receive => "Receive",
+            PacketDirection::Both => "Both",
+        }
+    }
 }
 
 /// Event tracing configuration
@@ -118,12 +128,23 @@ pub enum TracingLevel {
 }
 
 /// Packet type enumeration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PacketType {
     Hello,
     Lsp,
     Csnp,
     Psnp,
+}
+
+impl PacketType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PacketType::Hello => "Hello",
+            PacketType::Lsp => "Lsp",
+            PacketType::Csnp => "Csnp",
+            PacketType::Psnp => "Psnp",
+        }
+    }
 }
 
 /// Event type enumeration
@@ -427,6 +448,44 @@ macro_rules! isis_sr_adjacency_trace {
                 proto = "isis",
                 category = "segment_routing",
                 sr_type = "adjacency_sid",
+                $($arg)*
+            )
+        }
+    };
+}
+
+/// Macro to define a packet receive handler with automatic tracing context.
+/// This creates local constants for packet type and direction that can be used
+/// with `isis_pkt_trace!` macro.
+///
+/// Usage:
+/// ```ignore
+/// isis_packet_handler!(Hello, Receive);
+/// // Now use isis_pkt_trace! instead of isis_packet_trace!
+/// isis_pkt_trace!(top.tracing, &level, "[Hello] recv on {}", link.state.name);
+/// ```
+#[macro_export]
+macro_rules! isis_packet_handler {
+    ($packet_type:ident, $direction:ident) => {
+        const _ISIS_PKT_TYPE: $crate::isis::tracing::PacketType =
+            $crate::isis::tracing::PacketType::$packet_type;
+        const _ISIS_PKT_DIR: $crate::isis::tracing::PacketDirection =
+            $crate::isis::tracing::PacketDirection::$direction;
+    };
+}
+
+/// Simplified packet tracing macro that uses the context defined by `isis_packet_handler!`.
+/// Must be used after `isis_packet_handler!` in the same scope.
+#[macro_export]
+macro_rules! isis_pkt_trace {
+    ($tracing:expr, $level:expr, $($arg:tt)*) => {
+        if $tracing.should_trace_packet(_ISIS_PKT_TYPE, _ISIS_PKT_DIR, $level) {
+            tracing::info!(
+                proto = "isis",
+                category = "packet",
+                packet_type = _ISIS_PKT_TYPE.as_str(),
+                direction = _ISIS_PKT_DIR.as_str(),
+                level = %$level,
                 $($arg)*
             )
         }

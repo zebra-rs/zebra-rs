@@ -6,7 +6,6 @@ use isis_packet::{
     IsLevel, IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisP2pHello, IsisPacket, IsisPdu,
     IsisPsnp, IsisTlv, IsisTlvLspEntries, IsisType,
 };
-use nix::sys::socket::sockopt::ReceiveTimeout;
 
 use crate::isis::Message;
 use crate::isis::inst::lsp_emit;
@@ -14,7 +13,9 @@ use crate::isis::link::DisStatus;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::rib::MacAddr;
-use crate::{isis_database_trace, isis_event_trace, isis_packet_trace};
+use crate::{
+    isis_database_trace, isis_event_trace, isis_packet_handler, isis_packet_trace, isis_pkt_trace,
+};
 
 use super::Level;
 use super::ifsm::has_level;
@@ -90,6 +91,8 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
 }
 
 pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
+    // Define packet handler context for simplified tracing
+    isis_packet_handler!(Hello, Receive);
     // Link must exists.
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
@@ -118,10 +121,9 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
             continue;
         }
 
-        isis_packet_trace!(
+        // Using simplified trace macro with handler context
+        isis_pkt_trace!(
             top.tracing,
-            Hello,
-            Receive,
             &level,
             "[P2P Hello] recv on link {}",
             link.state.name
