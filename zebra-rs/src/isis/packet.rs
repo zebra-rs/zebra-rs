@@ -16,7 +16,7 @@ use crate::rib::MacAddr;
 use crate::{
     isis_database_trace, isis_event_trace, isis_packet_trace, isis_pkt_trace, isis_pkt_trace_top,
 };
-use isis_macros::isis_packet_handler;
+use isis_macros::isis_pdu_handler;
 
 use super::Level;
 use super::ifsm::has_level;
@@ -32,7 +32,7 @@ pub fn link_level_capable(is_level: &IsLevel, level: &Level) -> bool {
     }
 }
 
-#[isis_packet_handler(Hello, Receive)]
+#[isis_pdu_handler(Hello, Receive)]
 pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
@@ -92,7 +92,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
     ));
 }
 
-#[isis_packet_handler(Hello, Receive)]
+#[isis_pdu_handler(Hello, Receive)]
 pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
     // Link must exists.
     let Some(link) = top.links.get_mut(&ifindex) else {
@@ -157,7 +157,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
     }
 }
 
-#[isis_packet_handler(Csnp, Receive)]
+#[isis_pdu_handler(Csnp, Receive)]
 pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;
@@ -411,7 +411,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     }
 }
 
-#[isis_packet_handler(Psnp, Receive)]
+#[isis_pdu_handler(Psnp, Receive)]
 pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         println!("Link not found {}", ifindex);
@@ -497,7 +497,7 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     }
 }
 
-#[isis_packet_handler(Lsp, Receive)]
+#[isis_pdu_handler(Lsp, Receive)]
 pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
     let Some(link) = top.links.get_mut(&ifindex) else {
         return;

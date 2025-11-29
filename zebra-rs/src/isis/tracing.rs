@@ -460,12 +460,12 @@ macro_rules! isis_sr_adjacency_trace {
 ///
 /// Usage:
 /// ```ignore
-/// isis_packet_handler!(Hello, Receive);
+/// isis_pdu_handler!(Hello, Receive);
 /// // Now use isis_pkt_trace! instead of isis_packet_trace!
 /// isis_pkt_trace!(top.tracing, &level, "[Hello] recv on {}", link.state.name);
 /// ```
 #[macro_export]
-macro_rules! isis_packet_handler {
+macro_rules! isis_pdu_handler {
     ($packet_type:ident, $direction:ident) => {
         const _ISIS_PKT_TYPE: $crate::isis::tracing::PacketType =
             $crate::isis::tracing::PacketType::$packet_type;
@@ -474,8 +474,8 @@ macro_rules! isis_packet_handler {
     };
 }
 
-/// Simplified packet tracing macro that uses the context defined by `isis_packet_handler!`.
-/// Must be used after `isis_packet_handler!` in the same scope.
+/// Simplified packet tracing macro that uses the context defined by `isis_pdu_handler!`.
+/// Must be used after `isis_pdu_handler!` in the same scope.
 #[macro_export]
 macro_rules! isis_pkt_trace {
     ($tracing:expr, $level:expr, $($arg:tt)*) => {
@@ -492,8 +492,8 @@ macro_rules! isis_pkt_trace {
     };
 }
 
-/// Simplified packet tracing macro that uses the context defined by `isis_packet_handler!`.
-/// Must be used after `isis_packet_handler!` in the same scope.
+/// Simplified packet tracing macro that uses the context defined by `isis_pdu_handler!`.
+/// Must be used after `isis_pdu_handler!` in the same scope.
 #[macro_export]
 macro_rules! isis_pkt_trace_top {
     ($tracing:expr, $level:expr, $($arg:tt)*) => {
