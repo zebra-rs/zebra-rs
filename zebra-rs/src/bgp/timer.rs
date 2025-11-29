@@ -2,13 +2,11 @@ use std::cmp::min;
 
 use bgp_packet::OpenPacket;
 
-use crate::bgp::peer::State;
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
 
-use super::Bgp;
-use super::inst::Message;
-use super::peer::{Event, Peer};
+use super::peer::{Event, Peer, State};
+use super::{Bgp, Message};
 
 #[derive(Debug, Default, Clone)]
 pub struct Config {
@@ -20,19 +18,19 @@ pub struct Config {
     pub orig_interval: Option<u16>,
 }
 
-const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
-const DEFAULT_HOLD_TIME: u64 = 90;
-const DEFAULT_CONNECT_RETRY_TIME: u64 = 120;
-
-const DEFAULT_ADV_INTERVAL: u64 = 3;
-const DEFAULT_ORIG_INTERVAL: u64 = 3;
-
 impl Config {
+    const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
+    const DEFAULT_HOLD_TIME: u64 = 90;
+    const DEFAULT_CONNECT_RETRY_TIME: u64 = 120;
+
+    const DEFAULT_MIN_ADV_INTERVAL: u64 = 3;
+    const DEFAULT_ORIG_INTERVAL: u64 = 3;
+
     pub fn idle_hold_time(&self) -> u64 {
         if let Some(idle_hold_time) = self.idle_hold_time {
             idle_hold_time as u64
         } else {
-            DEFAULT_IDLE_HOLD_TIME
+            Self::DEFAULT_IDLE_HOLD_TIME
         }
     }
 
@@ -48,7 +46,7 @@ impl Config {
         if let Some(hold_time) = self.hold_time {
             hold_time as u64
         } else {
-            DEFAULT_HOLD_TIME
+            Self::DEFAULT_HOLD_TIME
         }
     }
 
@@ -56,15 +54,15 @@ impl Config {
         if let Some(connect_retry_time) = self.connect_retry_time {
             connect_retry_time as u64
         } else {
-            DEFAULT_CONNECT_RETRY_TIME
+            Self::DEFAULT_CONNECT_RETRY_TIME
         }
     }
 
-    pub fn adv_interval(&self) -> u64 {
+    pub fn min_adv_interval(&self) -> u64 {
         if let Some(adv_interval) = self.adv_interval {
             adv_interval as u64
         } else {
-            DEFAULT_ADV_INTERVAL
+            Self::DEFAULT_MIN_ADV_INTERVAL
         }
     }
 
@@ -72,7 +70,7 @@ impl Config {
         if let Some(orig_interval) = self.orig_interval {
             orig_interval as u64
         } else {
-            DEFAULT_ORIG_INTERVAL
+            Self::DEFAULT_ORIG_INTERVAL
         }
     }
 }
