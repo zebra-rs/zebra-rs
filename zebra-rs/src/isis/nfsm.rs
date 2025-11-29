@@ -60,12 +60,12 @@ impl NfsmState {
     }
 }
 
-fn nfsm_hello_has_mac(pdu: &IsisHello, mac: Option<MacAddr>) -> bool {
+fn nfsm_hello_has_mac(tlvs: &Vec<IsisTlv>, mac: Option<MacAddr>) -> bool {
     let Some(addr) = mac else {
         return false;
     };
 
-    for tlv in &pdu.tlvs {
+    for tlv in tlvs.iter() {
         if let IsisTlv::IsNeighbor(neigh) = tlv {
             for neighbor in neigh.neighbors.iter() {
                 if addr.octets() == neighbor.octets {
@@ -182,13 +182,13 @@ pub fn nfsm_hello_received(
     }
 
     if state == NfsmState::Init {
-        if nfsm_hello_has_mac(&nbr.hello, mac) {
+        if nfsm_hello_has_mac(&nbr.tlvs, mac) {
             println!("===== DIS =====");
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Up;
         }
     } else {
-        if !nfsm_hello_has_mac(&nbr.hello, mac) {
+        if !nfsm_hello_has_mac(&nbr.tlvs, mac) {
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Init;
         }
@@ -196,17 +196,17 @@ pub fn nfsm_hello_received(
 
     if state == NfsmState::Up
         && nbr.is_dis()
-        && !nbr.hello.lan_id.is_empty()
+        && !nbr.lan_id.is_empty()
         && ntop.dis.get(&level).is_some()
         && ntop.lan_id.get(&level).is_none()
     {
-        *ntop.lan_id.get_mut(&level) = Some(nbr.hello.lan_id.clone());
+        *ntop.lan_id.get_mut(&level) = Some(nbr.lan_id.clone());
         isis_fsm_trace!(
             ntop.tracing,
             Nfsm,
             true,
             "DIS LAN ID is set in Hello {} on level {}",
-            nbr.hello.lan_id,
+            nbr.lan_id,
             level
         );
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -340,7 +340,7 @@ pub fn nfsm_hold_timer_expire(
 }
 
 fn p2ptlv(nbr: &Neighbor) -> Option<IsisTlvP2p3Way> {
-    for tlv in nbr.hello_p2p.tlvs.iter() {
+    for tlv in nbr.tlvs.iter() {
         if let IsisTlv::P2p3Way(tlv) = tlv {
             return Some(tlv.clone());
         }
