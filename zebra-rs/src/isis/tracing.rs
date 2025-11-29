@@ -491,3 +491,21 @@ macro_rules! isis_pkt_trace {
         }
     };
 }
+
+/// Simplified packet tracing macro that uses the context defined by `isis_packet_handler!`.
+/// Must be used after `isis_packet_handler!` in the same scope.
+#[macro_export]
+macro_rules! isis_pkt_trace_top {
+    ($tracing:expr, $level:expr, $($arg:tt)*) => {
+        if $tracing.tracing.should_trace_packet(_ISIS_PKT_TYPE, _ISIS_PKT_DIR, $level) {
+            tracing::info!(
+                proto = "isis",
+                category = "packet",
+                packet_type = _ISIS_PKT_TYPE.as_str(),
+                direction = _ISIS_PKT_DIR.as_str(),
+                level = %$level,
+                $($arg)*
+            )
+        }
+    };
+}

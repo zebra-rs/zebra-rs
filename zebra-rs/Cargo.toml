@@ -44,6 +44,7 @@ ospf-packet = { path = "../crates/ospf-packet" }
 #ospf-packet = { git = "https://github.com/zebra-rs/ospf-packet", branch = "main" }
 isis-packet = { path = "../crates/isis-packet" }
 #isis-packet = { git = "https://github.com/zebra-rs/isis-packet", branch = "main" }
+isis-macros = { path = "../crates/isis-macros" }
 #spf-rs = { path = "../../spf-rs" }
 bitfield-struct = "0.11"
 rand = "0.9"
