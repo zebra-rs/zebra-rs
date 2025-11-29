@@ -13,9 +13,7 @@ use crate::isis::link::DisStatus;
 use crate::isis::lsdb::insert_self_originate;
 use crate::isis::neigh::Neighbor;
 use crate::rib::MacAddr;
-use crate::{
-    isis_database_trace, isis_event_trace, isis_packet_trace, isis_pkt_trace, isis_pkt_trace_top,
-};
+use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
 use isis_macros::isis_pdu_handler;
 
 use super::Level;
@@ -49,14 +47,7 @@ pub fn hello_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Opti
         _ => return,
     };
 
-    isis_packet_trace!(
-        top.tracing,
-        Hello,
-        Receive,
-        &level,
-        "[Hello] recv on link {}",
-        link.state.name
-    );
+    isis_pdu_trace!(top, &level, "[Hello] recv on link {}", link.state.name);
 
     // Check link capability for the PDU type.
     if !link_level_capable(&link.state.level(), &level) {
@@ -123,7 +114,7 @@ pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: 
         }
 
         // Using simplified trace macro with handler context
-        isis_pkt_trace_top!(top, &level, "[P2P Hello] recv on link {}", link.state.name);
+        isis_pdu_trace!(top, &level, "[P2P Hello] recv on link {}", link.state.name);
 
         // Create or update neighbor for this level
         let nbr = link
@@ -173,29 +164,22 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         _ => return,
     };
 
-    isis_packet_trace!(
-        top.tracing,
-        Csnp,
-        Receive,
-        &level,
-        "[CSNP] Recv on {}",
-        link.state.name
-    );
+    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", link.state.name);
 
     // Check link capability for the PDU type.
     if !link_level_capable(&link.state.level(), &level) {
         return;
     }
 
-    isis_packet_trace!(top.tracing, Csnp, Receive, &level, "[CSNP] ----");
+    isis_pdu_trace!(top, &level, "[CSNP] ----");
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
             for lsp in &lsps.entries {
-                isis_packet_trace!(top.tracing, Csnp, Receive, &level, "[CSNP] {}", lsp.lsp_id);
+                isis_pdu_trace!(top, &level, "[CSNP] {}", lsp.lsp_id);
             }
         }
     }
-    isis_packet_trace!(top.tracing, Csnp, Receive, &level, "[CSNP] ----");
+    isis_pdu_trace!(top, &level, "[CSNP] ----");
 
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
@@ -232,14 +216,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
             for lsp in &lsps.entries {
                 // If LSP_ID is my own.
                 if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
-                    isis_packet_trace!(
-                        top.tracing,
-                        Csnp,
-                        Receive,
-                        &level,
-                        "[CSNP] {} Self LSP",
-                        lsp.lsp_id
-                    );
+                    isis_pdu_trace!(top, &level, "[CSNP] {} Self LSP", lsp.lsp_id);
                     if lsp.lsp_id.is_pseudo() {
                         // tracing::info!("CSNP: Self DIS {}", lsp.lsp_id);
                         // println!("LSP myown DIS hold_time {}", lsp.hold_time);
@@ -257,21 +234,12 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                 }
 
                 // Need to check sequence number.
-                isis_packet_trace!(
-                    top.tracing,
-                    Csnp,
-                    Receive,
-                    &level,
-                    "[CSNP] {} Processing",
-                    lsp.lsp_id
-                );
+                isis_pdu_trace!(top, &level, "[CSNP] {} Processing", lsp.lsp_id);
                 match lsdb_locals.get(&lsp.lsp_id) {
                     None => {
                         // set_ssn();
-                        isis_packet_trace!(
-                            top.tracing,
-                            Csnp,
-                            Receive,
+                        isis_pdu_trace!(
+                            top,
                             &level,
                             "[CSNP] {} S:{:08x} H: {} None",
                             lsp.lsp_id,
@@ -289,10 +257,8 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         }
                     }
                     Some(&seq_number) if seq_number < lsp.seq_number => {
-                        isis_packet_trace!(
-                            top.tracing,
-                            Csnp,
-                            Receive,
+                        isis_pdu_trace!(
+                            top,
                             &level,
                             "[CSNP] {} S:{:08x} H: {} seq:{:08x} < exiting seq:{:08x}",
                             lsp.lsp_id,
@@ -309,10 +275,8 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         req.entries.push(psnp);
                     }
                     Some(&seq_number) if seq_number > lsp.seq_number => {
-                        isis_packet_trace!(
-                            top.tracing,
-                            Csnp,
-                            Receive,
+                        isis_pdu_trace!(
+                            top,
                             &level,
                             "[CSNP] {} S:{:08x} H:{} seq: {:08x} > exiting seq:{:08x} ",
                             lsp.lsp_id,
@@ -329,10 +293,8 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         top.tx.send(msg);
                     }
                     Some(&_seq_number) if lsp.hold_time == 0 => {
-                        isis_packet_trace!(
-                            top.tracing,
-                            Csnp,
-                            Receive,
+                        isis_pdu_trace!(
+                            top,
                             &level,
                             "[CSNP] {} S:{} H:{} Purge",
                             lsp.lsp_id,
@@ -343,10 +305,8 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                     }
                     _ => {
                         // Identical, nothing to do.
-                        isis_packet_trace!(
-                            top.tracing,
-                            Csnp,
-                            Receive,
+                        isis_pdu_trace!(
+                            top,
                             &level,
                             "[CSNP] {} S:{:08x} H:{} Identical",
                             lsp.lsp_id,
@@ -405,7 +365,7 @@ pub fn csnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
             tracing::info!("[PSNP] {} will be sent", e.lsp_id,);
         }
         psnp.tlvs.push(req.into());
-        isis_packet_trace!(top.tracing, Psnp, Send, &level, "Send PSNP");
+        isis_pdu_trace!(top, &level, "Send PSNP");
 
         isis_psnp_send(top, ifindex, level, psnp);
     }
@@ -428,14 +388,7 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         _ => return,
     };
 
-    isis_packet_trace!(
-        top.tracing,
-        Psnp,
-        Receive,
-        &level,
-        "[PSNP] Recv on {}",
-        link.state.name
-    );
+    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", link.state.name);
 
     // Check link capability for the PDU type.
     if !link_level_capable(&link.state.level(), &level) {
@@ -446,10 +399,8 @@ pub fn psnp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     for entry in pdu.tlvs.iter() {
         if let IsisTlv::LspEntries(tlv) = entry {
             for entry in tlv.entries.iter() {
-                isis_packet_trace!(
-                    top.tracing,
-                    Psnp,
-                    Receive,
+                isis_pdu_trace!(
+                    top,
                     &level,
                     "[PSNP] {} Seq:{:08x} HoldTime:{}",
                     entry.lsp_id,
@@ -517,15 +468,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option
         return;
     }
 
-    isis_packet_trace!(
-        top.tracing,
-        Lsp,
-        Receive,
-        &level,
-        "[LSP] {} {}",
-        lsp.lsp_id,
-        link.state.name
-    );
+    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, link.state.name);
 
     // Self LSP recieved.
     if lsp.lsp_id.sys_id() == top.config.net.sys_id() {
@@ -589,14 +532,7 @@ pub fn lsp_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option
 
     // DIS
     if lsp.lsp_id.is_pseudo() {
-        isis_packet_trace!(
-            top.tracing,
-            Lsp,
-            Receive,
-            &level,
-            "[DIS LSP] recv on link {}",
-            link.state.name
-        );
+        isis_pdu_trace!(top, &level, "[DIS LSP] recv on link {}", link.state.name);
 
         match link.state.dis_status.get(&level) {
             DisStatus::NotSelected => {
