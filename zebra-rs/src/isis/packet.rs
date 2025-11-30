@@ -294,8 +294,12 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 
                     isis_packet::write_hold_time(&mut buf, hold_time);
 
-                    top.ptx
-                        .send(PacketMessage::Send(Packet::Bytes(buf), top.ifindex, level));
+                    top.ptx.send(PacketMessage::Send(
+                        Packet::Bytes(buf),
+                        top.ifindex,
+                        level,
+                        top.dest(level),
+                    ));
                 }
             }
         }
@@ -359,8 +363,12 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
 
                         isis_packet::write_hold_time(&mut buf, hold_time);
 
-                        top.ptx
-                            .send(PacketMessage::Send(Packet::Bytes(buf), top.ifindex, level));
+                        top.ptx.send(PacketMessage::Send(
+                            Packet::Bytes(buf),
+                            top.ifindex,
+                            level,
+                            top.dest(level),
+                        ));
                     } else {
                         let mut lsp = lsa.lsp.clone();
                         lsp.hold_time = hold_time;
@@ -368,8 +376,12 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         tracing::info!("IsisLsp packet from PSNP (emit)");
                         let buf = lsp_emit(&mut lsp, level);
 
-                        top.ptx
-                            .send(PacketMessage::Send(Packet::Bytes(buf), top.ifindex, level));
+                        top.ptx.send(PacketMessage::Send(
+                            Packet::Bytes(buf),
+                            top.ifindex,
+                            level,
+                            top.dest(level),
+                        ));
                     }
                 }
             }
@@ -391,14 +403,14 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
         // Self LSP logging.
         isis_event_trace!(
             top.tracing,
-            Dis,
+            LspOriginate,
             &level,
-            "Self LSP rcvd {} {} seq {:04x} hold_time {}",
-            lsp.lsp_id,
-            top.ifindex,
+            "[LspRecv] Seq:0x{:08x} HoldTime:{} On:{}",
             lsp.seq_number,
-            lsp.hold_time
+            lsp.hold_time,
+            top.state.name,
         );
+
         // Pseudo LSP has been received.
         if lsp.lsp_id.is_pseudo() {
             // Pseudo LSP purge request.
@@ -509,7 +521,8 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
                                     "DIS Adjacency with {}",
                                     lan_id
                                 );
-                                *top.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
+                                *top.state.adj.get_mut(&level) =
+                                    Some((lsp.lsp_id.neighbor_id(), None));
                                 isis_event_trace!(
                                     top.tracing,
                                     LspOriginate,
@@ -602,6 +615,14 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
         Some(originated) => {
             match lsp.seq_number.cmp(&originated.lsp.seq_number) {
                 std::cmp::Ordering::Greater => {
+                    isis_event_trace!(
+                        top.tracing,
+                        LspOriginate,
+                        &level,
+                        "[LspInstall] Seq:0x{:08x} > Seq:0x{:08x}",
+                        lsp.seq_number,
+                        originated.lsp.seq_number,
+                    );
                     isis_database_trace!(
                         top.tracing,
                         Lsdb,
@@ -614,6 +635,16 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
                     insert_self_originate_link(top, level, lsp);
                 }
                 std::cmp::Ordering::Equal => {
+                    isis_event_trace!(
+                        top.tracing,
+                        LspOriginate,
+                        &level,
+                        "[LspInstall] Seq:0x{:08x} == Seq:0x{:08x}, ChkSum:0x{:04x} <=> ChkSum:0x{:04x}",
+                        lsp.seq_number,
+                        originated.lsp.seq_number,
+                        lsp.checksum,
+                        originated.lsp.checksum,
+                    );
                     if lsp.checksum != originated.lsp.checksum {
                         isis_event_trace!(
                             top.tracing,
@@ -649,8 +680,12 @@ pub fn isis_psnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisPs
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
     };
 
-    top.ptx
-        .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
+    top.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        ifindex,
+        level,
+        top.dest(level),
+    ));
 }
 
 pub fn process_packet(
