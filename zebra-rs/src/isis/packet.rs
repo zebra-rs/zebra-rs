@@ -704,7 +704,7 @@ pub fn process_packet(
             lsp_recv(top, Level::L2, pdu, packet.bytes);
         }
         _ => {
-            // Unknown IS-IS packet type.
+            // TODO: Unknown IS-IS packet type, need logging.
         }
     }
 
