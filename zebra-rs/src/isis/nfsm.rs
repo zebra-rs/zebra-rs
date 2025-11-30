@@ -226,7 +226,7 @@ pub fn nfsm_hello_received(
 pub fn nfsm_p2p_hello_received(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
-    _mac: Option<MacAddr>,
+    mac: Option<MacAddr>,
     level: Level,
 ) -> Option<NfsmState> {
     use IfsmEvent::*;
@@ -272,7 +272,8 @@ pub fn nfsm_p2p_hello_received(
         if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
             let next = NfsmState::Up;
 
-            *ntop.adj.get_mut(&level) = Some(IsisNeighborId::from_sys_id(&nbr.sys_id, 0));
+            *ntop.adj.get_mut(&level) =
+                Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
 
             nbr.event(Message::LspOriginate(level));
 
@@ -389,7 +390,7 @@ pub fn isis_nfsm(
 
             // Up -> Down/Init
             if nbr.prev == NfsmState::Up {
-                if let Some(adj) = ntop.adj.get(&level) {
+                if let Some((adj, _)) = ntop.adj.get(&level) {
                     if adj.sys_id() == nbr.sys_id {
                         *ntop.adj.get_mut(&level) = None;
                     }

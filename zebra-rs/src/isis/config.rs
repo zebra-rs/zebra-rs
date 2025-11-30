@@ -20,6 +20,10 @@ impl Isis {
         self.callback_add("/routing/isis/tracing/event", config_tracing_event);
         self.callback_add("/routing/isis/tracing/fsm", config_tracing_fsm);
         self.callback_add("/routing/isis/tracing/packet", config_tracing_packet);
+        self.callback_add(
+            "/routing/isis/tracing/packet/direction",
+            config_tracing_packet,
+        );
         self.callback_add("/routing/isis/tracing/database", config_tracing_database);
         self.callback_add(
             "/routing/isis/interface/circuit-type",

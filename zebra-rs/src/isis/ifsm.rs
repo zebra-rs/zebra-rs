@@ -4,6 +4,7 @@ use isis_packet::*;
 
 use crate::context::Timer;
 use crate::isis::link::DisStatus;
+use crate::isis::network::P2P_ISS;
 use crate::rib::MacAddr;
 use crate::{isis_debug, isis_event_trace, isis_packet_trace, isis_pdu_trace};
 
@@ -159,22 +160,29 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
 
     isis_pdu_trace!(link, &level, "[Hello] Send on {}", link.state.name);
 
-    let packet = match hello {
-        IsisPdu::P2pHello(hello) => {
-            IsisPacket::from(IsisType::P2pHello, IsisPdu::P2pHello(hello.clone()))
-        }
-        IsisPdu::L1Hello(hello) => {
-            IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone()))
-        }
-        IsisPdu::L2Hello(hello) => {
-            IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone()))
-        }
+    let (packet, mac) = match hello {
+        IsisPdu::L1Hello(hello) => (
+            IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
+            None,
+        ),
+        IsisPdu::L2Hello(hello) => (
+            IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
+            None,
+        ),
+        IsisPdu::P2pHello(hello) => (
+            IsisPacket::from(IsisType::P2pHello, IsisPdu::P2pHello(hello.clone())),
+            MacAddr::from_vec(P2P_ISS.to_vec()),
+        ),
         _ => return Ok(()),
     };
 
     let ifindex = link.ifindex;
-    link.ptx
-        .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
+    link.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        ifindex,
+        level,
+        mac,
+    ));
     Ok(())
 }
 
@@ -231,8 +239,12 @@ pub fn csnp_send(link: &mut LinkTop, level: Level) -> Result<()> {
         Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(csnp.clone())),
     };
     let ifindex = link.ifindex;
-    link.ptx
-        .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
+    link.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        ifindex,
+        level,
+        link.dest(level),
+    ));
     isis_packet_trace!(link.tracing, Csnp, Send, &level, "---------");
     Ok(())
 }
@@ -301,7 +313,7 @@ pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
 
 pub fn purge_pseudonode_lsp(ltop: &mut LinkTop, level: Level) {
     // Only purge if we have an adjacency (meaning we were DIS)
-    let Some(adj) = ltop.state.adj.get(&level) else {
+    let Some((adj, _)) = ltop.state.adj.get(&level) else {
         return;
     };
 
@@ -552,7 +564,7 @@ pub fn become_dis(ltop: &mut LinkTop, level: Level) {
     *ltop.state.dis_status.get_mut(&level) = DisStatus::Myself;
 
     // Register adjacency.
-    *ltop.state.adj.get_mut(&level) = Some(lsp_id.neighbor_id());
+    *ltop.state.adj.get_mut(&level) = Some((lsp_id.neighbor_id(), None));
 
     // Set LAN ID then generate hello.
     isis_event_trace!(

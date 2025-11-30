@@ -21,7 +21,7 @@ use super::config::IsisConfig;
 use super::ifsm::{self, has_level};
 use super::inst::{PacketMessage, ReachMap};
 use super::neigh::Neighbor;
-use super::network::{read_packet, write_packet};
+use super::network::{P2P_ISS, read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::LabelMap;
 use super::tracing::IsisTracing;
@@ -127,6 +127,30 @@ pub struct LinkTop<'a> {
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub label_map: &'a mut Levels<LabelMap>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
+}
+
+impl<'a> LinkTop<'a> {
+    pub fn is_p2p(&self) -> bool {
+        // When we have user configuration.
+        if let Some(link_type) = self.config.link_type {
+            return link_type == LinkType::P2p;
+        }
+        // Otherwise check interface flags.
+        self.flags.is_p2p()
+    }
+
+    pub fn dest(&self, level: Level) -> Option<MacAddr> {
+        if self.is_p2p() {
+            // MacAddr::from_vec(P2P_ISS.to_vec())
+            if let Some((_, mac)) = self.state.adj.get(&level) {
+                *mac
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -353,8 +377,8 @@ pub struct LinkState {
     pub lan_id: Levels<Option<IsisNeighborId>>,
 
     // DIS in pseudo node LSP. When LSP has been received and my own system ID
-    // exists in
-    pub adj: Levels<Option<IsisNeighborId>>,
+    // exists in.
+    pub adj: Levels<Option<(IsisNeighborId, Option<MacAddr>)>>,
 
     // DIS statistics and flap tracking
     pub dis_stats: Levels<DisStatistics>,
@@ -433,6 +457,20 @@ impl IsisLink {
         }
         // Otherwise check interface flags.
         self.flags.is_p2p()
+    }
+
+    // Destination L2 address.  When the link is point-to-point,
+    pub fn dest(&self, level: Level) -> Option<MacAddr> {
+        if self.is_p2p() {
+            // MacAddr::from_vec(P2P_ISS.to_vec())
+            if let Some((_, mac)) = self.state.adj.get(&level) {
+                *mac
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 
