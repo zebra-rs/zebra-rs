@@ -44,7 +44,7 @@ pub struct PacketConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum PacketDirection {
     Send,
-    Receive,
+    Recv,
     #[default]
     Both,
 }
@@ -53,7 +53,7 @@ impl PacketDirection {
     pub const fn as_str(&self) -> &'static str {
         match self {
             PacketDirection::Send => "Send",
-            PacketDirection::Receive => "Receive",
+            PacketDirection::Recv => "Receive",
             PacketDirection::Both => "Both",
         }
     }
@@ -460,7 +460,7 @@ macro_rules! isis_sr_adjacency_trace {
 ///
 /// Usage:
 /// ```ignore
-/// isis_pdu_handler!(Hello, Receive);
+/// isis_pdu_handler!(Hello, Recv);
 /// // Now use isis_pkt_trace! instead of isis_packet_trace!
 /// isis_pkt_trace!(top.tracing, &level, "[Hello] recv on {}", link.state.name);
 /// ```
