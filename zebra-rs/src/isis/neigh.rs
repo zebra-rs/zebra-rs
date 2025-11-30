@@ -27,11 +27,10 @@ pub enum NfsmP2pState {
 #[derive(Debug)]
 pub struct Neighbor {
     pub tx: UnboundedSender<Message>,
-    //
+    pub ifindex: u32,
+    pub link_type: LinkType,
     pub sys_id: IsisSysId,
     // Unchange.
-    pub ifindex: u32,
-    // Params.
     pub priority: u8,            // LAN
     pub lan_id: IsisNeighborId,  // LAN
     pub circuit_type: IsLevel,   // LAN & P2P
@@ -40,17 +39,13 @@ pub struct Neighbor {
     pub prev: NfsmState,
     pub state: NfsmState,
     pub p2p: NfsmP2pState,
-    // IP Addrs
+    pub dis: bool,
+    // Addrs
     pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
     pub laddr6: Vec<Ipv6Addr>,
-    // MAC
     pub mac: Option<MacAddr>,
     //
-    pub dis: bool,
-    pub link_type: LinkType,
-    // P2P adjacency state TLV: Extended local circuit ID.
-    // P2P end.
     pub hold_time: u16,
     pub hold_timer: Option<Timer>,
     pub tlvs: Vec<IsisTlv>,
@@ -74,7 +69,6 @@ impl Neighbor {
             prev: NfsmState::Down,
             state: NfsmState::Down,
             p2p: NfsmP2pState::None,
-            // level,
             naddr4: BTreeMap::new(),
             addr6: Vec::new(),
             laddr6: Vec::new(),
