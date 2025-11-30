@@ -642,10 +642,6 @@ fn mac_str(mac: &Option<MacAddr>) -> String {
     }
 }
 
-pub fn unknown_recv(top: &mut LinkTop, _packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
-    //
-}
-
 pub fn isis_psnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisPsnp) {
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
