@@ -21,7 +21,7 @@ use super::config::IsisConfig;
 use super::ifsm::{self, has_level};
 use super::inst::{PacketMessage, ReachMap};
 use super::neigh::Neighbor;
-use super::network::{read_packet, write_packet};
+use super::network::{P2P_ISS, read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::LabelMap;
 use super::tracing::IsisTracing;
@@ -101,6 +101,7 @@ impl IsisLinks {
 
 #[derive(Debug)]
 pub struct IsisLink {
+    pub ifindex: u32,
     pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<PacketMessage>,
     pub sock: Arc<AsyncFd<Socket>>,
@@ -111,6 +112,7 @@ pub struct IsisLink {
 }
 
 pub struct LinkTop<'a> {
+    pub ifindex: u32,
     pub tx: &'a UnboundedSender<Message>,
     pub ptx: &'a UnboundedSender<PacketMessage>,
     pub lsdb: &'a mut Levels<Lsdb>,
@@ -125,6 +127,30 @@ pub struct LinkTop<'a> {
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub label_map: &'a mut Levels<LabelMap>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
+}
+
+impl<'a> LinkTop<'a> {
+    pub fn is_p2p(&self) -> bool {
+        // When we have user configuration.
+        if let Some(link_type) = self.config.link_type {
+            return link_type == LinkType::P2p;
+        }
+        // Otherwise check interface flags.
+        self.flags.is_p2p()
+    }
+
+    pub fn dest(&self, level: Level) -> Option<MacAddr> {
+        if self.is_p2p() {
+            // MacAddr::from_vec(P2P_ISS.to_vec())
+            if let Some((_, mac)) = self.state.adj.get(&level) {
+                *mac
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -318,7 +344,7 @@ impl DisStatistics {
 // Mutable data during operation.
 #[derive(Default, Debug)]
 pub struct LinkState {
-    pub ifindex: u32,
+    // pub ifindex: u32,
     pub name: String,
     pub mtu: u32,
     pub mac: Option<MacAddr>,
@@ -351,8 +377,8 @@ pub struct LinkState {
     pub lan_id: Levels<Option<IsisNeighborId>>,
 
     // DIS in pseudo node LSP. When LSP has been received and my own system ID
-    // exists in
-    pub adj: Levels<Option<IsisNeighborId>>,
+    // exists in.
+    pub adj: Levels<Option<(IsisNeighborId, Option<MacAddr>)>>,
 
     // DIS statistics and flap tracking
     pub dis_stats: Levels<DisStatistics>,
@@ -398,6 +424,7 @@ impl IsisLink {
         let sock = Arc::new(AsyncFd::new(isis_socket(link.index).unwrap()).unwrap());
         let (ptx, prx) = mpsc::unbounded_channel();
         let mut is_link = Self {
+            ifindex: link.index,
             tx: tx.clone(),
             ptx,
             sock,
@@ -406,7 +433,6 @@ impl IsisLink {
             state: LinkState::default(),
             timer: LinkTimer::default(),
         };
-        is_link.state.ifindex = link.index;
         is_link.state.name = link.name.to_owned();
         is_link.state.mtu = link.mtu;
         is_link.state.mac = link.mac;
@@ -432,6 +458,20 @@ impl IsisLink {
         // Otherwise check interface flags.
         self.flags.is_p2p()
     }
+
+    // Destination L2 address.  When the link is point-to-point,
+    pub fn dest(&self, level: Level) -> Option<MacAddr> {
+        if self.is_p2p() {
+            // MacAddr::from_vec(P2P_ISS.to_vec())
+            if let Some((_, mac)) = self.state.adj.get(&level) {
+                *mac
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 impl Isis {
@@ -441,7 +481,7 @@ impl Isis {
             //
         } else {
             let link = IsisLink::from(link, self.tx.clone());
-            self.links.insert(link.state.ifindex, link);
+            self.links.insert(link.ifindex, link);
         }
     }
 
@@ -521,7 +561,7 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.priority = Some(priority);
 
-    let msg = Message::Ifsm(IfsmEvent::DisSelection, link.state.ifindex, None);
+    let msg = Message::Ifsm(IfsmEvent::DisSelection, link.ifindex, None);
     isis.tx.send(msg);
 
     Some(())
@@ -553,13 +593,13 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     if !enabled {
         if link.config.enabled() {
             // Disable -> Enable.
-            let msg = Message::Ifsm(IfsmEvent::Start, link.state.ifindex, None);
+            let msg = Message::Ifsm(IfsmEvent::Start, link.ifindex, None);
             isis.tx.send(msg);
         }
     } else {
         if !link.config.enabled() {
             // Enable -> Disable.
-            let msg = Message::Ifsm(IfsmEvent::Stop, link.state.ifindex, None);
+            let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex, None);
             isis.tx.send(msg);
         }
     }
@@ -655,7 +695,7 @@ pub fn config_link_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Optio
     let ifindex = {
         let link = isis.links.get_mut_by_name(&name)?;
         link.config.link_type = Some(link_type);
-        link.state.ifindex
+        link.ifindex
     };
 
     if let Some(mut top) = isis.link_top(ifindex) {
@@ -677,19 +717,11 @@ pub fn config_hello_padding(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> O
 
         // Update Hello.
         if link.state.hello.l1.is_some() {
-            let msg = Message::Ifsm(
-                IfsmEvent::HelloOriginate,
-                link.state.ifindex,
-                Some(Level::L1),
-            );
+            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L1));
             isis.tx.send(msg);
         }
         if link.state.hello.l2.is_some() {
-            let msg = Message::Ifsm(
-                IfsmEvent::HelloOriginate,
-                link.state.ifindex,
-                Some(Level::L2),
-            );
+            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L2));
             isis.tx.send(msg);
         }
     }
@@ -713,7 +745,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
             if link.config.enabled() {
                 links.push(LinkInfo {
                     name: link.state.name.clone(),
-                    ifindex: link.state.ifindex,
+                    ifindex: link.ifindex,
                     is_up: link.state.is_up(),
                     link_type: link.config.link_type().to_string(),
                     level: link.state.level.to_string(),
@@ -746,7 +778,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
                 buf,
                 "  {:<11} 0x{:02X}     {:<8} {:<8} {} {}",
                 link.state.name,
-                link.state.ifindex,
+                link.ifindex,
                 link_state,
                 link.config.link_type().to_string(),
                 link.state.level,
@@ -897,7 +929,7 @@ pub fn show_detail(
                         "Down".to_string()
                     },
                     active: true,
-                    circuit_id: format!("0x{:02X}", link.state.ifindex),
+                    circuit_id: format!("0x{:02X}", link.ifindex),
                     link_type: format!("{}", link.config.link_type()),
                     level: format!("{}", link.state.level()),
                     snpa: link.state.mac.map(|mac| mac.to_string()),
@@ -933,7 +965,7 @@ pub fn show_detail(
                 writeln!(
                     buf,
                     "Interface: {}, State: {}, Active, Circuit Id: 0x{:02X}",
-                    link.state.name, link_state, link.state.ifindex
+                    link.state.name, link_state, link.ifindex
                 )?;
                 writeln!(
                     buf,

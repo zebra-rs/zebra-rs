@@ -16,7 +16,7 @@ use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::link::{Afi, DisStatus};
 use crate::isis::nfsm::isis_nfsm;
 use crate::isis::tracing::IsisTracing;
-use crate::isis::{ifsm, link_level_capable, lsdb};
+use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::util::IpNetExt;
@@ -91,7 +91,7 @@ pub struct NeighborTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub dis: &'a mut Levels<Option<IsisSysId>>,
     pub lan_id: &'a mut Levels<Option<IsisNeighborId>>,
-    pub adj: &'a mut Levels<Option<IsisNeighborId>>,
+    pub adj: &'a mut Levels<Option<(IsisNeighborId, Option<MacAddr>)>>,
     pub tracing: &'a IsisTracing,
     pub local_pool: &'a mut Option<LabelPool>,
     pub up_config: &'a IsisConfig,
@@ -228,7 +228,7 @@ impl Isis {
                 link.state.name,
                 reason
             );
-            if !link_level_capable(&link.state.level(), &level) {
+            if !has_level(link.state.level(), level) {
                 isis_event_trace!(
                     self.tracing,
                     Flooding,
@@ -251,7 +251,7 @@ impl Isis {
             }
 
             if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
-                if lsa.ifindex == link.state.ifindex {
+                if lsa.ifindex == link.ifindex {
                     isis_event_trace!(
                         self.tracing,
                         Flooding,
@@ -279,8 +279,9 @@ impl Isis {
 
                     link.ptx.send(PacketMessage::Send(
                         Packet::Bytes(buf),
-                        link.state.ifindex,
+                        link.ifindex,
                         level,
+                        link.state.mac,
                     ));
                 } else {
                     isis_event_trace!(
@@ -297,10 +298,9 @@ impl Isis {
     fn process_lsp_originate(&mut self, level: Level) {
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
-        tracing::info!("IsisLsp originate");
         let buf = lsp_emit(&mut lsp, level);
         lsp_flood(&mut top, level, &buf);
-        insert_self_originate(&mut top, level, lsp);
+        insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -335,7 +335,7 @@ impl Isis {
         lsp_flood(&mut top, level, &buf);
 
         // Insert as self-originated so we track it
-        insert_self_originate(&mut top, level, purged_lsp);
+        insert_self_originate(&mut top, level, purged_lsp, None);
 
         isis_event_trace!(
             self.tracing,
@@ -353,7 +353,7 @@ impl Isis {
         tracing::info!("IsisLsp dis originate");
         let buf = lsp_emit(&mut lsp, level);
         lsp_flood(&mut top, level, &buf);
-        insert_self_originate(&mut top, level, lsp);
+        insert_self_originate(&mut top, level, lsp, None);
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
@@ -499,6 +499,7 @@ impl Isis {
 
     pub fn link_top<'a>(&'a mut self, ifindex: u32) -> Option<LinkTop<'a>> {
         self.links.get_mut(&ifindex).map(|link| LinkTop {
+            ifindex: link.ifindex,
             tx: &self.tx,
             ptx: &link.ptx,
             up_config: &self.config,
@@ -525,7 +526,7 @@ impl Isis {
 
 pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<u32>) -> IsisLsp {
     let neighbor_id = if let Some(link) = top.links.get(&ifindex) {
-        if let Some(adj) = link.state.adj.get(&level) {
+        if let Some((adj, _)) = link.state.adj.get(&level) {
             adj.clone()
         } else {
             IsisNeighborId::default()
@@ -600,7 +601,6 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
 }
 
 pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
-    println!("LSP generate is called");
     // LSP ID with no pseudo id and no fragmentation.
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
@@ -612,15 +612,29 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .map(|x| x.lsp.seq_number + 1)
         .unwrap_or(0x0001);
 
+    // Logging.
     isis_event_trace!(
         top.tracing,
         LspOriginate,
         &level,
-        "LSP originate seq number: 0x{:04x}",
+        "[LspOriginate] Seq:0x{:08x} Self Originate",
         seq_number
     );
 
-    // XXX We need wrap around of seq_number.
+    // ISO 10589 Section 7.3.16.4: Sequence number wrap-around handling.
+    // When sequence number reaches maximum (0xFFFFFFFF), we must purge the LSP
+    // and wait for it to age out before originating a new one with seq 1.
+    if seq_number == u32::MAX {
+        isis_event_trace!(
+            top.tracing,
+            LspOriginate,
+            &level,
+            "[LspOriginate] seq number reached maximum, purging LSP"
+        );
+        // TODO: After age out, we need to originate a new one with seq 1.
+        top.tx.send(Message::LspPurge(level, lsp_id.clone()));
+        return IsisLsp::default();
+    }
 
     // Generate self originated LSP.
     let types = IsisLspTypes::from(level.digit());
@@ -704,7 +718,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
 
     // IS Reachability.
     for (_, link) in top.links.iter() {
-        let Some(adj) = &link.state.adj.get(&level) else {
+        let Some((adj, _)) = &link.state.adj.get(&level) else {
             continue;
         };
 
@@ -832,7 +846,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
 }
 
 pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
-    let packet = match level {
+    let mut packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone())),
     };
@@ -852,7 +866,7 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
 }
 
 pub enum PacketMessage {
-    Send(Packet, u32, Level),
+    Send(Packet, u32, Level, Option<MacAddr>),
 }
 
 pub enum Packet {
@@ -871,15 +885,17 @@ pub fn lsp_flood(top: &mut IsisTop, level: Level, buf: &BytesMut) {
             if link.is_p2p() {
                 link.ptx.send(PacketMessage::Send(
                     Packet::Bytes(buf.clone()),
-                    link.state.ifindex,
+                    link.ifindex,
                     level,
+                    link.dest(level),
                 ));
             } else {
                 if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
                     link.ptx.send(PacketMessage::Send(
                         Packet::Bytes(buf.clone()),
-                        link.state.ifindex,
+                        link.ifindex,
                         level,
+                        link.dest(level),
                     ));
                 }
             }
@@ -1405,7 +1421,7 @@ fn build_adjacency_ilm(
 
         for (ifindex, link) in top.links.iter() {
             if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                for tlv in nbr.hello.tlvs.iter() {
+                for tlv in nbr.tlvs.iter() {
                     if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                         let nhop = SpfNexthop {
                             ifindex: *ifindex,
@@ -1460,7 +1476,7 @@ fn build_rib_from_spf(
                     // Find nhop from links
                     for (ifindex, link) in top.links.iter() {
                         if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                            for tlv in nbr.hello.tlvs.iter() {
+                            for tlv in nbr.tlvs.iter() {
                                 if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
                                     let nhop = SpfNexthop {
                                         ifindex: *ifindex,
