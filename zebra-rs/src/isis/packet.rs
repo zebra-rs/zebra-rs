@@ -44,20 +44,20 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
             mac,
         ));
 
-    // Common parameter.
+    // Update parameters.
     nbr.circuit_type = pdu.circuit_type;
     nbr.hold_time = pdu.hold_time;
     nbr.tlvs = pdu.tlvs;
 
-    // LAN Hello only parameters.
+    // Update LAN Hello only parameters.
     nbr.priority = pdu.priority;
     nbr.lan_id = pdu.lan_id;
 
     // NFSM event.
     link.tx.send(Message::Nfsm(
         NfsmEvent::HelloReceived,
-        link.ifindex,
-        pdu.source_id,
+        nbr.ifindex,
+        nbr.sys_id,
         level,
         link.state.mac,
     ));
@@ -95,7 +95,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
                 mac,
             ));
 
-        // Common parameter.
+        // Update parameters.
         nbr.circuit_type = pdu.circuit_type;
         nbr.hold_time = pdu.hold_time;
         nbr.tlvs = pdu.tlvs.clone();
@@ -103,8 +103,8 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // NFSM event.
         link.tx.send(Message::Nfsm(
             NfsmEvent::P2pHelloReceived,
-            link.ifindex,
-            pdu.source_id,
+            nbr.ifindex,
+            nbr.sys_id,
             level,
             link.state.mac,
         ));
