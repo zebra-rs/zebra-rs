@@ -20,7 +20,7 @@ use super::link::{LinkTop, LinkType};
 use super::lsdb;
 use super::nfsm::{NfsmEvent, isis_nfsm};
 
-#[isis_pdu_handler(Hello, Receive)]
+#[isis_pdu_handler(Hello, Recv)]
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
     // Check link capability for the level.
     if !has_level(link.state.level(), level) {
@@ -63,7 +63,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     ));
 }
 
-#[isis_pdu_handler(Hello, Receive)]
+#[isis_pdu_handler(Hello, Recv)]
 pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr>) {
     // Check link capability for the level.
     let link_level = link.state.level();
@@ -111,7 +111,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
     }
 }
 
-#[isis_pdu_handler(Csnp, Receive)]
+#[isis_pdu_handler(Csnp, Recv)]
 pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // Check link capability for the PDU type.
     if !has_level(top.state.level(), level) {
@@ -319,7 +319,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     }
 }
 
-#[isis_pdu_handler(Psnp, Receive)]
+#[isis_pdu_handler(Psnp, Recv)]
 pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // Check link capability for the PDU type.
     if !has_level(top.state.level(), level) {
@@ -376,7 +376,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     }
 }
 
-#[isis_pdu_handler(Lsp, Receive)]
+#[isis_pdu_handler(Lsp, Recv)]
 pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     if !has_level(top.state.level(), level) {
         return;

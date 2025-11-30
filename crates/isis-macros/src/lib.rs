@@ -10,7 +10,7 @@ use syn::{ItemFn, Token, parse_macro_input};
 /// # Usage
 ///
 /// ```ignore
-/// #[isis_pdu_handler(Hello, Receive)]
+/// #[isis_pdu_handler(Hello, Recv)]
 /// pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
 ///     // _ISIS_PKT_TYPE and _ISIS_PKT_DIR are now available
 ///     isis_pkt_trace!(top.tracing, &level, "[P2P Hello] recv on link {}", link.state.name);
@@ -69,7 +69,7 @@ fn parse_handler_args(input: syn::parse::ParseStream) -> syn::Result<(syn::Ident
     }
 
     // Validate direction
-    let valid_directions = ["Send", "Receive", "Both"];
+    let valid_directions = ["Send", "Recv", "Both"];
     if !valid_directions.contains(&direction.to_string().as_str()) {
         return Err(syn::Error::new(
             direction.span(),
