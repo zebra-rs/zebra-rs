@@ -287,7 +287,12 @@ pub fn insert_lsp(
     lsa
 }
 
-pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> Option<Lsa> {
+pub fn insert_self_originate(
+    top: &mut IsisTop,
+    level: Level,
+    lsp: IsisLsp,
+    bytes: Option<Vec<u8>>,
+) -> Option<Lsa> {
     let key = lsp.lsp_id.clone();
     let mut lsa = Lsa::new(lsp);
     lsa.originated = true;
@@ -312,6 +317,9 @@ pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> O
     }
 
     lsa.refresh_timer = Some(refresh_timer(top.tx, level, key, refresh_time));
+    if let Some(bytes) = bytes {
+        lsa.bytes = bytes;
+    }
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
@@ -372,6 +380,6 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
         tracing::info!("IsisLsp packet");
         let buf = lsp_emit(&mut lsp, level);
         lsp_flood(top, level, &buf);
-        insert_self_originate(top, level, lsp);
+        insert_self_originate(top, level, lsp, None);
     }
 }

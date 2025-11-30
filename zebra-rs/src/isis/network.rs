@@ -95,11 +95,12 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
 pub const LLC_HDR: [u8; 3] = [0xFE, 0xFE, 0x03];
 pub const L1_ISS: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x14];
 pub const L2_ISS: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x15];
+pub const P2P_ISS: [u8; 6] = [0x09, 0x00, 0x2B, 0x00, 0x00, 0x05];
 
 pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<PacketMessage>) {
     loop {
         let msg = rx.recv().await;
-        let PacketMessage::Send(packet, ifindex, level) = msg.unwrap();
+        let PacketMessage::Send(packet, ifindex, level, dest) = msg.unwrap();
 
         let buf = match packet {
             Packet::Packet(packet) => {
@@ -112,7 +113,13 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
 
         let iov = [IoSlice::new(&LLC_HDR), IoSlice::new(&buf)];
 
-        let iss = if level == Level::L1 { L1_ISS } else { L2_ISS };
+        let iss = if let Some(dest) = dest {
+            dest.octets()
+        } else if level == Level::L1 {
+            L1_ISS
+        } else {
+            L2_ISS
+        };
 
         let sockaddr = link_addr((LLC_HDR.len() + buf.len()) as u16, ifindex, Some(iss));
 

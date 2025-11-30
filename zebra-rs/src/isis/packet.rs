@@ -2,10 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Error};
 use bytes::BytesMut;
-use isis_packet::{
-    IsLevel, IsisHello, IsisLsp, IsisLspId, IsisNeighborId, IsisP2pHello, IsisPacket, IsisPdu,
-    IsisPsnp, IsisTlv, IsisTlvLspEntries, IsisType,
-};
+use isis_packet::*;
 
 use crate::isis::Message;
 use crate::isis::inst::lsp_emit;
@@ -23,128 +20,108 @@ use super::link::{LinkTop, LinkType};
 use super::lsdb;
 use super::nfsm::{NfsmEvent, isis_nfsm};
 
-pub fn link_level_capable(is_level: &IsLevel, level: &Level) -> bool {
-    match level {
-        Level::L1 => *is_level == IsLevel::L1 || *is_level == IsLevel::L1L2,
-        Level::L2 => *is_level == IsLevel::L2 || *is_level == IsLevel::L1L2,
-    }
-}
-
-#[isis_pdu_handler(Hello, Receive)]
-pub fn hello_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
-    // Extract Hello PDU and level.
-    let (pdu, level) = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L1Hello, IsisPdu::L1Hello(pdu)) => (pdu, Level::L1),
-        (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => (pdu, Level::L2),
-        _ => return,
-    };
-
-    isis_pdu_trace!(top, &level, "[Hello] recv on link {}", top.state.name);
-
-    // Check link capability for the PDU type.
-    if !link_level_capable(&top.state.level(), &level) {
+#[isis_pdu_handler(Hello, Recv)]
+pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
+    // Check link capability for the level.
+    if !has_level(link.state.level(), level) {
         return;
     }
 
-    let nbr = top
+    // Logging.
+    isis_pdu_trace!(link, &level, "[Hello] recv on link {}", link.state.name);
+
+    // Create or update neighbor for this level
+    let nbr = link
         .state
         .nbrs
         .get_mut(&level)
-        .entry(pdu.source_id.clone())
+        .entry(pdu.source_id)
         .or_insert(Neighbor::new(
-            level,
-            pdu.source_id.clone(),
-            pdu.clone(),
-            IsisP2pHello::default(),
-            ifindex,
-            mac,
-            top.tx.clone(),
+            link.tx.clone(),
+            link.ifindex,
             LinkType::Lan,
+            pdu.source_id,
+            mac,
         ));
 
+    // Update parameters.
+    nbr.circuit_type = pdu.circuit_type;
     nbr.hold_time = pdu.hold_time;
-    nbr.tlvs = pdu.tlvs.clone();
-    nbr.hello = pdu.clone();
+    nbr.tlvs = pdu.tlvs;
 
-    top.tx.send(Message::Nfsm(
+    // Update LAN Hello only parameters.
+    nbr.priority = pdu.priority;
+    nbr.lan_id = pdu.lan_id;
+
+    // NFSM event.
+    link.tx.send(Message::Nfsm(
         NfsmEvent::HelloReceived,
-        ifindex,
-        pdu.source_id,
+        nbr.ifindex,
+        nbr.sys_id,
         level,
-        top.state.mac,
+        link.state.mac,
     ));
 }
 
-#[isis_pdu_handler(Hello, Receive)]
-pub fn hello_p2p_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
-    // Extract P2P Hello PDU.
-    let IsisPdu::P2pHello(pdu) = packet.pdu else {
-        return;
-    };
-
-    // Check what levels this interface supports
-    let link_level = top.state.level();
+#[isis_pdu_handler(Hello, Recv)]
+pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr>) {
+    // Check link capability for the level.
+    let link_level = link.state.level();
 
     // P2P Hello contains circuit_type indicating what levels the sender supports
-    let sender_level = pdu.circuit_type;
+    let pdu_level = pdu.circuit_type;
 
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
         // Check if both sender and receiver support this level
-        if !has_level(link_level, level) || !has_level(sender_level, level) {
+        if !has_level(link_level, level) || !has_level(pdu_level, level) {
             continue;
         }
 
-        // Using simplified trace macro with handler context
-        isis_pdu_trace!(top, &level, "[P2P Hello] recv on link {}", top.state.name);
+        // Logging.
+        isis_pdu_trace!(link, &level, "[P2P Hello] recv on link {}", link.state.name);
 
         // Create or update neighbor for this level
-        let nbr = top
+        let nbr = link
             .state
             .nbrs
             .get_mut(&level)
-            .entry(pdu.source_id.clone())
+            .entry(pdu.source_id)
             .or_insert(Neighbor::new(
-                level,
-                pdu.source_id.clone(),
-                IsisHello::default(),
-                pdu.clone(),
-                ifindex,
-                mac,
-                top.tx.clone(),
+                link.tx.clone(),
+                link.ifindex,
                 LinkType::P2p,
+                pdu.source_id,
+                mac,
             ));
 
-        // Update neighbor's Hello PDU
-        nbr.hello_p2p = pdu.clone();
+        // Update parameters.
+        nbr.circuit_type = pdu.circuit_type;
         nbr.hold_time = pdu.hold_time;
         nbr.tlvs = pdu.tlvs.clone();
 
-        top.tx.send(Message::Nfsm(
+        // NFSM event.
+        link.tx.send(Message::Nfsm(
             NfsmEvent::P2pHelloReceived,
-            ifindex,
-            pdu.source_id.clone(),
+            nbr.ifindex,
+            nbr.sys_id,
             level,
-            None,
+            link.state.mac,
         ));
     }
 }
 
-#[isis_pdu_handler(Csnp, Receive)]
-pub fn csnp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
-    let (pdu, level) = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => (pdu, Level::L1),
-        (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => (pdu, Level::L2),
-        _ => return,
-    };
-
-    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
-
+#[isis_pdu_handler(Csnp, Recv)]
+pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // Check link capability for the PDU type.
-    if !link_level_capable(&top.state.level(), &level) {
+    if !has_level(top.state.level(), level) {
         return;
     }
 
+    // Logging
+    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
+
+    // Detail logging.
     isis_pdu_trace!(top, &level, "[CSNP] ----");
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
@@ -319,8 +296,9 @@ pub fn csnp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, _mac: Opti
 
                     top.ptx.send(PacketMessage::Send(
                         Packet::Bytes(buf),
-                        top.state.ifindex,
+                        top.ifindex,
                         level,
+                        top.dest(level),
                     ));
                 }
             }
@@ -341,24 +319,19 @@ pub fn csnp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, _mac: Opti
         psnp.tlvs.push(req.into());
         isis_pdu_trace!(top, &level, "Send PSNP");
 
-        isis_psnp_send(top, ifindex, level, psnp);
+        isis_psnp_send(top, top.ifindex, level, psnp);
     }
 }
 
-#[isis_pdu_handler(Psnp, Receive)]
-pub fn psnp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
-    let (pdu, level) = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L1Psnp, IsisPdu::L1Psnp(pdu)) => (pdu, Level::L1),
-        (IsisType::L2Psnp, IsisPdu::L2Psnp(pdu)) => (pdu, Level::L2),
-        _ => return,
-    };
-
-    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
-
+#[isis_pdu_handler(Psnp, Recv)]
+pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // Check link capability for the PDU type.
-    if !link_level_capable(&top.state.level(), &level) {
+    if !has_level(top.state.level(), level) {
         return;
     }
+
+    // Logging
+    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
 
     // XXX
     for entry in pdu.tlvs.iter() {
@@ -385,26 +358,29 @@ pub fn psnp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, _mac: Opti
                         lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
 
                     if !lsa.bytes.is_empty() {
+                        tracing::info!("IsisLsp packet from PSNP (non emit)");
                         let mut buf = BytesMut::from(&lsa.bytes[..]);
 
                         isis_packet::write_hold_time(&mut buf, hold_time);
 
                         top.ptx.send(PacketMessage::Send(
                             Packet::Bytes(buf),
-                            top.state.ifindex,
+                            top.ifindex,
                             level,
+                            top.dest(level),
                         ));
                     } else {
                         let mut lsp = lsa.lsp.clone();
                         lsp.hold_time = hold_time;
                         lsp.checksum = 0;
-                        tracing::info!("IsisLsp packet");
+                        tracing::info!("IsisLsp packet from PSNP (emit)");
                         let buf = lsp_emit(&mut lsp, level);
 
                         top.ptx.send(PacketMessage::Send(
                             Packet::Bytes(buf),
-                            top.state.ifindex,
+                            top.ifindex,
                             level,
+                            top.dest(level),
                         ));
                     }
                 }
@@ -413,18 +389,13 @@ pub fn psnp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, _mac: Opti
     }
 }
 
-#[isis_pdu_handler(Lsp, Receive)]
-pub fn lsp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
-    let (lsp, level) = match (packet.pdu_type, packet.pdu) {
-        (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) => (pdu, Level::L1),
-        (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => (pdu, Level::L2),
-        _ => return,
-    };
-
-    if !link_level_capable(&top.state.level(), &level) {
+#[isis_pdu_handler(Lsp, Recv)]
+pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
+    if !has_level(top.state.level(), level) {
         return;
     }
 
+    // Logging.
     isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
 
     // Self LSP recieved.
@@ -432,15 +403,14 @@ pub fn lsp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option
         // Self LSP logging.
         isis_event_trace!(
             top.tracing,
-            Dis,
+            LspOriginate,
             &level,
-            "Self LSP rcvd {} {} {} seq {:04x} hold_time {}",
-            lsp.lsp_id,
-            ifindex,
-            mac_str(&mac),
+            "[LspRecv] Seq:0x{:08x} HoldTime:{} On:{}",
             lsp.seq_number,
-            lsp.hold_time
+            lsp.hold_time,
+            top.state.name,
         );
+
         // Pseudo LSP has been received.
         if lsp.lsp_id.is_pseudo() {
             // Pseudo LSP purge request.
@@ -455,7 +425,11 @@ pub fn lsp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option
                     );
                     // Originate DIS with seqnumber + 1.
                     top.tx
-                        .send(Message::DisOriginate(level, ifindex, Some(lsp.seq_number)))
+                        .send(Message::DisOriginate(
+                            level,
+                            top.ifindex,
+                            Some(lsp.seq_number),
+                        ))
                         .unwrap();
                 } else {
                     isis_event_trace!(top.tracing, Dis, &level, "DIS purge accepted (I'm not DIS)");
@@ -473,7 +447,7 @@ pub fn lsp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option
                         &level,
                         "DIS I'm no longer DIS. Treat it as other LSP."
                     );
-                    lsdb::insert_lsp(top, level, lsp, packet.bytes, ifindex);
+                    lsdb::insert_lsp(top, level, lsp, bytes, top.ifindex);
                 }
             }
         } else {
@@ -547,7 +521,8 @@ pub fn lsp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option
                                     "DIS Adjacency with {}",
                                     lan_id
                                 );
-                                *top.state.adj.get_mut(&level) = Some(lsp.lsp_id.neighbor_id());
+                                *top.state.adj.get_mut(&level) =
+                                    Some((lsp.lsp_id.neighbor_id(), None));
                                 isis_event_trace!(
                                     top.tracing,
                                     LspOriginate,
@@ -566,7 +541,7 @@ pub fn lsp_recv(top: &mut LinkTop, packet: IsisPacket, ifindex: u32, mac: Option
     if lsp.hold_time == 0 {
         lsdb::remove_lsp_link(top, level, lsp.lsp_id);
     } else {
-        lsdb::insert_lsp(top, level, lsp, packet.bytes, ifindex);
+        lsdb::insert_lsp(top, level, lsp, bytes, top.ifindex);
     }
 }
 
@@ -640,6 +615,14 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
         Some(originated) => {
             match lsp.seq_number.cmp(&originated.lsp.seq_number) {
                 std::cmp::Ordering::Greater => {
+                    isis_event_trace!(
+                        top.tracing,
+                        LspOriginate,
+                        &level,
+                        "[LspInstall] Seq:0x{:08x} > Seq:0x{:08x}",
+                        lsp.seq_number,
+                        originated.lsp.seq_number,
+                    );
                     isis_database_trace!(
                         top.tracing,
                         Lsdb,
@@ -652,6 +635,16 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
                     insert_self_originate_link(top, level, lsp);
                 }
                 std::cmp::Ordering::Equal => {
+                    isis_event_trace!(
+                        top.tracing,
+                        LspOriginate,
+                        &level,
+                        "[LspInstall] Seq:0x{:08x} == Seq:0x{:08x}, ChkSum:0x{:04x} <=> ChkSum:0x{:04x}",
+                        lsp.seq_number,
+                        originated.lsp.seq_number,
+                        lsp.checksum,
+                        originated.lsp.checksum,
+                    );
                     if lsp.checksum != originated.lsp.checksum {
                         isis_event_trace!(
                             top.tracing,
@@ -681,18 +674,18 @@ fn mac_str(mac: &Option<MacAddr>) -> String {
     }
 }
 
-pub fn unknown_recv(top: &mut LinkTop, _packet: IsisPacket, ifindex: u32, _mac: Option<MacAddr>) {
-    //
-}
-
 pub fn isis_psnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisPsnp) {
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
     };
 
-    top.ptx
-        .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
+    top.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        ifindex,
+        level,
+        top.dest(level),
+    ));
 }
 
 pub fn process_packet(
@@ -718,24 +711,36 @@ pub fn process_packet(
         return Ok(());
     }
 
-    match packet.pdu_type {
-        IsisType::L1Hello | IsisType::L2Hello => {
-            hello_recv(top, packet, ifindex, mac);
+    match (packet.pdu_type, packet.pdu) {
+        (IsisType::L1Hello, IsisPdu::L1Hello(pdu)) => {
+            hello_recv(top, Level::L1, pdu, mac);
         }
-        IsisType::P2pHello => {
-            hello_p2p_recv(top, packet, ifindex, mac);
+        (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => {
+            hello_recv(top, Level::L2, pdu, mac);
         }
-        IsisType::L1Lsp | IsisType::L2Lsp => {
-            lsp_recv(top, packet, ifindex, mac);
+        (IsisType::P2pHello, IsisPdu::P2pHello(pdu)) => {
+            hello_p2p_recv(top, pdu, mac);
         }
-        IsisType::L1Csnp | IsisType::L2Csnp => {
-            csnp_recv(top, packet, ifindex, mac);
+        (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => {
+            csnp_recv(top, Level::L1, pdu);
         }
-        IsisType::L1Psnp | IsisType::L2Psnp => {
-            psnp_recv(top, packet, ifindex, mac);
+        (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => {
+            csnp_recv(top, Level::L2, pdu);
         }
-        IsisType::Unknown(_) => {
-            unknown_recv(top, packet, ifindex, mac);
+        (IsisType::L1Psnp, IsisPdu::L1Psnp(pdu)) => {
+            psnp_recv(top, Level::L1, pdu);
+        }
+        (IsisType::L2Psnp, IsisPdu::L2Psnp(pdu)) => {
+            psnp_recv(top, Level::L2, pdu);
+        }
+        (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) => {
+            lsp_recv(top, Level::L1, pdu, packet.bytes);
+        }
+        (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => {
+            lsp_recv(top, Level::L2, pdu, packet.bytes);
+        }
+        _ => {
+            // TODO: Unknown IS-IS packet type, need logging.
         }
     }
 
