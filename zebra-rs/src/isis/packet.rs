@@ -354,6 +354,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
 
                     if !lsa.bytes.is_empty() {
+                        tracing::info!("IsisLsp packet from PSNP (non emit)");
                         let mut buf = BytesMut::from(&lsa.bytes[..]);
 
                         isis_packet::write_hold_time(&mut buf, hold_time);
@@ -364,7 +365,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         let mut lsp = lsa.lsp.clone();
                         lsp.hold_time = hold_time;
                         lsp.checksum = 0;
-                        tracing::info!("IsisLsp packet");
+                        tracing::info!("IsisLsp packet from PSNP (emit)");
                         let buf = lsp_emit(&mut lsp, level);
 
                         top.ptx

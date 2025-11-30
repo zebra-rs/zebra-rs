@@ -598,7 +598,6 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
 }
 
 pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
-    println!("LSP generate is called");
     // LSP ID with no pseudo id and no fragmentation.
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
@@ -830,7 +829,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
 }
 
 pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
-    let packet = match level {
+    let mut packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone())),
     };
