@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
+use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::context::Timer;
 use crate::isis::link::DisStatus;
 use crate::rib::MacAddr;
-use crate::{isis_debug, isis_event_trace, isis_packet_trace};
+use crate::{isis_debug, isis_event_trace, isis_packet_trace, isis_pdu_trace};
 
 use super::inst::{Packet, PacketMessage};
 use super::link::{Afis, HelloPaddingPolicy, LinkTop, LinkType};
@@ -152,8 +153,11 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
     })
 }
 
-pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
-    let hello = ltop.state.hello.get(&level).as_ref().context("")?;
+#[isis_pdu_handler(Hello, Send)]
+pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
+    let hello = link.state.hello.get(&level).as_ref().context("")?;
+
+    isis_pdu_trace!(link, &level, "[Hello] Send on {}", link.state.name);
 
     let packet = match hello {
         IsisPdu::P2pHello(hello) => {
@@ -168,28 +172,22 @@ pub fn hello_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
         _ => return Ok(()),
     };
 
-    let ifindex = ltop.ifindex;
-    ltop.ptx
+    let ifindex = link.ifindex;
+    link.ptx
         .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
     Ok(())
 }
 
-pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
+#[isis_pdu_handler(Csnp, Send)]
+pub fn csnp_send(link: &mut LinkTop, level: Level) -> Result<()> {
     // P2P interfaces don't use CSNP for database synchronization
-    if ltop.config.link_type() == LinkType::P2p {
-        isis_debug!("Skipping CSNP send for P2P interface {}", ltop.state.name);
+    if link.config.link_type() == LinkType::P2p {
+        isis_debug!("Skipping CSNP send for P2P interface {}", link.state.name);
         return Ok(());
     }
 
-    isis_packet_trace!(
-        ltop.tracing,
-        Csnp,
-        Send,
-        &level,
-        "CSNP Send on {}",
-        ltop.state.name
-    );
-    isis_packet_trace!(ltop.tracing, Csnp, Send, &level, "---------");
+    isis_pdu_trace!(link, &level, "CSNP Send on {}", link.state.name);
+    isis_packet_trace!(link.tracing, Csnp, Send, &level, "---------");
 
     const MAX_LSP_ENTRIES_PER_TLV: usize = 15;
     let mut lsp_entries = IsisTlvLspEntries::default();
@@ -197,15 +195,14 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
 
     let mut csnp = IsisCsnp {
         pdu_len: 0,
-        source_id: ltop.up_config.net.sys_id().clone(),
+        source_id: link.up_config.net.sys_id().clone(),
         source_id_circuit: 0,
         start: IsisLspId::start(),
         end: IsisLspId::end(),
         tlvs: vec![],
     };
 
-    for (lsp_id, lsa) in ltop.lsdb.get(&level).iter() {
-        // isis_database_trace!(ltop.tracing, Lsdb, &level, "LSP: {}", lsp_id);
+    for (lsp_id, lsa) in link.lsdb.get(&level).iter() {
         let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
         let entry = IsisLspEntry {
             hold_time,
@@ -233,10 +230,10 @@ pub fn csnp_send(ltop: &mut LinkTop, level: Level) -> Result<()> {
         Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(csnp.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(csnp.clone())),
     };
-    let ifindex = ltop.ifindex;
-    ltop.ptx
+    let ifindex = link.ifindex;
+    link.ptx
         .send(PacketMessage::Send(Packet::Packet(packet), ifindex, level));
-    isis_packet_trace!(ltop.tracing, Csnp, Send, &level, "---------");
+    isis_packet_trace!(link.tracing, Csnp, Send, &level, "---------");
     Ok(())
 }
 

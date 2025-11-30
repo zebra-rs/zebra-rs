@@ -106,7 +106,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             link.ifindex,
             pdu.source_id,
             level,
-            None,
+            link.state.mac,
         ));
     }
 }
@@ -121,6 +121,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // Logging
     isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
 
+    // Detail logging.
     isis_pdu_trace!(top, &level, "[CSNP] ----");
     for tlv in &pdu.tlvs {
         if let IsisTlv::LspEntries(lsps) = tlv {
@@ -707,7 +708,7 @@ pub fn process_packet(
             lsp_recv(top, Level::L2, pdu, packet.bytes);
         }
         _ => {
-            //
+            // Unknown IS-IS packet type.
         }
     }
 
