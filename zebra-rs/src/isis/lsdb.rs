@@ -20,8 +20,22 @@ use super::{
 };
 
 #[derive(Default)]
+pub struct LsaFlagsEntry {
+    pub seq_number: u32,
+    pub hold_time: u16,
+    pub checksum: u16,
+}
+
+#[derive(Default)]
+pub struct LsaFlags {
+    srm: BTreeMap<IsisLspId, LsaFlagsEntry>,
+    ssn: BTreeMap<IsisLspId, LsaFlagsEntry>,
+}
+
+#[derive(Default)]
 pub struct Lsdb {
     map: BTreeMap<IsisLspId, Lsa>,
+    adj: BTreeMap<u32, u32>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -75,6 +89,18 @@ impl Lsdb {
 
     pub fn iter(&self) -> Iter<'_, IsisLspId, Lsa> {
         self.map.iter()
+    }
+
+    pub fn adj_set(&mut self, ifindex: u32) {
+        self.adj.entry(ifindex).or_default();
+    }
+
+    pub fn adj_clear(&mut self, ifindex: u32) {
+        self.adj.remove(&ifindex);
+    }
+
+    pub fn set_flag() {
+        //
     }
 }
 
@@ -382,4 +408,20 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
         lsp_flood(top, level, &buf);
         insert_self_originate(top, level, lsp, None);
     }
+}
+
+pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    // top.lsdb.get(&level).srm_set_other(lsp, ifindex);
+}
+
+pub fn srm_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    //
+}
+
+pub fn ssn_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    //
+}
+
+pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    //
 }
