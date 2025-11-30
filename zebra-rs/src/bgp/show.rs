@@ -164,6 +164,25 @@ fn show_ecom(attr: &BgpAttr) -> String {
 }
 
 #[derive(Serialize)]
+struct BgpSummaryJson {
+    router_id: String,
+    local_as: u32,
+    peers: Vec<BgpPeerSummaryJson>,
+}
+
+#[derive(Serialize)]
+struct BgpPeerSummaryJson {
+    neighbor: String,
+    remote_as: u32,
+    msg_rcvd: u64,
+    msg_sent: u64,
+    up_down: String,
+    state: String,
+    pfx_rcvd: u64,
+    pfx_sent: u64,
+}
+
+#[derive(Serialize)]
 struct BgpRouteJson {
     prefix: String,
     valid: bool,
@@ -787,8 +806,55 @@ fn show_bgp_received(
 fn show_bgp_summary(
     bgp: &Bgp,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let router_id = if bgp.router_id.is_unspecified() {
+            "Not Configured".to_string()
+        } else {
+            bgp.router_id.to_string()
+        };
+
+        let mut peers = Vec::new();
+        for (_, peer) in bgp.peers.iter() {
+            let mut msg_sent: u64 = 0;
+            let mut msg_rcvd: u64 = 0;
+            for counter in peer.counter.iter() {
+                msg_sent += counter.sent;
+                msg_rcvd += counter.rcvd;
+            }
+
+            let pfx_rcvd = peer.adj_in.count(Afi::Ip, Safi::MplsVpn) as u64;
+            let pfx_sent = peer.adj_out.count(Afi::Ip, Safi::MplsVpn) as u64;
+
+            let state = if peer.state != State::Established {
+                peer.state.to_str().to_string()
+            } else {
+                pfx_rcvd.to_string()
+            };
+
+            peers.push(BgpPeerSummaryJson {
+                neighbor: peer.address.to_string(),
+                remote_as: peer.peer_as,
+                msg_rcvd,
+                msg_sent,
+                up_down: uptime(&peer.instant),
+                state,
+                pfx_rcvd,
+                pfx_sent,
+            });
+        }
+
+        let summary = BgpSummaryJson {
+            router_id,
+            local_as: bgp.asn,
+            peers,
+        };
+
+        return Ok(serde_json::to_string_pretty(&summary)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize summary: {}\"}}", e)));
+    }
+
     show_bgp_instance(bgp)
 }
 
