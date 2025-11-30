@@ -6,6 +6,7 @@ use crate::config::{Args, ConfigOp};
 
 use super::Isis;
 use super::link::Afis;
+use super::tracing::{PacketConfig, PacketDirection};
 use super::{Level, link};
 
 impl Isis {
@@ -212,51 +213,50 @@ fn config_tracing_fsm(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<(
     Some(())
 }
 
+fn parse_direction(args: &mut Args) -> PacketDirection {
+    match args.string().as_deref() {
+        Some("send") => PacketDirection::Send,
+        Some("recv") | Some("receive") => PacketDirection::Recv,
+        Some("both") | None => PacketDirection::Both,
+        Some(_) => PacketDirection::Both,
+    }
+}
+
+fn set_packet_config(config: &mut PacketConfig, op: ConfigOp, direction: PacketDirection) {
+    if op.is_set() {
+        config.enabled = true;
+        config.direction = direction;
+    } else {
+        config.enabled = false;
+        config.direction = PacketDirection::Both;
+    }
+}
+
 fn config_tracing_packet(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let typ = args.string()?;
+    let direction = parse_direction(&mut args);
 
     match typ.as_str() {
-        // "all" => {
-        //     if op.is_set() {
-        //         isis.tracing.event.dis.enabled = true;
-        //     } else {
-        //         isis.tracing.event.dis.enabled = false;
-        //     }
-        // }
+        "all" => {
+            set_packet_config(&mut isis.tracing.packet.hello, op, direction);
+            set_packet_config(&mut isis.tracing.packet.lsp, op, direction);
+            set_packet_config(&mut isis.tracing.packet.csnp, op, direction);
+            set_packet_config(&mut isis.tracing.packet.psnp, op, direction);
+        }
         "hello" => {
-            if op.is_set() {
-                isis.tracing.packet.hello.enabled = true;
-            } else {
-                isis.tracing.packet.hello.enabled = false;
-            }
+            set_packet_config(&mut isis.tracing.packet.hello, op, direction);
         }
         "lsp" => {
-            if op.is_set() {
-                isis.tracing.packet.lsp.enabled = true;
-            } else {
-                isis.tracing.packet.lsp.enabled = false;
-            }
+            set_packet_config(&mut isis.tracing.packet.lsp, op, direction);
         }
         "csnp" => {
-            if op.is_set() {
-                isis.tracing.packet.csnp.enabled = true;
-            } else {
-                isis.tracing.packet.csnp.enabled = false;
-            }
+            set_packet_config(&mut isis.tracing.packet.csnp, op, direction);
         }
         "psnp" => {
-            if op.is_set() {
-                isis.tracing.packet.psnp.enabled = true;
-            } else {
-                isis.tracing.packet.psnp.enabled = false;
-            }
+            set_packet_config(&mut isis.tracing.packet.psnp, op, direction);
         }
         _ => {
-            if op.is_set() {
-                println!("Trace on {} (not implemented)", typ);
-            } else {
-                println!("Trace off {} (not implemented)", typ);
-            }
+            println!("Unknown packet type: {}", typ);
         }
     }
 

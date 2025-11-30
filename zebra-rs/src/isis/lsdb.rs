@@ -307,6 +307,7 @@ pub fn insert_self_originate(top: &mut IsisTop, level: Level, lsp: IsisLsp) -> O
         if rl > safety_margin {
             refresh_time = rl - safety_margin;
         } else {
+            println!("XXXXXXXX");
             refresh_time = 1;
         }
     }
