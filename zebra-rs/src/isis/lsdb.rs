@@ -323,13 +323,7 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     }
 }
 
-pub fn insert_lsp(
-    top: &mut LinkTop,
-    level: Level,
-    lsp: IsisLsp,
-    bytes: Vec<u8>,
-    ifindex: u32,
-) -> Option<Lsa> {
+pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) -> Option<Lsa> {
     let key = lsp.lsp_id.clone();
 
     if top.up_config.net.sys_id() == key.sys_id() {
@@ -359,7 +353,7 @@ pub fn insert_lsp(
 
     let hold_time = lsp.hold_time;
     let mut lsa = Lsa::new(lsp);
-    lsa.ifindex = ifindex;
+    lsa.ifindex = top.ifindex;
     lsa.bytes = bytes;
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
 
@@ -469,26 +463,26 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     }
 }
 
-pub fn srm_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    top.lsdb.get_mut(&level).srm_set(lsp, ifindex);
+pub fn srm_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+    top.lsdb.get_mut(&level).srm_set(lsp, top.ifindex);
 }
 
-pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    top.lsdb.get_mut(&level).srm_set_other(lsp, ifindex);
+pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+    top.lsdb.get_mut(&level).srm_set_other(lsp, top.ifindex);
 }
 
-pub fn srm_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    top.lsdb.get_mut(&level).srm_clear(lsp, ifindex);
+pub fn srm_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+    top.lsdb.get_mut(&level).srm_clear(lsp, top.ifindex);
 }
 
-pub fn ssn_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    top.lsdb.get_mut(&level).ssn_set(lsp, ifindex);
+pub fn ssn_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+    top.lsdb.get_mut(&level).ssn_set(lsp, top.ifindex);
 }
 
-pub fn ssn_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    top.lsdb.get_mut(&level).ssn_clear(lsp, ifindex);
+pub fn ssn_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+    top.lsdb.get_mut(&level).ssn_clear(lsp, top.ifindex);
 }
 
-pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    top.lsdb.get_mut(&level).ssn_clear_other(lsp, ifindex);
+pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+    top.lsdb.get_mut(&level).ssn_clear_other(lsp, top.ifindex);
 }
