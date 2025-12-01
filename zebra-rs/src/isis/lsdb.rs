@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, Values};
 
+use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::isis::isis_psnp_send;
 use crate::isis_database_trace;
 
 use crate::context::Timer;
@@ -12,6 +14,7 @@ use crate::isis::{
     srmpls::{LabelBlock, LabelConfig},
 };
 
+use super::inst::{MsgSender, Packet, PacketMessage};
 use super::link::LinkTop;
 use super::{
     Level,
@@ -20,8 +23,52 @@ use super::{
 };
 
 #[derive(Default)]
+pub struct LsaFlagsMap(BTreeMap<IsisLspId, IsisLspEntry>);
+
+impl LsaFlagsMap {
+    pub fn set(&mut self, lsp: &IsisLspEntry) {
+        self.0.insert(lsp.lsp_id, lsp.clone());
+    }
+
+    pub fn clear(&mut self, lsp_id: &IsisLspId) {
+        self.0.remove(lsp_id);
+    }
+}
+
+fn srm_timer(tx: &MsgSender, level: Level, ifindex: u32) -> Timer {
+    let tx = tx.clone();
+    Timer::once(0, move || {
+        let tx = tx.clone();
+        let msg = Message::SrmX(level, ifindex);
+        async move {
+            tx.send(msg);
+        }
+    })
+}
+
+fn ssn_timer(tx: &MsgSender, level: Level, ifindex: u32) -> Timer {
+    let tx = tx.clone();
+    Timer::once(1, move || {
+        let tx = tx.clone();
+        let msg = Message::SsnX(level, ifindex);
+        async move {
+            tx.send(msg);
+        }
+    })
+}
+
+#[derive(Default)]
+pub struct LsaFlags {
+    pub srm: LsaFlagsMap,
+    pub srm_timer: Option<Timer>,
+    pub ssn: LsaFlagsMap,
+    pub ssn_timer: Option<Timer>,
+}
+
+#[derive(Default)]
 pub struct Lsdb {
     map: BTreeMap<IsisLspId, Lsa>,
+    adj: BTreeMap<u32, LsaFlags>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -76,9 +123,80 @@ impl Lsdb {
     pub fn iter(&self) -> Iter<'_, IsisLspId, Lsa> {
         self.map.iter()
     }
-}
 
-type MsgSender = UnboundedSender<Message>;
+    pub fn adj_set(&mut self, ifindex: u32) {
+        self.adj.entry(ifindex).or_default();
+    }
+
+    pub fn adj_clear(&mut self, ifindex: u32) {
+        self.adj.remove(&ifindex);
+    }
+
+    pub fn adj_get_mut(&mut self, ifindex: u32) -> Option<&mut LsaFlags> {
+        self.adj.get_mut(&ifindex)
+    }
+
+    pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.srm.set(&IsisLspEntry {
+                lsp_id: *lsp_id,
+                ..Default::default()
+            });
+            if flags.srm_timer.is_none() {
+                flags.srm_timer = Some(srm_timer(tx, level, ifindex));
+            }
+        }
+    }
+
+    pub fn srm_set_other(
+        &mut self,
+        tx: &MsgSender,
+        level: Level,
+        lsp_id: &IsisLspId,
+        ifindex: u32,
+    ) {
+        for (link, flags) in self.adj.iter_mut() {
+            if *link != ifindex {
+                flags.srm.set(&IsisLspEntry {
+                    lsp_id: *lsp_id,
+                    ..Default::default()
+                });
+                if flags.srm_timer.is_none() {
+                    flags.srm_timer = Some(srm_timer(tx, level, ifindex));
+                }
+            }
+        }
+    }
+
+    pub fn srm_clear(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.srm.clear(lsp_id);
+        }
+    }
+
+    pub fn ssn_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLspEntry, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.ssn.set(lsp);
+            if flags.ssn_timer.is_none() {
+                flags.ssn_timer = Some(ssn_timer(tx, level, ifindex));
+            }
+        }
+    }
+
+    pub fn ssn_clear(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.ssn.clear(&lsp_id);
+        }
+    }
+
+    pub fn ssn_clear_other(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
+        for (link, flags) in self.adj.iter_mut() {
+            if *link != ifindex {
+                flags.ssn.clear(&lsp_id);
+            }
+        }
+    }
+}
 
 fn lsdb_timer(tx: &MsgSender, level: Level, key: IsisLspId, tick: u16, ev: LsdbEvent) -> Timer {
     let tx = tx.clone();
@@ -189,7 +307,6 @@ pub struct LspCapView<'a> {
 fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     if let Some(prev) = top.lsdb.get(&level).get(&key) {
         if prev.lsp.tlvs == lsp.tlvs {
-            // println!("LSP is same as prev one");
             return;
         }
     }
@@ -201,8 +318,6 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
         top.hostname
             .get_mut(&level)
             .insert(key.sys_id(), tlv.hostname.clone());
-    } else {
-        top.hostname.get_mut(&level).remove(&key.sys_id());
     }
 
     if let Some(tlv) = lsp.cap {
@@ -238,13 +353,7 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
     }
 }
 
-pub fn insert_lsp(
-    top: &mut LinkTop,
-    level: Level,
-    lsp: IsisLsp,
-    bytes: Vec<u8>,
-    ifindex: u32,
-) -> Option<Lsa> {
+pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) -> Option<Lsa> {
     let key = lsp.lsp_id.clone();
 
     if top.up_config.net.sys_id() == key.sys_id() {
@@ -274,7 +383,7 @@ pub fn insert_lsp(
 
     let hold_time = lsp.hold_time;
     let mut lsa = Lsa::new(lsp);
-    lsa.ifindex = ifindex;
+    lsa.ifindex = top.ifindex;
     lsa.bytes = bytes;
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
 
@@ -379,7 +488,105 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
         let mut lsp = lsp_clone_with_seqno_inc(&lsa.lsp);
         tracing::info!("IsisLsp packet");
         let buf = lsp_emit(&mut lsp, level);
-        lsp_flood(top, level, &buf);
-        insert_self_originate(top, level, lsp, None);
+        let lsp_id = lsp.lsp_id;
+        insert_self_originate(top, level, lsp, Some(buf.to_vec()));
+        lsp_flood(top, level, &lsp_id);
     }
+}
+
+pub fn srm_set(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb
+        .get_mut(&level)
+        .srm_set(top.tx, level, lsp_id, top.ifindex);
+}
+
+pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb
+        .get_mut(&level)
+        .srm_set_other(top.tx, level, lsp_id, top.ifindex);
+}
+
+pub fn srm_clear(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb.get_mut(&level).srm_clear(lsp_id, top.ifindex);
+}
+
+pub fn ssn_set(top: &mut LinkTop, level: Level, lsp: &IsisLspEntry) {
+    top.lsdb
+        .get_mut(&level)
+        .ssn_set(top.tx, level, lsp, top.ifindex);
+}
+
+pub fn ssn_clear(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb.get_mut(&level).ssn_clear(lsp_id, top.ifindex);
+}
+
+pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb
+        .get_mut(&level)
+        .ssn_clear_other(&lsp_id, top.ifindex);
+}
+
+pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32, _sys_id: IsisSysId) {
+    // Extract SRM entries first to avoid borrow checker issues.
+    let srm_entries: Vec<IsisLspId> = {
+        let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) else {
+            return;
+        };
+        adj.srm_timer = None;
+
+        if adj.srm.0.is_empty() {
+            return;
+        }
+
+        adj.srm.0.keys().cloned().collect()
+    };
+
+    // Send LSPs for each SRM entry.
+    for lsp_id in srm_entries {
+        let lsdb = top.lsdb.get(&level);
+        if let Some(lsa) = lsdb.get(&lsp_id) {
+            let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+
+            if !lsa.bytes.is_empty() {
+                let mut buf = BytesMut::from(&lsa.bytes[..]);
+                isis_packet::write_hold_time(&mut buf, hold_time);
+
+                top.ptx.send(PacketMessage::Send(
+                    Packet::Bytes(buf),
+                    ifindex,
+                    level,
+                    top.dest(level),
+                ));
+            }
+        }
+
+        // Clear SRM flag after sending.
+        if let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) {
+            adj.srm.0.remove(&lsp_id);
+        }
+    }
+}
+
+pub fn ssn_advertise(top: &mut LinkTop, level: Level, ifindex: u32, sys_id: IsisSysId) {
+    let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) else {
+        return;
+    };
+    adj.ssn_timer = None;
+
+    if adj.ssn.0.is_empty() {
+        return;
+    }
+    // TODO: Need to check maximum packet size of the interface.
+    let mut psnp = IsisPsnp {
+        source_id: sys_id,
+        source_id_circuit: 1,
+        ..Default::default()
+    };
+    let mut lsps = IsisTlvLspEntries::default();
+    while let Some((_, value)) = adj.ssn.0.pop_first() {
+        lsps.entries.push(value);
+    }
+    psnp.tlvs.push(lsps.into());
+
+    isis_psnp_send(top, ifindex, level, psnp);
 }

@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Error};
@@ -121,206 +122,140 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // Logging
     isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
 
-    // Detail logging.
-    isis_pdu_trace!(top, &level, "[CSNP] ----");
-    for tlv in &pdu.tlvs {
-        if let IsisTlv::LspEntries(lsps) = tlv {
-            for lsp in &lsps.entries {
-                isis_pdu_trace!(top, &level, "[CSNP] {}", lsp.lsp_id);
-            }
-        }
-    }
-    isis_pdu_trace!(top, &level, "[CSNP] ----");
-
-    // Need to check CSNP came from Adjacency neighbor or Adjacency
-    // candidate neighbor?
-    if top.config.link_type().is_p2p() {
-        // TODO.  Find adjacency neighbor and check Exchange or Full.
-    } else {
-        let Some(dis) = &top.state.dis.get(&level) else {
-            isis_event_trace!(top.tracing, Dis, &level, "CSNP DIS was yet not selected");
-            return;
-        };
-
-        if pdu.source_id != *dis {
-            isis_event_trace!(
-                top.tracing,
-                Dis,
-                &level,
-                "CSNP came from {} non DIS neighbor {}",
-                pdu.source_id,
-                *dis
-            );
-            return;
-        }
+    // Adjacency check.
+    if top.state.adj.get(&level).is_none() {
+        return;
     }
 
-    // Local cache for LSDB.
-    let mut lsdb_locals: BTreeMap<IsisLspId, u32> = BTreeMap::new();
+    // TODO: Need to check CSNP's LSP ID start and end.
+    let mut lsdb: BTreeMap<IsisLspId, u32> = BTreeMap::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
-        lsdb_locals.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
+        lsdb.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
     }
 
-    let mut req = IsisTlvLspEntries::default();
-    for tlv in &pdu.tlvs {
-        if let IsisTlv::LspEntries(lsps) = tlv {
-            for lsp in &lsps.entries {
-                // If LSP_ID is my own.
-                if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
-                    isis_pdu_trace!(top, &level, "[CSNP] {} Self LSP", lsp.lsp_id);
-                    if lsp.lsp_id.is_pseudo() {
-                        // tracing::info!("CSNP: Self DIS {}", lsp.lsp_id);
-                        // println!("LSP myown DIS hold_time {}", lsp.hold_time);
-                    } else {
-                        // tracing::info!("CSNP: Self LSP {}", lsp.lsp_id);
-                        if let Some(_local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
-                            // tracing::info!(
-                            //     " Local Seq 0x{:04x} Remote Seq 0x{:04x}",
-                            //     local.lsp.seq_number,
-                            //     lsp.seq_number,
-                            // );
-                        }
-                    }
-                    // continue;
-                }
+    // 7.3.15.2 b
+    for entry in pdu.tlvs.iter() {
+        if let IsisTlv::LspEntries(tlv) = entry {
+            for lsp in &tlv.entries {
+                match lsdb
+                    .get(&lsp.lsp_id)
+                    .map(|seq_number| lsp.seq_number.cmp(&seq_number))
+                {
+                    Some(Ordering::Greater) => {
+                        // 7.3.15.2 b.4
+                        //
+                        // If the reported value is newer than the database
+                        // value, Set SSNflag, and if C is a non-broadcast
+                        // circuit Clear SRMflag.
+                        lsdb::ssn_set(top, level, lsp);
 
-                // Need to check sequence number.
-                isis_pdu_trace!(top, &level, "[CSNP] {} Processing", lsp.lsp_id);
-                match lsdb_locals.get(&lsp.lsp_id) {
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                        lsdb.remove(&lsp.lsp_id);
+                    }
+                    Some(Ordering::Equal) => {
+                        // 7.3.15.2 b.2
+                        //
+                        // If the reported value equals the database value and C
+                        // is a non-broadcast circuit, Clear SRMflag for C for
+                        // that LSP
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                        lsdb.remove(&lsp.lsp_id);
+                    }
+                    Some(Ordering::Less) => {
+                        // 7.3.15.2 b.3
+                        //
+                        // If the reported value is older than the database
+                        // value, Clear SSNflag, and Set SRMflag.
+                        lsdb::ssn_clear(top, level, &lsp.lsp_id);
+                        lsdb::srm_set(top, level, &lsp.lsp_id);
+                        lsdb.remove(&lsp.lsp_id);
+                    }
                     None => {
-                        // set_ssn();
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H: {} None",
-                            lsp.lsp_id,
-                            lsp.hold_time,
-                            lsp.seq_number,
-                        );
-                        if lsp.hold_time != 0 {
-                            // println!("LSP REQ New: {}", lsp.lsp_id);
-                            isis_database_trace!(top.tracing, Lsdb, &level, "Req: {}", lsp.lsp_id);
-                            let mut psnp = lsp.clone();
-                            psnp.seq_number = 0;
-                            req.entries.push(psnp);
-                        } else {
-                            // println!("LSP REQ New(Purged): {}", lsp.lsp_id);
+                        // 7.3.15.2 b.5
+
+                        // If no database entry exists for the LSP, and the
+                        // reported Remaining Lifetime, Checksum and Sequence
+                        // Number fields of the LSP are all non-zero, create an
+                        // entry with sequence number 0 (see 7.3.16.1), and set
+                        // SSNflag for that entry and circuit C. Under no
+                        // circumstances shall SRMflag be set for such an LSP
+                        // with zero sequence number.
+                        if lsp.hold_time != 0 && lsp.checksum != 0 && lsp.seq_number != 0 {
+                            let lsp = IsisLspEntry {
+                                lsp_id: lsp.lsp_id,
+                                hold_time: lsp.hold_time,
+                                seq_number: 0,
+                                checksum: lsp.checksum,
+                            };
+                            lsdb::ssn_set(top, level, &lsp);
                         }
                     }
-                    Some(&seq_number) if seq_number < lsp.seq_number => {
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H: {} seq:{:08x} < exiting seq:{:08x}",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time,
-                            lsp.seq_number,
-                            seq_number,
-                        );
-                        // When local sequence number is smaller than remote.
-                        // set_ssn();
-                        isis_database_trace!(top.tracing, Lsdb, &level, "Upd: {}", lsp.lsp_id);
-                        let mut psnp = lsp.clone();
-                        psnp.seq_number = 0;
-                        req.entries.push(psnp);
-                    }
-                    Some(&seq_number) if seq_number > lsp.seq_number => {
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H:{} seq: {:08x} > exiting seq:{:08x} ",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time,
-                            lsp.seq_number,
-                            seq_number,
-                        );
-                        let msg = Message::Srm(
-                            lsp.lsp_id,
-                            level,
-                            format!("local seq {}, remote seq {}", seq_number, lsp.seq_number),
-                        );
-                        top.tx.send(msg);
-                    }
-                    Some(&_seq_number) if lsp.hold_time == 0 => {
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{} H:{} Purge",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time,
-                        );
-                        // purge_local() set srm();
-                    }
-                    _ => {
-                        // Identical, nothing to do.
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H:{} Identical",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time
-                        );
-                    }
-                }
-                lsdb_locals.remove(&lsp.lsp_id);
-            }
-        }
-    }
-
-    if !lsdb_locals.is_empty() {
-        // Local need to flood.
-        // isis_event_trace!(
-        //     top.tracing,
-        //     Flooding,
-        //     &level,
-        //     "Flood plan on {}",
-        //     link.state.name
-        // );
-        // isis_event_trace!(top.tracing, Flooding, &level, "---------");
-
-        for (key, _flag) in lsdb_locals.iter() {
-            // Flood.
-            isis_event_trace!(top.tracing, Flooding, &level, "{}", key);
-            let lsa = top.lsdb.get(&level).get(key);
-            if let Some(lsa) = lsa {
-                let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
-
-                if !lsa.bytes.is_empty() {
-                    let mut buf = BytesMut::from(&lsa.bytes[..]);
-
-                    isis_packet::write_hold_time(&mut buf, hold_time);
-
-                    top.ptx.send(PacketMessage::Send(
-                        Packet::Bytes(buf),
-                        top.ifindex,
-                        level,
-                        top.dest(level),
-                    ));
                 }
             }
         }
-        // isis_event_trace!(top.tracing, Flooding, &level, "---------");
     }
-    if !req.entries.is_empty() {
-        // Send PSNP.
-        let mut psnp = IsisPsnp {
-            pdu_len: 0,
-            source_id: top.up_config.net.sys_id(),
-            source_id_curcuit: 1,
-            tlvs: Vec::new(),
-        };
-        for e in req.entries.iter() {
-            tracing::info!("[PSNP] {} will be sent", e.lsp_id,);
+    // 7.3.15.2 c
+    //
+    // If the Sequence Numbers PDU is a Complete Sequence Numbers PDU, Set
+    // SRMflags for C for all LSPs in the database (except those with zero
+    // sequence number or zero Remaining Lifetime) with LSPIDs within the range
+    // specified for the CSNP by the Start LSPID and End LSPID fields, which
+    // were not mentioned in the Complete Sequence Numbers PDU
+    for (lsp_id, seq_number) in lsdb.iter() {
+        if *seq_number != 0 {
+            lsdb::srm_set(top, level, lsp_id);
         }
-        psnp.tlvs.push(req.into());
-        isis_pdu_trace!(top, &level, "Send PSNP");
-
-        isis_psnp_send(top, top.ifindex, level, psnp);
     }
+}
+
+// 7.3.17 Making the update reliable.
+//
+// When a point-to-point circuit (including non-DA DED circuits and virtual
+// links) starts (or restarts), the IS shall
+//
+// a) set SRMflag for that circuit on all LSPs, and
+pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
+    // Extract LSP entries first to avoid borrow checker issues.
+    let lsp_ids: Vec<IsisLspId> = top
+        .lsdb
+        .get(&level)
+        .iter()
+        .map(|(lsp_id, _)| lsp_id.clone())
+        .collect();
+
+    for lsp_id in lsp_ids.iter() {
+        lsdb::srm_set(top, level, lsp_id);
+    }
+}
+
+// 7.3.17 Making the update reliable.
+//
+// When a point-to-point circuit (including non-DA DED circuits and virtual
+// links) starts (or restarts), the IS shall
+//
+// b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
+#[isis_pdu_handler(Csnp, Send)]
+pub fn csnp_advertise(top: &mut LinkTop, level: Level, sys_id: IsisSysId) {
+    let mut csnp = IsisCsnp {
+        source_id: sys_id,
+        source_id_circuit: 1,
+        start: IsisLspId::start(),
+        end: IsisLspId::end(),
+        ..Default::default()
+    };
+    let mut lsps = IsisTlvLspEntries::default();
+    for (lsp_id, lsa) in top.lsdb.get(&level).iter() {
+        // TODO: Update hold_time.
+        let entry = IsisLspEntry::from_lsp(&lsa.lsp);
+        lsps.entries.push(entry);
+    }
+    csnp.tlvs.push(lsps.into());
+
+    isis_csnp_send(top, top.ifindex, level, csnp);
 }
 
 #[isis_pdu_handler(Psnp, Recv)]
@@ -333,55 +268,70 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // Logging
     isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
 
-    // XXX
+    // Adjacency check.
+    if top.state.adj.get(&level).is_none() {
+        return;
+    }
+
+    // 7.3.15.2 Action on receipt of a PSNP.
     for entry in pdu.tlvs.iter() {
         if let IsisTlv::LspEntries(tlv) = entry {
-            for entry in tlv.entries.iter() {
-                isis_pdu_trace!(
-                    top,
-                    &level,
-                    "[PSNP] {} Seq:{:08x} HoldTime:{}",
-                    entry.lsp_id,
-                    entry.seq_number,
-                    entry.hold_time,
-                );
-                if let Some(lsa) = top.lsdb.get(&level).get(&entry.lsp_id) {
-                    isis_database_trace!(
-                        top.tracing,
-                        Lsdb,
-                        &level,
-                        "PSNP REQ 0x{:04x} LSDB 0x{:04x}",
-                        entry.seq_number,
-                        lsa.lsp.seq_number
-                    );
-                    let hold_time =
-                        lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+            for lsp in tlv.entries.iter() {
+                match top
+                    .lsdb
+                    .get(&level)
+                    .get(&lsp.lsp_id)
+                    .map(|lsa| lsp.seq_number.cmp(&lsa.lsp.seq_number))
+                {
+                    Some(Ordering::Greater) => {
+                        // 7.3.15.2 b.4
+                        //
+                        // If the reported value is newer than the database
+                        // value, Set SSNflag, and if C is a non-broadcast
+                        // circuit Clear SRMflag.
+                        lsdb::ssn_set(top, level, lsp);
 
-                    if !lsa.bytes.is_empty() {
-                        tracing::info!("IsisLsp packet from PSNP (non emit)");
-                        let mut buf = BytesMut::from(&lsa.bytes[..]);
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                    }
+                    Some(Ordering::Equal) => {
+                        // 7.3.15.2 b.2
+                        //
+                        // If the reported value equals the database value and C
+                        // is a non-broadcast circuit, Clear SRMflag for C for
+                        // that LSP
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                    }
+                    Some(Ordering::Less) => {
+                        // 7.3.15.2 b.3
+                        //
+                        // If the reported value is older than the database
+                        // value, Clear SSNflag, and Set SRMflag.
+                        lsdb::ssn_clear(top, level, &lsp.lsp_id);
+                        lsdb::srm_set(top, level, &lsp.lsp_id);
+                    }
+                    None => {
+                        // 7.3.15.2 b.5
 
-                        isis_packet::write_hold_time(&mut buf, hold_time);
-
-                        top.ptx.send(PacketMessage::Send(
-                            Packet::Bytes(buf),
-                            top.ifindex,
-                            level,
-                            top.dest(level),
-                        ));
-                    } else {
-                        let mut lsp = lsa.lsp.clone();
-                        lsp.hold_time = hold_time;
-                        lsp.checksum = 0;
-                        tracing::info!("IsisLsp packet from PSNP (emit)");
-                        let buf = lsp_emit(&mut lsp, level);
-
-                        top.ptx.send(PacketMessage::Send(
-                            Packet::Bytes(buf),
-                            top.ifindex,
-                            level,
-                            top.dest(level),
-                        ));
+                        // If no database entry exists for the LSP, and the
+                        // reported Remaining Lifetime, Checksum and Sequence
+                        // Number fields of the LSP are all non-zero, create an
+                        // entry with sequence number 0 (see 7.3.16.1), and set
+                        // SSNflag for that entry and circuit C. Under no
+                        // circumstances shall SRMflag be set for such an LSP
+                        // with zero sequence number.
+                        if lsp.hold_time != 0 && lsp.checksum != 0 && lsp.seq_number != 0 {
+                            let lsp = IsisLspEntry {
+                                lsp_id: lsp.lsp_id,
+                                hold_time: lsp.hold_time,
+                                seq_number: 0,
+                                checksum: lsp.checksum,
+                            };
+                            lsdb::ssn_set(top, level, &lsp);
+                        }
                     }
                 }
             }
@@ -391,6 +341,17 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
 
 #[isis_pdu_handler(Lsp, Recv)]
 pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
+    if top.is_p2p() {
+        lsp_recv_p2p(top, level, lsp, bytes);
+    } else {
+        lsp_recv_lan(top, level, lsp, bytes);
+    }
+}
+
+// SRM and SSN
+#[isis_pdu_handler(Lsp, Recv)]
+pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
+    // Interface level check.
     if !has_level(top.state.level(), level) {
         return;
     }
@@ -398,31 +359,90 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     // Logging.
     isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
 
-    // Self LSP recieved.
-    if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
-        // Self LSP logging.
-        isis_event_trace!(
-            top.tracing,
-            LspOriginate,
-            &level,
-            "[LspRecv] Seq:0x{:08x} HoldTime:{} On:{}",
-            lsp.seq_number,
-            lsp.hold_time,
-            top.state.name,
-        );
+    // Adjacency check.
+    if top.state.adj.get(&level).is_none() {
+        return;
+    }
 
+    // Purge the LSP.
+    if lsp.hold_time == 0 {
+        // lsdb::remove_lsp_link(top, level, lsp.lsp_id);
+        return;
+    }
+
+    // 7.3.15.1 Action on receipt of a link state PDU
+    match top
+        .lsdb
+        .get(&level)
+        .get(&lsp.lsp_id)
+        .map(|lsa| lsp.seq_number.cmp(&lsa.lsp.seq_number))
+    {
+        None | Some(Ordering::Greater) => {
+            // 7.3.15.1 e.1
+
+            // 1. Store the new LSP in the database, overwriting the
+            //    existing database LSP for that source (if any) with the
+            //    received LSP.
+
+            // TODO: We may consider update self originated LSP when it really
+            // overwrite existing one.
+            lsdb::insert_lsp(top, level, lsp.clone(), bytes);
+
+            // 2. Set SRMflag for that LSP for all circuits other than C.
+            lsdb::srm_set_other(top, level, &lsp.lsp_id);
+
+            // 3. Clear SRMflag for C.
+            lsdb::srm_clear(top, level, &lsp.lsp_id);
+
+            // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
+            if top.is_p2p() {
+                lsdb::ssn_set(top, level, &IsisLspEntry::from_lsp(&lsp));
+            }
+
+            // 5. Clear SSNflag for that LSP for the circuits associated
+            //    with a linkage other than C.
+            lsdb::ssn_clear_other(top, level, &lsp.lsp_id);
+        }
+        Some(Ordering::Equal) => {
+            // 7.3.15.1 e.2
+
+            // 1. Clear SRMflag for C.
+            lsdb::srm_clear(top, level, &lsp.lsp_id);
+
+            // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
+            //    for C.
+            if top.is_p2p() {
+                lsdb::ssn_set(top, level, &IsisLspEntry::from_lsp(&lsp));
+            }
+        }
+        Some(Ordering::Less) => {
+            // 7.3.15.1 e.3
+
+            // 1. Set SRMflag for C.
+            lsdb::srm_set(top, level, &lsp.lsp_id);
+
+            // 2. Clear SSNflag for C.
+            lsdb::ssn_clear(top, level, &lsp.lsp_id);
+        }
+    }
+}
+
+#[isis_pdu_handler(Lsp, Recv)]
+pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
+    if !has_level(top.state.level(), level) {
+        return;
+    }
+
+    // Logging.
+    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
+
+    // Self LSP received.
+    if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
         // Pseudo LSP has been received.
         if lsp.lsp_id.is_pseudo() {
             // Pseudo LSP purge request.
             if lsp.hold_time == 0 {
                 if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    isis_event_trace!(
-                        top.tracing,
-                        Dis,
-                        &level,
-                        "DIS purge trigger DIS LSP originate from base seq_num {} (I'm DIS)",
-                        lsp.seq_number
-                    );
                     // Originate DIS with seqnumber + 1.
                     top.tx
                         .send(Message::DisOriginate(
@@ -437,17 +457,9 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
                 }
             } else {
                 if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    isis_event_trace!(top.tracing, Dis, &level, "DIS self update");
                     lsp_self_updated(top, level, lsp);
                 } else {
-                    // I'm no longer DIS. Treat it as other LSP.
-                    isis_event_trace!(
-                        top.tracing,
-                        Dis,
-                        &level,
-                        "DIS I'm no longer DIS. Treat it as other LSP."
-                    );
-                    lsdb::insert_lsp(top, level, lsp, bytes, top.ifindex);
+                    lsdb::insert_lsp(top, level, lsp, bytes);
                 }
             }
         } else {
@@ -467,68 +479,19 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
 
         match top.state.dis_status.get(&level) {
             DisStatus::NotSelected => {
-                isis_event_trace!(
-                    top.tracing,
-                    Dis,
-                    &level,
-                    "DIS is not selected on {}, just store {} into LSDB",
-                    top.state.name,
-                    lsp.lsp_id
-                );
+                //
             }
             DisStatus::Myself => {
-                isis_event_trace!(
-                    top.tracing,
-                    Dis,
-                    &level,
-                    "DIS is self on {}, just store {} into LSDB",
-                    top.state.name,
-                    lsp.lsp_id
-                );
+                //
             }
             DisStatus::Other => {
                 if let Some(lan_id) = &top.state.lan_id.get(&level) {
-                    isis_event_trace!(
-                        top.tracing,
-                        Dis,
-                        &level,
-                        "DIS is other {} on link {}",
-                        lan_id,
-                        top.state.name
-                    );
                     if top.state.adj.get(&level).is_none() {
-                        isis_event_trace!(
-                            top.tracing,
-                            Adjacency,
-                            &level,
-                            "DIS Adjacency is None, comparing incoming sys_id {} with DIS sys_id {}",
-                            lsp.lsp_id.neighbor_id(),
-                            lan_id
-                        );
                         if lsp.lsp_id.neighbor_id() == *lan_id {
-                            isis_event_trace!(
-                                top.tracing,
-                                Adjacency,
-                                &level,
-                                "DIS is accepted, try to find Adj"
-                            );
-                            // IS Neighbor include my LSP ID.
                             if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-                                isis_event_trace!(
-                                    top.tracing,
-                                    Adjacency,
-                                    &level,
-                                    "DIS Adjacency with {}",
-                                    lan_id
-                                );
                                 *top.state.adj.get_mut(&level) =
                                     Some((lsp.lsp_id.neighbor_id(), None));
-                                isis_event_trace!(
-                                    top.tracing,
-                                    LspOriginate,
-                                    &level,
-                                    "DIS LspOriginate from lsp_recv"
-                                );
+                                top.lsdb.get_mut(&level).adj_set(top.ifindex);
                                 top.tx.send(Message::LspOriginate(level)).unwrap();
                             }
                         }
@@ -541,7 +504,7 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     if lsp.hold_time == 0 {
         lsdb::remove_lsp_link(top, level, lsp.lsp_id);
     } else {
-        lsdb::insert_lsp(top, level, lsp, bytes, top.ifindex);
+        lsdb::insert_lsp(top, level, lsp, bytes);
     }
 }
 
@@ -615,36 +578,12 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
         Some(originated) => {
             match lsp.seq_number.cmp(&originated.lsp.seq_number) {
                 std::cmp::Ordering::Greater => {
-                    isis_event_trace!(
-                        top.tracing,
-                        LspOriginate,
-                        &level,
-                        "[LspInstall] Seq:0x{:08x} > Seq:0x{:08x}",
-                        lsp.seq_number,
-                        originated.lsp.seq_number,
-                    );
-                    isis_database_trace!(
-                        top.tracing,
-                        Lsdb,
-                        &level,
-                        "Self originated LSP is insert into LSDB"
-                    );
                     if !lsp_same(&originated.lsp, &lsp) {
                         top.tx.send(Message::LspOriginate(level));
                     }
                     insert_self_originate_link(top, level, lsp);
                 }
                 std::cmp::Ordering::Equal => {
-                    isis_event_trace!(
-                        top.tracing,
-                        LspOriginate,
-                        &level,
-                        "[LspInstall] Seq:0x{:08x} == Seq:0x{:08x}, ChkSum:0x{:04x} <=> ChkSum:0x{:04x}",
-                        lsp.seq_number,
-                        originated.lsp.seq_number,
-                        lsp.checksum,
-                        originated.lsp.checksum,
-                    );
                     if lsp.checksum != originated.lsp.checksum {
                         isis_event_trace!(
                             top.tracing,
@@ -678,6 +617,20 @@ pub fn isis_psnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisPs
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
+    };
+
+    top.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        ifindex,
+        level,
+        top.dest(level),
+    ));
+}
+
+pub fn isis_csnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisCsnp) {
+    let packet = match level {
+        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
+        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
     };
 
     top.ptx.send(PacketMessage::Send(
