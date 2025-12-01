@@ -184,6 +184,20 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
+            Message::SrmX(level, ifindex) => {
+                let sys_id = self.config.net.sys_id();
+                let Some(mut link) = self.link_top(ifindex) else {
+                    return;
+                };
+                lsdb::srm_advertise(&mut link, level, ifindex, sys_id);
+            }
+            Message::SsnX(level, ifindex) => {
+                let sys_id = self.config.net.sys_id();
+                let Some(mut link) = self.link_top(ifindex) else {
+                    return;
+                };
+                lsdb::ssn_advertise(&mut link, level, ifindex, sys_id);
+            }
             Message::Srm(lsp_id, level, reason) => {
                 self.process_srm(lsp_id, level, reason);
             }
@@ -1376,11 +1390,19 @@ pub enum Message {
     Srm(IsisLspId, Level, String),
     DisOriginate(Level, u32, Option<u32>),
     SpfCalc(Level),
+    SrmX(Level, u32),
+    SsnX(Level, u32),
 }
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Message::SrmX(level, ifindex) => {
+                write!(f, "[Message::SrmX({}:{})]", level, ifindex)
+            }
+            Message::SsnX(level, ifindex) => {
+                write!(f, "[Message::SsnX({}:{})]", level, ifindex)
+            }
             Message::Srm(lsp_id, level, _) => {
                 write!(f, "[Message::Srm({}, {})]", lsp_id, level)
             }

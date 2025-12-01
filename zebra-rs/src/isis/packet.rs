@@ -329,16 +329,6 @@ pub fn csnp_recv_lan(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
                         req.entries.push(psnp);
                     }
                     Some(&seq_number) if seq_number > lsp.seq_number => {
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H:{} seq: {:08x} > exiting seq:{:08x} ",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time,
-                            lsp.seq_number,
-                            seq_number,
-                        );
                         let msg = Message::Srm(
                             lsp.lsp_id,
                             level,
@@ -347,26 +337,10 @@ pub fn csnp_recv_lan(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
                         top.tx.send(msg);
                     }
                     Some(&_seq_number) if lsp.hold_time == 0 => {
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{} H:{} Purge",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time,
-                        );
                         // purge_local() set srm();
                     }
                     _ => {
-                        // Identical, nothing to do.
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H:{} Identical",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time
-                        );
+                        //
                     }
                 }
                 lsdb_locals.remove(&lsp.lsp_id);
@@ -611,6 +585,9 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
             // 1. Store the new LSP in the database, overwriting the
             //    existing database LSP for that source (if any) with the
             //    received LSP.
+
+            // TODO: We may consider update self originated LSP when it really
+            // overwrite existing one.
             lsdb::insert_lsp(top, level, lsp.clone(), bytes);
 
             // 2. Set SRMflag for that LSP for all circuits other than C.
@@ -663,29 +640,11 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
 
     // Self LSP received.
     if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
-        // Self LSP logging.
-        isis_event_trace!(
-            top.tracing,
-            LspOriginate,
-            &level,
-            "[LspRecv] Seq:0x{:08x} HoldTime:{} On:{}",
-            lsp.seq_number,
-            lsp.hold_time,
-            top.state.name,
-        );
-
         // Pseudo LSP has been received.
         if lsp.lsp_id.is_pseudo() {
             // Pseudo LSP purge request.
             if lsp.hold_time == 0 {
                 if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    isis_event_trace!(
-                        top.tracing,
-                        Dis,
-                        &level,
-                        "DIS purge trigger DIS LSP originate from base seq_num {} (I'm DIS)",
-                        lsp.seq_number
-                    );
                     // Originate DIS with seqnumber + 1.
                     top.tx
                         .send(Message::DisOriginate(
@@ -700,16 +659,8 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
                 }
             } else {
                 if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    isis_event_trace!(top.tracing, Dis, &level, "DIS self update");
                     lsp_self_updated(top, level, lsp);
                 } else {
-                    // I'm no longer DIS. Treat it as other LSP.
-                    isis_event_trace!(
-                        top.tracing,
-                        Dis,
-                        &level,
-                        "DIS I'm no longer DIS. Treat it as other LSP."
-                    );
                     lsdb::insert_lsp(top, level, lsp, bytes);
                 }
             }
@@ -730,68 +681,19 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
 
         match top.state.dis_status.get(&level) {
             DisStatus::NotSelected => {
-                isis_event_trace!(
-                    top.tracing,
-                    Dis,
-                    &level,
-                    "DIS is not selected on {}, just store {} into LSDB",
-                    top.state.name,
-                    lsp.lsp_id
-                );
+                //
             }
             DisStatus::Myself => {
-                isis_event_trace!(
-                    top.tracing,
-                    Dis,
-                    &level,
-                    "DIS is self on {}, just store {} into LSDB",
-                    top.state.name,
-                    lsp.lsp_id
-                );
+                //
             }
             DisStatus::Other => {
                 if let Some(lan_id) = &top.state.lan_id.get(&level) {
-                    isis_event_trace!(
-                        top.tracing,
-                        Dis,
-                        &level,
-                        "DIS is other {} on link {}",
-                        lan_id,
-                        top.state.name
-                    );
                     if top.state.adj.get(&level).is_none() {
-                        isis_event_trace!(
-                            top.tracing,
-                            Adjacency,
-                            &level,
-                            "DIS Adjacency is None, comparing incoming sys_id {} with DIS sys_id {}",
-                            lsp.lsp_id.neighbor_id(),
-                            lan_id
-                        );
                         if lsp.lsp_id.neighbor_id() == *lan_id {
-                            isis_event_trace!(
-                                top.tracing,
-                                Adjacency,
-                                &level,
-                                "DIS is accepted, try to find Adj"
-                            );
                             // IS Neighbor include my LSP ID.
                             if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-                                isis_event_trace!(
-                                    top.tracing,
-                                    Adjacency,
-                                    &level,
-                                    "DIS Adjacency with {}",
-                                    lan_id
-                                );
                                 *top.state.adj.get_mut(&level) =
                                     Some((lsp.lsp_id.neighbor_id(), None));
-                                isis_event_trace!(
-                                    top.tracing,
-                                    LspOriginate,
-                                    &level,
-                                    "DIS LspOriginate from lsp_recv"
-                                );
                                 top.tx.send(Message::LspOriginate(level)).unwrap();
                             }
                         }
@@ -878,36 +780,12 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
         Some(originated) => {
             match lsp.seq_number.cmp(&originated.lsp.seq_number) {
                 std::cmp::Ordering::Greater => {
-                    isis_event_trace!(
-                        top.tracing,
-                        LspOriginate,
-                        &level,
-                        "[LspInstall] Seq:0x{:08x} > Seq:0x{:08x}",
-                        lsp.seq_number,
-                        originated.lsp.seq_number,
-                    );
-                    isis_database_trace!(
-                        top.tracing,
-                        Lsdb,
-                        &level,
-                        "Self originated LSP is insert into LSDB"
-                    );
                     if !lsp_same(&originated.lsp, &lsp) {
                         top.tx.send(Message::LspOriginate(level));
                     }
                     insert_self_originate_link(top, level, lsp);
                 }
                 std::cmp::Ordering::Equal => {
-                    isis_event_trace!(
-                        top.tracing,
-                        LspOriginate,
-                        &level,
-                        "[LspInstall] Seq:0x{:08x} == Seq:0x{:08x}, ChkSum:0x{:04x} <=> ChkSum:0x{:04x}",
-                        lsp.seq_number,
-                        originated.lsp.seq_number,
-                        lsp.checksum,
-                        originated.lsp.checksum,
-                    );
                     if lsp.checksum != originated.lsp.checksum {
                         isis_event_trace!(
                             top.tracing,
