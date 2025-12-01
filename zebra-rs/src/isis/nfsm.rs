@@ -8,7 +8,6 @@ use strum_macros::{Display, EnumString};
 
 use crate::context::Timer;
 use crate::isis::link::LinkType;
-use crate::isis::neigh::NfsmP2pState;
 use crate::rib::MacAddr;
 use crate::{isis_fsm_trace, isis_packet_trace};
 
@@ -166,16 +165,6 @@ pub fn nfsm_hello_received(
 
     let mut state = nbr.state;
 
-    // isis_packet_trace!(
-    //     ntop.tracing,
-    //     Hello,
-    //     Receive,
-    //     &level,
-    //     "NBR Hello received on {} from {}",
-    //     nbr.ifindex,
-    //     nbr.sys_id
-    // );
-
     if state == NfsmState::Down {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         state = NfsmState::Init;
@@ -241,36 +230,23 @@ pub fn nfsm_p2p_hello_received(
 
     // When it is three way handshake.
     if state == NfsmState::Down {
-        let next = NfsmState::Init;
-
-        state = next;
-
-        // Need to originate Hello for updating three way handshake.
+        state = NfsmState::Init;
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
     // Fall down from previous.
     if state == NfsmState::Init {
         if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
-            let next = NfsmState::Up;
+            state = NfsmState::Up;
 
             // Set adjacency.
             *ntop.adj.get_mut(&level) =
                 Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
             ntop.lsdb.get_mut(&level).adj_set(nbr.ifindex);
-
-            nbr.event(Message::LspOriginate(level));
-
-            state = next;
-            let p2p = NfsmP2pState::Exchange;
-
-            nbr.p2p = p2p;
-            nbr.event(Message::LspOriginate(level));
         }
     }
 
     // Update interface addresses from Hello
-    //
     nfsm_ifaddr_update(nbr, ntop.local_pool);
 
     // Reset hold timer
@@ -333,18 +309,14 @@ pub fn isis_nfsm(
     mac: Option<MacAddr>,
     level: Level,
 ) {
-    // println!("NFSM {}, {}, {}", nbr.sys_id, level, event);
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event, level);
 
     let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
 
-    if let Some(new_state) = next_state {
-        if new_state != nbr.state {
-            nbr.prev = nbr.state;
-            nbr.state = new_state;
-
+    if let Some(next_state) = next_state {
+        if next_state != nbr.state {
             // Up -> Down/Init
-            if nbr.prev == NfsmState::Up {
+            if nbr.state == NfsmState::Up {
                 if let Some((adj, _)) = ntop.adj.get(&level) {
                     if adj.sys_id() == nbr.sys_id {
                         *ntop.adj.get_mut(&level) = None;
@@ -364,18 +336,9 @@ pub fn isis_nfsm(
             }
 
             // Neighbor comes UP.
-            if nbr.state == NfsmState::Up {
+            if next_state == NfsmState::Up {
+                // Allocate adjacency SID when it is not yet.
                 if let Some(local_pool) = ntop.local_pool {
-                    // On P2P interface, start DB exchange.
-                    if nbr.link_type == LinkType::P2p {
-                        // Start DB exchange.
-                        if nbr.sys_id < ntop.up_config.net.sys_id() {
-                            // Master
-                        } else {
-                            // Slave
-                        }
-                    }
-                    // Allocate adjacency SID when it is not yet.
                     for (_key, value) in nbr.naddr4.iter_mut() {
                         if value.label.is_none() {
                             if let Some(label) = local_pool.allocate() {
@@ -384,7 +347,11 @@ pub fn isis_nfsm(
                         }
                     }
                 }
+                if nbr.link_type.is_p2p() {
+                    ntop.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
+                }
             }
+            nbr.state = next_state;
         }
     }
 }

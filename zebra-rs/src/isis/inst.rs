@@ -35,7 +35,7 @@ use super::ifsm::has_level;
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_advertise, srm_set_all};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -229,6 +229,15 @@ impl Isis {
             Message::Lsdb(ev, level, key) => {
                 self.process_lsdb(ev, level, key);
             }
+            Message::AdjacencyUp(level, ifindex) => {
+                let sys_id = self.config.net.sys_id();
+                self.process_lsp_originate(level);
+                let Some(mut link) = self.link_top(ifindex) else {
+                    return;
+                };
+                srm_set_all(&mut link, level);
+                csnp_advertise(&mut link, level, sys_id);
+            }
         }
     }
 
@@ -314,8 +323,8 @@ impl Isis {
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
         let buf = lsp_emit(&mut lsp, level);
-        lsp_flood(&mut top, level, &buf);
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
+        lsp_flood(&mut top, level, &buf);
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -1391,6 +1400,7 @@ pub enum Message {
     SpfCalc(Level),
     SrmX(Level, u32),
     SsnX(Level, u32),
+    AdjacencyUp(Level, u32),
 }
 
 impl Display for Message {
@@ -1421,6 +1431,9 @@ impl Display for Message {
             }
             Message::DisOriginate(level, _, _) => write!(f, "[Message::DisOriginate({})]", level),
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
+            Message::AdjacencyUp(level, ifindex) => {
+                write!(f, "[Message::AdjacencyUp({}:{})]", level, ifindex)
+            }
         }
     }
 }

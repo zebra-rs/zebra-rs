@@ -221,6 +221,52 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     }
 }
 
+// 7.3.17 Making the update reliable.
+//
+// When a point-to-point circuit (including non-DA DED circuits and virtual
+// links) starts (or restarts), the IS shall
+//
+// a) set SRMflag for that circuit on all LSPs, and
+pub fn srm_set_all(top: &mut LinkTop, level: Level) {
+    // Extract LSP entries first to avoid borrow checker issues.
+    let entries: Vec<IsisLspEntry> = top
+        .lsdb
+        .get(&level)
+        .iter()
+        .map(|(_, lsa)| IsisLspEntry::from_lsp(&lsa.lsp))
+        .collect();
+
+    for entry in entries {
+        lsdb::srm_set(top, level, &entry);
+    }
+}
+
+// 7.3.17 Making the update reliable.
+//
+// When a point-to-point circuit (including non-DA DED circuits and virtual
+// links) starts (or restarts), the IS shall
+//
+// b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
+#[isis_pdu_handler(Csnp, Send)]
+pub fn csnp_advertise(top: &mut LinkTop, level: Level, sys_id: IsisSysId) {
+    let mut csnp = IsisCsnp {
+        source_id: sys_id,
+        source_id_circuit: 1,
+        start: IsisLspId::start(),
+        end: IsisLspId::end(),
+        ..Default::default()
+    };
+    let mut lsps = IsisTlvLspEntries::default();
+    for (lsp_id, lsa) in top.lsdb.get(&level).iter() {
+        // TODO: Update hold_time.
+        let entry = IsisLspEntry::from_lsp(&lsa.lsp);
+        lsps.entries.push(entry);
+    }
+    csnp.tlvs.push(lsps.into());
+
+    isis_csnp_send(top, top.ifindex, level, csnp);
+}
+
 #[isis_pdu_handler(Psnp, Recv)]
 pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // Check link capability for the PDU type.
@@ -352,14 +398,14 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
             lsdb::insert_lsp(top, level, lsp.clone(), bytes);
 
             // 2. Set SRMflag for that LSP for all circuits other than C.
-            lsdb::srm_set_other(top, level, &lsp.clone().into());
+            lsdb::srm_set_other(top, level, &IsisLspEntry::from_lsp(&lsp));
 
             // 3. Clear SRMflag for C.
             lsdb::srm_clear(top, level, &lsp.lsp_id);
 
             // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
             if top.is_p2p() {
-                lsdb::ssn_set(top, level, &lsp.clone().into());
+                lsdb::ssn_set(top, level, &IsisLspEntry::from_lsp(&lsp));
             }
 
             // 5. Clear SSNflag for that LSP for the circuits associated
@@ -375,14 +421,14 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
             // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
             //    for C.
             if top.is_p2p() {
-                lsdb::ssn_set(top, level, &lsp.clone().into());
+                lsdb::ssn_set(top, level, &IsisLspEntry::from_lsp(&lsp));
             }
         }
         Some(Ordering::Less) => {
             // 7.3.15.1 e.3
 
             // 1. Set SRMflag for C.
-            lsdb::srm_set(top, level, &lsp.clone().into());
+            lsdb::srm_set(top, level, &IsisLspEntry::from_lsp(&lsp));
 
             // 2. Clear SSNflag for C.
             lsdb::ssn_clear(top, level, &lsp.lsp_id);
@@ -580,6 +626,20 @@ pub fn isis_psnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisPs
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
+    };
+
+    top.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        ifindex,
+        level,
+        top.dest(level),
+    ));
+}
+
+pub fn isis_csnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisCsnp) {
+    let packet = match level {
+        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
+        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
     };
 
     top.ptx.send(PacketMessage::Send(
