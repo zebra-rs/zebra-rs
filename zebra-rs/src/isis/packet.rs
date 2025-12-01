@@ -142,75 +142,102 @@ pub fn csnp_recv_p2p(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     }
     isis_pdu_trace!(top, &level, "[CSNP] ----");
 
-    // Need to check CSNP came from Adjacency neighbor or Adjacency
-    // candidate neighbor?
-    if top.config.link_type().is_p2p() {
-        // TODO.  Find adjacency neighbor and check Exchange or Full.
-    } else {
-        let Some(dis) = &top.state.dis.get(&level) else {
-            isis_event_trace!(top.tracing, Dis, &level, "CSNP DIS was yet not selected");
-            return;
-        };
-
-        if pdu.source_id != *dis {
-            isis_event_trace!(
-                top.tracing,
-                Dis,
-                &level,
-                "CSNP came from {} non DIS neighbor {}",
-                pdu.source_id,
-                *dis
-            );
-            return;
-        }
+    // Adjacency check.
+    if top.state.adj.get(&level).is_none() {
+        return;
     }
 
-    // Local cache for LSDB.
-    let mut lsdb_locals: BTreeMap<IsisLspId, u32> = BTreeMap::new();
+    // TODO: Need to check CSNP's LSP ID start and end.
+    let mut lsdb: BTreeMap<IsisLspId, u32> = BTreeMap::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
-        lsdb_locals.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
+        lsdb.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
     }
 
-    let mut req = IsisTlvLspEntries::default();
-    for tlv in &pdu.tlvs {
-        if let IsisTlv::LspEntries(lsps) = tlv {
-            for lsp in &lsps.entries {
-                // If LSP_ID is my own.
-                if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
-                    //
-                }
+    // 7.3.15.2 b
+    for entry in pdu.tlvs.iter() {
+        if let IsisTlv::LspEntries(tlv) = entry {
+            for lsp in &tlv.entries {
+                match lsdb
+                    .get(&lsp.lsp_id)
+                    .map(|seq_number| lsp.seq_number.cmp(&seq_number))
+                {
+                    Some(Ordering::Greater) => {
+                        // 7.3.15.2 b.4
+                        //
+                        // If the reported value is newer than the database
+                        // value, Set SSNflag, and if C is a non-broadcast
+                        // circuit Clear SRMflag.
+                        lsdb::ssn_set(top, level, lsp);
 
-                // Need to check sequence number.
-                isis_pdu_trace!(top, &level, "[CSNP] {} Processing", lsp.lsp_id);
-                match lsdb_locals.get(&lsp.lsp_id) {
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                        lsdb.remove(&lsp.lsp_id);
+                    }
+                    Some(Ordering::Equal) => {
+                        // 7.3.15.2 b.2
+                        //
+                        // If the reported value equals the database value and C
+                        // is a non-broadcast circuit, Clear SRMflag for C for
+                        // that LSP
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                        lsdb.remove(&lsp.lsp_id);
+                    }
+                    Some(Ordering::Less) => {
+                        // 7.3.15.2 b.3
+                        //
+                        // If the reported value is older than the database
+                        // value, Clear SSNflag, and Set SRMflag.
+                        lsdb::ssn_clear(top, level, &lsp.lsp_id);
+                        lsdb::srm_set(top, level, &lsp);
+                        lsdb.remove(&lsp.lsp_id);
+                    }
                     None => {
-                        //
-                    }
-                    Some(&seq_number) if seq_number < lsp.seq_number => {
-                        //
-                    }
-                    Some(&seq_number) if seq_number > lsp.seq_number => {
-                        //
-                    }
-                    Some(&_seq_number) if lsp.hold_time == 0 => {
-                        // purge_local() set srm();
-                    }
-                    _ => {
-                        //
+                        // 7.3.15.2 b.5
+
+                        // If no database entry exists for the LSP, and the
+                        // reported Remaining Lifetime, Checksum and Sequence
+                        // Number fields of the LSP are all non-zero, create an
+                        // entry with sequence number 0 (see 7.3.16.1), and set
+                        // SSNflag for that entry and circuit C. Under no
+                        // circumstances shall SRMflag be set for such an LSP
+                        // with zero sequence number.
+                        if lsp.hold_time != 0 && lsp.checksum != 0 && lsp.seq_number != 0 {
+                            let lsp = IsisLspEntry {
+                                lsp_id: lsp.lsp_id,
+                                hold_time: lsp.hold_time,
+                                seq_number: 0,
+                                checksum: lsp.checksum,
+                            };
+                            lsdb::ssn_set(top, level, &lsp);
+                        }
                     }
                 }
             }
         }
     }
-
-    if !lsdb_locals.is_empty() {
-        for (_key, _flag) in lsdb_locals.iter() {
-            //
+    // 7.3.15.2 c
+    //
+    // If the Sequence Numbers PDU is a Complete Sequence Numbers PDU, Set
+    // SRMflags for C for all LSPs in the database (except those with zero
+    // sequence number or zero Remaining Lifetime) with LSPIDs within the range
+    // specified for the CSNP by the Start LSPID and End LSPID fields, which
+    // were not mentioned in the Complete Sequence Numbers PDU
+    for (lsp_id, seq_number) in lsdb.iter() {
+        if *seq_number != 0 {
+            lsdb::srm_set(
+                top,
+                level,
+                &IsisLspEntry {
+                    hold_time: 0,
+                    lsp_id: *lsp_id,
+                    seq_number: *seq_number,
+                    checksum: 0,
+                },
+            );
         }
-    }
-
-    if !req.entries.is_empty() {
-        //
     }
 }
 
