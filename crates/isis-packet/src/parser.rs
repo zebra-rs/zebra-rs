@@ -668,7 +668,7 @@ impl TlvEmitter for IsisTlvPadding {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisLspEntry {
     pub hold_time: u16,
     pub lsp_id: IsisLspId,
@@ -693,17 +693,6 @@ impl IsisLspEntry {
         }
     }
 }
-
-// impl From<IsisLsp> for IsisLspEntry {
-//     fn from(value: IsisLsp) -> Self {
-//         Self {
-//             hold_time: value.hold_time,
-//             lsp_id: value.lsp_id,
-//             seq_number: value.seq_number,
-//             checksum: value.checksum,
-//         }
-//     }
-// }
 
 #[derive(Debug, NomBE, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvLspEntries {

@@ -35,7 +35,7 @@ use super::ifsm::has_level;
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_advertise, srm_set_all};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_advertise, srm_set_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -231,11 +231,13 @@ impl Isis {
             }
             Message::AdjacencyUp(level, ifindex) => {
                 let sys_id = self.config.net.sys_id();
+
                 self.process_lsp_originate(level);
+
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                srm_set_all(&mut link, level);
+                srm_set_all_lsp(&mut link, level);
                 csnp_advertise(&mut link, level, sys_id);
             }
         }
@@ -323,8 +325,10 @@ impl Isis {
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
         let buf = lsp_emit(&mut lsp, level);
+        let lsp_id = lsp.lsp_id;
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
-        lsp_flood(&mut top, level, &buf);
+
+        lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -354,30 +358,21 @@ impl Isis {
         };
 
         // Emit and flood the purged LSP
-        tracing::info!("IsisLsp purge");
         let buf = lsp_emit(&mut purged_lsp, level);
-        lsp_flood(&mut top, level, &buf);
-
-        // Insert as self-originated so we track it
         insert_self_originate(&mut top, level, purged_lsp, None);
 
-        isis_event_trace!(
-            self.tracing,
-            LspPurge,
-            &level,
-            "Purged LSP {} with seq {}",
-            lsp_id,
-            seq_number
-        );
+        lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_dis_originate(&mut self, level: Level, ifindex: u32, base: Option<u32>) {
         let mut top = self.top();
+
         let mut lsp = dis_generate(&mut top, level, ifindex, base);
-        tracing::info!("IsisLsp dis originate");
+        let lsp_id = lsp.lsp_id;
         let buf = lsp_emit(&mut lsp, level);
-        lsp_flood(&mut top, level, &buf);
-        insert_self_originate(&mut top, level, lsp, None);
+        insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
+
+        lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
@@ -898,33 +893,16 @@ pub enum Packet {
     Bytes(BytesMut),
 }
 
-pub fn lsp_flood(top: &mut IsisTop, level: Level, buf: &BytesMut) {
-    let pdu_type = match level {
-        Level::L1 => IsisType::L1Lsp,
-        Level::L2 => IsisType::L2Lsp,
-    };
-
-    for (_, link) in top.links.iter() {
-        if link.state.level().capable(&pdu_type) {
-            if link.is_p2p() {
-                link.ptx.send(PacketMessage::Send(
-                    Packet::Bytes(buf.clone()),
-                    link.ifindex,
-                    level,
-                    link.dest(level),
-                ));
-            } else {
-                if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
-                    link.ptx.send(PacketMessage::Send(
-                        Packet::Bytes(buf.clone()),
-                        link.ifindex,
-                        level,
-                        link.dest(level),
-                    ));
-                }
-            }
-        }
-    }
+// TODO: We want to iterate &mut IsisTop. for calling lsdb::srm_set();
+pub fn lsp_flood(top: &mut IsisTop, level: Level, lsp_id: &IsisLspId) {
+    // let ifps: Vec<u32> = top.links.iter().map(|(ifindex, _)| *ifindex).collect();
+    // for ifindex in ifps.iter() {
+    //     if let Some(mut top) = top.link_top(*ifindex) {
+    //         if has_level(top.state.level(), level) {
+    //             lsdb::srm_set(&mut top, level, &lsp_id);
+    //         }
+    //     };
+    // }
 }
 
 pub fn serve(mut isis: Isis) {
