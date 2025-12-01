@@ -233,16 +233,6 @@ pub fn nfsm_p2p_hello_received(
 
     let mut state = nbr.state;
 
-    // isis_packet_trace!(
-    //     ntop.tracing,
-    //     Hello,
-    //     Receive,
-    //     &level,
-    //     "P2P Hello received on {} from {}",
-    //     nbr.ifindex,
-    //     nbr.sys_id
-    // );
-
     // Lookup three way handshake TLV.
     let three_way = p2ptlv(nbr);
     if let Some(tlv) = &three_way {
@@ -252,15 +242,7 @@ pub fn nfsm_p2p_hello_received(
     // When it is three way handshake.
     if state == NfsmState::Down {
         let next = NfsmState::Init;
-        isis_fsm_trace!(
-            ntop.tracing,
-            Nfsm,
-            false,
-            "[NFSM] {:?} -> {:?} on level {}",
-            state,
-            next,
-            level
-        );
+
         state = next;
 
         // Need to originate Hello for updating three way handshake.
@@ -279,28 +261,8 @@ pub fn nfsm_p2p_hello_received(
 
             nbr.event(Message::LspOriginate(level));
 
-            isis_fsm_trace!(
-                ntop.tracing,
-                Nfsm,
-                false,
-                "[NFSM] {:?} -> {:?} on level {}",
-                state,
-                next,
-                level
-            );
-
             state = next;
             let p2p = NfsmP2pState::Exchange;
-
-            isis_fsm_trace!(
-                ntop.tracing,
-                Nfsm,
-                false,
-                "[NFSM:P2P] {:?} -> {:?} level {}",
-                nbr.p2p,
-                p2p,
-                level
-            );
 
             nbr.p2p = p2p;
             nbr.event(Message::LspOriginate(level));
@@ -377,15 +339,6 @@ pub fn isis_nfsm(
     let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
 
     if let Some(new_state) = next_state {
-        // isis_fsm_trace!(
-        //     ntop.tracing,
-        //     Nfsm,
-        //     false,
-        //     "NFSM State Transition {:?} -> {:?} on level {}",
-        //     nbr.state,
-        //     new_state,
-        //     level
-        // );
         if new_state != nbr.state {
             nbr.prev = nbr.state;
             nbr.state = new_state;
@@ -410,7 +363,7 @@ pub fn isis_nfsm(
                 }
             }
 
-            // Neighbor comes up.
+            // Neighbor comes UP.
             if nbr.state == NfsmState::Up {
                 if let Some(local_pool) = ntop.local_pool {
                     // On P2P interface, start DB exchange.
@@ -418,17 +371,8 @@ pub fn isis_nfsm(
                         // Start DB exchange.
                         if nbr.sys_id < ntop.up_config.net.sys_id() {
                             // Master
-                            println!(
-                                "Master nbr {} self {}",
-                                nbr.sys_id,
-                                ntop.up_config.net.sys_id()
-                            );
                         } else {
-                            println!(
-                                "Slave nbr {} self {}",
-                                nbr.sys_id,
-                                ntop.up_config.net.sys_id()
-                            );
+                            // Slave
                         }
                     }
                     // Allocate adjacency SID when it is not yet.

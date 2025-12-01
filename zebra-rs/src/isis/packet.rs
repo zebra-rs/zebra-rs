@@ -454,6 +454,7 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
                             if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
                                 *top.state.adj.get_mut(&level) =
                                     Some((lsp.lsp_id.neighbor_id(), None));
+                                top.lsdb.get_mut(&level).adj_set(top.ifindex);
                                 top.tx.send(Message::LspOriginate(level)).unwrap();
                             }
                         }
