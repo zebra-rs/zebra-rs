@@ -114,13 +114,13 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
 #[isis_pdu_handler(Csnp, Recv)]
 pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
-    // Logging
-    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
-
     // Check link capability for the PDU type.
     if !has_level(top.state.level(), level) {
         return;
     }
+
+    // Logging
+    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -223,13 +223,13 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 
 #[isis_pdu_handler(Psnp, Recv)]
 pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
-    // Logging
-    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
-
     // Check link capability for the PDU type.
     if !has_level(top.state.level(), level) {
         return;
     }
+
+    // Logging
+    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -314,13 +314,13 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
 // SRM and SSN
 #[isis_pdu_handler(Lsp, Recv)]
 pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
-    // Logging.
-    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
-
     // Interface level check.
     if !has_level(top.state.level(), level) {
         return;
     }
+
+    // Logging.
+    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
