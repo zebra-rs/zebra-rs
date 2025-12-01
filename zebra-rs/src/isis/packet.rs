@@ -171,7 +171,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
                         // If the reported value is older than the database
                         // value, Clear SSNflag, and Set SRMflag.
                         lsdb::ssn_clear(top, level, &lsp.lsp_id);
-                        lsdb::srm_set(top, level, &lsp);
+                        lsdb::srm_set(top, level, &lsp.lsp_id);
                         lsdb.remove(&lsp.lsp_id);
                     }
                     None => {
@@ -207,16 +207,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // were not mentioned in the Complete Sequence Numbers PDU
     for (lsp_id, seq_number) in lsdb.iter() {
         if *seq_number != 0 {
-            lsdb::srm_set(
-                top,
-                level,
-                &IsisLspEntry {
-                    hold_time: 0,
-                    lsp_id: *lsp_id,
-                    seq_number: *seq_number,
-                    checksum: 0,
-                },
-            );
+            lsdb::srm_set(top, level, lsp_id);
         }
     }
 }
@@ -227,17 +218,17 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 // links) starts (or restarts), the IS shall
 //
 // a) set SRMflag for that circuit on all LSPs, and
-pub fn srm_set_all(top: &mut LinkTop, level: Level) {
+pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
     // Extract LSP entries first to avoid borrow checker issues.
-    let entries: Vec<IsisLspEntry> = top
+    let lsp_ids: Vec<IsisLspId> = top
         .lsdb
         .get(&level)
         .iter()
-        .map(|(_, lsa)| IsisLspEntry::from_lsp(&lsa.lsp))
+        .map(|(lsp_id, _)| lsp_id.clone())
         .collect();
 
-    for entry in entries {
-        lsdb::srm_set(top, level, &entry);
+    for lsp_id in lsp_ids.iter() {
+        lsdb::srm_set(top, level, lsp_id);
     }
 }
 
@@ -320,7 +311,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         // If the reported value is older than the database
                         // value, Clear SSNflag, and Set SRMflag.
                         lsdb::ssn_clear(top, level, &lsp.lsp_id);
-                        lsdb::srm_set(top, level, &lsp);
+                        lsdb::srm_set(top, level, &lsp.lsp_id);
                     }
                     None => {
                         // 7.3.15.2 b.5
@@ -398,7 +389,7 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
             lsdb::insert_lsp(top, level, lsp.clone(), bytes);
 
             // 2. Set SRMflag for that LSP for all circuits other than C.
-            lsdb::srm_set_other(top, level, &IsisLspEntry::from_lsp(&lsp));
+            lsdb::srm_set_other(top, level, &lsp.lsp_id);
 
             // 3. Clear SRMflag for C.
             lsdb::srm_clear(top, level, &lsp.lsp_id);
@@ -428,7 +419,7 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
             // 7.3.15.1 e.3
 
             // 1. Set SRMflag for C.
-            lsdb::srm_set(top, level, &IsisLspEntry::from_lsp(&lsp));
+            lsdb::srm_set(top, level, &lsp.lsp_id);
 
             // 2. Clear SSNflag for C.
             lsdb::ssn_clear(top, level, &lsp.lsp_id);

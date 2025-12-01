@@ -136,9 +136,12 @@ impl Lsdb {
         self.adj.get_mut(&ifindex)
     }
 
-    pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLspEntry, ifindex: u32) {
+    pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
         if let Some(flags) = self.adj.get_mut(&ifindex) {
-            flags.srm.set(lsp);
+            flags.srm.set(&IsisLspEntry {
+                lsp_id: *lsp_id,
+                ..Default::default()
+            });
             if flags.srm_timer.is_none() {
                 flags.srm_timer = Some(srm_timer(tx, level, ifindex));
             }
@@ -149,12 +152,15 @@ impl Lsdb {
         &mut self,
         tx: &MsgSender,
         level: Level,
-        lsp: &IsisLspEntry,
+        lsp_id: &IsisLspId,
         ifindex: u32,
     ) {
         for (link, flags) in self.adj.iter_mut() {
             if *link != ifindex {
-                flags.srm.set(lsp);
+                flags.srm.set(&IsisLspEntry {
+                    lsp_id: *lsp_id,
+                    ..Default::default()
+                });
                 if flags.srm_timer.is_none() {
                     flags.srm_timer = Some(srm_timer(tx, level, ifindex));
                 }
@@ -485,21 +491,22 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
         let mut lsp = lsp_clone_with_seqno_inc(&lsa.lsp);
         tracing::info!("IsisLsp packet");
         let buf = lsp_emit(&mut lsp, level);
-        lsp_flood(top, level, &buf);
-        insert_self_originate(top, level, lsp, None);
+        let lsp_id = lsp.lsp_id;
+        insert_self_originate(top, level, lsp, Some(buf.to_vec()));
+        lsp_flood(top, level, &lsp_id);
     }
 }
 
-pub fn srm_set(top: &mut LinkTop, level: Level, lsp: &IsisLspEntry) {
+pub fn srm_set(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
     top.lsdb
         .get_mut(&level)
-        .srm_set(top.tx, level, lsp, top.ifindex);
+        .srm_set(top.tx, level, lsp_id, top.ifindex);
 }
 
-pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp: &IsisLspEntry) {
+pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
     top.lsdb
         .get_mut(&level)
-        .srm_set_other(top.tx, level, lsp, top.ifindex);
+        .srm_set_other(top.tx, level, lsp_id, top.ifindex);
 }
 
 pub fn srm_clear(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
