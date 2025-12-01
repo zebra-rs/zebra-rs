@@ -598,55 +598,56 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
         return;
     }
 
-    match top.lsdb.get(&level).get(&lsp.lsp_id) {
-        Some(lsa) => match lsp.seq_number.cmp(&lsa.lsp.seq_number) {
-            Ordering::Greater => {
-                // 7.3.1.15.1 e.1
+    // 7.3.15.1 Action on receipt of a link state PDU
+    match top
+        .lsdb
+        .get(&level)
+        .get(&lsp.lsp_id)
+        .map(|lsa| lsp.seq_number.cmp(&lsa.lsp.seq_number))
+    {
+        None | Some(Ordering::Greater) => {
+            // 7.3.1.15.1 e.1
 
-                // 1. Store the new LSP in the database, overwriting the
-                //    existing database LSP for that source (if any) with the
-                //    received LSP.
-                lsdb::insert_lsp(top, level, lsp.clone(), bytes);
+            // 1. Store the new LSP in the database, overwriting the
+            //    existing database LSP for that source (if any) with the
+            //    received LSP.
+            lsdb::insert_lsp(top, level, lsp.clone(), bytes);
 
-                // 2. Set SRMflag for that LSP for all circuits other than C.
-                lsdb::srm_set_other(top, level, &lsp);
+            // 2. Set SRMflag for that LSP for all circuits other than C.
+            lsdb::srm_set_other(top, level, &lsp);
 
-                // 3. Clear SRMflag for C.
-                lsdb::srm_clear(top, level, &lsp);
+            // 3. Clear SRMflag for C.
+            lsdb::srm_clear(top, level, &lsp);
 
-                // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
-                if top.is_p2p() {
-                    lsdb::ssn_set(top, level, &lsp);
-                }
-
-                // 5. Clear SSNflag for that LSP for the circuits associated
-                //    with a linkage other than C.
-                lsdb::ssn_clear_other(top, level, &lsp);
+            // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
+            if top.is_p2p() {
+                lsdb::ssn_set(top, level, &lsp);
             }
-            Ordering::Equal => {
-                // 7.3.1.15 e.2
 
-                // 1. Clear SRMflag for C.
-                lsdb::srm_clear(top, level, &lsp);
+            // 5. Clear SSNflag for that LSP for the circuits associated
+            //    with a linkage other than C.
+            lsdb::ssn_clear_other(top, level, &lsp);
+        }
+        Some(Ordering::Equal) => {
+            // 7.3.1.15 e.2
 
-                // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
-                //    for C.
-                if top.is_p2p() {
-                    lsdb::ssn_set(top, level, &lsp);
-                }
+            // 1. Clear SRMflag for C.
+            lsdb::srm_clear(top, level, &lsp);
+
+            // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
+            //    for C.
+            if top.is_p2p() {
+                lsdb::ssn_set(top, level, &lsp);
             }
-            Ordering::Less => {
-                // 7.3.1.15 e.3
+        }
+        Some(Ordering::Less) => {
+            // 7.3.1.15 e.3
 
-                // 1. Set SRMflag for C.
-                lsdb::srm_set(top, level, &lsp);
+            // 1. Set SRMflag for C.
+            lsdb::srm_set(top, level, &lsp);
 
-                // 2. Clear SSNflag for C.
-                lsdb::ssn_clear(top, level, &lsp);
-            }
-        },
-        None => {
-            // TODO: Same as 7.3.1.15.1 e.1
+            // 2. Clear SSNflag for C.
+            lsdb::ssn_clear(top, level, &lsp);
         }
     }
 }
