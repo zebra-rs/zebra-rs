@@ -489,7 +489,7 @@ impl IsisCsnp {
 pub struct IsisPsnp {
     pub pdu_len: u16,
     pub source_id: IsisSysId,
-    pub source_id_curcuit: u8,
+    pub source_id_circuit: u8,
     #[nom(Parse = "IsisTlv::parse_tlvs")]
     pub tlvs: Vec<IsisTlv>,
 }
@@ -499,7 +499,7 @@ impl IsisPsnp {
         let pp = buf.len();
         buf.put_u16(self.pdu_len);
         buf.put(&self.source_id.id[..]);
-        buf.put_u8(self.source_id_curcuit);
+        buf.put_u8(self.source_id_circuit);
         self.tlvs.iter().for_each(|tlv| tlv.emit(buf));
         let pdu_len: u16 = buf.len() as u16;
         BigEndian::write_u16(&mut buf[pp..pp + 2], pdu_len);
@@ -683,18 +683,27 @@ impl IsisLspEntry {
         buf.put_u32(self.seq_number);
         buf.put_u16(self.checksum);
     }
-}
 
-impl From<IsisLsp> for IsisLspEntry {
-    fn from(value: IsisLsp) -> Self {
+    pub fn from_lsp(lsp: &IsisLsp) -> Self {
         Self {
-            hold_time: value.hold_time,
-            lsp_id: value.lsp_id,
-            seq_number: value.seq_number,
-            checksum: value.checksum,
+            hold_time: lsp.hold_time,
+            lsp_id: lsp.lsp_id,
+            seq_number: lsp.seq_number,
+            checksum: lsp.checksum,
         }
     }
 }
+
+// impl From<IsisLsp> for IsisLspEntry {
+//     fn from(value: IsisLsp) -> Self {
+//         Self {
+//             hold_time: value.hold_time,
+//             lsp_id: value.lsp_id,
+//             seq_number: value.seq_number,
+//             checksum: value.checksum,
+//         }
+//     }
+// }
 
 #[derive(Debug, NomBE, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvLspEntries {

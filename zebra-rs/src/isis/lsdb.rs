@@ -574,20 +574,13 @@ pub fn ssn_advertise(top: &mut LinkTop, level: Level, ifindex: u32, sys_id: Isis
     }
     // TODO: Need to check maximum packet size of the interface.
     let mut psnp = IsisPsnp {
-        pdu_len: 0,
         source_id: sys_id,
-        source_id_curcuit: 1,
-        tlvs: vec![],
+        source_id_circuit: 1,
+        ..Default::default()
     };
     let mut lsps = IsisTlvLspEntries::default();
-    while let Some((key, value)) = adj.ssn.0.pop_first() {
-        let entry = IsisLspEntry {
-            lsp_id: key,
-            hold_time: value.hold_time,
-            seq_number: value.seq_number,
-            checksum: value.checksum,
-        };
-        lsps.entries.push(entry);
+    while let Some((_, value)) = adj.ssn.0.pop_first() {
+        lsps.entries.push(value);
     }
     psnp.tlvs.push(lsps.into());
 
