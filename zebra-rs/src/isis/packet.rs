@@ -114,22 +114,13 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
 #[isis_pdu_handler(Csnp, Recv)]
 pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
-    if top.is_p2p() {
-        csnp_recv_p2p(top, level, pdu);
-    } else {
-        csnp_recv_lan(top, level, pdu);
-    }
-}
+    // Logging
+    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
 
-#[isis_pdu_handler(Csnp, Recv)]
-pub fn csnp_recv_p2p(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // Check link capability for the PDU type.
     if !has_level(top.state.level(), level) {
         return;
     }
-
-    // Logging
-    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -230,190 +221,20 @@ pub fn csnp_recv_p2p(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     }
 }
 
-#[isis_pdu_handler(Csnp, Recv)]
-pub fn csnp_recv_lan(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
-    // Check link capability for the PDU type.
-    if !has_level(top.state.level(), level) {
-        return;
-    }
-
-    // Logging
-    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
-
-    // Need to check CSNP came from Adjacency neighbor or Adjacency
-    // candidate neighbor?
-    if top.config.link_type().is_p2p() {
-        // TODO.  Find adjacency neighbor and check Exchange or Full.
-    } else {
-        let Some(dis) = &top.state.dis.get(&level) else {
-            isis_event_trace!(top.tracing, Dis, &level, "CSNP DIS was yet not selected");
-            return;
-        };
-
-        if pdu.source_id != *dis {
-            isis_event_trace!(
-                top.tracing,
-                Dis,
-                &level,
-                "CSNP came from {} non DIS neighbor {}",
-                pdu.source_id,
-                *dis
-            );
-            return;
-        }
-    }
-
-    // Local cache for LSDB.
-    let mut lsdb_locals: BTreeMap<IsisLspId, u32> = BTreeMap::new();
-    for (_, lsa) in top.lsdb.get(&level).iter() {
-        lsdb_locals.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
-    }
-
-    let mut req = IsisTlvLspEntries::default();
-    for tlv in &pdu.tlvs {
-        if let IsisTlv::LspEntries(lsps) = tlv {
-            for lsp in &lsps.entries {
-                // If LSP_ID is my own.
-                if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
-                    isis_pdu_trace!(top, &level, "[CSNP] {} Self LSP", lsp.lsp_id);
-                    if lsp.lsp_id.is_pseudo() {
-                        // tracing::info!("CSNP: Self DIS {}", lsp.lsp_id);
-                        // println!("LSP myown DIS hold_time {}", lsp.hold_time);
-                    } else {
-                        // tracing::info!("CSNP: Self LSP {}", lsp.lsp_id);
-                        if let Some(_local) = top.lsdb.get(&level).get(&lsp.lsp_id) {
-                            // tracing::info!(
-                            //     " Local Seq 0x{:04x} Remote Seq 0x{:04x}",
-                            //     local.lsp.seq_number,
-                            //     lsp.seq_number,
-                            // );
-                        }
-                    }
-                    // continue;
-                }
-
-                // Need to check sequence number.
-                isis_pdu_trace!(top, &level, "[CSNP] {} Processing", lsp.lsp_id);
-                match lsdb_locals.get(&lsp.lsp_id) {
-                    None => {
-                        // set_ssn();
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H: {} None",
-                            lsp.lsp_id,
-                            lsp.hold_time,
-                            lsp.seq_number,
-                        );
-                        if lsp.hold_time != 0 {
-                            // println!("LSP REQ New: {}", lsp.lsp_id);
-                            isis_database_trace!(top.tracing, Lsdb, &level, "Req: {}", lsp.lsp_id);
-                            let mut psnp = lsp.clone();
-                            psnp.seq_number = 0;
-                            req.entries.push(psnp);
-                        } else {
-                            // println!("LSP REQ New(Purged): {}", lsp.lsp_id);
-                        }
-                    }
-                    Some(&seq_number) if seq_number < lsp.seq_number => {
-                        isis_pdu_trace!(
-                            top,
-                            &level,
-                            "[CSNP] {} S:{:08x} H: {} seq:{:08x} < exiting seq:{:08x}",
-                            lsp.lsp_id,
-                            lsp.seq_number,
-                            lsp.hold_time,
-                            lsp.seq_number,
-                            seq_number,
-                        );
-                        // When local sequence number is smaller than remote.
-                        // set_ssn();
-                        isis_database_trace!(top.tracing, Lsdb, &level, "Upd: {}", lsp.lsp_id);
-                        let mut psnp = lsp.clone();
-                        psnp.seq_number = 0;
-                        req.entries.push(psnp);
-                    }
-                    Some(&seq_number) if seq_number > lsp.seq_number => {
-                        let msg = Message::Srm(
-                            lsp.lsp_id,
-                            level,
-                            format!("local seq {}, remote seq {}", seq_number, lsp.seq_number),
-                        );
-                        top.tx.send(msg);
-                    }
-                    Some(&_seq_number) if lsp.hold_time == 0 => {
-                        // purge_local() set srm();
-                    }
-                    _ => {
-                        //
-                    }
-                }
-                lsdb_locals.remove(&lsp.lsp_id);
-            }
-        }
-    }
-
-    if !lsdb_locals.is_empty() {
-        // Local need to flood.
-        // isis_event_trace!(
-        //     top.tracing,
-        //     Flooding,
-        //     &level,
-        //     "Flood plan on {}",
-        //     link.state.name
-        // );
-        // isis_event_trace!(top.tracing, Flooding, &level, "---------");
-
-        for (key, _flag) in lsdb_locals.iter() {
-            // Flood.
-            isis_event_trace!(top.tracing, Flooding, &level, "{}", key);
-            let lsa = top.lsdb.get(&level).get(key);
-            if let Some(lsa) = lsa {
-                let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
-
-                if !lsa.bytes.is_empty() {
-                    let mut buf = BytesMut::from(&lsa.bytes[..]);
-
-                    isis_packet::write_hold_time(&mut buf, hold_time);
-
-                    top.ptx.send(PacketMessage::Send(
-                        Packet::Bytes(buf),
-                        top.ifindex,
-                        level,
-                        top.dest(level),
-                    ));
-                }
-            }
-        }
-        // isis_event_trace!(top.tracing, Flooding, &level, "---------");
-    }
-    if !req.entries.is_empty() {
-        // Send PSNP.
-        let mut psnp = IsisPsnp {
-            pdu_len: 0,
-            source_id: top.up_config.net.sys_id(),
-            source_id_curcuit: 1,
-            tlvs: Vec::new(),
-        };
-        for e in req.entries.iter() {
-            tracing::info!("[PSNP] {} will be sent", e.lsp_id,);
-        }
-        psnp.tlvs.push(req.into());
-        isis_pdu_trace!(top, &level, "Send PSNP");
-
-        isis_psnp_send(top, top.ifindex, level, psnp);
-    }
-}
-
 #[isis_pdu_handler(Psnp, Recv)]
 pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
+    // Logging
+    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
+
     // Check link capability for the PDU type.
     if !has_level(top.state.level(), level) {
         return;
     }
 
-    // Logging
-    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
+    // Adjacency check.
+    if top.state.adj.get(&level).is_none() {
+        return;
+    }
 
     // 7.3.15.2 Action on receipt of a PSNP.
     for entry in pdu.tlvs.iter() {
