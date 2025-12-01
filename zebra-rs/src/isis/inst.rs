@@ -35,11 +35,14 @@ use super::ifsm::has_level;
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_advertise, srm_set_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std::fmt::Error>;
+
+pub type MsgSender = UnboundedSender<Message>;
+pub type PktSender = UnboundedSender<PacketMessage>;
 
 pub struct Isis {
     pub ctx: Context,
@@ -95,6 +98,7 @@ pub struct NeighborTop<'a> {
     pub tracing: &'a IsisTracing,
     pub local_pool: &'a mut Option<LabelPool>,
     pub up_config: &'a IsisConfig,
+    pub lsdb: &'a mut Levels<Lsdb>,
 }
 
 impl Isis {
@@ -183,6 +187,20 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
+            Message::SrmX(level, ifindex) => {
+                let sys_id = self.config.net.sys_id();
+                let Some(mut link) = self.link_top(ifindex) else {
+                    return;
+                };
+                lsdb::srm_advertise(&mut link, level, ifindex, sys_id);
+            }
+            Message::SsnX(level, ifindex) => {
+                let sys_id = self.config.net.sys_id();
+                let Some(mut link) = self.link_top(ifindex) else {
+                    return;
+                };
+                lsdb::ssn_advertise(&mut link, level, ifindex, sys_id);
+            }
             Message::Srm(lsp_id, level, reason) => {
                 self.process_srm(lsp_id, level, reason);
             }
@@ -213,6 +231,17 @@ impl Isis {
             }
             Message::Lsdb(ev, level, key) => {
                 self.process_lsdb(ev, level, key);
+            }
+            Message::AdjacencyUp(level, ifindex) => {
+                let sys_id = self.config.net.sys_id();
+
+                self.process_lsp_originate(level);
+
+                let Some(mut link) = self.link_top(ifindex) else {
+                    return;
+                };
+                srm_set_all_lsp(&mut link, level);
+                csnp_advertise(&mut link, level, sys_id);
             }
         }
     }
@@ -299,8 +328,10 @@ impl Isis {
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
         let buf = lsp_emit(&mut lsp, level);
-        lsp_flood(&mut top, level, &buf);
+        let lsp_id = lsp.lsp_id;
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
+
+        lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -330,30 +361,21 @@ impl Isis {
         };
 
         // Emit and flood the purged LSP
-        tracing::info!("IsisLsp purge");
         let buf = lsp_emit(&mut purged_lsp, level);
-        lsp_flood(&mut top, level, &buf);
-
-        // Insert as self-originated so we track it
         insert_self_originate(&mut top, level, purged_lsp, None);
 
-        isis_event_trace!(
-            self.tracing,
-            LspPurge,
-            &level,
-            "Purged LSP {} with seq {}",
-            lsp_id,
-            seq_number
-        );
+        lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_dis_originate(&mut self, level: Level, ifindex: u32, base: Option<u32>) {
         let mut top = self.top();
+
         let mut lsp = dis_generate(&mut top, level, ifindex, base);
-        tracing::info!("IsisLsp dis originate");
+        let lsp_id = lsp.lsp_id;
         let buf = lsp_emit(&mut lsp, level);
-        lsp_flood(&mut top, level, &buf);
-        insert_self_originate(&mut top, level, lsp, None);
+        insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
+
+        lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
@@ -422,6 +444,7 @@ impl Isis {
             tracing: &ltop.tracing,
             local_pool: &mut ltop.local_pool,
             up_config: &ltop.up_config,
+            lsdb: &mut ltop.lsdb,
         };
         let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
             return;
@@ -742,7 +765,6 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             }
         } else {
             // Point-to-point link, always use direct adjacency
-            println!("XXX {adj}");
             adj.clone()
         };
 
@@ -874,31 +896,12 @@ pub enum Packet {
     Bytes(BytesMut),
 }
 
-pub fn lsp_flood(top: &mut IsisTop, level: Level, buf: &BytesMut) {
-    let pdu_type = match level {
-        Level::L1 => IsisType::L1Lsp,
-        Level::L2 => IsisType::L2Lsp,
-    };
-
-    for (_, link) in top.links.iter() {
-        if link.state.level().capable(&pdu_type) {
-            if link.is_p2p() {
-                link.ptx.send(PacketMessage::Send(
-                    Packet::Bytes(buf.clone()),
-                    link.ifindex,
-                    level,
-                    link.dest(level),
-                ));
-            } else {
-                if *link.state.dis_status.get(&level) != DisStatus::NotSelected {
-                    link.ptx.send(PacketMessage::Send(
-                        Packet::Bytes(buf.clone()),
-                        link.ifindex,
-                        level,
-                        link.dest(level),
-                    ));
-                }
-            }
+pub fn lsp_flood(top: &mut IsisTop, level: Level, lsp_id: &IsisLspId) {
+    for (ifindex, link) in top.links.iter() {
+        if has_level(link.state.level(), level) {
+            top.lsdb
+                .get_mut(&level)
+                .srm_set(top.tx, level, lsp_id, *ifindex);
         }
     }
 }
@@ -1374,11 +1377,20 @@ pub enum Message {
     Srm(IsisLspId, Level, String),
     DisOriginate(Level, u32, Option<u32>),
     SpfCalc(Level),
+    SrmX(Level, u32),
+    SsnX(Level, u32),
+    AdjacencyUp(Level, u32),
 }
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Message::SrmX(level, ifindex) => {
+                write!(f, "[Message::SrmX({}:{})]", level, ifindex)
+            }
+            Message::SsnX(level, ifindex) => {
+                write!(f, "[Message::SsnX({}:{})]", level, ifindex)
+            }
             Message::Srm(lsp_id, level, _) => {
                 write!(f, "[Message::Srm({}, {})]", lsp_id, level)
             }
@@ -1398,6 +1410,9 @@ impl Display for Message {
             }
             Message::DisOriginate(level, _, _) => write!(f, "[Message::DisOriginate({})]", level),
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
+            Message::AdjacencyUp(level, ifindex) => {
+                write!(f, "[Message::AdjacencyUp({}:{})]", level, ifindex)
+            }
         }
     }
 }
