@@ -685,6 +685,17 @@ impl IsisLspEntry {
     }
 }
 
+impl From<IsisLsp> for IsisLspEntry {
+    fn from(value: IsisLsp) -> Self {
+        Self {
+            hold_time: value.hold_time,
+            lsp_id: value.lsp_id,
+            seq_number: value.seq_number,
+            checksum: value.checksum,
+        }
+    }
+}
+
 #[derive(Debug, NomBE, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvLspEntries {
     pub entries: Vec<IsisLspEntry>,

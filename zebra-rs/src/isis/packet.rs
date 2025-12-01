@@ -419,55 +419,65 @@ pub fn psnp_recv_p2p(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // Logging
     isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
 
-    // XXX
+    // 7.3.15.2 Action on receipt of a PSNP.
     for entry in pdu.tlvs.iter() {
         if let IsisTlv::LspEntries(tlv) = entry {
-            for entry in tlv.entries.iter() {
-                isis_pdu_trace!(
-                    top,
-                    &level,
-                    "[PSNP] {} Seq:{:08x} HoldTime:{}",
-                    entry.lsp_id,
-                    entry.seq_number,
-                    entry.hold_time,
-                );
-                if let Some(lsa) = top.lsdb.get(&level).get(&entry.lsp_id) {
-                    isis_database_trace!(
-                        top.tracing,
-                        Lsdb,
-                        &level,
-                        "PSNP REQ 0x{:04x} LSDB 0x{:04x}",
-                        entry.seq_number,
-                        lsa.lsp.seq_number
-                    );
-                    let hold_time =
-                        lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+            for lsp in tlv.entries.iter() {
+                match top
+                    .lsdb
+                    .get(&level)
+                    .get(&lsp.lsp_id)
+                    .map(|lsa| lsp.seq_number.cmp(&lsa.lsp.seq_number))
+                {
+                    Some(Ordering::Greater) => {
+                        // 7.3.15.2 b.4
+                        //
+                        // If the reported value is newer than the database
+                        // value, Set SSNflag, and if C is a non-broadcast
+                        // circuit Clear SRMflag.
+                        lsdb::ssn_set(top, level, lsp);
 
-                    if !lsa.bytes.is_empty() {
-                        tracing::info!("IsisLsp packet from PSNP (non emit)");
-                        let mut buf = BytesMut::from(&lsa.bytes[..]);
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                    }
+                    Some(Ordering::Equal) => {
+                        // 7.3.15.2 b.2
+                        //
+                        // If the reported value equals the database value and C
+                        // is a non-broadcast circuit, Clear SRMflag for C for
+                        // that LSP
+                        if top.is_p2p() {
+                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        }
+                    }
+                    Some(Ordering::Less) => {
+                        // 7.3.15.2 b.3
+                        //
+                        // If the reported value is older than the database
+                        // value, Clear SSNflag, and Set SRMflag.
+                        lsdb::ssn_clear(top, level, &lsp.lsp_id);
+                        lsdb::srm_set(top, level, &lsp);
+                    }
+                    None => {
+                        // 7.3.15.2 b.5
 
-                        isis_packet::write_hold_time(&mut buf, hold_time);
-
-                        top.ptx.send(PacketMessage::Send(
-                            Packet::Bytes(buf),
-                            top.ifindex,
-                            level,
-                            top.dest(level),
-                        ));
-                    } else {
-                        let mut lsp = lsa.lsp.clone();
-                        lsp.hold_time = hold_time;
-                        lsp.checksum = 0;
-                        tracing::info!("IsisLsp packet from PSNP (emit)");
-                        let buf = lsp_emit(&mut lsp, level);
-
-                        top.ptx.send(PacketMessage::Send(
-                            Packet::Bytes(buf),
-                            top.ifindex,
-                            level,
-                            top.dest(level),
-                        ));
+                        // If no database entry exists for the LSP, and the
+                        // reported Remaining Lifetime, Checksum and Sequence
+                        // Number fields of the LSP are all non-zero, create an
+                        // entry with sequence number 0 (see 7.3.16.1), and set
+                        // SSNflag for that entry and circuit C. Under no
+                        // circumstances shall SRMflag be set for such an LSP
+                        // with zero sequence number.
+                        if lsp.hold_time != 0 && lsp.checksum != 0 && lsp.seq_number != 0 {
+                            let lsp = IsisLspEntry {
+                                lsp_id: lsp.lsp_id,
+                                hold_time: lsp.hold_time,
+                                seq_number: 0,
+                                checksum: lsp.checksum,
+                            };
+                            lsdb::ssn_set(top, level, &lsp);
+                        }
                     }
                 }
             }
@@ -580,7 +590,7 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
         .map(|lsa| lsp.seq_number.cmp(&lsa.lsp.seq_number))
     {
         None | Some(Ordering::Greater) => {
-            // 7.3.1.15.1 e.1
+            // 7.3.15.1 e.1
 
             // 1. Store the new LSP in the database, overwriting the
             //    existing database LSP for that source (if any) with the
@@ -591,40 +601,40 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
             lsdb::insert_lsp(top, level, lsp.clone(), bytes);
 
             // 2. Set SRMflag for that LSP for all circuits other than C.
-            lsdb::srm_set_other(top, level, &lsp);
+            lsdb::srm_set_other(top, level, &lsp.clone().into());
 
             // 3. Clear SRMflag for C.
-            lsdb::srm_clear(top, level, &lsp);
+            lsdb::srm_clear(top, level, &lsp.lsp_id);
 
             // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
             if top.is_p2p() {
-                lsdb::ssn_set(top, level, &lsp);
+                lsdb::ssn_set(top, level, &lsp.clone().into());
             }
 
             // 5. Clear SSNflag for that LSP for the circuits associated
             //    with a linkage other than C.
-            lsdb::ssn_clear_other(top, level, &lsp);
+            lsdb::ssn_clear_other(top, level, &lsp.lsp_id);
         }
         Some(Ordering::Equal) => {
-            // 7.3.1.15 e.2
+            // 7.3.15.1 e.2
 
             // 1. Clear SRMflag for C.
-            lsdb::srm_clear(top, level, &lsp);
+            lsdb::srm_clear(top, level, &lsp.lsp_id);
 
             // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
             //    for C.
             if top.is_p2p() {
-                lsdb::ssn_set(top, level, &lsp);
+                lsdb::ssn_set(top, level, &lsp.clone().into());
             }
         }
         Some(Ordering::Less) => {
-            // 7.3.1.15 e.3
+            // 7.3.15.1 e.3
 
             // 1. Set SRMflag for C.
-            lsdb::srm_set(top, level, &lsp);
+            lsdb::srm_set(top, level, &lsp.clone().into());
 
             // 2. Clear SSNflag for C.
-            lsdb::ssn_clear(top, level, &lsp);
+            lsdb::ssn_clear(top, level, &lsp.lsp_id);
         }
     }
 }

@@ -758,7 +758,6 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             }
         } else {
             // Point-to-point link, always use direct adjacency
-            println!("XXX {adj}");
             adj.clone()
         };
 
