@@ -576,34 +576,6 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     }
 }
 
-// Send Sequence Numbers flag entry.
-pub struct SsnEntry {
-    pub seq_number: u32,
-    pub hold_time: u16,
-    pub checksum: u16,
-}
-
-// Send Sequence Numbers flag
-pub struct SsnFlags {
-    pub lsps: BTreeMap<IsisLspId, SsnEntry>,
-}
-
-impl SsnFlags {
-    // Set SSN flag for the LSP.
-    pub fn set(&mut self, lsp: &IsisLsp) {
-        let entry = SsnEntry {
-            seq_number: lsp.seq_number,
-            hold_time: lsp.hold_time,
-            checksum: lsp.checksum,
-        };
-    }
-
-    // Clear SSN flag for the LSP.
-    pub fn clear(&mut self, lsp_id: IsisLspId) {
-        //
-    }
-}
-
 // SRM and SSN
 #[isis_pdu_handler(Lsp, Recv)]
 pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
@@ -629,7 +601,7 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
     match top.lsdb.get(&level).get(&lsp.lsp_id) {
         Some(lsa) => match lsp.seq_number.cmp(&lsa.lsp.seq_number) {
             Ordering::Greater => {
-                // 7.3.1.15.1 e.
+                // 7.3.1.15.1 e.1
 
                 // 1. Store the new LSP in the database, overwriting the
                 //    existing database LSP for that source (if any) with the
@@ -643,58 +615,40 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
                 lsdb::srm_clear(top, level, &lsp, top.ifindex);
 
                 // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
-                // top.ssn_flags.get_mut(&level).set(&lsp);
-                lsdb::ssn_set(top, level, &lsp, top.ifindex);
+                if top.is_p2p() {
+                    lsdb::ssn_set(top, level, &lsp, top.ifindex);
+                }
 
                 // 5. Clear SSNflag for that LSP for the circuits associated
                 //    with a linkage other than C.
                 lsdb::ssn_clear_other(top, level, &lsp, top.ifindex);
             }
             Ordering::Equal => {
-                //
+                // 7.3.1.15 e.2
+
+                // 1. Clear SRMflag for C.
+                lsdb::srm_clear(top, level, &lsp, top.ifindex);
+
+                // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
+                //    for C.
+                if top.is_p2p() {
+                    lsdb::ssn_set(top, level, &lsp, top.ifindex);
+                }
             }
             Ordering::Less => {
-                //
+                // 7.3.1.15 e.3
+
+                // 1. Set SRMflag for C.
+                lsdb::srm_set(top, level, &lsp, top.ifindex);
+
+                // 2. Clear SSNflag for C.
+                lsdb::ssn_clear(top, level, &lsp, top.ifindex);
             }
         },
         None => {
-            // 7.3.1.15.1 e.
+            // TODO: Same as 7.3.1.15.1 e.1
         }
     }
-
-    // match top
-    //     .lsdb
-    //     .get(&level)
-    //     .and_then(|by_id| by_id.get(&lsp.lsp_id))
-    // {
-    //     Some(lsa) => match lsp.seq_number.cmp(&lsa.lsp.seq_number) {
-    //         Ordering::Greater => { /* ... */ }
-    //         Ordering::Equal => { /* Send Ack PSNP. */ }
-    //         Ordering::Less => { /* lsa_srm_schedule(top, lsp); */ }
-    //     },
-    //     None => { /* ... */ }
-    // }
-    // Lookup LSA.
-    // match top.lsdb.get(&level).get(&lsp.lsp_id) {
-    //     Some(lsa) => {
-    //         if lsp.seq_number > lsa.lsp.seq_number {
-    //             //
-    //         }
-    //         if lsa.lsp.seq_number == lsp.seq_number {
-    //             // Send Ack PSNP.
-    //         }
-    //         if lsp.seq_number < lsa.lsp.seq_number {
-    //             // Old sequence number LSA has been received.
-    //             // Set SRM flag to the interface to update sender's LSP.
-    //             //lsa_srm_schedule(top, lsp)
-    //         }
-    //     }
-    //     None => {
-    //         //
-    //     }
-    // }
-
-    // lsdb::insert_lsp(top, level, lsp, bytes, top.ifindex);
 }
 
 #[isis_pdu_handler(Lsp, Recv)]
