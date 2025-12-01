@@ -41,6 +41,9 @@ use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
+pub type MsgSender = UnboundedSender<Message>;
+pub type PktSender = UnboundedSender<PacketMessage>;
+
 pub struct Isis {
     pub ctx: Context,
     pub tx: UnboundedSender<Message>,
@@ -893,16 +896,14 @@ pub enum Packet {
     Bytes(BytesMut),
 }
 
-// TODO: We want to iterate &mut IsisTop. for calling lsdb::srm_set();
 pub fn lsp_flood(top: &mut IsisTop, level: Level, lsp_id: &IsisLspId) {
-    // let ifps: Vec<u32> = top.links.iter().map(|(ifindex, _)| *ifindex).collect();
-    // for ifindex in ifps.iter() {
-    //     if let Some(mut top) = top.link_top(*ifindex) {
-    //         if has_level(top.state.level(), level) {
-    //             lsdb::srm_set(&mut top, level, &lsp_id);
-    //         }
-    //     };
-    // }
+    for (ifindex, link) in top.links.iter() {
+        if has_level(link.state.level(), level) {
+            top.lsdb
+                .get_mut(&level)
+                .srm_set(top.tx, level, lsp_id, *ifindex);
+        }
+    }
 }
 
 pub fn serve(mut isis: Isis) {

@@ -14,7 +14,7 @@ use crate::isis::{
     srmpls::{LabelBlock, LabelConfig},
 };
 
-use super::inst::{Packet, PacketMessage};
+use super::inst::{MsgSender, Packet, PacketMessage};
 use super::link::LinkTop;
 use super::{
     Level,
@@ -197,9 +197,6 @@ impl Lsdb {
         }
     }
 }
-
-type MsgSender = UnboundedSender<Message>;
-type PktSender = UnboundedSender<PacketMessage>;
 
 fn lsdb_timer(tx: &MsgSender, level: Level, key: IsisLspId, tick: u16, ev: LsdbEvent) -> Timer {
     let tx = tx.clone();
