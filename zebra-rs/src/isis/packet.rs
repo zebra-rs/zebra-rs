@@ -606,43 +606,43 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
                 // 1. Store the new LSP in the database, overwriting the
                 //    existing database LSP for that source (if any) with the
                 //    received LSP.
-                lsdb::insert_lsp(top, level, lsp.clone(), bytes, top.ifindex);
+                lsdb::insert_lsp(top, level, lsp.clone(), bytes);
 
                 // 2. Set SRMflag for that LSP for all circuits other than C.
-                lsdb::srm_set_other(top, level, &lsp, top.ifindex);
+                lsdb::srm_set_other(top, level, &lsp);
 
                 // 3. Clear SRMflag for C.
-                lsdb::srm_clear(top, level, &lsp, top.ifindex);
+                lsdb::srm_clear(top, level, &lsp);
 
                 // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
                 if top.is_p2p() {
-                    lsdb::ssn_set(top, level, &lsp, top.ifindex);
+                    lsdb::ssn_set(top, level, &lsp);
                 }
 
                 // 5. Clear SSNflag for that LSP for the circuits associated
                 //    with a linkage other than C.
-                lsdb::ssn_clear_other(top, level, &lsp, top.ifindex);
+                lsdb::ssn_clear_other(top, level, &lsp);
             }
             Ordering::Equal => {
                 // 7.3.1.15 e.2
 
                 // 1. Clear SRMflag for C.
-                lsdb::srm_clear(top, level, &lsp, top.ifindex);
+                lsdb::srm_clear(top, level, &lsp);
 
                 // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
                 //    for C.
                 if top.is_p2p() {
-                    lsdb::ssn_set(top, level, &lsp, top.ifindex);
+                    lsdb::ssn_set(top, level, &lsp);
                 }
             }
             Ordering::Less => {
                 // 7.3.1.15 e.3
 
                 // 1. Set SRMflag for C.
-                lsdb::srm_set(top, level, &lsp, top.ifindex);
+                lsdb::srm_set(top, level, &lsp);
 
                 // 2. Clear SSNflag for C.
-                lsdb::ssn_clear(top, level, &lsp, top.ifindex);
+                lsdb::ssn_clear(top, level, &lsp);
             }
         },
         None => {
@@ -660,7 +660,7 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
     // Logging.
     isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
 
-    // Self LSP recieved.
+    // Self LSP received.
     if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
         // Self LSP logging.
         isis_event_trace!(
@@ -709,7 +709,7 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
                         &level,
                         "DIS I'm no longer DIS. Treat it as other LSP."
                     );
-                    lsdb::insert_lsp(top, level, lsp, bytes, top.ifindex);
+                    lsdb::insert_lsp(top, level, lsp, bytes);
                 }
             }
         } else {
@@ -803,7 +803,7 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
     if lsp.hold_time == 0 {
         lsdb::remove_lsp_link(top, level, lsp.lsp_id);
     } else {
-        lsdb::insert_lsp(top, level, lsp, bytes, top.ifindex);
+        lsdb::insert_lsp(top, level, lsp, bytes);
     }
 }
 
