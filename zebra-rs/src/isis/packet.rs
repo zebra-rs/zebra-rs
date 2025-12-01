@@ -131,17 +131,6 @@ pub fn csnp_recv_p2p(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // Logging
     isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
 
-    // Detail logging.
-    isis_pdu_trace!(top, &level, "[CSNP] ----");
-    for tlv in &pdu.tlvs {
-        if let IsisTlv::LspEntries(lsps) = tlv {
-            for lsp in &lsps.entries {
-                isis_pdu_trace!(top, &level, "[CSNP] {}", lsp.lsp_id);
-            }
-        }
-    }
-    isis_pdu_trace!(top, &level, "[CSNP] ----");
-
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
         return;
@@ -250,17 +239,6 @@ pub fn csnp_recv_lan(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 
     // Logging
     isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
-
-    // Detail logging.
-    isis_pdu_trace!(top, &level, "[CSNP] ----");
-    for tlv in &pdu.tlvs {
-        if let IsisTlv::LspEntries(lsps) = tlv {
-            for lsp in &lsps.entries {
-                isis_pdu_trace!(top, &level, "[CSNP] {}", lsp.lsp_id);
-            }
-        }
-    }
-    isis_pdu_trace!(top, &level, "[CSNP] ----");
 
     // Need to check CSNP came from Adjacency neighbor or Adjacency
     // candidate neighbor?
@@ -429,15 +407,6 @@ pub fn csnp_recv_lan(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 
 #[isis_pdu_handler(Psnp, Recv)]
 pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
-    if top.is_p2p() {
-        psnp_recv_p2p(top, level, pdu);
-    } else {
-        psnp_recv_lan(top, level, pdu);
-    }
-}
-
-#[isis_pdu_handler(Psnp, Recv)]
-pub fn psnp_recv_p2p(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // Check link capability for the PDU type.
     if !has_level(top.state.level(), level) {
         return;
@@ -505,72 +474,6 @@ pub fn psnp_recv_p2p(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                             };
                             lsdb::ssn_set(top, level, &lsp);
                         }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[isis_pdu_handler(Psnp, Recv)]
-pub fn psnp_recv_lan(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
-    // Check link capability for the PDU type.
-    if !has_level(top.state.level(), level) {
-        return;
-    }
-
-    // Logging
-    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
-
-    // XXX
-    for entry in pdu.tlvs.iter() {
-        if let IsisTlv::LspEntries(tlv) = entry {
-            for entry in tlv.entries.iter() {
-                isis_pdu_trace!(
-                    top,
-                    &level,
-                    "[PSNP] {} Seq:{:08x} HoldTime:{}",
-                    entry.lsp_id,
-                    entry.seq_number,
-                    entry.hold_time,
-                );
-                if let Some(lsa) = top.lsdb.get(&level).get(&entry.lsp_id) {
-                    isis_database_trace!(
-                        top.tracing,
-                        Lsdb,
-                        &level,
-                        "PSNP REQ 0x{:04x} LSDB 0x{:04x}",
-                        entry.seq_number,
-                        lsa.lsp.seq_number
-                    );
-                    let hold_time =
-                        lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
-
-                    if !lsa.bytes.is_empty() {
-                        tracing::info!("IsisLsp packet from PSNP (non emit)");
-                        let mut buf = BytesMut::from(&lsa.bytes[..]);
-
-                        isis_packet::write_hold_time(&mut buf, hold_time);
-
-                        top.ptx.send(PacketMessage::Send(
-                            Packet::Bytes(buf),
-                            top.ifindex,
-                            level,
-                            top.dest(level),
-                        ));
-                    } else {
-                        let mut lsp = lsa.lsp.clone();
-                        lsp.hold_time = hold_time;
-                        lsp.checksum = 0;
-                        tracing::info!("IsisLsp packet from PSNP (emit)");
-                        let buf = lsp_emit(&mut lsp, level);
-
-                        top.ptx.send(PacketMessage::Send(
-                            Packet::Bytes(buf),
-                            top.ifindex,
-                            level,
-                            top.dest(level),
-                        ));
                     }
                 }
             }
@@ -727,7 +630,6 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
                 if let Some(lan_id) = &top.state.lan_id.get(&level) {
                     if top.state.adj.get(&level).is_none() {
                         if lsp.lsp_id.neighbor_id() == *lan_id {
-                            // IS Neighbor include my LSP ID.
                             if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
                                 *top.state.adj.get_mut(&level) =
                                     Some((lsp.lsp_id.neighbor_id(), None));
