@@ -26,16 +26,39 @@ pub struct LsaFlagsEntry {
     pub checksum: u16,
 }
 
+impl LsaFlagsEntry {
+    pub fn from(lsp: &IsisLsp) -> Self {
+        Self {
+            seq_number: lsp.seq_number,
+            hold_time: lsp.hold_time,
+            checksum: lsp.checksum,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct LsaFlagsMap(BTreeMap<IsisLspId, LsaFlagsEntry>);
+
+impl LsaFlagsMap {
+    pub fn set(&mut self, lsa: &IsisLsp) {
+        self.0.insert(lsa.lsp_id, LsaFlagsEntry::from(lsa));
+    }
+
+    pub fn clear(&mut self, lsp_id: IsisLspId) {
+        self.0.remove(&lsp_id);
+    }
+}
+
 #[derive(Default)]
 pub struct LsaFlags {
-    srm: BTreeMap<IsisLspId, LsaFlagsEntry>,
-    ssn: BTreeMap<IsisLspId, LsaFlagsEntry>,
+    srm: LsaFlagsMap,
+    ssn: LsaFlagsMap,
 }
 
 #[derive(Default)]
 pub struct Lsdb {
     map: BTreeMap<IsisLspId, Lsa>,
-    adj: BTreeMap<u32, u32>,
+    adj: BTreeMap<u32, LsaFlags>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -99,8 +122,44 @@ impl Lsdb {
         self.adj.remove(&ifindex);
     }
 
-    pub fn set_flag() {
-        //
+    pub fn srm_set(&mut self, lsp: &IsisLsp, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.srm.set(lsp);
+        }
+    }
+
+    pub fn srm_set_other(&mut self, lsp: &IsisLsp, ifindex: u32) {
+        for (link, flags) in self.adj.iter_mut() {
+            if *link != ifindex {
+                flags.srm.set(lsp);
+            }
+        }
+    }
+
+    pub fn srm_clear(&mut self, lsp: &IsisLsp, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.srm.clear(lsp.lsp_id);
+        }
+    }
+
+    pub fn ssn_set(&mut self, lsp: &IsisLsp, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.ssn.set(lsp);
+        }
+    }
+
+    pub fn ssn_clear(&mut self, lsp: &IsisLsp, ifindex: u32) {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.ssn.clear(lsp.lsp_id);
+        }
+    }
+
+    pub fn ssn_clear_other(&mut self, lsp: &IsisLsp, ifindex: u32) {
+        for (link, flags) in self.adj.iter_mut() {
+            if *link != ifindex {
+                flags.ssn.clear(lsp.lsp_id);
+            }
+        }
     }
 }
 
@@ -410,18 +469,26 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     }
 }
 
+pub fn srm_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    top.lsdb.get_mut(&level).srm_set(lsp, ifindex);
+}
+
 pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    // top.lsdb.get(&level).srm_set_other(lsp, ifindex);
+    top.lsdb.get_mut(&level).srm_set_other(lsp, ifindex);
 }
 
 pub fn srm_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    //
+    top.lsdb.get_mut(&level).srm_clear(lsp, ifindex);
 }
 
 pub fn ssn_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    //
+    top.lsdb.get_mut(&level).ssn_set(lsp, ifindex);
+}
+
+pub fn ssn_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    top.lsdb.get_mut(&level).ssn_clear(lsp, ifindex);
 }
 
 pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp, ifindex: u32) {
-    //
+    top.lsdb.get_mut(&level).ssn_clear_other(lsp, ifindex);
 }

@@ -95,6 +95,7 @@ pub struct NeighborTop<'a> {
     pub tracing: &'a IsisTracing,
     pub local_pool: &'a mut Option<LabelPool>,
     pub up_config: &'a IsisConfig,
+    pub lsdb: &'a mut Levels<Lsdb>,
 }
 
 impl Isis {
@@ -422,6 +423,7 @@ impl Isis {
             tracing: &ltop.tracing,
             local_pool: &mut ltop.local_pool,
             up_config: &ltop.up_config,
+            lsdb: &mut ltop.lsdb,
         };
         let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
             return;

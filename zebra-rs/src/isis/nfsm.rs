@@ -272,8 +272,10 @@ pub fn nfsm_p2p_hello_received(
         if nfsm_p2ptlv_has_me(three_way, &ntop.up_config.net) {
             let next = NfsmState::Up;
 
+            // Set adjacency.
             *ntop.adj.get_mut(&level) =
                 Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
+            ntop.lsdb.get_mut(&level).adj_set(nbr.ifindex);
 
             nbr.event(Message::LspOriginate(level));
 
@@ -393,6 +395,7 @@ pub fn isis_nfsm(
                 if let Some((adj, _)) = ntop.adj.get(&level) {
                     if adj.sys_id() == nbr.sys_id {
                         *ntop.adj.get_mut(&level) = None;
+                        ntop.lsdb.get_mut(&level).adj_clear(nbr.ifindex);
                     }
                 }
 
