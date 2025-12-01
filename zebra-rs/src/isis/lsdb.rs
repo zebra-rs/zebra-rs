@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, Values};
 
+use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -13,7 +14,7 @@ use crate::isis::{
     srmpls::{LabelBlock, LabelConfig},
 };
 
-use super::inst::PacketMessage;
+use super::inst::{Packet, PacketMessage};
 use super::link::LinkTop;
 use super::{
     Level,
@@ -22,32 +23,15 @@ use super::{
 };
 
 #[derive(Default)]
-pub struct LsaFlagsEntry {
-    pub seq_number: u32,
-    pub hold_time: u16,
-    pub checksum: u16,
-}
-
-impl LsaFlagsEntry {
-    pub fn from(lsp: &IsisLsp) -> Self {
-        Self {
-            seq_number: lsp.seq_number,
-            hold_time: lsp.hold_time,
-            checksum: lsp.checksum,
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct LsaFlagsMap(BTreeMap<IsisLspId, LsaFlagsEntry>);
+pub struct LsaFlagsMap(BTreeMap<IsisLspId, IsisLspEntry>);
 
 impl LsaFlagsMap {
-    pub fn set(&mut self, lsa: &IsisLsp) {
-        self.0.insert(lsa.lsp_id, LsaFlagsEntry::from(lsa));
+    pub fn set(&mut self, lsp: &IsisLspEntry) {
+        self.0.insert(lsp.lsp_id, lsp.clone());
     }
 
-    pub fn clear(&mut self, lsp_id: IsisLspId) {
-        self.0.remove(&lsp_id);
+    pub fn clear(&mut self, lsp_id: &IsisLspId) {
+        self.0.remove(lsp_id);
     }
 }
 
@@ -152,7 +136,7 @@ impl Lsdb {
         self.adj.get_mut(&ifindex)
     }
 
-    pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLspEntry, ifindex: u32) {
         if let Some(flags) = self.adj.get_mut(&ifindex) {
             flags.srm.set(lsp);
             if flags.srm_timer.is_none() {
@@ -161,7 +145,13 @@ impl Lsdb {
         }
     }
 
-    pub fn srm_set_other(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    pub fn srm_set_other(
+        &mut self,
+        tx: &MsgSender,
+        level: Level,
+        lsp: &IsisLspEntry,
+        ifindex: u32,
+    ) {
         for (link, flags) in self.adj.iter_mut() {
             if *link != ifindex {
                 flags.srm.set(lsp);
@@ -172,13 +162,13 @@ impl Lsdb {
         }
     }
 
-    pub fn srm_clear(&mut self, lsp: &IsisLsp, ifindex: u32) {
+    pub fn srm_clear(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
         if let Some(flags) = self.adj.get_mut(&ifindex) {
-            flags.srm.clear(lsp.lsp_id);
+            flags.srm.clear(lsp_id);
         }
     }
 
-    pub fn ssn_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLsp, ifindex: u32) {
+    pub fn ssn_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLspEntry, ifindex: u32) {
         if let Some(flags) = self.adj.get_mut(&ifindex) {
             flags.ssn.set(lsp);
             if flags.ssn_timer.is_none() {
@@ -187,16 +177,16 @@ impl Lsdb {
         }
     }
 
-    pub fn ssn_clear(&mut self, lsp: &IsisLsp, ifindex: u32) {
+    pub fn ssn_clear(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
         if let Some(flags) = self.adj.get_mut(&ifindex) {
-            flags.ssn.clear(lsp.lsp_id);
+            flags.ssn.clear(&lsp_id);
         }
     }
 
-    pub fn ssn_clear_other(&mut self, lsp: &IsisLsp, ifindex: u32) {
+    pub fn ssn_clear_other(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
         for (link, flags) in self.adj.iter_mut() {
             if *link != ifindex {
-                flags.ssn.clear(lsp.lsp_id);
+                flags.ssn.clear(&lsp_id);
             }
         }
     }
@@ -326,8 +316,6 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
         top.hostname
             .get_mut(&level)
             .insert(key.sys_id(), tlv.hostname.clone());
-    } else {
-        top.hostname.get_mut(&level).remove(&key.sys_id());
     }
 
     if let Some(tlv) = lsp.cap {
@@ -503,51 +491,77 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     }
 }
 
-pub fn srm_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+pub fn srm_set(top: &mut LinkTop, level: Level, lsp: &IsisLspEntry) {
     top.lsdb
         .get_mut(&level)
         .srm_set(top.tx, level, lsp, top.ifindex);
 }
 
-pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+pub fn srm_set_other(top: &mut LinkTop, level: Level, lsp: &IsisLspEntry) {
     top.lsdb
         .get_mut(&level)
         .srm_set_other(top.tx, level, lsp, top.ifindex);
 }
 
-pub fn srm_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
-    top.lsdb.get_mut(&level).srm_clear(lsp, top.ifindex);
+pub fn srm_clear(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb.get_mut(&level).srm_clear(lsp_id, top.ifindex);
 }
 
-pub fn ssn_set(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
+pub fn ssn_set(top: &mut LinkTop, level: Level, lsp: &IsisLspEntry) {
     top.lsdb
         .get_mut(&level)
         .ssn_set(top.tx, level, lsp, top.ifindex);
 }
 
-pub fn ssn_clear(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
-    top.lsdb.get_mut(&level).ssn_clear(lsp, top.ifindex);
+pub fn ssn_clear(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb.get_mut(&level).ssn_clear(lsp_id, top.ifindex);
 }
 
-pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp: &IsisLsp) {
-    top.lsdb.get_mut(&level).ssn_clear_other(lsp, top.ifindex);
+pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
+    top.lsdb
+        .get_mut(&level)
+        .ssn_clear_other(&lsp_id, top.ifindex);
 }
 
-pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32, sys_id: IsisSysId) {
-    let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) else {
-        return;
+pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32, _sys_id: IsisSysId) {
+    // Extract SRM entries first to avoid borrow checker issues.
+    let srm_entries: Vec<IsisLspId> = {
+        let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) else {
+            return;
+        };
+        adj.srm_timer = None;
+
+        if adj.srm.0.is_empty() {
+            return;
+        }
+
+        adj.srm.0.keys().cloned().collect()
     };
-    adj.srm_timer = None;
 
-    if adj.ssn.0.is_empty() {
-        return;
+    // Send LSPs for each SRM entry.
+    for lsp_id in srm_entries {
+        let lsdb = top.lsdb.get(&level);
+        if let Some(lsa) = lsdb.get(&lsp_id) {
+            let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
+
+            if !lsa.bytes.is_empty() {
+                let mut buf = BytesMut::from(&lsa.bytes[..]);
+                isis_packet::write_hold_time(&mut buf, hold_time);
+
+                top.ptx.send(PacketMessage::Send(
+                    Packet::Bytes(buf),
+                    ifindex,
+                    level,
+                    top.dest(level),
+                ));
+            }
+        }
+
+        // Clear SRM flag after sending.
+        if let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) {
+            adj.srm.0.remove(&lsp_id);
+        }
     }
-
-    // while let Some((key, value)) = adj.srm.0.pop_first() {
-    //     if let Some(lsa) = top.lsdb.get_mut(&level).get(&key) {
-    //         //
-    //     }
-    // }
 }
 
 pub fn ssn_advertise(top: &mut LinkTop, level: Level, ifindex: u32, sys_id: IsisSysId) {
