@@ -486,7 +486,6 @@ fn lsp_clone_with_seqno_inc(lsp: &IsisLsp) -> IsisLsp {
 pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     if let Some(lsa) = top.lsdb.get(&level).get(&key) {
         let mut lsp = lsp_clone_with_seqno_inc(&lsa.lsp);
-        tracing::info!("IsisLsp packet");
         let buf = lsp_emit(&mut lsp, level);
         let lsp_id = lsp.lsp_id;
         insert_self_originate(top, level, lsp, Some(buf.to_vec()));

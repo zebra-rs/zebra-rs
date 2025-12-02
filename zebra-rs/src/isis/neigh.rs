@@ -30,7 +30,7 @@ pub struct Neighbor {
     // State
     // pub prev: NfsmState,
     pub state: NfsmState,
-    pub dis: bool,
+    pub is_dis: bool,
     // Addrs
     pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: Vec<Ipv6Addr>,
@@ -64,7 +64,7 @@ impl Neighbor {
             laddr6: Vec::new(),
             mac,
             hold_timer: None,
-            dis: false,
+            is_dis: false,
             circuit_id: None,
             hold_time: 0,
             tlvs: vec![],
@@ -73,7 +73,7 @@ impl Neighbor {
     }
 
     pub fn is_dis(&self) -> bool {
-        self.dis
+        self.is_dis
     }
 
     pub fn event(&self, message: Message) {

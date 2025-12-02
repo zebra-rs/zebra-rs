@@ -155,6 +155,7 @@ fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
     nbr.laddr6 = laddr6;
 }
 
+// XXX
 pub fn nfsm_hello_received(
     ntop: &mut NeighborTop,
     nbr: &mut Neighbor,
@@ -166,46 +167,63 @@ pub fn nfsm_hello_received(
     let mut state = nbr.state;
 
     if state == NfsmState::Down {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        // 8.4.2.5.1
+        // The IS shall set the adjacencyState of the adjacency to
+        // “initialising”, until it is known that the communication between this
+        // system and the source of the PDU (R) is two-way. However R shall be
+        // included in future Level n LAN IIH PDUs transmitted by this system.
         state = NfsmState::Init;
     }
 
     if state == NfsmState::Init {
+        // 8.4.2.5.1
+        // When R reports the local system’s SNPA address in its Level n LAN IIH PDUs, the IS shall
+        // d) set the adjacency’s adjacencyState to “Up”, and
+        // e) generate an adjacencyStateChange (Up)” event.
         if nfsm_hello_has_mac(&nbr.tlvs, mac) {
-            println!("===== DIS =====");
-            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Up;
+            // XXX Adjacency(Up)
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
         }
     } else {
+        // 8.4.2.5.3
+        //
+        // If a Level n LAN IIH PDU is received from neighbour N, and this
+        // system’s lANAddress is no longer in N’s IIH PDU, the IS shall
+        //
+        // a) set the adjacency’s adjacencyState to “initialising”, and
+        // b) generate an adjacencyStateChange (Down) event.
         if !nfsm_hello_has_mac(&nbr.tlvs, mac) {
-            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
             state = NfsmState::Init;
+            // XXX Adjacency(Down)
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
         }
     }
 
-    if state == NfsmState::Up
-        && nbr.is_dis()
-        && !nbr.lan_id.is_empty()
-        && ntop.dis.get(&level).is_some()
-        && ntop.lan_id.get(&level).is_none()
-    {
-        *ntop.lan_id.get_mut(&level) = Some(nbr.lan_id.clone());
-        isis_fsm_trace!(
-            ntop.tracing,
-            Nfsm,
-            true,
-            "DIS LAN ID is set in Hello {} on level {}",
-            nbr.lan_id,
-            level
-        );
+    // Need to move to prev func?
+    // Update neighbor's IP address from the Hello packet.
+    nfsm_ifaddr_update(nbr, ntop.local_pool);
+
+    // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
+    // holdingTimer) for each “Ln Intermediate System” adjacency.
+    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+    tracing::info!("Hello Recv:LAN ID {}", nbr.lan_id);
+
+    // When Neighbor is DIS and LAN id is not yet set...
+    if nbr.is_dis() && !nbr.lan_id.is_empty() && ntop.adj.get(&level).is_none() {
+        tracing::info!("Hello Recv:DIS get LAN Id in Hello packet (Setting Adj)");
+        *ntop.adj.get_mut(&level) = Some((nbr.lan_id, None));
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        nbr.event(Message::LspOriginate(level));
+    }
+
+    // When neighbor state has been changed.
+    if nbr.state != state {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
-    nfsm_ifaddr_update(nbr, ntop.local_pool);
-
-    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
-
-    if state != nbr.state {
+    if nbr.state != state {
         Some(state)
     } else {
         None

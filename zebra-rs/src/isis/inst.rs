@@ -92,8 +92,7 @@ pub struct IsisTop<'a> {
 
 pub struct NeighborTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
-    pub dis: &'a mut Levels<Option<IsisSysId>>,
-    pub lan_id: &'a mut Levels<Option<IsisNeighborId>>,
+    //pub lan_id: &'a mut Levels<Option<IsisNeighborId>>,
     pub adj: &'a mut Levels<Option<(IsisNeighborId, Option<MacAddr>)>>,
     pub tracing: &'a IsisTracing,
     pub local_pool: &'a mut Option<LabelPool>,
@@ -438,8 +437,7 @@ impl Isis {
         };
         let mut ntop = NeighborTop {
             tx: &ltop.tx,
-            dis: &mut ltop.state.dis,
-            lan_id: &mut ltop.state.lan_id,
+            // lan_id: &mut ltop.state.lan_id,
             adj: &mut ltop.state.adj,
             tracing: &ltop.tracing,
             local_pool: &mut ltop.local_pool,
@@ -464,7 +462,6 @@ impl Isis {
         let mut top = self.top();
         match ev {
             RefreshTimerExpire => {
-                tracing::info!("IsisLsp refresh_lsp");
                 lsdb::refresh_lsp(&mut top, level, key);
             }
             HoldTimerExpire => {
@@ -745,33 +742,10 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             continue;
         };
 
-        // Determine the correct neighbor ID
-        let neighbor_id = if !link.is_p2p() {
-            // On LAN, check if we're DIS or not
-            match link.state.dis_status.get(&level) {
-                DisStatus::Myself => {
-                    // We are DIS, use direct adjacency
-                    adj.clone()
-                }
-                DisStatus::Other | DisStatus::NotSelected => {
-                    // We're not DIS, reference the pseudonode if available
-                    if let Some(lan_id) = link.state.lan_id.get(&level) {
-                        lan_id.clone()
-                    } else {
-                        // No DIS selected yet, use direct adjacency
-                        adj.clone()
-                    }
-                }
-            }
-        } else {
-            // Point-to-point link, always use direct adjacency
-            adj.clone()
-        };
-
         // Ext IS Reach.
         let mut ext_is_reach = IsisTlvExtIsReach::default();
         let mut is_reach = IsisTlvExtIsReachEntry {
-            neighbor_id,
+            neighbor_id: adj.clone(),
             metric: link.config.metric(),
             subs: Vec::new(),
         };
