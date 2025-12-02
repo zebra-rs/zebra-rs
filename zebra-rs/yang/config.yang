@@ -608,6 +608,7 @@ module config {
       ext:sort "20";
       key "if-name";
       leaf if-name {
+        ext:dynamic "rib:interface";
         type string;
       }
       container ipv4 {
