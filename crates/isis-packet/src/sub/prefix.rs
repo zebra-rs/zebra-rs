@@ -264,7 +264,6 @@ impl TlvEmitter for IsisTlvExtIpReach {
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        println!("IsisTlvExtIpReach emit");
         self.entries.iter().for_each(|entry| entry.emit(buf));
     }
 }

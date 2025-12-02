@@ -333,7 +333,6 @@ pub struct IsisLsp {
 
 impl IsisLsp {
     pub fn emit(&self, buf: &mut BytesMut) {
-        println!("IsisLsp emit");
         let pp = buf.len();
         buf.put_u16(self.pdu_len);
         buf.put_u16(self.hold_time);
