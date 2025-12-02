@@ -396,7 +396,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         if prev_state == new_state {
             return;
         }
-        bgp_info!("FSM: {:?} -> {:?}", prev_state, new_state);
+        // bgp_info!("FSM: {:?} -> {:?}", prev_state, new_state);
 
         let peer = bgp.peers.get_mut(&id).unwrap();
         if prev_state.is_established() && !peer.state.is_established() {
@@ -440,7 +440,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         if prev_state == peer.state {
             return;
         }
-        bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
+        // bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
 
         if prev_state.is_established() && !peer.state.is_established() {
             peer.instant = Some(Instant::now());
@@ -512,13 +512,11 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     }
 
     if peer.state != State::OpenSent {
-        println!("peer state mismatch {:?}", peer.state);
         // Send notification.
         return State::Idle;
     }
     if packet.asn as u32 != peer.peer_as {
         // Send notification.
-        println!("ASN mismatch");
         return State::Idle;
     }
     // TODO: correct router-id validation.
@@ -642,7 +640,6 @@ pub fn peer_packet_parse(
                     let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
                 }
                 BgpPacket::Notification(p) => {
-                    println!("{}", p);
                     let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
                 }
                 BgpPacket::Update(p) => {
@@ -681,7 +678,6 @@ pub async fn peer_read(
                             buf = remain;
                         }
                         Err(err) => {
-                            println!("Packet Parse Error: {}", err);
                             let _ = tx.send(Message::Event(ident, Event::ConnFail));
                             return;
                         }
@@ -689,7 +685,6 @@ pub async fn peer_read(
                 }
             }
             Err(err) => {
-                println!("{:?}", err);
                 let _ = tx.send(Message::Event(ident, Event::ConnFail));
             }
         }
@@ -733,7 +728,6 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
                 let _ = tx.send(Message::Event(ident, Event::Connected(stream)));
             }
             Err(err) => {
-                println!("{:?}", err);
                 let _ = tx.send(Message::Event(ident, Event::ConnFail));
             }
         };
@@ -818,12 +812,12 @@ fn handle_peer_connection(
     if let Some(peer) = bgp.peers.get_mut(&peer_addr) {
         match peer.state {
             State::Idle => {
-                bgp_info!("Idle state, rejecting remote connection from {}", peer_addr);
+                // bgp_info!("Idle state, rejecting remote connection from {}", peer_addr);
                 None
             }
             State::Connect => {
                 // Cancel connect task.
-                bgp_info!("Connect state, cancel connection then accept {}", peer_addr);
+                //bgp_info!("Connect state, cancel connection then accept {}", peer_addr);
                 peer.task.connect = None;
                 peer.state = fsm_connected(peer, stream);
                 None
@@ -842,10 +836,10 @@ fn handle_peer_connection(
                 None
             }
             State::Established => {
-                bgp_info!(
-                    "Established state, rejecting remote connection from {}",
-                    peer_addr
-                );
+                // bgp_info!(
+                //     "Established state, rejecting remote connection from {}",
+                //     peer_addr
+                // );
                 None
             }
         }
