@@ -134,10 +134,10 @@ impl Bgp {
             Message::Event(peer, event) => {
                 match event {
                     Event::BGPOpen(ref msg) => {
-                        print!("{}", msg);
+                        // print!("{}", msg);
                     }
                     Event::UpdateMsg(ref msg) => {
-                        print!("{}", msg);
+                        // print!("{}", msg);
                     }
                     Event::KeepAliveMsg => {
                         // println!("KeepAlive:");
@@ -255,7 +255,6 @@ impl Bgp {
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
-                                println!("IPv6 connection accepted from: {}", sockaddr);
                                 if let Err(e) = tx_ipv6.send(Message::Accept(socket, sockaddr)) {
                                     eprintln!("Failed to send Accept message: {}", e);
                                     break;
