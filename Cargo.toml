@@ -5,6 +5,7 @@ members = [
   "vtyctl",
   "vtyhelper",
   "crates/bgp-packet",
+  "crates/bgp-macros",
   "crates/isis-packet",
   "crates/isis-macros",
   "crates/ospf-packet",
