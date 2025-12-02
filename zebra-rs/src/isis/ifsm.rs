@@ -293,7 +293,7 @@ pub fn stop(ltop: &mut LinkTop) {
 pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
     let tx = ltop.tx.clone();
     let ifindex = ltop.ifindex;
-    Timer::once(1, move || {
+    Timer::once(0, move || {
         let tx = tx.clone();
         async move {
             tx.send(Message::DisOriginate(level, ifindex, None))
