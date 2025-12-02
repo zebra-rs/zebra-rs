@@ -31,7 +31,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // Logging.
     isis_pdu_trace!(link, &level, "[Hello] recv on link {}", link.state.name);
 
-    // Create or update neighbor for this level
+    // 8.4.2.5 New adjacencies
     let nbr = link
         .state
         .nbrs
@@ -45,14 +45,28 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
             mac,
         ));
 
-    // Update parameters.
+    // 8.4.2 Broadcast subnetwork IIH PDUs
+    //
+    // Level n LAN IIH PDUs contain the transmitting Intermediate system’s ID,
+    // holding timer, Level n Priority and manual-AreaAddresses, plus a list
+    // containing the lANAddresses of all the adjacencies of neighbourSystemType
+    // “Ln Intermediate System” (in adjacencyState “Initialising” or “Up”) on
+    // this circuit.
+    //
+    // a) set neighbourSystemType to “Ln Intermediate System” (where n is the
+    //    level of the IIH PDU),
+    // b) set the holdingTimer, priorityOfNeighbour, neighbour-SystemID and
+    //    areaAddressesOfNeighbour according to the values in the PDU., and
+    // c) set the neighbourSNPAAddress according to the MAC source address of
+    //    the PDU.
     nbr.circuit_type = pdu.circuit_type;
     nbr.hold_time = pdu.hold_time;
-    nbr.tlvs = pdu.tlvs;
-
-    // Update LAN Hello only parameters.
     nbr.priority = pdu.priority;
     nbr.lan_id = pdu.lan_id;
+    nbr.mac = mac;
+
+    // Store Hello packet TLV to neighbor for further processing.
+    nbr.tlvs = pdu.tlvs;
 
     // NFSM event.
     link.tx.send(Message::Nfsm(
@@ -99,6 +113,8 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // Update parameters.
         nbr.circuit_type = pdu.circuit_type;
         nbr.hold_time = pdu.hold_time;
+
+        // Store Hello packet TLV to neighbor for further processing.
         nbr.tlvs = pdu.tlvs.clone();
 
         // NFSM event.
@@ -339,18 +355,9 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     }
 }
 
-#[isis_pdu_handler(Lsp, Recv)]
-pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
-    if top.is_p2p() {
-        lsp_recv_p2p(top, level, lsp, bytes);
-    } else {
-        lsp_recv_lan(top, level, lsp, bytes);
-    }
-}
-
 // SRM and SSN
 #[isis_pdu_handler(Lsp, Recv)]
-pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
+pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     // Interface level check.
     if !has_level(top.state.level(), level) {
         return;
@@ -358,6 +365,20 @@ pub fn lsp_recv_p2p(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
 
     // Logging.
     isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
+
+    // Temp.
+    if lsp.lsp_id.is_pseudo() {
+        isis_pdu_trace!(top, &level, "[DIS LSP] recv on link {}", top.state.name);
+        if *top.state.dis_status.get(&level) == DisStatus::Other {
+            if top.state.adj.get(&level).is_none() {
+                if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
+                    *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
+                    top.lsdb.get_mut(&level).adj_set(top.ifindex);
+                    top.tx.send(Message::LspOriginate(level)).unwrap();
+                }
+            }
+        }
+    }
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -485,16 +506,12 @@ pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8
                 //
             }
             DisStatus::Other => {
-                if let Some(lan_id) = &top.state.lan_id.get(&level) {
-                    if top.state.adj.get(&level).is_none() {
-                        if lsp.lsp_id.neighbor_id() == *lan_id {
-                            if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-                                *top.state.adj.get_mut(&level) =
-                                    Some((lsp.lsp_id.neighbor_id(), None));
-                                top.lsdb.get_mut(&level).adj_set(top.ifindex);
-                                top.tx.send(Message::LspOriginate(level)).unwrap();
-                            }
-                        }
+                // When DIS is other, check if received pseudonode LSP contains our neighbor ID.
+                if top.state.adj.get(&level).is_none() {
+                    if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
+                        *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
+                        top.lsdb.get_mut(&level).adj_set(top.ifindex);
+                        top.tx.send(Message::LspOriginate(level)).unwrap();
                     }
                 }
             }
