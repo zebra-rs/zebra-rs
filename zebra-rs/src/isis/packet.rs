@@ -258,7 +258,7 @@ pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
 pub fn csnp_advertise(top: &mut LinkTop, level: Level, sys_id: IsisSysId) {
     let mut csnp = IsisCsnp {
         source_id: sys_id,
-        source_id_circuit: 1,
+        source_id_circuit: 0,
         start: IsisLspId::start(),
         end: IsisLspId::end(),
         ..Default::default()
