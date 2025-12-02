@@ -284,7 +284,7 @@ impl FibHandle {
             }
         }
 
-        println!("gid: {gid} refcnt: {refcnt}");
+        // println!("gid: {gid} refcnt: {refcnt}");
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;

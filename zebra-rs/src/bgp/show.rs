@@ -973,8 +973,6 @@ fn uptime(instant: &Option<Instant>) -> String {
 }
 
 fn fetch(peer: &Peer) -> Neighbor<'_> {
-    println!("{}", peer.cap_send);
-    println!("{}", peer.cap_recv);
     let mut n = Neighbor {
         address: peer.address,
         remote_as: peer.peer_as,
