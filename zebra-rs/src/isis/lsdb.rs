@@ -578,7 +578,7 @@ pub fn ssn_advertise(top: &mut LinkTop, level: Level, ifindex: u32, sys_id: Isis
     // TODO: Need to check maximum packet size of the interface.
     let mut psnp = IsisPsnp {
         source_id: sys_id,
-        source_id_circuit: 1,
+        source_id_circuit: 0,
         ..Default::default()
     };
     let mut lsps = IsisTlvLspEntries::default();

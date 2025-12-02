@@ -184,6 +184,7 @@ pub fn nfsm_hello_received(
             state = NfsmState::Up;
             // XXX Adjacency(Up)
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+            ntop.lsdb.get_mut(&level).adj_set(nbr.ifindex);
         }
     } else {
         // 8.4.2.5.3
