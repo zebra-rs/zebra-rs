@@ -148,6 +148,18 @@ impl Lsdb {
         }
     }
 
+    pub fn srm_set_all(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
+        for (link, flags) in self.adj.iter_mut() {
+            flags.srm.set(&IsisLspEntry {
+                lsp_id: *lsp_id,
+                ..Default::default()
+            });
+            if flags.srm_timer.is_none() {
+                flags.srm_timer = Some(srm_timer(tx, level, ifindex));
+            }
+        }
+    }
+
     pub fn srm_set_other(
         &mut self,
         tx: &MsgSender,
@@ -432,7 +444,12 @@ pub fn insert_self_originate(
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
-pub fn insert_self_originate_link(top: &mut LinkTop, level: Level, lsp: IsisLsp) -> Option<Lsa> {
+pub fn insert_self_originate_link(
+    top: &mut LinkTop,
+    level: Level,
+    lsp: IsisLsp,
+    bytes: Option<Vec<u8>>,
+) -> Option<Lsa> {
     let key = lsp.lsp_id.clone();
     let mut lsa = Lsa::new(lsp);
     lsa.originated = true;
@@ -457,6 +474,9 @@ pub fn insert_self_originate_link(top: &mut LinkTop, level: Level, lsp: IsisLsp)
     }
 
     lsa.refresh_timer = Some(refresh_timer(top.tx, level, key, refresh_time));
+    if let Some(bytes) = bytes {
+        lsa.bytes = bytes;
+    }
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
