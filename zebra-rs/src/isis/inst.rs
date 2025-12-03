@@ -324,9 +324,9 @@ impl Isis {
     }
 
     fn process_lsp_originate(&mut self, level: Level) {
-        tracing::info!("[LSPOriginate]");
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
+        tracing::info!("[LSP:Gen] {}", lsp.lsp_id);
         let buf = lsp_emit(&mut lsp, level);
         let lsp_id = lsp.lsp_id;
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
@@ -418,8 +418,8 @@ impl Isis {
                     ifsm::dis_selection(&mut top, level);
                 }
                 None => {
-                    ifsm::dis_selection(&mut top, Level::L1);
-                    ifsm::dis_selection(&mut top, Level::L2);
+                    // ifsm::dis_selection(&mut top, Level::L1);
+                    // ifsm::dis_selection(&mut top, Level::L2);
                 }
             },
         }

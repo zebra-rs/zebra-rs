@@ -358,9 +358,11 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 })
     }
 
+    tracing::info!("DIS selection start");
+
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);
-    let old_sys_id = *link.state.dis_sys_id.get(&level);
+    // let old_sys_id = *link.state.dis_sys_id.get(&level);
 
     // When curr is None, current candidate DIS is myself.
     let mut best_sys_id: Option<IsisSysId> = None;
@@ -435,7 +437,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     tracing::info!("DIS selection {:?} {}", new_status, reason);
 
     // Perform DIS change when status or sys_id has been changed.
-    if old_status != new_status || old_sys_id != new_sys_id {
+    if old_status != new_status {
         match (old_status, new_status) {
             (DisStatus::NotSelected, DisStatus::Myself) => {
                 dis_pseudo_node_generate(link, level);
@@ -452,17 +454,17 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             (DisStatus::Myself, DisStatus::Other) => {
                 dis_pseudo_node_purge(link, level);
                 dis_timers_stop(link, level);
-                *link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
             }
             (DisStatus::NotSelected, DisStatus::Other) => {
-                *link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
             }
             (DisStatus::Other, DisStatus::NotSelected) => {
                 //
             }
             (DisStatus::Other, DisStatus::Other) => {
                 // When DIS SysId has been changed.
-                *link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
             }
             (_, _) => {
                 // This should not happen.
@@ -479,7 +481,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         link.state
             .dis_stats
             .get_mut(&level)
-            .record_change(old_status, new_status, old_sys_id, new_sys_id, reason);
+            .record_change(old_status, new_status, new_sys_id, new_sys_id, reason);
     }
 }
 
