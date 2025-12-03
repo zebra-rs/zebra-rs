@@ -324,6 +324,7 @@ impl Isis {
     }
 
     fn process_lsp_originate(&mut self, level: Level) {
+        tracing::info!("[LSPOriginate]");
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
         let buf = lsp_emit(&mut lsp, level);
@@ -575,14 +576,6 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
             .map(|x| x.lsp.seq_number + 1)
             .unwrap_or(0x0001)
     };
-    isis_event_trace!(
-        top.tracing,
-        Dis,
-        &level,
-        "DIS generate with seq_number {}",
-        seq_number
-    );
-
     let types = IsisLspTypes::from(level.digit());
     let mut lsp = IsisLsp {
         hold_time: top.config.hold_time(),

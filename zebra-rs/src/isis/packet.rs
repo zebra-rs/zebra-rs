@@ -29,7 +29,13 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     }
 
     // Logging.
-    isis_pdu_trace!(link, &level, "[Hello] recv on link {}", link.state.name);
+    isis_pdu_trace!(
+        link,
+        &level,
+        "[Hello:Recv] {} LanID:{}",
+        link.state.name,
+        pdu.lan_id
+    );
 
     // 8.4.2.5 New adjacencies
     let nbr = link
@@ -94,7 +100,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         }
 
         // Logging.
-        isis_pdu_trace!(link, &level, "[P2P Hello] recv on link {}", link.state.name);
+        isis_pdu_trace!(link, &level, "[P2P Hello:Recv] on link {}", link.state.name);
 
         // Create or update neighbor for this level
         let nbr = link
@@ -136,7 +142,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     }
 
     // Logging
-    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
+    isis_pdu_trace!(top, &level, "[CSNP:Recv] on {}", top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -282,7 +288,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     }
 
     // Logging
-    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
+    isis_pdu_trace!(top, &level, "[PSNP:Recv] on {}", top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -364,7 +370,7 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     }
 
     // Logging.
-    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
+    isis_pdu_trace!(top, &level, "[LSP:Rev] {} {}", lsp.lsp_id, top.state.name);
 
     // Temp.
     if lsp.lsp_id.is_pseudo() {
@@ -448,83 +454,6 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     }
 }
 
-#[isis_pdu_handler(Lsp, Recv)]
-pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
-    if !has_level(top.state.level(), level) {
-        return;
-    }
-
-    // Logging.
-    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
-
-    // Self LSP received.
-    if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
-        // Pseudo LSP has been received.
-        if lsp.lsp_id.is_pseudo() {
-            // Pseudo LSP purge request.
-            if lsp.hold_time == 0 {
-                if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    // Originate DIS with seqnumber + 1.
-                    top.tx
-                        .send(Message::DisOriginate(
-                            level,
-                            top.ifindex,
-                            Some(lsp.seq_number),
-                        ))
-                        .unwrap();
-                } else {
-                    isis_event_trace!(top.tracing, Dis, &level, "DIS purge accepted (I'm not DIS)");
-                    top.lsdb.get_mut(&level).remove(&lsp.lsp_id);
-                }
-            } else {
-                if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    lsp_self_updated(top, level, lsp);
-                } else {
-                    lsdb::insert_lsp(top, level, lsp, bytes);
-                }
-            }
-        } else {
-            if lsp.hold_time == 0 {
-                lsp_self_purged(top, level, lsp);
-            } else {
-                lsp_self_updated(top, level, lsp);
-            }
-        }
-
-        return;
-    }
-
-    // DIS
-    if lsp.lsp_id.is_pseudo() {
-        isis_pdu_trace!(top, &level, "[DIS LSP] recv on link {}", top.state.name);
-
-        match top.state.dis_status.get(&level) {
-            DisStatus::NotSelected => {
-                //
-            }
-            DisStatus::Myself => {
-                //
-            }
-            DisStatus::Other => {
-                // When DIS is other, check if received pseudonode LSP contains our neighbor ID.
-                if top.state.adj.get(&level).is_none() {
-                    if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-                        *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
-                        top.lsdb.get_mut(&level).adj_set(top.ifindex);
-                        top.tx.send(Message::LspOriginate(level)).unwrap();
-                    }
-                }
-            }
-        }
-    }
-
-    if lsp.hold_time == 0 {
-        lsdb::remove_lsp_link(top, level, lsp.lsp_id);
-    } else {
-        lsdb::insert_lsp(top, level, lsp, bytes);
-    }
-}
-
 pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool {
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
@@ -548,7 +477,7 @@ pub fn lsp_self_purged(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
     match top.lsdb.get(&level).get(&lsp.lsp_id) {
         Some(originated) => {
             if lsp.seq_number > originated.lsp.seq_number {
-                insert_self_originate_link(top, level, lsp);
+                insert_self_originate_link(top, level, lsp, None);
             }
             isis_event_trace!(
                 top.tracing,
@@ -598,7 +527,7 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
                     if !lsp_same(&originated.lsp, &lsp) {
                         top.tx.send(Message::LspOriginate(level));
                     }
-                    insert_self_originate_link(top, level, lsp);
+                    insert_self_originate_link(top, level, lsp, None);
                 }
                 std::cmp::Ordering::Equal => {
                     if lsp.checksum != originated.lsp.checksum {

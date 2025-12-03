@@ -44,7 +44,7 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
         .get(&level)
         .map(|(neighbor_id, _)| neighbor_id)
         .unwrap_or_default();
-    tracing::info!("Hello generate with LAN ID:{}", lan_id);
+    tracing::info!("[Hello:Gen] LAN ID:{}", lan_id);
     let mut hello = IsisHello {
         circuit_type: ltop.state.level(),
         source_id,
@@ -159,7 +159,7 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
 pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     let hello = link.state.hello.get(&level).as_ref().context("")?;
 
-    isis_pdu_trace!(link, &level, "[Hello] Send on {}", link.state.name);
+    isis_pdu_trace!(link, &level, "[Hello:Send] {}", link.state.name);
 
     let (packet, mac) = match hello {
         IsisPdu::L1Hello(hello) => (
@@ -212,6 +212,7 @@ pub fn csnp_send(link: &mut LinkTop, level: Level) -> Result<()> {
     };
 
     for (lsp_id, lsa) in link.lsdb.get(&level).iter() {
+        isis_pdu_trace!(link, &level, "{}", lsp_id);
         let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
         let entry = IsisLspEntry {
             hold_time,
