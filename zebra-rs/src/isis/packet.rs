@@ -5,11 +5,12 @@ use anyhow::{Context, Error};
 use bytes::BytesMut;
 use isis_packet::*;
 
-use crate::isis::Message;
 use crate::isis::inst::lsp_emit;
 use crate::isis::link::DisStatus;
 use crate::isis::lsdb::{insert_self_originate, insert_self_originate_link};
 use crate::isis::neigh::Neighbor;
+use crate::isis::nfsm::{nfsm_hello_has_mac, nfsm_hold_timer, nfsm_ifaddr_update};
+use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::rib::MacAddr;
 use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
 use isis_macros::isis_pdu_handler;
@@ -23,19 +24,15 @@ use super::nfsm::{NfsmEvent, isis_nfsm};
 
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
+    use IfsmEvent::*;
+
     // Check link capability for the level.
     if !has_level(link.state.level(), level) {
         return;
     }
 
     // Logging.
-    isis_pdu_trace!(
-        link,
-        &level,
-        "[Hello:Recv] {} LanID:{}",
-        link.state.name,
-        pdu.lan_id
-    );
+    isis_pdu_trace!(link, &level, "[Hello:Recv] {}", link.state.name,);
 
     // 8.4.2.5 New adjacencies
     let nbr = link
@@ -74,14 +71,69 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // Store Hello packet TLV to neighbor for further processing.
     nbr.tlvs = pdu.tlvs;
 
-    // NFSM event.
-    link.tx.send(Message::Nfsm(
-        NfsmEvent::HelloReceived,
-        nbr.ifindex,
-        nbr.sys_id,
-        level,
-        link.state.mac,
-    ));
+    // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
+    // holdingTimer) for each “Ln Intermediate System” adjacency.
+    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+    // Update IPv4/IPv6 address.
+    nfsm_ifaddr_update(nbr, link.local_pool);
+
+    // State transition.
+    let mut state = nbr.state;
+
+    if state == NfsmState::Down {
+        // 8.4.2.5.1
+        // The IS shall set the adjacencyState of the adjacency to
+        // “initialising”, until it is known that the communication between this
+        // system and the source of the PDU (R) is two-way. However R shall be
+        // included in future Level n LAN IIH PDUs transmitted by this system.
+        state = NfsmState::Init;
+    }
+
+    if state == NfsmState::Init {
+        // 8.4.2.5.1
+        // When R reports the local system’s SNPA address in its Level n LAN IIH PDUs, the IS shall
+        // d) set the adjacency’s adjacencyState to “Up”, and
+        // e) generate an adjacencyStateChange (Up)” event.
+        if nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
+            state = NfsmState::Up;
+            // XXX Adjacency(Up)
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+        }
+    } else {
+        // 8.4.2.5.3
+        //
+        // If a Level n LAN IIH PDU is received from neighbour N, and this
+        // system’s lANAddress is no longer in N’s IIH PDU, the IS shall
+        //
+        // a) set the adjacency’s adjacencyState to “initialising”, and
+        // b) generate an adjacencyStateChange (Down) event.
+        if !nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
+            state = NfsmState::Init;
+            // XXX Adjacency(Down)
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+        }
+    }
+
+    if nbr.is_dis() && !nbr.lan_id.is_empty() {
+        if link.state.adj.get_mut(&level).is_none() {
+            tracing::info!("[Hello Recv] Setting LAN ID!!!!");
+
+            *link.state.adj.get_mut(&level) = Some((nbr.lan_id, None));
+            link.lsdb.get_mut(&level).adj_set(link.ifindex);
+
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+            nbr.event(Message::LspOriginate(level));
+        }
+    }
+
+    // When neighbor state has been changed.
+    if nbr.state != state {
+        tracing::info!("NFSM {} => {}", nbr.state, state);
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+    }
+
+    nbr.state = state
 }
 
 #[isis_pdu_handler(Hello, Recv)]
@@ -122,6 +174,9 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // Store Hello packet TLV to neighbor for further processing.
         nbr.tlvs = pdu.tlvs.clone();
+
+        // Update IPv4/IPv6 address.
+        nfsm_ifaddr_update(nbr, link.local_pool);
 
         // NFSM event.
         link.tx.send(Message::Nfsm(
@@ -373,18 +428,19 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     isis_pdu_trace!(top, &level, "[LSP:Rev] {} {}", lsp.lsp_id, top.state.name);
 
     // Temp.
-    if lsp.lsp_id.is_pseudo() {
-        isis_pdu_trace!(top, &level, "[DIS LSP] recv on link {}", top.state.name);
-        if *top.state.dis_status.get(&level) == DisStatus::Other {
-            if top.state.adj.get(&level).is_none() {
-                if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-                    *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
-                    top.lsdb.get_mut(&level).adj_set(top.ifindex);
-                    top.tx.send(Message::LspOriginate(level)).unwrap();
-                }
-            }
-        }
-    }
+    // if lsp.lsp_id.is_pseudo() {
+    //     isis_pdu_trace!(top, &level, "[DIS:Recv] recv on link {}", top.state.name);
+    //     if *top.state.dis_status.get(&level) == DisStatus::Other {
+    //         if top.state.adj.get(&level).is_none() {
+    //             if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
+    //                 isis_pdu_trace!(top, &level, "[DIS:Recv] LAN Id Set {}", lsp.lsp_id);
+    //                 *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
+    //                 top.lsdb.get_mut(&level).adj_set(top.ifindex);
+    //                 top.tx.send(Message::LspOriginate(level)).unwrap();
+    //             }
+    //         }
+    //     }
+    // }
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
