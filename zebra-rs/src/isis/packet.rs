@@ -34,7 +34,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // Logging.
     isis_pdu_trace!(link, &level, "[Hello:Recv] {}", link.state.name,);
 
-    // 8.4.2.5 New adjacencies
+    // Find neighbor by system id or create a new one.
     let nbr = link
         .state
         .nbrs
@@ -68,12 +68,12 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     nbr.lan_id = pdu.lan_id;
     nbr.mac = mac;
 
-    // Store Hello packet TLV to neighbor for further processing.
-    nbr.tlvs = pdu.tlvs;
-
     // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
     // holdingTimer) for each “Ln Intermediate System” adjacency.
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+    // Store Hello packet TLV to neighbor for further processing.
+    nbr.tlvs = pdu.tlvs;
 
     // Update IPv4/IPv6 address.
     nfsm_ifaddr_update(nbr, link.local_pool);
@@ -115,10 +115,12 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         }
     }
 
+    // When neighbor is elected as DIS and reports LAN ID in Hello packet,
+    // register adjacency if not already set. This handles the case where
+    // neighbor reaches Up state before we receive the DIS's LAN ID.
     if nbr.is_dis() && !nbr.lan_id.is_empty() {
         if link.state.adj.get_mut(&level).is_none() {
-            tracing::info!("[Hello Recv] Setting LAN ID!!!!");
-
+            // Register adjacency and create SRM/SSN entry in LSDB.
             *link.state.adj.get_mut(&level) = Some((nbr.lan_id, None));
             link.lsdb.get_mut(&level).adj_set(link.ifindex);
 
@@ -136,8 +138,32 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     nbr.state = state
 }
 
+fn p2ptlv(nbr: &Neighbor) -> Option<IsisTlvP2p3Way> {
+    for tlv in nbr.tlvs.iter() {
+        if let IsisTlv::P2p3Way(tlv) = tlv {
+            return Some(tlv.clone());
+        }
+    }
+    None
+}
+
+fn nfsm_p2ptlv_has_me(tlv: Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
+    let sys_id = nsap.sys_id();
+
+    if let Some(tlv) = tlv {
+        if let Some(neighbor_id) = tlv.neighbor_id {
+            if sys_id == neighbor_id {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr>) {
+    use IfsmEvent::*;
+
     // Check link capability for the level.
     let link_level = link.state.level();
 
@@ -177,6 +203,47 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // Update IPv4/IPv6 address.
         nfsm_ifaddr_update(nbr, link.local_pool);
+
+        //
+        // let mut state = nbr.state;
+
+        // // Lookup three way handshake TLV.
+        // let three_way = p2ptlv(nbr);
+        // if let Some(tlv) = &three_way {
+        //     nbr.circuit_id = Some(tlv.circuit_id);
+        // }
+
+        // // When it is three way handshake.
+        // if state == NfsmState::Down {
+        //     state = NfsmState::Init;
+        //     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        // }
+
+        // // Fall down from previous.
+        // if state == NfsmState::Init {
+        //     if nfsm_p2ptlv_has_me(three_way, &link.up_config.net) {
+        //         state = NfsmState::Up;
+
+        //         // Set adjacency.
+        //         *link.state.adj.get_mut(&level) =
+        //             Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
+        //         link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
+
+        //         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        //         link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
+        //     }
+        // }
+
+        // // Reset hold timer
+        // nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+        // // When neighbor state has been changed.
+        // if nbr.state != state {
+        //     tracing::info!("NFSM {} => {}", nbr.state, state);
+        //     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        // }
+
+        // nbr.state = state
 
         // NFSM event.
         link.tx.send(Message::Nfsm(
@@ -426,21 +493,6 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
 
     // Logging.
     isis_pdu_trace!(top, &level, "[LSP:Rev] {} {}", lsp.lsp_id, top.state.name);
-
-    // Temp.
-    // if lsp.lsp_id.is_pseudo() {
-    //     isis_pdu_trace!(top, &level, "[DIS:Recv] recv on link {}", top.state.name);
-    //     if *top.state.dis_status.get(&level) == DisStatus::Other {
-    //         if top.state.adj.get(&level).is_none() {
-    //             if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-    //                 isis_pdu_trace!(top, &level, "[DIS:Recv] LAN Id Set {}", lsp.lsp_id);
-    //                 *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
-    //                 top.lsdb.get_mut(&level).adj_set(top.ifindex);
-    //                 top.tx.send(Message::LspOriginate(level)).unwrap();
-    //             }
-    //         }
-    //     }
-    // }
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
