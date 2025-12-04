@@ -138,14 +138,13 @@ impl Lsdb {
     }
 
     pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
-        if let Some(flags) = self.adj.get_mut(&ifindex) {
-            flags.srm.set(&IsisLspEntry {
-                lsp_id: *lsp_id,
-                ..Default::default()
-            });
-            if flags.srm_timer.is_none() {
-                flags.srm_timer = Some(srm_timer(tx, level, ifindex));
-            }
+        let flags = self.adj.entry(ifindex).or_default();
+        flags.srm.set(&IsisLspEntry {
+            lsp_id: *lsp_id,
+            ..Default::default()
+        });
+        if flags.srm_timer.is_none() {
+            flags.srm_timer = Some(srm_timer(tx, level, ifindex));
         }
     }
 
@@ -188,11 +187,10 @@ impl Lsdb {
     }
 
     pub fn ssn_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLspEntry, ifindex: u32) {
-        if let Some(flags) = self.adj.get_mut(&ifindex) {
-            flags.ssn.set(lsp);
-            if flags.ssn_timer.is_none() {
-                flags.ssn_timer = Some(ssn_timer(tx, level, ifindex));
-            }
+        let flags = self.adj.entry(ifindex).or_default();
+        flags.ssn.set(lsp);
+        if flags.ssn_timer.is_none() {
+            flags.ssn_timer = Some(ssn_timer(tx, level, ifindex));
         }
     }
 
