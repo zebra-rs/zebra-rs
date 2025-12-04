@@ -3,6 +3,7 @@ use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::context::Timer;
+use crate::isis::inst::csnp_generate;
 use crate::isis::link::DisStatus;
 use crate::isis::network::P2P_ISS;
 use crate::rib::MacAddr;
@@ -44,7 +45,7 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
         .get(&level)
         .map(|(neighbor_id, _)| neighbor_id)
         .unwrap_or_default();
-    tracing::info!("Hello generate with LAN ID:{}", lan_id);
+    tracing::info!("[Hello:Gen] LAN ID:{}", lan_id);
     let mut hello = IsisHello {
         circuit_type: ltop.state.level(),
         source_id,
@@ -159,7 +160,7 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
 pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     let hello = link.state.hello.get(&level).as_ref().context("")?;
 
-    isis_pdu_trace!(link, &level, "[Hello] Send on {}", link.state.name);
+    isis_pdu_trace!(link, &level, "[Hello:Send] {}", link.state.name);
 
     let (packet, mac) = match hello {
         IsisPdu::L1Hello(hello) => (
@@ -184,69 +185,6 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         level,
         mac,
     ));
-    Ok(())
-}
-
-#[isis_pdu_handler(Csnp, Send)]
-pub fn csnp_send(link: &mut LinkTop, level: Level) -> Result<()> {
-    // P2P interfaces don't use CSNP for database synchronization
-    if link.config.link_type() == LinkType::P2p {
-        isis_debug!("Skipping CSNP send for P2P interface {}", link.state.name);
-        return Ok(());
-    }
-
-    isis_pdu_trace!(link, &level, "CSNP Send on {}", link.state.name);
-    isis_packet_trace!(link.tracing, Csnp, Send, &level, "---------");
-
-    const MAX_LSP_ENTRIES_PER_TLV: usize = 15;
-    let mut lsp_entries = IsisTlvLspEntries::default();
-    let mut entry_count = 0;
-
-    let mut csnp = IsisCsnp {
-        pdu_len: 0,
-        source_id: link.up_config.net.sys_id().clone(),
-        source_id_circuit: 0,
-        start: IsisLspId::start(),
-        end: IsisLspId::end(),
-        tlvs: vec![],
-    };
-
-    for (lsp_id, lsa) in link.lsdb.get(&level).iter() {
-        let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
-        let entry = IsisLspEntry {
-            hold_time,
-            lsp_id: lsp_id.clone(),
-            seq_number: lsa.lsp.seq_number,
-            checksum: lsa.lsp.checksum,
-        };
-        lsp_entries.entries.push(entry);
-        entry_count += 1;
-
-        // If we've reached the limit, push this TLV and start a new one
-        if entry_count >= MAX_LSP_ENTRIES_PER_TLV {
-            csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
-            lsp_entries = IsisTlvLspEntries::default();
-            entry_count = 0;
-        }
-    }
-
-    // Don't forget to add the last TLV if it has any entries
-    if !lsp_entries.entries.is_empty() {
-        csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
-    }
-
-    let packet = match level {
-        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(csnp.clone())),
-        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(csnp.clone())),
-    };
-    let ifindex = link.ifindex;
-    link.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
-        ifindex,
-        level,
-        link.dest(level),
-    ));
-    isis_packet_trace!(link.tracing, Csnp, Send, &level, "---------");
     Ok(())
 }
 
@@ -357,9 +295,11 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 })
     }
 
+    tracing::info!("DIS selection start");
+
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);
-    let old_sys_id = *link.state.dis_sys_id.get(&level);
+    // let old_sys_id = *link.state.dis_sys_id.get(&level);
 
     // When curr is None, current candidate DIS is myself.
     let mut best_sys_id: Option<IsisSysId> = None;
@@ -434,7 +374,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     tracing::info!("DIS selection {:?} {}", new_status, reason);
 
     // Perform DIS change when status or sys_id has been changed.
-    if old_status != new_status || old_sys_id != new_sys_id {
+    if old_status != new_status {
         match (old_status, new_status) {
             (DisStatus::NotSelected, DisStatus::Myself) => {
                 dis_pseudo_node_generate(link, level);
@@ -451,17 +391,17 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             (DisStatus::Myself, DisStatus::Other) => {
                 dis_pseudo_node_purge(link, level);
                 dis_timers_stop(link, level);
-                *link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
             }
             (DisStatus::NotSelected, DisStatus::Other) => {
-                *link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
             }
             (DisStatus::Other, DisStatus::NotSelected) => {
                 //
             }
             (DisStatus::Other, DisStatus::Other) => {
                 // When DIS SysId has been changed.
-                *link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
             }
             (_, _) => {
                 // This should not happen.
@@ -478,7 +418,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         link.state
             .dis_stats
             .get_mut(&level)
-            .record_change(old_status, new_status, old_sys_id, new_sys_id, reason);
+            .record_change(old_status, new_status, new_sys_id, new_sys_id, reason);
     }
 }
 

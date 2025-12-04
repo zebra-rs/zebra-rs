@@ -375,7 +375,7 @@ pub struct LinkState {
     // DIS on LAN interface. This value is set when DIS selection has been
     // completed. After DIS selection, we may have 2 events. One is lan_id value
     // in DIS's hello packet.  Another one is DIS generated pseudo node LSP.
-    pub dis_sys_id: Levels<Option<IsisSysId>>,
+    // pub dis_sys_id: Levels<Option<IsisSysId>>,
 
     // DIS in pseudo node LSP. When LSP has been received and my own system ID
     // exists in.
@@ -1088,7 +1088,7 @@ pub fn show_dis_statistics(
                         let current_dis = match link.state.dis_status.get(&level) {
                             DisStatus::Myself => "Self".to_string(),
                             DisStatus::Other => {
-                                if let Some(sys_id) = link.state.dis_sys_id.get(&level) {
+                                if let Some((sys_id, _)) = link.state.adj.get(&level) {
                                     sys_id.to_string()
                                 } else {
                                     "Unknown".to_string()
@@ -1133,7 +1133,7 @@ pub fn show_dis_statistics(
                     let current_dis = match link.state.dis_status.get(&level) {
                         DisStatus::Myself => "Self".to_string(),
                         DisStatus::Other => {
-                            if let Some(sys_id) = link.state.dis_sys_id.get(&level) {
+                            if let Some((sys_id, _)) = link.state.adj.get(&level) {
                                 sys_id.to_string()
                             } else {
                                 "Unknown".to_string()

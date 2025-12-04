@@ -59,7 +59,7 @@ impl NfsmState {
     }
 }
 
-fn nfsm_hello_has_mac(tlvs: &Vec<IsisTlv>, mac: Option<MacAddr>) -> bool {
+pub fn nfsm_hello_has_mac(tlvs: &Vec<IsisTlv>, mac: Option<MacAddr>) -> bool {
     let Some(addr) = mac else {
         return false;
     };
@@ -115,7 +115,7 @@ impl NeighborAddr6 {
     }
 }
 
-fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
+pub fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
     let mut naddr4 = BTreeMap::new();
     let mut addr6 = vec![];
     let mut laddr6 = vec![];
@@ -203,17 +203,32 @@ pub fn nfsm_hello_received(
 
     // Need to move to prev func?
     // Update neighbor's IP address from the Hello packet.
-    nfsm_ifaddr_update(nbr, ntop.local_pool);
+    // nfsm_ifaddr_update(nbr, ntop.local_pool);
 
     // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
     // holdingTimer) for each “Ln Intermediate System” adjacency.
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
-    tracing::info!("Hello Recv:LAN ID {}", nbr.lan_id);
+    tracing::info!(
+        "[Hello:Recv] IsDIS:{} LAN ID:{} Adj is Some:{}",
+        nbr.is_dis,
+        nbr.lan_id,
+        ntop.adj.get_mut(&level).is_some()
+    );
+
+    if nbr.is_dis() && !nbr.lan_id.is_empty() {
+        tracing::info!(
+            "[Hello Recv] Nbr is DIS and has LAN ID ntop.adj is Some {}",
+            ntop.adj.get_mut(&level).is_some()
+        );
+        if ntop.adj.get_mut(&level).is_none() {
+            tracing::info!("[Hello Recv] Setting LAN ID!!!!");
+        }
+    }
 
     // When Neighbor is DIS and LAN id is not yet set...
     if nbr.is_dis() && !nbr.lan_id.is_empty() && ntop.adj.get(&level).is_none() {
-        tracing::info!("Hello Recv:DIS get LAN Id in Hello packet (Setting Adj)");
+        tracing::info!("[Hello Recv]:DIS get LAN Id in Hello packet (Setting Adj)");
         *ntop.adj.get_mut(&level) = Some((nbr.lan_id, None));
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         nbr.event(Message::LspOriginate(level));
@@ -264,9 +279,6 @@ pub fn nfsm_p2p_hello_received(
             ntop.lsdb.get_mut(&level).adj_set(nbr.ifindex);
         }
     }
-
-    // Update interface addresses from Hello
-    nfsm_ifaddr_update(nbr, ntop.local_pool);
 
     // Reset hold timer
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
@@ -334,6 +346,7 @@ pub fn isis_nfsm(
 
     if let Some(next_state) = next_state {
         if next_state != nbr.state {
+            tracing::info!("[NFSM] {} {} => {}", nbr.sys_id, nbr.state, next_state);
             // Up -> Down/Init
             if nbr.state == NfsmState::Up {
                 if let Some((adj, _)) = ntop.adj.get(&level) {
