@@ -3,6 +3,7 @@ use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::context::Timer;
+use crate::isis::inst::csnp_generate;
 use crate::isis::link::DisStatus;
 use crate::isis::network::P2P_ISS;
 use crate::rib::MacAddr;
@@ -359,6 +360,8 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     }
 
     tracing::info!("DIS selection start");
+
+    csnp_generate(link, level);
 
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);

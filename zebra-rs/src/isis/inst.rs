@@ -854,6 +854,89 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
     buf
 }
 
+pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
+    // Interface MTU.
+    let mtu = link.state.mtu as usize;
+
+    // For the record, we will try to encode the packet length.
+    let available_len = {
+        let mut buf = BytesMut::new();
+
+        let mut csnp = IsisCsnp {
+            source_id: IsisSysId::default(),
+            source_id_circuit: 0,
+            start: IsisLspId::start(),
+            end: IsisLspId::end(),
+            ..Default::default()
+        };
+
+        let packet = IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(csnp.clone()));
+        packet.emit(&mut buf);
+        if parse(&buf).is_err() {
+            return vec![];
+        }
+
+        let packet_len = buf.len();
+        let base_len = 3;
+        let tlv_header_len = 2;
+
+        let total_base_len = packet_len + base_len + tlv_header_len;
+
+        let available_len = mtu - total_base_len;
+
+        available_len
+    };
+    tracing::info!("[CSNP:Gen] available_len {}", available_len);
+
+    let entry_size_max = available_len / 16;
+
+    tracing::info!("[CSNP:Gen] entry_len {}", entry_size_max);
+
+    let mut csnps: Vec<IsisCsnp> = vec![];
+    let mut tlvs = IsisTlvLspEntries::default();
+
+    let mut start: Option<IsisLspId> = Some(IsisLspId::start());
+
+    let mut entry_size = 0;
+    for (lsp_id, lsa) in link.lsdb.get(&level).iter() {
+        if start.is_none() {
+            start = Some(lsa.lsp.lsp_id);
+        }
+        let entry = IsisLspEntry::from_lsp(&lsa.lsp);
+        tlvs.entries.push(entry);
+
+        entry_size += 1;
+        if entry_size == entry_size_max {
+            let mut csnp = IsisCsnp {
+                pdu_len: 0,
+                source_id: link.up_config.net.sys_id(),
+                source_id_circuit: 0,
+                start: start.unwrap_or(IsisLspId::start()),
+                end: lsa.lsp.lsp_id,
+                tlvs: vec![tlvs.clone().into()],
+            };
+            csnps.push(csnp);
+
+            tlvs.entries.clear();
+            entry_size = 0;
+            start = None;
+        }
+    }
+    if !tlvs.entries.is_empty() {
+        let mut csnp = IsisCsnp {
+            pdu_len: 0,
+            source_id: link.up_config.net.sys_id(),
+            source_id_circuit: 0,
+            start: start.unwrap_or(IsisLspId::start()),
+            end: IsisLspId::end(),
+            tlvs: vec![tlvs.into()],
+        };
+        csnps.push(csnp);
+    }
+
+    csnps
+}
+
 pub enum PacketMessage {
     Send(Packet, u32, Level, Option<MacAddr>),
 }
