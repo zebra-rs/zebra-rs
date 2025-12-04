@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use isis_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::isis::isis_psnp_send;
+use crate::isis::psnp_send_pdu;
 use crate::isis_database_trace;
 
 use crate::context::Timer;
@@ -16,6 +16,7 @@ use crate::isis::{
 
 use super::inst::{MsgSender, Packet, PacketMessage};
 use super::link::LinkTop;
+use super::psnp_send;
 use super::{
     Level,
     inst::{IsisTop, lsp_emit, lsp_flood, spf_schedule},
@@ -137,7 +138,18 @@ impl Lsdb {
     }
 
     pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
-        if let Some(flags) = self.adj.get_mut(&ifindex) {
+        let flags = self.adj.entry(ifindex).or_default();
+        flags.srm.set(&IsisLspEntry {
+            lsp_id: *lsp_id,
+            ..Default::default()
+        });
+        if flags.srm_timer.is_none() {
+            flags.srm_timer = Some(srm_timer(tx, level, ifindex));
+        }
+    }
+
+    pub fn srm_set_all(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
+        for (link, flags) in self.adj.iter_mut() {
             flags.srm.set(&IsisLspEntry {
                 lsp_id: *lsp_id,
                 ..Default::default()
@@ -175,11 +187,10 @@ impl Lsdb {
     }
 
     pub fn ssn_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLspEntry, ifindex: u32) {
-        if let Some(flags) = self.adj.get_mut(&ifindex) {
-            flags.ssn.set(lsp);
-            if flags.ssn_timer.is_none() {
-                flags.ssn_timer = Some(ssn_timer(tx, level, ifindex));
-            }
+        let flags = self.adj.entry(ifindex).or_default();
+        flags.ssn.set(lsp);
+        if flags.ssn_timer.is_none() {
+            flags.ssn_timer = Some(ssn_timer(tx, level, ifindex));
         }
     }
 
@@ -432,7 +443,12 @@ pub fn insert_self_originate(
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
-pub fn insert_self_originate_link(top: &mut LinkTop, level: Level, lsp: IsisLsp) -> Option<Lsa> {
+pub fn insert_self_originate_link(
+    top: &mut LinkTop,
+    level: Level,
+    lsp: IsisLsp,
+    bytes: Option<Vec<u8>>,
+) -> Option<Lsa> {
     let key = lsp.lsp_id.clone();
     let mut lsa = Lsa::new(lsp);
     lsa.originated = true;
@@ -457,6 +473,9 @@ pub fn insert_self_originate_link(top: &mut LinkTop, level: Level, lsp: IsisLsp)
     }
 
     lsa.refresh_timer = Some(refresh_timer(top.tx, level, key, refresh_time));
+    if let Some(bytes) = bytes {
+        lsa.bytes = bytes;
+    }
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
@@ -566,8 +585,8 @@ pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32, _sys_id: Isi
     }
 }
 
-pub fn ssn_advertise(top: &mut LinkTop, level: Level, ifindex: u32, sys_id: IsisSysId) {
-    let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) else {
+pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
+    let Some(adj) = link.lsdb.get_mut(&level).adj_get_mut(link.ifindex) else {
         return;
     };
     adj.ssn_timer = None;
@@ -575,17 +594,72 @@ pub fn ssn_advertise(top: &mut LinkTop, level: Level, ifindex: u32, sys_id: Isis
     if adj.ssn.0.is_empty() {
         return;
     }
-    // TODO: Need to check maximum packet size of the interface.
-    let mut psnp = IsisPsnp {
-        source_id: sys_id,
-        source_id_circuit: 0,
-        ..Default::default()
-    };
-    let mut lsps = IsisTlvLspEntries::default();
-    while let Some((_, value)) = adj.ssn.0.pop_first() {
-        lsps.entries.push(value);
-    }
-    psnp.tlvs.push(lsps.into());
 
-    isis_psnp_send(top, ifindex, level, psnp);
+    // Interface MTU.
+    let mtu = link.state.mtu as usize;
+
+    let available_len = {
+        let mut buf = BytesMut::new();
+
+        let mut psnp = IsisPsnp {
+            source_id: IsisSysId::default(),
+            source_id_circuit: 0,
+            ..Default::default()
+        };
+
+        let packet = IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(psnp.clone()));
+        packet.emit(&mut buf);
+        if parse(&buf).is_err() {
+            return;
+        }
+
+        let packet_len = buf.len();
+        let base_len = 3;
+        let tlv_header_len = 2;
+
+        let total_base_len = packet_len + base_len + tlv_header_len;
+
+        let available_len = mtu - total_base_len;
+
+        available_len
+    };
+
+    // 16 is IsisLspEntry's length.
+    let entry_size_max = available_len / 16;
+
+    let mut psnps: Vec<IsisPsnp> = vec![];
+    let mut tlvs = IsisTlvLspEntries::default();
+
+    let mut entry_size = 0;
+
+    while let Some((_, entry)) = adj.ssn.0.pop_first() {
+        tlvs.entries.push(entry);
+
+        entry_size += 1;
+        if entry_size == entry_size_max {
+            let mut psnp = IsisPsnp {
+                pdu_len: 0,
+                source_id: link.up_config.net.sys_id(),
+                source_id_circuit: 0,
+                tlvs: vec![tlvs.clone().into()],
+            };
+            psnps.push(psnp);
+
+            tlvs.entries.clear();
+            entry_size = 0;
+        }
+    }
+    if !tlvs.entries.is_empty() {
+        let mut psnp = IsisPsnp {
+            pdu_len: 0,
+            source_id: link.up_config.net.sys_id(),
+            source_id_circuit: 0,
+            tlvs: vec![tlvs.into()],
+        };
+        psnps.push(psnp);
+    }
+
+    for psnp in psnps.into_iter() {
+        psnp_send_pdu(link, level, psnp);
+    }
 }

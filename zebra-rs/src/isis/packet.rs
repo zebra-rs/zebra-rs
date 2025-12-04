@@ -5,11 +5,12 @@ use anyhow::{Context, Error};
 use bytes::BytesMut;
 use isis_packet::*;
 
-use crate::isis::Message;
-use crate::isis::inst::lsp_emit;
+use crate::isis::inst::{csnp_generate, lsp_emit};
 use crate::isis::link::DisStatus;
 use crate::isis::lsdb::{insert_self_originate, insert_self_originate_link};
 use crate::isis::neigh::Neighbor;
+use crate::isis::nfsm::{nfsm_hello_has_mac, nfsm_hold_timer, nfsm_ifaddr_update};
+use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::rib::MacAddr;
 use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
 use isis_macros::isis_pdu_handler;
@@ -23,15 +24,17 @@ use super::nfsm::{NfsmEvent, isis_nfsm};
 
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
+    use IfsmEvent::*;
+
     // Check link capability for the level.
     if !has_level(link.state.level(), level) {
         return;
     }
 
     // Logging.
-    isis_pdu_trace!(link, &level, "[Hello] recv on link {}", link.state.name);
+    isis_pdu_trace!(link, &level, "[Hello:Recv] {}", link.state.name,);
 
-    // 8.4.2.5 New adjacencies
+    // Find neighbor by system id or create a new one.
     let nbr = link
         .state
         .nbrs
@@ -65,21 +68,102 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     nbr.lan_id = pdu.lan_id;
     nbr.mac = mac;
 
+    // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
+    // holdingTimer) for each “Ln Intermediate System” adjacency.
+    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
     // Store Hello packet TLV to neighbor for further processing.
     nbr.tlvs = pdu.tlvs;
 
-    // NFSM event.
-    link.tx.send(Message::Nfsm(
-        NfsmEvent::HelloReceived,
-        nbr.ifindex,
-        nbr.sys_id,
-        level,
-        link.state.mac,
-    ));
+    // Update IPv4/IPv6 address.
+    nfsm_ifaddr_update(nbr, link.local_pool);
+
+    // State transition.
+    let mut state = nbr.state;
+
+    if state == NfsmState::Down {
+        // 8.4.2.5.1
+        // The IS shall set the adjacencyState of the adjacency to
+        // “initialising”, until it is known that the communication between this
+        // system and the source of the PDU (R) is two-way. However R shall be
+        // included in future Level n LAN IIH PDUs transmitted by this system.
+        state = NfsmState::Init;
+    }
+
+    if state == NfsmState::Init {
+        // 8.4.2.5.1
+        // When R reports the local system’s SNPA address in its Level n LAN IIH PDUs, the IS shall
+        // d) set the adjacency’s adjacencyState to “Up”, and
+        // e) generate an adjacencyStateChange (Up)” event.
+        if nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
+            state = NfsmState::Up;
+            // XXX Adjacency(Up)
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+        }
+    } else {
+        // 8.4.2.5.3
+        //
+        // If a Level n LAN IIH PDU is received from neighbour N, and this
+        // system’s lANAddress is no longer in N’s IIH PDU, the IS shall
+        //
+        // a) set the adjacency’s adjacencyState to “initialising”, and
+        // b) generate an adjacencyStateChange (Down) event.
+        if !nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
+            state = NfsmState::Init;
+            // XXX Adjacency(Down)
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+        }
+    }
+
+    // When neighbor is elected as DIS and reports LAN ID in Hello packet,
+    // register adjacency if not already set. This handles the case where
+    // neighbor reaches Up state before we receive the DIS's LAN ID.
+    if nbr.is_dis() && !nbr.lan_id.is_empty() {
+        if link.state.adj.get_mut(&level).is_none() {
+            // Register adjacency and create SRM/SSN entry in LSDB.
+            *link.state.adj.get_mut(&level) = Some((nbr.lan_id, None));
+            link.lsdb.get_mut(&level).adj_set(link.ifindex);
+
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+            nbr.event(Message::LspOriginate(level));
+        }
+    }
+
+    // When neighbor state has been changed.
+    if nbr.state != state {
+        tracing::info!("NFSM {} => {}", nbr.state, state);
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+    }
+
+    nbr.state = state
+}
+
+fn p2ptlv(nbr: &Neighbor) -> Option<IsisTlvP2p3Way> {
+    for tlv in nbr.tlvs.iter() {
+        if let IsisTlv::P2p3Way(tlv) = tlv {
+            return Some(tlv.clone());
+        }
+    }
+    None
+}
+
+fn nfsm_p2ptlv_has_me(tlv: Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
+    let sys_id = nsap.sys_id();
+
+    if let Some(tlv) = tlv {
+        if let Some(neighbor_id) = tlv.neighbor_id {
+            if sys_id == neighbor_id {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr>) {
+    use IfsmEvent::*;
+
     // Check link capability for the level.
     let link_level = link.state.level();
 
@@ -94,7 +178,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         }
 
         // Logging.
-        isis_pdu_trace!(link, &level, "[P2P Hello] recv on link {}", link.state.name);
+        isis_pdu_trace!(link, &level, "[P2P Hello:Recv] on link {}", link.state.name);
 
         // Create or update neighbor for this level
         let nbr = link
@@ -117,6 +201,50 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // Store Hello packet TLV to neighbor for further processing.
         nbr.tlvs = pdu.tlvs.clone();
 
+        // Update IPv4/IPv6 address.
+        nfsm_ifaddr_update(nbr, link.local_pool);
+
+        //
+        // let mut state = nbr.state;
+
+        // // Lookup three way handshake TLV.
+        // let three_way = p2ptlv(nbr);
+        // if let Some(tlv) = &three_way {
+        //     nbr.circuit_id = Some(tlv.circuit_id);
+        // }
+
+        // // When it is three way handshake.
+        // if state == NfsmState::Down {
+        //     state = NfsmState::Init;
+        //     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        // }
+
+        // // Fall down from previous.
+        // if state == NfsmState::Init {
+        //     if nfsm_p2ptlv_has_me(three_way, &link.up_config.net) {
+        //         state = NfsmState::Up;
+
+        //         // Set adjacency.
+        //         *link.state.adj.get_mut(&level) =
+        //             Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
+        //         link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
+
+        //         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        //         link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
+        //     }
+        // }
+
+        // // Reset hold timer
+        // nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+
+        // // When neighbor state has been changed.
+        // if nbr.state != state {
+        //     tracing::info!("NFSM {} => {}", nbr.state, state);
+        //     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        // }
+
+        // nbr.state = state
+
         // NFSM event.
         link.tx.send(Message::Nfsm(
             NfsmEvent::P2pHelloReceived,
@@ -136,7 +264,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     }
 
     // Logging
-    isis_pdu_trace!(top, &level, "[CSNP] Recv on {}", top.state.name);
+    isis_pdu_trace!(top, &level, "[CSNP:Recv] on {}", top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -234,9 +362,9 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 // links) starts (or restarts), the IS shall
 //
 // a) set SRMflag for that circuit on all LSPs, and
-pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
+pub fn srm_set_all_lsp(link: &mut LinkTop, level: Level) {
     // Extract LSP entries first to avoid borrow checker issues.
-    let lsp_ids: Vec<IsisLspId> = top
+    let lsp_ids: Vec<IsisLspId> = link
         .lsdb
         .get(&level)
         .iter()
@@ -244,7 +372,7 @@ pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
         .collect();
 
     for lsp_id in lsp_ids.iter() {
-        lsdb::srm_set(top, level, lsp_id);
+        lsdb::srm_set(link, level, lsp_id);
     }
 }
 
@@ -255,23 +383,41 @@ pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
 //
 // b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
 #[isis_pdu_handler(Csnp, Send)]
-pub fn csnp_advertise(top: &mut LinkTop, level: Level, sys_id: IsisSysId) {
-    let mut csnp = IsisCsnp {
-        source_id: sys_id,
+pub fn csnp_send(link: &mut LinkTop, level: Level) {
+    let csnps = csnp_generate(link, level);
+    for csnp in csnps.into_iter() {
+        csnp_send_pdu(link, level, csnp);
+    }
+}
+
+fn csnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
+    let packet = match level {
+        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
+        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
+    };
+    link.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        link.ifindex,
+        level,
+        link.dest(level),
+    ));
+}
+
+//
+pub fn psnp_send(link: &mut LinkTop, level: Level, entries: &BTreeMap<IsisLspId, IsisLspEntry>) {
+    // TODO: Need to check maximum packet size of the interface.
+    let mut psnp = IsisPsnp {
+        source_id: link.up_config.net.sys_id(),
         source_id_circuit: 0,
-        start: IsisLspId::start(),
-        end: IsisLspId::end(),
         ..Default::default()
     };
     let mut lsps = IsisTlvLspEntries::default();
-    for (lsp_id, lsa) in top.lsdb.get(&level).iter() {
-        // TODO: Update hold_time.
-        let entry = IsisLspEntry::from_lsp(&lsa.lsp);
-        lsps.entries.push(entry);
+    for ((_, value)) in entries.iter() {
+        lsps.entries.push(value.clone());
     }
-    csnp.tlvs.push(lsps.into());
+    psnp.tlvs.push(lsps.into());
 
-    isis_csnp_send(top, top.ifindex, level, csnp);
+    psnp_send_pdu(link, level, psnp);
 }
 
 #[isis_pdu_handler(Psnp, Recv)]
@@ -282,7 +428,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     }
 
     // Logging
-    isis_pdu_trace!(top, &level, "[PSNP] Recv on {}", top.state.name);
+    isis_pdu_trace!(top, &level, "[PSNP:Recv] on {}", top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -364,21 +510,7 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     }
 
     // Logging.
-    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
-
-    // Temp.
-    if lsp.lsp_id.is_pseudo() {
-        isis_pdu_trace!(top, &level, "[DIS LSP] recv on link {}", top.state.name);
-        if *top.state.dis_status.get(&level) == DisStatus::Other {
-            if top.state.adj.get(&level).is_none() {
-                if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-                    *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
-                    top.lsdb.get_mut(&level).adj_set(top.ifindex);
-                    top.tx.send(Message::LspOriginate(level)).unwrap();
-                }
-            }
-        }
-    }
+    isis_pdu_trace!(top, &level, "[LSP:Rev] {} {}", lsp.lsp_id, top.state.name);
 
     // Adjacency check.
     if top.state.adj.get(&level).is_none() {
@@ -448,83 +580,6 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     }
 }
 
-#[isis_pdu_handler(Lsp, Recv)]
-pub fn lsp_recv_lan(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
-    if !has_level(top.state.level(), level) {
-        return;
-    }
-
-    // Logging.
-    isis_pdu_trace!(top, &level, "[LSP] {} {}", lsp.lsp_id, top.state.name);
-
-    // Self LSP received.
-    if lsp.lsp_id.sys_id() == top.up_config.net.sys_id() {
-        // Pseudo LSP has been received.
-        if lsp.lsp_id.is_pseudo() {
-            // Pseudo LSP purge request.
-            if lsp.hold_time == 0 {
-                if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    // Originate DIS with seqnumber + 1.
-                    top.tx
-                        .send(Message::DisOriginate(
-                            level,
-                            top.ifindex,
-                            Some(lsp.seq_number),
-                        ))
-                        .unwrap();
-                } else {
-                    isis_event_trace!(top.tracing, Dis, &level, "DIS purge accepted (I'm not DIS)");
-                    top.lsdb.get_mut(&level).remove(&lsp.lsp_id);
-                }
-            } else {
-                if *top.state.dis_status.get(&level) == DisStatus::Myself {
-                    lsp_self_updated(top, level, lsp);
-                } else {
-                    lsdb::insert_lsp(top, level, lsp, bytes);
-                }
-            }
-        } else {
-            if lsp.hold_time == 0 {
-                lsp_self_purged(top, level, lsp);
-            } else {
-                lsp_self_updated(top, level, lsp);
-            }
-        }
-
-        return;
-    }
-
-    // DIS
-    if lsp.lsp_id.is_pseudo() {
-        isis_pdu_trace!(top, &level, "[DIS LSP] recv on link {}", top.state.name);
-
-        match top.state.dis_status.get(&level) {
-            DisStatus::NotSelected => {
-                //
-            }
-            DisStatus::Myself => {
-                //
-            }
-            DisStatus::Other => {
-                // When DIS is other, check if received pseudonode LSP contains our neighbor ID.
-                if top.state.adj.get(&level).is_none() {
-                    if lsp_has_neighbor_id(&lsp, &top.up_config.net.neighbor_id()) {
-                        *top.state.adj.get_mut(&level) = Some((lsp.lsp_id.neighbor_id(), None));
-                        top.lsdb.get_mut(&level).adj_set(top.ifindex);
-                        top.tx.send(Message::LspOriginate(level)).unwrap();
-                    }
-                }
-            }
-        }
-    }
-
-    if lsp.hold_time == 0 {
-        lsdb::remove_lsp_link(top, level, lsp.lsp_id);
-    } else {
-        lsdb::insert_lsp(top, level, lsp, bytes);
-    }
-}
-
 pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool {
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
@@ -548,7 +603,7 @@ pub fn lsp_self_purged(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
     match top.lsdb.get(&level).get(&lsp.lsp_id) {
         Some(originated) => {
             if lsp.seq_number > originated.lsp.seq_number {
-                insert_self_originate_link(top, level, lsp);
+                insert_self_originate_link(top, level, lsp, None);
             }
             isis_event_trace!(
                 top.tracing,
@@ -598,7 +653,7 @@ pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
                     if !lsp_same(&originated.lsp, &lsp) {
                         top.tx.send(Message::LspOriginate(level));
                     }
-                    insert_self_originate_link(top, level, lsp);
+                    insert_self_originate_link(top, level, lsp, None);
                 }
                 std::cmp::Ordering::Equal => {
                     if lsp.checksum != originated.lsp.checksum {
@@ -630,31 +685,16 @@ fn mac_str(mac: &Option<MacAddr>) -> String {
     }
 }
 
-pub fn isis_psnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisPsnp) {
+pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
     };
-
-    top.ptx.send(PacketMessage::Send(
+    link.ptx.send(PacketMessage::Send(
         Packet::Packet(packet),
-        ifindex,
+        link.ifindex,
         level,
-        top.dest(level),
-    ));
-}
-
-pub fn isis_csnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisCsnp) {
-    let packet = match level {
-        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
-        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
-    };
-
-    top.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
-        ifindex,
-        level,
-        top.dest(level),
+        link.dest(level),
     ));
 }
 

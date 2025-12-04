@@ -35,7 +35,7 @@ use super::ifsm::has_level;
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_advertise, srm_set_all_lsp};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -198,7 +198,7 @@ impl Isis {
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                lsdb::ssn_advertise(&mut link, level, ifindex, sys_id);
+                lsdb::ssn_advertise(&mut link, level);
             }
             Message::Srm(lsp_id, level, reason) => {
                 self.process_srm(lsp_id, level, reason);
@@ -240,7 +240,7 @@ impl Isis {
                     return;
                 };
                 srm_set_all_lsp(&mut link, level);
-                csnp_advertise(&mut link, level, sys_id);
+                csnp_send(&mut link, level);
             }
         }
     }
@@ -326,6 +326,7 @@ impl Isis {
     fn process_lsp_originate(&mut self, level: Level) {
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level);
+        tracing::info!("[LSP:Gen] {}", lsp.lsp_id);
         let buf = lsp_emit(&mut lsp, level);
         let lsp_id = lsp.lsp_id;
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
@@ -401,7 +402,7 @@ impl Isis {
             }
             IfsmEvent::CsnpTimerExpire => {
                 if let Some(level) = level {
-                    ifsm::csnp_send(&mut top, level);
+                    csnp_send(&mut top, level);
                 }
             }
             IfsmEvent::HelloOriginate => match level {
@@ -417,8 +418,8 @@ impl Isis {
                     ifsm::dis_selection(&mut top, level);
                 }
                 None => {
-                    ifsm::dis_selection(&mut top, Level::L1);
-                    ifsm::dis_selection(&mut top, Level::L2);
+                    // ifsm::dis_selection(&mut top, Level::L1);
+                    // ifsm::dis_selection(&mut top, Level::L2);
                 }
             },
         }
@@ -575,14 +576,6 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
             .map(|x| x.lsp.seq_number + 1)
             .unwrap_or(0x0001)
     };
-    isis_event_trace!(
-        top.tracing,
-        Dis,
-        &level,
-        "DIS generate with seq_number {}",
-        seq_number
-    );
-
     let types = IsisLspTypes::from(level.digit());
     let mut lsp = IsisLsp {
         hold_time: top.config.hold_time(),
@@ -859,6 +852,89 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
     lsp.checksum = u16::from_be_bytes(buf[CKSUM_OFFSET..CKSUM_OFFSET + 2].try_into().unwrap());
 
     buf
+}
+
+pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
+    // Interface MTU.
+    let mtu = link.state.mtu as usize;
+
+    // For the record, we will try to encode the packet length.
+    let available_len = {
+        let mut buf = BytesMut::new();
+
+        let mut csnp = IsisCsnp {
+            source_id: IsisSysId::default(),
+            source_id_circuit: 0,
+            start: IsisLspId::start(),
+            end: IsisLspId::end(),
+            ..Default::default()
+        };
+
+        let packet = IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(csnp.clone()));
+        packet.emit(&mut buf);
+        if parse(&buf).is_err() {
+            return vec![];
+        }
+
+        let packet_len = buf.len();
+        let base_len = 3;
+        let tlv_header_len = 2;
+
+        let total_base_len = packet_len + base_len + tlv_header_len;
+
+        let available_len = mtu - total_base_len;
+
+        available_len
+    };
+    // tracing::info!("[CSNP:Gen] available_len {}", available_len);
+
+    let entry_size_max = available_len / 16;
+
+    // tracing::info!("[CSNP:Gen] entry_len {}", entry_size_max);
+
+    let mut csnps: Vec<IsisCsnp> = vec![];
+    let mut tlvs = IsisTlvLspEntries::default();
+
+    let mut start: Option<IsisLspId> = Some(IsisLspId::start());
+
+    let mut entry_size = 0;
+    for (lsp_id, lsa) in link.lsdb.get(&level).iter() {
+        if start.is_none() {
+            start = Some(lsa.lsp.lsp_id);
+        }
+        let entry = IsisLspEntry::from_lsp(&lsa.lsp);
+        tlvs.entries.push(entry);
+
+        entry_size += 1;
+        if entry_size == entry_size_max {
+            let mut csnp = IsisCsnp {
+                pdu_len: 0,
+                source_id: link.up_config.net.sys_id(),
+                source_id_circuit: 0,
+                start: start.unwrap_or(IsisLspId::start()),
+                end: lsa.lsp.lsp_id,
+                tlvs: vec![tlvs.clone().into()],
+            };
+            csnps.push(csnp);
+
+            tlvs.entries.clear();
+            entry_size = 0;
+            start = None;
+        }
+    }
+    if !tlvs.entries.is_empty() {
+        let mut csnp = IsisCsnp {
+            pdu_len: 0,
+            source_id: link.up_config.net.sys_id(),
+            source_id_circuit: 0,
+            start: start.unwrap_or(IsisLspId::start()),
+            end: IsisLspId::end(),
+            tlvs: vec![tlvs.into()],
+        };
+        csnps.push(csnp);
+    }
+
+    csnps
 }
 
 pub enum PacketMessage {
