@@ -35,7 +35,7 @@ use super::ifsm::has_level;
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_advertise, srm_set_all_lsp};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -198,7 +198,7 @@ impl Isis {
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                lsdb::ssn_advertise(&mut link, level, ifindex, sys_id);
+                lsdb::ssn_advertise(&mut link, level);
             }
             Message::Srm(lsp_id, level, reason) => {
                 self.process_srm(lsp_id, level, reason);
@@ -240,7 +240,7 @@ impl Isis {
                     return;
                 };
                 srm_set_all_lsp(&mut link, level);
-                csnp_advertise(&mut link, level, sys_id);
+                csnp_send(&mut link, level);
             }
         }
     }
@@ -402,7 +402,7 @@ impl Isis {
             }
             IfsmEvent::CsnpTimerExpire => {
                 if let Some(level) = level {
-                    ifsm::csnp_send(&mut top, level);
+                    csnp_send(&mut top, level);
                 }
             }
             IfsmEvent::HelloOriginate => match level {
@@ -886,11 +886,11 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
 
         available_len
     };
-    tracing::info!("[CSNP:Gen] available_len {}", available_len);
+    // tracing::info!("[CSNP:Gen] available_len {}", available_len);
 
     let entry_size_max = available_len / 16;
 
-    tracing::info!("[CSNP:Gen] entry_len {}", entry_size_max);
+    // tracing::info!("[CSNP:Gen] entry_len {}", entry_size_max);
 
     let mut csnps: Vec<IsisCsnp> = vec![];
     let mut tlvs = IsisTlvLspEntries::default();

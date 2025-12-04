@@ -5,7 +5,7 @@ use anyhow::{Context, Error};
 use bytes::BytesMut;
 use isis_packet::*;
 
-use crate::isis::inst::lsp_emit;
+use crate::isis::inst::{csnp_generate, lsp_emit};
 use crate::isis::link::DisStatus;
 use crate::isis::lsdb::{insert_self_originate, insert_self_originate_link};
 use crate::isis::neigh::Neighbor;
@@ -362,9 +362,9 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 // links) starts (or restarts), the IS shall
 //
 // a) set SRMflag for that circuit on all LSPs, and
-pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
+pub fn srm_set_all_lsp(link: &mut LinkTop, level: Level) {
     // Extract LSP entries first to avoid borrow checker issues.
-    let lsp_ids: Vec<IsisLspId> = top
+    let lsp_ids: Vec<IsisLspId> = link
         .lsdb
         .get(&level)
         .iter()
@@ -372,7 +372,7 @@ pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
         .collect();
 
     for lsp_id in lsp_ids.iter() {
-        lsdb::srm_set(top, level, lsp_id);
+        lsdb::srm_set(link, level, lsp_id);
     }
 }
 
@@ -383,23 +383,41 @@ pub fn srm_set_all_lsp(top: &mut LinkTop, level: Level) {
 //
 // b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
 #[isis_pdu_handler(Csnp, Send)]
-pub fn csnp_advertise(top: &mut LinkTop, level: Level, sys_id: IsisSysId) {
-    let mut csnp = IsisCsnp {
-        source_id: sys_id,
+pub fn csnp_send(link: &mut LinkTop, level: Level) {
+    let csnps = csnp_generate(link, level);
+    for csnp in csnps.into_iter() {
+        csnp_send_pdu(link, level, csnp);
+    }
+}
+
+fn csnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
+    let packet = match level {
+        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
+        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
+    };
+    link.ptx.send(PacketMessage::Send(
+        Packet::Packet(packet),
+        link.ifindex,
+        level,
+        link.dest(level),
+    ));
+}
+
+//
+pub fn psnp_send(link: &mut LinkTop, level: Level, entries: &BTreeMap<IsisLspId, IsisLspEntry>) {
+    // TODO: Need to check maximum packet size of the interface.
+    let mut psnp = IsisPsnp {
+        source_id: link.up_config.net.sys_id(),
         source_id_circuit: 0,
-        start: IsisLspId::start(),
-        end: IsisLspId::end(),
         ..Default::default()
     };
     let mut lsps = IsisTlvLspEntries::default();
-    for (lsp_id, lsa) in top.lsdb.get(&level).iter() {
-        // TODO: Update hold_time.
-        let entry = IsisLspEntry::from_lsp(&lsa.lsp);
-        lsps.entries.push(entry);
+    for ((_, value)) in entries.iter() {
+        lsps.entries.push(value.clone());
     }
-    csnp.tlvs.push(lsps.into());
+    psnp.tlvs.push(lsps.into());
 
-    isis_csnp_send(top, top.ifindex, level, csnp);
+    psnp_send_pdu(link, level, psnp);
 }
 
 #[isis_pdu_handler(Psnp, Recv)]
@@ -667,31 +685,16 @@ fn mac_str(mac: &Option<MacAddr>) -> String {
     }
 }
 
-pub fn isis_psnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisPsnp) {
+pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
     };
-
-    top.ptx.send(PacketMessage::Send(
+    link.ptx.send(PacketMessage::Send(
         Packet::Packet(packet),
-        ifindex,
+        link.ifindex,
         level,
-        top.dest(level),
-    ));
-}
-
-pub fn isis_csnp_send(top: &mut LinkTop, ifindex: u32, level: Level, pdu: IsisCsnp) {
-    let packet = match level {
-        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
-        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
-    };
-
-    top.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
-        ifindex,
-        level,
-        top.dest(level),
+        link.dest(level),
     ));
 }
 
