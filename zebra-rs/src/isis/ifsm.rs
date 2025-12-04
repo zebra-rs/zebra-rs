@@ -188,70 +188,6 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     Ok(())
 }
 
-#[isis_pdu_handler(Csnp, Send)]
-pub fn csnp_send(link: &mut LinkTop, level: Level) -> Result<()> {
-    // P2P interfaces don't use CSNP for database synchronization
-    if link.config.link_type() == LinkType::P2p {
-        isis_debug!("Skipping CSNP send for P2P interface {}", link.state.name);
-        return Ok(());
-    }
-
-    isis_pdu_trace!(link, &level, "CSNP Send on {}", link.state.name);
-    isis_packet_trace!(link.tracing, Csnp, Send, &level, "---------");
-
-    const MAX_LSP_ENTRIES_PER_TLV: usize = 15;
-    let mut lsp_entries = IsisTlvLspEntries::default();
-    let mut entry_count = 0;
-
-    let mut csnp = IsisCsnp {
-        pdu_len: 0,
-        source_id: link.up_config.net.sys_id().clone(),
-        source_id_circuit: 0,
-        start: IsisLspId::start(),
-        end: IsisLspId::end(),
-        tlvs: vec![],
-    };
-
-    for (lsp_id, lsa) in link.lsdb.get(&level).iter() {
-        isis_pdu_trace!(link, &level, "{}", lsp_id);
-        let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
-        let entry = IsisLspEntry {
-            hold_time,
-            lsp_id: lsp_id.clone(),
-            seq_number: lsa.lsp.seq_number,
-            checksum: lsa.lsp.checksum,
-        };
-        lsp_entries.entries.push(entry);
-        entry_count += 1;
-
-        // If we've reached the limit, push this TLV and start a new one
-        if entry_count >= MAX_LSP_ENTRIES_PER_TLV {
-            csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
-            lsp_entries = IsisTlvLspEntries::default();
-            entry_count = 0;
-        }
-    }
-
-    // Don't forget to add the last TLV if it has any entries
-    if !lsp_entries.entries.is_empty() {
-        csnp.tlvs.push(IsisTlv::LspEntries(lsp_entries));
-    }
-
-    let packet = match level {
-        Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(csnp.clone())),
-        Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(csnp.clone())),
-    };
-    let ifindex = link.ifindex;
-    link.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
-        ifindex,
-        level,
-        link.dest(level),
-    ));
-    isis_packet_trace!(link.tracing, Csnp, Send, &level, "---------");
-    Ok(())
-}
-
 pub fn has_level(is_level: IsLevel, level: Level) -> bool {
     match level {
         Level::L1 => matches!(is_level, IsLevel::L1 | IsLevel::L1L2),
@@ -360,8 +296,6 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     }
 
     tracing::info!("DIS selection start");
-
-    csnp_generate(link, level);
 
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);
