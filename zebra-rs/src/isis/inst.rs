@@ -1486,16 +1486,24 @@ fn build_adjacency_ilm(
 
         for (ifindex, link) in top.links.iter() {
             if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                for tlv in nbr.tlvs.iter() {
-                    if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                        let nhop = SpfNexthop {
-                            ifindex: *ifindex,
-                            adjacency: true,
-                            sys_id: Some(nhop_id.clone()),
-                        };
-                        nhops.insert(ifaddr.addr, nhop);
-                    }
+                for (addr, _) in nbr.addr4.iter() {
+                    let nhop = SpfNexthop {
+                        ifindex: *ifindex,
+                        adjacency: true,
+                        sys_id: Some(nhop_id.clone()),
+                    };
+                    nhops.insert(*addr, nhop);
                 }
+                // for tlv in nbr.tlvs.iter() {
+                //     if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
+                //         let nhop = SpfNexthop {
+                //             ifindex: *ifindex,
+                //             adjacency: true,
+                //             sys_id: Some(nhop_id.clone()),
+                //         };
+                //         nhops.insert(ifaddr.addr, nhop);
+                //     }
+                // }
             }
         }
 
@@ -1541,16 +1549,25 @@ fn build_rib_from_spf(
                     // Find nhop from links
                     for (ifindex, link) in top.links.iter() {
                         if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                            for tlv in nbr.tlvs.iter() {
-                                if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                                    let nhop = SpfNexthop {
-                                        ifindex: *ifindex,
-                                        adjacency: p[0] == *node,
-                                        sys_id: Some(nhop_id.clone()),
-                                    };
-                                    spf_nhops.insert(ifaddr.addr, nhop);
-                                }
+                            for (addr, _) in nbr.addr4.iter() {
+                                let nhop = SpfNexthop {
+                                    ifindex: *ifindex,
+                                    adjacency: p[0] == *node,
+                                    sys_id: Some(nhop_id.clone()),
+                                };
+                                spf_nhops.insert(*addr, nhop);
                             }
+
+                            // for tlv in nbr.tlvs.iter() {
+                            //     if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
+                            //         let nhop = SpfNexthop {
+                            //             ifindex: *ifindex,
+                            //             adjacency: p[0] == *node,
+                            //             sys_id: Some(nhop_id.clone()),
+                            //         };
+                            //         spf_nhops.insert(ifaddr.addr, nhop);
+                            //     }
+                            // }
                         }
                     }
                 }

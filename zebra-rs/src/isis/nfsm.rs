@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use isis_packet::{IsisHello, IsisNeighborId, IsisTlv, IsisTlvP2p3Way, Nsap};
+use isis_packet::*;
 use num_enum::IntoPrimitive;
 use strum_macros::{Display, EnumString};
 
@@ -98,13 +98,33 @@ impl NeighborAddr6 {
     }
 }
 
-pub fn nbr_hello_tlv_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
+pub fn nbr_hello_interpret(
+    nbr: &mut Neighbor,
+    tlvs: &Vec<IsisTlv>,
+    mac: Option<MacAddr>,
+    sys_id: IsisSysId,
+    local_pool: &mut Option<LabelPool>,
+) -> (bool, bool) {
+    let mut has_mac = false;
+    let mut has_my_sys_id = false;
+
     let mut addr4 = BTreeMap::new();
     let mut addr6 = BTreeMap::new();
     let mut laddr6 = vec![];
 
-    for tlv in nbr.tlvs.iter() {
+    for tlv in tlvs.iter() {
         match tlv {
+            IsisTlv::IsNeighbor(neigh) => {
+                if let Some(mac) = mac {
+                    has_mac = neigh.neighbors.iter().any(|n| mac.octets() == n.octets);
+                }
+            }
+            IsisTlv::P2p3Way(tlv) => {
+                nbr.circuit_id = Some(tlv.circuit_id);
+                if let Some(neighbor_id) = tlv.neighbor_id {
+                    has_my_sys_id = (sys_id == neighbor_id);
+                }
+            }
             IsisTlv::Ipv4IfAddr(ifaddr) => {
                 addr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
             }
@@ -112,8 +132,8 @@ pub fn nbr_hello_tlv_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPoo
                 addr6.insert(ifaddr.addr, NeighborAddr6::new(ifaddr.addr));
             }
             IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
-            IsisTlv::P2p3Way(tlv) => {
-                nbr.threeway = Some(tlv.clone());
+            IsisTlv::ProtoSupported(tlv) => {
+                nbr.proto = Some(tlv.clone());
             }
             _ => {}
         }
@@ -156,6 +176,8 @@ pub fn nbr_hello_tlv_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPoo
     }
 
     nbr.addr6l = laddr6;
+
+    (has_mac, has_my_sys_id)
 }
 
 pub fn nfsm_hello_received(
@@ -196,28 +218,6 @@ pub fn nfsm_hold_timer_expire(
     }
 
     Some(NfsmState::Down)
-}
-
-fn p2ptlv(nbr: &Neighbor) -> Option<IsisTlvP2p3Way> {
-    for tlv in nbr.tlvs.iter() {
-        if let IsisTlv::P2p3Way(tlv) = tlv {
-            return Some(tlv.clone());
-        }
-    }
-    None
-}
-
-fn nfsm_p2ptlv_has_me(tlv: Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
-    let sys_id = nsap.sys_id();
-
-    if let Some(tlv) = tlv {
-        if let Some(neighbor_id) = tlv.neighbor_id {
-            if sys_id == neighbor_id {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 pub fn isis_nfsm(

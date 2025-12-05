@@ -27,10 +27,11 @@ pub struct Neighbor {
     pub lan_id: IsisNeighborId,  // LAN
     pub circuit_type: IsLevel,   // LAN & P2P
     pub circuit_id: Option<u32>, // P2P
-    pub threeway: Option<IsisTlvP2p3Way>,
     // State
     pub state: NfsmState,
     pub is_dis: bool,
+    // Protos.
+    pub proto: Option<IsisTlvProtoSupported>,
     // Addrs
     pub addr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: BTreeMap<Ipv6Addr, NeighborAddr6>,
@@ -39,7 +40,7 @@ pub struct Neighbor {
     //
     pub hold_time: u16,
     pub hold_timer: Option<Timer>,
-    pub tlvs: Vec<IsisTlv>,
+    // pub tlvs: Vec<IsisTlv>,
     //
     hello_originate: bool,
 }
@@ -58,7 +59,6 @@ impl Neighbor {
             priority: 0,
             lan_id: IsisNeighborId::default(),
             circuit_type: IsLevel::default(),
-            threeway: None,
             ifindex,
             // prev: NfsmState::Down,
             state: NfsmState::Down,
@@ -66,11 +66,11 @@ impl Neighbor {
             addr6: BTreeMap::new(),
             addr6l: Vec::new(),
             mac,
+            proto: None,
             hold_timer: None,
             is_dis: false,
             circuit_id: None,
             hold_time: 0,
-            tlvs: vec![],
             link_type,
             hello_originate: false,
         }
@@ -96,16 +96,6 @@ impl Neighbor {
                 self.tx.send(message).unwrap();
             }
         }
-    }
-
-    pub fn proto_tlv(&self) -> Option<&IsisTlvProtoSupported> {
-        self.tlvs.iter().find_map(|tlv| {
-            if let IsisTlv::ProtoSupported(tlv) = tlv {
-                Some(tlv)
-            } else {
-                None
-            }
-        })
     }
 }
 
@@ -233,7 +223,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     )?;
 
     write!(buf, "    Circuit type: {}, Speaks:", nbr.circuit_type)?;
-    if let Some(proto) = &nbr.proto_tlv() {
+    if let Some(proto) = &nbr.proto {
         if !proto.nlpids.is_empty() {
             let protocols = proto
                 .nlpids
@@ -291,7 +281,7 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         nbr.sys_id.to_string()
     };
 
-    let speaks = if let Some(proto) = &nbr.proto_tlv() {
+    let speaks = if let Some(proto) = &nbr.proto {
         proto
             .nlpids
             .iter()
