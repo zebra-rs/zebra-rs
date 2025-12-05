@@ -9,7 +9,7 @@ use crate::isis::inst::{csnp_generate, lsp_emit};
 use crate::isis::link::DisStatus;
 use crate::isis::lsdb::{insert_self_originate, insert_self_originate_link};
 use crate::isis::neigh::Neighbor;
-use crate::isis::nfsm::{nbr_hello_tlv_update, nfsm_hold_timer};
+use crate::isis::nfsm::{nbr_hello_interpret, nfsm_hold_timer};
 use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::rib::MacAddr;
 use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
@@ -99,15 +99,17 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     nbr.lan_id = pdu.lan_id;
     nbr.mac = mac;
 
+    // Store Hello packet TLV to neighbor for further processing.
+    //nbr.tlvs = pdu.tlvs;
+
+    // Update IPv4/IPv6 address.
+    let mac = link.state.mac;
+    let sys_id = link.up_config.net.sys_id();
+    let (has_mac, _) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+
     // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
     // holdingTimer) for each “Ln Intermediate System” adjacency.
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
-
-    // Store Hello packet TLV to neighbor for further processing.
-    nbr.tlvs = pdu.tlvs;
-
-    // Update IPv4/IPv6 address.
-    nbr_hello_tlv_update(nbr, link.local_pool);
 
     // State transition.
     let mut state = nbr.state;
@@ -128,7 +130,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // When R reports the local system’s SNPA address in its Level n LAN IIH PDUs, the IS shall
         // d) set the adjacency’s adjacencyState to “Up”, and
         // e) generate an adjacencyStateChange (Up)” event.
-        if nbr_hello_has_mac(&nbr.tlvs, link.state.mac) {
+        if has_mac {
             state = NfsmState::Up;
             // XXX Adjacency(Up)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -142,7 +144,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         //
         // a) set the adjacency’s adjacencyState to “initialising”, and
         // b) generate an adjacencyStateChange (Down) event.
-        if !nbr_hello_has_mac(&nbr.tlvs, link.state.mac) {
+        if !has_mac {
             state = NfsmState::Init;
             // XXX Adjacency(Down)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -211,19 +213,16 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         nbr.hold_time = pdu.hold_time;
 
         // Store Hello packet TLV to neighbor for further processing.
-        nbr.tlvs = pdu.tlvs.clone();
+        // nbr.tlvs = pdu.tlvs.clone();
 
         // Update IPv4/IPv6 address.
-        nbr_hello_tlv_update(nbr, link.local_pool);
+        let mac = link.state.mac;
+        let sys_id = link.up_config.net.sys_id();
+        let (_, has_my_sys_id) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
 
         //
         let mut state = nbr.state;
         nbr.event_clear();
-
-        // Lookup three way handshake TLV.
-        if let Some(tlv) = &nbr.threeway {
-            nbr.circuit_id = Some(tlv.circuit_id);
-        }
 
         // When it is three way handshake.
         if state == NfsmState::Down {
@@ -233,7 +232,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // Fall down from previous.
         if state == NfsmState::Init {
-            if nbr_hello_has_me(&nbr.threeway, &link.up_config.net) {
+            if has_my_sys_id {
                 state = NfsmState::Up;
 
                 // Set adjacency.
