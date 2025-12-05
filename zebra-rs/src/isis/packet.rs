@@ -22,37 +22,6 @@ use super::link::{LinkTop, LinkType};
 use super::lsdb;
 use super::nfsm::{NfsmEvent, isis_nfsm};
 
-fn nbr_hello_has_mac(tlvs: &Vec<IsisTlv>, mac: Option<MacAddr>) -> bool {
-    let Some(addr) = mac else {
-        return false;
-    };
-
-    for tlv in tlvs.iter() {
-        if let IsisTlv::IsNeighbor(neigh) = tlv {
-            for neighbor in neigh.neighbors.iter() {
-                if addr.octets() == neighbor.octets {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-fn nbr_hello_has_me(tlv: &Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
-    let sys_id = nsap.sys_id();
-
-    if let Some(tlv) = tlv
-        && let Some(neighbor_id) = tlv.neighbor_id
-        && sys_id == neighbor_id
-    {
-        true
-    } else {
-        false
-    }
-}
-
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
     use IfsmEvent::*;
@@ -99,19 +68,16 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     nbr.lan_id = pdu.lan_id;
     nbr.mac = mac;
 
-    // Store Hello packet TLV to neighbor for further processing.
-    //nbr.tlvs = pdu.tlvs;
-
-    // Update IPv4/IPv6 address.
-    let mac = link.state.mac;
-    let sys_id = link.up_config.net.sys_id();
-    let (has_mac, _) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
-
     // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
     // holdingTimer) for each “Ln Intermediate System” adjacency.
     nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
-    // State transition.
+    // Interpret TLVs.
+    let mac = link.state.mac;
+    let sys_id = link.up_config.net.sys_id();
+    let (has_mac, _) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+
+    // Start state transition.
     let mut state = nbr.state;
     nbr.event_clear();
 
@@ -212,15 +178,15 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         nbr.circuit_type = pdu.circuit_type;
         nbr.hold_time = pdu.hold_time;
 
-        // Store Hello packet TLV to neighbor for further processing.
-        // nbr.tlvs = pdu.tlvs.clone();
+        // Reset hold timer
+        nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
-        // Update IPv4/IPv6 address.
+        // Interpret TLVs.
         let mac = link.state.mac;
         let sys_id = link.up_config.net.sys_id();
         let (_, has_my_sys_id) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
 
-        //
+        // Start state transition.
         let mut state = nbr.state;
         nbr.event_clear();
 
@@ -244,9 +210,6 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
                 link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
             }
         }
-
-        // Reset hold timer
-        nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
         // When neighbor state has been changed.
         if nbr.state != state {

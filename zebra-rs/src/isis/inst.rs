@@ -187,11 +187,10 @@ impl Isis {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::SrmX(level, ifindex) => {
-                let sys_id = self.config.net.sys_id();
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                lsdb::srm_advertise(&mut link, level, ifindex, sys_id);
+                lsdb::srm_advertise(&mut link, level, ifindex);
             }
             Message::SsnX(level, ifindex) => {
                 let sys_id = self.config.net.sys_id();
@@ -232,8 +231,6 @@ impl Isis {
                 self.process_lsdb(ev, level, key);
             }
             Message::AdjacencyUp(level, ifindex) => {
-                let sys_id = self.config.net.sys_id();
-
                 self.process_lsp_originate(level);
 
                 let Some(mut link) = self.link_top(ifindex) else {
@@ -247,15 +244,6 @@ impl Isis {
 
     fn process_srm(&mut self, lsp_id: IsisLspId, level: Level, reason: String) {
         for (_, link) in self.links.iter() {
-            isis_event_trace!(
-                self.tracing,
-                Flooding,
-                &level,
-                "SRM: processing {} on {} due to {}",
-                lsp_id,
-                link.state.name,
-                reason
-            );
             if !has_level(link.state.level(), level) {
                 isis_event_trace!(
                     self.tracing,
@@ -280,12 +268,6 @@ impl Isis {
 
             if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
                 if lsa.ifindex == link.ifindex {
-                    isis_event_trace!(
-                        self.tracing,
-                        Flooding,
-                        &level,
-                        "SRM: LSP comes from the same interface, continue"
-                    );
                     continue;
                 }
 
@@ -296,28 +278,12 @@ impl Isis {
 
                     isis_packet::write_hold_time(&mut buf, hold_time);
 
-                    isis_event_trace!(
-                        self.tracing,
-                        Flooding,
-                        &level,
-                        "SRM: Send LSP on {}, {}",
-                        link.state.name,
-                        lsp_id
-                    );
-
                     link.ptx.send(PacketMessage::Send(
                         Packet::Bytes(buf),
                         link.ifindex,
                         level,
                         link.state.mac,
                     ));
-                } else {
-                    isis_event_trace!(
-                        self.tracing,
-                        Flooding,
-                        &level,
-                        "SRM: LSP does not have bytes, return"
-                    );
                 }
             }
         }
