@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Error};
 use bytes::BytesMut;
+use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::isis::inst::{csnp_generate, lsp_emit};
@@ -13,7 +14,6 @@ use crate::isis::nfsm::{nbr_hello_interpret, nfsm_hold_timer};
 use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::rib::MacAddr;
 use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
-use isis_macros::isis_pdu_handler;
 
 use super::Level;
 use super::ifsm::has_level;
@@ -326,7 +326,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 // links) starts (or restarts), the IS shall
 //
 // a) set SRMflag for that circuit on all LSPs, and
-pub fn srm_set_all_lsp(link: &mut LinkTop, level: Level) {
+pub fn srm_set_lsp_all(link: &mut LinkTop, level: Level) {
     // Extract LSP entries first to avoid borrow checker issues.
     let lsp_ids: Vec<IsisLspId> = link
         .lsdb
@@ -348,6 +348,9 @@ pub fn srm_set_all_lsp(link: &mut LinkTop, level: Level) {
 // b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
 #[isis_pdu_handler(Csnp, Send)]
 pub fn csnp_send(link: &mut LinkTop, level: Level) {
+    // Logging
+    isis_pdu_trace!(link, &level, "[CSNP:Send] on {}", link.state.name);
+
     let csnps = csnp_generate(link, level);
     for csnp in csnps.into_iter() {
         csnp_send_pdu(link, level, csnp);
@@ -365,23 +368,6 @@ fn csnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
         level,
         link.dest(level),
     ));
-}
-
-//
-pub fn psnp_send(link: &mut LinkTop, level: Level, entries: &BTreeMap<IsisLspId, IsisLspEntry>) {
-    // TODO: Need to check maximum packet size of the interface.
-    let mut psnp = IsisPsnp {
-        source_id: link.up_config.net.sys_id(),
-        source_id_circuit: 0,
-        ..Default::default()
-    };
-    let mut lsps = IsisTlvLspEntries::default();
-    for ((_, value)) in entries.iter() {
-        lsps.entries.push(value.clone());
-    }
-    psnp.tlvs.push(lsps.into());
-
-    psnp_send_pdu(link, level, psnp);
 }
 
 #[isis_pdu_handler(Psnp, Recv)]
@@ -544,111 +530,7 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     }
 }
 
-pub fn lsp_has_neighbor_id(lsp: &IsisLsp, neighbor_id: &IsisNeighborId) -> bool {
-    for tlv in &lsp.tlvs {
-        if let IsisTlv::ExtIsReach(ext_is_reach) = tlv {
-            for entry in &ext_is_reach.entries {
-                if entry.neighbor_id == *neighbor_id {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-pub fn lsp_self_purged(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
-    isis_event_trace!(
-        top.tracing,
-        LspPurge,
-        &level,
-        "Self originated LSP is purged"
-    );
-    match top.lsdb.get(&level).get(&lsp.lsp_id) {
-        Some(originated) => {
-            if lsp.seq_number > originated.lsp.seq_number {
-                insert_self_originate_link(top, level, lsp, None);
-            }
-            isis_event_trace!(
-                top.tracing,
-                LspOriginate,
-                &level,
-                "LspOriginate from lsp_self_purged"
-            );
-            top.tx.send(Message::LspOriginate(level));
-        }
-        None => {
-            // Self LSP does not exists in LSDB, accept the purge
-        }
-    }
-}
-
-pub fn lsp_same(src: &IsisLsp, dest: &IsisLsp) -> bool {
-    if src.tlvs.len() != dest.tlvs.len() {
-        return false;
-    }
-    for (i, (src_tlv, dest_tlv)) in src.tlvs.iter().zip(dest.tlvs.iter()).enumerate() {
-        if src_tlv != dest_tlv {
-            tracing::debug!(
-                "TLV mismatch at index {}: src={}, dest={}",
-                i,
-                src_tlv,
-                dest_tlv
-            );
-            return false;
-        }
-    }
-    true
-}
-
 // Self originated LSP has been received from neighbor.
-pub fn lsp_self_updated(top: &mut LinkTop, level: Level, lsp: IsisLsp) {
-    isis_database_trace!(
-        top.tracing,
-        Lsdb,
-        &level,
-        "Self originated LSP is updated seq number: 0x{:04x}",
-        lsp.seq_number
-    );
-    match top.lsdb.get(&level).get(&lsp.lsp_id) {
-        Some(originated) => {
-            match lsp.seq_number.cmp(&originated.lsp.seq_number) {
-                std::cmp::Ordering::Greater => {
-                    if !lsp_same(&originated.lsp, &lsp) {
-                        top.tx.send(Message::LspOriginate(level));
-                    }
-                    insert_self_originate_link(top, level, lsp, None);
-                }
-                std::cmp::Ordering::Equal => {
-                    if lsp.checksum != originated.lsp.checksum {
-                        isis_event_trace!(
-                            top.tracing,
-                            LspOriginate,
-                            &level,
-                            "LspOriginate from lsp_self_update"
-                        );
-                        top.tx.send(Message::LspOriginate(level));
-                    }
-                }
-                std::cmp::Ordering::Less => {
-                    // TODO: We need flood LSP with SRM flag.
-                }
-            }
-        }
-        None => {
-            tracing::debug!("Self LSP {} is not in LSDB", lsp.lsp_id);
-        }
-    }
-}
-
-fn mac_str(mac: &Option<MacAddr>) -> String {
-    if let Some(mac) = mac {
-        format!("{}", mac)
-    } else {
-        String::from("N/A")
-    }
-}
-
 pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
