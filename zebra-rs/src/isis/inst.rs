@@ -744,7 +744,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         };
         // Neighbor
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
-            for (_key, value) in nbr.naddr4.iter() {
+            for (_key, value) in nbr.addr4.iter() {
                 if let Some(label) = value.label {
                     if nbr.link_type.is_p2p() {
                         let sub = IsisSubAdjSid {

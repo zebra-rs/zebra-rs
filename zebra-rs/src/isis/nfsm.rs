@@ -104,9 +104,10 @@ impl NeighborAddr4 {
     }
 }
 
+#[derive(Debug)]
 pub struct NeighborAddr6 {
-    addr: Ipv6Addr,
-    label: Option<u32>,
+    pub addr: Ipv6Addr,
+    pub label: Option<u32>,
 }
 
 impl NeighborAddr6 {
@@ -116,42 +117,59 @@ impl NeighborAddr6 {
 }
 
 pub fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
-    let mut naddr4 = BTreeMap::new();
-    let mut addr6 = vec![];
+    let mut addr4 = BTreeMap::new();
+    let mut addr6 = BTreeMap::new();
     let mut laddr6 = vec![];
 
     for tlv in &nbr.tlvs {
         match tlv {
             IsisTlv::Ipv4IfAddr(ifaddr) => {
-                naddr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
+                addr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
             }
-            IsisTlv::Ipv6GlobalIfAddr(ifaddr) => addr6.push(ifaddr.addr),
+            IsisTlv::Ipv6GlobalIfAddr(ifaddr) => {
+                addr6.insert(ifaddr.addr, NeighborAddr6::new(ifaddr.addr));
+            }
             IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
             _ => {}
         }
     }
 
     // Release removed address's label.
-    nbr.naddr4.retain(|key, value| {
-        if !naddr4.contains_key(key) {
+    nbr.addr4.retain(|key, value| {
+        let keep = addr4.contains_key(key);
+        if !keep {
             // Release the label before removing
             if let Some(label) = value.label {
                 if let Some(local_pool) = local_pool {
                     local_pool.release(label as usize);
                 }
             }
-            false // Remove this entry
-        } else {
-            true // Keep this entry
         }
+        keep
     });
-
-    for (&key, _) in naddr4.iter() {
-        if !nbr.naddr4.contains_key(&key) {
-            nbr.naddr4.insert(key, NeighborAddr4::new(key));
+    for (&key, _) in addr4.iter() {
+        if !nbr.addr4.contains_key(&key) {
+            nbr.addr4.insert(key, NeighborAddr4::new(key));
         }
     }
-    nbr.addr6 = addr6;
+    nbr.addr6.retain(|key, value| {
+        let keep = addr6.contains_key(key);
+        if !keep {
+            // Release the label before removing
+            if let Some(label) = value.label {
+                if let Some(local_pool) = local_pool {
+                    local_pool.release(label as usize);
+                }
+            }
+        }
+        keep
+    });
+    for (&key, _) in addr6.iter() {
+        if !nbr.addr6.contains_key(&key) {
+            nbr.addr6.insert(key, NeighborAddr6::new(key));
+        }
+    }
+
     nbr.laddr6 = laddr6;
 }
 
@@ -241,7 +259,7 @@ pub fn isis_nfsm(
                 }
 
                 // Release adjacency SID if it has been allocated.
-                for (_key, value) in nbr.naddr4.iter_mut() {
+                for (_key, value) in nbr.addr4.iter_mut() {
                     if let Some(label) = value.label {
                         if let Some(local_pool) = ntop.local_pool {
                             local_pool.release(label as usize);
@@ -255,7 +273,7 @@ pub fn isis_nfsm(
             if next_state == NfsmState::Up {
                 // Allocate adjacency SID when it is not yet.
                 if let Some(local_pool) = ntop.local_pool {
-                    for (_key, value) in nbr.naddr4.iter_mut() {
+                    for (_key, value) in nbr.addr4.iter_mut() {
                         if value.label.is_none() {
                             if let Some(label) = local_pool.allocate() {
                                 value.label = Some(label as u32);
