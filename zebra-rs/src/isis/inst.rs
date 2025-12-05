@@ -31,11 +31,11 @@ use crate::context::Timer;
 use crate::spf;
 
 use super::config::IsisConfig;
-use super::ifsm::has_level;
+use super::ifsm::{csnp_timer, has_level};
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_all_lsp};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_lsp_all};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -233,8 +233,9 @@ impl Isis {
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                srm_set_all_lsp(&mut link, level);
+                srm_set_lsp_all(&mut link, level);
                 csnp_send(&mut link, level);
+                *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
             }
         }
     }

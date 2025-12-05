@@ -434,7 +434,7 @@ fn dis_timers_stop(link: &mut LinkTop, level: Level) {
     *link.timer.csnp.get_mut(&level) = None;
 }
 
-fn csnp_timer(ltop: &LinkTop, level: Level) -> Timer {
+pub fn csnp_timer(ltop: &LinkTop, level: Level) -> Timer {
     let tx = ltop.tx.clone();
     let ifindex = ltop.ifindex;
     Timer::repeat(ltop.config.csnp_interval(), move || {

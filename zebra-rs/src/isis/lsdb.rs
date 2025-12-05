@@ -16,7 +16,6 @@ use crate::isis::{
 
 use super::inst::{MsgSender, Packet, PacketMessage};
 use super::link::LinkTop;
-use super::psnp_send;
 use super::{
     Level,
     inst::{IsisTop, lsp_emit, lsp_flood, spf_schedule},
