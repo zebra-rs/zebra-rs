@@ -12,7 +12,7 @@ use crate::context::Timer;
 use crate::rib::MacAddr;
 
 use super::link::LinkType;
-use super::nfsm::{NeighborAddr4, NfsmState};
+use super::nfsm::{NeighborAddr4, NeighborAddr6, NfsmState};
 use super::{IfsmEvent, Isis, Level, Message};
 
 // IS-IS Neighbor
@@ -32,8 +32,8 @@ pub struct Neighbor {
     pub state: NfsmState,
     pub is_dis: bool,
     // Addrs
-    pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
-    pub addr6: Vec<Ipv6Addr>,
+    pub addr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
+    pub addr6: BTreeMap<Ipv6Addr, NeighborAddr6>,
     pub laddr6: Vec<Ipv6Addr>,
     pub mac: Option<MacAddr>,
     //
@@ -61,8 +61,8 @@ impl Neighbor {
             ifindex,
             // prev: NfsmState::Down,
             state: NfsmState::Down,
-            naddr4: BTreeMap::new(),
-            addr6: Vec::new(),
+            addr4: BTreeMap::new(),
+            addr6: BTreeMap::new(),
             laddr6: Vec::new(),
             mac,
             hold_timer: None,
@@ -135,7 +135,7 @@ struct NeighborDetail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ipv6_link_locals: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    ipv6_prefixes: Vec<String>,
+    ipv6_prefixes: Vec<IpPrefix>,
 }
 
 #[derive(Serialize)]
@@ -256,10 +256,10 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     // XXX
     writeln!(buf, "    LAN Priority: {}, {}", nbr.priority, dis)?;
 
-    if !nbr.naddr4.is_empty() {
+    if !nbr.addr4.is_empty() {
         writeln!(buf, "    IP Prefixes")?;
     }
-    for (_key, value) in &nbr.naddr4 {
+    for (_key, value) in &nbr.addr4 {
         write!(buf, "      {}", value.addr)?;
         if let Some(label) = value.label {
             write!(buf, " ({})", label);
@@ -275,8 +275,8 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     if !nbr.addr6.is_empty() {
         writeln!(buf, "    IPv6 Prefixes")?;
     }
-    for addr in &nbr.addr6 {
-        writeln!(buf, "      {}", addr)?;
+    for (_, value) in &nbr.addr6 {
+        writeln!(buf, "      {}", value.addr)?;
     }
 
     writeln!(buf, "")?;
@@ -301,7 +301,7 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
     };
 
     let ip_prefixes = nbr
-        .naddr4
+        .addr4
         .iter()
         .map(|(_, value)| IpPrefix {
             address: value.addr.to_string(),
@@ -310,7 +310,14 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         .collect();
 
     let ipv6_link_locals = nbr.laddr6.iter().map(|addr| addr.to_string()).collect();
-    let ipv6_prefixes = nbr.addr6.iter().map(|addr| addr.to_string()).collect();
+    let ipv6_prefixes = nbr
+        .addr6
+        .iter()
+        .map(|(_, value)| IpPrefix {
+            address: value.addr.to_string(),
+            label: value.label,
+        })
+        .collect();
 
     NeighborDetail {
         system_id,
