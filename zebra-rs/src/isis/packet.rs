@@ -80,6 +80,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // State transition.
     let mut state = nbr.state;
+    nbr.event_clear();
 
     if state == NfsmState::Down {
         // 8.4.2.5.1
@@ -88,6 +89,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // system and the source of the PDU (R) is two-way. However R shall be
         // included in future Level n LAN IIH PDUs transmitted by this system.
         state = NfsmState::Init;
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
     if state == NfsmState::Init {
@@ -98,6 +100,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         if nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
             state = NfsmState::Up;
             // XXX Adjacency(Up)
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
         }
     } else {
@@ -111,6 +114,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         if !nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
             state = NfsmState::Init;
             // XXX Adjacency(Down)
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
         }
     }
@@ -132,7 +136,6 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // When neighbor state has been changed.
     if nbr.state != state {
         tracing::info!("NFSM {} => {}", nbr.state, state);
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
     nbr.state = state
@@ -206,6 +209,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         //
         let mut state = nbr.state;
+        nbr.event_clear();
 
         // Lookup three way handshake TLV.
         let three_way = p2ptlv(nbr);

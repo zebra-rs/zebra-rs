@@ -346,6 +346,8 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             mac_str(&nbr.mac),
         );
 
+        nbr.event_clear();
+
         // Adjacency with Other DIS.
         if link.state.adj.get(&level).is_none() {
             use IfsmEvent::*;

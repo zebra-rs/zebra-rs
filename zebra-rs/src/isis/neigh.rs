@@ -13,7 +13,7 @@ use crate::rib::MacAddr;
 
 use super::link::LinkType;
 use super::nfsm::{NeighborAddr4, NfsmState};
-use super::{Isis, Level, Message};
+use super::{IfsmEvent, Isis, Level, Message};
 
 // IS-IS Neighbor
 #[derive(Debug)]
@@ -40,6 +40,8 @@ pub struct Neighbor {
     pub hold_time: u16,
     pub hold_timer: Option<Timer>,
     pub tlvs: Vec<IsisTlv>,
+    //
+    hello_originate: bool,
 }
 
 impl Neighbor {
@@ -69,6 +71,7 @@ impl Neighbor {
             hold_time: 0,
             tlvs: vec![],
             link_type,
+            hello_originate: false,
         }
     }
 
@@ -76,8 +79,22 @@ impl Neighbor {
         self.is_dis
     }
 
-    pub fn event(&self, message: Message) {
-        self.tx.send(message).unwrap();
+    pub fn event_clear(&mut self) {
+        self.hello_originate = false;
+    }
+
+    pub fn event(&mut self, message: Message) {
+        match message {
+            Message::Ifsm(IfsmEvent::HelloOriginate, _, _) => {
+                if !self.hello_originate {
+                    self.hello_originate = true;
+                    self.tx.send(message).unwrap();
+                }
+            }
+            _ => {
+                self.tx.send(message).unwrap();
+            }
+        }
     }
 
     pub fn proto_tlv(&self) -> Option<&IsisTlvProtoSupported> {
