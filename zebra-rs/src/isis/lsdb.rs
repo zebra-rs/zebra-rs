@@ -133,29 +133,30 @@ impl Lsdb {
         self.adj.remove(&ifindex);
     }
 
-    pub fn adj_get_mut(&mut self, ifindex: u32) -> Option<&mut LsaFlags> {
-        self.adj.get_mut(&ifindex)
-    }
+    // pub fn adj_get_mut(&mut self, ifindex: u32) -> Option<&mut LsaFlags> {
+    //     self.adj.get_mut(&ifindex)
+    // }
 
     pub fn srm_set(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
-        let flags = self.adj.entry(ifindex).or_default();
-        flags.srm.set(&IsisLspEntry {
-            lsp_id: *lsp_id,
-            ..Default::default()
-        });
-        if flags.srm_timer.is_none() {
-            flags.srm_timer = Some(srm_timer(tx, level, ifindex));
-        }
-    }
-
-    pub fn srm_set_all(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId, ifindex: u32) {
-        for (link, flags) in self.adj.iter_mut() {
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
             flags.srm.set(&IsisLspEntry {
                 lsp_id: *lsp_id,
                 ..Default::default()
             });
             if flags.srm_timer.is_none() {
                 flags.srm_timer = Some(srm_timer(tx, level, ifindex));
+            }
+        }
+    }
+
+    pub fn srm_set_all(&mut self, tx: &MsgSender, level: Level, lsp_id: &IsisLspId) {
+        for (link, flags) in self.adj.iter_mut() {
+            flags.srm.set(&IsisLspEntry {
+                lsp_id: *lsp_id,
+                ..Default::default()
+            });
+            if flags.srm_timer.is_none() {
+                flags.srm_timer = Some(srm_timer(tx, level, *link));
             }
         }
     }
@@ -174,7 +175,7 @@ impl Lsdb {
                     ..Default::default()
                 });
                 if flags.srm_timer.is_none() {
-                    flags.srm_timer = Some(srm_timer(tx, level, ifindex));
+                    flags.srm_timer = Some(srm_timer(tx, level, *link));
                 }
             }
         }
@@ -187,10 +188,11 @@ impl Lsdb {
     }
 
     pub fn ssn_set(&mut self, tx: &MsgSender, level: Level, lsp: &IsisLspEntry, ifindex: u32) {
-        let flags = self.adj.entry(ifindex).or_default();
-        flags.ssn.set(lsp);
-        if flags.ssn_timer.is_none() {
-            flags.ssn_timer = Some(ssn_timer(tx, level, ifindex));
+        if let Some(flags) = self.adj.get_mut(&ifindex) {
+            flags.ssn.set(lsp);
+            if flags.ssn_timer.is_none() {
+                flags.ssn_timer = Some(ssn_timer(tx, level, ifindex));
+            }
         }
     }
 
@@ -544,10 +546,10 @@ pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
         .ssn_clear_other(&lsp_id, top.ifindex);
 }
 
-pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32, _sys_id: IsisSysId) {
+pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32) {
     // Extract SRM entries first to avoid borrow checker issues.
     let srm_entries: Vec<IsisLspId> = {
-        let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) else {
+        let Some(adj) = top.lsdb.get_mut(&level).adj.get_mut(&ifindex) else {
             return;
         };
         adj.srm_timer = None;
@@ -579,14 +581,14 @@ pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32, _sys_id: Isi
         }
 
         // Clear SRM flag after sending.
-        if let Some(adj) = top.lsdb.get_mut(&level).adj_get_mut(ifindex) {
+        if let Some(adj) = top.lsdb.get_mut(&level).adj.get_mut(&ifindex) {
             adj.srm.0.remove(&lsp_id);
         }
     }
 }
 
 pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
-    let Some(adj) = link.lsdb.get_mut(&level).adj_get_mut(link.ifindex) else {
+    let Some(adj) = link.lsdb.get_mut(&level).adj.get_mut(&link.ifindex) else {
         return;
     };
     adj.ssn_timer = None;
