@@ -205,54 +205,44 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         nfsm_ifaddr_update(nbr, link.local_pool);
 
         //
-        // let mut state = nbr.state;
+        let mut state = nbr.state;
 
-        // // Lookup three way handshake TLV.
-        // let three_way = p2ptlv(nbr);
-        // if let Some(tlv) = &three_way {
-        //     nbr.circuit_id = Some(tlv.circuit_id);
-        // }
+        // Lookup three way handshake TLV.
+        let three_way = p2ptlv(nbr);
+        if let Some(tlv) = &three_way {
+            nbr.circuit_id = Some(tlv.circuit_id);
+        }
 
-        // // When it is three way handshake.
-        // if state == NfsmState::Down {
-        //     state = NfsmState::Init;
-        //     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        // }
+        // When it is three way handshake.
+        if state == NfsmState::Down {
+            state = NfsmState::Init;
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        }
 
-        // // Fall down from previous.
-        // if state == NfsmState::Init {
-        //     if nfsm_p2ptlv_has_me(three_way, &link.up_config.net) {
-        //         state = NfsmState::Up;
+        // Fall down from previous.
+        if state == NfsmState::Init {
+            if nfsm_p2ptlv_has_me(three_way, &link.up_config.net) {
+                state = NfsmState::Up;
 
-        //         // Set adjacency.
-        //         *link.state.adj.get_mut(&level) =
-        //             Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
-        //         link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
+                // Set adjacency.
+                *link.state.adj.get_mut(&level) =
+                    Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
+                link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
 
-        //         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        //         link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
-        //     }
-        // }
+                nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+                link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
+            }
+        }
 
-        // // Reset hold timer
-        // nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+        // Reset hold timer
+        nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
 
-        // // When neighbor state has been changed.
-        // if nbr.state != state {
-        //     tracing::info!("NFSM {} => {}", nbr.state, state);
-        //     nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        // }
+        // When neighbor state has been changed.
+        if nbr.state != state {
+            tracing::info!("NFSM {} => {}", nbr.state, state);
+        }
 
-        // nbr.state = state
-
-        // NFSM event.
-        link.tx.send(Message::Nfsm(
-            NfsmEvent::P2pHelloReceived,
-            nbr.ifindex,
-            nbr.sys_id,
-            level,
-            link.state.mac,
-        ));
+        nbr.state = state
     }
 }
 
