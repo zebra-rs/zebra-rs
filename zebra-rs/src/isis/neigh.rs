@@ -22,19 +22,19 @@ pub struct Neighbor {
     pub ifindex: u32,
     pub link_type: LinkType,
     pub sys_id: IsisSysId,
-    // Unchange.
+    // Hello parameters
     pub priority: u8,            // LAN
     pub lan_id: IsisNeighborId,  // LAN
     pub circuit_type: IsLevel,   // LAN & P2P
     pub circuit_id: Option<u32>, // P2P
+    pub threeway: Option<IsisTlvP2p3Way>,
     // State
-    // pub prev: NfsmState,
     pub state: NfsmState,
     pub is_dis: bool,
     // Addrs
     pub addr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
     pub addr6: BTreeMap<Ipv6Addr, NeighborAddr6>,
-    pub laddr6: Vec<Ipv6Addr>,
+    pub addr6l: Vec<Ipv6Addr>,
     pub mac: Option<MacAddr>,
     //
     pub hold_time: u16,
@@ -58,12 +58,13 @@ impl Neighbor {
             priority: 0,
             lan_id: IsisNeighborId::default(),
             circuit_type: IsLevel::default(),
+            threeway: None,
             ifindex,
             // prev: NfsmState::Down,
             state: NfsmState::Down,
             addr4: BTreeMap::new(),
             addr6: BTreeMap::new(),
-            laddr6: Vec::new(),
+            addr6l: Vec::new(),
             mac,
             hold_timer: None,
             is_dis: false,
@@ -266,10 +267,10 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         }
         writeln!(buf, "");
     }
-    if !nbr.laddr6.is_empty() {
+    if !nbr.addr6l.is_empty() {
         writeln!(buf, "    IPv6 Link-Locals")?;
     }
-    for addr in &nbr.laddr6 {
+    for addr in &nbr.addr6l {
         writeln!(buf, "      {}", addr)?;
     }
     if !nbr.addr6.is_empty() {
@@ -309,7 +310,7 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         })
         .collect();
 
-    let ipv6_link_locals = nbr.laddr6.iter().map(|addr| addr.to_string()).collect();
+    let ipv6_link_locals = nbr.addr6l.iter().map(|addr| addr.to_string()).collect();
     let ipv6_prefixes = nbr
         .addr6
         .iter()
