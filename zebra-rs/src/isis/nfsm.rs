@@ -59,24 +59,6 @@ impl NfsmState {
     }
 }
 
-pub fn nfsm_hello_has_mac(tlvs: &Vec<IsisTlv>, mac: Option<MacAddr>) -> bool {
-    let Some(addr) = mac else {
-        return false;
-    };
-
-    for tlv in tlvs.iter() {
-        if let IsisTlv::IsNeighbor(neigh) = tlv {
-            for neighbor in neigh.neighbors.iter() {
-                if addr.octets() == neighbor.octets {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
 pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
     let tx = nbr.tx.clone();
     let sys_id = nbr.sys_id.clone();
@@ -116,12 +98,12 @@ impl NeighborAddr6 {
     }
 }
 
-pub fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
+pub fn nbr_hello_tlv_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>) {
     let mut addr4 = BTreeMap::new();
     let mut addr6 = BTreeMap::new();
     let mut laddr6 = vec![];
 
-    for tlv in &nbr.tlvs {
+    for tlv in nbr.tlvs.iter() {
         match tlv {
             IsisTlv::Ipv4IfAddr(ifaddr) => {
                 addr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
@@ -130,6 +112,9 @@ pub fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>
                 addr6.insert(ifaddr.addr, NeighborAddr6::new(ifaddr.addr));
             }
             IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
+            IsisTlv::P2p3Way(tlv) => {
+                nbr.threeway = Some(tlv.clone());
+            }
             _ => {}
         }
     }
@@ -170,7 +155,7 @@ pub fn nfsm_ifaddr_update(nbr: &mut Neighbor, local_pool: &mut Option<LabelPool>
         }
     }
 
-    nbr.laddr6 = laddr6;
+    nbr.addr6l = laddr6;
 }
 
 pub fn nfsm_hello_received(

@@ -9,7 +9,7 @@ use crate::isis::inst::{csnp_generate, lsp_emit};
 use crate::isis::link::DisStatus;
 use crate::isis::lsdb::{insert_self_originate, insert_self_originate_link};
 use crate::isis::neigh::Neighbor;
-use crate::isis::nfsm::{nfsm_hello_has_mac, nfsm_hold_timer, nfsm_ifaddr_update};
+use crate::isis::nfsm::{nbr_hello_tlv_update, nfsm_hold_timer};
 use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::rib::MacAddr;
 use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
@@ -21,6 +21,37 @@ use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
 use super::link::{LinkTop, LinkType};
 use super::lsdb;
 use super::nfsm::{NfsmEvent, isis_nfsm};
+
+fn nbr_hello_has_mac(tlvs: &Vec<IsisTlv>, mac: Option<MacAddr>) -> bool {
+    let Some(addr) = mac else {
+        return false;
+    };
+
+    for tlv in tlvs.iter() {
+        if let IsisTlv::IsNeighbor(neigh) = tlv {
+            for neighbor in neigh.neighbors.iter() {
+                if addr.octets() == neighbor.octets {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn nbr_hello_has_me(tlv: &Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
+    let sys_id = nsap.sys_id();
+
+    if let Some(tlv) = tlv
+        && let Some(neighbor_id) = tlv.neighbor_id
+        && sys_id == neighbor_id
+    {
+        true
+    } else {
+        false
+    }
+}
 
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
@@ -76,7 +107,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     nbr.tlvs = pdu.tlvs;
 
     // Update IPv4/IPv6 address.
-    nfsm_ifaddr_update(nbr, link.local_pool);
+    nbr_hello_tlv_update(nbr, link.local_pool);
 
     // State transition.
     let mut state = nbr.state;
@@ -97,7 +128,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // When R reports the local system’s SNPA address in its Level n LAN IIH PDUs, the IS shall
         // d) set the adjacency’s adjacencyState to “Up”, and
         // e) generate an adjacencyStateChange (Up)” event.
-        if nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
+        if nbr_hello_has_mac(&nbr.tlvs, link.state.mac) {
             state = NfsmState::Up;
             // XXX Adjacency(Up)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -111,7 +142,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         //
         // a) set the adjacency’s adjacencyState to “initialising”, and
         // b) generate an adjacencyStateChange (Down) event.
-        if !nfsm_hello_has_mac(&nbr.tlvs, link.state.mac) {
+        if !nbr_hello_has_mac(&nbr.tlvs, link.state.mac) {
             state = NfsmState::Init;
             // XXX Adjacency(Down)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -139,28 +170,6 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     }
 
     nbr.state = state
-}
-
-fn p2ptlv(nbr: &Neighbor) -> Option<IsisTlvP2p3Way> {
-    for tlv in nbr.tlvs.iter() {
-        if let IsisTlv::P2p3Way(tlv) = tlv {
-            return Some(tlv.clone());
-        }
-    }
-    None
-}
-
-fn nfsm_p2ptlv_has_me(tlv: Option<IsisTlvP2p3Way>, nsap: &Nsap) -> bool {
-    let sys_id = nsap.sys_id();
-
-    if let Some(tlv) = tlv {
-        if let Some(neighbor_id) = tlv.neighbor_id {
-            if sys_id == neighbor_id {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 #[isis_pdu_handler(Hello, Recv)]
@@ -205,15 +214,14 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         nbr.tlvs = pdu.tlvs.clone();
 
         // Update IPv4/IPv6 address.
-        nfsm_ifaddr_update(nbr, link.local_pool);
+        nbr_hello_tlv_update(nbr, link.local_pool);
 
         //
         let mut state = nbr.state;
         nbr.event_clear();
 
         // Lookup three way handshake TLV.
-        let three_way = p2ptlv(nbr);
-        if let Some(tlv) = &three_way {
+        if let Some(tlv) = &nbr.threeway {
             nbr.circuit_id = Some(tlv.circuit_id);
         }
 
@@ -225,7 +233,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // Fall down from previous.
         if state == NfsmState::Init {
-            if nfsm_p2ptlv_has_me(three_way, &link.up_config.net) {
+            if nbr_hello_has_me(&nbr.threeway, &link.up_config.net) {
                 state = NfsmState::Up;
 
                 // Set adjacency.
