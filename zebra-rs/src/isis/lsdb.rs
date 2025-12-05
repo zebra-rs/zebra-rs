@@ -40,7 +40,7 @@ fn srm_timer(tx: &MsgSender, level: Level, ifindex: u32) -> Timer {
     let tx = tx.clone();
     Timer::once(0, move || {
         let tx = tx.clone();
-        let msg = Message::SrmX(level, ifindex);
+        let msg = Message::Srm(level, ifindex);
         async move {
             tx.send(msg);
         }
@@ -51,7 +51,7 @@ fn ssn_timer(tx: &MsgSender, level: Level, ifindex: u32) -> Timer {
     let tx = tx.clone();
     Timer::once(1, move || {
         let tx = tx.clone();
-        let msg = Message::SsnX(level, ifindex);
+        let msg = Message::Ssn(level, ifindex);
         async move {
             tx.send(msg);
         }
@@ -401,10 +401,6 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
 
     let lsa = top.lsdb.get_mut(&level).map.insert(key, lsa);
-
-    // Schedule SRM (Send Routing Message).
-    let msg = Message::Srm(key, level, "LSDB update".to_string());
-    top.tx.send(msg);
 
     lsa
 }

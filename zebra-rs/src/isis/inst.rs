@@ -186,21 +186,18 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::SrmX(level, ifindex) => {
+            Message::Srm(level, ifindex) => {
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
                 lsdb::srm_advertise(&mut link, level, ifindex);
             }
-            Message::SsnX(level, ifindex) => {
+            Message::Ssn(level, ifindex) => {
                 let sys_id = self.config.net.sys_id();
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
                 lsdb::ssn_advertise(&mut link, level);
-            }
-            Message::Srm(lsp_id, level, reason) => {
-                self.process_srm(lsp_id, level, reason);
             }
             Message::SpfCalc(level) => {
                 let mut top = self.top();
@@ -1390,25 +1387,21 @@ pub enum Message {
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
     LspPurge(Level, IsisLspId),
-    Srm(IsisLspId, Level, String),
     DisOriginate(Level, u32, Option<u32>),
     SpfCalc(Level),
-    SrmX(Level, u32),
-    SsnX(Level, u32),
+    Srm(Level, u32),
+    Ssn(Level, u32),
     AdjacencyUp(Level, u32),
 }
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Message::SrmX(level, ifindex) => {
-                write!(f, "[Message::SrmX({}:{})]", level, ifindex)
+            Message::Srm(level, ifindex) => {
+                write!(f, "[Message::Srm({}:{})]", level, ifindex)
             }
-            Message::SsnX(level, ifindex) => {
-                write!(f, "[Message::SsnX({}:{})]", level, ifindex)
-            }
-            Message::Srm(lsp_id, level, _) => {
-                write!(f, "[Message::Srm({}, {})]", lsp_id, level)
+            Message::Ssn(level, ifindex) => {
+                write!(f, "[Message::Ssn({}:{})]", level, ifindex)
             }
             Message::Recv(isis_packet, _, _mac_addr) => {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
@@ -1460,16 +1453,6 @@ fn build_adjacency_ilm(
                     };
                     nhops.insert(*addr, nhop);
                 }
-                // for tlv in nbr.tlvs.iter() {
-                //     if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                //         let nhop = SpfNexthop {
-                //             ifindex: *ifindex,
-                //             adjacency: true,
-                //             sys_id: Some(nhop_id.clone()),
-                //         };
-                //         nhops.insert(ifaddr.addr, nhop);
-                //     }
-                // }
             }
         }
 
@@ -1523,17 +1506,6 @@ fn build_rib_from_spf(
                                 };
                                 spf_nhops.insert(*addr, nhop);
                             }
-
-                            // for tlv in nbr.tlvs.iter() {
-                            //     if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                            //         let nhop = SpfNexthop {
-                            //             ifindex: *ifindex,
-                            //             adjacency: p[0] == *node,
-                            //             sys_id: Some(nhop_id.clone()),
-                            //         };
-                            //         spf_nhops.insert(ifaddr.addr, nhop);
-                            //     }
-                            // }
                         }
                     }
                 }
@@ -1672,17 +1644,4 @@ pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, Sp
             ilm.insert(sid, spf_ilm);
         }
     }
-
-    // println!("-- ILM start --");
-    // for (label, ilm) in ilm.iter() {
-    //     for (addr, nhop) in ilm.nhops.iter() {
-    //         let olabel = if nhop.adjacency {
-    //             String::from("implicit null")
-    //         } else {
-    //             format!("{}", label)
-    //         };
-    //         println!("{} -> {} {} {}", label, addr, nhop.ifindex, olabel);
-    //     }
-    // }
-    // println!("-- ILM end --");
 }
