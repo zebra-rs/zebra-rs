@@ -31,12 +31,13 @@ use crate::context::Timer;
 use crate::spf;
 
 use super::config::IsisConfig;
+use super::flood;
 use super::ifsm::{csnp_timer, has_level};
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::nfsm::nbr_hold_timer_expire;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_lsp_all};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_for_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -191,14 +192,14 @@ impl Isis {
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                lsdb::srm_advertise(&mut link, level, ifindex);
+                flood::srm_advertise(&mut link, level, ifindex);
             }
             Message::Ssn(level, ifindex) => {
                 let sys_id = self.config.net.sys_id();
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                lsdb::ssn_advertise(&mut link, level);
+                flood::ssn_advertise(&mut link, level);
             }
             Message::NfsmExpire(level, ifindex, sys_id) => {
                 let Some(mut link) = self.link_top(ifindex) else {
@@ -250,7 +251,7 @@ impl Isis {
                     // links) starts (or restarts), the IS shall
                     //
                     // a) set SRMflag for that circuit on all LSPs, and
-                    srm_set_lsp_all(&mut link, level);
+                    srm_set_for_all_lsp(&mut link, level);
 
                     // b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
                     *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
@@ -314,7 +315,8 @@ impl Isis {
         let lsp_id = lsp.lsp_id;
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
 
-        lsp_flood(&mut top, level, &lsp_id);
+        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        // lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -347,7 +349,8 @@ impl Isis {
         let buf = lsp_emit(&mut purged_lsp, level);
         insert_self_originate(&mut top, level, purged_lsp, None);
 
-        lsp_flood(&mut top, level, &lsp_id);
+        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        // lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_dis_originate(&mut self, level: Level, ifindex: u32, base: Option<u32>) {
@@ -358,7 +361,8 @@ impl Isis {
         let buf = lsp_emit(&mut lsp, level);
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
 
-        lsp_flood(&mut top, level, &lsp_id);
+        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        //lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
@@ -923,13 +927,7 @@ pub enum Packet {
 }
 
 pub fn lsp_flood(top: &mut IsisTop, level: Level, lsp_id: &IsisLspId) {
-    for (ifindex, link) in top.links.iter() {
-        if has_level(link.state.level(), level) {
-            top.lsdb
-                .get_mut(&level)
-                .srm_set(top.tx, level, lsp_id, *ifindex);
-        }
-    }
+    top.lsdb.get_mut(&level).srm_set_all(top.tx, level, lsp_id);
 }
 
 pub fn serve(mut isis: Isis) {
