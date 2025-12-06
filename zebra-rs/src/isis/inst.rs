@@ -407,28 +407,28 @@ impl Isis {
         level: Level,
         mac: Option<MacAddr>,
     ) {
-        let Some(mut ltop) = self.link_top(ifindex) else {
+        let Some(mut link) = self.link_top(ifindex) else {
             return;
         };
         let mut ntop = NeighborTop {
-            tx: &ltop.tx,
+            tx: &link.tx,
             // lan_id: &mut ltop.state.lan_id,
-            adj: &mut ltop.state.adj,
-            tracing: &ltop.tracing,
-            local_pool: &mut ltop.local_pool,
-            up_config: &ltop.up_config,
-            lsdb: &mut ltop.lsdb,
+            adj: &mut link.state.adj,
+            tracing: &link.tracing,
+            local_pool: &mut link.local_pool,
+            up_config: &link.up_config,
+            lsdb: &mut link.lsdb,
         };
-        let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
+        let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sysid) else {
             return;
         };
 
         isis_nfsm(&mut ntop, nbr, ev, mac, level);
 
         if nbr.state == NfsmState::Down {
-            ltop.state.nbrs.get_mut(&level).remove(&sysid);
+            link.state.nbrs.get_mut(&level).remove(&sysid);
             let msg = Message::SpfCalc(level);
-            ltop.tx.send(msg).unwrap();
+            link.tx.send(msg).unwrap();
         }
     }
 

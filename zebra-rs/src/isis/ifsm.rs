@@ -37,9 +37,9 @@ pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
     IsisTlvProtoSupported { nlpids }
 }
 
-pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
-    let source_id = ltop.up_config.net.sys_id();
-    let lan_id = ltop
+pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
+    let source_id = link.up_config.net.sys_id();
+    let lan_id = link
         .state
         .adj
         .get(&level)
@@ -47,21 +47,21 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
         .unwrap_or_default();
     tracing::info!("[Hello:Gen] LAN ID:{}", lan_id);
     let mut hello = IsisHello {
-        circuit_type: ltop.state.level(),
+        circuit_type: link.state.level(),
         source_id,
-        hold_time: ltop.config.hold_time(),
+        hold_time: link.config.hold_time(),
         pdu_len: 0,
-        priority: ltop.config.priority(),
+        priority: link.config.priority(),
         lan_id,
         tlvs: Vec::new(),
     };
-    let tlv = proto_supported(&ltop.up_config.enable);
+    let tlv = proto_supported(&link.up_config.enable);
     hello.tlvs.push(tlv.into());
 
-    let area_addr = ltop.up_config.net.area_id();
+    let area_addr = link.up_config.net.area_id();
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
-    for prefix in &ltop.state.v4addr {
+    for prefix in &link.state.v4addr {
         hello.tlvs.push(
             IsisTlvIpv4IfAddr {
                 addr: prefix.addr(),
@@ -71,7 +71,7 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     }
 
     let mut neighbors = Vec::new();
-    for (_, nbr) in ltop.state.nbrs.get(&level).iter() {
+    for (_, nbr) in link.state.nbrs.get(&level).iter() {
         if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
             if let Some(mac) = nbr.mac {
                 neighbors.push(NeighborAddr {
@@ -81,36 +81,36 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
         }
     }
     hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
-    if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
-        hello.padding(ltop.state.mtu as usize);
+    if link.config.hello_padding() == HelloPaddingPolicy::Always {
+        hello.padding(link.state.mtu as usize);
     }
     hello
 }
 
-pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisP2pHello {
-    let source_id = ltop.up_config.net.sys_id();
+pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
+    let source_id = link.up_config.net.sys_id();
 
     // P2P Hello doesn't use LAN ID
     let mut hello = IsisP2pHello {
-        circuit_type: ltop.state.level(),
+        circuit_type: link.state.level(),
         source_id,
-        hold_time: ltop.config.hold_time(),
+        hold_time: link.config.hold_time(),
         pdu_len: 0,
         circuit_id: 0,
         tlvs: Vec::new(),
     };
 
     // Add protocol support TLV
-    let tlv = proto_supported(&ltop.up_config.enable);
+    let tlv = proto_supported(&link.up_config.enable);
     hello.tlvs.push(tlv.into());
 
     // Add area address TLV
-    let area_addr = ltop.up_config.net.area_id();
+    let area_addr = link.up_config.net.area_id();
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
 
     // Add IPv4 interface addresses
-    for prefix in &ltop.state.v4addr {
+    for prefix in &link.state.v4addr {
         hello.tlvs.push(
             IsisTlvIpv4IfAddr {
                 addr: prefix.addr(),
@@ -120,33 +120,33 @@ pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisP2pHello {
     }
 
     // Three way handshake.
-    let tlv = if let Some((_, nbr)) = ltop.state.nbrs.get(&level).first_key_value() {
+    let tlv = if let Some((_, nbr)) = link.state.nbrs.get(&level).first_key_value() {
         IsisTlvP2p3Way {
             state: nbr.state.into(),
-            circuit_id: ltop.ifindex,
+            circuit_id: link.ifindex,
             neighbor_id: Some(nbr.sys_id.clone()),
             neighbor_circuit_id: nbr.circuit_id,
         }
     } else {
         IsisTlvP2p3Way {
             state: NfsmState::Down.into(),
-            circuit_id: ltop.ifindex,
+            circuit_id: link.ifindex,
             neighbor_id: None,
             neighbor_circuit_id: None,
         }
     };
     hello.tlvs.push(tlv.into());
 
-    if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
-        hello.padding(ltop.state.mtu as usize);
+    if link.config.hello_padding() == HelloPaddingPolicy::Always {
+        hello.padding(link.state.mtu as usize);
     }
     hello
 }
 
-fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
-    let tx = ltop.tx.clone();
-    let ifindex = ltop.ifindex;
-    Timer::repeat(ltop.config.hello_interval(), move || {
+fn hello_timer(link: &LinkTop, level: Level) -> Timer {
+    let tx = link.tx.clone();
+    let ifindex = link.ifindex;
+    Timer::repeat(link.config.hello_interval(), move || {
         let tx = tx.clone();
         async move {
             use IfsmEvent::*;
@@ -199,42 +199,42 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
     }
 }
 
-pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
-    if has_level(ltop.state.level(), level) {
-        let hello = if ltop.config.link_type() == LinkType::P2p {
-            IsisPdu::P2pHello(hello_p2p_generate(ltop, level))
+pub fn hello_originate(link: &mut LinkTop, level: Level) {
+    if has_level(link.state.level(), level) {
+        let hello = if link.config.link_type() == LinkType::P2p {
+            IsisPdu::P2pHello(hello_p2p_generate(link, level))
         } else {
             match level {
-                Level::L1 => IsisPdu::L1Hello(hello_generate(ltop, level)),
-                Level::L2 => IsisPdu::L2Hello(hello_generate(ltop, level)),
+                Level::L1 => IsisPdu::L1Hello(hello_generate(link, level)),
+                Level::L2 => IsisPdu::L2Hello(hello_generate(link, level)),
             }
         };
 
-        *ltop.state.hello.get_mut(&level) = Some(hello);
-        hello_send(ltop, level);
-        *ltop.timer.hello.get_mut(&level) = Some(hello_timer(ltop, level));
+        *link.state.hello.get_mut(&level) = Some(hello);
+        hello_send(link, level);
+        *link.timer.hello.get_mut(&level) = Some(hello_timer(link, level));
     }
 }
 
-pub fn start(ltop: &mut LinkTop) {
-    if ltop.flags.is_loopback() {
+pub fn start(link: &mut LinkTop) {
+    if link.flags.is_loopback() {
         return;
     }
     for level in [Level::L1, Level::L2] {
-        hello_originate(ltop, level);
+        hello_originate(link, level);
     }
 }
 
-pub fn stop(ltop: &mut LinkTop) {
+pub fn stop(link: &mut LinkTop) {
     for level in [Level::L1, Level::L2] {
-        *ltop.state.hello.get_mut(&level) = None;
-        *ltop.timer.hello.get_mut(&level) = None;
+        *link.state.hello.get_mut(&level) = None;
+        *link.timer.hello.get_mut(&level) = None;
     }
 }
 
-pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
-    let tx = ltop.tx.clone();
-    let ifindex = ltop.ifindex;
+pub fn dis_timer(link: &mut LinkTop, level: Level) -> Timer {
+    let tx = link.tx.clone();
+    let ifindex = link.ifindex;
     Timer::once(0, move || {
         let tx = tx.clone();
         async move {
