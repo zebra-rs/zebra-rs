@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context, Error};
 use bytes::BytesMut;
@@ -10,17 +11,128 @@ use crate::isis::inst::{csnp_generate, lsp_emit};
 use crate::isis::link::DisStatus;
 use crate::isis::lsdb::{insert_self_originate, insert_self_originate_link};
 use crate::isis::neigh::Neighbor;
-use crate::isis::nfsm::{nbr_hello_interpret, nfsm_hold_timer};
+use crate::isis::nfsm::nfsm_hold_timer;
 use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::rib::MacAddr;
 use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
 
-use super::Level;
 use super::ifsm::has_level;
 use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
 use super::link::{LinkTop, LinkType};
 use super::lsdb;
 use super::nfsm::{NfsmEvent, isis_nfsm};
+use super::{LabelPool, Level};
+
+#[derive(Debug)]
+pub struct NeighborAddr4 {
+    pub addr: Ipv4Addr,
+    pub label: Option<u32>,
+}
+
+impl NeighborAddr4 {
+    pub fn new(addr: Ipv4Addr, label: Option<u32>) -> Self {
+        Self { addr, label }
+    }
+}
+
+#[derive(Debug)]
+pub struct NeighborAddr6 {
+    pub addr: Ipv6Addr,
+    pub label: Option<u32>,
+}
+
+impl NeighborAddr6 {
+    pub fn new(addr: Ipv6Addr) -> Self {
+        Self { addr, label: None }
+    }
+}
+
+pub fn nbr_hello_interpret(
+    nbr: &mut Neighbor,
+    tlvs: &Vec<IsisTlv>,
+    mac: Option<MacAddr>,
+    sys_id: IsisSysId,
+    local_pool: &mut Option<LabelPool>,
+) -> (bool, bool) {
+    let mut has_mac = false;
+    let mut has_my_sys_id = false;
+
+    let mut addr4 = BTreeMap::new();
+    let mut addr6 = BTreeMap::new();
+    let mut laddr6 = vec![];
+
+    for tlv in tlvs.iter() {
+        match tlv {
+            IsisTlv::IsNeighbor(neigh) => {
+                if let Some(mac) = mac {
+                    has_mac = neigh.neighbors.iter().any(|n| mac.octets() == n.octets);
+                }
+            }
+            IsisTlv::P2p3Way(tlv) => {
+                nbr.circuit_id = Some(tlv.circuit_id);
+                if let Some(neighbor_id) = tlv.neighbor_id {
+                    has_my_sys_id = (sys_id == neighbor_id);
+                }
+            }
+            IsisTlv::Ipv4IfAddr(ifaddr) => {
+                addr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr, None));
+            }
+            IsisTlv::Ipv6GlobalIfAddr(ifaddr) => {
+                addr6.insert(ifaddr.addr, NeighborAddr6::new(ifaddr.addr));
+            }
+            IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
+            IsisTlv::ProtoSupported(tlv) => {
+                nbr.proto = Some(tlv.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // Release removed address's label.
+    nbr.addr4.retain(|key, value| {
+        let keep = addr4.contains_key(key);
+        if !keep {
+            // Release the label before removing
+            if let Some(label) = value.label {
+                if let Some(local_pool) = local_pool {
+                    local_pool.release(label as usize);
+                }
+            }
+        }
+        keep
+    });
+    for (&key, _) in addr4.iter() {
+        if !nbr.addr4.contains_key(&key) {
+            // Fix borrow checker.
+            let label = local_pool
+                .as_mut()
+                .and_then(|pool| pool.allocate())
+                .map(|label| label as u32);
+            nbr.addr4.insert(key, NeighborAddr4::new(key, label));
+        }
+    }
+    nbr.addr6.retain(|key, value| {
+        let keep = addr6.contains_key(key);
+        if !keep {
+            // Release the label before removing
+            if let Some(label) = value.label {
+                if let Some(local_pool) = local_pool {
+                    local_pool.release(label as usize);
+                }
+            }
+        }
+        keep
+    });
+    for (&key, _) in addr6.iter() {
+        if !nbr.addr6.contains_key(&key) {
+            nbr.addr6.insert(key, NeighborAddr6::new(key));
+        }
+    }
+
+    nbr.addr6l = laddr6;
+
+    (has_mac, has_my_sys_id)
+}
 
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
@@ -213,7 +325,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // When neighbor state has been changed.
         if nbr.state != state {
-            tracing::info!("NFSM {} => {}", nbr.state, state);
+            tracing::info!("NFSM {}:{} => {}", nbr.sys_id, nbr.state, state);
         }
 
         nbr.state = state
@@ -221,23 +333,23 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 }
 
 #[isis_pdu_handler(Csnp, Recv)]
-pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
+pub fn csnp_recv(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // Check link capability for the PDU type.
-    if !has_level(top.state.level(), level) {
+    if !has_level(link.state.level(), level) {
         return;
     }
 
     // Logging
-    isis_pdu_trace!(top, &level, "[CSNP:Recv] on {}", top.state.name);
+    isis_pdu_trace!(link, &level, "[CSNP:Recv] on {}", link.state.name);
 
     // Adjacency check.
-    if top.state.adj.get(&level).is_none() {
+    if link.state.adj.get(&level).is_none() {
         return;
     }
 
     // TODO: Need to check CSNP's LSP ID start and end.
     let mut lsdb: BTreeMap<IsisLspId, u32> = BTreeMap::new();
-    for (_, lsa) in top.lsdb.get(&level).iter() {
+    for (_, lsa) in link.lsdb.get(&level).iter() {
         lsdb.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
     }
 
@@ -255,10 +367,10 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
                         // If the reported value is newer than the database
                         // value, Set SSNflag, and if C is a non-broadcast
                         // circuit Clear SRMflag.
-                        lsdb::ssn_set(top, level, lsp);
+                        lsdb::ssn_set(link, level, lsp);
 
-                        if top.is_p2p() {
-                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        if link.is_p2p() {
+                            lsdb::srm_clear(link, level, &lsp.lsp_id);
                         }
                         lsdb.remove(&lsp.lsp_id);
                     }
@@ -268,8 +380,8 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
                         // If the reported value equals the database value and C
                         // is a non-broadcast circuit, Clear SRMflag for C for
                         // that LSP
-                        if top.is_p2p() {
-                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        if link.is_p2p() {
+                            lsdb::srm_clear(link, level, &lsp.lsp_id);
                         }
                         lsdb.remove(&lsp.lsp_id);
                     }
@@ -278,8 +390,8 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
                         //
                         // If the reported value is older than the database
                         // value, Clear SSNflag, and Set SRMflag.
-                        lsdb::ssn_clear(top, level, &lsp.lsp_id);
-                        lsdb::srm_set(top, level, &lsp.lsp_id);
+                        lsdb::ssn_clear(link, level, &lsp.lsp_id);
+                        lsdb::srm_set(link, level, &lsp.lsp_id);
                         lsdb.remove(&lsp.lsp_id);
                     }
                     None => {
@@ -299,7 +411,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
                                 seq_number: 0,
                                 checksum: lsp.checksum,
                             };
-                            lsdb::ssn_set(top, level, &lsp);
+                            lsdb::ssn_set(link, level, &lsp);
                         }
                     }
                 }
@@ -315,7 +427,7 @@ pub fn csnp_recv(top: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // were not mentioned in the Complete Sequence Numbers PDU
     for (lsp_id, seq_number) in lsdb.iter() {
         if *seq_number != 0 {
-            lsdb::srm_set(top, level, lsp_id);
+            lsdb::srm_set(link, level, lsp_id);
         }
     }
 }
@@ -371,17 +483,17 @@ fn csnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
 }
 
 #[isis_pdu_handler(Psnp, Recv)]
-pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
+pub fn psnp_recv(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // Check link capability for the PDU type.
-    if !has_level(top.state.level(), level) {
+    if !has_level(link.state.level(), level) {
         return;
     }
 
     // Logging
-    isis_pdu_trace!(top, &level, "[PSNP:Recv] on {}", top.state.name);
+    isis_pdu_trace!(link, &level, "[PSNP:Recv] on {}", link.state.name);
 
     // Adjacency check.
-    if top.state.adj.get(&level).is_none() {
+    if link.state.adj.get(&level).is_none() {
         return;
     }
 
@@ -389,7 +501,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     for entry in pdu.tlvs.iter() {
         if let IsisTlv::LspEntries(tlv) = entry {
             for lsp in tlv.entries.iter() {
-                match top
+                match link
                     .lsdb
                     .get(&level)
                     .get(&lsp.lsp_id)
@@ -401,10 +513,10 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         // If the reported value is newer than the database
                         // value, Set SSNflag, and if C is a non-broadcast
                         // circuit Clear SRMflag.
-                        lsdb::ssn_set(top, level, lsp);
+                        lsdb::ssn_set(link, level, lsp);
 
-                        if top.is_p2p() {
-                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        if link.is_p2p() {
+                            lsdb::srm_clear(link, level, &lsp.lsp_id);
                         }
                     }
                     Some(Ordering::Equal) => {
@@ -413,8 +525,8 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         // If the reported value equals the database value and C
                         // is a non-broadcast circuit, Clear SRMflag for C for
                         // that LSP
-                        if top.is_p2p() {
-                            lsdb::srm_clear(top, level, &lsp.lsp_id);
+                        if link.is_p2p() {
+                            lsdb::srm_clear(link, level, &lsp.lsp_id);
                         }
                     }
                     Some(Ordering::Less) => {
@@ -422,8 +534,8 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         //
                         // If the reported value is older than the database
                         // value, Clear SSNflag, and Set SRMflag.
-                        lsdb::ssn_clear(top, level, &lsp.lsp_id);
-                        lsdb::srm_set(top, level, &lsp.lsp_id);
+                        lsdb::ssn_clear(link, level, &lsp.lsp_id);
+                        lsdb::srm_set(link, level, &lsp.lsp_id);
                     }
                     None => {
                         // 7.3.15.2 b.5
@@ -442,7 +554,7 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                                 seq_number: 0,
                                 checksum: lsp.checksum,
                             };
-                            lsdb::ssn_set(top, level, &lsp);
+                            lsdb::ssn_set(link, level, &lsp);
                         }
                     }
                 }
@@ -453,17 +565,17 @@ pub fn psnp_recv(top: &mut LinkTop, level: Level, pdu: IsisPsnp) {
 
 // SRM and SSN
 #[isis_pdu_handler(Lsp, Recv)]
-pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
+pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     // Interface level check.
-    if !has_level(top.state.level(), level) {
+    if !has_level(link.state.level(), level) {
         return;
     }
 
     // Logging.
-    isis_pdu_trace!(top, &level, "[LSP:Rev] {} {}", lsp.lsp_id, top.state.name);
+    isis_pdu_trace!(link, &level, "[LSP:Rev] {} {}", lsp.lsp_id, link.state.name);
 
     // Adjacency check.
-    if top.state.adj.get(&level).is_none() {
+    if link.state.adj.get(&level).is_none() {
         return;
     }
 
@@ -474,7 +586,7 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
     }
 
     // 7.3.15.1 Action on receipt of a link state PDU
-    match top
+    match link
         .lsdb
         .get(&level)
         .get(&lsp.lsp_id)
@@ -489,43 +601,43 @@ pub fn lsp_recv(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) {
 
             // TODO: We may consider update self originated LSP when it really
             // overwrite existing one.
-            lsdb::insert_lsp(top, level, lsp.clone(), bytes);
+            lsdb::insert_lsp(link, level, lsp.clone(), bytes);
 
             // 2. Set SRMflag for that LSP for all circuits other than C.
-            lsdb::srm_set_other(top, level, &lsp.lsp_id);
+            lsdb::srm_set_other(link, level, &lsp.lsp_id);
 
             // 3. Clear SRMflag for C.
-            lsdb::srm_clear(top, level, &lsp.lsp_id);
+            lsdb::srm_clear(link, level, &lsp.lsp_id);
 
             // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
-            if top.is_p2p() {
-                lsdb::ssn_set(top, level, &IsisLspEntry::from_lsp(&lsp));
+            if link.is_p2p() {
+                lsdb::ssn_set(link, level, &IsisLspEntry::from_lsp(&lsp));
             }
 
             // 5. Clear SSNflag for that LSP for the circuits associated
             //    with a linkage other than C.
-            lsdb::ssn_clear_other(top, level, &lsp.lsp_id);
+            lsdb::ssn_clear_other(link, level, &lsp.lsp_id);
         }
         Some(Ordering::Equal) => {
             // 7.3.15.1 e.2
 
             // 1. Clear SRMflag for C.
-            lsdb::srm_clear(top, level, &lsp.lsp_id);
+            lsdb::srm_clear(link, level, &lsp.lsp_id);
 
             // 2. If C is a non-broadcast circuit, set SSNflag for that LSP
             //    for C.
-            if top.is_p2p() {
-                lsdb::ssn_set(top, level, &IsisLspEntry::from_lsp(&lsp));
+            if link.is_p2p() {
+                lsdb::ssn_set(link, level, &IsisLspEntry::from_lsp(&lsp));
             }
         }
         Some(Ordering::Less) => {
             // 7.3.15.1 e.3
 
             // 1. Set SRMflag for C.
-            lsdb::srm_set(top, level, &lsp.lsp_id);
+            lsdb::srm_set(link, level, &lsp.lsp_id);
 
             // 2. Clear SSNflag for C.
-            lsdb::ssn_clear(top, level, &lsp.lsp_id);
+            lsdb::ssn_clear(link, level, &lsp.lsp_id);
         }
     }
 }
@@ -545,55 +657,55 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
 }
 
 pub fn process_packet(
-    top: &mut LinkTop,
+    link: &mut LinkTop,
     packet: IsisPacket,
     ifindex: u32,
     mac: Option<MacAddr>,
 ) -> Result<(), Error> {
     match packet.pdu_type {
-        IsisType::P2pHello => top.state.stats.rx.p2p_hello += 1,
-        IsisType::L1Hello => top.state.stats.rx.hello.l1 += 1,
-        IsisType::L2Hello => top.state.stats.rx.hello.l2 += 1,
-        IsisType::L1Lsp => top.state.stats.rx.lsp.l1 += 1,
-        IsisType::L2Lsp => top.state.stats.rx.lsp.l2 += 1,
-        IsisType::L1Psnp => top.state.stats.rx.psnp.l1 += 1,
-        IsisType::L2Psnp => top.state.stats.rx.psnp.l2 += 1,
-        IsisType::L1Csnp => top.state.stats.rx.csnp.l1 += 1,
-        IsisType::L2Csnp => top.state.stats.rx.csnp.l2 += 1,
-        _ => top.state.stats_unknown += 1,
+        IsisType::P2pHello => link.state.stats.rx.p2p_hello += 1,
+        IsisType::L1Hello => link.state.stats.rx.hello.l1 += 1,
+        IsisType::L2Hello => link.state.stats.rx.hello.l2 += 1,
+        IsisType::L1Lsp => link.state.stats.rx.lsp.l1 += 1,
+        IsisType::L2Lsp => link.state.stats.rx.lsp.l2 += 1,
+        IsisType::L1Psnp => link.state.stats.rx.psnp.l1 += 1,
+        IsisType::L2Psnp => link.state.stats.rx.psnp.l2 += 1,
+        IsisType::L1Csnp => link.state.stats.rx.csnp.l1 += 1,
+        IsisType::L2Csnp => link.state.stats.rx.csnp.l2 += 1,
+        _ => link.state.stats_unknown += 1,
     }
 
-    if !top.config.enabled() {
+    if !link.config.enabled() {
         return Ok(());
     }
 
     match (packet.pdu_type, packet.pdu) {
         (IsisType::L1Hello, IsisPdu::L1Hello(pdu)) => {
-            hello_recv(top, Level::L1, pdu, mac);
+            hello_recv(link, Level::L1, pdu, mac);
         }
         (IsisType::L2Hello, IsisPdu::L2Hello(pdu)) => {
-            hello_recv(top, Level::L2, pdu, mac);
+            hello_recv(link, Level::L2, pdu, mac);
         }
         (IsisType::P2pHello, IsisPdu::P2pHello(pdu)) => {
-            hello_p2p_recv(top, pdu, mac);
+            hello_p2p_recv(link, pdu, mac);
         }
         (IsisType::L1Csnp, IsisPdu::L1Csnp(pdu)) => {
-            csnp_recv(top, Level::L1, pdu);
+            csnp_recv(link, Level::L1, pdu);
         }
         (IsisType::L2Csnp, IsisPdu::L2Csnp(pdu)) => {
-            csnp_recv(top, Level::L2, pdu);
+            csnp_recv(link, Level::L2, pdu);
         }
         (IsisType::L1Psnp, IsisPdu::L1Psnp(pdu)) => {
-            psnp_recv(top, Level::L1, pdu);
+            psnp_recv(link, Level::L1, pdu);
         }
         (IsisType::L2Psnp, IsisPdu::L2Psnp(pdu)) => {
-            psnp_recv(top, Level::L2, pdu);
+            psnp_recv(link, Level::L2, pdu);
         }
         (IsisType::L1Lsp, IsisPdu::L1Lsp(pdu)) => {
-            lsp_recv(top, Level::L1, pdu, packet.bytes);
+            lsp_recv(link, Level::L1, pdu, packet.bytes);
         }
         (IsisType::L2Lsp, IsisPdu::L2Lsp(pdu)) => {
-            lsp_recv(top, Level::L2, pdu, packet.bytes);
+            lsp_recv(link, Level::L2, pdu, packet.bytes);
         }
         _ => {
             // TODO: Unknown IS-IS packet type, need logging.

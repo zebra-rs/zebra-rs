@@ -12,6 +12,7 @@ use crate::rib::MacAddr;
 use crate::{isis_fsm_trace, isis_packet_trace};
 
 use super::inst::NeighborTop;
+use super::link::LinkTop;
 use super::{IfsmEvent, LabelPool, Level, Message};
 
 use super::neigh::Neighbor;
@@ -37,10 +38,6 @@ impl NfsmState {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Display, EnumString)]
 pub enum NfsmEvent {
-    #[strum(serialize = "HelloReceived")]
-    HelloReceived,
-    #[strum(serialize = "P2pHelloReceived")]
-    P2pHelloReceived,
     #[strum(serialize = "HoldTimerExpire")]
     HoldTimerExpire,
 }
@@ -52,8 +49,6 @@ impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent, _level: Level) -> (NfsmFunc, Option<Self>) {
         use NfsmEvent::*;
         match ev {
-            HelloReceived => (nfsm_hello_received, None),
-            P2pHelloReceived => (nfsm_p2p_hello_received, None),
             HoldTimerExpire => (nfsm_hold_timer_expire, None),
         }
     }
@@ -65,137 +60,13 @@ pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
     let ifindex = nbr.ifindex;
     Timer::once(nbr.hold_time as u64, move || {
         let tx = tx.clone();
-        let sysid = sys_id.clone();
+        let sys_id = sys_id.clone();
         async move {
             use NfsmEvent::*;
-            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sysid, level, None))
+            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sys_id, level, None))
                 .unwrap();
         }
     })
-}
-
-#[derive(Debug)]
-pub struct NeighborAddr4 {
-    pub addr: Ipv4Addr,
-    pub label: Option<u32>,
-}
-
-impl NeighborAddr4 {
-    pub fn new(addr: Ipv4Addr) -> Self {
-        Self { addr, label: None }
-    }
-}
-
-#[derive(Debug)]
-pub struct NeighborAddr6 {
-    pub addr: Ipv6Addr,
-    pub label: Option<u32>,
-}
-
-impl NeighborAddr6 {
-    pub fn new(addr: Ipv6Addr) -> Self {
-        Self { addr, label: None }
-    }
-}
-
-pub fn nbr_hello_interpret(
-    nbr: &mut Neighbor,
-    tlvs: &Vec<IsisTlv>,
-    mac: Option<MacAddr>,
-    sys_id: IsisSysId,
-    local_pool: &mut Option<LabelPool>,
-) -> (bool, bool) {
-    let mut has_mac = false;
-    let mut has_my_sys_id = false;
-
-    let mut addr4 = BTreeMap::new();
-    let mut addr6 = BTreeMap::new();
-    let mut laddr6 = vec![];
-
-    for tlv in tlvs.iter() {
-        match tlv {
-            IsisTlv::IsNeighbor(neigh) => {
-                if let Some(mac) = mac {
-                    has_mac = neigh.neighbors.iter().any(|n| mac.octets() == n.octets);
-                }
-            }
-            IsisTlv::P2p3Way(tlv) => {
-                nbr.circuit_id = Some(tlv.circuit_id);
-                if let Some(neighbor_id) = tlv.neighbor_id {
-                    has_my_sys_id = (sys_id == neighbor_id);
-                }
-            }
-            IsisTlv::Ipv4IfAddr(ifaddr) => {
-                addr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr));
-            }
-            IsisTlv::Ipv6GlobalIfAddr(ifaddr) => {
-                addr6.insert(ifaddr.addr, NeighborAddr6::new(ifaddr.addr));
-            }
-            IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
-            IsisTlv::ProtoSupported(tlv) => {
-                nbr.proto = Some(tlv.clone());
-            }
-            _ => {}
-        }
-    }
-
-    // Release removed address's label.
-    nbr.addr4.retain(|key, value| {
-        let keep = addr4.contains_key(key);
-        if !keep {
-            // Release the label before removing
-            if let Some(label) = value.label {
-                if let Some(local_pool) = local_pool {
-                    local_pool.release(label as usize);
-                }
-            }
-        }
-        keep
-    });
-    for (&key, _) in addr4.iter() {
-        if !nbr.addr4.contains_key(&key) {
-            nbr.addr4.insert(key, NeighborAddr4::new(key));
-        }
-    }
-    nbr.addr6.retain(|key, value| {
-        let keep = addr6.contains_key(key);
-        if !keep {
-            // Release the label before removing
-            if let Some(label) = value.label {
-                if let Some(local_pool) = local_pool {
-                    local_pool.release(label as usize);
-                }
-            }
-        }
-        keep
-    });
-    for (&key, _) in addr6.iter() {
-        if !nbr.addr6.contains_key(&key) {
-            nbr.addr6.insert(key, NeighborAddr6::new(key));
-        }
-    }
-
-    nbr.addr6l = laddr6;
-
-    (has_mac, has_my_sys_id)
-}
-
-pub fn nfsm_hello_received(
-    ntop: &mut NeighborTop,
-    nbr: &mut Neighbor,
-    mac: Option<MacAddr>,
-    level: Level,
-) -> Option<NfsmState> {
-    None
-}
-
-pub fn nfsm_p2p_hello_received(
-    ntop: &mut NeighborTop,
-    nbr: &mut Neighbor,
-    mac: Option<MacAddr>,
-    level: Level,
-) -> Option<NfsmState> {
-    None
 }
 
 pub fn nfsm_hold_timer_expire(
@@ -218,6 +89,29 @@ pub fn nfsm_hold_timer_expire(
     }
 
     Some(NfsmState::Down)
+}
+
+pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId) {
+    // When the link is P2P, cancel CSNP timer. For LAN interface, CSNP timer
+    // will be handled by DIS election.
+    if link.is_p2p() {
+        *link.timer.csnp.get_mut(&level) = None;
+    }
+
+    // Find neighbor.
+    let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sys_id) else {
+        return;
+    };
+
+    // Release labels.
+    for (_key, value) in nbr.addr4.iter_mut() {
+        if let Some(label) = value.label {
+            if let Some(local_pool) = link.local_pool {
+                local_pool.release(label as usize);
+            }
+            value.label = None;
+        }
+    }
 }
 
 pub fn isis_nfsm(
@@ -251,23 +145,6 @@ pub fn isis_nfsm(
                         }
                         value.label = None;
                     }
-                }
-            }
-
-            // Neighbor comes UP.
-            if next_state == NfsmState::Up {
-                // Allocate adjacency SID when it is not yet.
-                if let Some(local_pool) = ntop.local_pool {
-                    for (_key, value) in nbr.addr4.iter_mut() {
-                        if value.label.is_none() {
-                            if let Some(label) = local_pool.allocate() {
-                                value.label = Some(label as u32);
-                            }
-                        }
-                    }
-                }
-                if nbr.link_type.is_p2p() {
-                    ntop.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
                 }
             }
             nbr.state = next_state;
