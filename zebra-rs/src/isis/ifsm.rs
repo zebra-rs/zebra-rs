@@ -160,8 +160,6 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
 pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     let hello = link.state.hello.get(&level).as_ref().context("")?;
 
-    isis_pdu_trace!(link, &level, "[Hello:Send] {}", link.state.name);
-
     let (packet, mac) = match hello {
         IsisPdu::L1Hello(hello) => (
             IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
@@ -177,6 +175,12 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         ),
         _ => return Ok(()),
     };
+
+    if mac.is_none() {
+        isis_pdu_trace!(link, &level, "[Hello:Send] {}", link.state.name);
+    } else {
+        isis_pdu_trace!(link, &level, "[P2P Hello:Send] {}", link.state.name);
+    }
 
     let ifindex = link.ifindex;
     link.ptx.send(PacketMessage::Send(
@@ -434,10 +438,10 @@ fn dis_timers_stop(link: &mut LinkTop, level: Level) {
     *link.timer.csnp.get_mut(&level) = None;
 }
 
-pub fn csnp_timer(ltop: &LinkTop, level: Level) -> Timer {
-    let tx = ltop.tx.clone();
-    let ifindex = ltop.ifindex;
-    Timer::repeat(ltop.config.csnp_interval(), move || {
+pub fn csnp_timer(link: &LinkTop, level: Level) -> Timer {
+    let tx = link.tx.clone();
+    let ifindex = link.ifindex;
+    Timer::immediate_repeat(link.config.csnp_interval(), move || {
         let tx = tx.clone();
         async move {
             use IfsmEvent::*;

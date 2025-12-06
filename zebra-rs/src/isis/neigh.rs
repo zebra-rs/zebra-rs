@@ -12,8 +12,8 @@ use crate::context::Timer;
 use crate::rib::MacAddr;
 
 use super::link::LinkType;
-use super::nfsm::{NeighborAddr4, NeighborAddr6, NfsmState};
-use super::{IfsmEvent, Isis, Level, Message};
+use super::nfsm::NfsmState;
+use super::{IfsmEvent, Isis, Level, Message, NeighborAddr4, NeighborAddr6};
 
 // IS-IS Neighbor
 #[derive(Debug)]

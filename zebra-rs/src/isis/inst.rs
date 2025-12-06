@@ -233,9 +233,19 @@ impl Isis {
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                srm_set_lsp_all(&mut link, level);
-                csnp_send(&mut link, level);
-                *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
+
+                if link.is_p2p() {
+                    // 7.3.17 Making the update reliable.
+                    //
+                    // When a point-to-point circuit (including non-DA DED circuits and virtual
+                    // links) starts (or restarts), the IS shall
+                    //
+                    // a) set SRMflag for that circuit on all LSPs, and
+                    srm_set_lsp_all(&mut link, level);
+
+                    // b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
+                    *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
+                }
             }
         }
     }
