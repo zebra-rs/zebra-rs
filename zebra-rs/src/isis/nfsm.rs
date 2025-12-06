@@ -63,7 +63,7 @@ pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
         let sys_id = sys_id.clone();
         async move {
             use NfsmEvent::*;
-            tx.send(Message::Nfsm(HoldTimerExpire, ifindex, sys_id, level, None))
+            tx.send(Message::NfsmExpire(level, ifindex, sys_id))
                 .unwrap();
         }
     })
@@ -91,17 +91,35 @@ pub fn nfsm_hold_timer_expire(
     Some(NfsmState::Down)
 }
 
+// XXX
 pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId) {
+    use IfsmEvent::*;
+
+    let is_p2p = link.is_p2p();
+
     // When the link is P2P, cancel CSNP timer. For LAN interface, CSNP timer
     // will be handled by DIS election.
-    if link.is_p2p() {
+    if is_p2p {
         *link.timer.csnp.get_mut(&level) = None;
+        *link.state.adj.get_mut(&level) = None;
+        link.lsdb.get_mut(&level).adj_clear(link.ifindex);
     }
 
     // Find neighbor.
     let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sys_id) else {
         return;
     };
+
+    // Neighbor state to be down.
+    nbr.state = NfsmState::Down;
+
+    // Originate Hello and LSP.
+    if is_p2p {
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        nbr.event(Message::LspOriginate(level));
+    } else {
+        // DIS slection.
+    }
 
     // Release labels.
     for (_key, value) in nbr.addr4.iter_mut() {
@@ -114,16 +132,10 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
     }
 }
 
-pub fn isis_nfsm(
-    ntop: &mut NeighborTop,
-    nbr: &mut Neighbor,
-    event: NfsmEvent,
-    mac: Option<MacAddr>,
-    level: Level,
-) {
+pub fn isis_nfsm(ntop: &mut NeighborTop, nbr: &mut Neighbor, event: NfsmEvent, level: Level) {
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event, level);
 
-    let next_state = fsm_func(ntop, nbr, mac, level).or(fsm_next_state);
+    let next_state = fsm_func(ntop, nbr, None, level).or(fsm_next_state);
 
     if let Some(next_state) = next_state {
         if next_state != nbr.state {
