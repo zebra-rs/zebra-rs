@@ -192,7 +192,6 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // Start state transition.
     let mut state = nbr.state;
-    nbr.event_clear();
 
     if state == NfsmState::Down {
         // 8.4.2.5.1
@@ -301,7 +300,6 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // Start state transition.
         let mut state = nbr.state;
-        nbr.event_clear();
 
         // When it is three way handshake.
         if state == NfsmState::Down {

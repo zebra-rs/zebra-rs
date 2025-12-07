@@ -69,7 +69,6 @@ impl Neighbor {
             circuit_id: None,
             hold_time: 0,
             link_type,
-            hello_originate: false,
         }
     }
 
