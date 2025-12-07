@@ -51,6 +51,7 @@ pub enum TimerMessage {
 pub enum TimerType {
     Once,
     Infinite,
+    ImmediateRepeat,
 }
 
 impl Timer {
@@ -71,7 +72,9 @@ impl Timer {
         let last_reset_clone = last_reset.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(duration);
-            _ = interval.tick().await;
+            if typ != TimerType::ImmediateRepeat {
+                _ = interval.tick().await;
+            }
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -116,6 +119,14 @@ impl Timer {
         Fut: Future<Output = ()> + Send,
     {
         Self::new(sec, TimerType::Infinite, cb)
+    }
+
+    pub fn immediate_repeat<F, Fut>(sec: u64, cb: F) -> Timer
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
+        Self::new(sec, TimerType::ImmediateRepeat, cb)
     }
 
     /// Refresh the timer (resets the timer countdown)

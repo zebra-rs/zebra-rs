@@ -37,9 +37,9 @@ pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
     IsisTlvProtoSupported { nlpids }
 }
 
-pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
-    let source_id = ltop.up_config.net.sys_id();
-    let lan_id = ltop
+pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
+    let source_id = link.up_config.net.sys_id();
+    let lan_id = link
         .state
         .adj
         .get(&level)
@@ -47,21 +47,21 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
         .unwrap_or_default();
     tracing::info!("[Hello:Gen] LAN ID:{}", lan_id);
     let mut hello = IsisHello {
-        circuit_type: ltop.state.level(),
+        circuit_type: link.state.level(),
         source_id,
-        hold_time: ltop.config.hold_time(),
+        hold_time: link.config.hold_time(),
         pdu_len: 0,
-        priority: ltop.config.priority(),
+        priority: link.config.priority(),
         lan_id,
         tlvs: Vec::new(),
     };
-    let tlv = proto_supported(&ltop.up_config.enable);
+    let tlv = proto_supported(&link.up_config.enable);
     hello.tlvs.push(tlv.into());
 
-    let area_addr = ltop.up_config.net.area_id();
+    let area_addr = link.up_config.net.area_id();
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
-    for prefix in &ltop.state.v4addr {
+    for prefix in &link.state.v4addr {
         hello.tlvs.push(
             IsisTlvIpv4IfAddr {
                 addr: prefix.addr(),
@@ -71,7 +71,7 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
     }
 
     let mut neighbors = Vec::new();
-    for (_, nbr) in ltop.state.nbrs.get(&level).iter() {
+    for (_, nbr) in link.state.nbrs.get(&level).iter() {
         if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
             if let Some(mac) = nbr.mac {
                 neighbors.push(NeighborAddr {
@@ -81,36 +81,36 @@ pub fn hello_generate(ltop: &LinkTop, level: Level) -> IsisHello {
         }
     }
     hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
-    if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
-        hello.padding(ltop.state.mtu as usize);
+    if link.config.hello_padding() == HelloPaddingPolicy::Always {
+        hello.padding(link.state.mtu as usize);
     }
     hello
 }
 
-pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisP2pHello {
-    let source_id = ltop.up_config.net.sys_id();
+pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
+    let source_id = link.up_config.net.sys_id();
 
     // P2P Hello doesn't use LAN ID
     let mut hello = IsisP2pHello {
-        circuit_type: ltop.state.level(),
+        circuit_type: link.state.level(),
         source_id,
-        hold_time: ltop.config.hold_time(),
+        hold_time: link.config.hold_time(),
         pdu_len: 0,
         circuit_id: 0,
         tlvs: Vec::new(),
     };
 
     // Add protocol support TLV
-    let tlv = proto_supported(&ltop.up_config.enable);
+    let tlv = proto_supported(&link.up_config.enable);
     hello.tlvs.push(tlv.into());
 
     // Add area address TLV
-    let area_addr = ltop.up_config.net.area_id();
+    let area_addr = link.up_config.net.area_id();
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
 
     // Add IPv4 interface addresses
-    for prefix in &ltop.state.v4addr {
+    for prefix in &link.state.v4addr {
         hello.tlvs.push(
             IsisTlvIpv4IfAddr {
                 addr: prefix.addr(),
@@ -120,33 +120,33 @@ pub fn hello_p2p_generate(ltop: &LinkTop, level: Level) -> IsisP2pHello {
     }
 
     // Three way handshake.
-    let tlv = if let Some((_, nbr)) = ltop.state.nbrs.get(&level).first_key_value() {
+    let tlv = if let Some((_, nbr)) = link.state.nbrs.get(&level).first_key_value() {
         IsisTlvP2p3Way {
             state: nbr.state.into(),
-            circuit_id: ltop.ifindex,
+            circuit_id: link.ifindex,
             neighbor_id: Some(nbr.sys_id.clone()),
             neighbor_circuit_id: nbr.circuit_id,
         }
     } else {
         IsisTlvP2p3Way {
             state: NfsmState::Down.into(),
-            circuit_id: ltop.ifindex,
+            circuit_id: link.ifindex,
             neighbor_id: None,
             neighbor_circuit_id: None,
         }
     };
     hello.tlvs.push(tlv.into());
 
-    if ltop.config.hello_padding() == HelloPaddingPolicy::Always {
-        hello.padding(ltop.state.mtu as usize);
+    if link.config.hello_padding() == HelloPaddingPolicy::Always {
+        hello.padding(link.state.mtu as usize);
     }
     hello
 }
 
-fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
-    let tx = ltop.tx.clone();
-    let ifindex = ltop.ifindex;
-    Timer::repeat(ltop.config.hello_interval(), move || {
+fn hello_timer(link: &LinkTop, level: Level) -> Timer {
+    let tx = link.tx.clone();
+    let ifindex = link.ifindex;
+    Timer::repeat(link.config.hello_interval(), move || {
         let tx = tx.clone();
         async move {
             use IfsmEvent::*;
@@ -159,8 +159,6 @@ fn hello_timer(ltop: &LinkTop, level: Level) -> Timer {
 #[isis_pdu_handler(Hello, Send)]
 pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     let hello = link.state.hello.get(&level).as_ref().context("")?;
-
-    isis_pdu_trace!(link, &level, "[Hello:Send] {}", link.state.name);
 
     let (packet, mac) = match hello {
         IsisPdu::L1Hello(hello) => (
@@ -177,6 +175,12 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         ),
         _ => return Ok(()),
     };
+
+    if mac.is_none() {
+        isis_pdu_trace!(link, &level, "[Hello:Send] {}", link.state.name);
+    } else {
+        isis_pdu_trace!(link, &level, "[P2P Hello:Send] {}", link.state.name);
+    }
 
     let ifindex = link.ifindex;
     link.ptx.send(PacketMessage::Send(
@@ -195,49 +199,37 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
     }
 }
 
-pub fn hello_originate(ltop: &mut LinkTop, level: Level) {
-    if has_level(ltop.state.level(), level) {
-        let hello = if ltop.config.link_type() == LinkType::P2p {
-            IsisPdu::P2pHello(hello_p2p_generate(ltop, level))
+pub fn hello_originate(link: &mut LinkTop, level: Level) {
+    if has_level(link.state.level(), level) {
+        let hello = if link.config.link_type() == LinkType::P2p {
+            IsisPdu::P2pHello(hello_p2p_generate(link, level))
         } else {
             match level {
-                Level::L1 => IsisPdu::L1Hello(hello_generate(ltop, level)),
-                Level::L2 => IsisPdu::L2Hello(hello_generate(ltop, level)),
+                Level::L1 => IsisPdu::L1Hello(hello_generate(link, level)),
+                Level::L2 => IsisPdu::L2Hello(hello_generate(link, level)),
             }
         };
 
-        *ltop.state.hello.get_mut(&level) = Some(hello);
-        hello_send(ltop, level);
-        *ltop.timer.hello.get_mut(&level) = Some(hello_timer(ltop, level));
+        *link.state.hello.get_mut(&level) = Some(hello);
+        hello_send(link, level);
+        *link.timer.hello.get_mut(&level) = Some(hello_timer(link, level));
     }
 }
 
-pub fn start(ltop: &mut LinkTop) {
-    if ltop.flags.is_loopback() {
+pub fn start(link: &mut LinkTop) {
+    if link.flags.is_loopback() {
         return;
     }
     for level in [Level::L1, Level::L2] {
-        hello_originate(ltop, level);
+        hello_originate(link, level);
     }
 }
 
-pub fn stop(ltop: &mut LinkTop) {
+pub fn stop(link: &mut LinkTop) {
     for level in [Level::L1, Level::L2] {
-        *ltop.state.hello.get_mut(&level) = None;
-        *ltop.timer.hello.get_mut(&level) = None;
+        *link.state.hello.get_mut(&level) = None;
+        *link.timer.hello.get_mut(&level) = None;
     }
-}
-
-pub fn dis_timer(ltop: &mut LinkTop, level: Level) -> Timer {
-    let tx = ltop.tx.clone();
-    let ifindex = ltop.ifindex;
-    Timer::once(0, move || {
-        let tx = tx.clone();
-        async move {
-            tx.send(Message::DisOriginate(level, ifindex, None))
-                .unwrap();
-        }
-    })
 }
 
 pub fn dis_pseudo_node_generate(link: &mut LinkTop, level: Level) {
@@ -250,7 +242,7 @@ pub fn dis_pseudo_node_generate(link: &mut LinkTop, level: Level) {
     *link.state.adj.get_mut(&level) = Some((lsp_id.neighbor_id(), None));
 
     // Regenerate Hello.
-    link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
+    // link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
 }
 
 pub fn dis_pseudo_node_purge(link: &mut LinkTop, level: Level) {
@@ -267,6 +259,7 @@ pub fn dis_pseudo_node_purge(link: &mut LinkTop, level: Level) {
         .send(Message::LspPurge(level, pseudonode_lsp_id))
         .unwrap();
 
+    // LAN_ID is cleared.
     *link.state.adj.get_mut(&level) = None;
 }
 
@@ -276,6 +269,19 @@ pub fn mac_str(mac: &Option<MacAddr>) -> String {
     } else {
         "".to_string()
     }
+}
+
+pub fn csnp_timer(link: &LinkTop, level: Level) -> Timer {
+    let tx = link.tx.clone();
+    let ifindex = link.ifindex;
+    Timer::immediate_repeat(link.config.csnp_interval(), move || {
+        let tx = tx.clone();
+        async move {
+            use IfsmEvent::*;
+            let msg = Message::Ifsm(CsnpTimerExpire, ifindex, Some(level));
+            tx.send(msg);
+        }
+    })
 }
 
 // DIS Selection
@@ -295,13 +301,14 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 })
     }
 
+    // Logging.
     tracing::info!("DIS selection start");
 
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);
     // let old_sys_id = *link.state.dis_sys_id.get(&level);
 
-    // When curr is None, current candidate DIS is myself.
+    // Reset current status.
     let mut best_sys_id: Option<IsisSysId> = None;
     let mut best_priority = link.config.priority();
     let mut best_mac = link.state.mac.clone();
@@ -309,7 +316,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     // We will check at least one Up state neighbor exists.
     let mut nbrs_up = 0;
 
-    // Track Up neighbor count and candidate Dis.
+    // Track Up neighbor count and candidate DIS.
     for (sys_id, nbr) in link.state.nbrs.get_mut(&level).iter_mut() {
         // Clear neighbor DIS flag, this will be updated following DIS
         // selection process.
@@ -327,12 +334,18 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         }
         nbrs_up += 1;
     }
+
+    // Update link's neighbors Up count.
     *link.state.nbrs_up.get_mut(&level) = nbrs_up;
 
     // DIS selection and get new status and new sys_id.
-    let (new_status, new_sys_id, reason) = if nbrs_up == 0 {
-        // No DIS present.
-        (DisStatus::NotSelected, None, "No up neighbors".to_string())
+    let (new_status, new_sys_id, lan_id, reason) = if nbrs_up == 0 {
+        (
+            DisStatus::NotSelected,
+            None,
+            None,
+            "No up neighbors".to_string(),
+        )
     } else if let Some(ref sys_id) = best_sys_id {
         // DIS is other IS.
         let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(sys_id) else {
@@ -345,21 +358,13 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             nbr.priority,
             mac_str(&nbr.mac),
         );
+        let lan_id = if !nbr.lan_id.is_empty() {
+            Some(nbr.lan_id.clone())
+        } else {
+            None
+        };
 
-        // Adjacency with Other DIS.
-        if link.state.adj.get(&level).is_none() {
-            use IfsmEvent::*;
-            if !nbr.lan_id.is_empty() {
-                tracing::info!("DIS get LAN Id in Hello packet");
-                *link.state.adj.get_mut(&level) = Some((nbr.lan_id.clone(), None));
-                nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-                nbr.event(Message::LspOriginate(level));
-            } else {
-                tracing::info!("DIS waiting for LAN Id in Hello packet");
-            }
-        }
-
-        (DisStatus::Other, Some(nbr.sys_id), reason)
+        (DisStatus::Other, Some(nbr.sys_id), lan_id, reason)
     } else {
         // DIS is myself.
         let sys_id = Some(link.up_config.net.sys_id());
@@ -368,51 +373,64 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             link.config.priority(),
             nbrs_up
         );
-        (DisStatus::Myself, sys_id, reason)
+        (DisStatus::Myself, sys_id, None, reason)
     };
 
     tracing::info!("DIS selection {:?} {}", new_status, reason);
 
     // Perform DIS change when status or sys_id has been changed.
     if old_status != new_status {
-        match (old_status, new_status) {
-            (DisStatus::NotSelected, DisStatus::Myself) => {
-                dis_pseudo_node_generate(link, level);
-                dis_timers_start(link, level);
+        match old_status {
+            DisStatus::NotSelected => {
+                // Nothing to do.
             }
-            (DisStatus::Other, DisStatus::Myself) => {
-                dis_pseudo_node_generate(link, level);
-                dis_timers_start(link, level);
-            }
-            (DisStatus::Myself, DisStatus::NotSelected) => {
+            DisStatus::Myself => {
+                // Remove pseudo node LSP and clear LAN_ID.
                 dis_pseudo_node_purge(link, level);
-                dis_timers_stop(link, level);
+
+                // Stop CSNP timer.
+                *link.timer.csnp.get_mut(&level) = None;
             }
-            (DisStatus::Myself, DisStatus::Other) => {
-                dis_pseudo_node_purge(link, level);
-                dis_timers_stop(link, level);
-                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+            DisStatus::Other => {
+                // No need of stopping CSNP timer.
+                // No need of removing pseudo node LSP.
+                // Clear adj information.
+                *link.state.adj.get_mut(&level) = None;
             }
-            (DisStatus::NotSelected, DisStatus::Other) => {
-                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+        }
+        match new_status {
+            DisStatus::NotSelected => {
+                // Nothing to do.
             }
-            (DisStatus::Other, DisStatus::NotSelected) => {
-                //
+            DisStatus::Myself => {
+                dis_pseudo_node_generate(link, level);
             }
-            (DisStatus::Other, DisStatus::Other) => {
-                // When DIS SysId has been changed.
-                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
-            }
-            (_, _) => {
-                // This should not happen.
+            DisStatus::Other => {
+                if link.state.adj.get(&level).is_none() {
+                    if let Some(lan_id) = lan_id {
+                        *link.state.adj.get_mut(&level) = Some((lan_id.clone(), None));
+                    }
+                }
             }
         }
 
         // Update link's DIS status to the new one.
         *link.state.dis_status.get_mut(&level) = new_status;
 
+        // If my role is DIS, we originate DIS.
+        if new_status == DisStatus::Myself {
+            link.event(Message::DisOriginate(level, link.ifindex, None));
+        }
+
         // LSP Originate.
-        link.tx.send(Message::LspOriginate(level)).unwrap();
+        link.event(Message::LspOriginate(level));
+
+        // CSNP timer for when DIS is me.
+        if new_status == DisStatus::Myself {
+            if link.timer.csnp.get(&level).is_none() {
+                *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
+            }
+        }
 
         // Record changes.
         link.state
@@ -420,27 +438,4 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             .get_mut(&level)
             .record_change(old_status, new_status, new_sys_id, new_sys_id, reason);
     }
-}
-
-fn dis_timers_start(link: &mut LinkTop, level: Level) {
-    *link.timer.dis.get_mut(&level) = Some(dis_timer(link, level));
-    *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
-}
-
-fn dis_timers_stop(link: &mut LinkTop, level: Level) {
-    *link.timer.dis.get_mut(&level) = None;
-    *link.timer.csnp.get_mut(&level) = None;
-}
-
-fn csnp_timer(ltop: &LinkTop, level: Level) -> Timer {
-    let tx = ltop.tx.clone();
-    let ifindex = ltop.ifindex;
-    Timer::repeat(ltop.config.csnp_interval(), move || {
-        let tx = tx.clone();
-        async move {
-            use IfsmEvent::*;
-            let msg = Message::Ifsm(CsnpTimerExpire, ifindex, Some(level));
-            tx.send(msg);
-        }
-    })
 }
