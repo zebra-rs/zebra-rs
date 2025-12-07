@@ -17,7 +17,7 @@ use crate::isis::{
 use super::inst::{MsgSender, Packet, PacketMessage};
 use super::link::LinkTop;
 use super::{
-    Level, LsaFlood,
+    Level, LspFlood,
     inst::{IsisTop, lsp_emit, lsp_flood, spf_schedule},
     link::Afi,
 };
@@ -25,7 +25,7 @@ use super::{
 #[derive(Default)]
 pub struct Lsdb {
     pub map: BTreeMap<IsisLspId, Lsa>,
-    pub adj: BTreeMap<u32, LsaFlood>,
+    pub adj: BTreeMap<u32, LspFlood>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
