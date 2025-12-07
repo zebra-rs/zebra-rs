@@ -40,9 +40,6 @@ pub struct Neighbor {
     //
     pub hold_time: u16,
     pub hold_timer: Option<Timer>,
-    // pub tlvs: Vec<IsisTlv>,
-    //
-    hello_originate: bool,
 }
 
 impl Neighbor {
@@ -80,22 +77,8 @@ impl Neighbor {
         self.is_dis
     }
 
-    pub fn event_clear(&mut self) {
-        self.hello_originate = false;
-    }
-
     pub fn event(&mut self, message: Message) {
-        match message {
-            Message::Ifsm(IfsmEvent::HelloOriginate, _, _) => {
-                if !self.hello_originate {
-                    self.hello_originate = true;
-                    self.tx.send(message).unwrap();
-                }
-            }
-            _ => {
-                self.tx.send(message).unwrap();
-            }
-        }
+        self.tx.send(message).unwrap();
     }
 }
 
