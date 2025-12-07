@@ -14,7 +14,6 @@ use crate::isis_event_trace;
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::link::{Afi, DisStatus};
-use crate::isis::nfsm::isis_nfsm;
 use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
@@ -31,11 +30,13 @@ use crate::context::Timer;
 use crate::spf;
 
 use super::config::IsisConfig;
-use super::ifsm::has_level;
+use super::flood;
+use super::ifsm::{csnp_timer, has_level};
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
+use super::nfsm::nbr_hold_timer_expire;
 use super::srmpls::{LabelConfig, LabelMap};
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_all_lsp};
+use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_for_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -186,22 +187,29 @@ impl Isis {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::SrmX(level, ifindex) => {
+            Message::Srm(level, ifindex) => {
+                let Some(mut link) = self.link_top(ifindex) else {
+                    return;
+                };
+                flood::srm_advertise(&mut link, level, ifindex);
+            }
+            Message::Ssn(level, ifindex) => {
                 let sys_id = self.config.net.sys_id();
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                lsdb::srm_advertise(&mut link, level, ifindex, sys_id);
+                flood::ssn_advertise(&mut link, level);
             }
-            Message::SsnX(level, ifindex) => {
-                let sys_id = self.config.net.sys_id();
+            Message::Nfsm(ev, level, ifindex, sys_id) => {
+                if ev != NfsmEvent::HoldTimerExpire {
+                    return;
+                }
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                lsdb::ssn_advertise(&mut link, level);
-            }
-            Message::Srm(lsp_id, level, reason) => {
-                self.process_srm(lsp_id, level, reason);
+                nbr_hold_timer_expire(&mut link, level, sys_id);
+
+                link.state.nbrs.get_mut(&level).remove(&sys_id);
             }
             Message::SpfCalc(level) => {
                 let mut top = self.top();
@@ -225,37 +233,34 @@ impl Isis {
             Message::Ifsm(ev, ifindex, level) => {
                 self.process_ifsm(ev, ifindex, level);
             }
-            Message::Nfsm(ev, ifindex, sysid, level, mac) => {
-                self.process_nfsm(ev, ifindex, sysid, level, mac);
-            }
             Message::Lsdb(ev, level, key) => {
                 self.process_lsdb(ev, level, key);
             }
             Message::AdjacencyUp(level, ifindex) => {
-                let sys_id = self.config.net.sys_id();
-
                 self.process_lsp_originate(level);
 
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                srm_set_all_lsp(&mut link, level);
-                csnp_send(&mut link, level);
+
+                if link.is_p2p() {
+                    // 7.3.17 Making the update reliable.
+                    //
+                    // When a point-to-point circuit (including non-DA DED circuits and virtual
+                    // links) starts (or restarts), the IS shall
+                    //
+                    // a) set SRMflag for that circuit on all LSPs, and
+                    srm_set_for_all_lsp(&mut link, level);
+
+                    // b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
+                    *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
+                }
             }
         }
     }
 
     fn process_srm(&mut self, lsp_id: IsisLspId, level: Level, reason: String) {
         for (_, link) in self.links.iter() {
-            isis_event_trace!(
-                self.tracing,
-                Flooding,
-                &level,
-                "SRM: processing {} on {} due to {}",
-                lsp_id,
-                link.state.name,
-                reason
-            );
             if !has_level(link.state.level(), level) {
                 isis_event_trace!(
                     self.tracing,
@@ -280,12 +285,6 @@ impl Isis {
 
             if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
                 if lsa.ifindex == link.ifindex {
-                    isis_event_trace!(
-                        self.tracing,
-                        Flooding,
-                        &level,
-                        "SRM: LSP comes from the same interface, continue"
-                    );
                     continue;
                 }
 
@@ -296,28 +295,12 @@ impl Isis {
 
                     isis_packet::write_hold_time(&mut buf, hold_time);
 
-                    isis_event_trace!(
-                        self.tracing,
-                        Flooding,
-                        &level,
-                        "SRM: Send LSP on {}, {}",
-                        link.state.name,
-                        lsp_id
-                    );
-
                     link.ptx.send(PacketMessage::Send(
                         Packet::Bytes(buf),
                         link.ifindex,
                         level,
                         link.state.mac,
                     ));
-                } else {
-                    isis_event_trace!(
-                        self.tracing,
-                        Flooding,
-                        &level,
-                        "SRM: LSP does not have bytes, return"
-                    );
                 }
             }
         }
@@ -331,7 +314,8 @@ impl Isis {
         let lsp_id = lsp.lsp_id;
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
 
-        lsp_flood(&mut top, level, &lsp_id);
+        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        // lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -364,7 +348,8 @@ impl Isis {
         let buf = lsp_emit(&mut purged_lsp, level);
         insert_self_originate(&mut top, level, purged_lsp, None);
 
-        lsp_flood(&mut top, level, &lsp_id);
+        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        // lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_dis_originate(&mut self, level: Level, ifindex: u32, base: Option<u32>) {
@@ -375,7 +360,8 @@ impl Isis {
         let buf = lsp_emit(&mut lsp, level);
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
 
-        lsp_flood(&mut top, level, &lsp_id);
+        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        //lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
@@ -422,39 +408,6 @@ impl Isis {
                     // ifsm::dis_selection(&mut top, Level::L2);
                 }
             },
-        }
-    }
-
-    fn process_nfsm(
-        &mut self,
-        ev: NfsmEvent,
-        ifindex: u32,
-        sysid: IsisSysId,
-        level: Level,
-        mac: Option<MacAddr>,
-    ) {
-        let Some(mut ltop) = self.link_top(ifindex) else {
-            return;
-        };
-        let mut ntop = NeighborTop {
-            tx: &ltop.tx,
-            // lan_id: &mut ltop.state.lan_id,
-            adj: &mut ltop.state.adj,
-            tracing: &ltop.tracing,
-            local_pool: &mut ltop.local_pool,
-            up_config: &ltop.up_config,
-            lsdb: &mut ltop.lsdb,
-        };
-        let Some(nbr) = ltop.state.nbrs.get_mut(&level).get_mut(&sysid) else {
-            return;
-        };
-
-        isis_nfsm(&mut ntop, nbr, ev, mac, level);
-
-        if nbr.state == NfsmState::Down {
-            ltop.state.nbrs.get_mut(&level).remove(&sysid);
-            let msg = Message::SpfCalc(level);
-            ltop.tx.send(msg).unwrap();
         }
     }
 
@@ -595,7 +548,7 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
 
     if let Some(link) = top.links.get(&ifindex) {
         for (sys_id, nbr) in link.state.nbrs.get(&level).iter() {
-            if nbr.state.is_up() {
+            if nbr.state == NfsmState::Up {
                 let neighbor_id = IsisNeighborId::from_sys_id(&sys_id, 0);
                 let entry = IsisTlvExtIsReachEntry {
                     neighbor_id,
@@ -695,7 +648,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         subs: Vec::new(),
     };
 
-    // TODO: SR Capability must be obtain from configuration.
+    // TODO: SR Capability must be obtained from configuration.
     let mut flags = SegmentRoutingCapFlags::default();
     flags.set_i_flag(true);
     flags.set_v_flag(true);
@@ -744,7 +697,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         };
         // Neighbor
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
-            for (_key, value) in nbr.naddr4.iter() {
+            for (_key, value) in nbr.addr4.iter() {
                 if let Some(label) = value.label {
                     if nbr.link_type.is_p2p() {
                         let sub = IsisSubAdjSid {
@@ -947,13 +900,7 @@ pub enum Packet {
 }
 
 pub fn lsp_flood(top: &mut IsisTop, level: Level, lsp_id: &IsisLspId) {
-    for (ifindex, link) in top.links.iter() {
-        if has_level(link.state.level(), level) {
-            top.lsdb
-                .get_mut(&level)
-                .srm_set(top.tx, level, lsp_id, *ifindex);
-        }
-    }
+    top.lsdb.get_mut(&level).srm_set_all(top.tx, level, lsp_id);
 }
 
 pub fn serve(mut isis: Isis) {
@@ -1418,37 +1365,33 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
 }
 
 pub enum Message {
-    Recv(IsisPacket, u32, Option<MacAddr>),
+    Srm(Level, u32),
+    Ssn(Level, u32),
+    Nfsm(NfsmEvent, Level, u32, IsisSysId),
     Ifsm(IfsmEvent, u32, Option<Level>),
-    Nfsm(NfsmEvent, u32, IsisSysId, Level, Option<MacAddr>),
+    Recv(IsisPacket, u32, Option<MacAddr>),
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
     LspPurge(Level, IsisLspId),
-    Srm(IsisLspId, Level, String),
     DisOriginate(Level, u32, Option<u32>),
     SpfCalc(Level),
-    SrmX(Level, u32),
-    SsnX(Level, u32),
     AdjacencyUp(Level, u32),
 }
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Message::SrmX(level, ifindex) => {
-                write!(f, "[Message::SrmX({}:{})]", level, ifindex)
+            Message::Srm(level, ifindex) => {
+                write!(f, "[Message::Srm({}:{})]", level, ifindex)
             }
-            Message::SsnX(level, ifindex) => {
-                write!(f, "[Message::SsnX({}:{})]", level, ifindex)
-            }
-            Message::Srm(lsp_id, level, _) => {
-                write!(f, "[Message::Srm({}, {})]", lsp_id, level)
+            Message::Ssn(level, ifindex) => {
+                write!(f, "[Message::Ssn({}:{})]", level, ifindex)
             }
             Message::Recv(isis_packet, _, _mac_addr) => {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
             }
             Message::Ifsm(ifsm_event, _, _level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
-            Message::Nfsm(nfsm_event, _, _isis_sys_id, _level, _mac) => {
+            Message::Nfsm(nfsm_event, _, _isis_sys_id, _level) => {
                 write!(f, "[Message::Nfsm({:?})]", nfsm_event)
             }
             Message::Lsdb(lsdb_event, _level, _isis_lsp_id) => {
@@ -1486,15 +1429,13 @@ fn build_adjacency_ilm(
 
         for (ifindex, link) in top.links.iter() {
             if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                for tlv in nbr.tlvs.iter() {
-                    if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                        let nhop = SpfNexthop {
-                            ifindex: *ifindex,
-                            adjacency: true,
-                            sys_id: Some(nhop_id.clone()),
-                        };
-                        nhops.insert(ifaddr.addr, nhop);
-                    }
+                for (addr, _) in nbr.addr4.iter() {
+                    let nhop = SpfNexthop {
+                        ifindex: *ifindex,
+                        adjacency: true,
+                        sys_id: Some(nhop_id.clone()),
+                    };
+                    nhops.insert(*addr, nhop);
                 }
             }
         }
@@ -1541,15 +1482,13 @@ fn build_rib_from_spf(
                     // Find nhop from links
                     for (ifindex, link) in top.links.iter() {
                         if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                            for tlv in nbr.tlvs.iter() {
-                                if let IsisTlv::Ipv4IfAddr(ifaddr) = tlv {
-                                    let nhop = SpfNexthop {
-                                        ifindex: *ifindex,
-                                        adjacency: p[0] == *node,
-                                        sys_id: Some(nhop_id.clone()),
-                                    };
-                                    spf_nhops.insert(ifaddr.addr, nhop);
-                                }
+                            for (addr, _) in nbr.addr4.iter() {
+                                let nhop = SpfNexthop {
+                                    ifindex: *ifindex,
+                                    adjacency: p[0] == *node,
+                                    sys_id: Some(nhop_id.clone()),
+                                };
+                                spf_nhops.insert(*addr, nhop);
                             }
                         }
                     }
@@ -1689,17 +1628,4 @@ pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, Sp
             ilm.insert(sid, spf_ilm);
         }
     }
-
-    // println!("-- ILM start --");
-    // for (label, ilm) in ilm.iter() {
-    //     for (addr, nhop) in ilm.nhops.iter() {
-    //         let olabel = if nhop.adjacency {
-    //             String::from("implicit null")
-    //         } else {
-    //             format!("{}", label)
-    //         };
-    //         println!("{} -> {} {} {}", label, addr, nhop.ifindex, olabel);
-    //     }
-    // }
-    // println!("-- ILM end --");
 }

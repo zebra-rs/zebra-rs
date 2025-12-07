@@ -384,8 +384,11 @@ pub struct LinkState {
     // DIS statistics and flap tracking
     pub dis_stats: Levels<DisStatistics>,
 
+    // Stats.
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
+
+    // TODO: need to fix.
     pub hello: Levels<Option<IsisPdu>>,
 }
 

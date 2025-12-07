@@ -12,8 +12,8 @@ use crate::context::Timer;
 use crate::rib::MacAddr;
 
 use super::link::LinkType;
-use super::nfsm::{NeighborAddr4, NfsmState};
-use super::{Isis, Level, Message};
+use super::nfsm::NfsmState;
+use super::{IfsmEvent, Isis, Level, Message, NeighborAddr4, NeighborAddr6};
 
 // IS-IS Neighbor
 #[derive(Debug)]
@@ -22,24 +22,24 @@ pub struct Neighbor {
     pub ifindex: u32,
     pub link_type: LinkType,
     pub sys_id: IsisSysId,
-    // Unchange.
+    // Hello parameters
     pub priority: u8,            // LAN
     pub lan_id: IsisNeighborId,  // LAN
     pub circuit_type: IsLevel,   // LAN & P2P
     pub circuit_id: Option<u32>, // P2P
     // State
-    // pub prev: NfsmState,
     pub state: NfsmState,
     pub is_dis: bool,
+    // Protocol.
+    pub proto: Option<IsisTlvProtoSupported>,
     // Addrs
-    pub naddr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
-    pub addr6: Vec<Ipv6Addr>,
-    pub laddr6: Vec<Ipv6Addr>,
+    pub addr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
+    pub addr6: BTreeMap<Ipv6Addr, NeighborAddr6>,
+    pub addr6l: Vec<Ipv6Addr>,
     pub mac: Option<MacAddr>,
     //
     pub hold_time: u16,
     pub hold_timer: Option<Timer>,
-    pub tlvs: Vec<IsisTlv>,
 }
 
 impl Neighbor {
@@ -59,15 +59,15 @@ impl Neighbor {
             ifindex,
             // prev: NfsmState::Down,
             state: NfsmState::Down,
-            naddr4: BTreeMap::new(),
-            addr6: Vec::new(),
-            laddr6: Vec::new(),
+            addr4: BTreeMap::new(),
+            addr6: BTreeMap::new(),
+            addr6l: Vec::new(),
             mac,
+            proto: None,
             hold_timer: None,
             is_dis: false,
             circuit_id: None,
             hold_time: 0,
-            tlvs: vec![],
             link_type,
         }
     }
@@ -76,18 +76,8 @@ impl Neighbor {
         self.is_dis
     }
 
-    pub fn event(&self, message: Message) {
+    pub fn event(&mut self, message: Message) {
         self.tx.send(message).unwrap();
-    }
-
-    pub fn proto_tlv(&self) -> Option<&IsisTlvProtoSupported> {
-        self.tlvs.iter().find_map(|tlv| {
-            if let IsisTlv::ProtoSupported(tlv) = tlv {
-                Some(tlv)
-            } else {
-                None
-            }
-        })
     }
 }
 
@@ -118,7 +108,7 @@ struct NeighborDetail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ipv6_link_locals: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    ipv6_prefixes: Vec<String>,
+    ipv6_prefixes: Vec<IpPrefix>,
 }
 
 #[derive(Serialize)]
@@ -215,7 +205,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     )?;
 
     write!(buf, "    Circuit type: {}, Speaks:", nbr.circuit_type)?;
-    if let Some(proto) = &nbr.proto_tlv() {
+    if let Some(proto) = &nbr.proto {
         if !proto.nlpids.is_empty() {
             let protocols = proto
                 .nlpids
@@ -239,27 +229,27 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     // XXX
     writeln!(buf, "    LAN Priority: {}, {}", nbr.priority, dis)?;
 
-    if !nbr.naddr4.is_empty() {
+    if !nbr.addr4.is_empty() {
         writeln!(buf, "    IP Prefixes")?;
     }
-    for (_key, value) in &nbr.naddr4 {
+    for (_key, value) in &nbr.addr4 {
         write!(buf, "      {}", value.addr)?;
         if let Some(label) = value.label {
             write!(buf, " ({})", label);
         }
         writeln!(buf, "");
     }
-    if !nbr.laddr6.is_empty() {
+    if !nbr.addr6l.is_empty() {
         writeln!(buf, "    IPv6 Link-Locals")?;
     }
-    for addr in &nbr.laddr6 {
+    for addr in &nbr.addr6l {
         writeln!(buf, "      {}", addr)?;
     }
     if !nbr.addr6.is_empty() {
         writeln!(buf, "    IPv6 Prefixes")?;
     }
-    for addr in &nbr.addr6 {
-        writeln!(buf, "      {}", addr)?;
+    for (_, value) in &nbr.addr6 {
+        writeln!(buf, "      {}", value.addr)?;
     }
 
     writeln!(buf, "")?;
@@ -273,7 +263,7 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         nbr.sys_id.to_string()
     };
 
-    let speaks = if let Some(proto) = &nbr.proto_tlv() {
+    let speaks = if let Some(proto) = &nbr.proto {
         proto
             .nlpids
             .iter()
@@ -284,7 +274,7 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
     };
 
     let ip_prefixes = nbr
-        .naddr4
+        .addr4
         .iter()
         .map(|(_, value)| IpPrefix {
             address: value.addr.to_string(),
@@ -292,8 +282,15 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
         })
         .collect();
 
-    let ipv6_link_locals = nbr.laddr6.iter().map(|addr| addr.to_string()).collect();
-    let ipv6_prefixes = nbr.addr6.iter().map(|addr| addr.to_string()).collect();
+    let ipv6_link_locals = nbr.addr6l.iter().map(|addr| addr.to_string()).collect();
+    let ipv6_prefixes = nbr
+        .addr6
+        .iter()
+        .map(|(_, value)| IpPrefix {
+            address: value.addr.to_string(),
+            label: value.label,
+        })
+        .collect();
 
     NeighborDetail {
         system_id,
