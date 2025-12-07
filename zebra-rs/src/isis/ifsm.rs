@@ -232,18 +232,6 @@ pub fn stop(link: &mut LinkTop) {
     }
 }
 
-pub fn dis_timer(link: &mut LinkTop, level: Level) -> Timer {
-    let tx = link.tx.clone();
-    let ifindex = link.ifindex;
-    Timer::once(0, move || {
-        let tx = tx.clone();
-        async move {
-            tx.send(Message::DisOriginate(level, ifindex, None))
-                .unwrap();
-        }
-    })
-}
-
 pub fn dis_pseudo_node_generate(link: &mut LinkTop, level: Level) {
     use IfsmEvent::*;
 
