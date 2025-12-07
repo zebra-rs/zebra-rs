@@ -254,7 +254,7 @@ pub fn dis_pseudo_node_generate(link: &mut LinkTop, level: Level) {
     *link.state.adj.get_mut(&level) = Some((lsp_id.neighbor_id(), None));
 
     // Regenerate Hello.
-    link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
+    // link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
 }
 
 pub fn dis_pseudo_node_purge(link: &mut LinkTop, level: Level) {
@@ -271,6 +271,7 @@ pub fn dis_pseudo_node_purge(link: &mut LinkTop, level: Level) {
         .send(Message::LspPurge(level, pseudonode_lsp_id))
         .unwrap();
 
+    // LAN_ID is cleared.
     *link.state.adj.get_mut(&level) = None;
 }
 
@@ -280,16 +281,6 @@ pub fn mac_str(mac: &Option<MacAddr>) -> String {
     } else {
         "".to_string()
     }
-}
-
-fn dis_timers_start(link: &mut LinkTop, level: Level) {
-    *link.timer.dis.get_mut(&level) = Some(dis_timer(link, level));
-    *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
-}
-
-fn dis_timers_stop(link: &mut LinkTop, level: Level) {
-    *link.timer.dis.get_mut(&level) = None;
-    *link.timer.csnp.get_mut(&level) = None;
 }
 
 pub fn csnp_timer(link: &LinkTop, level: Level) -> Timer {
@@ -337,11 +328,12 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     // We will check at least one Up state neighbor exists.
     let mut nbrs_up = 0;
 
-    // Track Up neighbor count and candidate Dis.
+    // Track Up neighbor count and candidate DIS.
     for (sys_id, nbr) in link.state.nbrs.get_mut(&level).iter_mut() {
         // Clear neighbor DIS flag, this will be updated following DIS
         // selection process.
         nbr.is_dis = false;
+        nbr.event_clear();
 
         // Skip neighbor which state is not Up.
         if nbr.state != NfsmState::Up {
@@ -360,9 +352,13 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     *link.state.nbrs_up.get_mut(&level) = nbrs_up;
 
     // DIS selection and get new status and new sys_id.
-    let (new_status, new_sys_id, reason) = if nbrs_up == 0 {
-        // No DIS present.
-        (DisStatus::NotSelected, None, "No up neighbors".to_string())
+    let (new_status, new_sys_id, lan_id, reason) = if nbrs_up == 0 {
+        (
+            DisStatus::NotSelected,
+            None,
+            None,
+            "No up neighbors".to_string(),
+        )
     } else if let Some(ref sys_id) = best_sys_id {
         // DIS is other IS.
         let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(sys_id) else {
@@ -375,23 +371,13 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             nbr.priority,
             mac_str(&nbr.mac),
         );
+        let lan_id = if !nbr.lan_id.is_empty() {
+            Some(nbr.lan_id.clone())
+        } else {
+            None
+        };
 
-        nbr.event_clear();
-
-        // Adjacency with Other DIS.
-        if link.state.adj.get(&level).is_none() {
-            use IfsmEvent::*;
-            if !nbr.lan_id.is_empty() {
-                tracing::info!("DIS get LAN Id in Hello packet");
-                *link.state.adj.get_mut(&level) = Some((nbr.lan_id.clone(), None));
-                nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-                nbr.event(Message::LspOriginate(level));
-            } else {
-                tracing::info!("DIS waiting for LAN Id in Hello packet");
-            }
-        }
-
-        (DisStatus::Other, Some(nbr.sys_id), reason)
+        (DisStatus::Other, Some(nbr.sys_id), lan_id, reason)
     } else {
         // DIS is myself.
         let sys_id = Some(link.up_config.net.sys_id());
@@ -400,51 +386,64 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             link.config.priority(),
             nbrs_up
         );
-        (DisStatus::Myself, sys_id, reason)
+        (DisStatus::Myself, sys_id, None, reason)
     };
 
     tracing::info!("DIS selection {:?} {}", new_status, reason);
 
     // Perform DIS change when status or sys_id has been changed.
     if old_status != new_status {
-        match (old_status, new_status) {
-            (DisStatus::NotSelected, DisStatus::Myself) => {
-                dis_pseudo_node_generate(link, level);
-                dis_timers_start(link, level);
+        match old_status {
+            DisStatus::NotSelected => {
+                // Nothing to do.
             }
-            (DisStatus::Other, DisStatus::Myself) => {
-                dis_pseudo_node_generate(link, level);
-                dis_timers_start(link, level);
-            }
-            (DisStatus::Myself, DisStatus::NotSelected) => {
+            DisStatus::Myself => {
+                // Remove pseudo node LSP and clear LAN_ID.
                 dis_pseudo_node_purge(link, level);
-                dis_timers_stop(link, level);
+
+                // Stop CSNP timer.
+                *link.timer.csnp.get_mut(&level) = None;
             }
-            (DisStatus::Myself, DisStatus::Other) => {
-                dis_pseudo_node_purge(link, level);
-                dis_timers_stop(link, level);
-                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+            DisStatus::Other => {
+                // No need of stopping CSNP timer.
+                // No need of removing pseudo node LSP.
+                // Clear adj information.
+                *link.state.adj.get_mut(&level) = None;
             }
-            (DisStatus::NotSelected, DisStatus::Other) => {
-                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
+        }
+        match new_status {
+            DisStatus::NotSelected => {
+                // Nothing to do.
             }
-            (DisStatus::Other, DisStatus::NotSelected) => {
-                //
+            DisStatus::Myself => {
+                dis_pseudo_node_generate(link, level);
             }
-            (DisStatus::Other, DisStatus::Other) => {
-                // When DIS SysId has been changed.
-                //*link.state.dis_sys_id.get_mut(&level) = new_sys_id;
-            }
-            (_, _) => {
-                // This should not happen.
+            DisStatus::Other => {
+                if link.state.adj.get(&level).is_none() {
+                    if let Some(lan_id) = lan_id {
+                        *link.state.adj.get_mut(&level) = Some((lan_id.clone(), None));
+                    }
+                }
             }
         }
 
         // Update link's DIS status to the new one.
         *link.state.dis_status.get_mut(&level) = new_status;
 
+        // If my role is DIS, we originate DIS.
+        if new_status == DisStatus::Myself {
+            link.event(Message::DisOriginate(level, link.ifindex, None));
+        }
+
         // LSP Originate.
-        link.tx.send(Message::LspOriginate(level)).unwrap();
+        link.event(Message::LspOriginate(level));
+
+        // CSNP timer for when DIS is me.
+        if new_status == DisStatus::Myself {
+            if link.timer.csnp.get(&level).is_none() {
+                *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
+            }
+        }
 
         // Record changes.
         link.state
