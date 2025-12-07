@@ -7,6 +7,7 @@ use num_enum::IntoPrimitive;
 use strum_macros::{Display, EnumString};
 
 use crate::context::Timer;
+use crate::isis::inst::spf_schedule;
 use crate::isis::link::LinkType;
 use crate::rib::MacAddr;
 use crate::{isis_fsm_trace, isis_packet_trace};
@@ -30,28 +31,10 @@ pub enum NfsmState {
     Down = 2,
 }
 
-impl NfsmState {
-    pub fn is_up(&self) -> bool {
-        *self == NfsmState::Up
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Display, EnumString)]
 pub enum NfsmEvent {
     #[strum(serialize = "HoldTimerExpire")]
     HoldTimerExpire,
-}
-
-pub type NfsmFunc =
-    fn(&mut NeighborTop, &mut Neighbor, Option<MacAddr>, Level) -> Option<NfsmState>;
-
-impl NfsmState {
-    pub fn fsm(&self, ev: NfsmEvent, _level: Level) -> (NfsmFunc, Option<Self>) {
-        use NfsmEvent::*;
-        match ev {
-            HoldTimerExpire => (nfsm_hold_timer_expire, None),
-        }
-    }
 }
 
 pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
@@ -63,35 +46,17 @@ pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
         let sys_id = sys_id.clone();
         async move {
             use NfsmEvent::*;
-            tx.send(Message::NfsmExpire(level, ifindex, sys_id))
-                .unwrap();
+            tx.send(Message::Nfsm(
+                NfsmEvent::HoldTimerExpire,
+                level,
+                ifindex,
+                sys_id,
+            ))
+            .unwrap();
         }
     })
 }
 
-pub fn nfsm_hold_timer_expire(
-    _ntop: &mut NeighborTop,
-    nbr: &mut Neighbor,
-    _mac: Option<MacAddr>,
-    level: Level,
-) -> Option<NfsmState> {
-    use IfsmEvent::*;
-
-    nbr.hold_timer = None;
-    nbr.event_clear();
-
-    if nbr.state == NfsmState::Up {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
-    }
-    if nbr.state == NfsmState::Init {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-    }
-
-    Some(NfsmState::Down)
-}
-
-// XXX
 pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId) {
     use IfsmEvent::*;
 
@@ -110,15 +75,16 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
         return;
     };
 
-    // Neighbor state to be down.
-    nbr.state = NfsmState::Down;
-
     // Originate Hello and LSP.
     if is_p2p {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         nbr.event(Message::LspOriginate(level));
     } else {
-        // DIS slection.
+        // DIS election.
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        if nbr.state == NfsmState::Up {
+            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+        }
     }
 
     // Release labels.
@@ -130,36 +96,9 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
             value.label = None;
         }
     }
-}
 
-pub fn isis_nfsm(ntop: &mut NeighborTop, nbr: &mut Neighbor, event: NfsmEvent, level: Level) {
-    let (fsm_func, fsm_next_state) = nbr.state.fsm(event, level);
+    // Neighbor state to be down.
+    nbr.state = NfsmState::Down;
 
-    let next_state = fsm_func(ntop, nbr, None, level).or(fsm_next_state);
-
-    if let Some(next_state) = next_state {
-        if next_state != nbr.state {
-            tracing::info!("[NFSM] {} {} => {}", nbr.sys_id, nbr.state, next_state);
-            // Up -> Down/Init
-            if nbr.state == NfsmState::Up {
-                if let Some((adj, _)) = ntop.adj.get(&level) {
-                    if adj.sys_id() == nbr.sys_id {
-                        *ntop.adj.get_mut(&level) = None;
-                        ntop.lsdb.get_mut(&level).adj_clear(nbr.ifindex);
-                    }
-                }
-
-                // Release adjacency SID if it has been allocated.
-                for (_key, value) in nbr.addr4.iter_mut() {
-                    if let Some(label) = value.label {
-                        if let Some(local_pool) = ntop.local_pool {
-                            local_pool.release(label as usize);
-                        }
-                        value.label = None;
-                    }
-                }
-            }
-            nbr.state = next_state;
-        }
-    }
+    spf_schedule(link, level);
 }

@@ -21,7 +21,7 @@ use super::ifsm::has_level;
 use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
 use super::link::{LinkTop, LinkType};
 use super::lsdb;
-use super::nfsm::{NfsmEvent, isis_nfsm};
+use super::nfsm::NfsmEvent;
 use super::{LabelPool, Level};
 
 #[derive(Debug)]

@@ -14,7 +14,6 @@ use crate::isis_event_trace;
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::link::{Afi, DisStatus};
-use crate::isis::nfsm::isis_nfsm;
 use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
@@ -201,13 +200,16 @@ impl Isis {
                 };
                 flood::ssn_advertise(&mut link, level);
             }
-            Message::NfsmExpire(level, ifindex, sys_id) => {
+            Message::Nfsm(ev, level, ifindex, sys_id) => {
+                if ev != NfsmEvent::HoldTimerExpire {
+                    return;
+                }
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
                 nbr_hold_timer_expire(&mut link, level, sys_id);
+
                 link.state.nbrs.get_mut(&level).remove(&sys_id);
-                spf_schedule(&mut link, level);
             }
             Message::SpfCalc(level) => {
                 let mut top = self.top();
@@ -230,9 +232,6 @@ impl Isis {
             }
             Message::Ifsm(ev, ifindex, level) => {
                 self.process_ifsm(ev, ifindex, level);
-            }
-            Message::Nfsm(ev, ifindex, sysid, level) => {
-                self.process_nfsm(ev, ifindex, sysid, level);
             }
             Message::Lsdb(ev, level, key) => {
                 self.process_lsdb(ev, level, key);
@@ -412,32 +411,6 @@ impl Isis {
         }
     }
 
-    fn process_nfsm(&mut self, ev: NfsmEvent, ifindex: u32, sysid: IsisSysId, level: Level) {
-        let Some(mut link) = self.link_top(ifindex) else {
-            return;
-        };
-        let mut ntop = NeighborTop {
-            tx: &link.tx,
-            // lan_id: &mut ltop.state.lan_id,
-            adj: &mut link.state.adj,
-            tracing: &link.tracing,
-            local_pool: &mut link.local_pool,
-            up_config: &link.up_config,
-            lsdb: &mut link.lsdb,
-        };
-        let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sysid) else {
-            return;
-        };
-
-        isis_nfsm(&mut ntop, nbr, ev, level);
-
-        if nbr.state == NfsmState::Down {
-            link.state.nbrs.get_mut(&level).remove(&sysid);
-            let msg = Message::SpfCalc(level);
-            link.tx.send(msg).unwrap();
-        }
-    }
-
     fn process_lsdb(&mut self, ev: LsdbEvent, level: Level, key: IsisLspId) {
         use LsdbEvent::*;
         let mut top = self.top();
@@ -575,7 +548,7 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
 
     if let Some(link) = top.links.get(&ifindex) {
         for (sys_id, nbr) in link.state.nbrs.get(&level).iter() {
-            if nbr.state.is_up() {
+            if nbr.state == NfsmState::Up {
                 let neighbor_id = IsisNeighborId::from_sys_id(&sys_id, 0);
                 let entry = IsisTlvExtIsReachEntry {
                     neighbor_id,
@@ -1394,10 +1367,9 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
 pub enum Message {
     Srm(Level, u32),
     Ssn(Level, u32),
-    NfsmExpire(Level, u32, IsisSysId),
-    Recv(IsisPacket, u32, Option<MacAddr>),
+    Nfsm(NfsmEvent, Level, u32, IsisSysId),
     Ifsm(IfsmEvent, u32, Option<Level>),
-    Nfsm(NfsmEvent, u32, IsisSysId, Level),
+    Recv(IsisPacket, u32, Option<MacAddr>),
     Lsdb(LsdbEvent, Level, IsisLspId),
     LspOriginate(Level),
     LspPurge(Level, IsisLspId),
@@ -1414,9 +1386,6 @@ impl Display for Message {
             }
             Message::Ssn(level, ifindex) => {
                 write!(f, "[Message::Ssn({}:{})]", level, ifindex)
-            }
-            Message::NfsmExpire(level, ifindex, _sys_id) => {
-                write!(f, "[Message::NfsmExpire({}:{})]", level, ifindex)
             }
             Message::Recv(isis_packet, _, _mac_addr) => {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
