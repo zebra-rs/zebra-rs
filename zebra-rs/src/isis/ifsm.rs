@@ -333,7 +333,6 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         // Clear neighbor DIS flag, this will be updated following DIS
         // selection process.
         nbr.is_dis = false;
-        nbr.event_clear();
 
         // Skip neighbor which state is not Up.
         if nbr.state != NfsmState::Up {
