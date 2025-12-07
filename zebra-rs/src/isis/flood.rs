@@ -8,9 +8,9 @@ use crate::context::Timer;
 use super::{Level, LinkTop, Lsdb, Message, MsgSender, Packet, PacketMessage, psnp_send_pdu};
 
 #[derive(Default)]
-pub struct LsaFloodMap(pub BTreeMap<IsisLspId, IsisLspEntry>);
+pub struct LspFloodMap(pub BTreeMap<IsisLspId, IsisLspEntry>);
 
-impl LsaFloodMap {
+impl LspFloodMap {
     pub fn set(&mut self, lsp: &IsisLspEntry) {
         self.0.insert(lsp.lsp_id, lsp.clone());
     }
@@ -21,10 +21,10 @@ impl LsaFloodMap {
 }
 
 #[derive(Default)]
-pub struct LsaFlood {
-    pub srm: LsaFloodMap,
+pub struct LspFlood {
+    pub srm: LspFloodMap,
     pub srm_timer: Option<Timer>,
-    pub ssn: LsaFloodMap,
+    pub ssn: LspFloodMap,
     pub ssn_timer: Option<Timer>,
 }
 

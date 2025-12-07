@@ -46,4 +46,4 @@ pub use labelpool::*;
 pub mod tracing;
 
 pub mod flood;
-pub use flood::LsaFlood;
+pub use flood::LspFlood;
