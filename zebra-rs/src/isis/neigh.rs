@@ -30,7 +30,7 @@ pub struct Neighbor {
     // State
     pub state: NfsmState,
     pub is_dis: bool,
-    // Protos.
+    // Protocol.
     pub proto: Option<IsisTlvProtoSupported>,
     // Addrs
     pub addr4: BTreeMap<Ipv4Addr, NeighborAddr4>,

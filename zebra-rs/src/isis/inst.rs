@@ -648,7 +648,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         subs: Vec::new(),
     };
 
-    // TODO: SR Capability must be obtain from configuration.
+    // TODO: SR Capability must be obtained from configuration.
     let mut flags = SegmentRoutingCapFlags::default();
     flags.set_i_flag(true);
     flags.set_v_flag(true);
