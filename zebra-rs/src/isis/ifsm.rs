@@ -282,6 +282,29 @@ pub fn mac_str(mac: &Option<MacAddr>) -> String {
     }
 }
 
+fn dis_timers_start(link: &mut LinkTop, level: Level) {
+    *link.timer.dis.get_mut(&level) = Some(dis_timer(link, level));
+    *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
+}
+
+fn dis_timers_stop(link: &mut LinkTop, level: Level) {
+    *link.timer.dis.get_mut(&level) = None;
+    *link.timer.csnp.get_mut(&level) = None;
+}
+
+pub fn csnp_timer(link: &LinkTop, level: Level) -> Timer {
+    let tx = link.tx.clone();
+    let ifindex = link.ifindex;
+    Timer::immediate_repeat(link.config.csnp_interval(), move || {
+        let tx = tx.clone();
+        async move {
+            use IfsmEvent::*;
+            let msg = Message::Ifsm(CsnpTimerExpire, ifindex, Some(level));
+            tx.send(msg);
+        }
+    })
+}
+
 // DIS Selection
 pub fn dis_selection(link: &mut LinkTop, level: Level) {
     // 8.4.5 LAN designated intermediate systems
@@ -299,13 +322,14 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 })
     }
 
+    // Logging.
     tracing::info!("DIS selection start");
 
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);
     // let old_sys_id = *link.state.dis_sys_id.get(&level);
 
-    // When curr is None, current candidate DIS is myself.
+    // Reset current status.
     let mut best_sys_id: Option<IsisSysId> = None;
     let mut best_priority = link.config.priority();
     let mut best_mac = link.state.mac.clone();
@@ -331,6 +355,8 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         }
         nbrs_up += 1;
     }
+
+    // Update link's neighbors Up count.
     *link.state.nbrs_up.get_mut(&level) = nbrs_up;
 
     // DIS selection and get new status and new sys_id.
@@ -426,27 +452,4 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             .get_mut(&level)
             .record_change(old_status, new_status, new_sys_id, new_sys_id, reason);
     }
-}
-
-fn dis_timers_start(link: &mut LinkTop, level: Level) {
-    *link.timer.dis.get_mut(&level) = Some(dis_timer(link, level));
-    *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
-}
-
-fn dis_timers_stop(link: &mut LinkTop, level: Level) {
-    *link.timer.dis.get_mut(&level) = None;
-    *link.timer.csnp.get_mut(&level) = None;
-}
-
-pub fn csnp_timer(link: &LinkTop, level: Level) -> Timer {
-    let tx = link.tx.clone();
-    let ifindex = link.ifindex;
-    Timer::immediate_repeat(link.config.csnp_interval(), move || {
-        let tx = tx.clone();
-        async move {
-            use IfsmEvent::*;
-            let msg = Message::Ifsm(CsnpTimerExpire, ifindex, Some(level));
-            tx.send(msg);
-        }
-    })
 }
