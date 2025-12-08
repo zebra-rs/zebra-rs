@@ -11,7 +11,7 @@ use crate::{
     Vpnv4Nlri, many0,
 };
 
-use super::{AttrEmitter, RouteDistinguisher, Vpnv4Reach};
+use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach};
 
 #[derive(Clone, Debug, NomBE)]
 pub struct MpNlriReachHeader {
@@ -61,6 +61,18 @@ impl MpNlriReachAttr {
                 updates,
             } => {
                 let attr = Vpnv4Reach {
+                    snpa: *snpa,
+                    nhop: nhop.clone(),
+                    updates: updates.clone(),
+                };
+                attr.attr_emit(buf);
+            }
+            MpNlriReachAttr::Rtcv4 {
+                snpa,
+                nhop,
+                updates,
+            } => {
+                let attr = Rtcv4Reach {
                     snpa: *snpa,
                     nhop: nhop.clone(),
                     updates: updates.clone(),

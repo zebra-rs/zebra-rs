@@ -446,7 +446,7 @@ impl Bgp {
             "/afi-safi/long-lived-graceful-restart/restart-time",
             config_llgr_restart_time,
         );
-        // self.callback_peer("/rtc", config_rtc);
+        self.callback_peer("/rtc", config_rtc);
 
         // Timer configuration.
         self.timer("/hold-time", timer::config::hold_time);

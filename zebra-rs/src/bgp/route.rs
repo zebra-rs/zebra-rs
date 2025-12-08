@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -500,6 +500,21 @@ pub fn route_ipv4_update(
     route_advertise_to_addpath(rd, nlri.prefix, &rib, peer_ident, bgp, peers);
 }
 
+fn rtc_match(rtc: &BTreeSet<ExtCommunityValue>, ecom: &Option<ExtCommunity>) -> bool {
+    if let Some(ecom) = ecom {
+        // Extended community value in RIB.
+        for eval in ecom.0.iter() {
+            // When the value matches one of RTC, return true;
+            for rt in rtc.iter() {
+                if eval == rt {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn route_advertise_to_addpath(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
@@ -527,6 +542,14 @@ fn route_advertise_to_addpath(
 
         if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true) {
             if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
+                // RTC match.
+                if let Some(ref rd) = rd {
+                    if !peer.rtcv4.is_empty() {
+                        if !rtc_match(&peer.rtcv4, &attr.ecom) {
+                            continue;
+                        }
+                    }
+                }
                 let mut rib = rib.clone();
                 rib.attr = attr.clone();
 
@@ -571,11 +594,7 @@ fn route_withdraw_from_addpath(
     for peer_addr in peer_addrs {
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
-        if let Some(ref rd) = rd {
-            route_withdraw_ipv4(peer, Some(rd.clone()), prefix, removed.local_id);
-        } else {
-            route_withdraw_ipv4(peer, None, prefix, removed.local_id);
-        }
+        route_withdraw_ipv4(peer, rd, prefix, removed.local_id);
         peer.adj_out.remove(rd, prefix, removed.local_id);
     }
 }
@@ -634,6 +653,14 @@ fn route_advertise_to_peers(
         // Now apply the update/withdrawal
         match (nlri_opt, attr_opt) {
             (Some(nlri), Some(attr)) => {
+                if let Some(ref rd) = rd {
+                    // RTC match.
+                    if !peer.rtcv4.is_empty() {
+                        if !rtc_match(&peer.rtcv4, &attr.ecom) {
+                            continue;
+                        }
+                    }
+                }
                 // Send update
                 if let Some(best) = new_best {
                     let mut rib = best.clone();
@@ -725,6 +752,31 @@ pub fn route_ipv4_withdraw(
     }
 }
 
+pub fn route_ipv4_rtc_update(peer_id: IpAddr, rtcv4: &Rtcv4, peers: &mut BTreeMap<IpAddr, Peer>) {
+    let Some(peer) = peers.get_mut(&peer_id) else {
+        return;
+    };
+    peer.rtcv4.insert(rtcv4.rt.clone());
+}
+
+pub fn route_ipv4_rtc_withdraw(peer_id: IpAddr, rtcv4: &Rtcv4, peers: &mut BTreeMap<IpAddr, Peer>) {
+    let Some(peer) = peers.get_mut(&peer_id) else {
+        return;
+    };
+    peer.rtcv4.remove(&rtcv4.rt);
+}
+
+pub fn route_rtcv4_sync(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<IpAddr, Peer>) {
+    let Some(peer) = peers.get_mut(&peer_id) else {
+        return;
+    };
+    let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
+    if peer.eor.get(&key).is_some() {
+        route_sync_vpnv4(peer, bgp);
+    }
+    peer.eor.clear();
+}
+
 pub fn route_from_peer(
     peer_id: IpAddr,
     packet: UpdatePacket,
@@ -767,6 +819,15 @@ pub fn route_from_peer(
                     )
                 }
             }
+            MpNlriReachAttr::Rtcv4 {
+                snpa,
+                nhop,
+                updates,
+            } => {
+                for update in updates.iter() {
+                    route_ipv4_rtc_update(peer_id, update, peers);
+                }
+            }
             _ => {
                 //
             }
@@ -786,6 +847,10 @@ pub fn route_from_peer(
                         true,
                     );
                 }
+            }
+            MpNlriUnreachAttr::Rtcv4Eor => {
+                // If peer's EoR is true.
+                route_rtcv4_sync(peer_id, bgp, peers);
             }
             _ => {
                 //
@@ -859,6 +924,10 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
     peer.cap_map = CapAfiMap::new();
     peer.cap_recv = BgpCap::default();
     peer.opt.clear();
+
+    // IPv4 RTC.
+    peer.rtcv4.clear();
+    peer.eor.clear();
 }
 
 pub fn route_update_ipv4(
@@ -1091,6 +1160,13 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
                 continue;
             };
 
+            // RTC
+            if !peer.rtcv4.is_empty() {
+                if !rtc_match(&peer.rtcv4, &attr.ecom) {
+                    continue;
+                }
+            }
+
             // Register to AdjOut.
             rib.attr = attr.clone();
             peer.adj_out.add(Some(rd.clone()), nlri.prefix, rib);
@@ -1137,14 +1213,63 @@ fn send_eor_vpnv4_unicast(peer: &mut Peer) {
     }
 }
 
+// Send wildcard RTCv4.
+fn send_default_rtcv4_unicast(peer: &mut Peer) {
+    let mut update = UpdatePacket::new();
+
+    let mut attrs = BgpAttr::new();
+    if peer.is_ibgp() {
+        attrs.local_pref = Some(LocalPref::default());
+    }
+
+    update.bgp_attr = Some(attrs);
+    let mp_update = MpNlriReachAttr::Rtcv4 {
+        snpa: 0,
+        nhop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        updates: vec![],
+    };
+    update.mp_update = Some(mp_update);
+    let bytes: BytesMut = update.into();
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
+        }
+    }
+}
+
+fn send_eor_rtcv4_unicast(peer: &mut Peer) {
+    // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
+    let mut update = UpdatePacket::new();
+    let mp_withdraw = MpNlriUnreachAttr::Rtcv4Eor;
+    update.mp_withdraw = Some(mp_withdraw);
+    let bytes: BytesMut = update.into();
+
+    if let Some(ref packet_tx) = peer.packet_tx {
+        if let Err(e) = packet_tx.send(bytes) {
+            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
+        }
+    }
+}
+
 // Called when peer has been established.
 pub fn route_sync(peer: &mut Peer, bgp: &mut ConfigRef) {
     // Advertize.
     if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
         route_sync_ipv4(peer, bgp);
     }
+    // We want all RTC.
+    if peer.is_afi_safi(Afi::Ip, Safi::Rtc) {
+        let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
+        peer.eor.insert(key, true);
+        send_default_rtcv4_unicast(peer);
+        send_eor_rtcv4_unicast(peer);
+    }
     if peer.is_afi_safi(Afi::Ip, Safi::MplsVpn) {
-        route_sync_vpnv4(peer, bgp);
+        let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
+        if peer.eor.get(&key).is_none() {
+            route_sync_vpnv4(peer, bgp);
+        }
     }
 }
 
