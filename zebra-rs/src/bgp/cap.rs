@@ -2,9 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use bgp_packet::{
-    Afi, AfiSafi, BgpCap, CapMultiProtocol, Direct, ParseOption, Safi, addpath::AddPathValue,
-};
+use bgp_packet::*;
 use serde::Serialize;
 
 #[derive(Default, Debug, Serialize, Clone)]
@@ -74,9 +72,9 @@ pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
     }
 }
 
-pub fn cap_addpath_recv(bgp_cap: &BgpCap, opt: &mut ParseOption, configs: &BTreeSet<AddPathValue>) {
+pub fn cap_addpath_recv(bgp_cap: &BgpCap, opt: &mut ParseOption, configs: &AfiSafis<AddPathValue>) {
     for (_, cap) in bgp_cap.addpath.iter() {
-        for config in configs.iter() {
+        for (_, config) in configs.iter() {
             if cap.afi == config.afi && cap.safi == config.safi {
                 let send = cap.send_receive.is_receive() && config.send_receive.is_send();
                 let recv = cap.send_receive.is_send() && config.send_receive.is_receive();

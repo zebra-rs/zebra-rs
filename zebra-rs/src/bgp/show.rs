@@ -1097,6 +1097,54 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             }
         }
 
+        if !neighbor.cap_send.addpath.is_empty() || !neighbor.cap_recv.addpath.is_empty() {
+            writeln!(out, "    Add Path:")?;
+
+            // Collect all AFI/SAFI pairs from both send and recv
+            let mut all_afi_safis = std::collections::BTreeSet::new();
+            for key in neighbor.cap_send.addpath.keys() {
+                all_afi_safis.insert(key);
+            }
+            for key in neighbor.cap_recv.addpath.keys() {
+                all_afi_safis.insert(key);
+            }
+
+            // Display each AFI/SAFI pair
+            for afi_safi in all_afi_safis {
+                let afi_safi_str = match (afi_safi.afi, afi_safi.safi) {
+                    (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
+                    (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
+                    (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::Ip6, Safi::MplsVpn) => "IPv6/MPLS VPN",
+                    (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
+                    (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    _ => continue, // Skip unknown combinations
+                };
+
+                let send_val = neighbor.cap_send.addpath.get(afi_safi);
+                let recv_val = neighbor.cap_recv.addpath.get(afi_safi);
+
+                write!(out, "      {}: ", afi_safi_str)?;
+
+                match (send_val, recv_val) {
+                    (Some(send), Some(recv)) => {
+                        writeln!(
+                            out,
+                            "Local:{} and Remote:{}",
+                            send.send_receive, recv.send_receive
+                        )?;
+                    }
+                    (Some(send), None) => {
+                        writeln!(out, "Local:{}", send.send_receive)?;
+                    }
+                    (None, Some(recv)) => {
+                        writeln!(out, "Remote:{}", recv.send_receive)?;
+                    }
+                    (None, None) => {} // Should not happen
+                }
+            }
+        }
+
         if !neighbor.cap_send.restart.is_empty() || !neighbor.cap_recv.restart.is_empty() {
             writeln!(out, "    Graceful Restart:")?;
 
@@ -1115,6 +1163,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     (Afi::Ip, Safi::Unicast) => "IPv4/Unicast",
                     (Afi::Ip, Safi::MplsVpn) => "IPv4/MPLS VPN",
                     (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
+                    (Afi::Ip6, Safi::MplsVpn) => "IPv6/MPLS VPN",
                     (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
                     (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
                     _ => continue, // Skip unknown combinations
@@ -1414,25 +1463,6 @@ fn show_bgp_neighbor(
     }
     Ok(out)
 }
-
-// fn show_community_list(
-//     bgp: &Bgp,
-//     _args: Args,
-//     _json: bool,
-// ) -> std::result::Result<String, std::fmt::Error> {
-//     let mut out = String::from("community-list");
-//     for (name, clist) in bgp.clist.0.iter() {
-//         writeln!(out, "name: {:?}", name)?;
-//         for (seq, entry) in clist.entry.iter() {
-//             writeln!(out, " seq: {}", seq)?;
-//             if let Some(action) = &entry.action {
-//                 writeln!(out, " action: {:?}", action)?;
-//             }
-//         }
-//     }
-
-//     Ok(out)
-// }
 
 fn show_bgp_l2vpn_evpn(
     _bgp: &Bgp,
