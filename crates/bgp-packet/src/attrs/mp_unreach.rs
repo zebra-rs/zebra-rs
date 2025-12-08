@@ -5,7 +5,8 @@ use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use crate::{
-    Afi, EvpnRoute, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4, Safi, Vpnv4Nlri, many0,
+    Afi, EvpnRoute, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Safi,
+    Vpnv4Nlri, many0,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach};
@@ -43,6 +44,10 @@ impl MpNlriUnreachAttr {
             }
             MpNlriUnreachAttr::Vpnv4Eor => {
                 let attr = Vpnv4Unreach { withdraw: vec![] };
+                attr.attr_emit(buf);
+            }
+            MpNlriUnreachAttr::Rtcv4Eor => {
+                let attr = Rtcv4Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
             _ => {

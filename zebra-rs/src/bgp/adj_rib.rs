@@ -75,6 +75,9 @@ impl<D: RibDirection> AdjRibTable<D> {
             }
 
             Some(removed_route)
+        } else if id == 0 {
+            self.0.remove(&prefix);
+            None
         } else {
             None
         }

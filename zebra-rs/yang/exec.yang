@@ -96,6 +96,9 @@ module exec {
             ext:dynamic "bgp:neighbor";
             type "inet:ipv4-address";
           }
+          leaf rtcv4 {
+            type empty;
+          }
           container advertised-routes {
             presence "";
             leaf vpnv4 {
