@@ -266,38 +266,21 @@ fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 }
 
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    let add_path_str: String = args.string()?;
+    let send_receive: AddPathSendReceive = add_path_str.parse().ok()?;
+
     if op.is_set() {
-        if let Some(addr) = args.v4addr() {
-            let addr = IpAddr::V4(addr);
-            let afi_safi: AfiSafi = args.afi_safi()?;
-            let add_path_str: String = args.string()?;
-            let send_receive: AddPathSendReceive = add_path_str.parse().ok()?;
-            let add_path = AddPathValue {
-                afi: afi_safi.afi,
-                safi: afi_safi.safi,
-                send_receive,
-            };
-            if let Some(peer) = bgp.peers.get_mut(&addr) {
-                peer.config.add_path.insert(add_path);
-            } else {
-                // TODO
-            }
-        } else if let Some(addr) = args.v6addr() {
-            let addr = IpAddr::V6(addr);
-            let afi_safi: AfiSafi = args.afi_safi()?;
-            let add_path_str: String = args.string()?;
-            let send_receive: AddPathSendReceive = add_path_str.parse().ok()?;
-            let add_path = AddPathValue {
-                afi: afi_safi.afi,
-                safi: afi_safi.safi,
-                send_receive,
-            };
-            if let Some(peer) = bgp.peers.get_mut(&addr) {
-                peer.config.add_path.insert(add_path);
-            } else {
-                // TODO
-            }
-        }
+        let add_path = AddPathValue {
+            afi: afi_safi.afi,
+            safi: afi_safi.safi,
+            send_receive,
+        };
+        peer.config.addpath.insert(afi_safi, add_path);
+    } else {
+        peer.config.addpath.remove(&afi_safi);
     }
     Some(())
 }

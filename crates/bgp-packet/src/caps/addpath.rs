@@ -18,8 +18,11 @@ pub struct AddPathValue {
 #[repr(u8)]
 #[derive(Debug, Clone, PartialEq, Copy, Ord, PartialOrd, Eq, Display, EnumString)]
 pub enum AddPathSendReceive {
+    #[strum(serialize = "receive")]
     Receive = 1,
+    #[strum(serialize = "send")]
     Send = 2,
+    #[strum(serialize = "send-receive")]
     SendReceive = 3,
     #[strum(disabled)]
     Unknown(u8),
