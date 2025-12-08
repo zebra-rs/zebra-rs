@@ -543,7 +543,6 @@ pub fn psnp_recv(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
                         //
                         // If the reported value is older than the database
                         // value, Clear SSNflag, and Set SRMflag.
-                        println!("XXX seq number {}", lsp.seq_number);
                         flood::ssn_clear(link, level, &lsp.lsp_id);
                         flood::srm_set(link, level, &lsp.lsp_id);
                     }
