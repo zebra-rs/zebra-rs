@@ -188,9 +188,9 @@ impl Display for OspfLsUpdate {
 
 impl Display for OspfLsa {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        use OspfLsaPayload::*;
+        use OspfLsp::*;
         write!(f, "{}", self.h).unwrap();
-        match &self.lsa {
+        match &self.lsp {
             Router(v) => write!(f, "\n{}", v),
             Network(v) => write!(f, "\n{}", v),
             AsExternal(v) => write!(f, "\n{}", v),
