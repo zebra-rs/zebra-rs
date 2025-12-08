@@ -496,6 +496,16 @@ pub fn psnp_recv(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
         return;
     }
 
+    // 7.3.15 If circuit C is a broadcast circuit and either i. this is a level
+    // 1 PSNP and this IS is not the level 1 designated IS for the circuit C, or
+    // ii. this is a level 2 PSNP and this IS is not the level 2 designated IS
+    // for the circuit C, then the IS shall discard the PDU.
+    if link.is_lan() {
+        if *link.state.dis_status.get(&level) != DisStatus::Myself {
+            return;
+        }
+    }
+
     // 7.3.15.2 Action on receipt of a PSNP.
     for entry in pdu.tlvs.iter() {
         if let IsisTlv::LspEntries(tlv) = entry {

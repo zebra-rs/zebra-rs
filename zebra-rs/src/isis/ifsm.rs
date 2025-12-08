@@ -232,7 +232,7 @@ pub fn stop(link: &mut LinkTop) {
     }
 }
 
-pub fn dis_pseudo_node_generate(link: &mut LinkTop, level: Level) {
+pub fn dis_becoming(link: &mut LinkTop, level: Level) {
     use IfsmEvent::*;
 
     let pseudo_id: u8 = link.ifindex as u8;
@@ -240,12 +240,13 @@ pub fn dis_pseudo_node_generate(link: &mut LinkTop, level: Level) {
 
     // Register adjacency with LAN ID.
     *link.state.adj.get_mut(&level) = Some((lsp_id.neighbor_id(), None));
+    link.lsdb.get_mut(&level).adj_set(link.ifindex);
 
     // Regenerate Hello.
-    // link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
+    link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
 }
 
-pub fn dis_pseudo_node_purge(link: &mut LinkTop, level: Level) {
+pub fn dis_dropping(link: &mut LinkTop, level: Level) {
     // Only purge if we have an adjacency (meaning we were DIS)
     let Some((adj, _)) = link.state.adj.get(&level) else {
         return;
@@ -386,7 +387,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             }
             DisStatus::Myself => {
                 // Remove pseudo node LSP and clear LAN_ID.
-                dis_pseudo_node_purge(link, level);
+                dis_dropping(link, level);
 
                 // Stop CSNP timer.
                 *link.timer.csnp.get_mut(&level) = None;
@@ -403,12 +404,15 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 // Nothing to do.
             }
             DisStatus::Myself => {
-                dis_pseudo_node_generate(link, level);
+                dis_becoming(link, level);
             }
             DisStatus::Other => {
+                use IfsmEvent::*;
                 if link.state.adj.get(&level).is_none() {
                     if let Some(lan_id) = lan_id {
                         *link.state.adj.get_mut(&level) = Some((lan_id.clone(), None));
+                        link.lsdb.get_mut(&level).adj_set(link.ifindex);
+                        link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
                     }
                 }
             }

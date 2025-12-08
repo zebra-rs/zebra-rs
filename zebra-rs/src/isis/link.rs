@@ -139,6 +139,10 @@ impl<'a> LinkTop<'a> {
         self.flags.is_p2p()
     }
 
+    pub fn is_lan(&self) -> bool {
+        !self.is_p2p()
+    }
+
     pub fn dest(&self, level: Level) -> Option<MacAddr> {
         if self.is_p2p() {
             // MacAddr::from_vec(P2P_ISS.to_vec())
