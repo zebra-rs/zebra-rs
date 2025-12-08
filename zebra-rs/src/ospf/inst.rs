@@ -29,10 +29,10 @@ use super::link::OspfLink;
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
-use super::{Identity, Lsdb, Neighbor};
+use super::{AREA0, Identity, Lsdb, Neighbor};
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
-pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
+pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
 
 pub struct Ospf {
     ctx: Context,
@@ -144,16 +144,15 @@ impl Ospf {
     }
 
     pub fn router_lsa_originate(&mut self) {
-        if let Some(_area) = self.areas.get_mut(Ipv4Addr::UNSPECIFIED) {
+        if let Some(area) = self.areas.get_mut(AREA0) {
             println!(
                 "Found default area for self originated router_id {}",
                 self.router_id
             );
 
-            let _lsa_header =
-                OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
+            let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
 
-            let mut router_lsa = RouterLsa::default();
+            let mut r_lsa = RouterLsa::default();
 
             for (_, link) in self.links.iter() {
                 if !link.enabled {
@@ -162,11 +161,14 @@ impl Ospf {
                 for addr in link.addr.iter() {
                     println!("Addr {}", addr.prefix);
                     let lsa_link = RouterLsaLink::new(addr.prefix, 10);
-                    router_lsa.links.push(lsa_link);
+                    r_lsa.links.push(lsa_link);
                 }
             }
-            router_lsa.num_links = router_lsa.links.len() as u16;
-            //area.lsdb.insert(lsa);
+            r_lsa.num_links = r_lsa.links.len() as u16;
+
+            let lsa = OspfLsa::from(lsah, r_lsa.into());
+
+            area.lsdb.insert(lsa);
         }
     }
 
@@ -324,7 +326,10 @@ impl Ospf {
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
-            let output = f(self, args, msg.json);
+            let output = match f(self, args, msg.json) {
+                Ok(result) => result,
+                Err(e) => format!("Error formatting output: {}", e),
+            };
             msg.resp.send(output).await.unwrap();
         }
     }

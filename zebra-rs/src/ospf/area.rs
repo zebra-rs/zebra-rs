@@ -3,6 +3,8 @@ use std::net::Ipv4Addr;
 
 use super::Lsdb;
 
+pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+
 pub struct OspfAreaMap(BTreeMap<Ipv4Addr, OspfArea>);
 
 impl OspfAreaMap {

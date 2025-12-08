@@ -22,6 +22,7 @@ pub use task::{Timer, TimerType};
 pub mod addr;
 
 pub mod area;
+pub use area::*;
 
 pub mod show;
 
