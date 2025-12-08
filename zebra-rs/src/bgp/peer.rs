@@ -111,10 +111,6 @@ pub struct PeerConfig {
     pub restart: AfiSafis<RestartValue>,
     pub llgr: AfiSafis<LlgrValue>,
     pub addpath: AfiSafis<AddPathValue>,
-    // XXX Legacy
-    pub graceful_restart: Option<u16>,
-    pub add_path: BTreeSet<AddPathValue>,
-    // XXX Legacy
     pub route_refresh: bool,
     pub timer: timer::Config,
     pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
@@ -129,8 +125,6 @@ impl Default for PeerConfig {
             restart: AfiSafis::new(),
             llgr: AfiSafis::new(),
             addpath: AfiSafis::new(),
-            graceful_restart: Default::default(),
-            add_path: Default::default(),
             route_refresh: Default::default(),
             timer: Default::default(),
             sub: Default::default(),
@@ -545,10 +539,9 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     cap_register_recv(&packet.bgp_cap, &mut peer.cap_map);
 
     // Register add path caps.
-    cap_addpath_recv(&packet.bgp_cap, &mut peer.opt, &peer.config.add_path);
+    cap_addpath_recv(&packet.bgp_cap, &mut peer.opt, &peer.config.addpath);
 
     // Register graceful restart.
-    // cap_restart_recv(&packet.caps, &mut peer.restart, &peer.config);
     peer.cap_recv = packet.bgp_cap;
 
     State::Established
@@ -637,7 +630,7 @@ pub fn peer_packet_parse(
             match p {
                 BgpPacket::Open(p) => {
                     // config.cap_recv = p.bgp_cap.clone();
-                    cap_addpath_recv(&p.bgp_cap, opt, &config.add_path);
+                    cap_addpath_recv(&p.bgp_cap, opt, &config.addpath);
                     let _ = tx.send(Message::Event(ident, Event::BGPOpen(*p)));
                 }
                 BgpPacket::Keepalive(_) => {
@@ -759,14 +752,8 @@ pub fn peer_send_open(peer: &mut Peer) {
         let cap = CapRefresh::default();
         bgp_cap.refresh = Some(cap);
     }
-    if let Some(restart_time) = peer.config.graceful_restart {
-        let restart = RestartValue::new(restart_time, Afi::Ip, Safi::Unicast);
-        let key = AfiSafi::new(Afi::Ip, Safi::Unicast);
-        bgp_cap.restart.insert(key, restart);
-    }
-    for addpath in peer.config.add_path.iter() {
-        let key = AfiSafi::new(addpath.afi, addpath.safi);
-        bgp_cap.addpath.insert(key, addpath.clone());
+    for (key, addpath) in peer.config.addpath.iter() {
+        bgp_cap.addpath.insert(key.clone(), addpath.clone());
     }
     for (key, sub) in peer.config.sub.iter() {
         if let Some(_restart_time) = sub.graceful_restart {
