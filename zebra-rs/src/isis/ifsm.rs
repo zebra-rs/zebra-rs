@@ -240,9 +240,10 @@ pub fn dis_pseudo_node_generate(link: &mut LinkTop, level: Level) {
 
     // Register adjacency with LAN ID.
     *link.state.adj.get_mut(&level) = Some((lsp_id.neighbor_id(), None));
+    link.lsdb.get_mut(&level).adj_set(link.ifindex);
 
     // Regenerate Hello.
-    // link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
+    link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
 }
 
 pub fn dis_pseudo_node_purge(link: &mut LinkTop, level: Level) {
