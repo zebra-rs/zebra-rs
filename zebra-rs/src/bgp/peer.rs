@@ -266,6 +266,8 @@ pub struct Peer {
     pub opt: ParseOption,
     pub policy_list: InOuts<PolicyListValue>,
     pub prefix_set: InOuts<PrefixSetValue>,
+    pub rtcv4: BTreeSet<ExtCommunityValue>,
+    pub eor: BTreeMap<AfiSafi, bool>,
     pub reflector_client: bool,
     pub instant: Option<Instant>,
 }
@@ -309,6 +311,8 @@ impl Peer {
             opt: ParseOption::default(),
             policy_list: InOuts::<PolicyListValue>::default(),
             prefix_set: InOuts::<PrefixSetValue>::default(),
+            rtcv4: BTreeSet::default(),
+            eor: BTreeMap::default(),
             reflector_client: false,
             instant: None,
         };

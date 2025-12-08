@@ -1452,6 +1452,33 @@ fn show_evpn_vni_all(
     Ok(out)
 }
 
+fn show_bgp_rtcv4(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    if !peer.rtcv4.is_empty() {
+        writeln!(buf, "Route Target Constraints for {}", addr)?;
+        for rt in peer.rtcv4.iter() {
+            writeln!(buf, " {}", rt)?;
+        }
+    }
+
+    Ok(buf)
+}
+
 impl Bgp {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -1476,6 +1503,7 @@ impl Bgp {
             "/show/ip/bgp/neighbors/received-routes/vpnv4",
             show_bgp_received_vpnv4,
         );
+        self.show_add("/show/ip/bgp/neighbors/rtcv4", show_bgp_rtcv4);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
