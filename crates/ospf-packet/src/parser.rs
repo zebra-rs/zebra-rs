@@ -369,8 +369,8 @@ impl OspfLsaHeader {
 #[derive(Debug, NomBE)]
 pub struct OspfLsa {
     pub h: OspfLsaHeader,
-    #[nom(Parse = "{ |x| OspfLsaPayload::parse_lsa_with_length(x, h.ls_type, h.length) }")]
-    pub lsa: OspfLsaPayload,
+    #[nom(Parse = "{ |x| OspfLsp::parse_lsa_with_length(x, h.ls_type, h.length) }")]
+    pub lsp: OspfLsp,
 }
 
 impl Emit for OspfLsa {
@@ -379,9 +379,15 @@ impl Emit for OspfLsa {
     }
 }
 
+impl OspfLsa {
+    pub fn from(h: OspfLsaHeader, lsp: OspfLsp) -> Self {
+        Self { h, lsp }
+    }
+}
+
 #[derive(Debug, NomBE)]
 #[nom(Selector = "OspfLsType")]
-pub enum OspfLsaPayload {
+pub enum OspfLsp {
     #[nom(Selector = "OspfLsType::Router")]
     Router(RouterLsa),
     #[nom(Selector = "OspfLsType::Network")]
@@ -401,9 +407,9 @@ pub enum OspfLsaPayload {
     Unknown(UnknownLsa),
 }
 
-impl OspfLsaPayload {
+impl OspfLsp {
     pub fn parse_lsa(input: &[u8], typ: OspfLsType) -> IResult<&[u8], Self> {
-        OspfLsaPayload::parse_be(input, typ)
+        OspfLsp::parse_be(input, typ)
     }
 
     pub fn parse_lsa_with_length(
@@ -420,13 +426,13 @@ impl OspfLsaPayload {
         let (remaining_input, payload_input) = take(payload_length)(input)?;
 
         // Try to parse the payload within the exact byte boundary
-        match OspfLsaPayload::parse_be(payload_input, typ) {
+        match OspfLsp::parse_be(payload_input, typ) {
             Ok((_, parsed_payload)) => Ok((remaining_input, parsed_payload)),
             Err(_) => {
                 // If parsing fails, treat it as unknown LSA
                 Ok((
                     remaining_input,
-                    OspfLsaPayload::Unknown(UnknownLsa {
+                    OspfLsp::Unknown(UnknownLsa {
                         data: payload_input.to_vec(),
                     }),
                 ))
@@ -460,6 +466,12 @@ pub struct RouterLsa {
     pub num_links: u16,
     #[nom(Parse = "parse_router_links")]
     pub links: Vec<RouterLsaLink>,
+}
+
+impl From<RouterLsa> for OspfLsp {
+    fn from(lsa: RouterLsa) -> Self {
+        OspfLsp::Router(lsa)
+    }
 }
 
 #[derive(Debug, NomBE)]

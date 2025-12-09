@@ -135,6 +135,76 @@ module config {
             type uint8;
           }
         }
+        container tracing {
+          leaf all {
+            type boolean;
+            description "Enable all ISIS tracing";
+          }
+
+          list packet {
+            key "type";
+            leaf "type" {
+              type enumeration {
+                enum "hello";
+                enum "dd";
+                enum "ls-request";
+                enum "ls-update";
+                enum "ls-ack";
+              }
+            }
+            leaf direction {
+              type enumeration {
+                enum "send";
+                enum "receive";
+                enum "both";
+              }
+              default "both";
+              description "Packet direction to trace";
+            }
+          }
+
+          list event {
+            key "type";
+            leaf "type" {
+              type enumeration {
+                enum "lsp-originate";
+                enum "lsp-refresh";
+                enum "spf-calculation";
+                enum "adjacency";
+                enum "flooding";
+                enum "all";
+              }
+            }
+          }
+
+          list fsm {
+            key "type";
+            leaf "type" {
+              type enumeration {
+                enum "ifsm";
+                enum "nfsm";
+                enum "all";
+              }
+            }
+            leaf detail {
+              type boolean;
+              default false;
+              description "Enable detailed FSM state transition tracing";
+            }
+          }
+
+          list database {
+            key "type";
+            leaf "type" {
+              type enumeration {
+                enum "lsdb";
+                enum "spf-tree";
+                enum "rib";
+                enum "all";
+              }
+            }
+          }
+        }
       }
       container isis {
         presence "Enables configuration of IS-IS";
