@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
-use ospf_packet::{OspfLsType, OspfLsa};
+use ospf_packet::{OspfLsType, OspfLsa, OspfLsp};
 
 pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), OspfLsa>;
 
@@ -46,6 +46,38 @@ impl Lsdb {
     pub fn new() -> Self {
         Self {
             tables: LsTypes::<LsTable>::default(),
+        }
+    }
+
+    pub fn insert(&mut self, lsa: OspfLsa) {
+        use OspfLsType::*;
+        match lsa.h.ls_type {
+            Router => {
+                let typ = lsa.h.ls_type;
+                let key = (lsa.h.ls_id, lsa.h.adv_router);
+                self.tables.get_mut(&lsa.h.ls_type).insert(key, lsa);
+            }
+            _ => {
+                //
+            } // OspfLsp::Router(router_lsa) => self.tables.get_mut(OspfLsType::Router).insert(),
+              // OspfLsp::Network(network_lsa) => {
+              //     //
+              // }
+              // OspfLsp::Summary(summary_lsa) => {
+              //     //
+              // }
+              // OspfLsp::SummaryAsbr(summary_lsa) => {
+              //     //
+              // }
+              // OspfLsp::AsExternal(as_external_lsa) => {
+              //     //
+              // }
+              // OspfLsp::NssaAsExternal(nssa_as_external_lsa) => {
+              //     //
+              // }
+              // OspfLsp::Unknown(unknown_lsa) => {
+              //     //
+              // }
         }
     }
 

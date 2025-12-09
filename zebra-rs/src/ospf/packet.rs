@@ -5,14 +5,19 @@ use ospf_packet::{
     OspfDbDesc, OspfHello, OspfLsRequestEntry, OspfLsType, OspfLsa, Ospfv2Packet, Ospfv2Payload,
 };
 
-use crate::ospf::{
-    nfsm::{ospf_db_summary_isempty, ospf_nfsm, ospf_nfsm_ls_req_timer_on},
-    ospf_ls_rquest_new,
+use ospf_macros::ospf_packet_handler;
+
+use crate::{
+    ospf::{
+        nfsm::{ospf_db_summary_isempty, ospf_nfsm, ospf_nfsm_ls_req_timer_on},
+        ospf_ls_rquest_new,
+    },
+    ospf_packet_trace, ospf_pdu_trace,
 };
 
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::OspfInterface,
+    inst::OspfInterface, tracing::OspfTracing,
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -67,11 +72,13 @@ fn ospf_hello_is_nbr_changed(nbr: &Neighbor, prev: &Identity) -> bool {
         prev.priority != current.priority // Priority changed
 }
 
+#[ospf_packet_handler(Hello, Recv)]
 pub fn ospf_hello_recv(
     router_id: &Ipv4Addr,
     oi: &mut OspfLink,
     packet: &Ospfv2Packet,
     src: &Ipv4Addr,
+    tracing: &OspfTracing,
 ) {
     let Some(addr) = oi.addr.first() else {
         return;
@@ -81,8 +88,7 @@ pub fn ospf_hello_recv(
         return;
     }
 
-    println!("== RECV Hello from {} ==", src);
-    // println!("{}", packet);
+    ospf_pdu_trace!(tracing, "[Hello:Recv] on {}", oi.index);
 
     let Ospfv2Payload::Hello(ref hello) = packet.payload else {
         return;
@@ -104,7 +110,6 @@ pub fn ospf_hello_recv(
     let mut init = false;
     let nbr = oi.nbrs.entry(*src).or_insert_with(|| {
         init = true;
-        println!("Hello: Init is true");
         Neighbor::new(
             oi.tx.clone(),
             oi.index,
@@ -115,7 +120,9 @@ pub fn ospf_hello_recv(
         )
     });
 
-    ospf_nfsm(nbr, NfsmEvent::HelloReceived, &oi.ident);
+    oi.tx
+        .send(Message::Nfsm(oi.index, *src, NfsmEvent::HelloReceived))
+        .unwrap();
 
     // Remember identity.
     let ident = nbr.ident;
@@ -125,22 +132,26 @@ pub fn ospf_hello_recv(
     nbr.ident.d_router = hello.d_router;
     nbr.ident.bd_router = hello.bd_router;
 
-    if !ospf_hello_twoway_check(router_id, &nbr, hello) {
-        println!("opsf_nfsm:Oneway");
-        ospf_nfsm(nbr, NfsmEvent::OneWayReceived, &oi.ident);
+    if !ospf_hello_twoway_check(router_id, nbr, hello) {
+        tracing::info!("[NfsmEvent] OneWayReceived");
+        oi.tx
+            .send(Message::Nfsm(oi.index, *src, NfsmEvent::OneWayReceived))
+            .unwrap();
     } else {
-        println!("Twoway");
-        ospf_nfsm(nbr, NfsmEvent::TwoWayReceived, &oi.ident);
+        tracing::info!("[NfsmEvent] TwoWayReceived");
+        oi.tx
+            .send(Message::Nfsm(oi.index, *src, NfsmEvent::TwoWayReceived))
+            .unwrap();
         nbr.options = (nbr.options.into_bits() | hello.options.into_bits()).into();
 
         if oi.state == IfsmState::Waiting {
             use IfsmEvent::*;
             if nbr.ident.prefix.addr() == hello.bd_router {
-                println!("XX BackupSeen 1");
+                tracing::info!("[IfsmEvent] BackupSeen");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
             if nbr.ident.prefix.addr() == hello.d_router && hello.bd_router.is_unspecified() {
-                println!("XX BackupSeen 2");
+                tracing::info!("[IfsmEvent] BackupSeen");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
         };
@@ -171,6 +182,8 @@ pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
     let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
     let mut dd = OspfDbDesc::default();
 
+    println!("ospf_db_desc_send");
+
     dd.if_mtu = 1500;
     println!("XXX nbr.state {}", nbr.state);
     if ospf_db_summary_isempty(nbr) && nbr.state >= NfsmState::Exchange {
@@ -180,6 +193,8 @@ pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
     dd.flags = nbr.dd.flags;
     dd.seqnum = nbr.dd.seqnum;
     dd.options.set_external(true);
+
+    // LSAs
 
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
     println!("   XXX DB_DESC sent XXX");
@@ -225,7 +240,7 @@ fn ospf_lsa_lookup<'a>(
     match lsa_flood_scope(ls_type) {
         FloodScope::Area => {
             println!("FloodScope::Area");
-            oi.lsdb_area.lookup_by_id(ls_type, ls_id, adv_router)
+            oi.lsdb.lookup_by_id(ls_type, ls_id, adv_router)
         }
         FloodScope::As => {
             println!("FloodScope::As");
@@ -337,7 +352,7 @@ pub fn ospf_db_desc_recv(
                 TwoWay => NfsmEvent::AdjOk,
                 _ => unreachable!(),
             };
-            ospf_nfsm(nbr, event, &oi.ident);
+            ospf_nfsm(oi, nbr, event, oi.ident);
             if nbr.state != ExStart {
                 nbr.flags.set_dd_init(false);
                 return;
@@ -375,7 +390,7 @@ pub fn ospf_db_desc_recv(
                 println!("RECV[DD]:Negotioation fails.");
                 return;
             }
-            ospf_nfsm(nbr, NfsmEvent::NegotiationDone, &oi.ident);
+            ospf_nfsm(oi, nbr, NfsmEvent::NegotiationDone, oi.ident);
 
             ospf_db_desc_proc(oi, nbr, dd);
         }

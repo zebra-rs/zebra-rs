@@ -1,8 +1,10 @@
 use std::{fmt::Write, net::Ipv4Addr};
 
+use ospf_packet::*;
+
 use crate::config::Args;
 
-use super::{Neighbor, Ospf, OspfLink, ShowCallback};
+use super::{AREA0, Neighbor, Ospf, OspfLink, ShowCallback};
 
 impl Ospf {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -13,7 +15,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf", show_ospf);
         self.show_add("/show/ip/ospf/interface", show_ospf_interface);
         self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor_detail);
-        self.show_add("/show/ip/opsf/database", show_ospf_database);
+        self.show_add("/show/ip/ospf/database", show_ospf_database);
     }
 }
 
@@ -27,7 +29,11 @@ fn render_link(out: &mut String, oi: &OspfLink) {
     .unwrap();
 }
 
-fn show_ospf_interface(ospf: &Ospf, _args: Args, _json: bool) -> String {
+fn show_ospf_interface(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
     for (_, oi) in ospf.links.iter() {
@@ -35,11 +41,15 @@ fn show_ospf_interface(ospf: &Ospf, _args: Args, _json: bool) -> String {
             render_link(&mut buf, oi);
         }
     }
-    buf
+    Ok(buf)
 }
 
-fn show_ospf(_ospf: &Ospf, _args: Args, _json: bool) -> String {
-    String::from("show ospf")
+fn show_ospf(
+    _ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::from("show ospf"))
 }
 
 fn render_nbr(out: &mut String, router_id: &Ipv4Addr, nbr: &Neighbor) {
@@ -86,7 +96,11 @@ fn render_nbr_detail(out: &mut String, _src: &Ipv4Addr, nbr: &Neighbor) {
     .unwrap();
 }
 
-fn show_ospf_neighbor_detail(ospf: &Ospf, _args: Args, _json: bool) -> String {
+fn show_ospf_neighbor_detail(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
     for (_, oi) in ospf.links.iter() {
@@ -96,10 +110,43 @@ fn show_ospf_neighbor_detail(ospf: &Ospf, _args: Args, _json: bool) -> String {
             }
         }
     }
-    buf
+    Ok(buf)
 }
 
-fn show_ospf_database(_ospf: &Ospf, _args: Args, _json: bool) -> String {
-    String::from("show ospf database")
-    // let table = ospf.lsdb.get()
+fn show_ospf_database(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut out = String::new();
+
+    if ospf.router_id.is_unspecified() {
+        return Ok(String::from("OSPF router ID is not sepcified"));
+    }
+
+    writeln!(out, "");
+    writeln!(out, "       OSPF Router with ID ({})", ospf.router_id)?;
+    writeln!(out, "");
+
+    if let Some(area) = ospf.areas.get(AREA0) {
+        writeln!(out, "Router Link States (Area {})", area.id)?;
+        writeln!(out, "");
+
+        let mut header = true;
+        for ((lsa_id, adv_router), value) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+            if header {
+                header = false;
+                writeln!(
+                    out,
+                    "Link ID         ADV Router      Age  Seq#       CkSum  Link count"
+                )?;
+            }
+            let OspfLsp::Router(ref lsp) = value.lsp else {
+                continue;
+            };
+            writeln!(out, "{:15} {:15} {}", lsa_id, adv_router, lsp.links.len());
+        }
+    }
+
+    Ok(out)
 }

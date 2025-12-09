@@ -9,6 +9,7 @@ members = [
   "crates/isis-packet",
   "crates/isis-macros",
   "crates/ospf-packet",
+  "crates/ospf-macros",
 ]
 
 [workspace.package]

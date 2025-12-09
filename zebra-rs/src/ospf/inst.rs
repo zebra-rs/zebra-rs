@@ -23,16 +23,16 @@ use crate::{
 };
 
 use super::area::OspfAreaMap;
-use super::config::OspfNetworkConfig;
+use super::config::{Callback, OspfNetworkConfig};
 use super::ifsm::{IfsmEvent, ospf_ifsm};
 use super::link::OspfLink;
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
-use super::{Identity, Lsdb, Neighbor};
+use super::tracing::OspfTracing;
+use super::{AREA0, Identity, Lsdb, Neighbor};
 
-pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
-pub type ShowCallback = fn(&Ospf, Args, bool) -> String;
+pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
 
 pub struct Ospf {
     ctx: Context,
@@ -50,6 +50,7 @@ pub struct Ospf {
     pub sock: Arc<AsyncFd<Socket>>,
     pub router_id: Ipv4Addr,
     pub lsdb_as: Lsdb,
+    pub tracing: OspfTracing,
 }
 
 // OSPF inteface structure which points out upper layer struct members.
@@ -59,8 +60,9 @@ pub struct OspfInterface<'a> {
     pub ident: &'a Identity,
     pub addr: &'a Vec<OspfAddr>,
     pub db_desc_in: &'a mut usize,
+    pub lsdb: &'a Lsdb,
     pub lsdb_as: &'a Lsdb,
-    pub lsdb_area: &'a Lsdb,
+    pub tracing: &'a OspfTracing,
 }
 
 impl Ospf {
@@ -79,8 +81,9 @@ impl Ospf {
                             ident: &link.ident,
                             addr: &link.addr,
                             db_desc_in: &mut link.db_desc_in,
+                            lsdb: &mut area.lsdb,
                             lsdb_as: &mut self.lsdb_as,
-                            lsdb_area: &mut area.lsdb,
+                            tracing: &self.tracing,
                         },
                         nbr,
                     )
@@ -115,6 +118,7 @@ impl Ospf {
             show_cb: HashMap::new(),
             router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
             lsdb_as: Lsdb::new(),
+            tracing: OspfTracing::default(),
             sock,
         };
         ospf.callback_build();
@@ -132,10 +136,6 @@ impl Ospf {
         ospf
     }
 
-    pub fn callback_add(&mut self, path: &str, cb: Callback) {
-        self.callbacks.insert(path.to_string(), cb);
-    }
-
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
@@ -144,29 +144,25 @@ impl Ospf {
     }
 
     pub fn router_lsa_originate(&mut self) {
-        if let Some(_area) = self.areas.get_mut(Ipv4Addr::UNSPECIFIED) {
-            println!(
-                "Found default area for self originated router_id {}",
-                self.router_id
-            );
+        if let Some(area) = self.areas.get_mut(AREA0) {
+            let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
 
-            let _lsa_header =
-                OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
-
-            let mut router_lsa = RouterLsa::default();
+            let mut r_lsa = RouterLsa::default();
 
             for (_, link) in self.links.iter() {
                 if !link.enabled {
                     continue;
                 }
                 for addr in link.addr.iter() {
-                    println!("Addr {}", addr.prefix);
                     let lsa_link = RouterLsaLink::new(addr.prefix, 10);
-                    router_lsa.links.push(lsa_link);
+                    r_lsa.links.push(lsa_link);
                 }
             }
-            router_lsa.num_links = router_lsa.links.len() as u16;
-            //area.lsdb.insert(lsa);
+            r_lsa.num_links = r_lsa.links.len() as u16;
+
+            let lsa = OspfLsa::from(lsah, r_lsa.into());
+
+            area.lsdb.insert(lsa);
         }
     }
 
@@ -220,31 +216,31 @@ impl Ospf {
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
-                ospf_hello_recv(&self.router_id, link, &packet, &src);
+                ospf_hello_recv(&self.router_id, link, &packet, &src, &self.tracing);
             }
             OspfType::DbDesc => {
-                println!("DB_DESC: ifindex {}, nbr src {}", index, src);
-                if let Some((mut ltop, nbr)) = self.ospf_interface(index, &src) {
-                    ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
+                // println!("DB_DESC: ifindex {}, nbr src {}", index, src);
+                if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
+                    ospf_db_desc_recv(&mut link, nbr, &packet, &src);
                 } else {
-                    println!("DB_DESC: Pakcet from unknown neighbor {}", src);
+                    // println!("DB_DESC: Pakcet from unknown neighbor {}", src);
                 }
             }
             OspfType::LsRequest => {
                 let Some(_link) = self.links.get_mut(&index) else {
                     return;
                 };
-                println!("LS_REQ: {}", packet);
+                // println!("LS_REQ: {}", packet);
                 // ospf_ls_req_recv(&self.top, link, &packet, &src);
             }
             OspfType::LsUpdate => {
-                println!("LS_UPD: {}", packet);
+                // println!("LS_UPD: {}", packet);
             }
             OspfType::LsAck => {
-                println!("LS_ACK: {}", packet);
+                // println!("LS_ACK: {}", packet);
             }
             OspfType::Unknown(typ) => {
-                println!("Unknown: packet type {}", typ);
+                // println!("Unknown: packet type {}", typ);
             }
         }
     }
@@ -258,7 +254,6 @@ impl Ospf {
                 link.enabled = true;
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
-                println!("Enabling ifindex:{} area_id:{}", ifindex, area_id);
                 self.router_lsa_originate();
                 self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
@@ -269,7 +264,6 @@ impl Ospf {
                 link.enabled = false;
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
-                println!("Disabling ifindex:{} area_id:{}", ifindex, area_id);
                 self.router_lsa_originate();
                 self.tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
@@ -284,13 +278,20 @@ impl Ospf {
                 ospf_ifsm(link, ev);
             }
             Message::Nfsm(index, src, ev) => {
-                let Some(link) = self.links.get_mut(&index) else {
-                    return;
-                };
-                let Some(nbr) = link.nbrs.get_mut(&src) else {
-                    return;
-                };
-                ospf_nfsm(nbr, ev, &link.ident);
+                if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
+                    let ident = link.ident;
+                    ospf_nfsm(&mut link, nbr, ev, ident);
+                } else {
+                    println!("NFSM: Packet from unknown neighbor {}", src);
+                }
+
+                // let Some(link) = self.links.get_mut(&index) else {
+                //     return;
+                // };
+                // let Some(nbr) = link.nbrs.get_mut(&src) else {
+                //     return;
+                // };
+                // ospf_nfsm(nbr, ev, &link.ident);
             }
             Message::HelloTimer(index) => {
                 let Some(link) = self.links.get_mut(&index) else {
@@ -324,7 +325,10 @@ impl Ospf {
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
-            let output = f(self, args, msg.json);
+            let output = match f(self, args, msg.json) {
+                Ok(result) => result,
+                Err(e) => format!("Error formatting output: {}", e),
+            };
             msg.resp.send(output).await.unwrap();
         }
     }
