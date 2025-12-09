@@ -117,12 +117,16 @@ pub struct SegmentRoutingTracing {
 
 use strum_macros::{Display, EnumString};
 
+use crate::config::{Args, ConfigOp};
+
+use super::Ospf;
+
 // Packet type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
 pub enum PacketType {
     #[strum(serialize = "hello")]
     Hello,
-    #[strum(serialize = "database-description")]
+    #[strum(serialize = "dd")]
     Dd,
     #[strum(serialize = "ls-request")]
     LsRequest,
@@ -247,6 +251,60 @@ impl OspfTracing {
     pub fn should_trace_sr_adjacency_sid(&self) -> bool {
         self.all || self.segment_routing.enable || self.segment_routing.adjacency_sid
     }
+}
+
+fn parse_direction(args: &mut Args) -> PacketDirection {
+    match args.string().as_deref() {
+        Some("send") => PacketDirection::Send,
+        Some("recv") | Some("receive") => PacketDirection::Recv,
+        Some("both") | None => PacketDirection::Both,
+        Some(_) => PacketDirection::Both,
+    }
+}
+
+fn set_packet_config(config: &mut PacketConfig, op: ConfigOp, direction: PacketDirection) {
+    if op.is_set() {
+        config.enabled = true;
+        config.direction = direction;
+    } else {
+        config.enabled = false;
+        config.direction = PacketDirection::Both;
+    }
+}
+
+pub fn config_tracing_packet(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let typ = args.string()?;
+    let direction = parse_direction(&mut args);
+
+    match typ.as_str() {
+        "all" => {
+            set_packet_config(&mut ospf.tracing.packet.hello, op, direction);
+            set_packet_config(&mut ospf.tracing.packet.dd, op, direction);
+            set_packet_config(&mut ospf.tracing.packet.ls_req, op, direction);
+            set_packet_config(&mut ospf.tracing.packet.ls_update, op, direction);
+            set_packet_config(&mut ospf.tracing.packet.ls_ack, op, direction);
+        }
+        "hello" => {
+            set_packet_config(&mut ospf.tracing.packet.hello, op, direction);
+        }
+        "dd" => {
+            set_packet_config(&mut ospf.tracing.packet.dd, op, direction);
+        }
+        "ls-req" => {
+            set_packet_config(&mut ospf.tracing.packet.ls_req, op, direction);
+        }
+        "ls-update" => {
+            set_packet_config(&mut ospf.tracing.packet.ls_update, op, direction);
+        }
+        "ls-ack" => {
+            set_packet_config(&mut ospf.tracing.packet.ls_ack, op, direction);
+        }
+        _ => {
+            println!("Unknown packet type: {}", typ);
+        }
+    }
+
+    Some(())
 }
 
 // Log an info-level message with proto="ospf" field
@@ -422,7 +480,7 @@ macro_rules! ospf_pdu_handler {
 #[macro_export]
 macro_rules! ospf_pkt_trace {
     ($tracing:expr, $($arg:tt)*) => {
-        if $tracing.should_trace_packet(_OSPF_PKT_TYPE, _OSPF_PKT_DIR, $level) {
+        if $tracing.should_trace_packet(_OSPF_PKT_TYPE, _OSPF_PKT_DIR) {
             tracing::info!(
                 proto = "ospf",
                 category = "packet",
@@ -439,11 +497,11 @@ macro_rules! ospf_pkt_trace {
 #[macro_export]
 macro_rules! ospf_pdu_trace {
     ($tracing:expr, $($arg:tt)*) => {
-        if $tracing.tracing.should_trace_packet(_OSPF_PKT_TYPE, _OSPF_PKT_DIR, $level) {
+        if $tracing.should_trace_packet(_OSPF_PKT_TYPE, _OSPF_PKT_DIR) {
             tracing::info!(
                 proto = "ospf",
                 category = "packet",
-                packet_type = _OSPF_PKT_TYPE.as_str(),
+                packet_type = _OSPF_PKT_TYPE.to_string(),
                 direction = _OSPF_PKT_DIR.as_str(),
                 $($arg)*
             )

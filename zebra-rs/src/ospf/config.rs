@@ -6,6 +6,7 @@ use prefix_trie::PrefixMap;
 
 use super::OspfLink;
 use super::area::OspfAreaMap;
+use super::tracing::config_tracing_packet;
 use super::{Ospf, addr::OspfAddr};
 
 use crate::config::{Args, ConfigOp};
@@ -48,7 +49,7 @@ impl Ospf {
     pub fn callback_build(&mut self) {
         self.ospf_add("/router-id", config_ospf_router_id);
         self.ospf_add("/network/area", config_ospf_network);
-        self.tracing_add("/network/area", config_ospf_network);
+        self.tracing_add("/packet", config_tracing_packet);
     }
 }
 
@@ -114,6 +115,5 @@ fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<
 
 fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
     let router_id = args.v4addr()?;
-    println!("XXX OSPF router_id {}", router_id);
     None
 }
