@@ -26,10 +26,29 @@ impl Default for OspfNetworkConfig {
     }
 }
 
+pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
+
 impl Ospf {
+    const OSPF: &str = "/routing/ospf";
+    const TRACING: &str = "/routing/ospf/tracing";
+
+    pub fn callback_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks.insert(path.to_string(), cb);
+    }
+
+    pub fn ospf_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks.insert(format!("{}{}", Self::OSPF, path), cb);
+    }
+
+    pub fn tracing_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks
+            .insert(format!("{}{}", Self::TRACING, path), cb);
+    }
+
     pub fn callback_build(&mut self) {
-        self.callback_add("/routing/ospf/router-id", config_ospf_router_id);
-        self.callback_add("/routing/ospf/network/area", config_ospf_network);
+        self.ospf_add("/router-id", config_ospf_router_id);
+        self.ospf_add("/network/area", config_ospf_network);
+        self.tracing_add("/network/area", config_ospf_network);
     }
 }
 

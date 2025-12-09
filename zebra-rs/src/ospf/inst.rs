@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::area::OspfAreaMap;
-use super::config::OspfNetworkConfig;
+use super::config::{Callback, OspfNetworkConfig};
 use super::ifsm::{IfsmEvent, ospf_ifsm};
 use super::link::OspfLink;
 use super::network::{read_packet, write_packet};
@@ -31,7 +31,6 @@ use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
 use super::{AREA0, Identity, Lsdb, Neighbor};
 
-pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
 
 pub struct Ospf {
@@ -130,10 +129,6 @@ impl Ospf {
             write_packet(sock, prx).await;
         });
         ospf
-    }
-
-    pub fn callback_add(&mut self, path: &str, cb: Callback) {
-        self.callbacks.insert(path.to_string(), cb);
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
