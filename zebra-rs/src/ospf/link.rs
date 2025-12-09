@@ -95,6 +95,10 @@ impl OspfLink {
     pub fn is_dr_election_ready(&self) -> bool {
         self.flags.hello_sent()
     }
+
+    pub fn event(&mut self, msg: Message) {
+        self.tx.send(msg);
+    }
 }
 
 #[bitfield(u8, debug = true)]

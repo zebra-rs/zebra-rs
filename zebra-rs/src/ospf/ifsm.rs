@@ -170,13 +170,13 @@ pub fn ospf_wait_timer(oi: &OspfLink) -> Timer {
 }
 
 pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
-    println!("ospf_ifsm_interface_up");
+    // println!("ospf_ifsm_interface_up");
     if link.addr.is_empty() {
-        println!("link addr is empty");
+        // println!("link addr is empty");
         return None;
     }
 
-    println!("ospf_join_if index {}", link.index);
+    // println!("ospf_join_if index {}", link.index);
     ospf_join_if(&link.sock, link.index);
 
     // Comment out until we support pointopoint interface.
@@ -283,16 +283,16 @@ fn ospf_dr_election_dr_change(oi: &mut OspfLink) {
 }
 
 fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
-    println!("== DR election! ==");
+    // println!("== DR election! ==");
 
     let prev_dr = oi.ident.d_router;
     let prev_bdr = oi.ident.bd_router;
     let prev_state = oi.state;
 
     let v = ospf_dr_election_init(oi);
-    for i in v.iter() {
-        println!("{:?}", i);
-    }
+    // for i in v.iter() {
+    //     println!("{:?}", i);
+    // }
     let bdr = ospf_dr_election_bdr(oi, v.clone());
     ospf_dr_election_dr(oi, bdr, v.clone());
     let mut new_state = ospf_ifsm_state(oi);
@@ -335,17 +335,17 @@ fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
 }
 
 fn ospf_ifsm_wait_timer(oi: &mut OspfLink) -> Option<IfsmState> {
-    println!("ospf_ifsm_wait_timer");
+    // println!("ospf_ifsm_wait_timer");
     ospf_dr_election(oi)
 }
 
 fn ospf_ifsm_backup_seen(oi: &mut OspfLink) -> Option<IfsmState> {
-    println!("ospf_ifsm_backup_seen");
+    // println!("ospf_ifsm_backup_seen");
     ospf_dr_election(oi)
 }
 
 fn ospf_ifsm_neighbor_change(oi: &mut OspfLink) -> Option<IfsmState> {
-    println!("ospf_ifsm_neighbor_change");
+    // println!("ospf_ifsm_neighbor_change");
     ospf_dr_election(oi)
 }
 
