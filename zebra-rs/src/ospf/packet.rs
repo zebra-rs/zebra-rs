@@ -115,7 +115,9 @@ pub fn ospf_hello_recv(
         )
     });
 
-    ospf_nfsm(nbr, NfsmEvent::HelloReceived, &oi.ident);
+    oi.tx
+        .send(Message::Nfsm(oi.index, *src, NfsmEvent::HelloReceived))
+        .unwrap();
 
     // Remember identity.
     let ident = nbr.ident;
@@ -125,12 +127,16 @@ pub fn ospf_hello_recv(
     nbr.ident.d_router = hello.d_router;
     nbr.ident.bd_router = hello.bd_router;
 
-    if !ospf_hello_twoway_check(router_id, &nbr, hello) {
+    if !ospf_hello_twoway_check(router_id, nbr, hello) {
         println!("opsf_nfsm:Oneway");
-        ospf_nfsm(nbr, NfsmEvent::OneWayReceived, &oi.ident);
+        oi.tx
+            .send(Message::Nfsm(oi.index, *src, NfsmEvent::OneWayReceived))
+            .unwrap();
     } else {
         println!("Twoway");
-        ospf_nfsm(nbr, NfsmEvent::TwoWayReceived, &oi.ident);
+        oi.tx
+            .send(Message::Nfsm(oi.index, *src, NfsmEvent::TwoWayReceived))
+            .unwrap();
         nbr.options = (nbr.options.into_bits() | hello.options.into_bits()).into();
 
         if oi.state == IfsmState::Waiting {
@@ -181,6 +187,8 @@ pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
     dd.seqnum = nbr.dd.seqnum;
     dd.options.set_external(true);
 
+    // LSAs
+
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
     println!("   XXX DB_DESC sent XXX");
     println!("{}", packet);
@@ -225,7 +233,7 @@ fn ospf_lsa_lookup<'a>(
     match lsa_flood_scope(ls_type) {
         FloodScope::Area => {
             println!("FloodScope::Area");
-            oi.lsdb_area.lookup_by_id(ls_type, ls_id, adv_router)
+            oi.lsdb.lookup_by_id(ls_type, ls_id, adv_router)
         }
         FloodScope::As => {
             println!("FloodScope::As");
@@ -337,7 +345,7 @@ pub fn ospf_db_desc_recv(
                 TwoWay => NfsmEvent::AdjOk,
                 _ => unreachable!(),
             };
-            ospf_nfsm(nbr, event, &oi.ident);
+            ospf_nfsm(oi, nbr, event, oi.ident);
             if nbr.state != ExStart {
                 nbr.flags.set_dd_init(false);
                 return;
@@ -375,7 +383,7 @@ pub fn ospf_db_desc_recv(
                 println!("RECV[DD]:Negotioation fails.");
                 return;
             }
-            ospf_nfsm(nbr, NfsmEvent::NegotiationDone, &oi.ident);
+            ospf_nfsm(oi, nbr, NfsmEvent::NegotiationDone, oi.ident);
 
             ospf_db_desc_proc(oi, nbr, dd);
         }
