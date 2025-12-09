@@ -96,6 +96,10 @@ impl Neighbor {
         // PointToMultiPointNBMA
         false
     }
+
+    pub fn event(&self, ev: Message) {
+        self.tx.send(ev).unwrap();
+    }
 }
 
 impl Display for Neighbor {

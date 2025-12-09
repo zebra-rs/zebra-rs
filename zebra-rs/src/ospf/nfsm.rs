@@ -402,13 +402,9 @@ fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, _oident: &Identi
     }
 
     if nbr.ostate < TwoWay && nbr.state >= TwoWay {
-        nbr.tx
-            .send(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange))
-            .unwrap();
+        nbr.event(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange));
     } else if nbr.ostate >= TwoWay && nbr.state < TwoWay {
-        nbr.tx
-            .send(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange))
-            .unwrap();
+        nbr.event(Message::Ifsm(nbr.ifindex, IfsmEvent::NeighborChange));
 
         // ospf_nexthop_nbr_down(nbr);
     }
