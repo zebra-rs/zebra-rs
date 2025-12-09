@@ -59,8 +59,8 @@ pub struct OspfInterface<'a> {
     pub ident: &'a Identity,
     pub addr: &'a Vec<OspfAddr>,
     pub db_desc_in: &'a mut usize,
+    pub lsdb: &'a Lsdb,
     pub lsdb_as: &'a Lsdb,
-    pub lsdb_area: &'a Lsdb,
 }
 
 impl Ospf {
@@ -79,8 +79,8 @@ impl Ospf {
                             ident: &link.ident,
                             addr: &link.addr,
                             db_desc_in: &mut link.db_desc_in,
+                            lsdb: &mut area.lsdb,
                             lsdb_as: &mut self.lsdb_as,
-                            lsdb_area: &mut area.lsdb,
                         },
                         nbr,
                     )
@@ -226,8 +226,8 @@ impl Ospf {
             }
             OspfType::DbDesc => {
                 println!("DB_DESC: ifindex {}, nbr src {}", index, src);
-                if let Some((mut ltop, nbr)) = self.ospf_interface(index, &src) {
-                    ospf_db_desc_recv(&mut ltop, nbr, &packet, &src);
+                if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
+                    ospf_db_desc_recv(&mut link, nbr, &packet, &src);
                 } else {
                     println!("DB_DESC: Pakcet from unknown neighbor {}", src);
                 }
@@ -286,13 +286,20 @@ impl Ospf {
                 ospf_ifsm(link, ev);
             }
             Message::Nfsm(index, src, ev) => {
-                let Some(link) = self.links.get_mut(&index) else {
-                    return;
-                };
-                let Some(nbr) = link.nbrs.get_mut(&src) else {
-                    return;
-                };
-                ospf_nfsm(nbr, ev, &link.ident);
+                if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
+                    let ident = link.ident;
+                    ospf_nfsm(&mut link, nbr, ev, ident);
+                } else {
+                    println!("NFSM: Packet from unknown neighbor {}", src);
+                }
+
+                // let Some(link) = self.links.get_mut(&index) else {
+                //     return;
+                // };
+                // let Some(nbr) = link.nbrs.get_mut(&src) else {
+                //     return;
+                // };
+                // ospf_nfsm(nbr, ev, &link.ident);
             }
             Message::HelloTimer(index) => {
                 let Some(link) = self.links.get_mut(&index) else {

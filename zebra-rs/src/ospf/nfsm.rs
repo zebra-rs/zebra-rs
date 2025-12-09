@@ -2,7 +2,9 @@ use std::fmt::Display;
 
 use rand::Rng;
 
-use super::{Identity, IfsmEvent, Message, Neighbor, Timer, TimerType};
+use crate::ospf::ospf_db_desc_send;
+
+use super::{Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -50,7 +52,7 @@ pub enum NfsmEvent {
     LLDown,
 }
 
-pub type NfsmFunc = fn(&mut Neighbor, &Identity) -> Option<NfsmState>;
+pub type NfsmFunc = fn(&mut OspfInterface, &mut Neighbor, &Identity) -> Option<NfsmState>;
 
 impl NfsmState {
     pub fn fsm(&self, ev: NfsmEvent) -> (NfsmFunc, Option<Self>) {
@@ -272,7 +274,11 @@ impl Neighbor {
     }
 }
 
-pub fn ospf_nfsm_ignore(_on: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_ignore(
+    _oi: &mut OspfInterface,
+    _nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     println!("ospf_nfsm_ignore is called");
     None
 }
@@ -291,7 +297,11 @@ pub fn ospf_inactivity_timer(nbr: &Neighbor) -> Timer {
     })
 }
 
-pub fn ospf_nfsm_hello_received(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_hello_received(
+    _oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     println!("ospf_nfsm_hello_received");
 
     // Start or Restart Inactivity Timer.
@@ -300,12 +310,20 @@ pub fn ospf_nfsm_hello_received(nbr: &mut Neighbor, _oident: &Identity) -> Optio
     None
 }
 
-pub fn ospf_nfsm_start(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_start(
+    _oi: &mut OspfInterface,
+    _nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     println!("XXX ospf_nfsm_start");
     None
 }
 
-pub fn ospf_nfsm_twoway_received(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_twoway_received(
+    _oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    oident: &Identity,
+) -> Option<NfsmState> {
     println!("XXX ospf_nfsm_twoway_received");
     let mut next_state = NfsmState::TwoWay;
 
@@ -325,21 +343,37 @@ pub fn ospf_nfsm_twoway_received(nbr: &mut Neighbor, oident: &Identity) -> Optio
     Some(next_state)
 }
 
-pub fn ospf_nfsm_negotiation_done(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_negotiation_done(
+    _oi: &mut OspfInterface,
+    _nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     println!("ospf_nfsm_negotiation_done");
     None
 }
 
-pub fn ospf_nfsm_exchange_done(_nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_exchange_done(
+    _oi: &mut OspfInterface,
+    _nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     None
 }
 
-pub fn ospf_nfsm_bad_ls_req(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_bad_ls_req(
+    _oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     ospf_nfsm_reset_nbr(nbr);
     None
 }
 
-pub fn ospf_nfsm_adj_ok(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_adj_ok(
+    _oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    oident: &Identity,
+) -> Option<NfsmState> {
     let mut adj_ok = false;
     let mut next_state = nbr.state;
 
@@ -365,32 +399,52 @@ pub fn ospf_nfsm_adj_ok(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmSta
     Some(next_state)
 }
 
-pub fn ospf_nfsm_seq_number_mismatch(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_seq_number_mismatch(
+    _oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     ospf_nfsm_reset_nbr(nbr);
     None
 }
 
-pub fn ospf_nfsm_oneway_received(nbr: &mut Neighbor, _oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_oneway_received(
+    _oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    _oident: &Identity,
+) -> Option<NfsmState> {
     println!("ospf_nfsm_oneway_received");
     ospf_nfsm_reset_nbr(nbr);
     None
 }
 
-pub fn ospf_nfsm_kill_nbr(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
+pub fn ospf_nfsm_kill_nbr(
+    _oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    oident: &Identity,
+) -> Option<NfsmState> {
     ospf_nfsm_change_state(nbr, NfsmState::Down, oident);
 
     None
 }
 
-pub fn ospf_nfsm_inactivity_timer(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
-    ospf_nfsm_kill_nbr(nbr, oident)
+pub fn ospf_nfsm_inactivity_timer(
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    oident: &Identity,
+) -> Option<NfsmState> {
+    ospf_nfsm_kill_nbr(oi, nbr, oident)
 }
 
-pub fn ospf_nfsm_ll_down(nbr: &mut Neighbor, oident: &Identity) -> Option<NfsmState> {
-    ospf_nfsm_kill_nbr(nbr, oident)
+pub fn ospf_nfsm_ll_down(
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    oident: &Identity,
+) -> Option<NfsmState> {
+    ospf_nfsm_kill_nbr(oi, nbr, oident)
 }
 
-fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, _oident: &Identity) {
+fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identity) {
     use NfsmState::*;
 
     nbr.ostate = nbr.state;
@@ -428,18 +482,23 @@ fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, _oident: &Identi
         nbr.dd.flags.set_init(true);
 
         println!("DB_DESC from NFSM");
-        // ospf_db_desc_send(nbr, oident);
+        ospf_db_desc_send(nbr, oident);
     }
 }
 
-pub fn ospf_nfsm(nbr: &mut Neighbor, event: NfsmEvent, oident: &Identity) {
+pub fn ospf_nfsm(
+    link: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    event: NfsmEvent,
+    oident: &Identity,
+) {
     // Decompose the result of the state function into the transition function
     // and next state.
     let (fsm_func, fsm_next_state) = nbr.state.fsm(event);
 
     // Determine the next state by prioritizing the computed state over the
     // FSM-provided next state.
-    let next_state = fsm_func(nbr, oident).or(fsm_next_state);
+    let next_state = fsm_func(link, nbr, oident).or(fsm_next_state);
 
     // If a state transition occurs, update the state.
     if let Some(new_state) = next_state {
