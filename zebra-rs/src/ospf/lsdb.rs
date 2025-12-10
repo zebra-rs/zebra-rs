@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
-use ospf_packet::{OspfLsType, OspfLsa, OspfLsp};
+use ospf_packet::*;
 
 pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), OspfLsa>;
 

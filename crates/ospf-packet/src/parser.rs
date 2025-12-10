@@ -5,12 +5,12 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
-use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::error::{ErrorKind, make_error};
+use nom::number::complete::{be_u8, be_u24, be_u64};
 use nom::{Err, IResult};
 use nom_derive::*;
 
-use super::util::{many0, Emit, ParseBe};
+use super::util::{Emit, ParseBe, many0};
 use super::{OspfLsType, OspfType};
 
 // OSPF version.
@@ -348,7 +348,7 @@ impl OspfLsaHeader {
             ls_type,
             ls_id,
             adv_router,
-            ls_seq_number: 0,
+            ls_seq_number: 0x8000000,
             ls_checksum: 0,
             length: 0,
         }
