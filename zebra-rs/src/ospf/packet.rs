@@ -1,11 +1,9 @@
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
-use ospf_packet::{
-    OspfDbDesc, OspfHello, OspfLsRequestEntry, OspfLsType, OspfLsa, Ospfv2Packet, Ospfv2Payload,
-};
 
 use ospf_macros::ospf_packet_handler;
+use ospf_packet::*;
 
 use crate::{
     ospf::{
@@ -133,12 +131,12 @@ pub fn ospf_hello_recv(
     nbr.ident.bd_router = hello.bd_router;
 
     if !ospf_hello_twoway_check(router_id, nbr, hello) {
-        tracing::info!("[NfsmEvent] OneWayReceived");
+        tracing::info!("[NFSM:Event] OneWayReceived");
         oi.tx
             .send(Message::Nfsm(oi.index, *src, NfsmEvent::OneWayReceived))
             .unwrap();
     } else {
-        tracing::info!("[NfsmEvent] TwoWayReceived");
+        tracing::info!("[NFSM:Event] TwoWayReceived");
         oi.tx
             .send(Message::Nfsm(oi.index, *src, NfsmEvent::TwoWayReceived))
             .unwrap();
@@ -147,11 +145,11 @@ pub fn ospf_hello_recv(
         if oi.state == IfsmState::Waiting {
             use IfsmEvent::*;
             if nbr.ident.prefix.addr() == hello.bd_router {
-                tracing::info!("[IfsmEvent] BackupSeen");
+                tracing::info!("[IFSM:Event] BackupSeen");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
             if nbr.ident.prefix.addr() == hello.d_router && hello.bd_router.is_unspecified() {
-                tracing::info!("[IfsmEvent] BackupSeen");
+                tracing::info!("[IFSM:Event] BackupSeen");
                 oi.tx.send(Message::Ifsm(oi.index, BackupSeen)).unwrap();
             }
         };
@@ -166,11 +164,7 @@ pub fn ospf_hello_recv(
 }
 
 pub fn ospf_hello_send(oi: &mut OspfLink) {
-    println!(
-        "Send Hello packet on {} with hello_sent flag {}",
-        oi.name,
-        oi.flags.hello_sent()
-    );
+    tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
 
     let packet = ospf_hello_packet(oi).unwrap();
     oi.ptx.send(Message::Send(packet, oi.index, None)).unwrap();
@@ -178,27 +172,29 @@ pub fn ospf_hello_send(oi: &mut OspfLink) {
     oi.flags.set_hello_sent(true);
 }
 
-pub fn ospf_db_desc_send(nbr: &mut Neighbor, oident: &Identity) {
+pub fn ospf_packet_db_desc_set(nbr: &mut Neighbor, dd: &mut OspfDbDesc) {
+    while let Some(lsa) = nbr.db_sum.pop() {
+        //
+    }
+}
+
+pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
     let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
     let mut dd = OspfDbDesc::default();
 
-    println!("ospf_db_desc_send");
+    tracing::info!("ospf_db_desc_send {:?}", nbr.dd.flags);
 
     dd.if_mtu = 1500;
-    println!("XXX nbr.state {}", nbr.state);
-    if ospf_db_summary_isempty(nbr) && nbr.state >= NfsmState::Exchange {
-        println!("   XX DB_DESC more flag off");
-        nbr.dd.flags.set_more(false);
-    }
+
     dd.flags = nbr.dd.flags;
     dd.seqnum = nbr.dd.seqnum;
     dd.options.set_external(true);
 
-    // LSAs
+    ospf_packet_db_desc_set(nbr, &mut dd);
 
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
-    println!("   XXX DB_DESC sent XXX");
-    println!("{}", packet);
+    tracing::info!("[DB Desc:Send]");
+    tracing::info!("{}", packet);
     nbr.ptx
         .send(Message::Send(
             packet,
@@ -284,12 +280,12 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         if !dd.flags.more() && !nbr.dd.flags.more() {
             nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
         } else {
-            ospf_db_desc_send(nbr, oi.ident);
+            ospf_db_desc_send(oi, nbr, oi.ident);
         }
     } else {
         // Slave.
-        println!(
-            "XXX DB_DESC packet as Slave: dd.flags.more() {}",
+        tracing::info!(
+            "[DB Desc] packet as Slave: dd.flags.more() {}",
             dd.flags.more()
         );
         nbr.dd.seqnum = dd.seqnum;
@@ -301,7 +297,7 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         }
 
         // Going to send packet.
-        ospf_db_desc_send(nbr, oi.ident);
+        ospf_db_desc_send(oi, nbr, oi.ident);
     }
 
     nbr.dd.recv = dd.clone();
@@ -324,10 +320,10 @@ pub fn ospf_db_desc_recv(
     src: &Ipv4Addr,
 ) {
     use NfsmState::*;
-    println!("== DB DESC from {} ==", src);
+    tracing::info!("[DB Desc:Recv] {}", src);
     // println!("{}", packet);
 
-    println!("NBR: {}", nbr.ident.router_id);
+    tracing::info!("[DB Desc] From {}", nbr.ident.router_id);
 
     // Get DD.
     let Ospfv2Payload::DbDesc(ref dd) = packet.payload else {
@@ -367,25 +363,26 @@ pub fn ospf_db_desc_recv(
             // Already handled.
         }
         ExStart => {
-            println!(
+            tracing::info!(
                 "DbDesc: ExStart {} <-> {}",
-                nbr.ident.router_id, oi.router_id
+                nbr.ident.router_id,
+                oi.router_id
             );
             if dd.flags.is_all() && dd.lsa_headers.is_empty() && nbr.ident.router_id > *oi.router_id
             {
-                println!("DbDesc: Slave");
                 nbr.dd.seqnum = dd.seqnum;
                 nbr.dd.flags.set_master(false);
                 nbr.dd.flags.set_init(false);
                 nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
+                tracing::info!("[DB Desc] Becoming Slave {:?}", nbr.dd.flags);
             } else if !dd.flags.master()
                 && !dd.flags.init()
                 && dd.seqnum == nbr.dd.seqnum
                 && nbr.ident.router_id < *oi.router_id
             {
-                println!("DbDesc: Master");
                 nbr.dd.flags.set_init(false);
                 nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
+                tracing::info!("[DB Desc] Becoming Master {:?}", nbr.dd.flags);
             } else {
                 println!("RECV[DD]:Negotioation fails.");
                 return;

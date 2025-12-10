@@ -144,7 +144,14 @@ fn show_ospf_database(
             let OspfLsp::Router(ref lsp) = value.lsp else {
                 continue;
             };
-            writeln!(out, "{:15} {:15} {}", lsa_id, adv_router, lsp.links.len());
+            writeln!(
+                out,
+                "{:15} {:15} {} {:08x}",
+                lsa_id,
+                adv_router,
+                lsp.links.len(),
+                value.h.ls_seq_number
+            );
         }
     }
 
