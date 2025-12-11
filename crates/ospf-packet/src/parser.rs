@@ -5,12 +5,12 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
-use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::error::{ErrorKind, make_error};
+use nom::number::complete::{be_u8, be_u24, be_u64};
 use nom::{Err, IResult};
 use nom_derive::*;
 
-use super::util::{many0, Emit, ParseBe};
+use super::util::{Emit, ParseBe, many0};
 use super::{OspfLsType, OspfType};
 
 // OSPF version.
@@ -263,12 +263,12 @@ impl OspfDbDesc {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Default, NomBE)]
 pub struct OspfLsRequest {
     pub reqs: Vec<OspfLsRequestEntry>,
 }
 
-#[derive(Debug, NomBE, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, NomBE, PartialOrd, Ord, PartialEq, Eq, Clone)]
 pub struct OspfLsRequestEntry {
     pub ls_type: u32,
     pub ls_id: Ipv4Addr,

@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::OspfInterface, tracing::OspfTracing,
+    inst::OspfInterface, ospf_flood, tracing::OspfTracing,
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -173,8 +173,8 @@ pub fn ospf_hello_send(oi: &mut OspfLink) {
 }
 
 pub fn ospf_packet_db_desc_set(nbr: &mut Neighbor, dd: &mut OspfDbDesc) {
-    while let Some(lsa) = nbr.db_sum.pop() {
-        //
+    while let Some(lsah) = nbr.db_sum.pop() {
+        dd.lsa_headers.push(lsah);
     }
 }
 
@@ -193,6 +193,30 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
     ospf_packet_db_desc_set(nbr, &mut dd);
 
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
+    tracing::info!("[DB Desc:Send]");
+    tracing::info!("{}", packet);
+    nbr.ptx
+        .send(Message::Send(
+            packet,
+            nbr.ifindex,
+            Some(nbr.ident.prefix.addr()),
+        ))
+        .unwrap();
+}
+
+pub fn ospf_packet_ls_req_set(nbr: &mut Neighbor, ls_req: &mut OspfLsRequest) {
+    for ls_req_entry in nbr.ls_req.iter() {
+        ls_req.reqs.push(ls_req_entry.clone());
+    }
+}
+
+pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
+    let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+    let mut ls_req = OspfLsRequest::default();
+
+    ospf_packet_ls_req_set(nbr, &mut ls_req);
+
+    let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::LsRequest(ls_req));
     tracing::info!("[DB Desc:Send]");
     tracing::info!("{}", packet);
     nbr.ptx
@@ -254,7 +278,7 @@ fn ospf_lsa_lookup<'a>(
 }
 
 fn ospf_ls_request_add(nbr: &mut Neighbor, ls_req: OspfLsRequestEntry) {
-    nbr.ls_req.insert(ls_req);
+    nbr.ls_req.push(ls_req);
 }
 
 fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc) {
@@ -293,6 +317,7 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         // When master's more flags is not set and local system does not have
         // information to be sent.
         if !dd.flags.more() && ospf_db_summary_isempty(nbr) {
+            tracing::info!("[NFSM:Event] ExchangeDone");
             nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
         }
 
@@ -429,4 +454,58 @@ pub fn ospf_db_desc_recv(
             //
         }
     }
+}
+
+pub fn ospf_ls_req_recv(
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    packet: &Ospfv2Packet,
+    src: &Ipv4Addr,
+) {
+}
+
+pub fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
+    let current = oi
+        .lsdb
+        .lookup_by_id(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+
+    if current.is_none() {
+        ospf_flood(oi, nbr, lsa);
+    }
+}
+
+pub fn ospf_ls_upd_validate_proc(
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    ls_upd: &OspfLsUpdate,
+    src: &Ipv4Addr,
+) {
+    for lsa in ls_upd.lsas.iter() {
+        ospf_ls_upd_proc(oi, nbr, lsa);
+    }
+}
+
+pub fn ospf_ls_upd_recv(
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    packet: &Ospfv2Packet,
+    src: &Ipv4Addr,
+) {
+    if nbr.state < NfsmState::Exchange {
+        return;
+    }
+
+    let Ospfv2Payload::LsUpdate(ref ls_upd) = packet.payload else {
+        return;
+    };
+
+    ospf_ls_upd_validate_proc(oi, nbr, ls_upd, src);
+}
+
+pub fn ospf_ls_ack_recv(
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    packet: &Ospfv2Packet,
+    src: &Ipv4Addr,
+) {
 }

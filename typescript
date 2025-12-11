@@ -1,0 +1,848 @@
+Script started on 2025-12-10 08:24:58-08:00 [TERM="xterm-256color" TTY="/dev/pts/1" COLUMNS="205" LINES="24"]
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                             ]2;kunihiro@s:~/zebra-rs]1;~/zebra-rs[0m[27m[24m[J$ ~/zebra-rs [32mfeature/ospf-db-desc-send*[00m [00m[K[?1h=[?2004hmm[90make run[39mm[39ma[39mk[39me[39m [39mr[39mu[39mn[?1l>[?2004l
+]2;make run]1;make[1m[92m   Compiling[0m ospf-packet v0.8.6 (/home/kunihiro/zebra-rs/crates/ospf-packet)
+[1m[96m    Building[0m [=======================> ] 410/412: ospf-packet                                                                                                                                              [K[1m[92m   Compiling[0m zebra-rs v0.8.6 (/home/kunihiro/zebra-rs/zebra-rs)
+[1m[96m    Building[0m [=======================> ] 411/412: zebra-rs(bin)                                                                                                                                            [K[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`release` profile [optimized]]8;;\ target(s) in 16.59s
+target/release/zebra-rs
+[2m2025-12-10T16:25:16.980619Z[0m [32m INFO[0m [2mzebra-rs/src/main.rs[0m[2m:[0m[2m162:[0m zebra-rs started
+IFSM State Transition on enp0s7: Down -> Waiting
+[2m2025-12-10T16:25:17.868253Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:17.868404Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m134:[0m [NFSM:Event] OneWayReceived
+[2m2025-12-10T16:25:17.868467Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Down -> Init
+[2m2025-12-10T16:25:17.868484Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Init -> Init
+[2m2025-12-10T16:25:17.995420Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag false
+[2m2025-12-10T16:25:17.997261Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:17.997302Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:17.997308Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Init -> TwoWay
+IFSM State Transition on enp0s7: Waiting -> Waiting
+[2m2025-12-10T16:25:18.871176Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:18.871340Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:18.871466Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: TwoWay -> TwoWay
+[2m2025-12-10T16:25:18.871484Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: TwoWay -> TwoWay
+[2m2025-12-10T16:25:18.989912Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:19.875501Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:19.875571Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:19.875591Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: TwoWay -> TwoWay
+[2m2025-12-10T16:25:19.875612Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: TwoWay -> TwoWay
+[2m2025-12-10T16:25:19.990825Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:20.879641Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:20.879745Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:20.879775Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: TwoWay -> TwoWay
+[2m2025-12-10T16:25:20.879815Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: TwoWay -> TwoWay
+[2m2025-12-10T16:25:20.994783Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+IFSM State Transition on enp0s7: Waiting -> Backup
+[2m2025-12-10T16:25:20.994923Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: TwoWay -> ExStart
+[2m2025-12-10T16:25:20.994950Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m515:[0m DB_DESC from NFSM
+[2m2025-12-10T16:25:20.994953Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m185:[0m ospf_db_desc_send DbDescFlags { master: true, more: true, init: true, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:20.994957Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m196:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:20.994959Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m197:[0m == OSPFv2 ==
+ Version: 2
+ Type: Database Description
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Database Description ==
+ Interface MTU: 1500
+ Options: 
+  DN: Off
+  O: Off
+  Demand Circuit: Off
+  LLS Data: Off
+  NSSA: Off
+  Multicast: Off
+  External: On
+  MultiTopology: Off
+ Flags: master:1, more:1, init:1, oob:0
+ DD sequence number: 15054e1e
+[2m2025-12-10T16:25:21.879758Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:21.879819Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:21.879843Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: ExStart -> ExStart
+[2m2025-12-10T16:25:21.879866Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: ExStart -> ExStart
+[2m2025-12-10T16:25:21.989851Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:22.882363Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:22.882428Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:22.882486Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: ExStart -> ExStart
+[2m2025-12-10T16:25:22.882512Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: ExStart -> ExStart
+[2m2025-12-10T16:25:22.990569Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:22.997236Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:22.997311Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:22.997326Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m391:[0m DbDesc: ExStart 10.0.0.3 <-> 10.0.0.1
+[2m2025-12-10T16:25:22.997340Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m402:[0m [DB Desc] Becoming Slave DbDescFlags { master: false, more: true, init: false, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:22.997735Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m371:[0m [NFSM:NegotiationDone] DB Summary len 1
+[2m2025-12-10T16:25:22.997747Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: ExStart -> Exchange
+ospf_db_desc_proc() 0
+[2m2025-12-10T16:25:22.997757Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m311:[0m [DB Desc] packet as Slave: dd.flags.more() true
+[2m2025-12-10T16:25:22.997762Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m185:[0m ospf_db_desc_send DbDescFlags { master: false, more: true, init: false, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:22.997769Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m196:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:22.997774Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m197:[0m == OSPFv2 ==
+ Version: 2
+ Type: Database Description
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Database Description ==
+ Interface MTU: 1500
+ Options: 
+  DN: Off
+  O: Off
+  Demand Circuit: Off
+  LLS Data: Off
+  NSSA: Off
+  Multicast: Off
+  External: On
+  MultiTopology: Off
+ Flags: master:0, more:1, init:0, oob:0
+ DD sequence number: 297393b7
+ LS age: 0
+  Options: 0
+  LS Type: Router
+  LS ID: 10.0.0.1
+  Advertising router: 10.0.0.1
+  LS seq num: 8000000
+  LS checksu: 48260
+  Length: 36
+[2m2025-12-10T16:25:22.998465Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:22.998489Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+ospf_db_desc_proc() 1
+LSA: ID 10.0.0.3 Adv 10.0.0.3
+FloodScope::Area
+We don't have LSA
+[2m2025-12-10T16:25:22.998570Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m311:[0m [DB Desc] packet as Slave: dd.flags.more() false
+[2m2025-12-10T16:25:22.998587Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m320:[0m [NFSM:Event] ExchangeDone
+[2m2025-12-10T16:25:22.998591Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m185:[0m ospf_db_desc_send DbDescFlags { master: false, more: true, init: false, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:22.998597Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m196:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:22.998601Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m197:[0m == OSPFv2 ==
+ Version: 2
+ Type: Database Description
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Database Description ==
+ Interface MTU: 1500
+ Options: 
+  DN: Off
+  O: Off
+  Demand Circuit: Off
+  LLS Data: Off
+  NSSA: Off
+  Multicast: Off
+  External: On
+  MultiTopology: Off
+ Flags: master:0, more:1, init:0, oob:0
+ DD sequence number: 297393b8
+[2m2025-12-10T16:25:22.998637Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m220:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:22.998650Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m221:[0m == OSPFv2 ==
+ Version: 2
+ Type: LS Request
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Link State Request ==
+ LS Type: 1
+  LS ID: 10.0.0.3
+  Advertising router: 10.0.0.3
+[2m2025-12-10T16:25:22.998661Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Exchange -> Loading
+[2m2025-12-10T16:25:22.999369Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:22.999394Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:23.882974Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:23.883083Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:23.883130Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:23.883151Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:23.991262Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+ospf_ls_req_timer
+[2m2025-12-10T16:25:24.000245Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Down
+IFSM State Transition on enp0s7: Backup -> DR
+[2m2025-12-10T16:25:24.882787Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:24.882837Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:24.882859Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Down -> Init
+[2m2025-12-10T16:25:24.882877Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Init -> ExStart
+[2m2025-12-10T16:25:24.882881Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m515:[0m DB_DESC from NFSM
+[2m2025-12-10T16:25:24.882883Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m185:[0m ospf_db_desc_send DbDescFlags { master: true, more: true, init: true, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:24.882892Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m196:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:24.882894Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m197:[0m == OSPFv2 ==
+ Version: 2
+ Type: Database Description
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Database Description ==
+ Interface MTU: 1500
+ Options: 
+  DN: Off
+  O: Off
+  Demand Circuit: Off
+  LLS Data: Off
+  NSSA: Off
+  Multicast: Off
+  External: On
+  MultiTopology: Off
+ Flags: master:1, more:1, init:1, oob:0
+ DD sequence number: 297393b9
+IFSM State Transition on enp0s7: DR -> DROther
+[2m2025-12-10T16:25:24.882992Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: ExStart -> ExStart
+[2m2025-12-10T16:25:24.884538Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:24.884561Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:24.884565Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m391:[0m DbDesc: ExStart 10.0.0.3 <-> 10.0.0.1
+[2m2025-12-10T16:25:24.884568Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m402:[0m [DB Desc] Becoming Slave DbDescFlags { master: false, more: true, init: false, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:24.884573Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m371:[0m [NFSM:NegotiationDone] DB Summary len 1
+[2m2025-12-10T16:25:24.884575Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: ExStart -> Exchange
+ospf_db_desc_proc() 0
+[2m2025-12-10T16:25:24.884583Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m311:[0m [DB Desc] packet as Slave: dd.flags.more() true
+[2m2025-12-10T16:25:24.884586Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m185:[0m ospf_db_desc_send DbDescFlags { master: false, more: true, init: false, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:24.884594Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m196:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:24.884597Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m197:[0m == OSPFv2 ==
+ Version: 2
+ Type: Database Description
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Database Description ==
+ Interface MTU: 1500
+ Options: 
+  DN: Off
+  O: Off
+  Demand Circuit: Off
+  LLS Data: Off
+  NSSA: Off
+  Multicast: Off
+  External: On
+  MultiTopology: Off
+ Flags: master:0, more:1, init:0, oob:0
+ DD sequence number: 297393ba
+ LS age: 0
+  Options: 0
+  LS Type: Router
+  LS ID: 10.0.0.1
+  Advertising router: 10.0.0.1
+  LS seq num: 8000000
+  LS checksu: 48260
+  Length: 36
+[2m2025-12-10T16:25:24.885340Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:24.885361Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+ospf_db_desc_proc() 1
+LSA: ID 10.0.0.3 Adv 10.0.0.3
+FloodScope::Area
+We don't have LSA
+[2m2025-12-10T16:25:24.885371Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m311:[0m [DB Desc] packet as Slave: dd.flags.more() false
+[2m2025-12-10T16:25:24.885373Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m320:[0m [NFSM:Event] ExchangeDone
+[2m2025-12-10T16:25:24.885378Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m185:[0m ospf_db_desc_send DbDescFlags { master: false, more: true, init: false, oob_resync: false, resvd: 0 }
+[2m2025-12-10T16:25:24.885387Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m196:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:24.885394Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m197:[0m == OSPFv2 ==
+ Version: 2
+ Type: Database Description
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Database Description ==
+ Interface MTU: 1500
+ Options: 
+  DN: Off
+  O: Off
+  Demand Circuit: Off
+  LLS Data: Off
+  NSSA: Off
+  Multicast: Off
+  External: On
+  MultiTopology: Off
+ Flags: master:0, more:1, init:0, oob:0
+ DD sequence number: 297393bb
+[2m2025-12-10T16:25:24.885405Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m220:[0m [DB Desc:Send]
+[2m2025-12-10T16:25:24.885411Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m221:[0m == OSPFv2 ==
+ Version: 2
+ Type: LS Request
+ Length: 0
+ Router ID: 10.0.0.1
+ Area ID: 0.0.0.0
+ Checksum: 0
+ Auth type: 0
+ Auth: 0
+== Link State Request ==
+ LS Type: 1
+  LS ID: 10.0.0.3
+  Advertising router: 10.0.0.3
+[2m2025-12-10T16:25:24.885420Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Exchange -> Loading
+[2m2025-12-10T16:25:24.885729Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:24.885744Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:24.990509Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:25.887842Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:25.887892Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:25.887905Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:25.887910Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:25.991157Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:26.893005Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:26.893066Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:26.893102Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:26.893114Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:26.989923Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:27.894106Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:27.894203Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:27.894255Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:27.894339Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:27.991710Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:27.997785Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:27.997843Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:28.897703Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:28.897782Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:28.897822Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:28.897838Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:28.990641Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:29.899205Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:29.899346Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:29.899420Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:29.899457Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:29.990240Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:30.900095Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:30.900210Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:30.900357Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:30.900388Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:30.992359Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:31.900955Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:31.901006Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:31.901042Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:31.901056Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:31.991661Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:32.906240Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:32.906360Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:32.906400Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:32.906415Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:32.990512Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:32.998039Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:32.998086Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:33.906796Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:33.906837Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:33.906871Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:33.906894Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:33.994374Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:34.908038Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:34.908085Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:34.908112Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:34.908126Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:34.991513Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:35.908557Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:35.908598Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:35.908630Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:35.908642Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:35.990011Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:36.909037Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:36.909078Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:36.909105Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:36.909119Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:36.990243Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:37.909192Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:37.909238Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:37.909265Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:37.909305Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:37.992778Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:37.998315Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:37.998344Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:38.914151Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:38.914197Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:38.914225Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:38.914235Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:38.990429Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:39.915211Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:39.915262Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:39.915320Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:39.915330Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:39.990526Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:40.918152Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:40.918196Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:40.918224Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:40.918238Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:40.990375Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:41.922133Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:41.922243Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:41.922357Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:41.922397Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:41.991251Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:42.921798Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:42.921845Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:42.921868Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:42.921881Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:42.989676Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:42.998871Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:42.998909Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:43.922709Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:43.922764Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:43.922821Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:43.922835Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:43.990777Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:44.925526Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:44.925581Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:44.925617Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:44.925632Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:44.994566Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:45.927350Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:45.927377Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:45.927395Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:45.927407Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:45.991182Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:46.929620Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:46.929702Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:46.929749Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:46.929766Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:46.989839Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:47.930035Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:47.930090Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:47.930128Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:47.930145Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:47.989902Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:47.999350Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:47.999377Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:48.931000Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:48.931435Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:48.931530Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:48.931554Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:48.990932Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:49.931788Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:49.931845Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:49.931882Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:49.931894Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:49.990339Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:50.932374Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:50.932421Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:50.932449Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:50.932540Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:50.990250Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:51.934242Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:51.934422Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:51.934482Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:51.934501Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:51.989725Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:52.933862Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:52.933948Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:52.933996Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:52.934064Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:52.990472Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:52.999924Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:52.999956Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:53.936648Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:53.936815Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:53.936867Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:53.936943Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:53.994423Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:54.936398Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:54.936477Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:54.936567Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:54.936589Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:54.989845Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:55.938825Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:55.938871Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:55.938904Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:55.938911Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:55.989979Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:56.940377Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:56.940443Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:56.940493Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:56.940514Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:56.991432Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:57.941793Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:57.941877Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:57.942013Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:57.942040Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:57.989604Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:58.001433Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:25:58.001450Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:25:58.945058Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:58.945099Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:58.945126Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:58.945136Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:58.989794Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:25:59.945380Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:25:59.945455Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:25:59.945489Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:59.945498Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:25:59.990021Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:00.949754Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:00.949794Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:00.949819Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:00.949827Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:00.995251Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:01.951341Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:01.951421Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:01.951506Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:01.951524Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:01.994799Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:02.954230Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:02.954369Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:02.954439Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:02.954463Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:02.990335Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:03.002735Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:03.002788Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:03.956387Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:03.956459Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:03.956497Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:03.956512Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:03.990038Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:04.958448Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:04.958523Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:04.958568Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:04.958581Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:04.990043Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:05.958958Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:05.959049Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:05.959095Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:05.959111Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:05.989643Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:06.961414Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:06.961489Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:06.961535Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:06.961555Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:06.991117Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:07.962007Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:07.962143Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:07.962202Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:07.962213Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:07.991398Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:08.003738Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:08.003786Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:08.966113Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:08.966195Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:08.966247Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:08.966267Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:08.991736Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:09.966420Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:09.966584Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:09.966667Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:09.966678Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:09.994507Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:10.968055Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:10.968149Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:10.968206Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:10.968226Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:10.989411Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:11.968911Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:11.968991Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:11.969056Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:11.969074Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:11.990941Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:12.969061Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:12.969133Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:12.969171Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:12.969188Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:12.992581Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:13.003811Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:13.003872Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:13.970042Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:13.970119Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:13.970162Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:13.970179Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:13.990435Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:14.969771Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:14.969809Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:14.969853Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:14.969865Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:14.991243Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:15.969817Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:15.969857Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:15.969885Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:15.969917Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:15.991381Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:16.970133Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:16.970192Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:16.970230Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:16.970246Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:16.989845Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:17.971886Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:17.971924Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:17.971966Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:17.971974Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:17.989783Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:18.003798Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:18.003825Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:18.974044Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:18.974092Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:18.974122Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:18.974130Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:18.990484Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:19.974167Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:19.974210Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:19.974235Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:19.974249Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:19.990518Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:20.975005Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:20.975081Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:20.975140Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:20.975154Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:20.989488Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:21.975873Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:21.975924Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:21.975976Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:21.975990Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:21.989610Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:22.977399Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:22.977443Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:22.977469Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:22.977477Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:22.990446Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:23.005880Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:23.005907Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:23.981120Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:23.981230Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:23.981422Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:23.981439Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:23.990038Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:24.984802Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:24.984982Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:24.985037Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:24.985051Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:24.989589Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:25.987823Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:25.987867Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:25.987898Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:25.987907Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:25.989322Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:26.988898Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:26.989060Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:26.989169Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:26.989187Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:26.989246Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:27.993453Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:27.998360Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:27.998397Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:27.998444Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:27.998461Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:28.007000Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:28.007068Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:28.991653Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:28.993946Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:28.993993Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:28.994033Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:28.994055Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:29.990561Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:29.994790Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:29.994844Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:29.994901Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:29.994927Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:30.994939Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:30.996628Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:30.996684Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:30.996791Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:30.996820Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:31.991071Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:31.996534Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:31.996593Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:31.996660Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:31.996683Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:32.993197Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:32.996675Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:32.996727Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:32.996837Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:32.996887Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:33.008913Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:33.008979Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:33.995361Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:33.997005Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:33.997057Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:33.997130Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:33.997160Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:34.989409Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:34.997050Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:34.997109Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:34.997166Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:34.997202Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:35.991422Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:35.996925Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:35.996968Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:35.997020Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:35.997042Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:36.992116Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:36.997094Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:36.997154Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:36.997215Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:36.997246Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:37.991663Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:37.996718Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:37.996739Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:37.996760Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:37.996766Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:38.009142Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:38.009217Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:38.989772Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:38.996898Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:38.996933Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:38.996961Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:38.996972Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:39.991011Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:39.997202Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:39.997257Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:39.997358Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:39.997386Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:40.994757Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:40.997126Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:40.997162Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:40.997202Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:40.997218Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:41.994688Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:41.997157Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:41.997209Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:41.997316Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:41.997333Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:42.992044Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:42.997252Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:42.997336Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:42.997375Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:42.997390Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:43.009736Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:43.009777Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:43.995135Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:43.997228Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:43.997322Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:43.997396Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:43.997413Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:44.994400Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:44.997121Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:44.997171Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:44.997213Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:44.997237Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:45.992607Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:45.997484Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:45.997540Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:45.997599Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:45.997624Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:46.995455Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:46.997467Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:46.997514Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:46.997580Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:46.997602Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:47.990059Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:47.997995Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:47.998071Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:47.998124Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:47.998160Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:48.010379Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:48.010432Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:48.993827Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:48.997847Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:48.997899Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:48.997953Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:48.997982Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:49.990987Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:49.998468Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:49.998517Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:49.998557Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:49.998565Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:50.990351Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:50.998665Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:50.998718Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:50.998785Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:50.998812Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:51.994984Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:51.999033Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:51.999092Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:51.999159Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:51.999188Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:52.992658Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:52.999002Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:52.999066Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:52.999127Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:52.999152Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:53.010800Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:53.010875Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:53.994521Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:53.999038Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:53.999097Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:53.999219Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:53.999252Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:54.993371Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:54.999091Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:54.999140Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:54.999181Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:54.999190Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:55.989604Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:55.999264Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:55.999377Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:55.999433Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:55.999453Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:56.991589Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:56.999340Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:56.999405Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:56.999447Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:56.999459Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:57.992267Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:58.000084Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:58.000119Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:58.000150Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:58.000158Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:58.010470Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:26:58.010519Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:26:58.992059Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:26:58.999597Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:26:58.999639Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:26:58.999711Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:58.999728Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:26:59.992067Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:00.000647Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:00.000707Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:00.000748Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:00.000770Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:00.990116Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:01.000182Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:01.000199Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:01.000217Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:01.000222Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:01.991226Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:02.000745Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:02.000790Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:02.000824Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:02.000833Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:02.995458Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:03.000661Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:03.000702Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:03.000747Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:03.000762Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:03.011416Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:27:03.011456Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+[2m2025-12-10T16:27:03.989586Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:04.001330Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:04.001355Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:04.001385Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:04.001399Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:04.993902Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:05.002368Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:05.002413Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:05.002442Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:05.002451Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:05.993913Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:06.003411Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:06.003447Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:06.003508Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:06.003527Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:06.989514Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:07.005875Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:07.005891Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:07.005907Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:07.005911Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:07.989489Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m167:[0m [Hello:Send] on enp0s7 flag true
+[2m2025-12-10T16:27:08.008587Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m89:[0m [Hello:Recv] on 4 [3mproto[0m[2m=[0m"ospf" [3mcategory[0m[2m=[0m"packet" [3mpacket_type[0m[2m=[0m"hello" [3mdirection[0m[2m=[0m"Receive"
+[2m2025-12-10T16:27:08.008614Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m139:[0m [NFSM:Event] TwoWayReceived
+[2m2025-12-10T16:27:08.008636Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:08.008645Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/nfsm.rs[0m[2m:[0m[2m536:[0m [NFSM:State] 10.0.0.3: Loading -> Loading
+[2m2025-12-10T16:27:08.011222Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m348:[0m [DB Desc:Recv] 192.168.3.2
+[2m2025-12-10T16:27:08.011248Z[0m [32m INFO[0m [2mzebra-rs/src/ospf/packet.rs[0m[2m:[0m[2m351:[0m [DB Desc] From 10.0.0.3
+^C
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                             ]2;kunihiro@s:~/zebra-rs]1;~/zebra-rs[0m[27m[24m[J$ ~/zebra-rs [32mfeature/ospf-db-desc-send*[00m [00m[K[?1h=[?2004h[H[2J[0m[27m[24m[J$ ~/zebra-rs [32mfeature/ospf-db-desc-send*[00m [00m[K[?2004l
+
+Script done on 2025-12-10 08:27:08-08:00 [COMMAND_EXIT_CODE="130"]

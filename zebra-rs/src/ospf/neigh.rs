@@ -24,7 +24,8 @@ pub struct Neighbor {
     pub dd: NeighborDbDesc,
     pub ptx: UnboundedSender<Message>,
     pub db_sum: Vec<OspfLsaHeader>,
-    pub ls_req: BTreeSet<OspfLsRequestEntry>,
+    pub ls_req: Vec<OspfLsRequestEntry>,
+    pub ls_req_last: Option<OspfLsRequest>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -83,7 +84,8 @@ impl Neighbor {
             dd: NeighborDbDesc::new(),
             ptx,
             db_sum: vec![],
-            ls_req: BTreeSet::new(),
+            ls_req: vec![],
+            ls_req_last: None,
         };
         nbr.ident.prefix = prefix;
         nbr

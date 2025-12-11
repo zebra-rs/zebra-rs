@@ -5,7 +5,10 @@ use rand::Rng;
 
 use crate::ospf::ospf_db_desc_send;
 
-use super::{Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface};
+use super::{
+    Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface,
+    ospf_ls_req_send, ospf_ls_request_isempty,
+};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -370,11 +373,17 @@ pub fn ospf_nfsm_negotiation_done(
 }
 
 pub fn ospf_nfsm_exchange_done(
-    _oi: &mut OspfInterface,
-    _nbr: &mut Neighbor,
-    _oident: &Identity,
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    oident: &Identity,
 ) -> Option<NfsmState> {
-    None
+    if ospf_ls_request_isempty(nbr) {
+        return Some(NfsmState::Full);
+    }
+
+    ospf_ls_req_send(oi, nbr, oident);
+
+    Some(NfsmState::Loading)
 }
 
 pub fn ospf_nfsm_bad_ls_req(
@@ -535,4 +544,18 @@ pub fn ospf_nfsm(
         }
     }
     ospf_nfsm_timer_set(nbr);
+}
+
+pub fn ospf_nfsm_check_nbr_loading(nbr: &mut Neighbor) {
+    if nbr.state == NfsmState::Loading {
+        if ospf_ls_request_isempty(nbr) {
+            nbr.tx.send(Message::Nfsm(
+                nbr.ifindex,
+                nbr.ident.prefix.addr(),
+                NfsmEvent::LoadingDone,
+            ));
+        }
+    } else if nbr.ls_req_last.is_none() {
+        // ospf_ls_req_event(nbr);
+    }
 }
