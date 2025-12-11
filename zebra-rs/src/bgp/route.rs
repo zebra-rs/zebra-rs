@@ -42,12 +42,43 @@ pub struct BgpRib {
     pub weight: u32,
     // Route type.
     pub typ: BgpRibType,
-    // Whether this candidate is currently the best path.
+    // Whether this cand is currently the best path.
     pub best_path: bool,
+    // Label.
+    pub best_reason: Reason,
     // Label.
     pub label: Option<Label>,
     // Nexthop.
     pub nexthop: Option<Vpnv4Nexthop>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Reason {
+    Default,
+    Weight,
+    Originated,
+    Origin,
+    AsPath,
+    LocalPref,
+    Med,
+    RouterId,
+    Fail,
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reason::Default => write!(f, "Default selection (no other candidate)"),
+            Reason::Weight => write!(f, "weight"),
+            Reason::Originated => write!(f, "self originated route"),
+            Reason::Origin => write!(f, "origin attribute"),
+            Reason::AsPath => write!(f, "AS Path length"),
+            Reason::LocalPref => write!(f, "Local preference"),
+            Reason::Med => write!(f, "MED attribute"),
+            Reason::RouterId => write!(f, "Router ID"),
+            Reason::Fail => write!(f, "Failed due to tie-break"),
+        }
+    }
 }
 
 impl BgpRib {
@@ -70,6 +101,7 @@ impl BgpRib {
             weight,
             typ: rib_type,
             best_path: false,
+            best_reason: Reason::Fail,
             label,
             nexthop,
         }
@@ -82,22 +114,22 @@ impl BgpRib {
 
 #[derive(Debug, Default)]
 pub struct LocalRibTable(
-    pub PrefixMap<Ipv4Net, Vec<BgpRib>>, // Candidates.
+    pub PrefixMap<Ipv4Net, Vec<BgpRib>>, // Cands.
     pub PrefixMap<Ipv4Net, BgpRib>,      // Selected.
 );
 
 impl LocalRibTable {
     pub fn update(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        let candidates = self.0.entry(prefix).or_default();
+        let cands = self.0.entry(prefix).or_default();
 
         // Find if we're replacing an existing route (same peer ident and path ID)
-        let existing_local_id = candidates
+        let existing_local_id = cands
             .iter()
             .find(|r| r.ident == rib.ident && r.remote_id == rib.remote_id)
             .map(|r| r.local_id);
 
         // Extract routes being replaced
-        let replaced: Vec<BgpRib> = candidates
+        let replaced: Vec<BgpRib> = cands
             .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
             .collect();
 
@@ -110,7 +142,7 @@ impl LocalRibTable {
         } else {
             // Allocate a new local_id - find smallest unused positive integer
             let used_ids: std::collections::HashSet<u32> =
-                candidates.iter().map(|r| r.local_id).collect();
+                cands.iter().map(|r| r.local_id).collect();
 
             while used_ids.contains(&next_id) {
                 next_id += 1;
@@ -118,7 +150,7 @@ impl LocalRibTable {
             new_rib.local_id = next_id;
         }
 
-        candidates.push(new_rib);
+        cands.push(new_rib);
 
         let selected = self.select_best_path(prefix);
 
@@ -126,8 +158,8 @@ impl LocalRibTable {
     }
 
     pub fn remove(&mut self, prefix: Ipv4Net, id: u32, ident: IpAddr) -> Vec<BgpRib> {
-        let candidates = self.0.entry(prefix).or_default();
-        let removed: Vec<BgpRib> = candidates
+        let cands = self.0.entry(prefix).or_default();
+        let removed: Vec<BgpRib> = cands
             .extract_if(.., |r| r.ident == ident && r.remote_id == id)
             .collect();
         removed
@@ -135,9 +167,8 @@ impl LocalRibTable {
 
     pub fn remove_peer_routes(&mut self, ident: IpAddr) -> Vec<BgpRib> {
         let mut all_removed: Vec<BgpRib> = Vec::new();
-        for (_prefix, candidates) in self.0.iter_mut() {
-            let mut removed: Vec<BgpRib> =
-                candidates.extract_if(.., |r| r.ident == ident).collect();
+        for (_prefix, cands) in self.0.iter_mut() {
+            let mut removed: Vec<BgpRib> = cands.extract_if(.., |r| r.ident == ident).collect();
             all_removed.append(&mut removed);
         }
         all_removed
@@ -155,7 +186,7 @@ impl LocalRibTable {
         let is_empty = self
             .0
             .get(&prefix)
-            .map(|candidates| candidates.is_empty())
+            .map(|cands| cands.is_empty())
             .unwrap_or(true);
 
         if is_empty {
@@ -165,20 +196,25 @@ impl LocalRibTable {
         }
 
         let best = {
-            let candidates = self.0.get_mut(&prefix).expect("prefix checked above");
+            let cands = self.0.get_mut(&prefix).expect("prefix checked above");
 
             let mut best_index = 0usize;
-            for index in 1..candidates.len() {
-                if Self::is_better(&candidates[index], &candidates[best_index]) {
+            let mut best_reason = Reason::Default;
+            for index in 1..cands.len() {
+                let (better, reason) = Self::is_better(&cands[index], &cands[best_index]);
+                if better {
                     best_index = index;
+                    best_reason = reason;
                 }
             }
 
-            for rib in candidates.iter_mut() {
+            for rib in cands.iter_mut() {
                 rib.best_path = false;
+                rib.best_reason = Reason::Fail;
             }
-            candidates[best_index].best_path = true;
-            candidates[best_index].clone()
+            cands[best_index].best_path = true;
+            cands[best_index].best_reason = best_reason;
+            cands[best_index].clone()
         };
 
         self.1.insert(prefix, best.clone());
@@ -187,73 +223,73 @@ impl LocalRibTable {
         selected
     }
 
-    fn is_better(candidate: &BgpRib, incumbent: &BgpRib) -> bool {
-        if candidate.weight != incumbent.weight {
-            return candidate.weight > incumbent.weight;
+    fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
+        if cand.weight != incb.weight {
+            return (cand.weight > incb.weight, Reason::Weight);
         }
 
-        let candidate_lp = Self::effective_local_pref(candidate);
-        let incumbent_lp = Self::effective_local_pref(incumbent);
-        if candidate_lp != incumbent_lp {
-            return candidate_lp > incumbent_lp;
+        let cand_lp = Self::effective_local_pref(cand);
+        let incb_lp = Self::effective_local_pref(incb);
+        if cand_lp != incb_lp {
+            return (cand_lp > incb_lp, Reason::LocalPref);
         }
 
         // RFC 4456: Prefer path with shorter CLUSTER_LIST length (fewer route reflector hops)
-        // let candidate_cluster_len = candidate
+        // let cand_cluster_len = cand
         //     .attr
         //     .cluster_list
         //     .as_ref()
         //     .map_or(0, |cl| cl.list.len());
-        // let incumbent_cluster_len = incumbent
+        // let incb_cluster_len = incb
         //     .attr
         //     .cluster_list
         //     .as_ref()
         //     .map_or(0, |cl| cl.list.len());
-        // if candidate_cluster_len != incumbent_cluster_len {
-        //     return candidate_cluster_len < incumbent_cluster_len;
+        // if cand_cluster_len != incb_cluster_len {
+        //     return cand_cluster_len < incb_cluster_len;
         // }
 
-        let candidate_local = matches!(candidate.typ, BgpRibType::Originated);
-        let incumbent_local = matches!(incumbent.typ, BgpRibType::Originated);
-        if candidate_local != incumbent_local {
-            return candidate_local;
+        let cand_local = matches!(cand.typ, BgpRibType::Originated);
+        let incb_local = matches!(incb.typ, BgpRibType::Originated);
+        if cand_local != incb_local {
+            return (cand_local, Reason::Originated);
         }
 
-        let candidate_as_len = Self::as_path_len(candidate);
-        let incumbent_as_len = Self::as_path_len(incumbent);
-        if candidate_as_len != incumbent_as_len {
-            return candidate_as_len < incumbent_as_len;
+        let cand_as_len = Self::as_path_len(cand);
+        let incb_as_len = Self::as_path_len(incb);
+        if cand_as_len != incb_as_len {
+            return (cand_as_len < incb_as_len, Reason::AsPath);
         }
 
-        let candidate_origin_rank = Self::origin_rank(candidate.attr.origin);
-        let incumbent_origin_rank = Self::origin_rank(incumbent.attr.origin);
-        if candidate_origin_rank != incumbent_origin_rank {
-            return candidate_origin_rank < incumbent_origin_rank;
+        let cand_origin_rank = Self::origin_rank(cand.attr.origin);
+        let incb_origin_rank = Self::origin_rank(incb.attr.origin);
+        if cand_origin_rank != incb_origin_rank {
+            return (cand_origin_rank < incb_origin_rank, Reason::Origin);
         }
 
-        if candidate.ident == incumbent.ident {
-            let candidate_med = candidate.attr.med.clone().unwrap_or(Med::default());
-            let incumbent_med = incumbent.attr.med.clone().unwrap_or(Med::default());
-            if candidate_med != incumbent_med {
-                return candidate_med < incumbent_med;
+        if cand.ident == incb.ident {
+            let cand_med = cand.attr.med.clone().unwrap_or(Med::default());
+            let incb_med = incb.attr.med.clone().unwrap_or(Med::default());
+            if cand_med != incb_med {
+                return (cand_med < incb_med, Reason::Med);
             }
         }
 
-        let candidate_type_rank = Self::route_type_rank(candidate.typ);
-        let incumbent_type_rank = Self::route_type_rank(incumbent.typ);
-        if candidate_type_rank != incumbent_type_rank {
-            return candidate_type_rank < incumbent_type_rank;
+        let cand_type_rank = Self::route_type_rank(cand.typ);
+        let incb_type_rank = Self::route_type_rank(incb.typ);
+        if cand_type_rank != incb_type_rank {
+            return (cand_type_rank < incb_type_rank, Reason::Origin);
         }
 
-        if candidate.ident != incumbent.ident {
-            return candidate.ident < incumbent.ident;
+        if cand.ident != incb.ident {
+            return (cand.ident < incb.ident, Reason::RouterId);
         }
 
-        if candidate.remote_id != incumbent.remote_id {
-            return candidate.remote_id < incumbent.remote_id;
+        if cand.remote_id != incb.remote_id {
+            return (cand.remote_id < incb.remote_id, Reason::RouterId);
         }
 
-        false
+        (false, Reason::Fail)
     }
 
     fn effective_local_pref(rib: &BgpRib) -> u32 {

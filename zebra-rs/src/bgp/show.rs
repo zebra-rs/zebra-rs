@@ -654,6 +654,8 @@ fn show_bgp_vpnv4_route(
                     writeln!(out, "{}", cluster_ids.join(" "))?;
                 }
 
+                writeln!(out, "    Reason: {}", rib.best_reason);
+
                 writeln!(out)?;
             }
         }
