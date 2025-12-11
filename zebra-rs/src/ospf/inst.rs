@@ -30,7 +30,9 @@ use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
 use super::tracing::OspfTracing;
-use super::{AREA0, Identity, Lsdb, Neighbor};
+use super::{
+    AREA0, Identity, Lsdb, Neighbor, ospf_ls_ack_recv, ospf_ls_req_recv, ospf_ls_upd_recv,
+};
 
 pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
 
@@ -219,25 +221,28 @@ impl Ospf {
                 ospf_hello_recv(&self.router_id, link, &packet, &src, &self.tracing);
             }
             OspfType::DbDesc => {
-                // println!("DB_DESC: ifindex {}, nbr src {}", index, src);
-                if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
-                    ospf_db_desc_recv(&mut link, nbr, &packet, &src);
-                } else {
-                    // println!("DB_DESC: Pakcet from unknown neighbor {}", src);
-                }
-            }
-            OspfType::LsRequest => {
-                let Some(_link) = self.links.get_mut(&index) else {
+                let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
                     return;
                 };
-                // println!("LS_REQ: {}", packet);
-                // ospf_ls_req_recv(&self.top, link, &packet, &src);
+                ospf_db_desc_recv(&mut link, nbr, &packet, &src);
+            }
+            OspfType::LsRequest => {
+                let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
+                    return;
+                };
+                ospf_ls_req_recv(&mut link, nbr, &packet, &src);
             }
             OspfType::LsUpdate => {
-                // println!("LS_UPD: {}", packet);
+                let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
+                    return;
+                };
+                ospf_ls_upd_recv(&mut link, nbr, &packet, &src);
             }
             OspfType::LsAck => {
-                // println!("LS_ACK: {}", packet);
+                let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
+                    return;
+                };
+                ospf_ls_ack_recv(&mut link, nbr, &packet, &src);
             }
             OspfType::Unknown(typ) => {
                 // println!("Unknown: packet type {}", typ);
