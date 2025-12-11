@@ -120,6 +120,7 @@ fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
             ident: peer.ident,
             policy_type: policy::PolicyType::PolicyListOut,
         };
+        // tracing::info!("{:?}", msg);
         let _ = bgp.policy_tx.send(msg);
     } else {
         let config = peer.policy_list.get_mut(&InOut::Output);
