@@ -211,14 +211,18 @@ pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bo
             match extended_matcher {
                 ExtendedMatcher::Exact(target_value) => {
                     // Check if any extended community matches exactly
+                    // tracing::info!("{} <=> {}", ecom, target_value);
+
                     for ext_com_val in &ecom.0 {
                         if ext_com_val.high_type == target_value.high_type
                             && ext_com_val.low_type == target_value.low_type
                             && ext_com_val.val == target_value.val
                         {
+                            // tracing::info!(" -> true");
                             return true;
                         }
                     }
+                    // tracing::info!(" -> false");
                     false
                 }
                 ExtendedMatcher::Regex(sub_type, pattern) => {

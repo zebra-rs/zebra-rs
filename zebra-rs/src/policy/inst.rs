@@ -242,6 +242,12 @@ impl Policy {
                                 let _ = tx.send(msg);
                             }
                         }
+                        let watch = PolicyWatch {
+                            proto,
+                            ident,
+                            policy_type,
+                        };
+                        self.watch_policy.entry(name).or_default().push(watch);
                     }
                 }
             }
