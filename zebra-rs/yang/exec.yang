@@ -81,8 +81,11 @@ module exec {
           ext:help "BGP RIB";
           type inet:ipv4-address;
         }
-        leaf vpnv4 {
-          type empty;
+        container vpnv4 {
+          presence "BGP VPNv4 RIB";
+          leaf route {
+            type inet:ipv4-address;
+          }
         }
         leaf summary {
           ext:help "BGP summary information";
