@@ -382,6 +382,15 @@ impl As4Path {
         result.update_length();
         result
     }
+
+    /// Find neighboring AS for MED comparison (RFC 4271).
+    /// Returns the first AS number from the first AS_SEQ segment.
+    pub fn neighboring_as(&self) -> Option<u32> {
+        self.segs
+            .iter()
+            .find(|seg| seg.typ == AS_SEQ)
+            .and_then(|seg| seg.asn.first().copied())
+    }
 }
 
 impl Default for As4Path {
