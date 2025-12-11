@@ -99,6 +99,12 @@ impl BgpAttr {
             v.attr_emit(buf);
         }
     }
+
+    pub fn neighboring_as(&self) -> Option<u32> {
+        self.aspath
+            .as_ref()
+            .and_then(|aspath| aspath.neighboring_as())
+    }
 }
 
 impl fmt::Display for BgpAttr {

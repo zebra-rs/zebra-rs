@@ -62,7 +62,7 @@ pub enum Reason {
     LocalPref,
     Med,
     RouterId,
-    Fail,
+    NotSelected,
 }
 
 impl std::fmt::Display for Reason {
@@ -76,7 +76,7 @@ impl std::fmt::Display for Reason {
             Reason::LocalPref => write!(f, "Local preference"),
             Reason::Med => write!(f, "MED attribute"),
             Reason::RouterId => write!(f, "Router ID"),
-            Reason::Fail => write!(f, "Failed due to tie-break"),
+            Reason::NotSelected => write!(f, "Not selected"),
         }
     }
 }
@@ -101,7 +101,7 @@ impl BgpRib {
             weight,
             typ: rib_type,
             best_path: false,
-            best_reason: Reason::Fail,
+            best_reason: Reason::NotSelected,
             label,
             nexthop,
         }
@@ -204,13 +204,13 @@ impl LocalRibTable {
                 let (better, reason) = Self::is_better(&cands[index], &cands[best_index]);
                 if better {
                     best_index = index;
-                    best_reason = reason;
                 }
+                best_reason = reason;
             }
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;
-                rib.best_reason = Reason::Fail;
+                rib.best_reason = Reason::NotSelected;
             }
             cands[best_index].best_path = true;
             cands[best_index].best_reason = best_reason;
@@ -267,7 +267,12 @@ impl LocalRibTable {
             return (cand_origin_rank < incb_origin_rank, Reason::Origin);
         }
 
-        if cand.ident == incb.ident {
+        // By default, MED is only compared between routes learned from the neighboring AS.
+        // let cand_nei_as = cand.attr.aspath
+        let cand_neigh_as = cand.attr.neighboring_as();
+        let incb_neigh_as = incb.attr.neighboring_as();
+
+        if cand_neigh_as == incb_neigh_as {
             let cand_med = cand.attr.med.clone().unwrap_or(Med::default());
             let incb_med = incb.attr.med.clone().unwrap_or(Med::default());
             if cand_med != incb_med {
@@ -289,7 +294,7 @@ impl LocalRibTable {
             return (cand.remote_id < incb.remote_id, Reason::RouterId);
         }
 
-        (false, Reason::Fail)
+        (false, Reason::NotSelected)
     }
 
     fn effective_local_pref(rib: &BgpRib) -> u32 {
