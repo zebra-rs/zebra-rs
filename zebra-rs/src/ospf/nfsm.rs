@@ -1,10 +1,14 @@
 use std::fmt::Display;
 
+use ospf_packet::*;
 use rand::Rng;
 
 use crate::ospf::ospf_db_desc_send;
 
-use super::{Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface};
+use super::{
+    Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface,
+    ospf_ls_req_send, ospf_ls_request_isempty,
+};
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
@@ -343,21 +347,43 @@ pub fn ospf_nfsm_twoway_received(
     Some(next_state)
 }
 
+pub fn ospf_db_summary_add(nbr: &mut Neighbor, lsa: &OspfLsa) {
+    nbr.db_sum.push(lsa.h.clone());
+}
+
 pub fn ospf_nfsm_negotiation_done(
-    _oi: &mut OspfInterface,
-    _nbr: &mut Neighbor,
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
     _oident: &Identity,
 ) -> Option<NfsmState> {
-    // println!("ospf_nfsm_negotiation_done");
+    let table = oi.lsdb.tables.get(&OspfLsType::Router);
+    for lsa in table.values() {
+        ospf_db_summary_add(nbr, lsa);
+    }
+    let table = oi.lsdb.tables.get(&OspfLsType::Network);
+    for lsa in table.values() {
+        ospf_db_summary_add(nbr, lsa);
+    }
+    let table = oi.lsdb.tables.get(&OspfLsType::Summary);
+    for lsa in table.values() {
+        ospf_db_summary_add(nbr, lsa);
+    }
+    tracing::info!("[NFSM:NegotiationDone] DB Summary len {}", nbr.db_sum.len());
     None
 }
 
 pub fn ospf_nfsm_exchange_done(
-    _oi: &mut OspfInterface,
-    _nbr: &mut Neighbor,
-    _oident: &Identity,
+    oi: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    oident: &Identity,
 ) -> Option<NfsmState> {
-    None
+    if ospf_ls_request_isempty(nbr) {
+        return Some(NfsmState::Full);
+    }
+
+    ospf_ls_req_send(oi, nbr, oident);
+
+    Some(NfsmState::Loading)
 }
 
 pub fn ospf_nfsm_bad_ls_req(
@@ -423,7 +449,7 @@ pub fn ospf_nfsm_kill_nbr(
     nbr: &mut Neighbor,
     oident: &Identity,
 ) -> Option<NfsmState> {
-    ospf_nfsm_change_state(nbr, NfsmState::Down, oident);
+    // ospf_nfsm_change_state(nbr, NfsmState::Down, oident);
 
     None
 }
@@ -444,7 +470,12 @@ pub fn ospf_nfsm_ll_down(
     ospf_nfsm_kill_nbr(oi, nbr, oident)
 }
 
-fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identity) {
+fn ospf_nfsm_change_state(
+    link: &mut OspfInterface,
+    nbr: &mut Neighbor,
+    state: NfsmState,
+    oident: &Identity,
+) {
     use NfsmState::*;
 
     nbr.ostate = nbr.state;
@@ -481,8 +512,8 @@ fn ospf_nfsm_change_state(nbr: &mut Neighbor, state: NfsmState, oident: &Identit
         nbr.dd.flags.set_more(true);
         nbr.dd.flags.set_init(true);
 
-        println!("DB_DESC from NFSM");
-        ospf_db_desc_send(nbr, oident);
+        tracing::info!("DB_DESC from NFSM");
+        ospf_db_desc_send(link, nbr, oident);
     }
 }
 
@@ -502,13 +533,29 @@ pub fn ospf_nfsm(
 
     // If a state transition occurs, update the state.
     if let Some(new_state) = next_state {
-        println!(
-            "NFSM State Transition on {}: {:?} -> {:?}",
-            nbr.ident.router_id, nbr.state, new_state
+        tracing::info!(
+            "[NFSM:State] {}: {:?} -> {:?}",
+            nbr.ident.router_id,
+            nbr.state,
+            new_state
         );
         if new_state != nbr.state {
-            ospf_nfsm_change_state(nbr, new_state, oident);
+            ospf_nfsm_change_state(link, nbr, new_state, oident);
         }
     }
     ospf_nfsm_timer_set(nbr);
+}
+
+pub fn ospf_nfsm_check_nbr_loading(nbr: &mut Neighbor) {
+    if nbr.state == NfsmState::Loading {
+        if ospf_ls_request_isempty(nbr) {
+            nbr.tx.send(Message::Nfsm(
+                nbr.ifindex,
+                nbr.ident.prefix.addr(),
+                NfsmEvent::LoadingDone,
+            ));
+        }
+    } else if nbr.ls_req_last.is_none() {
+        // ospf_ls_req_event(nbr);
+    }
 }

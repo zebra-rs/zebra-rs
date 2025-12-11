@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 
 use bitfield_struct::bitfield;
 use ipnet::Ipv4Net;
-use ospf_packet::{DbDescFlags, OspfDbDesc, OspfLsRequestEntry, OspfOptions};
+use ospf_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::task::Timer;
@@ -23,8 +23,9 @@ pub struct Neighbor {
     pub state_change: usize,
     pub dd: NeighborDbDesc,
     pub ptx: UnboundedSender<Message>,
-    pub db_sum: Lsdb,
-    pub ls_req: BTreeSet<OspfLsRequestEntry>,
+    pub db_sum: Vec<OspfLsaHeader>,
+    pub ls_req: Vec<OspfLsRequestEntry>,
+    pub ls_req_last: Option<OspfLsRequest>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -43,6 +44,7 @@ pub struct NeighborTimer {
     pub ls_req: Option<Timer>,
 }
 
+#[derive(Debug)]
 pub struct NeighborDbDesc {
     pub flags: DbDescFlags,
     pub seqnum: u32,
@@ -81,8 +83,9 @@ impl Neighbor {
             state_change: 0,
             dd: NeighborDbDesc::new(),
             ptx,
-            db_sum: Lsdb::new(),
-            ls_req: BTreeSet::new(),
+            db_sum: vec![],
+            ls_req: vec![],
+            ls_req_last: None,
         };
         nbr.ident.prefix = prefix;
         nbr

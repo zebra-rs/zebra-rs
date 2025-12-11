@@ -133,7 +133,7 @@ fn show_ospf_database(
         writeln!(out, "");
 
         let mut header = true;
-        for ((lsa_id, adv_router), value) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
             if header {
                 header = false;
                 writeln!(
@@ -141,10 +141,18 @@ fn show_ospf_database(
                     "Link ID         ADV Router      Age  Seq#       CkSum  Link count"
                 )?;
             }
-            let OspfLsp::Router(ref lsp) = value.lsp else {
+            let OspfLsp::Router(ref lsp) = lsa.lsp else {
                 continue;
             };
-            writeln!(out, "{:15} {:15} {}", lsa_id, adv_router, lsp.links.len());
+            writeln!(
+                out,
+                "{:15} {:15} 0x{:08x} 0x{:04x} {}",
+                lsa_id,
+                adv_router,
+                lsa.h.ls_seq_number,
+                lsa.h.ls_checksum,
+                lsp.links.len(),
+            );
         }
     }
 
