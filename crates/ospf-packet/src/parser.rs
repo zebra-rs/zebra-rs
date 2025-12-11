@@ -5,12 +5,12 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
-use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::error::{ErrorKind, make_error};
+use nom::number::complete::{be_u8, be_u24, be_u64};
 use nom::{Err, IResult};
 use nom_derive::*;
 
-use super::util::{many0, Emit, ParseBe};
+use super::util::{Emit, ParseBe, many0};
 use super::{OspfLsType, OspfType};
 
 // OSPF version.
@@ -263,12 +263,12 @@ impl OspfDbDesc {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Default, NomBE)]
 pub struct OspfLsRequest {
     pub reqs: Vec<OspfLsRequestEntry>,
 }
 
-#[derive(Debug, NomBE, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, NomBE, PartialOrd, Ord, PartialEq, Eq, Clone)]
 pub struct OspfLsRequestEntry {
     pub ls_type: u32,
     pub ls_id: Ipv4Addr,
@@ -348,7 +348,7 @@ impl OspfLsaHeader {
             ls_type,
             ls_id,
             adv_router,
-            ls_seq_number: 0,
+            ls_seq_number: 0x8000000,
             ls_checksum: 0,
             length: 0,
         }
@@ -379,10 +379,67 @@ impl Emit for OspfLsa {
     }
 }
 
+const LSA_HEADER_LEN: u16 = 20;
+
 impl OspfLsa {
     pub fn from(h: OspfLsaHeader, lsp: OspfLsp) -> Self {
         Self { h, lsp }
     }
+
+    /// Emit the LSA payload to a buffer.
+    fn emit_lsp(&self, buf: &mut BytesMut) {
+        match &self.lsp {
+            OspfLsp::Router(lsp) => lsp.emit(buf),
+            _ => {}
+        }
+    }
+
+    /// Update the LSA length and calculate checksum according to RFC 2328.
+    /// The checksum uses Fletcher algorithm over the LSA excluding the LS Age field.
+    pub fn update(&mut self) {
+        // Calculate payload length.
+        let lsp_len = match &self.lsp {
+            OspfLsp::Router(lsp) => lsp.lsa_len(),
+            _ => 0,
+        };
+        let length = lsp_len + LSA_HEADER_LEN;
+        self.h.length = length;
+
+        // Set checksum to 0 before calculation.
+        self.h.ls_checksum = 0;
+
+        // Emit the full LSA to a buffer.
+        let mut buf = BytesMut::with_capacity(length as usize);
+        self.h.emit(&mut buf);
+        self.emit_lsp(&mut buf);
+
+        // Calculate Fletcher checksum over LSA excluding LS Age (first 2 bytes).
+        // Checksum position is at offset 16 from LSA start (14 from checksummed data start).
+        self.h.ls_checksum = lsa_checksum_calc(&buf[2..], 14);
+    }
+}
+
+/// Calculate LSA checksum according to RFC 2328 using Fletcher algorithm.
+/// The checksum is calculated over the data with the checksum field at `cksum_offset`.
+fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
+    let checksum = fletcher::calc_fletcher16(data);
+    let mut c0 = (checksum & 0x00FF) as i32;
+    let mut c1 = ((checksum >> 8) & 0x00FF) as i32;
+
+    // Calculate the adjustment values based on checksum position.
+    // sop = length - checksum_offset - 1 (position from end)
+    let sop = (data.len() - cksum_offset - 1) as i32;
+    let mut x = (sop * c0 - c1) % 255;
+    if x <= 0 {
+        x += 255;
+    }
+    c1 = 510 - c0 - x;
+    if c1 > 255 {
+        c1 -= 255;
+    }
+    c0 = x;
+
+    ((c0 as u16) << 8) | (c1 as u16)
 }
 
 #[derive(Debug, NomBE)]
@@ -460,12 +517,40 @@ pub struct OspfRouterTOS {
     pub metric: u16,
 }
 
+impl OspfRouterTOS {
+    pub const fn lsa_len() -> u16 {
+        // tos (1) + reserved (1) + metric (2)
+        4
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.tos);
+        buf.put_u8(self.resved);
+        buf.put_u16(self.metric);
+    }
+}
+
 #[derive(Debug, NomBE, Default)]
 pub struct RouterLsa {
     pub flags: u16,
     pub num_links: u16,
     #[nom(Parse = "parse_router_links")]
     pub links: Vec<RouterLsaLink>,
+}
+
+impl RouterLsa {
+    pub fn lsa_len(&self) -> u16 {
+        // flags (2) + num_links (2) + sum of link lengths
+        4 + self.links.iter().map(|l| l.lsa_len()).sum::<u16>()
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.flags);
+        buf.put_u16(self.num_links);
+        for link in &self.links {
+            link.emit(buf);
+        }
+    }
 }
 
 impl From<RouterLsa> for OspfLsp {
@@ -494,6 +579,22 @@ impl RouterLsaLink {
             num_tos: 0,
             tos_0_metric: metric,
             toses: vec![],
+        }
+    }
+
+    pub fn lsa_len(&self) -> u16 {
+        // link_id (4) + link_data (4) + link_type (1) + num_tos (1) + tos_0_metric (2) + TOS routes
+        12 + self.toses.len() as u16 * OspfRouterTOS::lsa_len()
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.link_id.octets()[..]);
+        buf.put(&self.link_data.octets()[..]);
+        buf.put_u8(self.link_type);
+        buf.put_u8(self.num_tos);
+        buf.put_u16(self.tos_0_metric);
+        for tos in &self.toses {
+            tos.emit(buf);
         }
     }
 }
