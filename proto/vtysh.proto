@@ -201,3 +201,18 @@ message ApplyReply {
 service Apply {
   rpc Apply(stream ApplyRequest) returns (ApplyReply) {}
 }
+
+// Clear service.
+message ClearRequest {
+  string line = 1;
+  repeated CommandPath paths = 2;
+}
+
+message ClearReply {
+  int32 result = 1;
+  string str = 2;
+}
+
+service Clear {
+  rpc Clear(ClearRequest) returns (ClearReply) {}
+}

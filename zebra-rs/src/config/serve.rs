@@ -8,15 +8,16 @@ use tonic::transport::Server;
 use crate::config::api::DeployRequest;
 
 use super::api::{
-    CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest, ExecuteRequest,
-    ExecuteResponse, Message,
+    ClearTxRequest, ClearTxResponse, CompletionRequest, CompletionResponse, DisplayRequest,
+    DisplayTxRequest, ExecuteRequest, ExecuteResponse, Message,
 };
 use super::vtysh::apply_server::{Apply, ApplyServer};
+use super::vtysh::clear_server::{Clear, ClearServer};
 use super::vtysh::exec_server::{Exec, ExecServer};
 use super::vtysh::show_server::{Show, ShowServer};
 use super::vtysh::{
-    ApplyCode, ApplyReply, ApplyRequest, CommandPath, ExecCode, ExecReply, ExecRequest, ExecType,
-    ShowReply, ShowRequest, YangMatch,
+    ApplyCode, ApplyReply, ApplyRequest, ClearReply, ClearRequest, CommandPath, ExecCode,
+    ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch,
 };
 #[derive(Debug)]
 struct ExecService {
@@ -218,6 +219,35 @@ impl Show for ShowService {
     }
 }
 
+#[derive(Debug)]
+struct ClearService {
+    pub tx: mpsc::Sender<Message>,
+}
+
+#[tonic::async_trait]
+impl Clear for ClearService {
+    async fn clear(
+        &self,
+        request: tonic::Request<ClearRequest>,
+    ) -> std::result::Result<Response<ClearReply>, tonic::Status> {
+        let request = request.get_ref();
+
+        let (tx, rx) = oneshot::channel();
+        let query = ClearTxRequest {
+            paths: request.paths.clone(),
+            resp: tx,
+        };
+        self.tx.send(Message::ClearTx(query)).await.unwrap();
+        let resp = rx.await.unwrap();
+
+        let reply = ClearReply {
+            result: resp.result,
+            str: resp.output,
+        };
+        Ok(Response::new(reply))
+    }
+}
+
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
     pub _show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
@@ -292,6 +322,9 @@ pub fn serve(cli: Cli) {
     let apply_service = ApplyService { tx: cli.tx.clone() };
     let apply_server = ApplyServer::new(apply_service);
 
+    let clear_service = ClearService { tx: cli.tx.clone() };
+    let clear_server = ClearServer::new(clear_service);
+
     let addr = "0.0.0.0:2666".parse().unwrap();
 
     tokio::spawn(async move {
@@ -299,6 +332,7 @@ pub fn serve(cli: Cli) {
             .add_service(exec_server)
             .add_service(show_server)
             .add_service(apply_server)
+            .add_service(clear_server)
             .serve(addr)
             .await
     });
