@@ -5,6 +5,7 @@ pub mod vtysh {
     tonic::include_proto!("vtysh");
 }
 pub mod apply;
+pub mod clear;
 pub mod mcp;
 pub mod show;
 
@@ -24,6 +25,14 @@ enum Commands {
 
         #[arg(short, long, help = "Base URL of the server", default_value = "")]
         filename: String,
+    },
+    #[command(disable_help_flag = true)]
+    Clear {
+        #[arg(short, long, default_value = "127.0.0.1")]
+        host: String,
+
+        #[arg(help = "Clear command to execute")]
+        command: String,
     },
     #[command(disable_help_flag = true)]
     Show {
@@ -54,6 +63,7 @@ fn print_help() {
     eprintln!("");
     eprintln!("Basic Commands:");
     eprintln!("  apply       Apply configuration.");
+    eprintln!("  clear       Clear commands.");
     eprintln!("  show        Show commands.");
     eprintln!("  mcp         Start MCP server for AI assistant integration.");
 }
@@ -65,6 +75,9 @@ async fn main() -> Result<()> {
     match &cli.command {
         Some(Commands::Apply { host, filename }) => {
             apply::apply(host, filename).await?;
+        }
+        Some(Commands::Clear { host, command }) => {
+            clear::clear(host, command).await?;
         }
         Some(Commands::Show {
             host,
