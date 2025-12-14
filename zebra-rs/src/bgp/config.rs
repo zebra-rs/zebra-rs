@@ -7,6 +7,8 @@ use crate::config::{Args, ConfigOp};
 use crate::policy;
 use crate::policy::com_list::*;
 
+use super::peer::ConfigRef;
+use super::route_clean;
 use super::{
     Bgp,
     inst::Callback,
@@ -31,16 +33,25 @@ fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 }
 
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
     if op == ConfigOp::Set {
-        if let Some(addr) = args.v4addr() {
-            let addr = IpAddr::V4(addr);
-            let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
-            bgp.peers.insert(addr, peer);
-        } else if let Some(addr) = args.v6addr() {
-            let addr = IpAddr::V6(addr);
-            let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
-            bgp.peers.insert(addr, peer);
-        }
+        let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
+        bgp.peers.insert(addr, peer);
+    } else {
+        let ident = if let Some(peer) = bgp.peers.get(&addr) {
+            addr
+        } else {
+            return None;
+        };
+        let mut bgp_ref = ConfigRef {
+            router_id: &bgp.router_id,
+            local_rib: &mut bgp.local_rib,
+            rib_tx: &bgp.rib_tx,
+        };
+        let mut peer_map = std::mem::take(&mut bgp.peers);
+        route_clean(ident, &mut bgp_ref, &mut peer_map);
+        bgp.peers = peer_map;
+        bgp.peers.remove(&ident);
     }
     Some(())
 }
