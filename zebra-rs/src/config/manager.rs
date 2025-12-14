@@ -1,4 +1,4 @@
-use crate::config::api::{DeployResponse, DisplayTxResponse};
+use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxResponse};
 
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::commands::Mode;
@@ -477,6 +477,15 @@ impl ConfigManager {
                         }
                     });
                 }
+            }
+            Message::ClearTx(req) => {
+                // Call clear on the config manager to broadcast to all cm_clients
+                self.clear(&req.paths);
+                let resp = ClearTxResponse {
+                    result: 0,
+                    output: String::new(),
+                };
+                req.resp.send(resp).unwrap();
             }
         }
     }

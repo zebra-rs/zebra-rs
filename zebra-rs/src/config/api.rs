@@ -141,6 +141,7 @@ pub enum Message {
     Completion(CompletionRequest),
     Deploy(DeployRequest),
     DisplayTx(DisplayTxRequest),
+    ClearTx(ClearTxRequest),
 }
 
 #[derive(Debug)]
@@ -161,4 +162,16 @@ pub struct DisplayRequest {
     pub paths: Vec<CommandPath>,
     pub json: bool,
     pub resp: mpsc::Sender<String>,
+}
+
+#[derive(Debug)]
+pub struct ClearTxRequest {
+    pub paths: Vec<CommandPath>,
+    pub resp: Sender<ClearTxResponse>,
+}
+
+#[derive(Debug)]
+pub struct ClearTxResponse {
+    pub result: i32,
+    pub output: String,
 }
