@@ -900,7 +900,12 @@ pub fn route_from_peer(
     }
 }
 
-pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<IpAddr, Peer>) {
+pub fn route_clean(
+    peer_id: IpAddr,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+    force: bool,
+) {
     // IPv4 unicast.
     let withdrawn = {
         let mut withdrawn: Vec<Ipv4Nlri> = vec![];
@@ -925,37 +930,47 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
     peer.adj_out.v4.0.clear();
 
     // IPv4 VPN.
-    let withdrawn = {
-        let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
-        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+    if let Some(_) = peer.cap_send.llgr.get(&afi_safi)
+        && let Some(llgr) = peer.cap_recv.llgr.get(&afi_safi)
+    {
+        // Mark routes and inject into LocalRIB.
 
-        for (rd, table) in peer.adj_in.v4vpn.iter() {
-            for (prefix, ribs) in table.0.iter() {
-                for rib in ribs.iter() {
-                    let withdraw = Vpnv4Nlri {
-                        label: rib.label.unwrap_or(Label::default()),
-                        rd: rd.clone(),
-                        nlri: Ipv4Nlri {
-                            id: rib.remote_id,
-                            prefix: *prefix,
-                        },
-                    };
-                    withdrawn.push(withdraw);
+        // Start stale timer.
+        println!("XXX Stale time {}", llgr.stale_time());
+    } else {
+        let withdrawn = {
+            let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
+            let peer = peers.get_mut(&peer_id).expect("peer must exist");
+
+            for (rd, table) in peer.adj_in.v4vpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        let withdraw = Vpnv4Nlri {
+                            label: rib.label.unwrap_or(Label::default()),
+                            rd: rd.clone(),
+                            nlri: Ipv4Nlri {
+                                id: rib.remote_id,
+                                prefix: *prefix,
+                            },
+                        };
+                        withdrawn.push(withdraw);
+                    }
                 }
             }
+            withdrawn
+        };
+        for withdraw in withdrawn.iter() {
+            route_ipv4_withdraw(
+                peer_id,
+                &withdraw.nlri,
+                Some(withdraw.rd.clone()),
+                Some(withdraw.label),
+                bgp,
+                peers,
+                true,
+            );
         }
-        withdrawn
-    };
-    for withdraw in withdrawn.iter() {
-        route_ipv4_withdraw(
-            peer_id,
-            &withdraw.nlri,
-            Some(withdraw.rd.clone()),
-            Some(withdraw.label),
-            bgp,
-            peers,
-            true,
-        );
     }
 
     let peer = peers.get_mut(&peer_id).expect("peer must exist");

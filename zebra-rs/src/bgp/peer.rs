@@ -384,7 +384,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         let prev_state = peer_map.get(&id).unwrap().state.clone();
         let new_state = fsm_bgp_update(id, packet, &mut bgp_ref, &mut peer_map);
         if prev_state.is_established() && !new_state.is_established() {
-            route_clean(id, &mut bgp_ref, &mut peer_map);
+            route_clean(id, &mut bgp_ref, &mut peer_map, false);
         }
         peer_map.get_mut(&id).unwrap().state = new_state.clone();
 
@@ -456,7 +456,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
 
     let mut peer_map = std::mem::take(&mut bgp.peers);
     if need_clean {
-        route_clean(id, &mut bgp_ref, &mut peer_map);
+        route_clean(id, &mut bgp_ref, &mut peer_map, false);
     }
     bgp.peers = peer_map;
 }

@@ -49,7 +49,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             rib_tx: &bgp.rib_tx,
         };
         let mut peer_map = std::mem::take(&mut bgp.peers);
-        route_clean(ident, &mut bgp_ref, &mut peer_map);
+        route_clean(ident, &mut bgp_ref, &mut peer_map, true);
         bgp.peers = peer_map;
         bgp.peers.remove(&ident);
     }
