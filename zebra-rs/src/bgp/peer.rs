@@ -18,8 +18,8 @@ use caps::CapabilityPacket;
 
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
-use crate::bgp::timer;
 use crate::bgp::{AdjRib, In, Out};
+use crate::bgp::{stale_timer_expire, timer};
 use crate::config::Args;
 use crate::context::task::*;
 use crate::{bgp_debug, bgp_info, rib};
@@ -31,7 +31,7 @@ use super::route::route_from_peer;
 use super::{BGP_PORT, PolicyListValue, PrefixSetValue};
 use super::{Bgp, InOuts};
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum State {
     Idle,
     Connect,
@@ -73,6 +73,7 @@ pub enum Event {
     NotifMsg(NotificationPacket), // 25
     KeepAliveMsg,                 // 26
     UpdateMsg(UpdatePacket),      // 27
+    StaleTimerExipires(AfiSafi),
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +91,7 @@ pub struct PeerTimer {
     pub keepalive: Option<Timer>,
     pub min_as_origin: Option<Timer>,
     pub min_route_adv: Option<Timer>,
+    pub stale_timer: BTreeMap<AfiSafi, Timer>,
 }
 
 #[derive(Serialize, Debug, Default, Clone, Copy)]
@@ -434,6 +436,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
             Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
             Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
             Event::UpdateMsg(_) => unreachable!(), // Handled above
+            Event::StaleTimerExipires(afi_safi) => stale_timer_expire(&bgp_ref, peer, afi_safi),
         };
         if prev_state == peer.state {
             return;

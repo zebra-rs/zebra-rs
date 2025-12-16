@@ -7,10 +7,11 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
+use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
-use super::peer::{ConfigRef, Peer, PeerType};
+use super::peer::{ConfigRef, Peer, PeerType, State};
 use super::{Bgp, InOut};
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
@@ -50,6 +51,8 @@ pub struct BgpRib {
     pub label: Option<Label>,
     // Nexthop.
     pub nexthop: Option<Vpnv4Nexthop>,
+    // Stale.
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +107,7 @@ impl BgpRib {
             best_reason: Reason::NotSelected,
             label,
             nexthop,
+            stale: false,
         }
     }
 
@@ -937,7 +941,18 @@ pub fn route_clean(
         // Mark routes and inject into LocalRIB.
 
         // Start stale timer.
-        println!("XXX Stale time {}", llgr.stale_time());
+        peer.timer.stale_timer.insert(
+            afi_safi,
+            start_stale_timer(peer, afi_safi, llgr.stale_time()),
+        );
+
+        for (rd, table) in peer.adj_in.v4vpn.iter_mut() {
+            for (prefix, ribs) in table.0.iter_mut() {
+                for rib in ribs.iter_mut() {
+                    rib.stale = true;
+                }
+            }
+        }
     } else {
         let withdrawn = {
             let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
@@ -971,10 +986,11 @@ pub fn route_clean(
                 true,
             );
         }
+        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+        peer.adj_in.v4vpn.clear();
     }
 
     let peer = peers.get_mut(&peer_id).expect("peer must exist");
-    peer.adj_in.v4vpn.clear();
     peer.adj_out.v4vpn.clear();
 
     peer.cap_map = CapAfiMap::new();
@@ -984,6 +1000,12 @@ pub fn route_clean(
     // IPv4 RTC.
     peer.rtcv4.clear();
     peer.eor.clear();
+}
+
+pub fn stale_timer_expire(bgp: &ConfigRef, peer: &mut Peer, afi_safi: AfiSafi) -> State {
+    peer.timer.stale_timer.remove(&afi_safi);
+
+    peer.state
 }
 
 pub fn route_update_ipv4(
