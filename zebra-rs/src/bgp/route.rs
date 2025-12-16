@@ -950,6 +950,16 @@ pub fn route_clean(
             for (prefix, ribs) in table.0.iter_mut() {
                 for rib in ribs.iter_mut() {
                     rib.stale = true;
+                    match &mut rib.attr.com {
+                        Some(com) => {
+                            com.push(CommunityValue::LLGR_STALE.value());
+                        }
+                        None => {
+                            let mut com = Community::new();
+                            com.push(CommunityValue::LLGR_STALE.value());
+                            rib.attr.com = Some(com);
+                        }
+                    }
                 }
             }
         }
