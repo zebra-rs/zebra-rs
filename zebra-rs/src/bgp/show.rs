@@ -155,6 +155,14 @@ fn show_nexthop_vpn(nexthop: &Option<Vpnv4Nexthop>) -> String {
     }
 }
 
+fn show_com(attr: &BgpAttr) -> String {
+    if let Some(com) = &attr.com {
+        com.to_string()
+    } else {
+        "".to_string()
+    }
+}
+
 fn show_ecom(attr: &BgpAttr) -> String {
     if let Some(ecom) = &attr.ecom {
         ecom.to_string()
@@ -273,6 +281,7 @@ fn show_bgp(bgp: &Bgp, _args: Args, json: bool) -> std::result::Result<String, s
 
     for (key, value) in bgp.local_rib.v4.0.iter() {
         for (_i, rib) in value.iter().enumerate() {
+            let stale = if rib.stale { "S" } else { " " };
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
             let internal = if rib.typ == BgpRibType::IBGP {
@@ -291,7 +300,7 @@ fn show_bgp(bgp: &Bgp, _args: Args, json: bool) -> std::result::Result<String, s
             let origin = show_origin(&rib.attr);
             writeln!(
                 buf,
-                "{valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                "{stale}{valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
                 key.to_string(),
                 nexthop,
                 med,
@@ -374,6 +383,7 @@ fn show_bgp_vpnv4(
         }
         for (k, v) in value.0.iter() {
             for (_i, rib) in v.iter().enumerate() {
+                let stale = if rib.stale { "S" } else { " " };
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
                 let internal = if rib.typ == BgpRibType::IBGP {
@@ -395,9 +405,10 @@ fn show_bgp_vpnv4(
                     format!("[{}] ", rib.local_id)
                 };
                 let origin = show_origin(&rib.attr);
+                let com = show_com(&rib.attr);
                 writeln!(
                     buf,
-                    " {valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    "{stale}{valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
                     add_path,
                     k.to_string(),
                     nexthop,
@@ -408,7 +419,7 @@ fn show_bgp_vpnv4(
                     origin,
                 )?;
                 let ecom = show_ecom(&rib.attr);
-                writeln!(buf, "     {} label=0", ecom)?;
+                writeln!(buf, "     {} label=0, {}", ecom, com)?;
             }
         }
     }
@@ -484,6 +495,7 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
         }
         for (k, v) in value.0.iter() {
             for (_i, rib) in v.iter().enumerate() {
+                let stale = if rib.stale { "S" } else { " " };
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
                 let internal = if rib.typ == BgpRibType::IBGP {
@@ -505,9 +517,10 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
                     format!("[{}] ", rib.local_id)
                 };
                 let origin = show_origin(&rib.attr);
+                let com = show_com(&rib.attr);
                 writeln!(
                     buf,
-                    " {valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    "{stale}{valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
                     add_path,
                     k.to_string(),
                     nexthop,
@@ -518,7 +531,7 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
                     origin,
                 )?;
                 let ecom = show_ecom(&rib.attr);
-                writeln!(buf, "     {} label=0", ecom)?;
+                writeln!(buf, "     {} label=0, {}", ecom, com)?;
             }
         }
     }
@@ -824,6 +837,7 @@ fn show_adj_rib_routes(
 
     for (key, value) in routes.iter() {
         for rib in value.iter() {
+            let stale = if rib.stale { "S" } else { " " };
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
             let internal = if rib.typ == BgpRibType::IBGP {
@@ -842,7 +856,7 @@ fn show_adj_rib_routes(
             let origin = show_origin(&rib.attr);
             writeln!(
                 buf,
-                "{valid}{best}{internal} {:<18} {:<18} {:>7} {:>6} {:>6} {}{}",
+                "{stale}{valid}{best}{internal} {:<18} {:<18} {:>7} {:>6} {:>6} {}{}",
                 key.to_string(),
                 nexthop,
                 med,
