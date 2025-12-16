@@ -412,6 +412,30 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         return;
     }
 
+    // Handle StaleTimerExpires separately to avoid borrow checker issues
+    if let Event::StaleTimerExipires(afi_safi) = event {
+        let mut bgp_ref = ConfigRef {
+            router_id: &bgp.router_id,
+            local_rib: &mut bgp.local_rib,
+            rib_tx: &bgp.rib_tx,
+        };
+
+        let mut peer_map = std::mem::take(&mut bgp.peers);
+        let prev_state = peer_map.get(&id).unwrap().state;
+        let new_state = stale_timer_expire(id, afi_safi, &mut bgp_ref, &mut peer_map);
+        peer_map.get_mut(&id).unwrap().state = new_state;
+
+        bgp.peers = peer_map;
+
+        if prev_state == new_state {
+            return;
+        }
+
+        let peer = bgp.peers.get_mut(&id).unwrap();
+        timer::update_timers(peer);
+        return;
+    }
+
     // Handle other events normally
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
@@ -436,7 +460,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
             Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
             Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
             Event::UpdateMsg(_) => unreachable!(), // Handled above
-            Event::StaleTimerExipires(afi_safi) => stale_timer_expire(&bgp_ref, peer, afi_safi),
+            Event::StaleTimerExipires(_) => unreachable!(), // Handled above
         };
         if prev_state == peer.state {
             return;

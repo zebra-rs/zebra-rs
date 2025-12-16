@@ -405,6 +405,7 @@ fn show_bgp_vpnv4(
                     format!("[{}] ", rib.local_id)
                 };
                 let origin = show_origin(&rib.attr);
+                let com = show_com(&rib.attr);
                 writeln!(
                     buf,
                     "{stale}{valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
@@ -418,7 +419,7 @@ fn show_bgp_vpnv4(
                     origin,
                 )?;
                 let ecom = show_ecom(&rib.attr);
-                writeln!(buf, "     {} label=0", ecom)?;
+                writeln!(buf, "     {} label=0, {}", ecom, com)?;
             }
         }
     }

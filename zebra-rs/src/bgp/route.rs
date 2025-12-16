@@ -951,7 +951,6 @@ pub fn route_clean(
         && let Some(llgr) = peer.cap_recv.llgr.get(&afi_safi)
     {
         // Start stale timer.
-        println!("Stale timer start {}", llgr.stale_time());
         peer.timer.stale_timer.insert(
             afi_safi,
             start_stale_timer(peer, afi_safi, llgr.stale_time()),
@@ -1067,9 +1066,52 @@ pub fn route_clean(
     peer.eor.clear();
 }
 
-pub fn stale_timer_expire(bgp: &ConfigRef, peer: &mut Peer, afi_safi: AfiSafi) -> State {
+pub fn stale_timer_expire(
+    peer_id: IpAddr,
+    afi_safi: AfiSafi,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+) -> State {
+    let peer = peers.get_mut(&peer_id).expect("peer must exist");
     peer.timer.stale_timer.remove(&afi_safi);
 
+    // Remove all stale marked routes in adj_in.
+    let withdrawn = {
+        let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
+
+        for (rd, table) in peer.adj_in.v4vpn.iter() {
+            for (prefix, ribs) in table.0.iter() {
+                for rib in ribs.iter() {
+                    if rib.stale {
+                        let withdraw = Vpnv4Nlri {
+                            label: rib.label.unwrap_or(Label::default()),
+                            rd: rd.clone(),
+                            nlri: Ipv4Nlri {
+                                id: rib.remote_id,
+                                prefix: *prefix,
+                            },
+                        };
+                        withdrawn.push(withdraw);
+                    }
+                }
+            }
+        }
+        withdrawn
+    };
+
+    for withdraw in withdrawn.iter() {
+        route_ipv4_withdraw(
+            peer_id,
+            &withdraw.nlri,
+            Some(withdraw.rd.clone()),
+            Some(withdraw.label),
+            bgp,
+            peers,
+            true,
+        );
+    }
+
+    let peer = peers.get(&peer_id).expect("peer must exist");
     peer.state
 }
 
