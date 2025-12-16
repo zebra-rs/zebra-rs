@@ -58,6 +58,7 @@ pub struct BgpRib {
 #[derive(Debug, Clone, Copy)]
 pub enum Reason {
     Default,
+    Llgr,
     Weight,
     Originated,
     Origin,
@@ -72,6 +73,7 @@ impl std::fmt::Display for Reason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Reason::Default => write!(f, "Default selection (no other candidate)"),
+            Reason::Llgr => write!(f, "llgr-stale"),
             Reason::Weight => write!(f, "weight"),
             Reason::Originated => write!(f, "self originated route"),
             Reason::Origin => write!(f, "origin attribute"),
@@ -94,6 +96,7 @@ impl BgpRib {
         attr: &BgpAttr,
         label: Option<Label>,
         nexthop: Option<Vpnv4Nexthop>,
+        stale: bool,
     ) -> Self {
         BgpRib {
             remote_id: id,
@@ -107,7 +110,7 @@ impl BgpRib {
             best_reason: Reason::NotSelected,
             label,
             nexthop,
-            stale: false,
+            stale,
         }
     }
 
@@ -228,6 +231,10 @@ impl LocalRibTable {
     }
 
     fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
+        if cand.stale != incb.stale {
+            return (!cand.stale, Reason::Llgr);
+        }
+
         if cand.weight != incb.weight {
             return (cand.weight > incb.weight, Reason::Weight);
         }
@@ -448,6 +455,7 @@ pub fn route_ipv4_update(
     nexthop: Option<Vpnv4Nexthop>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
+    stale: bool,
 ) {
     // Validate and extract peer information in a separate scope to release the borrow
     let (peer_ident, peer_router_id, typ, should_process) = {
@@ -518,6 +526,7 @@ pub fn route_ipv4_update(
         attr,
         label,
         nexthop,
+        stale,
     );
 
     // Register to peer's AdjRibIn and update stats
@@ -835,7 +844,9 @@ pub fn route_from_peer(
     // let nlri = BgpNlriAttr::from(&packet);
     if let Some(bgp_attr) = &packet.bgp_attr {
         for update in packet.ipv4_update.iter() {
-            route_ipv4_update(peer_id, update, None, None, bgp_attr, None, bgp, peers);
+            route_ipv4_update(
+                peer_id, update, None, None, bgp_attr, None, bgp, peers, false,
+            );
         }
     }
 
@@ -861,6 +872,7 @@ pub fn route_from_peer(
                         Some(nhop.clone()),
                         bgp,
                         peers,
+                        false,
                     )
                 }
             }
@@ -938,9 +950,8 @@ pub fn route_clean(
     if let Some(_) = peer.cap_send.llgr.get(&afi_safi)
         && let Some(llgr) = peer.cap_recv.llgr.get(&afi_safi)
     {
-        // Mark routes and inject into LocalRIB.
-
         // Start stale timer.
+        println!("Stale timer start {}", llgr.stale_time());
         peer.timer.stale_timer.insert(
             afi_safi,
             start_stale_timer(peer, afi_safi, llgr.stale_time()),
@@ -962,6 +973,50 @@ pub fn route_clean(
                     }
                 }
             }
+        }
+
+        // Collect stale routes to update in LocalRib.
+        let stale_updates: Vec<(
+            RouteDistinguisher,
+            Ipv4Nlri,
+            Option<Label>,
+            BgpAttr,
+            Option<Vpnv4Nexthop>,
+        )> = {
+            let mut updates = Vec::new();
+            for (rd, table) in peer.adj_in.v4vpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        let nlri = Ipv4Nlri {
+                            id: rib.remote_id,
+                            prefix: *prefix,
+                        };
+                        updates.push((
+                            rd.clone(),
+                            nlri,
+                            rib.label,
+                            rib.attr.clone(),
+                            rib.nexthop.clone(),
+                        ));
+                    }
+                }
+            }
+            updates
+        };
+
+        // Update LocalRib with stale routes.
+        for (rd, nlri, label, attr, nexthop) in stale_updates {
+            route_ipv4_update(
+                peer_id,
+                &nlri,
+                Some(rd),
+                label,
+                &attr,
+                nexthop,
+                bgp,
+                peers,
+                true,
+            );
         }
     } else {
         let withdrawn = {
@@ -1374,6 +1429,7 @@ impl Bgp {
             &attr,
             None,
             None,
+            false,
         );
         let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
