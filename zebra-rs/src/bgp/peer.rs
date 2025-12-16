@@ -369,6 +369,7 @@ impl Peer {
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut LocalRib,
+    pub tx: &'a UnboundedSender<Message>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
@@ -378,6 +379,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         let mut bgp_ref = ConfigRef {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
+            tx: &bgp.tx,
             rib_tx: &bgp.rib_tx,
         };
 
@@ -417,6 +419,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         let mut bgp_ref = ConfigRef {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
+            tx: &bgp.tx,
             rib_tx: &bgp.rib_tx,
         };
 
@@ -440,6 +443,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         local_rib: &mut bgp.local_rib,
+        tx: &bgp.tx,
         rib_tx: &bgp.rib_tx,
     };
     let mut need_clean = false;

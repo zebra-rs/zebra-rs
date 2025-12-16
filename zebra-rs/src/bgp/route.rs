@@ -11,8 +11,8 @@ use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
-use super::peer::{ConfigRef, Peer, PeerType, State};
-use super::{Bgp, InOut};
+use super::peer::{ConfigRef, Event, Peer, PeerType, State};
+use super::{Bgp, InOut, Message};
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BgpRibType {
@@ -905,6 +905,12 @@ pub fn route_from_peer(
                     );
                 }
             }
+            MpNlriUnreachAttr::Vpnv4Eor => {
+                let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
             MpNlriUnreachAttr::Rtcv4Eor => {
                 // If peer's EoR is true.
                 route_rtcv4_sync(peer_id, bgp, peers);
@@ -1479,6 +1485,7 @@ impl Bgp {
         let mut bgp_ref = ConfigRef {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
+            tx: &self.tx,
             rib_tx: &self.rib_tx,
         };
 
@@ -1497,6 +1504,7 @@ impl Bgp {
         let mut bgp_ref = ConfigRef {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
+            tx: &self.tx,
             rib_tx: &self.rib_tx,
         };
 

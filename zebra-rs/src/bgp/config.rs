@@ -46,6 +46,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         let mut bgp_ref = ConfigRef {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
+            tx: &bgp.tx,
             rib_tx: &bgp.rib_tx,
         };
         let mut peer_map = std::mem::take(&mut bgp.peers);
