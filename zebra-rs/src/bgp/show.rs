@@ -155,6 +155,14 @@ fn show_nexthop_vpn(nexthop: &Option<Vpnv4Nexthop>) -> String {
     }
 }
 
+fn show_com(attr: &BgpAttr) -> String {
+    if let Some(com) = &attr.com {
+        com.to_string()
+    } else {
+        "".to_string()
+    }
+}
+
 fn show_ecom(attr: &BgpAttr) -> String {
     if let Some(ecom) = &attr.ecom {
         ecom.to_string()
@@ -508,6 +516,7 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
                     format!("[{}] ", rib.local_id)
                 };
                 let origin = show_origin(&rib.attr);
+                let com = show_com(&rib.attr);
                 writeln!(
                     buf,
                     "{stale}{valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
@@ -521,7 +530,7 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
                     origin,
                 )?;
                 let ecom = show_ecom(&rib.attr);
-                writeln!(buf, "     {} label=0", ecom)?;
+                writeln!(buf, "     {} label=0, {}", ecom, com)?;
             }
         }
     }
