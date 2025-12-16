@@ -7,11 +7,12 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
+use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
-use super::peer::{ConfigRef, Peer, PeerType};
-use super::{Bgp, InOut};
+use super::peer::{ConfigRef, Event, Peer, PeerType, State};
+use super::{Bgp, InOut, Message};
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BgpRibType {
@@ -50,11 +51,14 @@ pub struct BgpRib {
     pub label: Option<Label>,
     // Nexthop.
     pub nexthop: Option<Vpnv4Nexthop>,
+    // Stale.
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Reason {
     Default,
+    Llgr,
     Weight,
     Originated,
     Origin,
@@ -69,6 +73,7 @@ impl std::fmt::Display for Reason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Reason::Default => write!(f, "Default selection (no other candidate)"),
+            Reason::Llgr => write!(f, "llgr-stale"),
             Reason::Weight => write!(f, "weight"),
             Reason::Originated => write!(f, "self originated route"),
             Reason::Origin => write!(f, "origin attribute"),
@@ -91,6 +96,7 @@ impl BgpRib {
         attr: &BgpAttr,
         label: Option<Label>,
         nexthop: Option<Vpnv4Nexthop>,
+        stale: bool,
     ) -> Self {
         BgpRib {
             remote_id: id,
@@ -104,6 +110,7 @@ impl BgpRib {
             best_reason: Reason::NotSelected,
             label,
             nexthop,
+            stale,
         }
     }
 
@@ -224,6 +231,10 @@ impl LocalRibTable {
     }
 
     fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
+        if cand.stale != incb.stale {
+            return (!cand.stale, Reason::Llgr);
+        }
+
         if cand.weight != incb.weight {
             return (cand.weight > incb.weight, Reason::Weight);
         }
@@ -444,6 +455,7 @@ pub fn route_ipv4_update(
     nexthop: Option<Vpnv4Nexthop>,
     bgp: &mut ConfigRef,
     peers: &mut BTreeMap<IpAddr, Peer>,
+    stale: bool,
 ) {
     // Validate and extract peer information in a separate scope to release the borrow
     let (peer_ident, peer_router_id, typ, should_process) = {
@@ -514,6 +526,7 @@ pub fn route_ipv4_update(
         attr,
         label,
         nexthop,
+        stale,
     );
 
     // Register to peer's AdjRibIn and update stats
@@ -831,7 +844,9 @@ pub fn route_from_peer(
     // let nlri = BgpNlriAttr::from(&packet);
     if let Some(bgp_attr) = &packet.bgp_attr {
         for update in packet.ipv4_update.iter() {
-            route_ipv4_update(peer_id, update, None, None, bgp_attr, None, bgp, peers);
+            route_ipv4_update(
+                peer_id, update, None, None, bgp_attr, None, bgp, peers, false,
+            );
         }
     }
 
@@ -857,6 +872,7 @@ pub fn route_from_peer(
                         Some(nhop.clone()),
                         bgp,
                         peers,
+                        false,
                     )
                 }
             }
@@ -889,6 +905,12 @@ pub fn route_from_peer(
                     );
                 }
             }
+            MpNlriUnreachAttr::Vpnv4Eor => {
+                let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
             MpNlriUnreachAttr::Rtcv4Eor => {
                 // If peer's EoR is true.
                 route_rtcv4_sync(peer_id, bgp, peers);
@@ -900,7 +922,12 @@ pub fn route_from_peer(
     }
 }
 
-pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<IpAddr, Peer>) {
+pub fn route_clean(
+    peer_id: IpAddr,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+    force: bool,
+) {
     // IPv4 unicast.
     let withdrawn = {
         let mut withdrawn: Vec<Ipv4Nlri> = vec![];
@@ -925,27 +952,159 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
     peer.adj_out.v4.0.clear();
 
     // IPv4 VPN.
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+    if let Some(_) = peer.cap_send.llgr.get(&afi_safi)
+        && let Some(llgr) = peer.cap_recv.llgr.get(&afi_safi)
+    {
+        // Start stale timer.
+        peer.timer.stale_timer.insert(
+            afi_safi,
+            start_stale_timer(peer, afi_safi, llgr.stale_time()),
+        );
+
+        for (rd, table) in peer.adj_in.v4vpn.iter_mut() {
+            for (prefix, ribs) in table.0.iter_mut() {
+                for rib in ribs.iter_mut() {
+                    rib.stale = true;
+                    match &mut rib.attr.com {
+                        Some(com) => {
+                            com.push(CommunityValue::LLGR_STALE.value());
+                        }
+                        None => {
+                            let mut com = Community::new();
+                            com.push(CommunityValue::LLGR_STALE.value());
+                            rib.attr.com = Some(com);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect stale routes to update in LocalRib.
+        let stale_updates: Vec<(
+            RouteDistinguisher,
+            Ipv4Nlri,
+            Option<Label>,
+            BgpAttr,
+            Option<Vpnv4Nexthop>,
+        )> = {
+            let mut updates = Vec::new();
+            for (rd, table) in peer.adj_in.v4vpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        let nlri = Ipv4Nlri {
+                            id: rib.remote_id,
+                            prefix: *prefix,
+                        };
+                        updates.push((
+                            rd.clone(),
+                            nlri,
+                            rib.label,
+                            rib.attr.clone(),
+                            rib.nexthop.clone(),
+                        ));
+                    }
+                }
+            }
+            updates
+        };
+
+        // Update LocalRib with stale routes.
+        for (rd, nlri, label, attr, nexthop) in stale_updates {
+            route_ipv4_update(
+                peer_id,
+                &nlri,
+                Some(rd),
+                label,
+                &attr,
+                nexthop,
+                bgp,
+                peers,
+                true,
+            );
+        }
+    } else {
+        let withdrawn = {
+            let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
+            let peer = peers.get_mut(&peer_id).expect("peer must exist");
+
+            for (rd, table) in peer.adj_in.v4vpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        let withdraw = Vpnv4Nlri {
+                            label: rib.label.unwrap_or(Label::default()),
+                            rd: rd.clone(),
+                            nlri: Ipv4Nlri {
+                                id: rib.remote_id,
+                                prefix: *prefix,
+                            },
+                        };
+                        withdrawn.push(withdraw);
+                    }
+                }
+            }
+            withdrawn
+        };
+        for withdraw in withdrawn.iter() {
+            route_ipv4_withdraw(
+                peer_id,
+                &withdraw.nlri,
+                Some(withdraw.rd.clone()),
+                Some(withdraw.label),
+                bgp,
+                peers,
+                true,
+            );
+        }
+        let peer = peers.get_mut(&peer_id).expect("peer must exist");
+        peer.adj_in.v4vpn.clear();
+    }
+
+    let peer = peers.get_mut(&peer_id).expect("peer must exist");
+    peer.adj_out.v4vpn.clear();
+
+    peer.cap_map = CapAfiMap::new();
+    peer.cap_recv = BgpCap::default();
+    peer.opt.clear();
+
+    // IPv4 RTC.
+    peer.rtcv4.clear();
+    peer.eor.clear();
+}
+
+pub fn stale_timer_expire(
+    peer_id: IpAddr,
+    afi_safi: AfiSafi,
+    bgp: &mut ConfigRef,
+    peers: &mut BTreeMap<IpAddr, Peer>,
+) -> State {
+    let peer = peers.get_mut(&peer_id).expect("peer must exist");
+    peer.timer.stale_timer.remove(&afi_safi);
+
+    // Remove all stale marked routes in adj_in.
     let withdrawn = {
         let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
-        let peer = peers.get_mut(&peer_id).expect("peer must exist");
 
         for (rd, table) in peer.adj_in.v4vpn.iter() {
             for (prefix, ribs) in table.0.iter() {
                 for rib in ribs.iter() {
-                    let withdraw = Vpnv4Nlri {
-                        label: rib.label.unwrap_or(Label::default()),
-                        rd: rd.clone(),
-                        nlri: Ipv4Nlri {
-                            id: rib.remote_id,
-                            prefix: *prefix,
-                        },
-                    };
-                    withdrawn.push(withdraw);
+                    if rib.stale {
+                        let withdraw = Vpnv4Nlri {
+                            label: rib.label.unwrap_or(Label::default()),
+                            rd: rd.clone(),
+                            nlri: Ipv4Nlri {
+                                id: rib.remote_id,
+                                prefix: *prefix,
+                            },
+                        };
+                        withdrawn.push(withdraw);
+                    }
                 }
             }
         }
         withdrawn
     };
+
     for withdraw in withdrawn.iter() {
         route_ipv4_withdraw(
             peer_id,
@@ -958,17 +1117,8 @@ pub fn route_clean(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<Ip
         );
     }
 
-    let peer = peers.get_mut(&peer_id).expect("peer must exist");
-    peer.adj_in.v4vpn.clear();
-    peer.adj_out.v4vpn.clear();
-
-    peer.cap_map = CapAfiMap::new();
-    peer.cap_recv = BgpCap::default();
-    peer.opt.clear();
-
-    // IPv4 RTC.
-    peer.rtcv4.clear();
-    peer.eor.clear();
+    let peer = peers.get(&peer_id).expect("peer must exist");
+    peer.state
 }
 
 pub fn route_update_ipv4(
@@ -1327,6 +1477,7 @@ impl Bgp {
             &attr,
             None,
             None,
+            false,
         );
         let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
@@ -1334,6 +1485,7 @@ impl Bgp {
         let mut bgp_ref = ConfigRef {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
+            tx: &self.tx,
             rib_tx: &self.rib_tx,
         };
 
@@ -1352,6 +1504,7 @@ impl Bgp {
         let mut bgp_ref = ConfigRef {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
+            tx: &self.tx,
             rib_tx: &self.rib_tx,
         };
 

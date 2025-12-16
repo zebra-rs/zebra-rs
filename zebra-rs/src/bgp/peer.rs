@@ -18,8 +18,8 @@ use caps::CapabilityPacket;
 
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
-use crate::bgp::timer;
 use crate::bgp::{AdjRib, In, Out};
+use crate::bgp::{stale_timer_expire, timer};
 use crate::config::Args;
 use crate::context::task::*;
 use crate::{bgp_debug, bgp_info, rib};
@@ -31,7 +31,7 @@ use super::route::route_from_peer;
 use super::{BGP_PORT, PolicyListValue, PrefixSetValue};
 use super::{Bgp, InOuts};
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum State {
     Idle,
     Connect,
@@ -73,6 +73,7 @@ pub enum Event {
     NotifMsg(NotificationPacket), // 25
     KeepAliveMsg,                 // 26
     UpdateMsg(UpdatePacket),      // 27
+    StaleTimerExipires(AfiSafi),
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +91,7 @@ pub struct PeerTimer {
     pub keepalive: Option<Timer>,
     pub min_as_origin: Option<Timer>,
     pub min_route_adv: Option<Timer>,
+    pub stale_timer: BTreeMap<AfiSafi, Timer>,
 }
 
 #[derive(Serialize, Debug, Default, Clone, Copy)]
@@ -367,6 +369,7 @@ impl Peer {
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut LocalRib,
+    pub tx: &'a UnboundedSender<Message>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
@@ -376,6 +379,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         let mut bgp_ref = ConfigRef {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
+            tx: &bgp.tx,
             rib_tx: &bgp.rib_tx,
         };
 
@@ -384,7 +388,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         let prev_state = peer_map.get(&id).unwrap().state.clone();
         let new_state = fsm_bgp_update(id, packet, &mut bgp_ref, &mut peer_map);
         if prev_state.is_established() && !new_state.is_established() {
-            route_clean(id, &mut bgp_ref, &mut peer_map);
+            route_clean(id, &mut bgp_ref, &mut peer_map, false);
         }
         peer_map.get_mut(&id).unwrap().state = new_state.clone();
 
@@ -410,10 +414,36 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         return;
     }
 
+    // Handle StaleTimerExpires separately to avoid borrow checker issues
+    if let Event::StaleTimerExipires(afi_safi) = event {
+        let mut bgp_ref = ConfigRef {
+            router_id: &bgp.router_id,
+            local_rib: &mut bgp.local_rib,
+            tx: &bgp.tx,
+            rib_tx: &bgp.rib_tx,
+        };
+
+        let mut peer_map = std::mem::take(&mut bgp.peers);
+        let prev_state = peer_map.get(&id).unwrap().state;
+        let new_state = stale_timer_expire(id, afi_safi, &mut bgp_ref, &mut peer_map);
+        peer_map.get_mut(&id).unwrap().state = new_state;
+
+        bgp.peers = peer_map;
+
+        if prev_state == new_state {
+            return;
+        }
+
+        let peer = bgp.peers.get_mut(&id).unwrap();
+        timer::update_timers(peer);
+        return;
+    }
+
     // Handle other events normally
     let mut bgp_ref = ConfigRef {
         router_id: &bgp.router_id,
         local_rib: &mut bgp.local_rib,
+        tx: &bgp.tx,
         rib_tx: &bgp.rib_tx,
     };
     let mut need_clean = false;
@@ -434,6 +464,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
             Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
             Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
             Event::UpdateMsg(_) => unreachable!(), // Handled above
+            Event::StaleTimerExipires(_) => unreachable!(), // Handled above
         };
         if prev_state == peer.state {
             return;
@@ -456,7 +487,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
 
     let mut peer_map = std::mem::take(&mut bgp.peers);
     if need_clean {
-        route_clean(id, &mut bgp_ref, &mut peer_map);
+        route_clean(id, &mut bgp_ref, &mut peer_map, false);
     }
     bgp.peers = peer_map;
 }

@@ -1,6 +1,6 @@
 use std::cmp::min;
 
-use bgp_packet::OpenPacket;
+use bgp_packet::{AfiSafi, OpenPacket};
 
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
@@ -121,6 +121,18 @@ fn start_keepalive_timer(peer: &Peer) -> Timer {
         peer.param.keepalive as u64,
         Event::KeepaliveTimerExpires
     )
+}
+
+pub fn start_stale_timer(peer: &Peer, afi_safi: AfiSafi, stale_time: u32) -> Timer {
+    let ident = peer.ident;
+    let tx = peer.tx.clone();
+
+    Timer::once(stale_time as u64, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Event(ident, Event::StaleTimerExipires(afi_safi)));
+        }
+    })
 }
 
 pub fn refresh_hold_timer(peer: &Peer) {
