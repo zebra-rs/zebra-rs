@@ -44,6 +44,12 @@ struct Arg {
 
     #[arg(long, value_enum, help = "Logging format", default_value = "terminal")]
     log_format: LogFormatType,
+
+    #[arg(
+        long,
+        help = "Disable nexthop ID and use embedded nexthop in routes (for kernels < 5.3)"
+    )]
+    no_nhid: bool,
 }
 
 // 1. Option Yang path
@@ -124,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let yang_path = yang_path.unwrap();
 
-    let mut rib = Rib::new()?;
+    let mut rib = Rib::new(arg.no_nhid)?;
 
     let policy = Policy::new();
 
