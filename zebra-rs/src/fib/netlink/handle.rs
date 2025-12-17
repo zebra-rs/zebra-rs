@@ -38,8 +38,33 @@ use crate::rib::{
     Vxlan, link,
 };
 
+/// Check if the kernel supports nexthop ID (kernel >= 5.3).
+/// Nexthop table was introduced in Linux kernel 5.3.
+fn kernel_supports_nhid() -> bool {
+    if let Ok(version) = std::fs::read_to_string("/proc/version") {
+        // Parse "Linux version X.Y.Z-..."
+        let parts: Vec<&str> = version.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == "Linux" && parts[1] == "version" {
+            let version_str = parts[2];
+            let version_parts: Vec<&str> = version_str.split('.').collect();
+            if version_parts.len() >= 2 {
+                if let (Ok(major), Ok(minor)) = (
+                    version_parts[0].parse::<u32>(),
+                    version_parts[1].parse::<u32>(),
+                ) {
+                    // Nexthop table introduced in kernel 5.3
+                    return major > 5 || (major == 5 && minor >= 3);
+                }
+            }
+        }
+    }
+    // Default to false for safety
+    false
+}
+
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
+    pub use_nhid: bool,
 }
 
 impl FibHandle {
@@ -66,7 +91,14 @@ impl FibHandle {
             }
         });
 
-        Ok(Self { handle })
+        let use_nhid = kernel_supports_nhid();
+        if use_nhid {
+            println!("Kernel supports nexthop ID (>= 5.3)");
+        } else {
+            println!("Kernel does not support nexthop ID (< 5.3), using embedded nexthop");
+        }
+
+        Ok(Self { handle, use_nhid })
     }
 
     pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
@@ -89,15 +121,55 @@ impl FibHandle {
         let attr = RouteAttribute::Destination(RouteAddress::Inet(prefix.addr()));
         msg.attributes.push(attr);
 
-        if let Nexthop::Uni(uni) = &nexthop {
-            msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
-            let attr = RouteAttribute::Priority(uni.metric);
-            msg.attributes.push(attr);
-        }
-        if let Nexthop::Multi(multi) = &nexthop {
-            msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
-            let attr = RouteAttribute::Priority(multi.metric);
-            msg.attributes.push(attr);
+        if self.use_nhid {
+            // Kernel >= 5.3: use nexthop ID
+            if let Nexthop::Uni(uni) = &nexthop {
+                msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
+        } else {
+            // Kernel < 5.3: embed nexthop directly
+            if let Nexthop::Uni(uni) = &nexthop {
+                match uni.addr {
+                    IpAddr::V4(ipv4) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet(ipv4)));
+                    }
+                    IpAddr::V6(ipv6) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
+                    }
+                }
+                if uni.ifindex != 0 {
+                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                }
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                let mut mpath = vec![];
+                for uni in multi.nexthops.iter() {
+                    let mut nhop = RouteNextHop::default();
+                    let attr = match uni.addr {
+                        IpAddr::V4(ipv4) => RouteAttribute::Gateway(RouteAddress::Inet(ipv4)),
+                        IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
+                    };
+                    nhop.attributes.push(attr);
+                    if uni.ifindex != 0 {
+                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    }
+                    mpath.push(nhop);
+                }
+                msg.attributes.push(RouteAttribute::MultiPath(mpath));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
@@ -159,15 +231,55 @@ impl FibHandle {
         let attr = RouteAttribute::Priority(entry.metric);
         msg.attributes.push(attr);
 
-        if let Nexthop::Uni(uni) = &nexthop {
-            msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
-            let attr = RouteAttribute::Priority(uni.metric);
-            msg.attributes.push(attr);
-        }
-        if let Nexthop::Multi(multi) = &nexthop {
-            msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
-            let attr = RouteAttribute::Priority(multi.metric);
-            msg.attributes.push(attr);
+        if self.use_nhid {
+            // Kernel >= 5.3: use nexthop ID
+            if let Nexthop::Uni(uni) = &nexthop {
+                msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
+        } else {
+            // Kernel < 5.3: embed nexthop directly
+            if let Nexthop::Uni(uni) = &nexthop {
+                match uni.addr {
+                    IpAddr::V4(ipv4) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet(ipv4)));
+                    }
+                    IpAddr::V6(ipv6) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
+                    }
+                }
+                if uni.ifindex != 0 {
+                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                }
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                let mut mpath = vec![];
+                for uni in multi.nexthops.iter() {
+                    let mut nhop = RouteNextHop::default();
+                    let attr = match uni.addr {
+                        IpAddr::V4(ipv4) => RouteAttribute::Gateway(RouteAddress::Inet(ipv4)),
+                        IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
+                    };
+                    nhop.attributes.push(attr);
+                    if uni.ifindex != 0 {
+                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    }
+                    mpath.push(nhop);
+                }
+                msg.attributes.push(RouteAttribute::MultiPath(mpath));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
@@ -201,6 +313,11 @@ impl FibHandle {
     }
 
     pub async fn nexthop_add(&self, nexthop: &Group) {
+        // Skip nexthop table management for kernels < 5.3
+        if !self.use_nhid {
+            return;
+        }
+
         // Nexthop message.
         let mut msg = NexthopMessage::default();
         msg.header.protocol = RouteProtocol::Zebra;
@@ -306,6 +423,11 @@ impl FibHandle {
     }
 
     pub async fn nexthop_del(&self, nexthop: &Group) {
+        // Skip nexthop table management for kernels < 5.3
+        if !self.use_nhid {
+            return;
+        }
+
         // Nexthop message.
         let mut msg = NexthopMessage::default();
         msg.header.address_family = AddressFamily::Unspec;
