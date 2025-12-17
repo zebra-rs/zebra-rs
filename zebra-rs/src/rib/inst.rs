@@ -128,9 +128,9 @@ pub struct Rib {
 }
 
 impl Rib {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(no_nhid: bool) -> anyhow::Result<Self> {
         let fib = FibChannel::new();
-        let fib_handle = FibHandle::new(fib.tx.clone())?;
+        let fib_handle = FibHandle::new(fib.tx.clone(), no_nhid)?;
         let (tx, rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
             api: RibTxChannel::new(),
