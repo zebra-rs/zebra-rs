@@ -68,7 +68,7 @@ pub struct FibHandle {
 }
 
 impl FibHandle {
-    pub fn new(rib_tx: UnboundedSender<FibMessage>) -> anyhow::Result<Self> {
+    pub fn new(rib_tx: UnboundedSender<FibMessage>, no_nhid: bool) -> anyhow::Result<Self> {
         let _ = sysctl_enable();
 
         let (mut connection, handle, mut messages) = new_connection()?;
@@ -91,12 +91,17 @@ impl FibHandle {
             }
         });
 
-        let use_nhid = kernel_supports_nhid();
-        if use_nhid {
+        // Use nhid unless explicitly disabled or kernel doesn't support it
+        let use_nhid = if no_nhid {
+            println!("Nexthop ID disabled by --no-nhid flag, using embedded nexthop");
+            false
+        } else if kernel_supports_nhid() {
             println!("Kernel supports nexthop ID (>= 5.3)");
+            true
         } else {
             println!("Kernel does not support nexthop ID (< 5.3), using embedded nexthop");
-        }
+            false
+        };
 
         Ok(Self { handle, use_nhid })
     }
