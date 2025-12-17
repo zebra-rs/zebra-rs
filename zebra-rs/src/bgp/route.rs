@@ -1289,16 +1289,24 @@ pub fn policy_list_apply(
 }
 
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
-    // Collect all routes first to avoid borrow checker issues
-    let routes: Vec<(Ipv4Net, BgpRib)> = bgp
-        .local_rib
-        .v4
-        .1
-        .iter()
-        .map(|(prefix, rib)| (*prefix, rib.clone()))
-        .collect();
-
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+
+    // Collect all routes first to avoid borrow checker issues
+    let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
+        bgp.local_rib
+            .v4
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (*prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.local_rib
+            .v4
+            .1
+            .iter()
+            .map(|(prefix, rib)| (*prefix, rib.clone()))
+            .collect()
+    };
 
     // Advertise all best paths to the peer
     for (prefix, mut rib) in routes {
@@ -1323,22 +1331,36 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
 }
 
 pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
-    // Collect all VPNv4 routes first to avoid borrow checker issues
-    let all_routes: Vec<(RouteDistinguisher, Vec<(Ipv4Net, BgpRib)>)> = bgp
-        .local_rib
-        .v4vpn
-        .iter()
-        .map(|(rd, table)| {
-            let routes: Vec<(Ipv4Net, BgpRib)> = table
-                .1
-                .iter()
-                .map(|(prefix, rib)| (*prefix, rib.clone()))
-                .collect();
-            (rd.clone(), routes)
-        })
-        .collect();
-
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsVpn);
+
+    // Collect all VPNv4 routes first to avoid borrow checker issues
+    let all_routes: Vec<(RouteDistinguisher, Vec<(Ipv4Net, BgpRib)>)> = if add_path {
+        bgp.local_rib
+            .v4vpn
+            .iter()
+            .map(|(rd, table)| {
+                let routes: Vec<(Ipv4Net, BgpRib)> = table
+                    .0
+                    .iter()
+                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (*prefix, rib.clone())))
+                    .collect();
+                (rd.clone(), routes)
+            })
+            .collect()
+    } else {
+        bgp.local_rib
+            .v4vpn
+            .iter()
+            .map(|(rd, table)| {
+                let routes: Vec<(Ipv4Net, BgpRib)> = table
+                    .1
+                    .iter()
+                    .map(|(prefix, rib)| (*prefix, rib.clone()))
+                    .collect();
+                (rd.clone(), routes)
+            })
+            .collect()
+    };
 
     // Advertise all best paths to the peer
     for (rd, routes) in all_routes {
