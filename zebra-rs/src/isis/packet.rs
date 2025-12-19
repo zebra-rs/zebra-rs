@@ -246,7 +246,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // When neighbor state has been changed.
     if nbr.state != state {
-        tracing::info!("NFSM {} => {}", nbr.state, state);
+        // tracing::info!("NFSM {} => {}", nbr.state, state);
     }
 
     nbr.state = state
@@ -324,7 +324,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // When neighbor state has been changed.
         if nbr.state != state {
-            tracing::info!("NFSM {}:{} => {}", nbr.sys_id, nbr.state, state);
+            // tracing::info!("NFSM {}:{} => {}", nbr.sys_id, nbr.state, state);
         }
 
         nbr.state = state

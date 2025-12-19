@@ -428,7 +428,7 @@ async fn ipv4_entry_selection(
         return;
     }
     if ifdown {
-        println!("Change: {} prev: {:?} next: {:?}", prefix, prev, next);
+        // println!("Change: {} prev: {:?} next: {:?}", prefix, prev, next);
     }
     if let Some(prev) = prev {
         let prev = entries.get_mut(prev).unwrap();
