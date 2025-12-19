@@ -986,6 +986,7 @@ struct Neighbor<'a> {
     cap_send: BgpCap,
     #[serde(skip_serializing)]
     cap_recv: BgpCap,
+    #[serde(skip_serializing)]
     cap_map: CapAfiMap,
     count: HashMap<&'a str, PeerCounter>,
     reflector_client: bool,
@@ -1548,7 +1549,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
 fn show_bgp_neighbor(
     bgp: &Bgp,
     mut args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
 
@@ -1557,6 +1558,10 @@ fn show_bgp_neighbor(
         for (_, peer) in bgp.peers.iter() {
             neighbors.push(fetch(peer));
         }
+        if json {
+            return Ok(serde_json::to_string_pretty(&neighbors)
+                .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize: {}\"}}", e)));
+        }
         for neighbor in neighbors.iter() {
             render(&mut out, neighbor)?;
         }
@@ -1564,11 +1569,22 @@ fn show_bgp_neighbor(
         if let Some(addr) = args.addr() {
             if let Some(peer) = bgp.peers.get(&addr) {
                 let neighbor = fetch(peer);
+                if json {
+                    return Ok(serde_json::to_string_pretty(&neighbor).unwrap_or_else(|e| {
+                        format!("{{\"error\": \"Failed to serialize: {}\"}}", e)
+                    }));
+                }
                 render(&mut out, &neighbor)?;
             } else {
+                if json {
+                    return Ok(format!("{{\"error\": \"No such neighbor: {}\"}}", addr));
+                }
                 writeln!(out, "% No such neighbor: {}", addr)?;
             }
         } else {
+            if json {
+                return Ok(String::from("{\"error\": \"Invalid address specified\"}"));
+            }
             writeln!(out, "% Invalid address specified")?;
         }
     }
