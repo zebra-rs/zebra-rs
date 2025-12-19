@@ -45,7 +45,7 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
         .get(&level)
         .map(|(neighbor_id, _)| neighbor_id)
         .unwrap_or_default();
-    tracing::info!("[Hello:Gen] LAN ID:{}", lan_id);
+    // tracing::info!("[Hello:Gen] LAN ID:{}", lan_id);
     let mut hello = IsisHello {
         circuit_type: link.state.level(),
         source_id,
@@ -303,7 +303,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     }
 
     // Logging.
-    tracing::info!("DIS selection start");
+    // tracing::info!("DIS selection start");
 
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);
@@ -377,7 +377,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         (DisStatus::Myself, sys_id, None, reason)
     };
 
-    tracing::info!("DIS selection {:?} {}", new_status, reason);
+    // tracing::info!("DIS selection {:?} {}", new_status, reason);
 
     // Perform DIS change when status or sys_id has been changed.
     if old_status != new_status {
