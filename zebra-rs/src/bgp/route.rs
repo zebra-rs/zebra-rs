@@ -157,6 +157,8 @@ impl LocalRibTable {
             new_rib.local_id = next_id;
         }
 
+        next_id = new_rib.local_id;
+
         cands.push(new_rib);
 
         let selected = self.select_best_path(prefix);
