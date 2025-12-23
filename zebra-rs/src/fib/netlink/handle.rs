@@ -93,13 +93,13 @@ impl FibHandle {
 
         // Use nhid unless explicitly disabled or kernel doesn't support it
         let use_nhid = if no_nhid {
-            println!("Nexthop ID disabled by --no-nhid flag, using embedded nexthop");
+            // println!("Nexthop ID disabled by --no-nhid flag, using embedded nexthop");
             false
         } else if kernel_supports_nhid() {
-            println!("Kernel supports nexthop ID (>= 5.3)");
+            // println!("Kernel supports nexthop ID (>= 5.3)");
             true
         } else {
-            println!("Kernel does not support nexthop ID (< 5.3), using embedded nexthop");
+            // println!("Kernel does not support nexthop ID (< 5.3), using embedded nexthop");
             false
         };
 
