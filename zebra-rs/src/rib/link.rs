@@ -124,7 +124,7 @@ impl fmt::Display for LinkType {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Copy)]
+#[derive(Default, Clone, PartialEq, Serialize, Copy)]
 pub struct LinkFlags(pub u32);
 
 pub const IFF_UP: u32 = 1 << 0;
@@ -143,6 +143,12 @@ impl LinkFlags {
 
     pub fn is_p2p(&self) -> bool {
         (self.0 & IFF_POINTOPOINT) == IFF_POINTOPOINT
+    }
+}
+
+impl fmt::Debug for LinkFlags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
     }
 }
 

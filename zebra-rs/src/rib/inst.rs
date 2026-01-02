@@ -280,6 +280,7 @@ impl Rib {
     }
 
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
+        println!("{:?}", msg);
         match msg {
             FibMessage::NewLink(link) => {
                 self.link_add(link).await;
