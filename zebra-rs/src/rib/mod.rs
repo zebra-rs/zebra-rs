@@ -5,7 +5,10 @@ pub mod inst;
 pub use inst::{Message, Rib, serve};
 
 pub mod link;
-pub use link::{Link, LinkFlags, LinkType};
+pub use link::{Link, LinkType};
+
+pub mod link_ext;
+pub use link_ext::LinkFlagsExt;
 
 pub mod entry;
 pub use entry::RibEntries;
