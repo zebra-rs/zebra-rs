@@ -7,6 +7,7 @@ use crate::isis::inst::csnp_generate;
 use crate::isis::link::DisStatus;
 use crate::isis::network::P2P_ISS;
 use crate::rib::MacAddr;
+use crate::rib::link_ext::LinkFlagsExt;
 use crate::{isis_debug, isis_event_trace, isis_packet_trace, isis_pdu_trace};
 
 use super::inst::{Packet, PacketMessage};

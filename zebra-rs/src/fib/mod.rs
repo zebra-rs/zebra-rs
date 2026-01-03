@@ -15,4 +15,4 @@ pub use macos::os_traffic_dump;
 pub mod message;
 pub use message::*;
 
-pub use crate::rib::{LinkFlags, LinkType};
+pub use crate::rib::LinkType;

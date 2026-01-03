@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::*;
+use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
 use socket2::Socket;
 use strum_macros::{Display, EnumString};
@@ -14,7 +15,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
 use crate::rib::link::LinkAddr;
-use crate::rib::{Link, LinkFlags, MacAddr};
+use crate::rib::{Link, MacAddr};
 use crate::{isis_event_trace, isis_warn};
 
 use super::config::IsisConfig;
@@ -136,7 +137,7 @@ impl<'a> LinkTop<'a> {
             return link_type == LinkType::P2p;
         }
         // Otherwise check interface flags.
-        self.flags.is_p2p()
+        (*self.flags & LinkFlags::Pointopoint) == LinkFlags::Pointopoint
     }
 
     pub fn is_lan(&self) -> bool {
@@ -464,7 +465,7 @@ impl IsisLink {
             return link_type == LinkType::P2p;
         }
         // Otherwise check interface flags.
-        self.flags.is_p2p()
+        (self.flags & LinkFlags::Pointopoint) == LinkFlags::Pointopoint
     }
 
     // Destination L2 address.  When the link is point-to-point,

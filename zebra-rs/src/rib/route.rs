@@ -196,13 +196,13 @@ impl Rib {
 
     pub async fn make_link_up(&mut self, ifindex: u32) {
         if let Some(link) = self.links.get(&ifindex) {
-            self.fib_handle.link_set_up(ifindex, link.flags.0).await;
+            self.fib_handle.link_set_up(ifindex).await;
         }
     }
 
     pub async fn make_link_down(&mut self, ifindex: u32) {
         if let Some(link) = self.links.get(&ifindex) {
-            self.fib_handle.link_set_down(ifindex, link.flags.0);
+            self.fib_handle.link_set_down(ifindex);
         }
     }
 

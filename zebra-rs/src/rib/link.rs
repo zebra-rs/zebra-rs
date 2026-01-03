@@ -1,5 +1,12 @@
 use anyhow::{Context, Result};
 
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use netlink_packet_route::link::LinkFlags;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::fmt::{self, Write};
+use tokio::sync::mpsc::UnboundedSender;
+
 use crate::config::{Args, ConfigOp};
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
@@ -8,12 +15,17 @@ use crate::fib::sysctl::sysctl_mpls_enable;
 use super::api::RibRx;
 use super::entry::RibEntry;
 use super::util::IpNetExt;
-use super::{MacAddr, Message, Rib, RibType};
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use serde::Serialize;
-use std::collections::BTreeMap;
-use std::fmt::{self, Write};
-use tokio::sync::mpsc::UnboundedSender;
+use super::{LinkFlagsExt, MacAddr, Message, Rib, RibType};
+
+mod linkflags_serde {
+    use super::*;
+    pub fn serialize<S>(flags: &LinkFlags, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{:?}", flags))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Link {
@@ -21,12 +33,12 @@ pub struct Link {
     pub name: String,
     pub mtu: u32,
     pub metric: u32,
+    #[serde(with = "linkflags_serde")]
     pub flags: LinkFlags,
     pub link_type: LinkType,
     pub label: bool,
     pub mac: Option<MacAddr>,
     pub addr4: Vec<LinkAddr>,
-    // pub addrv4: Vec<LinkAddr4>,
     pub addr6: Vec<LinkAddr>,
 }
 
@@ -42,29 +54,16 @@ impl Link {
             label: false,
             mac: link.mac,
             addr4: Vec::new(),
-            // addrv4: Vec::new(),
             addr6: Vec::new(),
         }
     }
 
-    // pub fn is_loopback(&self) -> bool {
-    //     (self.flags.0 & IFF_LOOPBACK) == IFF_LOOPBACK
-    // }
-
     pub fn is_up(&self) -> bool {
-        (self.flags.0 & IFF_UP) == IFF_UP
-    }
-
-    pub fn is_running(&self) -> bool {
-        (self.flags.0 & IFF_RUNNING) == IFF_RUNNING
-    }
-
-    pub fn is_up_and_running(&self) -> bool {
-        self.is_up() && self.is_running()
+        self.flags.is_up()
     }
 
     pub fn is_loopback(&self) -> bool {
-        (self.flags.0 & IFF_LOOPBACK) == IFF_LOOPBACK
+        self.flags.is_loopback()
     }
 }
 
@@ -124,65 +123,6 @@ impl fmt::Display for LinkType {
     }
 }
 
-#[derive(Default, Clone, PartialEq, Serialize, Copy)]
-pub struct LinkFlags(pub u32);
-
-pub const IFF_UP: u32 = 1 << 0;
-pub const IFF_BROADCAST: u32 = 1 << 1;
-pub const IFF_LOOPBACK: u32 = 1 << 3;
-pub const IFF_POINTOPOINT: u32 = 1 << 4;
-pub const IFF_RUNNING: u32 = 1 << 6;
-pub const IFF_PROMISC: u32 = 1 << 8;
-pub const IFF_MULTICAST: u32 = 1 << 12;
-pub const IFF_LOWER_UP: u32 = 1 << 16;
-
-impl LinkFlags {
-    pub fn is_loopback(&self) -> bool {
-        (self.0 & IFF_LOOPBACK) == IFF_LOOPBACK
-    }
-
-    pub fn is_p2p(&self) -> bool {
-        (self.0 & IFF_POINTOPOINT) == IFF_POINTOPOINT
-    }
-}
-
-impl fmt::Debug for LinkFlags {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl fmt::Display for LinkFlags {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut array = Vec::new();
-        if (self.0 & IFF_UP) == IFF_UP {
-            array.push("UP");
-        }
-        if (self.0 & IFF_BROADCAST) == IFF_BROADCAST {
-            array.push("BROADCAST");
-        }
-        if (self.0 & IFF_LOOPBACK) == IFF_LOOPBACK {
-            array.push("LOOPBACK");
-        }
-        if (self.0 & IFF_POINTOPOINT) == IFF_POINTOPOINT {
-            array.push("POINTOPOINT");
-        }
-        if (self.0 & IFF_RUNNING) == IFF_RUNNING {
-            array.push("RUNNING");
-        }
-        if (self.0 & IFF_PROMISC) == IFF_PROMISC {
-            array.push("PROMISC");
-        }
-        if (self.0 & IFF_MULTICAST) == IFF_MULTICAST {
-            array.push("MULTICAST");
-        }
-        if (self.0 & IFF_LOWER_UP) == IFF_LOWER_UP {
-            array.push("LOWER_UP");
-        }
-        write!(f, "<{}>", array.join(","))
-    }
-}
-
 fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
     writeln!(buf, "Interface: {}", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
@@ -204,11 +144,7 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     write!(
         buf,
         "  Link is {}",
-        if link.is_up_and_running() {
-            "Up\n"
-        } else {
-            "Down\n"
-        }
+        if link.is_up() { "Up\n" } else { "Down\n" }
     )
     .unwrap();
     writeln!(buf, "  {}", link.flags).unwrap();
@@ -370,7 +306,7 @@ fn link_to_detailed_json(link: &Link) -> InterfaceDetailed {
         index: link.index,
         metric: link.metric,
         mtu: link.mtu,
-        link_status: if link.is_up_and_running() {
+        link_status: if link.is_up() {
             "Up".to_string()
         } else {
             "Down".to_string()
@@ -458,23 +394,27 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 }
 
 impl Rib {
-    pub async fn link_add(&mut self, oslink: FibLink) {
-        if let Some(link) = self.links.get_mut(&oslink.index) {
+    pub async fn link_add(&mut self, fib_link: FibLink) {
+        if let Some(link) = self.links.get_mut(&fib_link.index) {
+            // When link already exists, we are going to check interface up &
+            // down event handling.
             if link.is_up() {
-                if !oslink.is_up() {
-                    link.flags = oslink.flags;
+                if !fib_link.flags.is_up() {
+                    println!("link: {} Up => Down", link.name);
+                    link.flags = fib_link.flags;
                     let _ = self.tx.send(Message::LinkDown {
                         ifindex: link.index,
                     });
                 }
-            } else if oslink.is_up() {
-                link.flags = oslink.flags;
+            } else if fib_link.flags.is_up() {
+                println!("link: {} Down => Up", link.name);
+                link.flags = fib_link.flags;
                 let _ = self.tx.send(Message::LinkUp {
                     ifindex: link.index,
                 });
             }
         } else {
-            let link = Link::from(oslink);
+            let link = Link::from(fib_link);
             sysctl_mpls_enable(&link.name);
             self.api_link_add(&link);
             self.links.insert(link.index, link.clone());
@@ -536,7 +476,7 @@ impl Rib {
 
             // If address was successfully added and the interface is up and running,
             // create a connected route
-            if was_addr_added && link.is_up_and_running() {
+            if was_addr_added && link.is_up() {
                 match addr.addr {
                     IpNet::V4(v4_addr) => {
                         let prefix = v4_addr.apply_mask();
@@ -569,7 +509,7 @@ impl Rib {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             // Before removing the address, create connected route removal message if interface is up
-            if link.is_up_and_running() {
+            if link.is_up() {
                 match addr.addr {
                     IpNet::V4(v4_addr) => {
                         let prefix = v4_addr.apply_mask();
