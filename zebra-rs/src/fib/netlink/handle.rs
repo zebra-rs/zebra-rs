@@ -709,7 +709,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn link_set_up(&self, ifindex: u32, _flags: u32) {
+    pub async fn link_set_up(&self, ifindex: u32) {
         let mut msg = LinkMessage::default();
         msg.header.index = ifindex;
         msg.header.flags = LinkFlags::Up;
@@ -726,7 +726,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn link_set_down(&self, ifindex: u32, _flags: u32) {
+    pub async fn link_set_down(&self, ifindex: u32) {
         let mut msg = LinkMessage::default();
         msg.header.index = ifindex;
         msg.header.flags = LinkFlags::empty();
@@ -1006,28 +1006,6 @@ impl FibHandle {
     }
 }
 
-fn flags_u32(f: &LinkFlags) -> u32 {
-    match *f {
-        LinkFlags::Up => link::IFF_UP,
-        LinkFlags::Broadcast => link::IFF_BROADCAST,
-        LinkFlags::Loopback => link::IFF_LOOPBACK,
-        LinkFlags::Pointopoint => link::IFF_POINTOPOINT,
-        LinkFlags::Running => link::IFF_RUNNING,
-        LinkFlags::Promisc => link::IFF_PROMISC,
-        LinkFlags::Multicast => link::IFF_MULTICAST,
-        LinkFlags::LowerUp => link::IFF_LOWER_UP,
-        _ => 0u32,
-    }
-}
-
-fn flags_from(v: &LinkFlags) -> link::LinkFlags {
-    let mut d: u32 = 0;
-    for flag in v.iter() {
-        d += flags_u32(&flag);
-    }
-    link::LinkFlags(d)
-}
-
 fn link_type_msg(link_type: LinkLayerType) -> link::LinkType {
     match link_type {
         LinkLayerType::Ether => link::LinkType::Ethernet,
@@ -1040,7 +1018,7 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
     let mut link = FibLink::new();
     link.index = msg.header.index;
     link.link_type = link_type_msg(msg.header.link_layer_type);
-    link.flags = flags_from(&msg.header.flags);
+    link.flags = msg.header.flags;
     for attr in msg.attributes.into_iter() {
         match attr {
             LinkAttribute::IfName(name) => {

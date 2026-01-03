@@ -1,9 +1,11 @@
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use netlink_packet_route::link::LinkFlags;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::rib::{MacAddr, entry::RibEntry, link::IFF_UP};
+use crate::rib::link_ext::LinkFlagsExt;
+use crate::rib::{MacAddr, entry::RibEntry};
 
-use super::{LinkFlags, LinkType};
+use super::LinkType;
 
 #[derive(Debug)]
 pub struct FibChannel {
@@ -33,10 +35,6 @@ impl FibLink {
         Self {
             ..Default::default()
         }
-    }
-
-    pub fn is_up(&self) -> bool {
-        (self.flags.0 & IFF_UP) == IFF_UP
     }
 }
 
