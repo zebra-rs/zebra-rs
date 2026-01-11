@@ -210,11 +210,16 @@ struct BgpInstance {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct BgpInstanceOnly {
+    instance: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct BgpNeighbor {
     #[serde(rename = "vrf-id")]
     vrf_id: u32,
     #[serde(rename = "bgp-instance")]
-    bgp_instance: u32,
+    bgp_instance: BgpInstanceOnly,
     address: Ipv4Addr,
     #[serde(rename = "remote-as")]
     remote_as: u32,
@@ -222,6 +227,8 @@ struct BgpNeighbor {
     local_as: u32,
     #[serde(rename = "address-family")]
     address_family: Vec<BgpAddressFamily>,
+    #[serde(rename = "update-source")]
+    update_source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -519,7 +526,8 @@ impl Nanomsg {
     fn bgp_vrf(&self) -> MsgEnum {
         let router_id = "192.168.10.1".parse::<Ipv4Addr>().unwrap();
         let redist = Redistribute { typ: 1 };
-        let redistribute = RedistributeAf { ipv4: vec![redist] };
+        // let redistribute = RedistributeAf { ipv4: vec![redist] };
+        let redistribute = RedistributeAf { ipv4: vec![] };
         let msg = BgpInstance {
             vrf_id: 1,
             asn: 65501,
@@ -532,16 +540,17 @@ impl Nanomsg {
     }
 
     fn bgp_neighbor(&self) -> MsgEnum {
-        let address = "192.168.2.2".parse::<Ipv4Addr>().unwrap();
+        let address = "10.0.0.6".parse::<Ipv4Addr>().unwrap();
         let ipv4_uni = BgpAddressFamily { afi: 1, safi: 1 };
-        let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
+        let ipv4_vpn = BgpAddressFamily { afi: 1, safi: 4 };
         let msg = BgpNeighbor {
             vrf_id: 0,
-            bgp_instance: 1,
+            bgp_instance: BgpInstanceOnly { instance: 1 },
             address,
             remote_as: 65501,
             local_as: 65501,
-            address_family: vec![ipv4_uni, vpnv4_uni],
+            address_family: vec![ipv4_uni, ipv4_vpn],
+            update_source: Some(String::from("10.0.0.1")),
         };
         MsgEnum::BgpNeighbor(msg)
     }
