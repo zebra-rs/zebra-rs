@@ -561,14 +561,14 @@ impl Nanomsg {
         let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
         let route = BgpRoute {
             afi: 1,
-            safi: 1,
+            safi: 4, // MPLS-VPN
             rd: "1:1".to_string(),
             prefix: "192.168.3.0/24".to_string(),
             mpls_label: 18,
         };
         let msg = BgpNetwork {
-            vrf_id: 1,
-            bgp_instance: 2,
+            vrf_id: 0,
+            bgp_instance: 1,
             route,
         };
         MsgEnum::BgpNetwork(msg)
@@ -631,7 +631,7 @@ impl Nanomsg {
                         data: self.bgp_vrf(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
-                    //
+                    // XXX
                     let msg = MsgSend {
                         method: String::from("bgp-network:add"),
                         data: self.bgp_network(),
