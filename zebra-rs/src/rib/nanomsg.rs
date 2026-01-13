@@ -6,6 +6,7 @@ use serde_json::{Value, from_value, to_string};
 
 struct Nanomsg {
     socket: Socket,
+    bgp_instance_request: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -285,7 +286,10 @@ impl Nanomsg {
     pub fn new(path: &str) -> anyhow::Result<Self> {
         let mut socket = Socket::new(Protocol::Pair)?;
         socket.bind(path)?;
-        let nanomsg = Self { socket };
+        let nanomsg = Self {
+            socket,
+            bgp_instance_request: false,
+        };
         Ok(nanomsg)
     }
 
@@ -618,6 +622,7 @@ impl Nanomsg {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
                 if msg.method == "bgp-global:request" {
+                    self.bgp_instance_request = false;
                     let msg = MsgSend {
                         method: String::from("vrf:add"),
                         data: self.vrf(),
@@ -631,6 +636,11 @@ impl Nanomsg {
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "bgp-instance:request" {
+                    if self.bgp_instance_request {
+                        return Ok(());
+                    } else {
+                        self.bgp_instance_request = true;
+                    }
                     let msg = MsgSend {
                         method: String::from("bgp-instance:add"),
                         data: self.bgp_instance(),
@@ -652,13 +662,12 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    //let msg = MsgSend {
-                    //    method: String::from("bgp-network:add"),
-                    //    data: self.bgp_vrf_network(),
-                    //};
-                    //self.socket.write_all(to_string(&msg)?.as_bytes());
+                    let msg = MsgSend {
+                        method: String::from("bgp-network:add"),
+                        data: self.bgp_vrf_network(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    // XXX
                     let msg = MsgSend {
                         method: String::from("bgp-network:add"),
                         data: self.bgp_vrf_static(),

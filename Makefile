@@ -42,6 +42,7 @@ cap:
 
 run:
 	@mkdir -p /tmp/ipc/pair
+	@mkdir -p /tmp/ipc/sync
 	@sudo rm -f /tmp/ipc/pair/config-ng_isisd
 	@sudo rm -f /tmp/ipc/pair/config-ng_bgpd
 	@RUSTFLAGS="--cfg tokio_unstable" cargo build --bin zebra-rs --release
