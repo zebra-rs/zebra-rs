@@ -11,6 +11,8 @@ StandardError=syslog
 ExecStart=/usr/bin/zebra-rs
 ExecStop=/bin/kill -INT ${MAINPID}
 Restart=always
+LimitNOFILE=32768
+LimitNOFILESoft=32768
 
 [Install]
 WantedBy=multi-user.target
