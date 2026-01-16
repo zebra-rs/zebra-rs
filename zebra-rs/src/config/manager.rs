@@ -421,15 +421,29 @@ impl ConfigManager {
                     super::yaml::yaml_parse(req.config.as_str())
                 };
 
-                // Here we are.
+                // Read json configuration and make it as a list of "set"
+                // commands.
                 let cmds = json_read(entry, config.as_str());
                 self.store.candidate_clear();
                 for cmd in cmds.iter() {
-                    let _ = self.execute(mode, cmd);
+                    let (code, output, paths) = self.execute(mode, cmd);
+                    if code != ExecCode::Show {
+                        let resp = DeployResponse {
+                            code: code as u32,
+                            cmd: cmd.clone(),
+                        };
+                        // Discard candidate config.
+                        self.store.discard();
+                        req.resp.send(resp).unwrap();
+                        return;
+                    }
                 }
                 let _ = self.commit_config();
 
-                let resp = DeployResponse {};
+                let resp = DeployResponse {
+                    code: ExecCode::Success as u32,
+                    cmd: String::new(),
+                };
                 req.resp.send(resp).unwrap();
             }
             Message::DisplayTx(req) => {

@@ -120,8 +120,8 @@ pub struct DeployRequest {
 
 #[derive(Debug, Default)]
 pub struct DeployResponse {
-    // pub code: u32,
-    // pub output: String,
+    pub code: u32,
+    pub cmd: String,
 }
 
 #[derive(Debug)]
