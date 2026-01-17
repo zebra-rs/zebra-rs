@@ -13,7 +13,7 @@ use super::parse::parse;
 use super::paths::{path_try_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
-use super::{Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
+use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
 use libyang::{Entry, YangStore, to_entry};
 use similar::TextDiff;
 use std::cell::RefCell;
@@ -429,7 +429,8 @@ impl ConfigManager {
                     let (code, output, paths) = self.execute(mode, cmd);
                     if code != ExecCode::Show {
                         let resp = DeployResponse {
-                            code: code as u32,
+                            apply_code: ApplyCode::ParseError,
+                            exec_code: code,
                             cmd: cmd.clone(),
                         };
                         // Discard candidate config.
@@ -441,7 +442,8 @@ impl ConfigManager {
                 let _ = self.commit_config();
 
                 let resp = DeployResponse {
-                    code: ExecCode::Success as u32,
+                    apply_code: ApplyCode::Applied,
+                    exec_code: ExecCode::Success,
                     cmd: String::new(),
                 };
                 req.resp.send(resp).unwrap();

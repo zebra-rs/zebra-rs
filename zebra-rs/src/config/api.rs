@@ -1,5 +1,5 @@
 use super::vtysh::CommandPath;
-use super::{Completion, ExecCode};
+use super::{ApplyCode, Completion, ExecCode};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::Sender;
 
@@ -120,7 +120,8 @@ pub struct DeployRequest {
 
 #[derive(Debug, Default)]
 pub struct DeployResponse {
-    pub code: u32,
+    pub apply_code: ApplyCode,
+    pub exec_code: ExecCode,
     pub cmd: String,
 }
 
