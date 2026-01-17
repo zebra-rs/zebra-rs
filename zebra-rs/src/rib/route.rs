@@ -117,7 +117,7 @@ impl Rib {
                 entry.ifindex = ifindex;
                 entry.set_valid(true);
 
-                println!("Adding Connected Prefix {prefix}");
+                // println!("Adding Connected Prefix {prefix}");
 
                 rib_add_system(&mut self.table, &prefix, entry);
                 rib_selection_ipv4(
