@@ -4,8 +4,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::exit;
 use tonic::Request;
-use vtysh::ApplyRequest;
 use vtysh::apply_client::ApplyClient;
+use vtysh::{ApplyCode, ApplyRequest};
 
 pub mod vtysh {
     tonic::include_proto!("vtysh");
@@ -48,7 +48,11 @@ pub async fn apply(host: &String, filename: &String) -> Result<()> {
 
     let reply = response.into_inner();
 
-    println!("Response received: {:?}", reply);
+    if reply.apply_code == ApplyCode::Applied as i32 {
+        println!("applied");
+    } else {
+        println!("error: {}", reply.description)
+    }
 
     Ok(())
 }

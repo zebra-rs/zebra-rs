@@ -194,8 +194,9 @@ enum ApplyCode {
 }
 
 message ApplyReply {
-  ApplyCode code = 1;
-  string description = 2;
+  ApplyCode apply_code = 1;
+  ExecCode exec_code = 2;
+  string description = 3;
 }
 
 service Apply {
