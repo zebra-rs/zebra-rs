@@ -1,6 +1,7 @@
 mod vtysh {
     tonic::include_proto!("vtysh");
 }
+pub use vtysh::ApplyCode;
 pub use vtysh::ExecCode;
 
 mod manager;

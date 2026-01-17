@@ -13,8 +13,11 @@ use super::parse::parse;
 use super::paths::{path_try_trim, paths_str};
 use super::util::trim_first_line;
 use super::vtysh::CommandPath;
-use super::{Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
+use super::yaml::yaml_parse;
+use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
+
 use libyang::{Entry, YangStore, to_entry};
+use serde_json::Value;
 use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -414,22 +417,37 @@ impl ConfigManager {
                 }
                 let entry = entry.unwrap();
 
-                // Parse as YAML.
-                let config = if req.config.as_str().starts_with('{') {
-                    req.config
-                } else {
-                    super::yaml::yaml_parse(req.config.as_str())
+                let cmds = match config_format_type(&req.config) {
+                    ConfigFormat::Cli => load_config_file(req.config.clone()),
+                    ConfigFormat::Json => json_read(entry, req.config.as_str()),
+                    ConfigFormat::Yaml => {
+                        let config = yaml_parse(req.config.as_str());
+                        json_read(entry, config.as_str())
+                    }
                 };
 
-                // Here we are.
-                let cmds = json_read(entry, config.as_str());
                 self.store.candidate_clear();
                 for cmd in cmds.iter() {
-                    let _ = self.execute(mode, cmd);
+                    let (code, output, paths) = self.execute(mode, cmd);
+                    if code != ExecCode::Show {
+                        let resp = DeployResponse {
+                            apply_code: ApplyCode::ParseError,
+                            exec_code: code,
+                            cmd: cmd.clone(),
+                        };
+                        // Discard candidate config.
+                        self.store.discard();
+                        req.resp.send(resp).unwrap();
+                        return;
+                    }
                 }
                 let _ = self.commit_config();
 
-                let resp = DeployResponse {};
+                let resp = DeployResponse {
+                    apply_code: ApplyCode::Applied,
+                    exec_code: ExecCode::Success,
+                    cmd: String::new(),
+                };
                 req.resp.send(resp).unwrap();
             }
             Message::DisplayTx(req) => {
@@ -573,5 +591,23 @@ fn has_dynamic(input: &str) -> Option<String> {
         Some(String::from("bgp:neighbor"))
     } else {
         None
+    }
+}
+
+#[derive(Debug)]
+pub enum ConfigFormat {
+    Cli,
+    Json,
+    Yaml,
+}
+
+pub fn config_format_type(config_str: &String) -> ConfigFormat {
+    let first_line = config_str.lines().next().unwrap_or("").trim();
+    if first_line.starts_with('{') {
+        ConfigFormat::Json
+    } else if first_line.ends_with('{') {
+        ConfigFormat::Cli
+    } else {
+        ConfigFormat::Yaml
     }
 }

@@ -6,6 +6,7 @@ use serde_json::{Value, from_value, to_string};
 
 struct Nanomsg {
     socket: Socket,
+    bgp_instance_request: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -207,6 +208,13 @@ struct BgpInstance {
     redistribute: RedistributeAf,
     #[serde(rename = "route-target-in")]
     route_target_in: Vec<String>,
+    #[serde(rename = "route-target-out")]
+    route_target_out: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BgpInstanceOnly {
+    instance: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,7 +222,7 @@ struct BgpNeighbor {
     #[serde(rename = "vrf-id")]
     vrf_id: u32,
     #[serde(rename = "bgp-instance")]
-    bgp_instance: u32,
+    bgp_instance: BgpInstanceOnly,
     address: Ipv4Addr,
     #[serde(rename = "remote-as")]
     remote_as: u32,
@@ -222,17 +230,22 @@ struct BgpNeighbor {
     local_as: u32,
     #[serde(rename = "address-family")]
     address_family: Vec<BgpAddressFamily>,
+    #[serde(rename = "update-source")]
+    update_source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BgpRoute {
     afi: u32,
     safi: u32,
-    #[serde(rename = "route-distinguisher")]
-    rd: String,
+    #[serde(
+        rename = "route-distinguisher",
+        skip_serializing_if = "Option::is_none"
+    )]
+    rd: Option<String>,
     prefix: String,
-    #[serde(rename = "mpls-label")]
-    mpls_label: u32,
+    #[serde(rename = "mpls-label", skip_serializing_if = "Option::is_none")]
+    mpls_label: Option<u32>,
 }
 
 // network 192.168.3.0 255.255.255.0 rd 1:1 label 128
@@ -273,7 +286,10 @@ impl Nanomsg {
     pub fn new(path: &str) -> anyhow::Result<Self> {
         let mut socket = Socket::new(Protocol::Pair)?;
         socket.bind(path)?;
-        let nanomsg = Self { socket };
+        let nanomsg = Self {
+            socket,
+            bgp_instance_request: false,
+        };
         Ok(nanomsg)
     }
 
@@ -512,6 +528,7 @@ impl Nanomsg {
             router_id: router_id,
             redistribute,
             route_target_in: vec![],
+            route_target_out: vec![],
         };
         MsgEnum::BgpInstance(msg)
     }
@@ -519,7 +536,8 @@ impl Nanomsg {
     fn bgp_vrf(&self) -> MsgEnum {
         let router_id = "192.168.10.1".parse::<Ipv4Addr>().unwrap();
         let redist = Redistribute { typ: 1 };
-        let redistribute = RedistributeAf { ipv4: vec![redist] };
+        // let redistribute = RedistributeAf { ipv4: vec![redist] };
+        let redistribute = RedistributeAf { ipv4: vec![] };
         let msg = BgpInstance {
             vrf_id: 1,
             asn: 65501,
@@ -527,35 +545,50 @@ impl Nanomsg {
             router_id: router_id,
             redistribute,
             route_target_in: vec!["1:1".to_string()],
+            route_target_out: vec!["1:1".to_string()],
         };
         MsgEnum::BgpInstance(msg)
     }
 
     fn bgp_neighbor(&self) -> MsgEnum {
-        let address = "192.168.2.2".parse::<Ipv4Addr>().unwrap();
+        let address = "10.0.0.6".parse::<Ipv4Addr>().unwrap();
         let ipv4_uni = BgpAddressFamily { afi: 1, safi: 1 };
-        let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
+        let ipv4_vpn = BgpAddressFamily { afi: 1, safi: 4 };
         let msg = BgpNeighbor {
             vrf_id: 0,
-            bgp_instance: 1,
+            bgp_instance: BgpInstanceOnly { instance: 1 },
             address,
             remote_as: 65501,
             local_as: 65501,
-            address_family: vec![ipv4_uni, vpnv4_uni],
+            address_family: vec![ipv4_uni, ipv4_vpn],
+            update_source: Some(String::from("10.0.0.1")),
         };
         MsgEnum::BgpNeighbor(msg)
     }
 
-    fn bgp_network(&self) -> MsgEnum {
-        let address = "192.168.2.2".parse::<Ipv4Addr>().unwrap();
-        let ipv4_uni = BgpAddressFamily { afi: 1, safi: 1 };
-        let vpnv4_uni = BgpAddressFamily { afi: 1, safi: 4 };
+    fn bgp_vrf_network(&self) -> MsgEnum {
         let route = BgpRoute {
             afi: 1,
-            safi: 1,
-            rd: "1:1".to_string(),
+            safi: 4, // MPLS-VPN
+            rd: Some("1:1".to_string()),
             prefix: "192.168.3.0/24".to_string(),
-            mpls_label: 18,
+            mpls_label: Some(18),
+        };
+        let msg = BgpNetwork {
+            vrf_id: 0,
+            bgp_instance: 1,
+            route,
+        };
+        MsgEnum::BgpNetwork(msg)
+    }
+
+    fn bgp_vrf_static(&self) -> MsgEnum {
+        let route = BgpRoute {
+            afi: 1,
+            safi: 1, // Unicast
+            rd: None,
+            prefix: "192.168.101.0/24".to_string(),
+            mpls_label: None,
         };
         let msg = BgpNetwork {
             vrf_id: 1,
@@ -589,6 +622,7 @@ impl Nanomsg {
             Ok(msg) => {
                 println!("method {:?}", msg.method);
                 if msg.method == "bgp-global:request" {
+                    self.bgp_instance_request = false;
                     let msg = MsgSend {
                         method: String::from("vrf:add"),
                         data: self.vrf(),
@@ -602,6 +636,11 @@ impl Nanomsg {
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
                 if msg.method == "bgp-instance:request" {
+                    if self.bgp_instance_request {
+                        return Ok(());
+                    } else {
+                        self.bgp_instance_request = true;
+                    }
                     let msg = MsgSend {
                         method: String::from("bgp-instance:add"),
                         data: self.bgp_instance(),
@@ -622,10 +661,16 @@ impl Nanomsg {
                         data: self.bgp_vrf(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
-                    //
+
                     let msg = MsgSend {
                         method: String::from("bgp-network:add"),
-                        data: self.bgp_network(),
+                        data: self.bgp_vrf_network(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("bgp-network:add"),
+                        data: self.bgp_vrf_static(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
@@ -664,11 +709,11 @@ impl Nanomsg {
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
-                    // let msg = MsgSend {
-                    //     method: String::from("segment-routing:update"),
-                    //     data: self.segment_routing_update(),
-                    // };
-                    // self.socket.write_all(to_string(&msg)?.as_bytes());
+                    let msg = MsgSend {
+                        method: String::from("segment-routing:update"),
+                        data: self.segment_routing_update(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
 
                     // thread::sleep(Duration::from_secs(10));
                     // println!("sent");

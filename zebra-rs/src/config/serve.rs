@@ -296,15 +296,13 @@ impl Apply for ApplyService {
         let (tx, rx) = oneshot::channel();
         let deploy = DeployRequest { config, resp: tx };
         self.tx.send(Message::Deploy(deploy)).await.unwrap();
-        let _resp = rx.await.unwrap();
-
-        let code = ApplyCode::Applied;
-        let description = String::from("All lines processed successfully.");
+        let resp = rx.await.unwrap();
 
         // Create the reply based on the processing outcome
         let reply = ApplyReply {
-            code: code as i32,
-            description,
+            apply_code: resp.apply_code as i32,
+            exec_code: resp.exec_code as i32,
+            description: resp.cmd,
         };
 
         // Return the response
