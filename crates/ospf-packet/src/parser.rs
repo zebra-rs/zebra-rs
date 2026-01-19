@@ -5,13 +5,13 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
-use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::error::{ErrorKind, make_error};
+use nom::number::complete::{be_u8, be_u24, be_u64};
 use nom::{Err, IResult};
 use nom_derive::*;
 
-use super::util::{many0, Emit, ParseBe};
-use super::{OspfLsType, OspfType};
+use super::util::{Emit, ParseBe};
+use super::{OspfLsType, OspfType, many0_complete};
 
 // OSPF version.
 const OSPF_VERSION: u8 = 2;
@@ -147,23 +147,23 @@ impl Ospfv2Payload {
 }
 
 pub fn parse_ipv4addr_vec(input: &[u8]) -> IResult<&[u8], Vec<Ipv4Addr>> {
-    many0(Ipv4Addr::parse_be)(input)
+    many0_complete(Ipv4Addr::parse_be).parse(input)
 }
 
 pub fn parse_tos_routes(input: &[u8]) -> IResult<&[u8], Vec<TosRoute>> {
-    many0(TosRoute::parse_be)(input)
+    many0_complete(TosRoute::parse_be).parse(input)
 }
 
 pub fn parse_external_tos_routes(input: &[u8]) -> IResult<&[u8], Vec<ExternalTosRoute>> {
-    many0(ExternalTosRoute::parse_be)(input)
+    many0_complete(ExternalTosRoute::parse_be).parse(input)
 }
 
 pub fn parse_router_links(input: &[u8]) -> IResult<&[u8], Vec<RouterLsaLink>> {
-    many0(RouterLsaLink::parse_be)(input)
+    many0_complete(RouterLsaLink::parse_be).parse(input)
 }
 
 pub fn parse_router_tos_routes(input: &[u8]) -> IResult<&[u8], Vec<OspfRouterTOS>> {
-    many0(OspfRouterTOS::parse_be)(input)
+    many0_complete(OspfRouterTOS::parse_be).parse(input)
 }
 
 #[derive(Debug, NomBE)]
