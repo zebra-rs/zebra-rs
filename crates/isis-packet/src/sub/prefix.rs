@@ -9,8 +9,8 @@ use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{ParseBe, TlvEmitter, many0};
-use crate::{Algo, IsisTlv, IsisTlvType, SidLabelValue};
+use crate::util::{ParseBe, TlvEmitter};
+use crate::{Algo, IsisTlv, IsisTlvType, SidLabelValue, many0_complete};
 
 use super::{Behavior, IsisCodeLen, IsisPrefixCode, IsisSrv6SidSub2Code, IsisSubTlvUnknown};
 
@@ -93,7 +93,7 @@ impl ParseBe<IsisSubSrv6EndSid> for IsisSubSrv6EndSid {
         if sub2_len == 0 {
             return Ok((input, sub));
         }
-        let (_, sub2s) = many0(IsisSub2Tlv::parse_subs)(input)?;
+        let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(input)?;
         sub.sub2s = sub2s;
         Ok((input, sub))
     }
@@ -249,7 +249,7 @@ pub struct IsisTlvExtIpReach {
 
 impl ParseBe<IsisTlvExtIpReach> for IsisTlvExtIpReach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, entries) = many0(IsisTlvExtIpReachEntry::parse_be)(input)?;
+        let (input, entries) = many0_complete(IsisTlvExtIpReachEntry::parse_be).parse(input)?;
         Ok((input, Self { entries }))
     }
 }
@@ -283,7 +283,7 @@ pub struct IsisTlvMtIpReach {
 impl ParseBe<IsisTlvMtIpReach> for IsisTlvMtIpReach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, mt) = be_u16(input)?;
-        let (input, entries) = many0(IsisTlvExtIpReachEntry::parse_be)(input)?;
+        let (input, entries) = many0_complete(IsisTlvExtIpReachEntry::parse_be).parse(input)?;
         Ok((
             input,
             Self {
@@ -367,7 +367,7 @@ pub struct IsisTlvIpv6Reach {
 
 impl ParseBe<IsisTlvIpv6Reach> for IsisTlvIpv6Reach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, entries) = many0(IsisTlvIpv6ReachEntry::parse_be)(input)?;
+        let (input, entries) = many0_complete(IsisTlvIpv6ReachEntry::parse_be).parse(input)?;
         Ok((input, Self { entries }))
     }
 }
@@ -410,7 +410,7 @@ pub struct IsisTlvMtIpv6Reach {
 impl ParseBe<IsisTlvMtIpv6Reach> for IsisTlvMtIpv6Reach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, mt) = be_u16(input)?;
-        let (input, entries) = many0(IsisTlvIpv6ReachEntry::parse_be)(input)?;
+        let (input, entries) = many0_complete(IsisTlvIpv6ReachEntry::parse_be).parse(input)?;
         Ok((
             input,
             Self {
@@ -546,7 +546,7 @@ impl ParseBe<IsisTlvExtIpReachEntry> for IsisTlvExtIpReachEntry {
         }
         let (input, sublen) = be_u8(input)?;
         let (sub, input) = input.split_at(sublen as usize);
-        let (_, subs) = many0(IsisSubTlv::parse_subs)(sub)?;
+        let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
         Ok((input, tlv))
     }
@@ -570,7 +570,7 @@ impl ParseBe<IsisTlvIpv6ReachEntry> for IsisTlvIpv6ReachEntry {
         }
         let (input, sublen) = be_u8(input)?;
         let (sub, input) = input.split_at(sublen as usize);
-        let (_, subs) = many0(IsisSubTlv::parse_subs)(sub)?;
+        let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
         Ok((input, tlv))
     }
@@ -647,7 +647,7 @@ impl ParseBe<Srv6Locator> for Srv6Locator {
             return Ok((input, tlv));
         }
         let (sub, input) = input.split_at(sublen as usize);
-        let (_, subs) = many0(IsisSubTlv::parse_subs)(sub)?;
+        let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
         Ok((input, tlv))
     }
@@ -662,7 +662,7 @@ pub struct IsisTlvSrv6 {
 impl ParseBe<IsisTlvSrv6> for IsisTlvSrv6 {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, flags) = be_u16(input)?;
-        let (input, locators) = many0(Srv6Locator::parse_be)(input)?;
+        let (input, locators) = many0_complete(Srv6Locator::parse_be).parse(input)?;
         Ok((
             input,
             Self {

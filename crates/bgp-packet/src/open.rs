@@ -6,7 +6,7 @@ use nom::IResult;
 use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
-use crate::{BgpCap, BgpHeader, CapabilityHeader, CapabilityPacket, many0};
+use crate::{BgpCap, BgpHeader, CapabilityHeader, CapabilityPacket, many0_complete};
 
 pub const BGP_VERSION: u8 = 4;
 
@@ -62,7 +62,7 @@ impl OpenPacket {
             return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
         }
         let (opts, input) = input.split_at(len as usize);
-        let (_, caps) = many0(parse_caps).parse(opts)?;
+        let (_, caps) = many0_complete(parse_caps).parse(opts)?;
         let bgp_cap = BgpCap::from(caps);
         packet.bgp_cap = bgp_cap;
         Ok((input, packet))
@@ -72,7 +72,7 @@ impl OpenPacket {
 fn parse_caps(input: &[u8]) -> IResult<&[u8], Vec<CapabilityPacket>> {
     let (input, header) = CapabilityHeader::parse_be(input)?;
     let (opts, input) = input.split_at(header.length as usize);
-    let (_, caps) = many0(CapabilityPacket::parse_cap).parse(opts)?;
+    let (_, caps) = many0_complete(CapabilityPacket::parse_cap).parse(opts)?;
     Ok((input, caps))
 }
 

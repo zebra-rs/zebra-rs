@@ -8,7 +8,7 @@ use nom_derive::*;
 
 use crate::{
     Afi, EvpnRoute, Ipv4Nlri, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4, Safi, Vpnv4Nexthop,
-    Vpnv4Nlri, many0,
+    Vpnv4Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach};
@@ -103,7 +103,8 @@ impl MpNlriReachAttr {
             let nhop: Ipv4Addr = Ipv4Addr::from(nhop);
             let nhop = Vpnv4Nexthop { rd, nhop };
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) = many0(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) =
+                many0_complete(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpNlriReachAttr::Vpnv4 {
                 snpa,
                 nhop,
@@ -118,7 +119,8 @@ impl MpNlriReachAttr {
             let (input, nhop) = be_u128(input)?;
             let nhop = IpAddr::V6(Ipv6Addr::from(nhop));
             let (input, snpa) = be_u8(input)?;
-            let (_, updates) = many0(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (_, updates) =
+                many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpNlriReachAttr::Ipv6 {
                 snpa,
                 nhop,
@@ -143,7 +145,8 @@ impl MpNlriReachAttr {
             let (input, snpa) = be_u8(input)?;
 
             // EVPN
-            let (input, updates) = many0(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
+            let (input, updates) =
+                many0_complete(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
 
             let mp_nlri = MpNlriReachAttr::Evpn {
                 snpa,
@@ -167,7 +170,8 @@ impl MpNlriReachAttr {
                 (input, nhop)
             };
             let (input, snpa) = be_u8(input)?;
-            let (input, updates) = many0(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
+            let (input, updates) =
+                many0_complete(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
             let rtc_nlri = MpNlriReachAttr::Rtcv4 {
                 snpa,
                 nhop,

@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
-use nom::number::complete::be_u8;
 use nom::IResult;
+use nom::number::complete::be_u8;
 use nom_derive::*;
 
 #[repr(u8)]

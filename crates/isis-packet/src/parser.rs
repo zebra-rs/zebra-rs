@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 
 use super::checksum_calc;
-use super::util::{ParseBe, TlvEmitter, many0, u32_u8_3};
+use super::util::{ParseBe, TlvEmitter, u32_u8_3};
 use super::{
     IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvMtIpReach, IsisTlvMtIpv6Reach,
-    IsisTlvRouterCap, IsisTlvSrv6, IsisTlvType, IsisType,
+    IsisTlvRouterCap, IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
 };
 
 // IS-IS discriminator.
@@ -1139,7 +1139,7 @@ impl IsisTlv {
     }
 
     pub fn parse_tlvs(input: &[u8]) -> IResult<&[u8], Vec<Self>> {
-        many0(Self::parse_tlv)(input)
+        many0_complete(Self::parse_tlv).parse(input)
     }
 }
 

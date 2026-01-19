@@ -7,7 +7,7 @@ use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u32};
 use nom_derive::*;
 
-use crate::{ParseNlri, many0, nlri_psize};
+use crate::{ParseNlri, many0_complete, nlri_psize};
 
 #[derive(Debug, Clone)]
 pub struct Ipv4Nlri {
@@ -38,6 +38,6 @@ pub fn parse_bgp_nlri_ipv4(
     add_path: bool,
 ) -> IResult<&[u8], Vec<Ipv4Nlri>> {
     let (nlri, input) = input.split_at(length as usize);
-    let (_, nlris) = many0(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(nlri)?;
+    let (_, nlris) = many0_complete(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(nlri)?;
     Ok((input, nlris))
 }

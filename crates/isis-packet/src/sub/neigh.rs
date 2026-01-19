@@ -8,10 +8,10 @@ use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{ParseBe, TlvEmitter, many0, u32_u8_3};
+use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
 use crate::{
     Algo, IPV4_ADDR_LEN, IPV6_ADDR_LEN, IsisNeighborId, IsisSysId, IsisTlv, IsisTlvType,
-    SidLabelValue,
+    SidLabelValue, many0_complete,
 };
 
 use super::{Behavior, IsisCodeLen, IsisNeighCode, IsisSub2Tlv, IsisSubTlvUnknown};
@@ -29,7 +29,7 @@ impl From<IsisTlvExtIsReach> for IsisTlv {
 
 impl ParseBe<IsisTlvExtIsReach> for IsisTlvExtIsReach {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, entries) = many0(IsisTlvExtIsReachEntry::parse_be)(input)?;
+        let (input, entries) = many0_complete(IsisTlvExtIsReachEntry::parse_be).parse(input)?;
         Ok((input, Self { entries }))
     }
 }
@@ -81,7 +81,7 @@ impl ParseBe<IsisTlvExtIsReachEntry> for IsisTlvExtIsReachEntry {
         let (input, metric) = be_u24(input)?;
         let (input, sublen) = be_u8(input)?;
         let (sub, input) = input.split_at(sublen as usize);
-        let (_, subs) = many0(IsisSubTlv::parse_subs)(sub)?;
+        let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
 
         let mut tlv = Self::default();
         tlv.neighbor_id.id.copy_from_slice(neighbor_id);
@@ -380,7 +380,7 @@ impl ParseBe<IsisSubSrv6EndXSid> for IsisSubSrv6EndXSid {
         if sub2_len == 0 {
             return Ok((input, sub));
         }
-        let (_, sub2s) = many0(IsisSub2Tlv::parse_subs)(input)?;
+        let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(input)?;
         sub.sub2s = sub2s;
         Ok((input, sub))
     }
@@ -446,7 +446,7 @@ impl ParseBe<IsisSubSrv6LanEndXSid> for IsisSubSrv6LanEndXSid {
         if sub2_len == 0 {
             return Ok((input, sub));
         }
-        let (_, sub2s) = many0(IsisSub2Tlv::parse_subs)(input)?;
+        let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(input)?;
         sub.sub2s = sub2s;
         Ok((input, sub))
     }

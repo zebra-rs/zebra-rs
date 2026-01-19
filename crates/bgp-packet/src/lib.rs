@@ -34,8 +34,8 @@ pub use bgp_nexthop::*;
 pub mod bgp_cap;
 pub use bgp_cap::*;
 
-pub mod many;
-pub use many::many0;
+pub mod many0;
+pub use many0::many0_complete;
 
 pub mod parse_be;
 pub use parse_be::{ParseBe, ParseNlri};
