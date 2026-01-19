@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{AttrType, ParseBe, many0};
+use crate::{AttrType, ParseBe, many0_complete};
 
 use super::aspath_token::{Token, tokenizer};
 use super::{AttrEmitter, AttrFlags};
@@ -64,7 +64,7 @@ impl As2Path {
 
 impl ParseBe<As2Path> for As2Path {
     fn parse_be(input: &[u8]) -> IResult<&[u8], As2Path> {
-        let (input, segs) = many0(parse_bgp_attr_as2_segment).parse(input)?;
+        let (input, segs) = many0_complete(parse_bgp_attr_as2_segment).parse(input)?;
         let mut path = As2Path { segs, length: 0 };
         path.length = path.calculate_length();
         Ok((input, path))
@@ -166,7 +166,7 @@ impl AttrEmitter for As4Path {
 
 impl ParseBe<As4Path> for As4Path {
     fn parse_be(input: &[u8]) -> IResult<&[u8], As4Path> {
-        let (input, segs) = many0(parse_bgp_attr_as4_segment).parse(input)?;
+        let (input, segs) = many0_complete(parse_bgp_attr_as4_segment).parse(input)?;
         let mut path = As4Path {
             segs: segs.into(),
             length: 0,
