@@ -7,8 +7,8 @@ use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{ParseBe, TlvEmitter, many0, u32_u8_3};
-use crate::{Algo, IsisTlv, IsisTlvType};
+use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
+use crate::{Algo, IsisTlv, IsisTlvType, many0_complete};
 
 use super::{IsisCapCode, IsisCodeLen, IsisSubTlvUnknown};
 
@@ -175,7 +175,7 @@ pub struct IsisSubSegmentRoutingAlgo {
 
 impl ParseBe<IsisSubSegmentRoutingAlgo> for IsisSubSegmentRoutingAlgo {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, algo) = many0(Algo::parse_be)(input)?;
+        let (input, algo) = many0_complete(Algo::parse_be).parse(input)?;
         Ok((input, Self { algo }))
     }
 }
@@ -283,7 +283,7 @@ impl ParseBe<IsisTlvRouterCap> for IsisTlvRouterCap {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, router_id) = Ipv4Addr::parse_be(input)?;
         let (input, flags) = be_u8(input)?;
-        let (input, subs) = many0(IsisSubTlv::parse_subs)(input)?;
+        let (input, subs) = many0_complete(IsisSubTlv::parse_subs).parse(input)?;
         let tlv = Self {
             router_id,
             flags: flags.into(),
