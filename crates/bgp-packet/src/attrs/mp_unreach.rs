@@ -6,7 +6,7 @@ use nom_derive::*;
 
 use crate::{
     Afi, EvpnRoute, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Safi,
-    Vpnv4Nlri, many0,
+    Vpnv4Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach};
@@ -77,7 +77,8 @@ impl MpNlriUnreachAttr {
                 let mp_nlri = MpNlriUnreachAttr::Vpnv4Eor;
                 return Ok((input, mp_nlri));
             }
-            let (input, withdrawal) = many0(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (input, withdrawal) =
+                many0_complete(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpNlriUnreachAttr::Vpnv4(withdrawal);
             return Ok((input, mp_nlri));
         }
@@ -86,7 +87,8 @@ impl MpNlriUnreachAttr {
                 let mp_nlri = MpNlriUnreachAttr::Ipv6Eor;
                 return Ok((input, mp_nlri));
             }
-            let (input, withdrawal) = many0(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let (input, withdrawal) =
+                many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpNlriUnreachAttr::Ipv6Nlri(withdrawal);
             return Ok((input, mp_nlri));
         }
@@ -95,7 +97,8 @@ impl MpNlriUnreachAttr {
                 let mp_nlri = MpNlriUnreachAttr::EvpnEor;
                 return Ok((input, mp_nlri));
             }
-            let (input, evpns) = many0(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
+            let (input, evpns) =
+                many0_complete(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpNlriUnreachAttr::Evpn(evpns);
             return Ok((input, mp_nlri));
         }
@@ -104,7 +107,7 @@ impl MpNlriUnreachAttr {
                 let mp_nlri = MpNlriUnreachAttr::Rtcv4Eor;
                 return Ok((input, mp_nlri));
             }
-            let (input, rtcv4) = many0(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
+            let (input, rtcv4) = many0_complete(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpNlriUnreachAttr::Rtcv4(rtcv4);
             return Ok((input, mp_nlri));
         }

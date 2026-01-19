@@ -7,7 +7,7 @@ use nom::IResult;
 use nom::Parser;
 use nom::number::complete::be_u32;
 
-use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe, many0};
+use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe, many0_complete};
 
 #[derive(Clone, Default)]
 pub struct ClusterList {
@@ -22,7 +22,7 @@ impl ClusterList {
 
 impl ParseBe<ClusterList> for ClusterList {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, ids) = many0(be_u32).parse(input)?;
+        let (input, ids) = many0_complete(be_u32).parse(input)?;
         let list = ids.into_iter().map(Ipv4Addr::from).collect();
         Ok((input, ClusterList { list }))
     }
