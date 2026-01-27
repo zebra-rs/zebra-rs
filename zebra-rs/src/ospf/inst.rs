@@ -147,6 +147,7 @@ impl Ospf {
 
     pub fn router_lsa_originate(&mut self) {
         if let Some(area) = self.areas.get_mut(AREA0) {
+            tracing::info!("Router LSA Originate");
             let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
 
             let mut r_lsa = RouterLsa::default();

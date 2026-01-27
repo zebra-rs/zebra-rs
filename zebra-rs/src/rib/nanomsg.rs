@@ -33,6 +33,45 @@ struct RouterIdRequest {
     vrf_id: u32,
 }
 
+// {
+//     "cmd": 1,
+//   "flags": 0,
+//   "type": 3,
+//   "sub-type": 0,
+//   "vrf-id": 1,
+//   "destination": "192.168.3.0/24",
+//   "distance": 0,
+//   "metric": 0,
+//   "tag": 0,
+//     "next-hop": [
+//     {
+//         "interface": "vip3"
+//     }
+//     ]
+// }
+#[derive(Debug, Serialize, Deserialize)]
+struct RedistInfoNexthop {
+    interface: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RedistInfo {
+    cmd: u32,
+    flags: u32,
+    #[serde(rename = "type")]
+    typ: u32,
+    #[serde(rename = "sub-type")]
+    sub_type: u32,
+    #[serde(rename = "vrf-id")]
+    vrf_id: u32,
+    destination: String,
+    distance: u32,
+    metric: u32,
+    tag: u32,
+    #[serde(rename = "next-hop")]
+    next_hop: Vec<RedistInfoNexthop>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct MsgSend {
     method: String,
@@ -54,6 +93,7 @@ enum MsgEnum {
     BgpNetwork(BgpNetwork),
     Vrf(Vrf),
     Srlg(Srlg),
+    Redist(RedistInfo),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -189,6 +229,8 @@ struct BgpGlobal {
 struct Redistribute {
     #[serde(rename = "type")]
     typ: u32,
+    #[serde(rename = "sub-type")]
+    sub_type: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -519,7 +561,10 @@ impl Nanomsg {
 
     fn bgp_instance(&self) -> MsgEnum {
         let router_id = "10.0.0.1".parse::<Ipv4Addr>().unwrap();
-        let redist = Redistribute { typ: 1 };
+        let redist = Redistribute {
+            typ: 3,
+            sub_type: 0,
+        };
         let redistribute = RedistributeAf { ipv4: vec![redist] };
         let msg = BgpInstance {
             vrf_id: 0,
@@ -533,15 +578,17 @@ impl Nanomsg {
         MsgEnum::BgpInstance(msg)
     }
 
-    fn bgp_vrf(&self) -> MsgEnum {
+    fn bgp_vrf_instance(&self) -> MsgEnum {
         let router_id = "192.168.10.1".parse::<Ipv4Addr>().unwrap();
-        let redist = Redistribute { typ: 1 };
-        // let redistribute = RedistributeAf { ipv4: vec![redist] };
-        let redistribute = RedistributeAf { ipv4: vec![] };
+        let redist = Redistribute {
+            typ: 3,
+            sub_type: 0,
+        };
+        let redistribute = RedistributeAf { ipv4: vec![redist] };
         let msg = BgpInstance {
             vrf_id: 1,
             asn: 65501,
-            instance: 2,
+            instance: 1,
             router_id: router_id,
             redistribute,
             route_target_in: vec!["1:1".to_string()],
@@ -592,10 +639,29 @@ impl Nanomsg {
         };
         let msg = BgpNetwork {
             vrf_id: 1,
-            bgp_instance: 2,
+            bgp_instance: 1,
             route,
         };
         MsgEnum::BgpNetwork(msg)
+    }
+
+    fn redist_info(&self) -> MsgEnum {
+        let nexthop = RedistInfoNexthop {
+            interface: "vip3".to_string(),
+        };
+        let msg = RedistInfo {
+            cmd: 1,
+            flags: 0,
+            typ: 3,
+            sub_type: 0,
+            vrf_id: 1,
+            destination: "192.168.3.0/24".to_string(),
+            distance: 0,
+            metric: 0,
+            tag: 0,
+            next_hop: vec![nexthop],
+        };
+        MsgEnum::Redist(msg)
     }
 
     fn vrf(&self) -> MsgEnum {
@@ -658,7 +724,7 @@ impl Nanomsg {
                     println!("BGP Instance for VRF {}", vrf.data.vrf_name);
                     let msg = MsgSend {
                         method: String::from("bgp-instance:add"),
-                        data: self.bgp_vrf(),
+                        data: self.bgp_vrf_instance(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
 
@@ -671,6 +737,12 @@ impl Nanomsg {
                     let msg = MsgSend {
                         method: String::from("bgp-network:add"),
                         data: self.bgp_vrf_static(),
+                    };
+                    self.socket.write_all(to_string(&msg)?.as_bytes());
+
+                    let msg = MsgSend {
+                        method: String::from("redistribute:information"),
+                        data: self.redist_info(),
                     };
                     self.socket.write_all(to_string(&msg)?.as_bytes());
                 }
