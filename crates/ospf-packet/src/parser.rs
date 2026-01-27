@@ -247,7 +247,7 @@ pub struct DbDescFlags {
 
 impl DbDescFlags {
     pub fn is_all(&self) -> bool {
-        self.master() && self.more() && self.init()
+        self.init() && self.more() && self.master()
     }
 }
 

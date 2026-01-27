@@ -16,6 +16,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf/interface", show_ospf_interface);
         self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor_detail);
         self.show_add("/show/ip/ospf/database", show_ospf_database);
+        self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
     }
 }
 
@@ -153,6 +154,111 @@ fn show_ospf_database(
                 lsa.h.ls_checksum,
                 lsp.links.len(),
             );
+        }
+    }
+
+    Ok(out)
+}
+
+fn show_ospf_database_detail(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut out = String::new();
+
+    if ospf.router_id.is_unspecified() {
+        return Ok(String::from("OSPF router ID is not specified"));
+    }
+
+    writeln!(out)?;
+    writeln!(out, "       OSPF Router with ID ({})", ospf.router_id)?;
+    writeln!(out)?;
+
+    if let Some(area) = ospf.areas.get(AREA0) {
+        writeln!(out, "                Router Link States (Area {})", area.id)?;
+        writeln!(out)?;
+
+        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+            writeln!(out, "  LS age: {}", lsa.h.ls_age)?;
+            writeln!(out, "  Options: 0x{:02x}", lsa.h.options)?;
+            writeln!(out, "  LS Type: Router Links")?;
+            writeln!(out, "  Link State ID: {}", lsa_id)?;
+            writeln!(out, "  Advertising Router: {}", adv_router)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.h.ls_seq_number)?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.h.ls_checksum)?;
+            writeln!(out, "  Length: {}", lsa.h.length)?;
+
+            let OspfLsp::Router(ref lsp) = lsa.lsp else {
+                continue;
+            };
+
+            writeln!(out, "  Number of Links: {}", lsp.links.len())?;
+            writeln!(out)?;
+
+            for link in &lsp.links {
+                let link_type_str = match link.link_type {
+                    1 => "Point-to-Point",
+                    2 => "Transit Network",
+                    3 => "Stub Network",
+                    4 => "Virtual Link",
+                    _ => "Unknown",
+                };
+                writeln!(out, "    Link connected to: {}", link_type_str)?;
+                match link.link_type {
+                    1 => {
+                        writeln!(
+                            out,
+                            "     (Link ID) Neighboring Router ID: {}",
+                            link.link_id
+                        )?;
+                        writeln!(
+                            out,
+                            "     (Link Data) Router Interface address: {}",
+                            link.link_data
+                        )?;
+                    }
+                    2 => {
+                        writeln!(
+                            out,
+                            "     (Link ID) Designated Router address: {}",
+                            link.link_id
+                        )?;
+                        writeln!(
+                            out,
+                            "     (Link Data) Router Interface address: {}",
+                            link.link_data
+                        )?;
+                    }
+                    3 => {
+                        writeln!(
+                            out,
+                            "     (Link ID) Network/subnet number: {}",
+                            link.link_id
+                        )?;
+                        writeln!(out, "     (Link Data) Network Mask: {}", link.link_data)?;
+                    }
+                    4 => {
+                        writeln!(
+                            out,
+                            "     (Link ID) Neighboring Router ID: {}",
+                            link.link_id
+                        )?;
+                        writeln!(
+                            out,
+                            "     (Link Data) Router Interface address: {}",
+                            link.link_data
+                        )?;
+                    }
+                    _ => {
+                        writeln!(out, "     (Link ID) {}", link.link_id)?;
+                        writeln!(out, "     (Link Data) {}", link.link_data)?;
+                    }
+                }
+                writeln!(out, "      Number of TOS metrics: {}", link.num_tos)?;
+                writeln!(out, "       TOS 0 Metric: {}", link.tos_0_metric)?;
+                writeln!(out)?;
+            }
         }
     }
 
