@@ -387,21 +387,36 @@ pub fn ospf_db_desc_recv(
         Down | Attempt | TwoWay | Init => {
             // Already handled.
         }
+        // 10.6.  Receiving Database Description Packets
+        // ExStart
         ExStart => {
             tracing::info!(
                 "DbDesc: ExStart {} <-> {}",
                 nbr.ident.router_id,
                 oi.router_id
             );
+            // o   The initialize(I), more (M) and master(MS) bits are set,
+            //     the contents of the packet are empty, and the neighbor's
+            //     Router ID is larger than the router's own.  In this case
+            //     the router is now Slave.  Set the master/slave bit to
+            //     slave, and set the neighbor data structure's DD sequence
+            //     number to that specified by the master.
             if dd.flags.is_all() && dd.lsa_headers.is_empty() && nbr.ident.router_id > *oi.router_id
             {
-                nbr.dd.seqnum = dd.seqnum;
                 nbr.dd.flags.set_master(false);
                 nbr.dd.flags.set_init(false);
+                nbr.dd.seqnum = dd.seqnum;
                 nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
                 tracing::info!("[DB Desc] Becoming Slave {:?}", nbr.dd.flags);
-            } else if !dd.flags.master()
-                && !dd.flags.init()
+            }
+            // o   The initialize(I) and master(MS) bits are off, the
+            //     packet's DD sequence number equals the neighbor data
+            //     structure's DD sequence number (indicating
+            //     acknowledgment) and the neighbor's Router ID is smaller
+            //     than the router's own.  In this case the router is
+            //     Master.
+            else if !dd.flags.init()
+                && !dd.flags.master()
                 && dd.seqnum == nbr.dd.seqnum
                 && nbr.ident.router_id < *oi.router_id
             {
