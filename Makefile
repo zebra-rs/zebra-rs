@@ -59,3 +59,6 @@ allclean:
 	rm -rf ${HOME}/.cargo/git
 	rm -rf target
 	rm -f Cargo.lock
+
+perf:
+	sudo perf record -g --call-graph dwarf ./target/release/zebra-rs
