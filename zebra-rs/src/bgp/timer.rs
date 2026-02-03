@@ -83,7 +83,7 @@ macro_rules! start_timer {
         Timer::once($time, move || {
             let tx = tx.clone();
             async move {
-                let _ = tx.send(Message::Event(ident, $ev));
+                let _ = tx.send(Message::Event(ident, $ev)).await;
             }
         })
     }};
@@ -97,7 +97,7 @@ macro_rules! start_repeater {
         Timer::repeat($time, move || {
             let tx = tx.clone();
             async move {
-                let _ = tx.send(Message::Event(ident, $ev));
+                let _ = tx.send(Message::Event(ident, $ev)).await;
             }
         })
     }};
@@ -130,9 +130,7 @@ pub fn start_stale_timer(peer: &Peer, afi_safi: AfiSafi, stale_time: u32) -> Tim
     Timer::once(stale_time as u64, move || {
         let tx = tx.clone();
         async move {
-            let _ = tx
-                .send(Message::Event(ident, Event::StaleTimerExipires(afi_safi)))
-                .unwrap();
+            let _ = tx.try_send(Message::Event(ident, Event::StaleTimerExipires(afi_safi)));
         }
     })
 }
