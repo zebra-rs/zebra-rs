@@ -770,7 +770,7 @@ fn show_bgp_route_entry(
 
 // Common helper function for displaying Adj-RIB routes
 fn show_adj_rib_routes(
-    routes: &prefix_trie::PrefixMap<ipnet::Ipv4Net, Vec<crate::bgp::route::BgpRib>>,
+    routes: &std::collections::BTreeMap<ipnet::Ipv4Net, Vec<crate::bgp::route::BgpRib>>,
     router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
