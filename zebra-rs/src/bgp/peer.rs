@@ -252,7 +252,7 @@ pub struct Peer {
     pub param_tx: PeerParam,
     pub param_rx: PeerParam,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
-    pub tx: UnboundedSender<Message>,
+    pub tx: mpsc::Sender<Message>,
     pub config: PeerConfig,
     pub cap_send: BgpCap,
     pub cap_recv: BgpCap,
@@ -275,7 +275,7 @@ impl Peer {
         router_id: Ipv4Addr,
         peer_as: u32,
         address: IpAddr,
-        tx: UnboundedSender<Message>,
+        tx: mpsc::Sender<Message>,
     ) -> Self {
         let mut peer = Self {
             ident,
@@ -369,7 +369,7 @@ impl Peer {
 pub struct ConfigRef<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut LocalRib,
-    pub tx: &'a UnboundedSender<Message>,
+    pub tx: &'a mpsc::Sender<Message>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
 }
 
@@ -638,6 +638,7 @@ pub fn fsm_idle_hold_timer_expires(peer: &mut Peer) -> State {
 }
 
 pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
+    // tracing::info!("Send keepalive {}", peer.ident);
     peer_send_keepalive(peer);
     State::Established
 }
@@ -649,10 +650,10 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
     State::Active
 }
 
-pub fn peer_packet_parse(
+pub async fn peer_packet_parse(
     rx: &[u8],
     ident: IpAddr,
-    tx: UnboundedSender<Message>,
+    tx: mpsc::Sender<Message>,
     config: &mut PeerConfig,
     opt: &mut ParseOption,
 ) -> Result<(), String> {
@@ -662,16 +663,18 @@ pub fn peer_packet_parse(
                 BgpPacket::Open(p) => {
                     // config.cap_recv = p.bgp_cap.clone();
                     cap_addpath_recv(&p.bgp_cap, opt, &config.addpath);
-                    let _ = tx.send(Message::Event(ident, Event::BGPOpen(*p)));
+                    let _ = tx.send(Message::Event(ident, Event::BGPOpen(*p))).await;
                 }
                 BgpPacket::Keepalive(_) => {
-                    let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg));
+                    // tracing::info!("Recv keepavlie {}", ident);
+                    let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg)).await;
                 }
                 BgpPacket::Notification(p) => {
-                    let _ = tx.send(Message::Event(ident, Event::NotifMsg(p)));
+                    // tracing::info!("{p}");
+                    let _ = tx.send(Message::Event(ident, Event::NotifMsg(p))).await;
                 }
                 BgpPacket::Update(p) => {
-                    let _ = tx.send(Message::Event(ident, Event::UpdateMsg(*p)));
+                    let _ = tx.send(Message::Event(ident, Event::UpdateMsg(*p))).await;
                 }
             }
             Ok(())
@@ -682,7 +685,7 @@ pub fn peer_packet_parse(
 
 pub async fn peer_read(
     ident: IpAddr,
-    tx: UnboundedSender<Message>,
+    tx: mpsc::Sender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
     mut opt: ParseOption,
@@ -692,7 +695,7 @@ pub async fn peer_read(
         match read_half.read_buf(&mut buf).await {
             Ok(read_len) => {
                 if read_len == 0 {
-                    let _ = tx.send(Message::Event(ident, Event::ConnFail));
+                    let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
                     return;
                 }
                 while buf.len() >= BGP_HEADER_LEN as usize && buf.len() >= peek_bgp_length(&buf) {
@@ -701,19 +704,19 @@ pub async fn peer_read(
                     let mut remain = buf.split_off(length);
                     remain.reserve(BGP_PACKET_LEN * 2);
 
-                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config, &mut opt) {
+                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config, &mut opt).await {
                         Ok(_) => {
                             buf = remain;
                         }
                         Err(err) => {
-                            let _ = tx.send(Message::Event(ident, Event::ConnFail));
+                            let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
                             return;
                         }
                     }
                 }
             }
             Err(err) => {
-                let _ = tx.send(Message::Event(ident, Event::ConnFail));
+                let _ = tx.send(Message::Event(ident, Event::ConnFail)).await;
             }
         }
     }
@@ -753,10 +756,11 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
         let result = TcpStream::connect(addr).await;
         match result {
             Ok(stream) => {
-                let _ = tx.send(Message::Event(ident, Event::Connected(stream)));
+                //
+                let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
             }
             Err(err) => {
-                let _ = tx.send(Message::Event(ident, Event::ConnFail));
+                let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
             }
         };
     })
@@ -897,8 +901,10 @@ pub fn clear(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt
         return Ok("peer not found".to_string());
     };
 
-    let _ = bgp.tx.send(Message::Event(peer.ident, Event::Stop));
-    Ok(format!("%% peer {} is cleared", addr))
+    match bgp.tx.try_send(Message::Event(peer.ident, Event::Stop)) {
+        Ok(()) => Ok(format!("%% peer {} is cleared", addr)),
+        Err(e) => Ok(format!("%% failed to clear peer {}: {}", addr, e)),
+    }
 }
 
 pub fn clear_keepalive(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt::Error> {
@@ -910,10 +916,16 @@ pub fn clear_keepalive(bgp: &Bgp, args: &mut Args) -> std::result::Result<String
         return Ok("peer not found".to_string());
     };
 
-    let _ = bgp
+    match bgp
         .tx
-        .send(Message::Event(peer.ident, Event::KeepaliveTimerExpires));
-    Ok(format!("%% peer {} keepalive expire event is sent", addr))
+        .try_send(Message::Event(peer.ident, Event::KeepaliveTimerExpires))
+    {
+        Ok(()) => Ok(format!("%% peer {} keepalive expire event is sent", addr)),
+        Err(e) => Ok(format!(
+            "%% failed to send keepalive event for {}: {}",
+            addr, e
+        )),
+    }
 }
 
 pub fn clear_keepalive_recv(
@@ -928,6 +940,14 @@ pub fn clear_keepalive_recv(
         return Ok("peer not found".to_string());
     };
 
-    let _ = bgp.tx.send(Message::Event(peer.ident, Event::KeepAliveMsg));
-    Ok(format!("%% peer {} keepalive recv event is sent", addr))
+    match bgp
+        .tx
+        .try_send(Message::Event(peer.ident, Event::KeepAliveMsg))
+    {
+        Ok(()) => Ok(format!("%% peer {} keepalive recv event is sent", addr)),
+        Err(e) => Ok(format!(
+            "%% failed to send keepalive recv event for {}: {}",
+            addr, e
+        )),
+    }
 }

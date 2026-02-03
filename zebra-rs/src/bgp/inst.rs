@@ -53,8 +53,9 @@ pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
     pub peers: BTreeMap<IpAddr, Peer>,
-    pub tx: UnboundedSender<Message>,
-    pub rx: UnboundedReceiver<Message>,
+    /// Bounded channel for BGP events (capacity: 8192)
+    pub tx: mpsc::Sender<Message>,
+    pub rx: mpsc::Receiver<Message>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -93,7 +94,7 @@ impl Bgp {
         };
         let _ = policy_tx.send(msg);
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(8192);
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
@@ -134,16 +135,19 @@ impl Bgp {
             Message::Event(peer, event) => {
                 match event {
                     Event::BGPOpen(ref msg) => {
-                        // print!("{}", msg);
+                        // tracing::info!("Open from: {}", peer);
                     }
                     Event::UpdateMsg(ref msg) => {
-                        // print!("{}", msg);
+                        // tracing::info!("Update from: {}", peer);
                     }
                     Event::KeepAliveMsg => {
-                        // println!("KeepAlive:");
+                        // tracing::info!("Keepalive from: {}", peer);
+                    }
+                    Event::KeepaliveTimerExpires => {
+                        // tracing::info!("KeepaliveTimerExpires for {}", peer);
                     }
                     _ => {
-                        // println!("Message::Event: {:?}", event);
+                        // tracing::info!("Other Event: {:?} for {}", event, peer);
                     }
                 }
                 fsm(self, peer, event);
@@ -153,7 +157,7 @@ impl Bgp {
                 accept(self, socket, sockaddr);
             }
             Message::Show(tx) => {
-                self.tx.send(Message::Show(tx)).unwrap();
+                let _ = self.tx.try_send(Message::Show(tx));
             }
         }
     }
@@ -233,7 +237,9 @@ impl Bgp {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
                                 // println!("IPv4 connection accepted from: {}", sockaddr);
-                                if let Err(e) = tx_ipv4.send(Message::Accept(socket, sockaddr)) {
+                                if let Err(e) =
+                                    tx_ipv4.send(Message::Accept(socket, sockaddr)).await
+                                {
                                     eprintln!("Failed to send Accept message: {}", e);
                                     break;
                                 }
@@ -261,7 +267,9 @@ impl Bgp {
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
-                                if let Err(e) = tx_ipv6.send(Message::Accept(socket, sockaddr)) {
+                                if let Err(e) =
+                                    tx_ipv6.send(Message::Accept(socket, sockaddr)).await
+                                {
                                     eprintln!("Failed to send Accept message: {}", e);
                                     break;
                                 }
@@ -358,17 +366,34 @@ impl Bgp {
         }
         loop {
             match self.rib_rx.recv().await {
-                Some(RibRx::EoR) => break,
+                Some(RibRx::EoR) => {
+                    tracing::info!("BGP: Received EoR, entering main event loop");
+                    break;
+                }
                 Some(msg) => self.process_rib_msg(msg),
                 None => break,
             }
         }
+        tracing::info!(
+            "BGP: Main event loop started with {} peers",
+            self.peers.len()
+        );
+        let mut event_count: u64 = 0;
+        let mut last_report = std::time::Instant::now();
         loop {
             tokio::select! {
                 Some(msg) = self.rib_rx.recv() => {
                     self.process_rib_msg(msg);
                 }
                 Some(msg) = self.rx.recv() => {
+                    // Decrement queue depth for events from timers
+                    event_count += 1;
+                    // Report every 10 seconds
+                    if last_report.elapsed().as_secs() >= 10 {
+                        tracing::info!("Event loop: processed {} events in last 10s", event_count);
+                        event_count = 0;
+                        last_report = std::time::Instant::now();
+                    }
                     self.process_msg(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
