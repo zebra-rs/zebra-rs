@@ -109,7 +109,7 @@ impl<D: RibDirection> Default for AdjRibTable<D> {
     }
 }
 
-impl<D: RibDirection> AdjRib<D> {
+impl AdjRib<In> {
     // Add a route to Adj-RIB-In
     pub fn add(
         &mut self,
@@ -150,5 +150,36 @@ impl<D: RibDirection> AdjRib<D> {
             Some(rd) => self.v4vpn.entry(rd).or_default().0.contains_key(prefix),
             None => self.v4.0.contains_key(prefix),
         }
+    }
+}
+
+impl AdjRib<Out> {
+    // Add a route to Adj-RIB-In
+    pub fn add(
+        &mut self,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        route: BgpRib,
+    ) -> Option<BgpRib> {
+        None
+    }
+
+    // Add a route to Adj-RIB-In
+    pub fn remove(
+        &mut self,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        id: u32,
+    ) -> Option<BgpRib> {
+        None
+    }
+
+    pub fn count(&self, afi: Afi, safi: Safi) -> usize {
+        0
+    }
+
+    // Check table has prefix.
+    pub fn contains_key(&mut self, rd: Option<RouteDistinguisher>, prefix: &Ipv4Net) -> bool {
+        true
     }
 }
