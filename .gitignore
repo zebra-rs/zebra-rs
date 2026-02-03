@@ -21,3 +21,7 @@ AGENTS.md
 
 # IntelliJ
 .idea
+
+# perf
+perf.data
+perf.data.old
