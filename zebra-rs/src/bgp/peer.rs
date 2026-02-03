@@ -900,3 +900,34 @@ pub fn clear(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt
     let _ = bgp.tx.send(Message::Event(peer.ident, Event::Stop));
     Ok(format!("%% peer {} is cleared", addr))
 }
+
+pub fn clear_keepalive(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt::Error> {
+    let Some(addr) = args.addr() else {
+        return Ok("peer not found".to_string());
+    };
+
+    let Some(peer) = bgp.peers.get(&addr) else {
+        return Ok("peer not found".to_string());
+    };
+
+    let _ = bgp
+        .tx
+        .send(Message::Event(peer.ident, Event::KeepaliveTimerExpires));
+    Ok(format!("%% peer {} keepalive expire event is sent", addr))
+}
+
+pub fn clear_keepalive_recv(
+    bgp: &Bgp,
+    args: &mut Args,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(addr) = args.addr() else {
+        return Ok("peer not found".to_string());
+    };
+
+    let Some(peer) = bgp.peers.get(&addr) else {
+        return Ok("peer not found".to_string());
+    };
+
+    let _ = bgp.tx.send(Message::Event(peer.ident, Event::KeepAliveMsg));
+    Ok(format!("%% peer {} keepalive recv event is sent", addr))
+}

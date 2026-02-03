@@ -36,11 +36,11 @@ impl RibDirection for Out {
 }
 
 #[derive(Debug)]
-pub struct AdjRibTable<D: RibDirection>(pub PrefixMap<Ipv4Net, Vec<BgpRib>>, PhantomData<D>);
+pub struct AdjRibTable<D: RibDirection>(pub BTreeMap<Ipv4Net, Vec<BgpRib>>, PhantomData<D>);
 
 impl<D: RibDirection> AdjRibTable<D> {
     pub fn new() -> Self {
-        Self(PrefixMap::new(), PhantomData)
+        Self(BTreeMap::new(), PhantomData)
     }
 
     // Add a route using the direction-specific ID field
