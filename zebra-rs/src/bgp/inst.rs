@@ -188,6 +188,12 @@ impl Bgp {
                     "/clear/ip/bgp/neighbors" => {
                         peer::clear(self, &mut args);
                     }
+                    "/clear/ip/bgp/keepalive" => {
+                        peer::clear_keepalive(self, &mut args);
+                    }
+                    "/clear/ip/bgp/keepalive-recv" => {
+                        peer::clear_keepalive_recv(self, &mut args);
+                    }
                     _ => {
                         //
                     }

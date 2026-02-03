@@ -130,7 +130,9 @@ pub fn start_stale_timer(peer: &Peer, afi_safi: AfiSafi, stale_time: u32) -> Tim
     Timer::once(stale_time as u64, move || {
         let tx = tx.clone();
         async move {
-            let _ = tx.send(Message::Event(ident, Event::StaleTimerExipires(afi_safi)));
+            let _ = tx
+                .send(Message::Event(ident, Event::StaleTimerExipires(afi_safi)))
+                .unwrap();
         }
     })
 }
