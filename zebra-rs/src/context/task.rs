@@ -79,6 +79,10 @@ impl Timer {
                 tokio::select! {
                     _ = interval.tick() => {
                         // println!("Timer expired {}", sec);
+                        // Update last_reset for repeating timers so rem_sec() works correctly
+                        if typ != TimerType::Once {
+                            *last_reset_clone.lock().unwrap() = Instant::now();
+                        }
                         (cb)().await;
                         if typ == TimerType::Once {
                             break;

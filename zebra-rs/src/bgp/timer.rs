@@ -20,7 +20,7 @@ pub struct Config {
 
 impl Config {
     const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
-    const DEFAULT_HOLD_TIME: u64 = 90;
+    const DEFAULT_HOLD_TIME: u64 = 180;
     const DEFAULT_CONNECT_RETRY_TIME: u64 = 120;
 
     const DEFAULT_MIN_ADV_INTERVAL: u64 = 3;
