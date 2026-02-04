@@ -371,17 +371,17 @@ impl Bgp {
         loop {
             match self.rib_rx.recv().await {
                 Some(RibRx::EoR) => {
-                    tracing::info!("BGP: Received EoR, entering main event loop");
+                    // tracing::info!("BGP: Received EoR, entering main event loop");
                     break;
                 }
                 Some(msg) => self.process_rib_msg(msg),
                 None => break,
             }
         }
-        tracing::info!(
-            "BGP: Main event loop started with {} peers",
-            self.peers.len()
-        );
+        // tracing::info!(
+        //     "BGP: Main event loop started with {} peers",
+        //     self.peers.len()
+        // );
         let mut event_count: u64 = 0;
         let mut last_report = std::time::Instant::now();
         loop {
@@ -394,7 +394,7 @@ impl Bgp {
                     event_count += 1;
                     // Report every 10 seconds
                     if last_report.elapsed().as_secs() >= 10 {
-                        tracing::info!("Event loop: processed {} events in last 10s", event_count);
+                        // tracing::info!("Event loop: processed {} events in last 10s", event_count);
                         event_count = 0;
                         last_report = std::time::Instant::now();
                     }
