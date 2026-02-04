@@ -444,6 +444,8 @@ pub fn route_apply_policy_out(
             return None;
         };
         return policy_list_apply(policy_list, nlri, bgp_attr);
+    } else {
+        return None;
     }
     Some(bgp_attr)
 }
