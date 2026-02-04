@@ -10,8 +10,8 @@ use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
-    AfSpecInet6, AfSpecUnspec, In6AddrGenMode, InfoData, InfoKind, InfoVrf, InfoVxlan,
-    LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
+    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags,
+    LinkInfo, LinkLayerType, LinkMessage,
 };
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
@@ -493,15 +493,9 @@ impl FibHandle {
         let link_name = LinkAttribute::IfName(name.to_string());
         msg.attributes.push(link_name);
 
-        let in6_mode = match addr_gen_mode {
-            AddrGenMode::Eui64 => In6AddrGenMode::Eui64,
-            AddrGenMode::None => In6AddrGenMode::None,
-            AddrGenMode::StableSecret => In6AddrGenMode::StablePrivacy,
-            AddrGenMode::Random => In6AddrGenMode::Random,
-        };
         let mode =
             LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![AfSpecInet6::AddrGenMode(
-                in6_mode,
+                u8::from(addr_gen_mode.clone()),
             )])]);
         msg.attributes.push(mode);
 
@@ -568,8 +562,8 @@ impl FibHandle {
         // Local address.
         if let Some(local_addr) = vxlan.local_addr {
             let info = match local_addr {
-                IpAddr::V4(addr) => InfoVxlan::Local(addr),
-                IpAddr::V6(addr) => InfoVxlan::Local6(addr),
+                IpAddr::V4(addr) => InfoVxlan::Local(addr.octets().to_vec()),
+                IpAddr::V6(addr) => InfoVxlan::Local6(addr.octets().to_vec()),
             };
             vxlan_info.push(info);
         }
@@ -602,15 +596,9 @@ impl FibHandle {
         let link_name = LinkAttribute::IfName(name.to_string());
         msg.attributes.push(link_name);
 
-        let in6_mode = match addr_gen_mode {
-            AddrGenMode::Eui64 => In6AddrGenMode::Eui64,
-            AddrGenMode::None => In6AddrGenMode::None,
-            AddrGenMode::StableSecret => In6AddrGenMode::StablePrivacy,
-            AddrGenMode::Random => In6AddrGenMode::Random,
-        };
         let mode =
             LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet6(vec![AfSpecInet6::AddrGenMode(
-                in6_mode,
+                u8::from(addr_gen_mode.clone()),
             )])]);
         msg.attributes.push(mode);
 
