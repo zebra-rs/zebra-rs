@@ -80,17 +80,72 @@
 use std::str::FromStr;
 
 use bgp_packet::*;
+use regex::Regex;
+
+/// A pre-compiled regex pattern for efficient matching.
+/// Stores both the pattern string (for comparison/display) and compiled regex.
+#[derive(Clone)]
+pub struct CompiledRegex {
+    pattern: String,
+    regex: Regex,
+}
+
+impl CompiledRegex {
+    pub fn new(pattern: &str) -> Result<Self, regex::Error> {
+        let regex = Regex::new(pattern)?;
+        Ok(Self {
+            pattern: pattern.to_string(),
+            regex,
+        })
+    }
+
+    pub fn is_match(&self, text: &str) -> bool {
+        self.regex.is_match(text)
+    }
+
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+}
+
+impl std::fmt::Debug for CompiledRegex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledRegex")
+            .field("pattern", &self.pattern)
+            .finish()
+    }
+}
+
+impl PartialEq for CompiledRegex {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+impl Eq for CompiledRegex {}
+
+impl PartialOrd for CompiledRegex {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CompiledRegex {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.pattern.cmp(&other.pattern)
+    }
+}
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub enum StandardMatcher {
     Exact(CommunityValue),
-    Regex(String),
+    Regex(CompiledRegex),
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub enum ExtendedMatcher {
     Exact(ExtCommunityValue),
-    Regex(ExtCommunitySubType, String),
+    Regex(ExtCommunitySubType, CompiledRegex),
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
@@ -116,9 +171,12 @@ impl FromStr for CommunityMatcher {
 
             // If exact parse failed, treat as regex pattern (e.g., "rt:^62692:.*$")
             let value_str = &input[3..]; // Skip "rt:" prefix for regex pattern
+            let Ok(compiled) = CompiledRegex::new(value_str) else {
+                return Err(());
+            };
             return Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(
                 ExtCommunitySubType::RouteTarget,
-                value_str.to_string(),
+                compiled,
             )));
         }
 
@@ -134,9 +192,12 @@ impl FromStr for CommunityMatcher {
 
             // If exact parse failed, treat as regex pattern
             let value_str = &input[4..]; // Skip "soo:" prefix for regex pattern
+            let Ok(compiled) = CompiledRegex::new(value_str) else {
+                return Err(());
+            };
             return Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(
                 ExtCommunitySubType::RouteOrigin,
-                value_str.to_string(),
+                compiled,
             )));
         }
 
@@ -155,9 +216,10 @@ impl FromStr for CommunityMatcher {
 
         if has_regex_chars {
             // Definitely a regex pattern
-            return Ok(CommunityMatcher::Standard(StandardMatcher::Regex(
-                input.to_string(),
-            )));
+            let Ok(compiled) = CompiledRegex::new(input) else {
+                return Err(());
+            };
+            return Ok(CommunityMatcher::Standard(StandardMatcher::Regex(compiled)));
         }
 
         // Try to parse as standard community (e.g., "100:200")
@@ -166,9 +228,10 @@ impl FromStr for CommunityMatcher {
         }
 
         // If it doesn't parse as exact value and no regex chars, treat as simple regex
-        Ok(CommunityMatcher::Standard(StandardMatcher::Regex(
-            input.to_string(),
-        )))
+        let Ok(compiled) = CompiledRegex::new(input) else {
+            return Err(());
+        };
+        Ok(CommunityMatcher::Standard(StandardMatcher::Regex(compiled)))
     }
 }
 
@@ -185,16 +248,11 @@ pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bo
                     // Check if the community list contains the exact value
                     community.contains(&target_value.0)
                 }
-                StandardMatcher::Regex(pattern) => {
-                    // Convert all communities to strings and check against regex
-                    use regex::Regex;
-                    let Ok(re) = Regex::new(pattern) else {
-                        return false;
-                    };
-
+                StandardMatcher::Regex(compiled) => {
+                    // Convert all communities to strings and check against pre-compiled regex
                     for &com_val in &community.0 {
                         let com_str = CommunityValue(com_val).to_str();
-                        if re.is_match(&com_str) {
+                        if compiled.is_match(&com_str) {
                             return true;
                         }
                     }
@@ -225,13 +283,8 @@ pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bo
                     // tracing::info!(" -> false");
                     false
                 }
-                ExtendedMatcher::Regex(sub_type, pattern) => {
-                    // Filter by subtype and match against regex
-                    use regex::Regex;
-                    let Ok(re) = Regex::new(pattern) else {
-                        return false;
-                    };
-
+                ExtendedMatcher::Regex(sub_type, compiled) => {
+                    // Filter by subtype and match against pre-compiled regex
                     // Use IntoPrimitive derive to convert ExtCommunitySubType to u8
                     let target_low_type: u8 = (*sub_type).into();
 
@@ -242,7 +295,7 @@ pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bo
                             // Remove the prefix (e.g., "rt:" or "soo:") before matching
                             // The to_string() produces "rt:100:200", but pattern is "^100:.*"
                             if let Some(value_part) = ext_com_str.split_once(':') {
-                                if re.is_match(value_part.1) {
+                                if compiled.is_match(value_part.1) {
                                     return true;
                                 }
                             }
@@ -297,9 +350,9 @@ mod tests {
     fn test_parse_rt_regex() {
         let result = CommunityMatcher::from_str("rt:62692:.*");
         assert!(result.is_ok());
-        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, pattern))) = result {
+        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, compiled))) = result {
             assert_eq!(sub_type, ExtCommunitySubType::RouteTarget);
-            assert_eq!(pattern, "62692:.*");
+            assert_eq!(compiled.pattern(), "62692:.*");
         } else {
             panic!("Expected Extended regex match for rt:62692:.*");
         }
@@ -320,9 +373,9 @@ mod tests {
     fn test_parse_soo_regex() {
         let result = CommunityMatcher::from_str("soo:100:.*");
         assert!(result.is_ok());
-        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, pattern))) = result {
+        if let Ok(CommunityMatcher::Extended(ExtendedMatcher::Regex(sub_type, compiled))) = result {
             assert_eq!(sub_type, ExtCommunitySubType::RouteOrigin);
-            assert_eq!(pattern, "100:.*");
+            assert_eq!(compiled.pattern(), "100:.*");
         } else {
             panic!("Expected Extended regex match for soo:100:.*");
         }
@@ -519,16 +572,8 @@ mod tests {
 
     #[test]
     fn test_match_extended_community_invalid_regex() {
-        // Create a BGP attribute with extended community
-        let mut bgp_attr = BgpAttr::new();
-        let ecom = ExtCommunity::from_str("rt:100:200").unwrap();
-        bgp_attr.ecom = Some(ecom);
-
-        // Test with invalid regex pattern - should return false without panicking
-        let matcher = CommunityMatcher::Extended(ExtendedMatcher::Regex(
-            ExtCommunitySubType::RouteTarget,
-            "[invalid(regex".to_string(),
-        ));
-        assert!(!match_community_set(&matcher, &bgp_attr));
+        // Test that invalid regex pattern fails at parse time
+        let result = CommunityMatcher::from_str("rt:[invalid(regex");
+        assert!(result.is_err());
     }
 }

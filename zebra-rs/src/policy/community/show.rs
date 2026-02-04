@@ -44,12 +44,12 @@ fn format_community_matcher(matcher: &CommunityMatcher) -> String {
     match matcher {
         CommunityMatcher::Standard(standard) => match standard {
             StandardMatcher::Exact(val) => val.to_str(),
-            StandardMatcher::Regex(pattern) => pattern.clone(),
+            StandardMatcher::Regex(compiled) => compiled.pattern().to_string(),
         },
         CommunityMatcher::Extended(extended) => match extended {
             ExtendedMatcher::Exact(val) => val.to_string(),
-            ExtendedMatcher::Regex(sub_type, pattern) => {
-                format!("{}:{}", sub_type, pattern)
+            ExtendedMatcher::Regex(sub_type, compiled) => {
+                format!("{}:{}", sub_type, compiled.pattern())
             }
         },
     }

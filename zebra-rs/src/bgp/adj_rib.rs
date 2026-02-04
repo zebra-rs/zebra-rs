@@ -161,7 +161,10 @@ impl AdjRib<Out> {
         prefix: Ipv4Net,
         route: BgpRib,
     ) -> Option<BgpRib> {
-        None
+        match rd {
+            Some(rd) => self.v4vpn.entry(rd).or_default().add(prefix, route),
+            None => self.v4.add(prefix, route),
+        }
     }
 
     // Add a route to Adj-RIB-In
@@ -171,15 +174,25 @@ impl AdjRib<Out> {
         prefix: Ipv4Net,
         id: u32,
     ) -> Option<BgpRib> {
-        None
+        match rd {
+            Some(rd) => self.v4vpn.entry(rd).or_default().remove(prefix, id),
+            None => self.v4.remove(prefix, id),
+        }
     }
 
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
-        0
+        match (afi, safi) {
+            (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
+            (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
+            (_, _) => 0,
+        }
     }
 
     // Check table has prefix.
     pub fn contains_key(&mut self, rd: Option<RouteDistinguisher>, prefix: &Ipv4Net) -> bool {
-        true
+        match rd {
+            Some(rd) => self.v4vpn.entry(rd).or_default().0.contains_key(prefix),
+            None => self.v4.0.contains_key(prefix),
+        }
     }
 }
