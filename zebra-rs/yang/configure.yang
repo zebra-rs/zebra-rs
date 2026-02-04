@@ -107,6 +107,14 @@ module configure {
             type "inet:ipv4-address";
           }
         }
+        // Test for manual clear of keepalive timer.
+        leaf keepalive {
+          type "inet:ipv4-address";
+        }
+        // Test for manual clear of keepalive timer.
+        leaf keepalive-recv {
+          type "inet:ipv4-address";
+        }
       }
     }
   }

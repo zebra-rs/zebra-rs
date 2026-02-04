@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.7"
+version = "0.8.8"
 edition = "2024"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
 license = "GPL-3.0"
