@@ -1,6 +1,7 @@
 use std::cmp::min;
 
 use bgp_packet::{AfiSafi, OpenPacket};
+use rand::Rng;
 
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
@@ -20,7 +21,7 @@ pub struct Config {
 
 impl Config {
     const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
-    const DEFAULT_HOLD_TIME: u64 = 90;
+    const DEFAULT_HOLD_TIME: u64 = 180;
     const DEFAULT_CONNECT_RETRY_TIME: u64 = 120;
 
     const DEFAULT_MIN_ADV_INTERVAL: u64 = 3;
@@ -83,7 +84,7 @@ macro_rules! start_timer {
         Timer::once($time, move || {
             let tx = tx.clone();
             async move {
-                let _ = tx.send(Message::Event(ident, $ev));
+                let _ = tx.send(Message::Event(ident, $ev)).await;
             }
         })
     }};
@@ -97,14 +98,20 @@ macro_rules! start_repeater {
         Timer::repeat($time, move || {
             let tx = tx.clone();
             async move {
-                let _ = tx.send(Message::Event(ident, $ev));
+                let _ = tx.send(Message::Event(ident, $ev)).await;
             }
         })
     }};
 }
 
-fn start_idle_hold_timer(peer: &Peer) -> Timer {
-    start_timer!(peer, peer.config.timer.idle_hold_time(), Event::Start)
+fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
+    let time = if peer.first_start {
+        peer.first_start = false;
+        rand::rng().random_range(5..=60)
+    } else {
+        peer.config.timer.idle_hold_time()
+    };
+    start_timer!(peer, time, Event::Start)
 }
 
 pub fn start_connect_retry_timer(peer: &Peer) -> Timer {
@@ -130,7 +137,7 @@ pub fn start_stale_timer(peer: &Peer, afi_safi: AfiSafi, stale_time: u32) -> Tim
     Timer::once(stale_time as u64, move || {
         let tx = tx.clone();
         async move {
-            let _ = tx.send(Message::Event(ident, Event::StaleTimerExipires(afi_safi)));
+            let _ = tx.try_send(Message::Event(ident, Event::StaleTimerExipires(afi_safi)));
         }
     })
 }
@@ -184,6 +191,7 @@ pub fn update_timers(peer: &mut Peer) {
 
             peer.task.writer = None;
             peer.task.reader = None;
+            peer.packet_tx = None;
         }
         Connect => {
             peer.timer.idle_hold_timer = None;
