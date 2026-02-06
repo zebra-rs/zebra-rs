@@ -7,7 +7,7 @@ use std::str::FromStr;
 use super::{AttrEmitter, AttrFlags};
 use crate::AttrType;
 
-#[derive(Clone, Debug, Default, NomBE)]
+#[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, Hash)]
 pub struct LargeCommunity(pub Vec<LargeCommunityValue>);
 
 impl AttrEmitter for LargeCommunity {
@@ -81,7 +81,7 @@ impl FromStr for LargeCommunity {
     }
 }
 
-#[derive(Clone, Default, Debug, NomBE, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Default, Debug, NomBE, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LargeCommunityValue {
     pub global: u32,
     pub local1: u32,

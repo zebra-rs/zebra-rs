@@ -12,7 +12,7 @@ use crate::ParseBe;
 use super::{AttrEmitter, AttrFlags};
 use crate::AttrType;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Aigp {
     pub aigp: u64,
 }

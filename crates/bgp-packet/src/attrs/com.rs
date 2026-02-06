@@ -7,7 +7,7 @@ use std::sync::LazyLock; // If using Rust 1.70+, otherwise use once_cell::sync::
 
 use crate::{AttrEmitter, AttrFlags, AttrType};
 
-#[derive(Clone, Debug, Default, NomBE)]
+#[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, Hash)]
 pub struct Community(pub Vec<u32>);
 
 impl Community {
