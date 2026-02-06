@@ -91,7 +91,7 @@ fn parse_bgp_attr_as4_segment(input: &[u8]) -> IResult<&[u8], As4Segment> {
     Ok((input, segment))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct As4Segment {
     pub typ: u8,
     pub asn: Vec<u32>,
@@ -140,7 +140,7 @@ impl fmt::Display for As4Segment {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct As4Path {
     pub segs: VecDeque<As4Segment>,
     pub length: u32,

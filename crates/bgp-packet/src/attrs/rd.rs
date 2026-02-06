@@ -5,14 +5,14 @@ use std::str::FromStr;
 
 #[allow(clippy::upper_case_acronyms)]
 #[repr(u16)]
-#[derive(Default, NomBE, PartialEq, Debug, Clone, Ord, PartialOrd, Eq, Copy)]
+#[derive(Default, NomBE, PartialEq, Debug, Clone, Ord, PartialOrd, Eq, Copy, Hash)]
 pub enum RouteDistinguisherType {
     #[default]
     ASN = 0,
     IP = 1,
 }
 
-#[derive(Default, NomBE, PartialEq, Debug, Clone, Ord, Eq, PartialOrd, Copy)]
+#[derive(Default, NomBE, PartialEq, Debug, Clone, Ord, Eq, PartialOrd, Copy, Hash)]
 pub struct RouteDistinguisher {
     pub typ: RouteDistinguisherType,
     pub val: [u8; 6],

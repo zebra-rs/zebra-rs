@@ -9,7 +9,7 @@ use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe};
 
 /// BGP route origin types as defined in RFC 4271
 #[repr(u8)]
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Default)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Default, Hash)]
 pub enum Origin {
     #[default]
     Igp = 0, // IGP (lowest preference)

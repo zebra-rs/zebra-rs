@@ -7,7 +7,7 @@ use nom_derive::*;
 
 use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe, u32_u24};
 
-#[derive(Clone, NomBE)]
+#[derive(Clone, NomBE, PartialEq, Eq, Hash)]
 pub struct PmsiTunnel {
     pub flags: u8,
     pub tunnel_type: u8,

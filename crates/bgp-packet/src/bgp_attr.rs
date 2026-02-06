@@ -9,7 +9,7 @@ use crate::{
 
 // BGP Attribute for quick access to each attribute. This would be used for
 // consolidating route advertisement.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BgpAttr {
     /// Origin type
     pub origin: Option<Origin>,

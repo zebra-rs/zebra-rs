@@ -5,7 +5,7 @@ use nom_derive::*;
 
 use crate::{AttrEmitter, AttrFlags, AttrType};
 
-#[derive(Clone, NomBE)]
+#[derive(Clone, NomBE, PartialEq, Eq, Hash)]
 pub struct AtomicAggregate {}
 
 impl AtomicAggregate {
