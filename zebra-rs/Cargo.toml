@@ -6,8 +6,8 @@ edition.workspace = true
 [lints.rust]
 unused = "allow"
 
-[profile.release]
-debug = true
+#[profile.release]
+#debug = true
 
 [dependencies]
 anyhow.workspace = true
