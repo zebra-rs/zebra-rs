@@ -359,8 +359,8 @@ impl ConfigManager {
                 op: ConfigOp::Completion,
                 resp: Some(comp_tx),
             };
-            tx.send(req).unwrap();
-            comp_rx.await.unwrap()
+            let _ = tx.send(req);
+            comp_rx.await.unwrap_or_default()
         } else {
             Vec::new()
         }
@@ -400,7 +400,7 @@ impl ConfigManager {
                         resp.code = ExecCode::Nomatch;
                     }
                 }
-                req.resp.send(resp).unwrap();
+                let _ = req.resp.send(resp);
             }
             Message::Completion(req) => {
                 let mut resp = CompletionResponse::new();
@@ -413,7 +413,7 @@ impl ConfigManager {
                         resp.code = ExecCode::Nomatch;
                     }
                 }
-                req.resp.send(resp).unwrap();
+                let _ = req.resp.send(resp);
             }
             Message::Deploy(req) => {
                 let mode = self.modes.get("configure").unwrap();
@@ -445,7 +445,7 @@ impl ConfigManager {
                         };
                         // Discard candidate config.
                         self.store.discard();
-                        req.resp.send(resp).unwrap();
+                        let _ = req.resp.send(resp);
                         return;
                     }
                 }
@@ -456,8 +456,7 @@ impl ConfigManager {
                     exec_code: ExecCode::Success,
                     cmd: String::new(),
                 };
-                // XXX Fix.
-                req.resp.send(resp).unwrap();
+                let _ = req.resp.send(resp);
             }
             Message::DisplayTx(req) => {
                 let tx_option = if is_bgp(&req.paths) {
@@ -475,12 +474,12 @@ impl ConfigManager {
                 if let Some(tx) = tx_option {
                     // Protocol is initialized, send the actual handler
                     let reply = DisplayTxResponse { tx };
-                    req.resp.send(reply).unwrap();
+                    let _ = req.resp.send(reply);
                 } else {
                     // Protocol is not initialized, send a fallback handler that returns an error message
                     let (fallback_tx, fallback_rx) = mpsc::unbounded_channel();
                     let reply = DisplayTxResponse { tx: fallback_tx };
-                    req.resp.send(reply).unwrap();
+                    let _ = req.resp.send(reply);
 
                     // Spawn a task to handle the fallback response
                     let paths = req.paths.clone();
@@ -512,7 +511,7 @@ impl ConfigManager {
                     result: 0,
                     output: String::new(),
                 };
-                req.resp.send(resp).unwrap();
+                let _ = req.resp.send(resp);
             }
         }
     }
