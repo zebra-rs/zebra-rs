@@ -25,6 +25,7 @@ message ExecRequest {
   uint32 privilege = 3;
   string line = 4;
   repeated string args = 5;
+  bool interactive = 6;
 }
 
 // Command exec code.

@@ -1,6 +1,6 @@
 [package]
 name = "isis-packet"
-version = "0.8.8"
+version = "0.8.9"
 description = "Parser for the IS-IS protocol"
 license = "MIT/Apache-2.0"
 keywords = ["IS-IS","routing","protocol","parser","nom"]

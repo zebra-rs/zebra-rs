@@ -3,6 +3,7 @@ use super::parse::State;
 use super::parse::{entry_is_key, ymatch_complete, ytype_from_typedef};
 use super::vtysh::YangMatch;
 use libyang::{Entry, TypeNode, YangType};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Debug, Default, Clone)]
@@ -112,17 +113,14 @@ pub fn cleaf(entry: &Rc<Entry>) -> Completion {
     }
 }
 
-fn comps_exists(comps: &[Completion], name: &String) -> bool {
-    comps.iter().any(|x| x.name == *name)
-}
-
 pub fn comps_add_cr(comps: &mut Vec<Completion>) {
     comps.push(Completion::new_name("<cr>"));
 }
 
 pub fn comps_append(from: &mut Vec<Completion>, to: &mut Vec<Completion>) {
-    while let Some(comp) = from.pop() {
-        if !comps_exists(to, &comp.name) {
+    let mut existing: HashSet<String> = to.iter().map(|c| c.name.clone()).collect();
+    for comp in from.drain(..) {
+        if existing.insert(comp.name.clone()) {
             to.push(comp);
         }
     }
