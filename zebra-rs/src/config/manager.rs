@@ -368,10 +368,10 @@ impl ConfigManager {
 
     pub async fn completion(&self, mode: &Mode, input: &str) -> (ExecCode, Vec<Completion>) {
         let mut state = State::new();
-        if let Some(dynamic) = has_dynamic(input) {
-            let comps = self.comps_dynamic(dynamic.clone()).await;
-            state.dynamic.insert(dynamic, comps);
-        }
+        // if let Some(dynamic) = has_dynamic(input) {
+        //     let comps = self.comps_dynamic(dynamic.clone()).await;
+        //     state.dynamic.insert(dynamic, comps);
+        // }
         let (code, comps, _state) = parse(
             input,
             mode.entry.clone(),
