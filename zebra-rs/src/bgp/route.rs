@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use bgp_packet::*;
 use bytes::BytesMut;
@@ -34,7 +35,7 @@ pub struct BgpRib {
     // AddPath ID from peer.
     pub local_id: u32,
     // BGP Attribute.
-    pub attr: BgpAttr,
+    pub attr: Arc<BgpAttr>,
     // Peer ID.
     pub ident: IpAddr,
     // Peer router id.
@@ -103,7 +104,7 @@ impl BgpRib {
             local_id: 0, // Will be assigned in LocalRibTable::update_route()
             ident,
             router_id,
-            attr: attr.clone(),
+            attr: Arc::new(attr.clone()),
             weight,
             typ: rib_type,
             best_path: false,
@@ -547,7 +548,7 @@ pub fn route_ipv4_update(
         route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers, false);
         return;
     };
-    rib.attr = attr;
+    rib.attr = Arc::new(attr);
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
     // Advertise to peers if best path changed.
@@ -609,7 +610,7 @@ fn route_advertise_to_addpath(
                     }
                 }
                 let mut rib = rib.clone();
-                rib.attr = attr.clone();
+                rib.attr = Arc::new(attr.clone());
 
                 peer.adj_out.add(rd, nlri.prefix, rib);
                 if let Some(ref rd) = rd {
@@ -722,7 +723,7 @@ fn route_advertise_to_peers(
                 // Send update
                 if let Some(best) = new_best {
                     let mut rib = best.clone();
-                    rib.attr = attr.clone();
+                    rib.attr = Arc::new(attr.clone());
                     peer.adj_out.add(rd, nlri.prefix, rib);
                 }
                 if let Some(ref rd) = rd {
@@ -970,16 +971,18 @@ pub fn route_clean(
             for (prefix, ribs) in table.0.iter_mut() {
                 for rib in ribs.iter_mut() {
                     rib.stale = true;
-                    match &mut rib.attr.com {
+                    let mut new_attr = (*rib.attr).clone();
+                    match &mut new_attr.com {
                         Some(com) => {
                             com.push(CommunityValue::LLGR_STALE.value());
                         }
                         None => {
                             let mut com = Community::new();
                             com.push(CommunityValue::LLGR_STALE.value());
-                            rib.attr.com = Some(com);
+                            new_attr.com = Some(com);
                         }
                     }
+                    rib.attr = Arc::new(new_attr);
                 }
             }
         }
@@ -1004,7 +1007,7 @@ pub fn route_clean(
                             rd.clone(),
                             nlri,
                             rib.label,
-                            rib.attr.clone(),
+                            (*rib.attr).clone(),
                             rib.nexthop.clone(),
                         ));
                     }
@@ -1153,7 +1156,7 @@ pub fn route_update_ipv4(
     };
 
     // Build attributes
-    let mut attrs = rib.attr.clone();
+    let mut attrs = (*rib.attr).clone();
 
     // 1. Origin.  Pass through
 
@@ -1323,7 +1326,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         };
 
         // Register to AdjOut.
-        rib.attr = attr.clone();
+        rib.attr = Arc::new(attr.clone());
         peer.adj_out.add(None, nlri.prefix, rib);
 
         // Send the routes.
@@ -1385,7 +1388,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             }
 
             // Register to AdjOut.
-            rib.attr = attr.clone();
+            rib.attr = Arc::new(attr.clone());
             peer.adj_out.add(Some(rd.clone()), nlri.prefix, rib);
 
             let vpnv4_nlri = Vpnv4Nlri {
