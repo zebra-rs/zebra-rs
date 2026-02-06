@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::*;
@@ -1665,6 +1666,14 @@ fn show_bgp_rtcv4(
     Ok(buf)
 }
 
+fn show_bgp_attributes(
+    bgp: &Bgp,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::from("show ip bgp attributes place holder"))
+}
+
 impl Bgp {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -1693,6 +1702,7 @@ impl Bgp {
         self.show_add("/show/ip/bgp/neighbors/rtcv4", show_bgp_rtcv4);
         self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
         // self.show_add("/show/community-list", show_community_list);
+        self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
     }
 }

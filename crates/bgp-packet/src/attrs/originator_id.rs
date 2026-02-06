@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 
 use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe};
 
-#[derive(Clone, NomBE)]
+#[derive(Clone, NomBE, PartialEq, Eq, Hash)]
 pub struct OriginatorId {
     pub id: Ipv4Addr,
 }

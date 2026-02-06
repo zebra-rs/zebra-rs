@@ -9,7 +9,7 @@ use nom::number::complete::be_u32;
 
 use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe, many0_complete};
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ClusterList {
     pub list: Vec<Ipv4Addr>,
 }

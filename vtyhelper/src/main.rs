@@ -102,8 +102,10 @@ async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()
     let mut stream = client.show(request).await?.into_inner();
     println!("Show");
     while let Some(reply) = stream.next().await {
-        let reply = reply.unwrap();
-        stdout.write_all(reply.str.as_bytes()).await.unwrap();
+        let Ok(reply) = reply else {
+            return Ok(());
+        };
+        stdout.write_all(reply.str.as_bytes()).await?;
     }
 
     Ok(())
