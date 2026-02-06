@@ -32,9 +32,14 @@ impl ExecService {
         rx.await.unwrap()
     }
 
-    async fn completion_request(&self, mode: &str, input: &str) -> CompletionResponse {
+    async fn completion_request(
+        &self,
+        mode: &str,
+        input: &str,
+        interactive: bool,
+    ) -> CompletionResponse {
         let (tx, rx) = oneshot::channel();
-        let req = CompletionRequest::new(mode, input, tx);
+        let req = CompletionRequest::new(mode, input, interactive, tx);
         self.tx.send(Message::Completion(req)).await.unwrap();
         rx.await.unwrap()
     }
@@ -81,17 +86,23 @@ impl Exec for ExecService {
                 self.reply_exec(code, output, paths)
             }
             x if x == ExecType::CompleteFirstCommands as i32 => {
-                let resp = self.completion_request(&request.mode, &request.line).await;
+                let resp = self
+                    .completion_request(&request.mode, &request.line, request.interactive)
+                    .await;
                 self.reply(ExecCode::Success, first_commands(&resp))
             }
             x if x == ExecType::Complete as i32 => {
-                let resp = self.completion_request(&request.mode, &request.line).await;
+                let resp = self
+                    .completion_request(&request.mode, &request.line, request.interactive)
+                    .await;
                 self.reply(ExecCode::Success, comp_commands(&resp))
             }
             x if x == ExecType::CompleteTrailingSpace as i32 => {
                 let mut input = request.line.clone();
                 input.push(' ');
-                let resp = self.completion_request(&request.mode, &input).await;
+                let resp = self
+                    .completion_request(&request.mode, &input, request.interactive)
+                    .await;
                 self.reply(ExecCode::Success, comp_commands(&resp))
             }
             _ => self.reply(ExecCode::Success, String::from("Success\n")),

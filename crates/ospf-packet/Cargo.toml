@@ -1,6 +1,6 @@
 [package]
 name = "ospf-packet"
-version = "0.8.8"
+version = "0.8.9"
 description = "Parser for the OSPFv2 and OSPFv3 protocol"
 license = "MIT/Apache-2.0"
 keywords = ["OSPF","routing","protocol","parser","nom"]
