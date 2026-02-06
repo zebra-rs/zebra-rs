@@ -10,8 +10,12 @@ use super::vtysh::{CommandPath, YangMatch};
 use super::{Completion, Config, ExecCode};
 use libyang::{Entry, MinMax, RangeExtract, RangeNode, TypeNode, YangType, range_match};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::{LazyLock, Mutex};
+
+static REGEX_CACHE: LazyLock<Mutex<HashMap<String, Regex>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub struct State {
     ymatch: YangMatch,
@@ -90,8 +94,27 @@ fn match_word(str: &str) -> (MatchType, usize) {
 
 fn match_regexp(s: &str, regstr: &str) -> (MatchType, usize) {
     let pos = 0usize;
-    let regex = Regex::new(regstr).unwrap();
-    if regex.is_match(s) {
+    let cache = REGEX_CACHE.lock().unwrap();
+    if let Some(regex) = cache.get(regstr) {
+        let matched = regex.is_match(s);
+        drop(cache);
+        return if matched {
+            (MatchType::Exact, pos)
+        } else {
+            (MatchType::None, pos)
+        };
+    }
+    drop(cache);
+
+    let Ok(regex) = Regex::new(regstr) else {
+        return (MatchType::None, pos);
+    };
+    let matched = regex.is_match(s);
+    REGEX_CACHE
+        .lock()
+        .unwrap()
+        .insert(regstr.to_string(), regex);
+    if matched {
         (MatchType::Exact, pos)
     } else {
         (MatchType::None, pos)
