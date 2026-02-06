@@ -80,7 +80,7 @@ impl fmt::Display for Vpnv4Nlri {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Vpnv4Nexthop {
     pub rd: RouteDistinguisher,
     pub nhop: Ipv4Addr,

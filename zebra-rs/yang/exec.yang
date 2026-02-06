@@ -115,6 +115,9 @@ module exec {
             }
           }
         }
+        leaf attributes {
+          type empty;
+        }
       }
 
       container ospf {

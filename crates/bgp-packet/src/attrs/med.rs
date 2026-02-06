@@ -5,7 +5,7 @@ use nom_derive::*;
 
 use crate::{AttrEmitter, AttrFlags, AttrType};
 
-#[derive(Clone, NomBE, PartialEq, PartialOrd, Default)]
+#[derive(Clone, NomBE, PartialEq, Eq, Hash, PartialOrd, Default)]
 pub struct Med {
     pub med: u32,
 }

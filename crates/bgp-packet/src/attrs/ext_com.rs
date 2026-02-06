@@ -12,10 +12,10 @@ use crate::{
 
 use super::ext_com_token::{Token, tokenizer};
 
-#[derive(Clone, Default, NomBE)]
+#[derive(Clone, Default, NomBE, PartialEq, Eq, Hash)]
 pub struct ExtCommunity(pub Vec<ExtCommunityValue>);
 
-#[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtCommunityValue {
     pub high_type: u8,
     pub low_type: u8,

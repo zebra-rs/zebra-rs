@@ -8,7 +8,7 @@ use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe};
 
 use super::AS_TRANS;
 
-#[derive(Clone, NomBE)]
+#[derive(Clone, NomBE, PartialEq, Eq, Hash)]
 pub struct Aggregator {
     pub asn: u32,
     pub ip: Ipv4Addr,
