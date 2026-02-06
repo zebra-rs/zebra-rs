@@ -67,6 +67,7 @@ pub struct ExecuteResponse {
 pub struct CompletionRequest {
     pub mode: String,
     pub input: String,
+    pub interactive: bool,
     pub resp: Sender<CompletionResponse>,
 }
 
@@ -95,10 +96,16 @@ impl ExecuteResponse {
 }
 
 impl CompletionRequest {
-    pub fn new(mode: &str, input: &str, resp: Sender<CompletionResponse>) -> Self {
+    pub fn new(
+        mode: &str,
+        input: &str,
+        interactive: bool,
+        resp: Sender<CompletionResponse>,
+    ) -> Self {
         Self {
             mode: mode.to_string(),
             input: input.to_string(),
+            interactive,
             resp,
         }
     }
