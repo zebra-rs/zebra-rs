@@ -30,6 +30,7 @@ pub async fn show(host: &String, command: &String, json: bool) -> Result<()> {
         privilege: 15,
         line: command.clone(),
         args: Vec::new(),
+        ..Default::default()
     };
 
     let exec_reply = exec_client.do_exec(Request::new(exec_request)).await?;

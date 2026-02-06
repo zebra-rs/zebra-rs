@@ -366,12 +366,19 @@ impl ConfigManager {
         }
     }
 
-    pub async fn completion(&self, mode: &Mode, input: &str) -> (ExecCode, Vec<Completion>) {
+    pub async fn completion(
+        &self,
+        mode: &Mode,
+        input: &str,
+        interactive: bool,
+    ) -> (ExecCode, Vec<Completion>) {
         let mut state = State::new();
-        // if let Some(dynamic) = has_dynamic(input) {
-        //     let comps = self.comps_dynamic(dynamic.clone()).await;
-        //     state.dynamic.insert(dynamic, comps);
-        // }
+        if interactive {
+            if let Some(dynamic) = has_dynamic(input) {
+                let comps = self.comps_dynamic(dynamic.clone()).await;
+                state.dynamic.insert(dynamic, comps);
+            }
+        }
         let (code, comps, _state) = parse(
             input,
             mode.entry.clone(),
@@ -399,7 +406,8 @@ impl ConfigManager {
                 let mut resp = CompletionResponse::new();
                 match self.modes.get(&req.mode) {
                     Some(mode) => {
-                        (resp.code, resp.comps) = self.completion(mode, &req.input).await;
+                        (resp.code, resp.comps) =
+                            self.completion(mode, &req.input, req.interactive).await;
                     }
                     None => {
                         resp.code = ExecCode::Nomatch;
@@ -448,6 +456,7 @@ impl ConfigManager {
                     exec_code: ExecCode::Success,
                     cmd: String::new(),
                 };
+                // XXX Fix.
                 req.resp.send(resp).unwrap();
             }
             Message::DisplayTx(req) => {
