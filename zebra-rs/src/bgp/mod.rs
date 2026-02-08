@@ -26,3 +26,6 @@ pub use route::*;
 
 pub mod adj_rib;
 pub use adj_rib::*;
+
+pub mod store;
+pub use store::*;
