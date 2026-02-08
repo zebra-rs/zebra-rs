@@ -548,7 +548,7 @@ pub fn route_ipv4_update(
         route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers, false);
         return;
     };
-    rib.attr = Arc::new(attr);
+    rib.attr = bgp.attr_store.intern(attr);
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
     // Advertise to peers if best path changed.
@@ -610,7 +610,7 @@ fn route_advertise_to_addpath(
                     }
                 }
                 let mut rib = rib.clone();
-                rib.attr = Arc::new(attr.clone());
+                rib.attr = bgp.attr_store.intern(attr.clone());
 
                 peer.adj_out.add(rd, nlri.prefix, rib);
                 if let Some(ref rd) = rd {
@@ -723,7 +723,7 @@ fn route_advertise_to_peers(
                 // Send update
                 if let Some(best) = new_best {
                     let mut rib = best.clone();
-                    rib.attr = Arc::new(attr.clone());
+                    rib.attr = bgp.attr_store.intern(attr.clone());
                     peer.adj_out.add(rd, nlri.prefix, rib);
                 }
                 if let Some(ref rd) = rd {
@@ -982,7 +982,7 @@ pub fn route_clean(
                             new_attr.com = Some(com);
                         }
                     }
-                    rib.attr = Arc::new(new_attr);
+                    rib.attr = bgp.attr_store.intern(new_attr);
                 }
             }
         }
@@ -1326,7 +1326,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         };
 
         // Register to AdjOut.
-        rib.attr = Arc::new(attr.clone());
+        rib.attr = bgp.attr_store.intern(attr.clone());
         peer.adj_out.add(None, nlri.prefix, rib);
 
         // Send the routes.
@@ -1388,7 +1388,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             }
 
             // Register to AdjOut.
-            rib.attr = Arc::new(attr.clone());
+            rib.attr = bgp.attr_store.intern(attr.clone());
             peer.adj_out.add(Some(rd.clone()), nlri.prefix, rib);
 
             let vpnv4_nlri = Vpnv4Nlri {
@@ -1516,6 +1516,7 @@ impl Bgp {
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_tx: &self.rib_tx,
+            attr_store: &mut self.attr_store,
         };
 
         if !selected.is_empty() {
@@ -1535,6 +1536,7 @@ impl Bgp {
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_tx: &self.rib_tx,
+            attr_store: &mut self.attr_store,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);

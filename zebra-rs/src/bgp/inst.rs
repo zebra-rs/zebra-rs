@@ -1,3 +1,4 @@
+use super::BgpAttrStore;
 use super::peer::{Event, Peer, fsm};
 use super::route::LocalRib;
 use crate::bgp::debug::BgpDebugFlags;
@@ -73,6 +74,8 @@ pub struct Bgp {
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
     pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
+    // BgpAttr shared storage.
+    pub attr_store: BgpAttrStore,
 }
 
 impl Bgp {
@@ -116,6 +119,7 @@ impl Bgp {
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
+            attr_store: BgpAttrStore::new(),
         };
         bgp.callback_build();
         bgp.show_build();
