@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::sync::{Arc, Weak};
 
 use bgp_packet::BgpAttr;
 
@@ -21,14 +21,14 @@ impl BgpAttrStore {
         }
     }
 
-    pub fn intern(&mut self, attr: BgpAttr) -> Rc<BgpAttr> {
+    pub fn intern(&mut self, attr: BgpAttr) -> Arc<BgpAttr> {
         if let Some(weak) = self.store.get(&attr)
             && let Some(rc) = weak.upgrade()
         {
             return rc;
         }
-        let rc = Rc::new(attr.clone());
-        self.store.insert(attr, Rc::downgrade(&rc));
+        let rc = Arc::new(attr.clone());
+        self.store.insert(attr, Arc::downgrade(&rc));
         rc
     }
 
