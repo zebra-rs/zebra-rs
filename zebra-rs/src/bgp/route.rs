@@ -1520,9 +1520,14 @@ impl Bgp {
         };
 
         if !selected.is_empty() {
-            let mut peer_map = std::mem::take(&mut self.peers);
-            route_advertise_to_peers(None, prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
-            self.peers = peer_map;
+            route_advertise_to_peers(
+                None,
+                prefix,
+                &selected,
+                ident,
+                &mut bgp_ref,
+                &mut self.peers,
+            );
         }
     }
 
@@ -1541,9 +1546,14 @@ impl Bgp {
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
         if !selected.is_empty() || !removed.is_empty() {
-            let mut peer_map = std::mem::take(&mut self.peers);
-            route_advertise_to_peers(None, prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
-            self.peers = peer_map;
+            route_advertise_to_peers(
+                None,
+                prefix,
+                &selected,
+                ident,
+                &mut bgp_ref,
+                &mut self.peers,
+            );
         }
     }
 }

@@ -376,42 +376,34 @@ pub struct ConfigRef<'a> {
     pub attr_store: &'a mut BgpAttrStore,
 }
 
-pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
+pub fn fsm(
+    bgp_ref: &mut ConfigRef,
+    peer_map: &mut BTreeMap<IpAddr, Peer>,
+    id: IpAddr,
+    event: Event,
+) {
     // Handle UpdateMsg separately to avoid borrow checker issues
     if let Event::UpdateMsg(packet) = event {
-        let mut bgp_ref = ConfigRef {
-            router_id: &bgp.router_id,
-            local_rib: &mut bgp.local_rib,
-            tx: &bgp.tx,
-            rib_tx: &bgp.rib_tx,
-            attr_store: &mut bgp.attr_store,
-        };
-
-        // Take ownership temporarily to avoid double borrow
-        let mut peer_map = std::mem::take(&mut bgp.peers);
         let prev_state = peer_map.get(&id).unwrap().state.clone();
-        let new_state = fsm_bgp_update(id, packet, &mut bgp_ref, &mut peer_map);
+        let new_state = fsm_bgp_update(id, packet, bgp_ref, peer_map);
         if prev_state.is_established() && !new_state.is_established() {
-            route_clean(id, &mut bgp_ref, &mut peer_map, false);
+            route_clean(id, bgp_ref, peer_map, false);
         }
         peer_map.get_mut(&id).unwrap().state = new_state.clone();
-
-        // Put the peers back
-        bgp.peers = peer_map;
 
         if prev_state == new_state {
             return;
         }
         // bgp_info!("FSM: {:?} -> {:?}", prev_state, new_state);
 
-        let peer = bgp.peers.get_mut(&id).unwrap();
+        let peer = peer_map.get_mut(&id).unwrap();
         if prev_state.is_established() && !peer.state.is_established() {
             peer.instant = Some(Instant::now());
         }
 
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
-            route_sync(peer, &mut bgp_ref);
+            route_sync(peer, bgp_ref);
         }
 
         timer::update_timers(peer);
@@ -420,41 +412,22 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
 
     // Handle StaleTimerExpires separately to avoid borrow checker issues
     if let Event::StaleTimerExipires(afi_safi) = event {
-        let mut bgp_ref = ConfigRef {
-            router_id: &bgp.router_id,
-            local_rib: &mut bgp.local_rib,
-            tx: &bgp.tx,
-            rib_tx: &bgp.rib_tx,
-            attr_store: &mut bgp.attr_store,
-        };
-
-        let mut peer_map = std::mem::take(&mut bgp.peers);
         let prev_state = peer_map.get(&id).unwrap().state;
-        let new_state = stale_timer_expire(id, afi_safi, &mut bgp_ref, &mut peer_map);
+        let new_state = stale_timer_expire(id, afi_safi, bgp_ref, peer_map);
         peer_map.get_mut(&id).unwrap().state = new_state;
-
-        bgp.peers = peer_map;
 
         if prev_state == new_state {
             return;
         }
 
-        let peer = bgp.peers.get_mut(&id).unwrap();
+        let peer = peer_map.get_mut(&id).unwrap();
         timer::update_timers(peer);
         return;
     }
 
-    // Handle other events normally
-    let mut bgp_ref = ConfigRef {
-        router_id: &bgp.router_id,
-        local_rib: &mut bgp.local_rib,
-        tx: &bgp.tx,
-        rib_tx: &bgp.rib_tx,
-        attr_store: &mut bgp.attr_store,
-    };
     let mut need_clean = false;
     {
-        let peer = bgp.peers.get_mut(&id).unwrap();
+        let peer = peer_map.get_mut(&id).unwrap();
         let prev_state = peer.state.clone();
         peer.state = match event {
             Event::ConfigUpdate => fsm_config_update(&bgp_ref, peer),
@@ -485,17 +458,15 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         // Update instant when entering or leaving the Established state.
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
-            route_sync(peer, &mut bgp_ref);
+            route_sync(peer, bgp_ref);
         }
 
         timer::update_timers(peer);
     }
 
-    let mut peer_map = std::mem::take(&mut bgp.peers);
     if need_clean {
-        route_clean(id, &mut bgp_ref, &mut peer_map, false);
+        route_clean(id, bgp_ref, peer_map, false);
     }
-    bgp.peers = peer_map;
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
