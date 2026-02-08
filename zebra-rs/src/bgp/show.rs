@@ -1671,7 +1671,22 @@ fn show_bgp_attributes(
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok(String::from("show ip bgp attributes place holder"))
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "BGP Attribute Store: {} entries ({} active)",
+        bgp.attr_store.len(),
+        bgp.attr_store.refcnt_all()
+    )?;
+    writeln!(buf)?;
+    for (attr, weak) in bgp.attr_store.iter() {
+        let refcnt = weak.strong_count();
+        if refcnt > 0 {
+            writeln!(buf, "Refcnt: {}", refcnt)?;
+            write!(buf, "{}", attr)?;
+        }
+    }
+    Ok(buf)
 }
 
 impl Bgp {

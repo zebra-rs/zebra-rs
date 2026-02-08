@@ -51,4 +51,8 @@ impl BgpAttrStore {
     pub fn refcnt_all(&self) -> usize {
         self.store.values().filter(|w| w.strong_count() > 0).count()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&BgpAttr, &Weak<BgpAttr>)> {
+        self.store.iter()
+    }
 }
