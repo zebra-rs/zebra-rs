@@ -29,7 +29,7 @@ use super::inst::Message;
 use super::route::LocalRib;
 use super::route::route_from_peer;
 use super::{BGP_PORT, PolicyListValue, PrefixSetValue};
-use super::{Bgp, InOuts};
+use super::{Bgp, BgpAttrStore, InOuts};
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum State {
@@ -373,6 +373,7 @@ pub struct ConfigRef<'a> {
     pub local_rib: &'a mut LocalRib,
     pub tx: &'a mpsc::Sender<Message>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
+    pub attr_store: &'a mut BgpAttrStore,
 }
 
 pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
@@ -383,6 +384,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
             local_rib: &mut bgp.local_rib,
             tx: &bgp.tx,
             rib_tx: &bgp.rib_tx,
+            attr_store: &mut bgp.attr_store,
         };
 
         // Take ownership temporarily to avoid double borrow
@@ -423,6 +425,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
             local_rib: &mut bgp.local_rib,
             tx: &bgp.tx,
             rib_tx: &bgp.rib_tx,
+            attr_store: &mut bgp.attr_store,
         };
 
         let mut peer_map = std::mem::take(&mut bgp.peers);
@@ -447,6 +450,7 @@ pub fn fsm(bgp: &mut Bgp, id: IpAddr, event: Event) {
         local_rib: &mut bgp.local_rib,
         tx: &bgp.tx,
         rib_tx: &bgp.rib_tx,
+        attr_store: &mut bgp.attr_store,
     };
     let mut need_clean = false;
     {
