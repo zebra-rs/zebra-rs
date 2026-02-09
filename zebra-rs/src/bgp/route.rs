@@ -1088,7 +1088,7 @@ pub fn stale_timer_expire(
     let peer = peers.get_mut(&peer_id).expect("peer must exist");
     peer.timer.stale_timer.remove(&afi_safi);
 
-    // Remove all stale marked routes in adj_in.
+    // Fetch all of route which as stale flag.
     let withdrawn = {
         let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
 
@@ -1112,6 +1112,7 @@ pub fn stale_timer_expire(
         withdrawn
     };
 
+    // Withdraw routes.
     for withdraw in withdrawn.iter() {
         route_ipv4_withdraw(
             peer_id,
