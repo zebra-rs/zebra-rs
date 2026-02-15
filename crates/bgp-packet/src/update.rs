@@ -6,7 +6,7 @@ use nom_derive::*;
 
 use crate::{
     Afi, BGP_HEADER_LEN, BgpAttr, BgpHeader, BgpParseError, BgpType, Ipv4Nlri, MpNlriReachAttr,
-    MpNlriUnreachAttr, ParseOption, Safi, nlri_psize, parse_bgp_nlri_ipv4,
+    MpNlriUnreachAttr, ParseOption, Safi, Vpnv4Nlri, nlri_psize, parse_bgp_nlri_ipv4,
     parse_bgp_update_attribute,
 };
 
@@ -23,6 +23,10 @@ pub struct UpdatePacket {
     pub mp_update: Option<MpNlriReachAttr>,
     #[nom(Ignore)]
     pub mp_withdraw: Option<MpNlriUnreachAttr>,
+    #[nom(Ignore)]
+    max_packet_size: usize,
+    #[nom(Ignore)]
+    pub vpnv4_update: Vec<Vpnv4Nlri>,
 }
 
 impl UpdatePacket {
@@ -40,7 +44,113 @@ impl Default for UpdatePacket {
             ipv4_withdraw: Vec::new(),
             mp_update: None,
             mp_withdraw: None,
+            max_packet_size: 4096,
+            vpnv4_update: Vec::new(),
         }
+    }
+}
+
+impl UpdatePacket {
+    pub fn pop_ipv4(&mut self) -> Option<BytesMut> {
+        if self.ipv4_update.is_empty() {
+            return None;
+        }
+        let mut buf = BytesMut::new();
+        let header: BytesMut = self.header.clone().into();
+        buf.put(&header[..]);
+
+        // IPv4 unicast withdraw right now we only support IPv4 updates only.
+        buf.put_u16(0u16); // Empty IPv4 withdraw.
+
+        // Attributes length.
+        let attr_len_pos = buf.len();
+        buf.put_u16(0u16); // Placeholder
+        let attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
+
+        // Attributes emit.
+        if let Some(bgp_attr) = &self.bgp_attr {
+            bgp_attr.attr_emit(&mut buf);
+        }
+
+        // No MP reach/unreach emit at this moment.
+
+        // Fill in attr length.
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        buf[attr_pos].copy_from_slice(&attr_len.to_be_bytes());
+
+        // Consume self.ipv4_update with checking buffer size.
+        while let Some(ip) = self.ipv4_update.pop() {
+            // Calculate NLRI len. When it exceed remaing size, push back the ip
+            // then return current buf.
+            let mut nlri_len: usize = 0;
+            if ip.id != 0 {
+                nlri_len = 4;
+            }
+            nlri_len += 1;
+            nlri_len += nlri_psize(ip.prefix.prefix_len());
+
+            if buf.len() + nlri_len > self.max_packet_size {
+                self.ipv4_update.push(ip);
+
+                const LENGTH_POS: std::ops::Range<usize> = 16..18;
+                let length: u16 = buf.len() as u16;
+                buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+
+                return Some(buf);
+            }
+
+            if ip.id != 0 {
+                buf.put_u32(ip.id);
+            }
+            buf.put_u8(ip.prefix.prefix_len());
+            let plen = nlri_psize(ip.prefix.prefix_len());
+            buf.put(&ip.prefix.addr().octets()[0..plen]);
+        }
+
+        const LENGTH_POS: std::ops::Range<usize> = 16..18;
+        let length: u16 = buf.len() as u16;
+        buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+
+        Some(buf)
+    }
+
+    pub fn pop_vpnv4(&mut self) -> Option<BytesMut> {
+        if self.vpnv4_update.is_empty() {
+            return None;
+        }
+        let mut buf = BytesMut::new();
+        let header: BytesMut = self.header.clone().into();
+        buf.put(&header[..]);
+
+        // IPv4 unicast withdraw right now we only support IPv4 updates only.
+        buf.put_u16(0u16); // Empty IPv4 withdraw.
+
+        // Attributes length.
+        let attr_len_pos = buf.len();
+        buf.put_u16(0u16); // Placeholder
+        let attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
+
+        // Attributes emit.
+        if let Some(bgp_attr) = &self.bgp_attr {
+            bgp_attr.attr_emit(&mut buf);
+        }
+
+        // MP reach.
+        if let Some(mp_update) = &self.mp_update {
+            //
+            mp_update.attr_emit_mut(&mut buf);
+        }
+
+        // Fill in attr length.
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        buf[attr_pos].copy_from_slice(&attr_len.to_be_bytes());
+
+        // Fill in total length.
+        const LENGTH_POS: std::ops::Range<usize> = 16..18;
+        let length: u16 = buf.len() as u16;
+        buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+
+        Some(buf)
     }
 }
 
@@ -80,7 +190,7 @@ impl From<UpdatePacket> for BytesMut {
             mp_update.attr_emit(&mut buf);
         }
 
-        // MP reach.
+        // MP unreach.
         if let Some(mp_withdraw) = update.mp_withdraw {
             mp_withdraw.attr_emit(&mut buf);
         }
