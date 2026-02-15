@@ -37,6 +37,7 @@ pub enum MpNlriReachAttr {
         nhop: Vpnv4Nexthop,
         updates: Vec<Vpnv4Nlri>,
     },
+    Vpnv4Reach(Vpnv4Reach),
     // Vpnv6 {
     //     //
     // },
@@ -85,8 +86,15 @@ impl MpNlriReachAttr {
         }
     }
 
-    pub fn attr_emit_mut(&mut self, _buf: &mut BytesMut) {
-        //
+    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut) {
+        match self {
+            MpNlriReachAttr::Vpnv4Reach(attr) => {
+                attr.attr_emit_mut(buf);
+            }
+            _ => {
+                //
+            }
+        }
     }
 }
 
