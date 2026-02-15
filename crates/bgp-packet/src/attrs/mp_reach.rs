@@ -84,6 +84,10 @@ impl MpNlriReachAttr {
             }
         }
     }
+
+    pub fn attr_emit_mut(&mut self, _buf: &mut BytesMut) {
+        //
+    }
 }
 
 impl MpNlriReachAttr {
