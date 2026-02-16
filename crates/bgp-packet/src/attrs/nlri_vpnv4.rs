@@ -148,15 +148,16 @@ impl AttrEmitter for Vpnv4Reach {
 
 impl Vpnv4Reach {
     pub fn attr_emit_mut(&mut self, buf: &mut BytesMut) {
-        // Helper to emit the header based on length.
+        let flags = self.attr_flags();
+        let attr_type = self.attr_type();
         let emit_header = |buf: &mut BytesMut, len: usize, extended: bool| {
             if extended {
-                buf.put_u8(self.attr_flags().with_extended(true).into());
-                buf.put_u8(self.attr_type().into());
+                buf.put_u8(flags.with_extended(true).into());
+                buf.put_u8(attr_type.into());
                 buf.put_u16(len as u16);
             } else {
-                buf.put_u8(self.attr_flags().into());
-                buf.put_u8(self.attr_type().into());
+                buf.put_u8(flags.into());
+                buf.put_u8(attr_type.into());
                 buf.put_u8(len as u8);
             }
         };
@@ -190,8 +191,28 @@ impl Vpnv4Reach {
         buf.put(&self.nhop.nhop.octets()[..]);
         // SNPA
         buf.put_u8(0);
+
         // Prefix.
         while let Some(update) = self.updates.pop() {
+            // Need to check remaining buffer size.
+            let mut nlri_len: usize = 0;
+            if update.nlri.id != 0 {
+                nlri_len += 4;
+            }
+            // Plen.
+            nlri_len += 1;
+            // Label.
+            nlri_len += 4;
+            // RD.
+            nlri_len += 8;
+            // Prefix.
+            nlri_len += nlri_psize(update.nlri.prefix.prefix_len());
+
+            if nlri_len + buf.len() > 4096 {
+                self.updates.push(update);
+                return;
+            }
+
             // AddPath
             if update.nlri.id != 0 {
                 buf.put_u32(update.nlri.id);

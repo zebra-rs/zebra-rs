@@ -105,12 +105,13 @@ macro_rules! start_repeater {
 }
 
 fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
-    let time = if peer.first_start {
-        peer.first_start = false;
-        rand::rng().random_range(5..=60)
-    } else {
-        peer.config.timer.idle_hold_time()
-    };
+    // let time = if peer.first_start {
+    //     peer.first_start = false;
+    //     rand::rng().random_range(5..=60)
+    // } else {
+    //     peer.config.timer.idle_hold_time()
+    // };
+    let time = 3;
     start_timer!(peer, time, Event::Start)
 }
 
@@ -120,6 +121,14 @@ pub fn start_connect_retry_timer(peer: &Peer) -> Timer {
 
 fn start_hold_timer(peer: &Peer) -> Timer {
     start_timer!(peer, peer.param.hold_time as u64, Event::HoldTimerExpires)
+}
+
+pub fn start_min_adv_timer(peer: &Peer) -> Timer {
+    if peer.is_ibgp() {
+        start_timer!(peer, 5 as u64, Event::AdvTimerExpires)
+    } else {
+        start_timer!(peer, 30 as u64, Event::AdvTimerExpires)
+    }
 }
 
 fn start_keepalive_timer(peer: &Peer) -> Timer {
