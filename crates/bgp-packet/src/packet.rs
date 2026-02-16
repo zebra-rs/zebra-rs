@@ -7,7 +7,7 @@ pub const BGP_PACKET_LEN: usize = 4096;
 pub const BGP_HEADER_LEN: u16 = 19;
 
 #[repr(u8)]
-#[derive(Debug, Eq, PartialEq, NomBE)]
+#[derive(Debug, Clone, Eq, PartialEq, NomBE)]
 pub enum BgpType {
     Open = 1,
     Update = 2,
@@ -18,7 +18,7 @@ pub enum BgpType {
     Max = 7,
 }
 
-#[derive(Debug, PartialEq, NomBE)]
+#[derive(Debug, Clone, PartialEq, NomBE)]
 pub struct BgpHeader {
     pub marker: [u8; 16],
     pub length: u16,

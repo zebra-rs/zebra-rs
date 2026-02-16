@@ -92,6 +92,7 @@ impl fmt::Display for Vpnv4Nexthop {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Vpnv4Reach {
     pub snpa: u8,
     pub nhop: Vpnv4Nexthop,
@@ -126,6 +127,92 @@ impl AttrEmitter for Vpnv4Reach {
         buf.put_u8(0);
         // Prefix.
         for update in self.updates.iter() {
+            // AddPath
+            if update.nlri.id != 0 {
+                buf.put_u32(update.nlri.id);
+            }
+            // Plen
+            let plen = update.nlri.prefix.prefix_len() + 88;
+            buf.put_u8(plen);
+            // Label
+            buf.put(&update.label.to_bytes()[..]);
+            // RD
+            buf.put_u16(update.rd.typ as u16);
+            buf.put(&update.rd.val[..]);
+            // Prefix
+            let plen = nlri_psize(update.nlri.prefix.prefix_len());
+            buf.put(&update.nlri.prefix.addr().octets()[0..plen]);
+        }
+    }
+}
+
+impl Vpnv4Reach {
+    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut) {
+        let flags = self.attr_flags();
+        let attr_type = self.attr_type();
+        let emit_header = |buf: &mut BytesMut, len: usize, extended: bool| {
+            if extended {
+                buf.put_u8(flags.with_extended(true).into());
+                buf.put_u8(attr_type.into());
+                buf.put_u16(len as u16);
+            } else {
+                buf.put_u8(flags.into());
+                buf.put_u8(attr_type.into());
+                buf.put_u8(len as u8);
+            }
+        };
+
+        if let Some(len) = self.len() {
+            // Length is known.
+            let extended = len > 255;
+            emit_header(buf, len, extended);
+            self.emit_mut(buf);
+        } else {
+            // Buffer the attribute to determine its length.
+            let mut attr_buf = BytesMut::new();
+            self.emit_mut(&mut attr_buf);
+            let len = attr_buf.len();
+            let extended = len > 255;
+            emit_header(buf, len, extended);
+            buf.put(&attr_buf[..]);
+        }
+    }
+
+    fn emit_mut(&mut self, buf: &mut BytesMut) {
+        // AFI/SAFI.
+        buf.put_u16(u16::from(Afi::Ip));
+        buf.put_u8(u8::from(Safi::MplsVpn));
+        // Nexthop
+        buf.put_u8(12); // Nexthop length.  RD(8)+IPv4 Nexthop(4);
+        // Nexthop RD.
+        let rd = [0u8; 8];
+        buf.put(&rd[..]);
+        // Nexthop.
+        buf.put(&self.nhop.nhop.octets()[..]);
+        // SNPA
+        buf.put_u8(0);
+
+        // Prefix.
+        while let Some(update) = self.updates.pop() {
+            // Need to check remaining buffer size.
+            let mut nlri_len: usize = 0;
+            if update.nlri.id != 0 {
+                nlri_len += 4;
+            }
+            // Plen.
+            nlri_len += 1;
+            // Label.
+            nlri_len += 4;
+            // RD.
+            nlri_len += 8;
+            // Prefix.
+            nlri_len += nlri_psize(update.nlri.prefix.prefix_len());
+
+            if nlri_len + buf.len() > 4096 {
+                self.updates.push(update);
+                return;
+            }
+
             // AddPath
             if update.nlri.id != 0 {
                 buf.put_u32(update.nlri.id);
