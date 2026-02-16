@@ -5,9 +5,8 @@ use nom::number::complete::be_u16;
 use nom_derive::*;
 
 use crate::{
-    Afi, BGP_HEADER_LEN, BgpAttr, BgpHeader, BgpParseError, BgpType, Ipv4Nlri, MpNlriReachAttr,
-    MpNlriUnreachAttr, ParseOption, Safi, nlri_psize, parse_bgp_nlri_ipv4,
-    parse_bgp_update_attribute,
+    Afi, BGP_HEADER_LEN, BgpAttr, BgpHeader, BgpParseError, BgpType, Ipv4Nlri, MpReachAttr,
+    MpUnreachAttr, ParseOption, Safi, nlri_psize, parse_bgp_nlri_ipv4, parse_bgp_update_attribute,
 };
 
 #[derive(NomBE)]
@@ -20,9 +19,9 @@ pub struct UpdatePacket {
     #[nom(Ignore)]
     pub ipv4_withdraw: Vec<Ipv4Nlri>,
     #[nom(Ignore)]
-    pub mp_update: Option<MpNlriReachAttr>,
+    pub mp_update: Option<MpReachAttr>,
     #[nom(Ignore)]
-    pub mp_withdraw: Option<MpNlriUnreachAttr>,
+    pub mp_withdraw: Option<MpUnreachAttr>,
     #[nom(Ignore)]
     max_packet_size: usize,
 }
@@ -117,7 +116,7 @@ impl UpdatePacket {
         };
 
         match mp_update {
-            MpNlriReachAttr::Vpnv4Reach(vpnv4reach) => {
+            MpReachAttr::Vpnv4(vpnv4reach) => {
                 if vpnv4reach.updates.is_empty() {
                     return None;
                 }
