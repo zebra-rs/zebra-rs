@@ -112,26 +112,17 @@ impl UpdatePacket {
     }
 
     pub fn pop_vpnv4(&mut self) -> Option<BytesMut> {
-        let Some(mp_update) = &mut self.mp_update else {
-            return None;
-        };
-
-        match mp_update {
-            MpReachAttr::Vpnv4(vpnv4reach) => {
-                if vpnv4reach.updates.is_empty() {
-                    return None;
-                }
-            }
-            _ => {
-                //
-            }
+        match &self.mp_update {
+            Some(MpReachAttr::Vpnv4(vpnv4)) if !vpnv4.updates.is_empty() => {}
+            _ => return None,
         }
+        let mp_update = self.mp_update.as_mut().unwrap();
 
         let mut buf = FixedBuf::new(self.max_packet_size);
         let header: BytesMut = self.header.clone().into();
         let _ = buf.put(&header[..]);
 
-        // IPv4 unicast withdraw right now we only support IPv4 updates only.
+        // IPv4 unicast withdraw right now we only support VPNv4 updates only.
         let _ = buf.put_u16(0u16); // Empty IPv4 withdraw.
 
         // Attributes length.
