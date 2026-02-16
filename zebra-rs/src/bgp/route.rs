@@ -879,7 +879,7 @@ pub fn route_from_peer(
                     )
                 }
             }
-            MpReachAttr::Rtcv4Reach(nlri) => {
+            MpReachAttr::Rtcv4(nlri) => {
                 for update in nlri.updates.iter() {
                     route_ipv4_rtc_update(peer_id, update, peers);
                 }
@@ -1509,7 +1509,7 @@ fn send_default_rtcv4_unicast(peer: &mut Peer) {
         nhop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         updates: vec![],
     };
-    let mp_update = MpReachAttr::Rtcv4Reach(nlri);
+    let mp_update = MpReachAttr::Rtcv4(nlri);
     update.mp_update = Some(mp_update);
     let bytes: BytesMut = update.into();
 
