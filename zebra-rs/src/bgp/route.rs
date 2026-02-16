@@ -761,7 +761,7 @@ fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: 
                 rd,
                 nlri: Ipv4Nlri { id, prefix },
             };
-            let mp_withdraw = MpNlriUnreachAttr::Vpnv4(vec![vpnv4_nlri]);
+            let mp_withdraw = MpUnreachAttr::Vpnv4(vec![vpnv4_nlri]);
             update.mp_withdraw = Some(mp_withdraw);
         }
         None => {
@@ -864,7 +864,7 @@ pub fn route_from_peer(
         && let Some(bgp_attr) = &packet.bgp_attr
     {
         match mp_updates {
-            MpNlriReachAttr::Vpnv4Reach(nlri) => {
+            MpReachAttr::Vpnv4(nlri) => {
                 for update in nlri.updates.iter() {
                     route_ipv4_update(
                         peer_id,
@@ -879,7 +879,7 @@ pub fn route_from_peer(
                     )
                 }
             }
-            MpNlriReachAttr::Rtcv4 {
+            MpReachAttr::Rtcv4 {
                 snpa,
                 nhop,
                 updates,
@@ -895,7 +895,7 @@ pub fn route_from_peer(
     }
     if let Some(mp_withdrawals) = packet.mp_withdraw {
         match mp_withdrawals {
-            MpNlriUnreachAttr::Vpnv4(withdrawals) => {
+            MpUnreachAttr::Vpnv4(withdrawals) => {
                 for withdraw in withdrawals.iter() {
                     route_ipv4_withdraw(
                         peer_id,
@@ -908,13 +908,13 @@ pub fn route_from_peer(
                     );
                 }
             }
-            MpNlriUnreachAttr::Vpnv4Eor => {
+            MpUnreachAttr::Vpnv4Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
                 let _ = bgp
                     .tx
                     .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
             }
-            MpNlriUnreachAttr::Rtcv4Eor => {
+            MpUnreachAttr::Rtcv4Eor => {
                 // If peer's EoR is true.
                 route_rtcv4_sync(peer_id, bgp, peers);
             }
@@ -1279,7 +1279,7 @@ impl Peer {
                     nhop: nhop.clone(),
                     updates: nlris,
                 };
-                update.mp_update = Some(MpNlriReachAttr::Vpnv4Reach(vpnv4reach));
+                update.mp_update = Some(MpReachAttr::Vpnv4(vpnv4reach));
             }
             update.bgp_attr = Some(attr);
 
@@ -1302,7 +1302,7 @@ pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
             nhop: nhop.clone(),
             updates: vec![nlri],
         };
-        let mp_update = MpNlriReachAttr::Vpnv4Reach(nlri);
+        let mp_update = MpReachAttr::Vpnv4(nlri);
         update.mp_update = Some(mp_update);
     }
     update.bgp_attr = Some(bgp_attr);
@@ -1487,7 +1487,7 @@ fn send_eor_ipv4_unicast(peer: &mut Peer) {
 fn send_eor_vpnv4_unicast(peer: &mut Peer) {
     // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
     let mut update = UpdatePacket::new();
-    let mp_withdraw = MpNlriUnreachAttr::Vpnv4Eor;
+    let mp_withdraw = MpUnreachAttr::Vpnv4Eor;
     update.mp_withdraw = Some(mp_withdraw);
     let bytes: BytesMut = update.into();
 
@@ -1508,7 +1508,7 @@ fn send_default_rtcv4_unicast(peer: &mut Peer) {
     }
 
     update.bgp_attr = Some(attrs);
-    let mp_update = MpNlriReachAttr::Rtcv4 {
+    let mp_update = MpReachAttr::Rtcv4 {
         snpa: 0,
         nhop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         updates: vec![],
@@ -1526,7 +1526,7 @@ fn send_default_rtcv4_unicast(peer: &mut Peer) {
 fn send_eor_rtcv4_unicast(peer: &mut Peer) {
     // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
     let mut update = UpdatePacket::new();
-    let mp_withdraw = MpNlriUnreachAttr::Rtcv4Eor;
+    let mp_withdraw = MpUnreachAttr::Rtcv4Eor;
     update.mp_withdraw = Some(mp_withdraw);
     let bytes: BytesMut = update.into();
 

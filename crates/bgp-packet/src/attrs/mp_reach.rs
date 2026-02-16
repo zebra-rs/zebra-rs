@@ -14,14 +14,14 @@ use crate::{
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach};
 
 #[derive(Clone, Debug, NomBE)]
-pub struct MpNlriReachHeader {
+pub struct MpReachHeader {
     pub afi: Afi,
     pub safi: Safi,
     pub nhop_len: u8,
 }
 
 #[derive(Clone)]
-pub enum MpNlriReachAttr {
+pub enum MpReachAttr {
     Ipv4 {
         snpa: u8,
         nhop: IpAddr,
@@ -32,7 +32,7 @@ pub enum MpNlriReachAttr {
         nhop: IpAddr,
         updates: Vec<Ipv6Nlri>,
     },
-    Vpnv4Reach(Vpnv4Reach),
+    Vpnv4(Vpnv4Reach),
     Evpn {
         snpa: u8,
         nhop: IpAddr,
@@ -45,13 +45,13 @@ pub enum MpNlriReachAttr {
     },
 }
 
-impl MpNlriReachAttr {
+impl MpReachAttr {
     pub fn attr_emit(&self, buf: &mut BytesMut) {
         match self {
-            MpNlriReachAttr::Vpnv4Reach(nlri) => {
+            MpReachAttr::Vpnv4(nlri) => {
                 nlri.attr_emit(buf);
             }
-            MpNlriReachAttr::Rtcv4 {
+            MpReachAttr::Rtcv4 {
                 snpa,
                 nhop,
                 updates,
@@ -71,7 +71,7 @@ impl MpNlriReachAttr {
 
     pub fn attr_emit_mut(&mut self, buf: &mut BytesMut) {
         match self {
-            MpNlriReachAttr::Vpnv4Reach(attr) => {
+            MpReachAttr::Vpnv4(attr) => {
                 attr.attr_emit_mut(buf);
             }
             _ => {
@@ -81,12 +81,12 @@ impl MpNlriReachAttr {
     }
 }
 
-impl MpNlriReachAttr {
+impl MpReachAttr {
     pub fn parse_nlri_opt(input: &[u8], opt: Option<ParseOption>) -> nom::IResult<&[u8], Self> {
-        if input.len() < size_of::<MpNlriReachHeader>() {
+        if input.len() < size_of::<MpReachHeader>() {
             return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
         }
-        let (input, header) = MpNlriReachHeader::parse_be(input)?;
+        let (input, header) = MpReachHeader::parse_be(input)?;
         let add_path = if let Some(opt) = opt {
             opt.is_add_path_recv(header.afi, header.safi)
         } else {
@@ -105,7 +105,7 @@ impl MpNlriReachAttr {
                 nhop,
                 updates,
             };
-            let mp_nlri = MpNlriReachAttr::Vpnv4Reach(nlri);
+            let mp_nlri = MpReachAttr::Vpnv4(nlri);
             return Ok((input, mp_nlri));
         }
         if header.afi == Afi::Ip6 && header.safi == Safi::Unicast {
@@ -117,7 +117,7 @@ impl MpNlriReachAttr {
             let (input, snpa) = be_u8(input)?;
             let (_, updates) =
                 many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
-            let mp_nlri = MpNlriReachAttr::Ipv6 {
+            let mp_nlri = MpReachAttr::Ipv6 {
                 snpa,
                 nhop,
                 updates,
@@ -144,7 +144,7 @@ impl MpNlriReachAttr {
             let (input, updates) =
                 many0_complete(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
 
-            let mp_nlri = MpNlriReachAttr::Evpn {
+            let mp_nlri = MpReachAttr::Evpn {
                 snpa,
                 nhop,
                 updates,
@@ -168,7 +168,7 @@ impl MpNlriReachAttr {
             let (input, snpa) = be_u8(input)?;
             let (input, updates) =
                 many0_complete(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
-            let rtc_nlri = MpNlriReachAttr::Rtcv4 {
+            let rtc_nlri = MpReachAttr::Rtcv4 {
                 snpa,
                 nhop,
                 updates,
@@ -180,15 +180,15 @@ impl MpNlriReachAttr {
 }
 
 // Not used.
-impl ParseBe<MpNlriReachAttr> for MpNlriReachAttr {
+impl ParseBe<MpReachAttr> for MpReachAttr {
     fn parse_be(input: &[u8]) -> nom::IResult<&[u8], Self> {
         Self::parse_nlri_opt(input, None)
     }
 }
 
-impl fmt::Display for MpNlriReachAttr {
+impl fmt::Display for MpReachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use MpNlriReachAttr::*;
+        use MpReachAttr::*;
         match self {
             Ipv6 {
                 snpa: _,
@@ -199,7 +199,7 @@ impl fmt::Display for MpNlriReachAttr {
                     writeln!(f, "{}:{} => {}", update.id, update.prefix, nhop)?;
                 }
             }
-            Vpnv4Reach(nlri) => {
+            Vpnv4(nlri) => {
                 for update in nlri.updates.iter() {
                     writeln!(
                         f,
@@ -243,7 +243,7 @@ impl fmt::Display for MpNlriReachAttr {
     }
 }
 
-impl fmt::Debug for MpNlriReachAttr {
+impl fmt::Debug for MpReachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }
