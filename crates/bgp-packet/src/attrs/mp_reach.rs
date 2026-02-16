@@ -38,12 +38,7 @@ pub enum MpReachAttr {
         nhop: IpAddr,
         updates: Vec<EvpnRoute>,
     },
-    Rtcv4Reach(Rtcv4Reach),
-    // Rtcv4 {
-    //     snpa: u8,
-    //     nhop: IpAddr,
-    //     updates: Vec<Rtcv4>,
-    // },
+    Rtcv4(Rtcv4Reach),
 }
 
 impl MpReachAttr {
@@ -52,21 +47,9 @@ impl MpReachAttr {
             MpReachAttr::Vpnv4(nlri) => {
                 nlri.attr_emit(buf);
             }
-            MpReachAttr::Rtcv4Reach(nlri) => {
+            MpReachAttr::Rtcv4(nlri) => {
                 nlri.attr_emit(buf);
             }
-            // MpReachAttr::Rtcv4 {
-            //     snpa,
-            //     nhop,
-            //     updates,
-            // } => {
-            //     let attr = Rtcv4Reach {
-            //         snpa: *snpa,
-            //         nhop: nhop.clone(),
-            //         updates: updates.clone(),
-            //     };
-            //     attr.attr_emit(buf);
-            // }
             _ => {
                 //
             }
@@ -177,7 +160,7 @@ impl MpReachAttr {
                 nhop,
                 updates,
             };
-            let rtc_nlri = MpReachAttr::Rtcv4Reach(nlri);
+            let rtc_nlri = MpReachAttr::Rtcv4(nlri);
             return Ok((input, rtc_nlri));
         }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
