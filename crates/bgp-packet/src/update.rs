@@ -1,6 +1,7 @@
 use std::fmt;
 
 use bytes::{BufMut, BytesMut};
+use fixedbuf::FixedBuf;
 use nom::number::complete::be_u16;
 use nom_derive::*;
 
@@ -126,36 +127,34 @@ impl UpdatePacket {
             }
         }
 
-        let mut buf = BytesMut::with_capacity(self.max_packet_size);
+        let mut buf = FixedBuf::new(self.max_packet_size);
         let header: BytesMut = self.header.clone().into();
-        buf.put(&header[..]);
+        let _ = buf.put(&header[..]);
 
         // IPv4 unicast withdraw right now we only support IPv4 updates only.
-        buf.put_u16(0u16); // Empty IPv4 withdraw.
+        let _ = buf.put_u16(0u16); // Empty IPv4 withdraw.
 
         // Attributes length.
         let attr_len_pos = buf.len();
-        buf.put_u16(0u16); // Placeholder
-        let attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
+        let _ = buf.put_u16(0u16); // Placeholder
 
         // Attributes emit.
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(&mut buf);
+            bgp_attr.attr_emit(&mut buf.get_mut());
         }
 
         // MP reach.
-        mp_update.attr_emit_mut(&mut buf);
+        mp_update.attr_emit_mut(&mut buf.get_mut());
 
         // Fill in attr length.
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
-        buf[attr_pos].copy_from_slice(&attr_len.to_be_bytes());
+        let _ = buf.put_u16_at(attr_len_pos, attr_len);
 
         // Fill in total length.
-        const LENGTH_POS: std::ops::Range<usize> = 16..18;
         let length: u16 = buf.len() as u16;
-        buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+        let _ = buf.put_u16_at(16, length);
 
-        Some(buf)
+        Some(buf.get())
     }
 }
 
