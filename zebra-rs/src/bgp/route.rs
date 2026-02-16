@@ -13,6 +13,7 @@ use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
 use super::peer::{ConfigRef, Event, Peer, PeerType, State};
+use super::timer::start_min_adv_timer;
 use super::{Bgp, InOut, Message};
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
@@ -446,7 +447,8 @@ pub fn route_apply_policy_out(
         };
         return policy_list_apply(policy_list, nlri, bgp_attr);
     } else {
-        return None;
+        // Temporary comment out.
+        // return None;
     }
     Some(bgp_attr)
 }
@@ -1088,7 +1090,7 @@ pub fn stale_timer_expire(
     let peer = peers.get_mut(&peer_id).expect("peer must exist");
     peer.timer.stale_timer.remove(&afi_safi);
 
-    // Remove all stale marked routes in adj_in.
+    // Fetch all of route which as stale flag.
     let withdrawn = {
         let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
 
@@ -1112,6 +1114,7 @@ pub fn stale_timer_expire(
         withdrawn
     };
 
+    // Withdraw routes.
     for withdraw in withdrawn.iter() {
         route_ipv4_withdraw(
             peer_id,
@@ -1235,6 +1238,66 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
     }
 }
 
+impl Peer {
+    pub fn send_ipv4(&mut self, nlri: Ipv4Nlri, bgp_attr: BgpAttr, timer: bool) {
+        let entry = self.cache_ipv4.entry(bgp_attr).or_default();
+        entry.push(nlri);
+        if timer && self.cache_timer.is_none() {
+            self.cache_timer = Some(start_min_adv_timer(self));
+        }
+    }
+
+    // Flush BGP update.
+    pub fn flush_ipv4(&mut self) {
+        for (attr, mut nlris) in self.cache_ipv4.drain() {
+            let mut update = UpdatePacket::new();
+            update.bgp_attr = Some(attr);
+            update.ipv4_update.append(&mut nlris);
+
+            while let Some(bytes) = update.pop_ipv4() {
+                if let Some(ref packet_tx) = self.packet_tx {
+                    if let Err(e) = packet_tx.send(bytes) {
+                        eprintln!("Failed to send BGP Update to {}: {}", self.address, e);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, bgp_attr: BgpAttr, timer: bool) {
+        let entry = self.cache_vpnv4.entry(bgp_attr).or_default();
+        entry.push(nlri);
+        if timer && self.cache_timer.is_none() {
+            self.cache_timer = Some(start_min_adv_timer(self));
+        }
+    }
+
+    // Flush BGP update.
+    pub fn flush_vpnv4(&mut self) {
+        for (attr, mut nlris) in self.cache_vpnv4.drain() {
+            let mut update = UpdatePacket::new();
+
+            if let Some(BgpNexthop::Vpnv4(nhop)) = attr.nexthop.as_ref() {
+                let vpnv4reach = Vpnv4Reach {
+                    snpa: 0,
+                    nhop: nhop.clone(),
+                    updates: nlris,
+                };
+                update.mp_update = Some(MpNlriReachAttr::Vpnv4Reach(vpnv4reach));
+            }
+            update.bgp_attr = Some(attr);
+
+            while let Some(bytes) = update.pop_vpnv4() {
+                if let Some(ref packet_tx) = self.packet_tx {
+                    if let Err(e) = packet_tx.send(bytes) {
+                        eprintln!("Failed to send BGP Update to {}: {}", self.address, e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
     let mut update = UpdatePacket::new();
     if let Some(BgpNexthop::Vpnv4(nhop)) = bgp_attr.nexthop.as_ref() {
@@ -1330,8 +1393,10 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         peer.adj_out.add(None, nlri.prefix, rib);
 
         // Send the routes.
-        route_send_ipv4(peer, nlri, attr);
+        peer.send_ipv4(nlri, attr, false);
     }
+
+    peer.flush_ipv4();
 
     // Send End-of-RIB marker for IPv4 Unicast
     send_eor_ipv4_unicast(peer);
@@ -1398,9 +1463,12 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             };
 
             // Send the routes.
-            route_send_vpnv4(peer, vpnv4_nlri, attr);
+            peer.send_vpnv4(vpnv4_nlri, attr, false);
         }
     }
+
+    peer.flush_vpnv4();
+
     // Send End-of-RIB marker for IPv4 VPN
     send_eor_vpnv4_unicast(peer);
 }
@@ -1520,9 +1588,14 @@ impl Bgp {
         };
 
         if !selected.is_empty() {
-            let mut peer_map = std::mem::take(&mut self.peers);
-            route_advertise_to_peers(None, prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
-            self.peers = peer_map;
+            route_advertise_to_peers(
+                None,
+                prefix,
+                &selected,
+                ident,
+                &mut bgp_ref,
+                &mut self.peers,
+            );
         }
     }
 
@@ -1541,9 +1614,14 @@ impl Bgp {
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
         if !selected.is_empty() || !removed.is_empty() {
-            let mut peer_map = std::mem::take(&mut self.peers);
-            route_advertise_to_peers(None, prefix, &selected, ident, &mut bgp_ref, &mut peer_map);
-            self.peers = peer_map;
+            route_advertise_to_peers(
+                None,
+                prefix,
+                &selected,
+                ident,
+                &mut bgp_ref,
+                &mut self.peers,
+            );
         }
     }
 }

@@ -1,5 +1,5 @@
 use super::BgpAttrStore;
-use super::peer::{Event, Peer, fsm};
+use super::peer::{ConfigRef, Event, Peer, fsm};
 use super::route::LocalRib;
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
@@ -136,7 +136,7 @@ impl Bgp {
 
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
-            Message::Event(peer, event) => {
+            Message::Event(ident, event) => {
                 match event {
                     Event::BGPOpen(ref msg) => {
                         // tracing::info!("Open from: {}", peer);
@@ -154,7 +154,15 @@ impl Bgp {
                         // tracing::info!("Other Event: {:?} for {}", event, peer);
                     }
                 }
-                fsm(self, peer, event);
+                let mut bgp_ref = ConfigRef {
+                    router_id: &self.router_id,
+                    local_rib: &mut self.local_rib,
+                    tx: &self.tx,
+                    rib_tx: &self.rib_tx,
+                    attr_store: &mut self.attr_store,
+                };
+
+                fsm(&mut bgp_ref, &mut self.peers, ident, event);
             }
             Message::Accept(socket, sockaddr) => {
                 // println!("Accept: {:?}", sockaddr);
