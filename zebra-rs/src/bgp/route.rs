@@ -864,19 +864,15 @@ pub fn route_from_peer(
         && let Some(bgp_attr) = &packet.bgp_attr
     {
         match mp_updates {
-            MpNlriReachAttr::Vpnv4 {
-                snpa: _,
-                nhop,
-                updates,
-            } => {
-                for update in updates.iter() {
+            MpNlriReachAttr::Vpnv4Reach(nlri) => {
+                for update in nlri.updates.iter() {
                     route_ipv4_update(
                         peer_id,
                         &update.nlri,
                         Some(update.rd.clone()),
                         Some(update.label),
                         bgp_attr,
-                        Some(nhop.clone()),
+                        Some(nlri.nhop.clone()),
                         bgp,
                         peers,
                         false,
@@ -1301,11 +1297,12 @@ impl Peer {
 pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
     let mut update = UpdatePacket::new();
     if let Some(BgpNexthop::Vpnv4(nhop)) = bgp_attr.nexthop.as_ref() {
-        let mp_update = MpNlriReachAttr::Vpnv4 {
+        let nlri = Vpnv4Reach {
             snpa: 0,
             nhop: nhop.clone(),
             updates: vec![nlri],
         };
+        let mp_update = MpNlriReachAttr::Vpnv4Reach(nlri);
         update.mp_update = Some(mp_update);
     }
     update.bgp_attr = Some(bgp_attr);

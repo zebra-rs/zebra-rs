@@ -32,15 +32,7 @@ pub enum MpNlriReachAttr {
         nhop: IpAddr,
         updates: Vec<Ipv6Nlri>,
     },
-    Vpnv4 {
-        snpa: u8,
-        nhop: Vpnv4Nexthop,
-        updates: Vec<Vpnv4Nlri>,
-    },
     Vpnv4Reach(Vpnv4Reach),
-    // Vpnv6 {
-    //     //
-    // },
     Evpn {
         snpa: u8,
         nhop: IpAddr,
@@ -56,17 +48,8 @@ pub enum MpNlriReachAttr {
 impl MpNlriReachAttr {
     pub fn attr_emit(&self, buf: &mut BytesMut) {
         match self {
-            MpNlriReachAttr::Vpnv4 {
-                snpa,
-                nhop,
-                updates,
-            } => {
-                let attr = Vpnv4Reach {
-                    snpa: *snpa,
-                    nhop: nhop.clone(),
-                    updates: updates.clone(),
-                };
-                attr.attr_emit(buf);
+            MpNlriReachAttr::Vpnv4Reach(nlri) => {
+                nlri.attr_emit(buf);
             }
             MpNlriReachAttr::Rtcv4 {
                 snpa,
@@ -117,11 +100,12 @@ impl MpNlriReachAttr {
             let (input, snpa) = be_u8(input)?;
             let (_, updates) =
                 many0_complete(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
-            let mp_nlri = MpNlriReachAttr::Vpnv4 {
+            let nlri = Vpnv4Reach {
                 snpa,
                 nhop,
                 updates,
             };
+            let mp_nlri = MpNlriReachAttr::Vpnv4Reach(nlri);
             return Ok((input, mp_nlri));
         }
         if header.afi == Afi::Ip6 && header.safi == Safi::Unicast {
@@ -215,12 +199,8 @@ impl fmt::Display for MpNlriReachAttr {
                     writeln!(f, "{}:{} => {}", update.id, update.prefix, nhop)?;
                 }
             }
-            Vpnv4 {
-                snpa: _,
-                nhop: _,
-                updates,
-            } => {
-                for update in updates.iter() {
+            Vpnv4Reach(nlri) => {
+                for update in nlri.updates.iter() {
                     writeln!(
                         f,
                         " {}:[{}]:{}",
