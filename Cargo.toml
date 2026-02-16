@@ -10,6 +10,7 @@ members = [
   "crates/isis-macros",
   "crates/ospf-packet",
   "crates/ospf-macros",
+  "crates/fixedbuf",
 ]
 
 [workspace.package]
