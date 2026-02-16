@@ -334,23 +334,27 @@ pub fn parse_bgp_update_attribute(
                 bgp_attr.cluster_list = Some(v);
             }
             Attr::MpReachNlri(v) => {
-                if let MpNlriReachAttr::Vpnv4 {
-                    snpa: _,
-                    nhop,
-                    updates: _,
-                } = &v
-                {
-                    bgp_attr.nexthop = Some(BgpNexthop::Vpnv4(nhop.clone()));
+                match v {
+                    MpNlriReachAttr::Vpnv4Reach(nlri) => {
+                        bgp_attr.nexthop = Some(BgpNexthop::Vpnv4(nlri.nhop.clone()));
+                        mp_update = Some(MpNlriReachAttr::Vpnv4Reach(nlri));
+                    }
+                    MpNlriReachAttr::Evpn {
+                        snpa,
+                        nhop,
+                        updates,
+                    } => {
+                        bgp_attr.nexthop = Some(BgpNexthop::Evpn(nhop.clone()));
+                        mp_update = Some(MpNlriReachAttr::Evpn {
+                            snpa,
+                            nhop,
+                            updates,
+                        })
+                    }
+                    _ => {
+                        //
+                    }
                 }
-                if let MpNlriReachAttr::Evpn {
-                    snpa: _,
-                    nhop,
-                    updates: _,
-                } = &v
-                {
-                    bgp_attr.nexthop = Some(BgpNexthop::Evpn(*nhop));
-                }
-                mp_update = Some(v);
             }
             Attr::MpUnreachNlri(v) => {
                 mp_withdraw = Some(v);
