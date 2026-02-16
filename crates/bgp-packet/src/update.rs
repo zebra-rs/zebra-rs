@@ -6,7 +6,7 @@ use nom_derive::*;
 
 use crate::{
     Afi, BGP_HEADER_LEN, BgpAttr, BgpHeader, BgpParseError, BgpType, Ipv4Nlri, MpNlriReachAttr,
-    MpNlriUnreachAttr, ParseOption, Safi, Vpnv4Nlri, nlri_psize, parse_bgp_nlri_ipv4,
+    MpNlriUnreachAttr, ParseOption, Safi, nlri_psize, parse_bgp_nlri_ipv4,
     parse_bgp_update_attribute,
 };
 
@@ -25,8 +25,6 @@ pub struct UpdatePacket {
     pub mp_withdraw: Option<MpNlriUnreachAttr>,
     #[nom(Ignore)]
     max_packet_size: usize,
-    #[nom(Ignore)]
-    pub vpnv4_update: Vec<Vpnv4Nlri>,
 }
 
 impl UpdatePacket {
@@ -45,7 +43,6 @@ impl Default for UpdatePacket {
             mp_update: None,
             mp_withdraw: None,
             max_packet_size: 4096,
-            vpnv4_update: Vec::new(),
         }
     }
 }
@@ -55,7 +52,7 @@ impl UpdatePacket {
         if self.ipv4_update.is_empty() {
             return None;
         }
-        let mut buf = BytesMut::new();
+        let mut buf = BytesMut::with_capacity(self.max_packet_size);
         let header: BytesMut = self.header.clone().into();
         buf.put(&header[..]);
 
@@ -115,10 +112,22 @@ impl UpdatePacket {
     }
 
     pub fn pop_vpnv4(&mut self) -> Option<BytesMut> {
-        if self.vpnv4_update.is_empty() {
+        let Some(mp_update) = &mut self.mp_update else {
             return None;
+        };
+
+        match mp_update {
+            MpNlriReachAttr::Vpnv4Reach(vpnv4reach) => {
+                if vpnv4reach.updates.is_empty() {
+                    return None;
+                }
+            }
+            _ => {
+                //
+            }
         }
-        let mut buf = BytesMut::new();
+
+        let mut buf = BytesMut::with_capacity(self.max_packet_size);
         let header: BytesMut = self.header.clone().into();
         buf.put(&header[..]);
 
@@ -136,10 +145,7 @@ impl UpdatePacket {
         }
 
         // MP reach.
-        if let Some(mp_update) = &self.mp_update {
-            //
-            mp_update.attr_emit_mut(&mut buf);
-        }
+        mp_update.attr_emit_mut(&mut buf);
 
         // Fill in attr length.
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;

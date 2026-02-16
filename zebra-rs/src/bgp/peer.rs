@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
@@ -74,6 +74,7 @@ pub enum Event {
     KeepAliveMsg,                 // 26
     UpdateMsg(UpdatePacket),      // 27
     StaleTimerExipires(AfiSafi),
+    AdvTimerExpires,
 }
 
 #[derive(Debug, Default)]
@@ -267,6 +268,9 @@ pub struct Peer {
     pub reflector_client: bool,
     pub instant: Option<Instant>,
     pub first_start: bool,
+    pub cache_ipv4: HashMap<BgpAttr, Vec<Ipv4Nlri>>,
+    pub cache_vpnv4: HashMap<BgpAttr, Vec<Vpnv4Nlri>>,
+    pub cache_timer: Option<Timer>,
 }
 
 impl Peer {
@@ -313,6 +317,9 @@ impl Peer {
             reflector_client: false,
             instant: None,
             first_start: true,
+            cache_ipv4: HashMap::default(),
+            cache_vpnv4: HashMap::default(),
+            cache_timer: None,
         };
         peer.config
             .mp
@@ -444,6 +451,7 @@ pub fn fsm(
             Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
             Event::UpdateMsg(_) => unreachable!(), // Handled above
             Event::StaleTimerExipires(_) => unreachable!(), // Handled above
+            Event::AdvTimerExpires => fsm_adv_timer_expires(peer),
         };
         if prev_state == peer.state {
             return;
@@ -467,6 +475,11 @@ pub fn fsm(
     if need_clean {
         route_clean(id, bgp_ref, peer_map, false);
     }
+}
+
+pub fn fsm_adv_timer_expires(peer: &mut Peer) -> State {
+    tracing::info!("XXX Advtimer expire");
+    State::Established
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
