@@ -9,7 +9,7 @@ use prefix_trie::PrefixMap;
 
 use super::BgpRib;
 use super::cap::CapAfiMap;
-use super::peer::{ConfigRef, Peer, PeerType};
+use super::peer::{Peer, PeerType};
 
 // Direction marker types for compile-time type safety
 #[derive(Debug, Clone, Copy)]
