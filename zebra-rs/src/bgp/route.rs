@@ -13,7 +13,7 @@ use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
 use super::peer::{ConfigRef, Event, Peer, PeerType, State};
-use super::timer::start_min_adv_timer;
+use super::timer::{start_adv_timer_ipv4, start_adv_timer_vpnv4};
 use super::{Bgp, InOut, Message};
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
@@ -621,9 +621,9 @@ fn route_advertise_to_addpath(
                         rd: rd.clone(),
                         nlri,
                     };
-                    route_send_vpnv4(peer, vpnv4_nlri, attr);
+                    peer.send_vpnv4(vpnv4_nlri, attr, true);
                 } else {
-                    route_send_ipv4(peer, nlri, attr);
+                    peer.send_ipv4(nlri, attr, true);
                 }
             }
         }
@@ -734,9 +734,9 @@ fn route_advertise_to_peers(
                         rd: rd.clone(),
                         nlri,
                     };
-                    route_send_vpnv4(peer, vpnv4_nlri, attr);
+                    peer.send_vpnv4(vpnv4_nlri, attr, true);
                 } else {
-                    route_send_ipv4(peer, nlri, attr);
+                    peer.send_ipv4(nlri, attr, true);
                 }
             }
             _ => {
@@ -1234,8 +1234,8 @@ impl Peer {
     pub fn send_ipv4(&mut self, nlri: Ipv4Nlri, bgp_attr: BgpAttr, timer: bool) {
         let entry = self.cache_ipv4.entry(bgp_attr).or_default();
         entry.push(nlri);
-        if timer && self.cache_timer.is_none() {
-            self.cache_timer = Some(start_min_adv_timer(self));
+        if timer && self.cache_ipv4_timer.is_none() {
+            self.cache_ipv4_timer = Some(start_adv_timer_ipv4(self));
         }
     }
 
@@ -1259,8 +1259,8 @@ impl Peer {
     pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, bgp_attr: BgpAttr, timer: bool) {
         let entry = self.cache_vpnv4.entry(bgp_attr).or_default();
         entry.push(nlri);
-        if timer && self.cache_timer.is_none() {
-            self.cache_timer = Some(start_min_adv_timer(self));
+        if timer && self.cache_ipv4_timer.is_none() {
+            self.cache_vpnv4_timer = Some(start_adv_timer_vpnv4(self));
         }
     }
 
