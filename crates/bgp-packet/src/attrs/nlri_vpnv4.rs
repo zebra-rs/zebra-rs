@@ -13,7 +13,7 @@ use crate::{Afi, AttrType, Label, ParseNlri, RouteDistinguisher, Safi, nlri_psiz
 
 use super::{AttrEmitter, AttrFlags, Ipv4Nlri};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Vpnv4Nlri {
     pub label: Label,
     pub rd: RouteDistinguisher,

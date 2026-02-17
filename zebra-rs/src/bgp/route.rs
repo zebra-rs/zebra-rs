@@ -611,8 +611,9 @@ fn route_advertise_to_addpath(
                         }
                     }
                 }
+                let attr = bgp.attr_store.intern(attr);
                 let mut rib = rib.clone();
-                rib.attr = bgp.attr_store.intern(attr.clone());
+                rib.attr = attr.clone();
 
                 peer.adj_out.add(rd, nlri.prefix, rib);
                 if let Some(ref rd) = rd {
@@ -655,6 +656,11 @@ fn route_withdraw_from_addpath(
     for peer_addr in peer_addrs {
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
+        if let Some(ref rd) = rd {
+            peer.cache_remove_vpnv4(rd.clone(), prefix, removed.local_id);
+        } else {
+            peer.cache_remove_ipv4(prefix, removed.local_id);
+        }
         route_withdraw_ipv4(peer, rd, prefix, removed.local_id);
         peer.adj_out.remove(rd, prefix, removed.local_id);
     }
@@ -723,9 +729,10 @@ fn route_advertise_to_peers(
                     }
                 }
                 // Send update
+                let attr = bgp.attr_store.intern(attr);
                 if let Some(best) = new_best {
                     let mut rib = best.clone();
-                    rib.attr = bgp.attr_store.intern(attr.clone());
+                    rib.attr = attr.clone();
                     peer.adj_out.add(rd, nlri.prefix, rib);
                 }
                 if let Some(ref rd) = rd {
@@ -742,6 +749,11 @@ fn route_advertise_to_peers(
             _ => {
                 // Send withdrawal if we had previously advertised
                 if peer.adj_out.contains_key(rd, &prefix) {
+                    if let Some(ref rd) = rd {
+                        peer.cache_remove_vpnv4(rd.clone(), prefix, 0);
+                    } else {
+                        peer.cache_remove_ipv4(prefix, 0);
+                    }
                     route_withdraw_ipv4(peer, rd, prefix, 0);
                     peer.adj_out.remove(rd, prefix, 0);
                 }
@@ -1234,20 +1246,35 @@ pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
 }
 
 impl Peer {
-    pub fn send_ipv4(&mut self, nlri: Ipv4Nlri, bgp_attr: BgpAttr, timer: bool) {
-        let entry = self.cache_ipv4.entry(bgp_attr).or_default();
-        entry.push(nlri);
+    pub fn send_ipv4(&mut self, nlri: Ipv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
+        self.cache_ipv4
+            .entry(attr.clone())
+            .or_default()
+            .insert(nlri.clone());
+        self.cache_ipv4_rev.insert(nlri, attr);
         if timer && self.cache_ipv4_timer.is_none() {
             self.cache_ipv4_timer = Some(start_adv_timer_ipv4(self));
         }
     }
 
+    pub fn cache_remove_ipv4(&mut self, prefix: Ipv4Net, id: u32) {
+        let nlri = Ipv4Nlri { id, prefix };
+        if let Some(attr) = self.cache_ipv4_rev.remove(&nlri) {
+            if let Some(set) = self.cache_ipv4.get_mut(&attr) {
+                set.remove(&nlri);
+                if set.is_empty() {
+                    self.cache_ipv4.remove(&attr);
+                }
+            }
+        }
+    }
+
     // Flush BGP update.
     pub fn flush_ipv4(&mut self) {
-        for (attr, mut nlris) in self.cache_ipv4.drain() {
+        for (attr, nlris) in self.cache_ipv4.drain() {
             let mut update = UpdatePacket::new();
-            update.bgp_attr = Some(attr);
-            update.ipv4_update.append(&mut nlris);
+            update.bgp_attr = Some((*attr).clone());
+            update.ipv4_update = nlris.into_iter().collect();
 
             while let Some(bytes) = update.pop_ipv4() {
                 if let Some(ref packet_tx) = self.packet_tx {
@@ -1257,30 +1284,50 @@ impl Peer {
                 }
             }
         }
+        self.cache_ipv4_rev.clear();
     }
 
-    pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, bgp_attr: BgpAttr, timer: bool) {
-        let entry = self.cache_vpnv4.entry(bgp_attr).or_default();
-        entry.push(nlri);
-        if timer && self.cache_ipv4_timer.is_none() {
+    pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
+        self.cache_vpnv4
+            .entry(attr.clone())
+            .or_default()
+            .insert(nlri.clone());
+        self.cache_vpnv4_rev.insert(nlri, attr);
+        if timer && self.cache_vpnv4_timer.is_none() {
             self.cache_vpnv4_timer = Some(start_adv_timer_vpnv4(self));
+        }
+    }
+
+    pub fn cache_remove_vpnv4(&mut self, rd: RouteDistinguisher, prefix: Ipv4Net, id: u32) {
+        let nlri = Vpnv4Nlri {
+            label: Label::default(),
+            rd,
+            nlri: Ipv4Nlri { id, prefix },
+        };
+        if let Some(attr) = self.cache_vpnv4_rev.remove(&nlri) {
+            if let Some(set) = self.cache_vpnv4.get_mut(&attr) {
+                set.remove(&nlri);
+                if set.is_empty() {
+                    self.cache_vpnv4.remove(&attr);
+                }
+            }
         }
     }
 
     // Flush BGP update.
     pub fn flush_vpnv4(&mut self) {
-        for (attr, mut nlris) in self.cache_vpnv4.drain() {
+        for (attr, nlris) in self.cache_vpnv4.drain() {
             let mut update = UpdatePacket::new();
 
             if let Some(BgpNexthop::Vpnv4(nhop)) = attr.nexthop.as_ref() {
                 let vpnv4reach = Vpnv4Reach {
                     snpa: 0,
                     nhop: nhop.clone(),
-                    updates: nlris,
+                    updates: nlris.into_iter().collect(),
                 };
                 update.mp_update = Some(MpReachAttr::Vpnv4(vpnv4reach));
             }
-            update.bgp_attr = Some(attr);
+            update.bgp_attr = Some((*attr).clone());
 
             while let Some(bytes) = update.pop_vpnv4() {
                 if let Some(ref packet_tx) = self.packet_tx {
@@ -1290,6 +1337,7 @@ impl Peer {
                 }
             }
         }
+        self.cache_vpnv4_rev.clear();
     }
 }
 
@@ -1385,11 +1433,12 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
         };
 
         // Register to AdjOut.
-        rib.attr = bgp.attr_store.intern(attr.clone());
+        rib.attr = bgp.attr_store.intern(attr);
+        let arc_attr = rib.attr.clone();
         peer.adj_out.add(None, nlri.prefix, rib);
 
         // Send the routes.
-        peer.send_ipv4(nlri, attr, false);
+        peer.send_ipv4(nlri, arc_attr, false);
     }
 
     peer.flush_ipv4();
@@ -1449,7 +1498,8 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             }
 
             // Register to AdjOut.
-            rib.attr = bgp.attr_store.intern(attr.clone());
+            rib.attr = bgp.attr_store.intern(attr);
+            let arc_attr = rib.attr.clone();
             peer.adj_out.add(Some(rd.clone()), nlri.prefix, rib);
 
             let vpnv4_nlri = Vpnv4Nlri {
@@ -1459,7 +1509,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
             };
 
             // Send the routes.
-            peer.send_vpnv4(vpnv4_nlri, attr, false);
+            peer.send_vpnv4(vpnv4_nlri, arc_attr, false);
         }
     }
 

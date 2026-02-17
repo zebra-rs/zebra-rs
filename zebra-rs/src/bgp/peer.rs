@@ -1,6 +1,7 @@
 #![allow(dead_code)]
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::BytesMut;
@@ -270,8 +271,10 @@ pub struct Peer {
     pub reflector_client: bool,
     pub instant: Option<Instant>,
     pub first_start: bool,
-    pub cache_ipv4: HashMap<BgpAttr, Vec<Ipv4Nlri>>,
-    pub cache_vpnv4: HashMap<BgpAttr, Vec<Vpnv4Nlri>>,
+    pub cache_ipv4: HashMap<Arc<BgpAttr>, HashSet<Ipv4Nlri>>,
+    pub cache_ipv4_rev: HashMap<Ipv4Nlri, Arc<BgpAttr>>,
+    pub cache_vpnv4: HashMap<Arc<BgpAttr>, HashSet<Vpnv4Nlri>>,
+    pub cache_vpnv4_rev: HashMap<Vpnv4Nlri, Arc<BgpAttr>>,
     pub cache_ipv4_timer: Option<Timer>,
     pub cache_vpnv4_timer: Option<Timer>,
 }
@@ -323,7 +326,9 @@ impl Peer {
             instant: None,
             first_start: true,
             cache_ipv4: HashMap::default(),
+            cache_ipv4_rev: HashMap::default(),
             cache_vpnv4: HashMap::default(),
+            cache_vpnv4_rev: HashMap::default(),
             cache_ipv4_timer: None,
             cache_vpnv4_timer: None,
         };
