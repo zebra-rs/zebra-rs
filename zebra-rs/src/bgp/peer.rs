@@ -74,7 +74,8 @@ pub enum Event {
     KeepAliveMsg,                 // 26
     UpdateMsg(UpdatePacket),      // 27
     StaleTimerExipires(AfiSafi),
-    AdvTimerExpires,
+    AdvTimerIpv4Expires,
+    AdvTimerVpnv4Expires,
 }
 
 #[derive(Debug, Default)]
@@ -270,7 +271,8 @@ pub struct Peer {
     pub first_start: bool,
     pub cache_ipv4: HashMap<BgpAttr, Vec<Ipv4Nlri>>,
     pub cache_vpnv4: HashMap<BgpAttr, Vec<Vpnv4Nlri>>,
-    pub cache_timer: Option<Timer>,
+    pub cache_ipv4_timer: Option<Timer>,
+    pub cache_vpnv4_timer: Option<Timer>,
 }
 
 impl Peer {
@@ -319,7 +321,8 @@ impl Peer {
             first_start: true,
             cache_ipv4: HashMap::default(),
             cache_vpnv4: HashMap::default(),
-            cache_timer: None,
+            cache_ipv4_timer: None,
+            cache_vpnv4_timer: None,
         };
         peer.config
             .mp
@@ -451,7 +454,8 @@ pub fn fsm(
             Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
             Event::UpdateMsg(_) => unreachable!(), // Handled above
             Event::StaleTimerExipires(_) => unreachable!(), // Handled above
-            Event::AdvTimerExpires => fsm_adv_timer_expires(peer),
+            Event::AdvTimerIpv4Expires => fsm_adv_timer_ipv4_expires(peer),
+            Event::AdvTimerVpnv4Expires => fsm_adv_timer_vpnv4_expires(peer),
         };
         if prev_state == peer.state {
             return;
@@ -477,8 +481,15 @@ pub fn fsm(
     }
 }
 
-pub fn fsm_adv_timer_expires(peer: &mut Peer) -> State {
-    tracing::info!("XXX Advtimer expire");
+pub fn fsm_adv_timer_ipv4_expires(peer: &mut Peer) -> State {
+    peer.cache_ipv4_timer = None;
+    peer.flush_ipv4();
+    State::Established
+}
+
+pub fn fsm_adv_timer_vpnv4_expires(peer: &mut Peer) -> State {
+    peer.cache_vpnv4_timer = None;
+    peer.flush_vpnv4();
     State::Established
 }
 
