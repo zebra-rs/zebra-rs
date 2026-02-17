@@ -237,6 +237,7 @@ impl PeerStat {
 #[derive(Debug)]
 pub struct Peer {
     pub ident: IpAddr,
+    pub idx: usize,
     pub address: IpAddr,
     pub router_id: Ipv4Addr,
     pub local_identifier: Option<Ipv4Addr>,
@@ -278,6 +279,7 @@ pub struct Peer {
 impl Peer {
     pub fn new(
         ident: IpAddr,
+        idx: usize,
         local_as: u32,
         router_id: Ipv4Addr,
         peer_as: u32,
@@ -286,6 +288,7 @@ impl Peer {
     ) -> Self {
         let mut peer = Self {
             ident,
+            idx,
             router_id,
             local_as,
             peer_as,
@@ -494,6 +497,7 @@ pub fn fsm_adv_timer_vpnv4_expires(peer: &mut Peer) -> State {
 }
 
 pub fn fsm_start(peer: &mut Peer) -> State {
+    peer.first_start = false;
     peer.task.connect = Some(peer_start_connection(peer));
     State::Connect
 }

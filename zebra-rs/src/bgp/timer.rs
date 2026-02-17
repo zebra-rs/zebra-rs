@@ -105,13 +105,19 @@ macro_rules! start_repeater {
 }
 
 fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
-    // let time = if peer.first_start {
-    //     peer.first_start = false;
-    //     rand::rng().random_range(5..=60)
-    // } else {
-    //     peer.config.timer.idle_hold_time()
-    // };
-    let time = 3;
+    let time = if let Some(time) = peer.config.timer.idle_hold_time {
+        time as u64
+    } else {
+        if peer.first_start {
+            if peer.idx > 10 {
+                rand::rng().random_range(5..=60)
+            } else {
+                peer.config.timer.idle_hold_time()
+            }
+        } else {
+            peer.config.timer.idle_hold_time()
+        }
+    };
     start_timer!(peer, time, Event::Start)
 }
 
@@ -257,6 +263,8 @@ pub mod config {
         } else {
             peer.config.timer.idle_hold_time = None;
         }
+        peer.timer.idle_hold_timer = None;
+        update_timers(peer);
         Some(())
     }
 
