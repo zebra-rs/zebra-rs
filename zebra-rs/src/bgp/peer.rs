@@ -386,7 +386,7 @@ impl Peer {
     }
 }
 
-pub struct ConfigRef<'a> {
+pub struct BgpTop<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut LocalRib,
     pub tx: &'a mpsc::Sender<Message>,
@@ -394,12 +394,7 @@ pub struct ConfigRef<'a> {
     pub attr_store: &'a mut BgpAttrStore,
 }
 
-pub fn fsm(
-    bgp_ref: &mut ConfigRef,
-    peer_map: &mut BTreeMap<IpAddr, Peer>,
-    id: IpAddr,
-    event: Event,
-) {
+pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAddr, event: Event) {
     // Handle UpdateMsg separately to avoid borrow checker issues
     if let Event::UpdateMsg(packet) = event {
         let prev_state = peer_map.get(&id).unwrap().state.clone();
@@ -511,7 +506,7 @@ pub fn fsm_stop(_peer: &mut Peer) -> State {
     State::Idle
 }
 
-fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
+fn fsm_config_update(bgp: &BgpTop, peer: &mut Peer) -> State {
     bgp_debug!("BGP router ID: {}", bgp.router_id);
     peer.state.clone()
 }
@@ -602,7 +597,7 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
 fn fsm_bgp_update(
     peer_id: IpAddr,
     packet: UpdatePacket,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) -> State {
     {

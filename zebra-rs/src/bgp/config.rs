@@ -7,7 +7,7 @@ use crate::config::{Args, ConfigOp};
 use crate::policy;
 use crate::policy::com_list::*;
 
-use super::peer::ConfigRef;
+use super::peer::BgpTop;
 use super::route_clean;
 use super::{
     Bgp,
@@ -52,7 +52,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         } else {
             return None;
         };
-        let mut bgp_ref = ConfigRef {
+        let mut bgp_ref = BgpTop {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
             tx: &bgp.tx,
