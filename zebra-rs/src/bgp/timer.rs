@@ -247,6 +247,10 @@ pub fn update_timers(peer: &mut Peer) {
             }
         }
     }
+    if peer.state != Established {
+        peer.cache_ipv4_timer = None;
+        peer.cache_vpnv4_timer = None;
+    }
 }
 
 pub mod config {
