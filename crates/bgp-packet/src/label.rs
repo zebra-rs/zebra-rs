@@ -7,7 +7,7 @@
 //
 // In BGP MP_REACH_NLRI, only 3 octets are used (no TTL field):
 // |                Label (20 bits)                | Exp |S|
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct Label {
     pub label: u32,
     pub exp: u8,

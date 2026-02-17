@@ -35,7 +35,16 @@ fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
-        let peer = Peer::new(addr, bgp.asn, bgp.router_id, 0u32, addr, bgp.tx.clone());
+        let idx = bgp.peers.len();
+        let peer = Peer::new(
+            addr,
+            idx,
+            bgp.asn,
+            bgp.router_id,
+            0u32,
+            addr,
+            bgp.tx.clone(),
+        );
         bgp.peers.insert(addr, peer);
     } else {
         let ident = if let Some(peer) = bgp.peers.get(&addr) {
@@ -412,18 +421,19 @@ fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
 
 impl Bgp {
     fn callback_peer(&mut self, path: &str, cb: Callback) {
-        let neighbor_prefix = String::from("/routing/bgp/neighbor");
-        self.callbacks.insert(neighbor_prefix + path, cb);
+        let prefix = String::from("/routing/bgp/neighbor");
+        self.callbacks.insert(prefix + path, cb);
     }
 
     #[allow(dead_code)]
     fn callback_afi_safi(&mut self, path: &str, cb: Callback) {
-        let neighbor_prefix = String::from("/routing/bgp/neighbor");
-        self.callbacks.insert(neighbor_prefix + path, cb);
+        let prefix = String::from("/routing/bgp/neighbor");
+        self.callbacks.insert(prefix + path, cb);
     }
 
-    fn timer(&mut self, _path: &str, _cb: Callback) {
-        let _prefix = String::from("/routing/bgp/neighbor/timers");
+    fn timer(&mut self, path: &str, cb: Callback) {
+        let prefix = String::from("/routing/bgp/neighbor/timers");
+        self.callbacks.insert(prefix + path, cb);
     }
 
     pub fn callback_build(&mut self) {

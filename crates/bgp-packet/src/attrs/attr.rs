@@ -114,9 +114,9 @@ pub enum Attr {
     #[nom(Selector = "AttrSelector(AttrType::ClusterList, None)")]
     ClusterList(ClusterList),
     #[nom(Selector = "AttrSelector(AttrType::MpReachNlri, None)")]
-    MpReachNlri(MpNlriReachAttr),
+    MpReachNlri(MpReachAttr),
     #[nom(Selector = "AttrSelector(AttrType::MpUnreachNlri, None)")]
-    MpUnreachNlri(MpNlriUnreachAttr),
+    MpUnreachNlri(MpUnreachAttr),
     #[nom(Selector = "AttrSelector(AttrType::ExtendedCom, None)")]
     ExtendedCom(ExtCommunity),
     #[nom(Selector = "AttrSelector(AttrType::PmsiTunnel, None)")]
@@ -241,18 +241,16 @@ impl Attr {
         // Parse the attribute using the appropriate selector with error context
         let (_, attr) = match attr_type {
             AttrType::MpReachNlri => {
-                let (remaining, mp_reach) =
-                    MpNlriReachAttr::parse_nlri_opt(attr_payload, opt.clone()).map_err(|e| {
-                        BgpParseError::AttributeParseError {
-                            attr_type,
-                            source: Box::new(BgpParseError::from(e)),
-                        }
+                let (remaining, mp_reach) = MpReachAttr::parse_nlri_opt(attr_payload, opt.clone())
+                    .map_err(|e| BgpParseError::AttributeParseError {
+                        attr_type,
+                        source: Box::new(BgpParseError::from(e)),
                     })?;
                 (remaining, Attr::MpReachNlri(mp_reach))
             }
             AttrType::MpUnreachNlri => {
                 let (remaining, mp_unreach) =
-                    MpNlriUnreachAttr::parse_nlri_opt(attr_payload, opt.clone()).map_err(|e| {
+                    MpUnreachAttr::parse_nlri_opt(attr_payload, opt.clone()).map_err(|e| {
                         BgpParseError::AttributeParseError {
                             attr_type,
                             source: Box::new(BgpParseError::from(e)),
@@ -276,8 +274,8 @@ type ParsedAttributes<'a> = Result<
     (
         &'a [u8],
         Option<BgpAttr>,
-        Option<MpNlriReachAttr>,
-        Option<MpNlriUnreachAttr>,
+        Option<MpReachAttr>,
+        Option<MpUnreachAttr>,
     ),
     BgpParseError,
 >;
@@ -291,8 +289,8 @@ pub fn parse_bgp_update_attribute(
     let (attr, input) = input.split_at(length as usize);
     let mut remaining = attr;
     let mut bgp_attr = BgpAttr::default();
-    let mut mp_update: Option<MpNlriReachAttr> = None;
-    let mut mp_withdraw: Option<MpNlriUnreachAttr> = None;
+    let mut mp_update: Option<MpReachAttr> = None;
+    let mut mp_withdraw: Option<MpUnreachAttr> = None;
 
     while !remaining.is_empty() {
         let (new_remaining, attr) = Attr::parse_attr(remaining, as4, &opt)?;
@@ -334,23 +332,27 @@ pub fn parse_bgp_update_attribute(
                 bgp_attr.cluster_list = Some(v);
             }
             Attr::MpReachNlri(v) => {
-                if let MpNlriReachAttr::Vpnv4 {
-                    snpa: _,
-                    nhop,
-                    updates: _,
-                } = &v
-                {
-                    bgp_attr.nexthop = Some(BgpNexthop::Vpnv4(nhop.clone()));
+                match v {
+                    MpReachAttr::Vpnv4(nlri) => {
+                        bgp_attr.nexthop = Some(BgpNexthop::Vpnv4(nlri.nhop.clone()));
+                        mp_update = Some(MpReachAttr::Vpnv4(nlri));
+                    }
+                    MpReachAttr::Evpn {
+                        snpa,
+                        nhop,
+                        updates,
+                    } => {
+                        bgp_attr.nexthop = Some(BgpNexthop::Evpn(nhop.clone()));
+                        mp_update = Some(MpReachAttr::Evpn {
+                            snpa,
+                            nhop,
+                            updates,
+                        })
+                    }
+                    _ => {
+                        //
+                    }
                 }
-                if let MpNlriReachAttr::Evpn {
-                    snpa: _,
-                    nhop,
-                    updates: _,
-                } = &v
-                {
-                    bgp_attr.nexthop = Some(BgpNexthop::Evpn(*nhop));
-                }
-                mp_update = Some(v);
             }
             Attr::MpUnreachNlri(v) => {
                 mp_withdraw = Some(v);
