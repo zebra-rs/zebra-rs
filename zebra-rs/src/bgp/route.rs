@@ -783,14 +783,7 @@ fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: 
         }
     }
 
-    // Convert to bytes and send
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send BGP Withdrawal to {}: {}", peer.address, e);
-        }
-    }
+    peer.send_packet(update.into());
 }
 
 pub fn route_ipv4_withdraw(
@@ -1232,21 +1225,20 @@ pub fn route_update_ipv4(
 
 pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
     let mut update = UpdatePacket::new();
-    // let attrs = bgp_attr.to();
     update.bgp_attr = Some(bgp_attr);
     update.ipv4_update.push(nlri);
-
-    // Convert to bytes and send
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send BGP Update to {}: {}", peer.address, e);
-        }
-    }
+    peer.send_packet(update.into());
 }
 
 impl Peer {
+    pub fn send_packet(&self, bytes: BytesMut) {
+        if let Some(ref packet_tx) = self.packet_tx {
+            if let Err(e) = packet_tx.send(bytes) {
+                eprintln!("Failed to send BGP packet to {}: {}", self.address, e);
+            }
+        }
+    }
+
     pub fn send_ipv4(&mut self, nlri: Ipv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
         self.cache_ipv4
             .entry(attr.clone())
@@ -1272,16 +1264,15 @@ impl Peer {
 
     // Flush BGP update.
     pub fn flush_ipv4(&mut self) {
+        let packet_tx = self.packet_tx.clone();
         for (attr, nlris) in self.cache_ipv4.drain() {
             let mut update = UpdatePacket::new();
             update.bgp_attr = Some((*attr).clone());
             update.ipv4_update = nlris.into_iter().collect();
 
             while let Some(bytes) = update.pop_ipv4() {
-                if let Some(ref packet_tx) = self.packet_tx {
-                    if let Err(e) = packet_tx.send(bytes) {
-                        eprintln!("Failed to send BGP Update to {}: {}", self.address, e);
-                    }
+                if let Some(ref tx) = packet_tx {
+                    let _ = tx.send(bytes);
                 }
             }
         }
@@ -1317,6 +1308,7 @@ impl Peer {
 
     // Flush BGP update.
     pub fn flush_vpnv4(&mut self) {
+        let packet_tx = self.packet_tx.clone();
         for (attr, nlris) in self.cache_vpnv4.drain() {
             let mut update = UpdatePacket::new();
 
@@ -1331,10 +1323,8 @@ impl Peer {
             update.bgp_attr = Some((*attr).clone());
 
             while let Some(bytes) = update.pop_vpnv4() {
-                if let Some(ref packet_tx) = self.packet_tx {
-                    if let Err(e) = packet_tx.send(bytes) {
-                        eprintln!("Failed to send BGP Update to {}: {}", self.address, e);
-                    }
+                if let Some(ref tx) = packet_tx {
+                    let _ = tx.send(bytes);
                 }
             }
         }
@@ -1354,15 +1344,7 @@ pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
         update.mp_update = Some(mp_update);
     }
     update.bgp_attr = Some(bgp_attr);
-
-    // Convert to bytes and send
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send BGP Update to {}: {}", peer.address, e);
-        }
-    }
+    peer.send_packet(update.into());
 }
 
 pub fn policy_list_apply(
@@ -1520,32 +1502,17 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
     send_eor_vpnv4_unicast(peer);
 }
 
-// Send End-of-RIB marker for IPv4 Unicast
+// Send End-of-RIB marker for IPv4 Unicast.
 fn send_eor_ipv4_unicast(peer: &mut Peer) {
-    // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
     let update = UpdatePacket::new();
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
-        }
-    }
+    peer.send_packet(update.into());
 }
 
-// Send End-of-RIB marker for VPNv4 Unicast
+// Send End-of-RIB marker for VPNv4 Unicast.
 fn send_eor_vpnv4_unicast(peer: &mut Peer) {
-    // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
     let mut update = UpdatePacket::new();
-    let mp_withdraw = MpUnreachAttr::Vpnv4Eor;
-    update.mp_withdraw = Some(mp_withdraw);
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
-        }
-    }
+    update.mp_withdraw = Some(MpUnreachAttr::Vpnv4Eor);
+    peer.send_packet(update.into());
 }
 
 // Send wildcard RTCv4.
@@ -1556,36 +1523,22 @@ fn send_default_rtcv4_unicast(peer: &mut Peer) {
     if peer.is_ibgp() {
         attrs.local_pref = Some(LocalPref::default());
     }
-
     update.bgp_attr = Some(attrs);
+
     let nlri = Rtcv4Reach {
         snpa: 0,
         nhop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         updates: vec![],
     };
-    let mp_update = MpReachAttr::Rtcv4(nlri);
-    update.mp_update = Some(mp_update);
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
-        }
-    }
+    update.mp_update = Some(MpReachAttr::Rtcv4(nlri));
+    peer.send_packet(update.into());
 }
 
+// Send End-of-RIB marker for RTCv4.
 fn send_eor_rtcv4_unicast(peer: &mut Peer) {
-    // End-of-RIB is an empty Update packet (no attributes, no NLRI, no withdrawals)
     let mut update = UpdatePacket::new();
-    let mp_withdraw = MpUnreachAttr::Rtcv4Eor;
-    update.mp_withdraw = Some(mp_withdraw);
-    let bytes: BytesMut = update.into();
-
-    if let Some(ref packet_tx) = peer.packet_tx {
-        if let Err(e) = packet_tx.send(bytes) {
-            eprintln!("Failed to send End-of-RIB to {}: {}", peer.address, e);
-        }
-    }
+    update.mp_withdraw = Some(MpUnreachAttr::Rtcv4Eor);
+    peer.send_packet(update.into());
 }
 
 // Called when peer has been established.
