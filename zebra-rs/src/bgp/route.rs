@@ -950,6 +950,9 @@ pub fn route_clean(
     peer.adj_in.v4.0.clear();
     peer.adj_out.v4.0.clear();
 
+    peer.cache_ipv4.clear();
+    peer.cache_vpnv4.clear();
+
     // IPv4 VPN.
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
     if let Some(_) = peer.cap_send.llgr.get(&afi_safi)
