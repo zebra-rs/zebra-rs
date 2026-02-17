@@ -747,13 +747,14 @@ fn route_advertise_to_peers(
                 }
             }
             _ => {
+                // We remove the cache.
+                if let Some(ref rd) = rd {
+                    peer.cache_remove_vpnv4(rd.clone(), prefix, 0);
+                } else {
+                    peer.cache_remove_ipv4(prefix, 0);
+                }
                 // Send withdrawal if we had previously advertised
                 if peer.adj_out.contains_key(rd, &prefix) {
-                    if let Some(ref rd) = rd {
-                        peer.cache_remove_vpnv4(rd.clone(), prefix, 0);
-                    } else {
-                        peer.cache_remove_ipv4(prefix, 0);
-                    }
                     route_withdraw_ipv4(peer, rd, prefix, 0);
                     peer.adj_out.remove(rd, prefix, 0);
                 }
