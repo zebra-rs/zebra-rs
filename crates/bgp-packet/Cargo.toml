@@ -26,6 +26,7 @@ bitfield-struct = "0.11.0"
 bitflags = "2.6.0"
 byteorder = "1.5"
 bytes = "1.9"
+fixedbuf = { path = "../fixedbuf" }
 ipnet = { version = "2.10", features = ["serde"] }
 itertools = "0.14.0"
 nom = "8"

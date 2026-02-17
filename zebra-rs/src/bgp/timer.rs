@@ -105,13 +105,19 @@ macro_rules! start_repeater {
 }
 
 fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
-    // let time = if peer.first_start {
-    //     peer.first_start = false;
-    //     rand::rng().random_range(5..=60)
-    // } else {
-    //     peer.config.timer.idle_hold_time()
-    // };
-    let time = 3;
+    let time = if let Some(time) = peer.config.timer.idle_hold_time {
+        time as u64
+    } else {
+        if peer.first_start {
+            if peer.idx > 10 {
+                rand::rng().random_range(5..=60)
+            } else {
+                peer.config.timer.idle_hold_time()
+            }
+        } else {
+            peer.config.timer.idle_hold_time()
+        }
+    };
     start_timer!(peer, time, Event::Start)
 }
 
@@ -123,11 +129,19 @@ fn start_hold_timer(peer: &Peer) -> Timer {
     start_timer!(peer, peer.param.hold_time as u64, Event::HoldTimerExpires)
 }
 
-pub fn start_min_adv_timer(peer: &Peer) -> Timer {
+pub fn start_adv_timer_ipv4(peer: &Peer) -> Timer {
     if peer.is_ibgp() {
-        start_timer!(peer, 5 as u64, Event::AdvTimerExpires)
+        start_timer!(peer, 5 as u64, Event::AdvTimerIpv4Expires)
     } else {
-        start_timer!(peer, 30 as u64, Event::AdvTimerExpires)
+        start_timer!(peer, 30 as u64, Event::AdvTimerIpv4Expires)
+    }
+}
+
+pub fn start_adv_timer_vpnv4(peer: &Peer) -> Timer {
+    if peer.is_ibgp() {
+        start_timer!(peer, 5 as u64, Event::AdvTimerVpnv4Expires)
+    } else {
+        start_timer!(peer, 30 as u64, Event::AdvTimerVpnv4Expires)
     }
 }
 
@@ -233,6 +247,10 @@ pub fn update_timers(peer: &mut Peer) {
             }
         }
     }
+    if peer.state != Established {
+        peer.cache_ipv4_timer = None;
+        peer.cache_vpnv4_timer = None;
+    }
 }
 
 pub mod config {
@@ -249,6 +267,8 @@ pub mod config {
         } else {
             peer.config.timer.idle_hold_time = None;
         }
+        peer.timer.idle_hold_timer = None;
+        update_timers(peer);
         Some(())
     }
 

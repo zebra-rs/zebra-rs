@@ -12,13 +12,13 @@ use crate::{
 use super::{AttrEmitter, Vpnv4Unreach};
 
 #[derive(Clone, Debug, NomBE)]
-pub struct MpNlriUnreachHeader {
+pub struct MpUnreachHeader {
     pub afi: Afi,
     pub safi: Safi,
 }
 
 #[derive(Clone)]
-pub enum MpNlriUnreachAttr {
+pub enum MpUnreachAttr {
     // Ipv4Nlri(Vec<>),
     Ipv4Eor,
     Ipv6Nlri(Vec<Ipv6Nlri>),
@@ -33,20 +33,20 @@ pub enum MpNlriUnreachAttr {
     Rtcv4Eor,
 }
 
-impl MpNlriUnreachAttr {
+impl MpUnreachAttr {
     pub fn attr_emit(&self, buf: &mut BytesMut) {
         match self {
-            MpNlriUnreachAttr::Vpnv4(withdraw) => {
+            MpUnreachAttr::Vpnv4(withdraw) => {
                 let attr = Vpnv4Unreach {
                     withdraw: withdraw.clone(),
                 };
                 attr.attr_emit(buf);
             }
-            MpNlriUnreachAttr::Vpnv4Eor => {
+            MpUnreachAttr::Vpnv4Eor => {
                 let attr = Vpnv4Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
-            MpNlriUnreachAttr::Rtcv4Eor => {
+            MpUnreachAttr::Rtcv4Eor => {
                 let attr = Rtcv4Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
@@ -57,7 +57,7 @@ impl MpNlriUnreachAttr {
     }
 }
 
-impl MpNlriUnreachAttr {
+impl MpUnreachAttr {
     pub fn parse_nlri_opt(input: &[u8], opt: Option<ParseOption>) -> nom::IResult<&[u8], Self> {
         // AFI + SAFI = 3.
         if input.len() < 3 {
@@ -66,7 +66,7 @@ impl MpNlriUnreachAttr {
                 ErrorKind::Verify,
             )));
         }
-        let (input, header) = MpNlriUnreachHeader::parse_be(input)?;
+        let (input, header) = MpUnreachHeader::parse_be(input)?;
         let add_path = if let Some(opt) = opt {
             opt.is_add_path_recv(header.afi, header.safi)
         } else {
@@ -74,56 +74,56 @@ impl MpNlriUnreachAttr {
         };
         if header.afi == Afi::Ip && header.safi == Safi::MplsVpn {
             if input.is_empty() {
-                let mp_nlri = MpNlriUnreachAttr::Vpnv4Eor;
+                let mp_nlri = MpUnreachAttr::Vpnv4Eor;
                 return Ok((input, mp_nlri));
             }
             let (input, withdrawal) =
                 many0_complete(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;
-            let mp_nlri = MpNlriUnreachAttr::Vpnv4(withdrawal);
+            let mp_nlri = MpUnreachAttr::Vpnv4(withdrawal);
             return Ok((input, mp_nlri));
         }
         if header.afi == Afi::Ip6 && header.safi == Safi::Unicast {
             if input.is_empty() {
-                let mp_nlri = MpNlriUnreachAttr::Ipv6Eor;
+                let mp_nlri = MpUnreachAttr::Ipv6Eor;
                 return Ok((input, mp_nlri));
             }
             let (input, withdrawal) =
                 many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
-            let mp_nlri = MpNlriUnreachAttr::Ipv6Nlri(withdrawal);
+            let mp_nlri = MpUnreachAttr::Ipv6Nlri(withdrawal);
             return Ok((input, mp_nlri));
         }
         if header.afi == Afi::L2vpn && header.safi == Safi::Evpn {
             if input.is_empty() {
-                let mp_nlri = MpNlriUnreachAttr::EvpnEor;
+                let mp_nlri = MpUnreachAttr::EvpnEor;
                 return Ok((input, mp_nlri));
             }
             let (input, evpns) =
                 many0_complete(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
-            let mp_nlri = MpNlriUnreachAttr::Evpn(evpns);
+            let mp_nlri = MpUnreachAttr::Evpn(evpns);
             return Ok((input, mp_nlri));
         }
         if header.afi == Afi::Ip && header.safi == Safi::Rtc {
             if input.is_empty() {
-                let mp_nlri = MpNlriUnreachAttr::Rtcv4Eor;
+                let mp_nlri = MpUnreachAttr::Rtcv4Eor;
                 return Ok((input, mp_nlri));
             }
             let (input, rtcv4) = many0_complete(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
-            let mp_nlri = MpNlriUnreachAttr::Rtcv4(rtcv4);
+            let mp_nlri = MpUnreachAttr::Rtcv4(rtcv4);
             return Ok((input, mp_nlri));
         }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
 }
 
-impl ParseBe<MpNlriUnreachAttr> for MpNlriUnreachAttr {
+impl ParseBe<MpUnreachAttr> for MpUnreachAttr {
     fn parse_be(input: &[u8]) -> nom::IResult<&[u8], Self> {
         Self::parse_nlri_opt(input, None)
     }
 }
 
-impl fmt::Display for MpNlriUnreachAttr {
+impl fmt::Display for MpUnreachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use MpNlriUnreachAttr::*;
+        use MpUnreachAttr::*;
         match self {
             Ipv4Eor => {
                 writeln!(f, " EoR: {}/{}", Afi::Ip, Safi::Unicast)
@@ -186,7 +186,7 @@ impl fmt::Display for MpNlriUnreachAttr {
     }
 }
 
-impl fmt::Debug for MpNlriUnreachAttr {
+impl fmt::Debug for MpUnreachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }

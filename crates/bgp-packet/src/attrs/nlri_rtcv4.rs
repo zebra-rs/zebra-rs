@@ -31,6 +31,7 @@ impl ParseNlri<Rtcv4> for Rtcv4 {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Rtcv4Reach {
     pub snpa: u8,
     pub nhop: IpAddr,

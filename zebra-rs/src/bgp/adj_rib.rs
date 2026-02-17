@@ -154,7 +154,7 @@ impl AdjRib<In> {
 }
 
 impl AdjRib<Out> {
-    // Add a route to Adj-RIB-In
+    // Add a route to Adj-RIB-Out
     pub fn add(
         &mut self,
         rd: Option<RouteDistinguisher>,
@@ -167,7 +167,7 @@ impl AdjRib<Out> {
         }
     }
 
-    // Add a route to Adj-RIB-In
+    // Add a route to Adj-RIB-Out
     pub fn remove(
         &mut self,
         rd: Option<RouteDistinguisher>,
