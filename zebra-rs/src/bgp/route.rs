@@ -927,12 +927,7 @@ pub fn route_from_peer(
     }
 }
 
-pub fn route_clean(
-    peer_id: IpAddr,
-    bgp: &mut BgpTop,
-    peers: &mut BTreeMap<IpAddr, Peer>,
-    force: bool,
-) {
+pub fn route_clean(peer_id: IpAddr, bgp: &mut BgpTop, peers: &mut BTreeMap<IpAddr, Peer>) {
     // IPv4 unicast.
     let withdrawn = {
         let mut withdrawn: Vec<Ipv4Nlri> = vec![];
