@@ -243,8 +243,7 @@ impl PeerStat {
 
 #[derive(Debug)]
 pub struct Peer {
-    pub ident: IpAddr,
-    pub idx: usize,
+    pub ident: usize,
     pub address: IpAddr,
     pub router_id: Ipv4Addr,
     pub local_identifier: Option<Ipv4Addr>,
@@ -287,8 +286,7 @@ pub struct Peer {
 
 impl Peer {
     pub fn new(
-        ident: IpAddr,
-        idx: usize,
+        ident: usize,
         local_as: u32,
         router_id: Ipv4Addr,
         peer_as: u32,
@@ -297,7 +295,6 @@ impl Peer {
     ) -> Self {
         let mut peer = Self {
             ident,
-            idx,
             router_id,
             local_as,
             peer_as,
@@ -347,7 +344,7 @@ impl Peer {
         peer
     }
 
-    pub fn event(&self, ident: IpAddr, event: Event) {
+    pub fn event(&self, ident: usize, event: Event) {
         let _ = self.tx.clone().send(Message::Event(ident, event));
     }
 
@@ -400,6 +397,84 @@ pub struct BgpTop<'a> {
     pub attr_store: &'a mut BgpAttrStore,
 }
 
+#[derive(Debug, Default)]
+pub struct PeerMap {
+    map: BTreeMap<IpAddr, usize>,
+    peers: Vec<Option<Peer>>,
+}
+
+impl PeerMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, addr: &IpAddr) -> Option<&Peer> {
+        let &idx = self.map.get(addr)?;
+        self.peers[idx].as_ref()
+    }
+
+    pub fn get_mut(&mut self, addr: &IpAddr) -> Option<&mut Peer> {
+        let &idx = self.map.get(addr)?;
+        self.peers[idx].as_mut()
+    }
+
+    pub fn get_by_idx(&self, idx: usize) -> Option<&Peer> {
+        self.peers.get(idx)?.as_ref()
+    }
+
+    pub fn get_mut_by_idx(&mut self, idx: usize) -> Option<&mut Peer> {
+        self.peers.get_mut(idx)?.as_mut()
+    }
+
+    pub fn addr_of(&self, idx: usize) -> Option<IpAddr> {
+        self.peers.get(idx)?.as_ref().map(|p| p.address)
+    }
+
+    pub fn insert(&mut self, addr: IpAddr, mut peer: Peer) {
+        if let Some(&idx) = self.map.get(&addr) {
+            peer.ident = idx;
+            self.peers[idx] = Some(peer);
+        } else {
+            let idx = self.peers.len();
+            peer.ident = idx;
+            self.map.insert(addr, idx);
+            self.peers.push(Some(peer));
+        }
+    }
+
+    pub fn remove(&mut self, addr: &IpAddr) -> Option<Peer> {
+        let &idx = self.map.get(addr)?;
+        self.peers[idx].take()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&IpAddr, &Peer)> {
+        self.map
+            .iter()
+            .filter_map(move |(addr, &idx)| self.peers[idx].as_ref().map(|peer| (addr, peer)))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &IpAddr> {
+        self.map.iter().filter_map(move |(addr, &idx)| {
+            if self.peers[idx].is_some() {
+                Some(addr)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.map
+            .values()
+            .filter(|&&idx| self.peers[idx].is_some())
+            .count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
     match event {
         Event::ConfigUpdate => (peer.state, FsmEffect::None),
@@ -428,7 +503,7 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
     }
 }
 
-fn fsm_effect(id: IpAddr, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut BTreeMap<IpAddr, Peer>) {
+fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMap) {
     match effect {
         FsmEffect::None => {}
         FsmEffect::RouteUpdate(packet) => {
@@ -440,10 +515,10 @@ fn fsm_effect(id: IpAddr, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut BTree
     }
 }
 
-pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAddr, event: Event) {
+pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event) {
     // Phase 1: Compute new state (single match, only &mut Peer)
     let (prev_state, effect) = {
-        let peer = peer_map.get_mut(&id).unwrap();
+        let peer = peer_map.get_mut_by_idx(id).unwrap();
         let prev_state = peer.state;
         let (new_state, effect) = fsm_next_state(peer, event);
         peer.state = new_state;
@@ -455,7 +530,7 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAd
 
     // Phase 3: Handle state transition consequences
     {
-        let peer = peer_map.get_mut(&id).unwrap();
+        let peer = peer_map.get_mut_by_idx(id).unwrap();
         if prev_state == peer.state {
             return;
         }
@@ -470,7 +545,7 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAd
     }
 
     // Phase 4: route_clean if leaving Established (needs peer_map)
-    if prev_state.is_established() && !peer_map.get(&id).unwrap().state.is_established() {
+    if prev_state.is_established() && !peer_map.get_by_idx(id).unwrap().state.is_established() {
         route_clean(id, bgp_ref, peer_map);
     }
 }
@@ -627,7 +702,7 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
 
 pub async fn peer_packet_parse(
     rx: &[u8],
-    ident: IpAddr,
+    ident: usize,
     tx: mpsc::Sender<Message>,
     config: &mut PeerConfig,
     opt: &mut ParseOption,
@@ -659,7 +734,7 @@ pub async fn peer_packet_parse(
 }
 
 pub async fn peer_read(
-    ident: IpAddr,
+    ident: usize,
     tx: mpsc::Sender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,

@@ -608,6 +608,11 @@ fn show_bgp_vpnv4_route(
                     "external"
                 };
 
+                let from_addr = bgp
+                    .peers
+                    .addr_of(rib.ident)
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "self".to_string());
                 writeln!(
                     out,
                     "  {} ({}), ({}{}) from {}",
@@ -615,7 +620,7 @@ fn show_bgp_vpnv4_route(
                     rib.router_id,
                     internal_marker,
                     best_marker,
-                    rib.ident
+                    from_addr
                 )?;
 
                 // Display origin
@@ -702,6 +707,11 @@ fn show_bgp_route_entry(
                 "external"
             };
 
+            let from_addr = bgp
+                .peers
+                .addr_of(rib.ident)
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "self".to_string());
             writeln!(
                 out,
                 "  {} ({}), ({}{}) from {}",
@@ -709,7 +719,7 @@ fn show_bgp_route_entry(
                 rib.router_id,
                 internal_marker,
                 best_marker,
-                rib.ident
+                from_addr
             )?;
 
             // Display origin
