@@ -35,10 +35,8 @@ fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
-        let idx = bgp.peers.len();
         let peer = Peer::new(
-            addr,
-            idx,
+            0, // PeerMap will assign the stable index
             bgp.asn,
             bgp.router_id,
             0u32,
@@ -47,10 +45,9 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         );
         bgp.peers.insert(addr, peer);
     } else {
-        let ident = if let Some(peer) = bgp.peers.get(&addr) {
-            addr
-        } else {
-            return None;
+        let peer_idx = match bgp.peers.get(&addr) {
+            Some(peer) => peer.ident,
+            None => return None,
         };
         let mut bgp_ref = BgpTop {
             router_id: &bgp.router_id,
@@ -59,8 +56,8 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             rib_tx: &bgp.rib_tx,
             attr_store: &mut bgp.attr_store,
         };
-        route_clean(ident, &mut bgp_ref, &mut bgp.peers);
-        bgp.peers.remove(&ident);
+        route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
+        bgp.peers.remove(&addr);
     }
     Some(())
 }
