@@ -20,10 +20,10 @@ use caps::CapabilityPacket;
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::{AdjRib, In, Out};
-use crate::bgp::{stale_timer_expire, timer};
+use crate::bgp::{stale_route_withdraw, timer};
 use crate::config::Args;
 use crate::context::task::*;
-use crate::{bgp_debug, bgp_info, rib};
+use crate::rib;
 
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
@@ -77,6 +77,12 @@ pub enum Event {
     StaleTimerExipires(AfiSafi),
     AdvTimerIpv4Expires,
     AdvTimerVpnv4Expires,
+}
+
+pub enum FsmEffect {
+    None,
+    RouteUpdate(UpdatePacket),
+    StaleExpire(AfiSafi),
 }
 
 #[derive(Debug, Default)]
@@ -386,7 +392,7 @@ impl Peer {
     }
 }
 
-pub struct ConfigRef<'a> {
+pub struct BgpTop<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut LocalRib,
     pub tx: &'a mpsc::Sender<Message>,
@@ -394,97 +400,77 @@ pub struct ConfigRef<'a> {
     pub attr_store: &'a mut BgpAttrStore,
 }
 
-pub fn fsm(
-    bgp_ref: &mut ConfigRef,
-    peer_map: &mut BTreeMap<IpAddr, Peer>,
-    id: IpAddr,
-    event: Event,
-) {
-    // Handle UpdateMsg separately to avoid borrow checker issues
-    if let Event::UpdateMsg(packet) = event {
-        let prev_state = peer_map.get(&id).unwrap().state.clone();
-        let new_state = fsm_bgp_update(id, packet, bgp_ref, peer_map);
-        if prev_state.is_established() && !new_state.is_established() {
-            route_clean(id, bgp_ref, peer_map, false);
+pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
+    match event {
+        Event::ConfigUpdate => (peer.state, FsmEffect::None),
+        Event::Start => (fsm_start(peer), FsmEffect::None),
+        Event::Stop => (fsm_stop(peer), FsmEffect::None),
+        Event::ConnRetryTimerExpires => (fsm_conn_retry_expires(peer), FsmEffect::None),
+        Event::HoldTimerExpires => (fsm_holdtimer_expires(peer), FsmEffect::None),
+        Event::KeepaliveTimerExpires => (fsm_keepalive_expires(peer), FsmEffect::None),
+        Event::IdleHoldTimerExpires => (fsm_idle_hold_timer_expires(peer), FsmEffect::None),
+        Event::Connected(stream) => (fsm_connected(peer, stream), FsmEffect::None),
+        Event::ConnFail => (fsm_conn_fail(peer), FsmEffect::None),
+        Event::BGPOpen(packet) => (fsm_bgp_open(peer, packet), FsmEffect::None),
+        Event::NotifMsg(packet) => (fsm_bgp_notification(peer, packet), FsmEffect::None),
+        Event::KeepAliveMsg => (fsm_bgp_keepalive(peer), FsmEffect::None),
+        Event::UpdateMsg(packet) => {
+            peer.counter[BgpType::Update as usize].rcvd += 1;
+            timer::refresh_hold_timer(peer);
+            (State::Established, FsmEffect::RouteUpdate(packet))
         }
-        peer_map.get_mut(&id).unwrap().state = new_state.clone();
-
-        if prev_state == new_state {
-            return;
+        Event::StaleTimerExipires(afi_safi) => {
+            peer.timer.stale_timer.remove(&afi_safi);
+            (peer.state, FsmEffect::StaleExpire(afi_safi))
         }
-        // bgp_info!("FSM: {:?} -> {:?}", prev_state, new_state);
-
-        let peer = peer_map.get_mut(&id).unwrap();
-        if prev_state.is_established() && !peer.state.is_established() {
-            peer.instant = Some(Instant::now());
-        }
-
-        if !prev_state.is_established() && peer.state.is_established() {
-            peer.instant = Some(Instant::now());
-            route_sync(peer, bgp_ref);
-        }
-
-        timer::update_timers(peer);
-        return;
+        Event::AdvTimerIpv4Expires => (fsm_adv_timer_ipv4_expires(peer), FsmEffect::None),
+        Event::AdvTimerVpnv4Expires => (fsm_adv_timer_vpnv4_expires(peer), FsmEffect::None),
     }
+}
 
-    // Handle StaleTimerExpires separately to avoid borrow checker issues
-    if let Event::StaleTimerExipires(afi_safi) = event {
-        let prev_state = peer_map.get(&id).unwrap().state;
-        let new_state = stale_timer_expire(id, afi_safi, bgp_ref, peer_map);
-        peer_map.get_mut(&id).unwrap().state = new_state;
-
-        if prev_state == new_state {
-            return;
+fn fsm_effect(id: IpAddr, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut BTreeMap<IpAddr, Peer>) {
+    match effect {
+        FsmEffect::None => {}
+        FsmEffect::RouteUpdate(packet) => {
+            route_from_peer(id, packet, bgp, peers);
         }
-
-        let peer = peer_map.get_mut(&id).unwrap();
-        timer::update_timers(peer);
-        return;
+        FsmEffect::StaleExpire(_afi_safi) => {
+            stale_route_withdraw(id, bgp, peers);
+        }
     }
+}
 
-    let mut need_clean = false;
+pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAddr, event: Event) {
+    // Phase 1: Compute new state (single match, only &mut Peer)
+    let (prev_state, effect) = {
+        let peer = peer_map.get_mut(&id).unwrap();
+        let prev_state = peer.state;
+        let (new_state, effect) = fsm_next_state(peer, event);
+        peer.state = new_state;
+        (prev_state, effect)
+    };
+
+    // Phase 2: Execute side effects that need peer_map
+    fsm_effect(id, effect, bgp_ref, peer_map);
+
+    // Phase 3: Handle state transition consequences
     {
         let peer = peer_map.get_mut(&id).unwrap();
-        let prev_state = peer.state.clone();
-        peer.state = match event {
-            Event::ConfigUpdate => fsm_config_update(&bgp_ref, peer),
-            Event::Start => fsm_start(peer),
-            Event::Stop => fsm_stop(peer),
-            Event::ConnRetryTimerExpires => fsm_conn_retry_expires(peer),
-            Event::HoldTimerExpires => fsm_holdtimer_expires(peer),
-            Event::KeepaliveTimerExpires => fsm_keepalive_expires(peer),
-            Event::IdleHoldTimerExpires => fsm_idle_hold_timer_expires(peer),
-            Event::Connected(stream) => fsm_connected(peer, stream),
-            Event::ConnFail => fsm_conn_fail(peer),
-            Event::BGPOpen(packet) => fsm_bgp_open(peer, packet),
-            Event::NotifMsg(packet) => fsm_bgp_notification(peer, packet),
-            Event::KeepAliveMsg => fsm_bgp_keepalive(peer),
-            Event::UpdateMsg(_) => unreachable!(), // Handled above
-            Event::StaleTimerExipires(_) => unreachable!(), // Handled above
-            Event::AdvTimerIpv4Expires => fsm_adv_timer_ipv4_expires(peer),
-            Event::AdvTimerVpnv4Expires => fsm_adv_timer_vpnv4_expires(peer),
-        };
         if prev_state == peer.state {
             return;
         }
-        // bgp_info!("FSM: {:?} -> {:?}", prev_state, peer.state);
-
         if prev_state.is_established() && !peer.state.is_established() {
             peer.instant = Some(Instant::now());
-            need_clean = true;
         }
-
-        // Update instant when entering or leaving the Established state.
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
             route_sync(peer, bgp_ref);
         }
-
         timer::update_timers(peer);
     }
 
-    if need_clean {
+    // Phase 4: route_clean if leaving Established (needs peer_map)
+    if prev_state.is_established() && !peer_map.get(&id).unwrap().state.is_established() {
         route_clean(id, bgp_ref, peer_map, false);
     }
 }
@@ -509,11 +495,6 @@ pub fn fsm_start(peer: &mut Peer) -> State {
 
 pub fn fsm_stop(_peer: &mut Peer) -> State {
     State::Idle
-}
-
-fn fsm_config_update(bgp: &ConfigRef, peer: &mut Peer) -> State {
-    bgp_debug!("BGP router ID: {}", bgp.router_id);
-    peer.state.clone()
 }
 
 pub fn capability_as4(caps: &[CapabilityPacket]) -> Option<u32> {
@@ -596,23 +577,6 @@ pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> Sta
 pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     peer.counter[BgpType::Keepalive as usize].rcvd += 1;
     timer::refresh_hold_timer(peer);
-    State::Established
-}
-
-fn fsm_bgp_update(
-    peer_id: IpAddr,
-    packet: UpdatePacket,
-    bgp: &mut ConfigRef,
-    peers: &mut BTreeMap<IpAddr, Peer>,
-) -> State {
-    {
-        let peer = peers.get_mut(&peer_id).unwrap();
-        peer.counter[BgpType::Update as usize].rcvd += 1;
-        timer::refresh_hold_timer(peer);
-    }
-
-    route_from_peer(peer_id, packet, bgp, peers);
-
     State::Established
 }
 
