@@ -1,5 +1,5 @@
 use super::BgpAttrStore;
-use super::peer::{ConfigRef, Event, Peer, fsm};
+use super::peer::{BgpTop, Event, Peer, fsm};
 use super::route::LocalRib;
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
@@ -154,7 +154,7 @@ impl Bgp {
                         // tracing::info!("Other Event: {:?} for {}", event, peer);
                     }
                 }
-                let mut bgp_ref = ConfigRef {
+                let mut bgp_ref = BgpTop {
                     router_id: &self.router_id,
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,

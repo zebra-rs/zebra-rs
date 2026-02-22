@@ -12,7 +12,7 @@ use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
-use super::peer::{ConfigRef, Event, Peer, PeerType, State};
+use super::peer::{BgpTop, Event, Peer, PeerType};
 use super::timer::{start_adv_timer_ipv4, start_adv_timer_vpnv4};
 use super::{Bgp, InOut, Message};
 
@@ -460,7 +460,7 @@ pub fn route_ipv4_update(
     label: Option<Label>,
     attr: &BgpAttr,
     nexthop: Option<Vpnv4Nexthop>,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
     stale: bool,
 ) {
@@ -581,7 +581,7 @@ fn route_advertise_to_addpath(
     prefix: Ipv4Net,
     rib: &BgpRib,
     _source_peer: IpAddr,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
     let (afi, safi) = if rd.is_some() {
@@ -636,7 +636,7 @@ fn route_withdraw_from_addpath(
     prefix: Ipv4Net,
     removed: &BgpRib,
     _source_peer: IpAddr,
-    _bgp: &mut ConfigRef,
+    _bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
     let (afi, safi) = if rd.is_some() {
@@ -672,7 +672,7 @@ fn route_advertise_to_peers(
     prefix: Ipv4Net,
     selected: &[BgpRib],
     _source_peer: IpAddr,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
     // Get the new best path (last entry in selected vector)
@@ -791,7 +791,7 @@ pub fn route_ipv4_withdraw(
     nlri: &Ipv4Nlri,
     rd: Option<RouteDistinguisher>,
     _label: Option<Label>,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
     rib_in: bool,
 ) {
@@ -833,7 +833,7 @@ pub fn route_ipv4_rtc_withdraw(peer_id: IpAddr, rtcv4: &Rtcv4, peers: &mut BTree
     peer.rtcv4.remove(&rtcv4.rt);
 }
 
-pub fn route_rtcv4_sync(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeMap<IpAddr, Peer>) {
+pub fn route_rtcv4_sync(peer_id: IpAddr, bgp: &mut BgpTop, peers: &mut BTreeMap<IpAddr, Peer>) {
     let Some(peer) = peers.get_mut(&peer_id) else {
         return;
     };
@@ -847,7 +847,7 @@ pub fn route_rtcv4_sync(peer_id: IpAddr, bgp: &mut ConfigRef, peers: &mut BTreeM
 pub fn route_from_peer(
     peer_id: IpAddr,
     packet: UpdatePacket,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
 ) {
     // Convert UpdatePacket to BgpAttr.
@@ -929,7 +929,7 @@ pub fn route_from_peer(
 
 pub fn route_clean(
     peer_id: IpAddr,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     peers: &mut BTreeMap<IpAddr, Peer>,
     force: bool,
 ) {
@@ -1082,17 +1082,10 @@ pub fn route_clean(
     peer.eor.clear();
 }
 
-pub fn stale_timer_expire(
-    peer_id: IpAddr,
-    afi_safi: AfiSafi,
-    bgp: &mut ConfigRef,
-    peers: &mut BTreeMap<IpAddr, Peer>,
-) -> State {
-    let peer = peers.get_mut(&peer_id).expect("peer must exist");
-    peer.timer.stale_timer.remove(&afi_safi);
-
-    // Fetch all of route which as stale flag.
+pub fn stale_route_withdraw(peer_id: IpAddr, bgp: &mut BgpTop, peers: &mut BTreeMap<IpAddr, Peer>) {
+    // Fetch all of route which has stale flag.
     let withdrawn = {
+        let peer = peers.get(&peer_id).expect("peer must exist");
         let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
 
         for (rd, table) in peer.adj_in.v4vpn.iter() {
@@ -1127,16 +1120,13 @@ pub fn stale_timer_expire(
             true,
         );
     }
-
-    let peer = peers.get(&peer_id).expect("peer must exist");
-    peer.state
 }
 
 pub fn route_update_ipv4(
     peer: &mut Peer,
     prefix: &Ipv4Net,
     rib: &BgpRib,
-    bgp: &mut ConfigRef,
+    bgp: &mut BgpTop,
     add_path: bool,
 ) -> Option<(Ipv4Nlri, BgpAttr)> {
     // Split-horizon: Don't send route back to the peer that sent it
@@ -1385,7 +1375,7 @@ pub fn policy_list_apply(
     None
 }
 
-pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
+pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
 
     // Collect all routes first to avoid borrow checker issues
@@ -1430,7 +1420,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut ConfigRef) {
     send_eor_ipv4_unicast(peer);
 }
 
-pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut ConfigRef) {
+pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsVpn);
 
     // Collect all VPNv4 routes first to avoid borrow checker issues
@@ -1542,7 +1532,7 @@ fn send_eor_rtcv4_unicast(peer: &mut Peer) {
 }
 
 // Called when peer has been established.
-pub fn route_sync(peer: &mut Peer, bgp: &mut ConfigRef) {
+pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     // Advertize.
     if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
         route_sync_ipv4(peer, bgp);
@@ -1580,7 +1570,7 @@ impl Bgp {
         let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
-        let mut bgp_ref = ConfigRef {
+        let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
@@ -1605,7 +1595,7 @@ impl Bgp {
         let id = 0;
         let removed = self.local_rib.remove(None, prefix, id, ident);
 
-        let mut bgp_ref = ConfigRef {
+        let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
