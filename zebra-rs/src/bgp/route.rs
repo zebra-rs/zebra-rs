@@ -12,7 +12,7 @@ use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
-use super::peer::{BgpTop, Event, Peer, PeerType, State};
+use super::peer::{BgpTop, Event, Peer, PeerType};
 use super::timer::{start_adv_timer_ipv4, start_adv_timer_vpnv4};
 use super::{Bgp, InOut, Message};
 
@@ -1082,17 +1082,10 @@ pub fn route_clean(
     peer.eor.clear();
 }
 
-pub fn stale_timer_expire(
-    peer_id: IpAddr,
-    afi_safi: AfiSafi,
-    bgp: &mut BgpTop,
-    peers: &mut BTreeMap<IpAddr, Peer>,
-) -> State {
-    let peer = peers.get_mut(&peer_id).expect("peer must exist");
-    peer.timer.stale_timer.remove(&afi_safi);
-
-    // Fetch all of route which as stale flag.
+pub fn stale_route_withdraw(peer_id: IpAddr, bgp: &mut BgpTop, peers: &mut BTreeMap<IpAddr, Peer>) {
+    // Fetch all of route which has stale flag.
     let withdrawn = {
+        let peer = peers.get(&peer_id).expect("peer must exist");
         let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
 
         for (rd, table) in peer.adj_in.v4vpn.iter() {
@@ -1127,9 +1120,6 @@ pub fn stale_timer_expire(
             true,
         );
     }
-
-    let peer = peers.get(&peer_id).expect("peer must exist");
-    peer.state
 }
 
 pub fn route_update_ipv4(
