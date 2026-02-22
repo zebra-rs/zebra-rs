@@ -471,7 +471,7 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAd
 
     // Phase 4: route_clean if leaving Established (needs peer_map)
     if prev_state.is_established() && !peer_map.get(&id).unwrap().state.is_established() {
-        route_clean(id, bgp_ref, peer_map, false);
+        route_clean(id, bgp_ref, peer_map);
     }
 }
 

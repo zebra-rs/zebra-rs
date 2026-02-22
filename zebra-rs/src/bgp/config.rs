@@ -59,7 +59,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             rib_tx: &bgp.rib_tx,
             attr_store: &mut bgp.attr_store,
         };
-        route_clean(ident, &mut bgp_ref, &mut bgp.peers, true);
+        route_clean(ident, &mut bgp_ref, &mut bgp.peers);
         bgp.peers.remove(&ident);
     }
     Some(())
