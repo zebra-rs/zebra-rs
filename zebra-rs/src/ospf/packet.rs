@@ -164,7 +164,7 @@ pub fn ospf_hello_recv(
 }
 
 pub fn ospf_hello_send(oi: &mut OspfLink) {
-    tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
+    // tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
 
     let packet = ospf_hello_packet(oi).unwrap();
     oi.ptx.send(Message::Send(packet, oi.index, None)).unwrap();
@@ -258,22 +258,9 @@ fn ospf_lsa_lookup<'a>(
     adv_router: Ipv4Addr,
 ) -> Option<&'a OspfLsa> {
     match lsa_flood_scope(ls_type) {
-        FloodScope::Area => {
-            println!("FloodScope::Area");
-            oi.lsdb.lookup_by_id(ls_type, ls_id, adv_router)
-        }
-        FloodScope::As => {
-            println!("FloodScope::As");
-            None
-        }
-        FloodScope::Link => {
-            println!("FloodScope::Link");
-            None
-        }
-        FloodScope::Unknown => {
-            println!("FloodScope::Unknown");
-            None
-        }
+        FloodScope::Area => oi.lsdb.lookup_by_id(ls_type, ls_id, adv_router),
+        FloodScope::As => oi.lsdb_as.lookup_by_id(ls_type, ls_id, adv_router),
+        _ => None,
     }
 }
 
@@ -471,20 +458,131 @@ pub fn ospf_db_desc_recv(
     }
 }
 
+pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) {
+    let area = Ipv4Addr::UNSPECIFIED;
+    let ls_upd = OspfLsUpdate {
+        num_adv: lsas.len() as u32,
+        lsas,
+    };
+    let packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
+    tracing::info!("[LS Update:Send] to {}", nbr.ident.prefix.addr());
+    nbr.ptx
+        .send(Message::Send(
+            packet,
+            nbr.ifindex,
+            Some(nbr.ident.prefix.addr()),
+        ))
+        .unwrap();
+}
+
+pub fn ospf_ls_ack_send(oi: &OspfInterface, nbr: &Neighbor, lsa_headers: Vec<OspfLsaHeader>) {
+    let area = Ipv4Addr::UNSPECIFIED;
+    let ls_ack = OspfLsAck { lsa_headers };
+    let packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsAck(ls_ack));
+    tracing::info!("[LS Ack:Send] to {}", nbr.ident.prefix.addr());
+    nbr.ptx
+        .send(Message::Send(
+            packet,
+            nbr.ifindex,
+            Some(nbr.ident.prefix.addr()),
+        ))
+        .unwrap();
+}
+
+// ospf_ls_req_recv -- RFC2328 Section 10.7
+// Following ref/ospfd/ospf_packet.c ospf_ls_req()
 pub fn ospf_ls_req_recv(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,
     packet: &Ospfv2Packet,
     src: &Ipv4Addr,
 ) {
+    // Validate state >= Exchange.
+    if nbr.state < NfsmState::Exchange {
+        return;
+    }
+
+    let Ospfv2Payload::LsRequest(ref ls_req) = packet.payload else {
+        return;
+    };
+
+    tracing::info!(
+        "[LS Request:Recv] from {} entries={}",
+        src,
+        ls_req.reqs.len()
+    );
+
+    let mut lsas = Vec::new();
+    for req in ls_req.reqs.iter() {
+        let ls_type = OspfLsType::from(req.ls_type as u8);
+        let find = ospf_lsa_lookup(oi, ls_type, req.ls_id, req.adv_router);
+        match find {
+            Some(lsa) => {
+                lsas.push(lsa.clone());
+            }
+            None => {
+                // LSA not found in LSDB -> BadLSReq.
+                tracing::info!(
+                    "[LS Request] BadLSReq: LSA not found type={:?} id={} adv={}",
+                    ls_type,
+                    req.ls_id,
+                    req.adv_router
+                );
+                nbr_sched_event(nbr, NfsmEvent::BadLSReq);
+                return;
+            }
+        }
+    }
+
+    // Send LS Update with found LSAs.
+    if !lsas.is_empty() {
+        ospf_ls_upd_send(oi, nbr, lsas);
+    }
+}
+
+// Returns true if lsa1 is more recent than lsa2 (RFC2328 Section 13.1).
+fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, lsa2: &OspfLsaHeader) -> i32 {
+    if lsa1.ls_seq_number > lsa2.ls_seq_number {
+        return 1;
+    }
+    if lsa1.ls_seq_number < lsa2.ls_seq_number {
+        return -1;
+    }
+    if lsa1.ls_checksum > lsa2.ls_checksum {
+        return 1;
+    }
+    if lsa1.ls_checksum < lsa2.ls_checksum {
+        return -1;
+    }
+    if lsa1.ls_age == 3600 && lsa2.ls_age != 3600 {
+        return 1;
+    }
+    if lsa1.ls_age != 3600 && lsa2.ls_age == 3600 {
+        return -1;
+    }
+    if (lsa1.ls_age as i32 - lsa2.ls_age as i32).unsigned_abs() > 900 {
+        if lsa1.ls_age < lsa2.ls_age {
+            return 1;
+        }
+        if lsa1.ls_age > lsa2.ls_age {
+            return -1;
+        }
+    }
+    0
 }
 
 pub fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
-    let current = oi
-        .lsdb
-        .lookup_by_id(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    let is_newer = {
+        let current = oi
+            .lsdb
+            .lookup_by_id(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+        match current {
+            None => true,
+            Some(current_lsa) => ospf_lsa_more_recent(&lsa.h, &current_lsa.h) > 0,
+        }
+    };
 
-    if current.is_none() {
+    if is_newer {
         ospf_flood(oi, nbr, lsa);
     }
 }
@@ -495,8 +593,16 @@ pub fn ospf_ls_upd_validate_proc(
     ls_upd: &OspfLsUpdate,
     src: &Ipv4Addr,
 ) {
+    let mut ack_headers = Vec::new();
+
     for lsa in ls_upd.lsas.iter() {
+        ack_headers.push(lsa.h.clone());
         ospf_ls_upd_proc(oi, nbr, lsa);
+    }
+
+    // Send direct LS Ack for received LSAs.
+    if !ack_headers.is_empty() {
+        ospf_ls_ack_send(oi, nbr, ack_headers);
     }
 }
 
@@ -514,13 +620,30 @@ pub fn ospf_ls_upd_recv(
         return;
     };
 
+    tracing::info!("[LS Update:Recv] from {} lsas={}", src, ls_upd.lsas.len());
+
     ospf_ls_upd_validate_proc(oi, nbr, ls_upd, src);
 }
 
+// Minimal LS Ack receive handler.
+// TODO: retransmit list removal (deferred).
 pub fn ospf_ls_ack_recv(
-    oi: &mut OspfInterface,
+    _oi: &mut OspfInterface,
     nbr: &mut Neighbor,
     packet: &Ospfv2Packet,
     src: &Ipv4Addr,
 ) {
+    if nbr.state < NfsmState::Exchange {
+        return;
+    }
+
+    let Ospfv2Payload::LsAck(ref ls_ack) = packet.payload else {
+        return;
+    };
+
+    tracing::info!(
+        "[LS Ack:Recv] from {} headers={}",
+        src,
+        ls_ack.lsa_headers.len()
+    );
 }

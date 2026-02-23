@@ -366,7 +366,7 @@ impl OspfLsaHeader {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 pub struct OspfLsa {
     pub h: OspfLsaHeader,
     #[nom(Parse = "{ |x| OspfLsp::parse_lsa_with_length(x, h.ls_type, h.length) }")]
@@ -376,6 +376,7 @@ pub struct OspfLsa {
 impl Emit for OspfLsa {
     fn emit(&self, buf: &mut BytesMut) {
         self.h.emit(buf);
+        self.emit_lsp(buf);
     }
 }
 
@@ -390,7 +391,11 @@ impl OspfLsa {
     fn emit_lsp(&self, buf: &mut BytesMut) {
         match &self.lsp {
             OspfLsp::Router(lsp) => lsp.emit(buf),
-            _ => {}
+            OspfLsp::Network(lsp) => lsp.emit(buf),
+            OspfLsp::Summary(lsp) | OspfLsp::SummaryAsbr(lsp) => lsp.emit(buf),
+            OspfLsp::AsExternal(lsp) => lsp.emit(buf),
+            OspfLsp::NssaAsExternal(lsp) => lsp.emit(buf),
+            OspfLsp::Unknown(lsp) => lsp.emit(buf),
         }
     }
 
@@ -442,7 +447,7 @@ fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
     ((c0 as u16) << 8) | (c1 as u16)
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 #[nom(Selector = "OspfLsType")]
 pub enum OspfLsp {
     #[nom(Selector = "OspfLsType::Router")]
@@ -510,7 +515,7 @@ pub enum OspfLinkType {
 // #[derive(Debug, PartialEq, Eq, Clone, Copy, NomBE)]
 // pub struct OspfRouterLinkType(pub u8);
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 pub struct OspfRouterTOS {
     pub tos: u8,
     pub resved: u8,
@@ -530,7 +535,7 @@ impl OspfRouterTOS {
     }
 }
 
-#[derive(Debug, NomBE, Default)]
+#[derive(Debug, Clone, NomBE, Default)]
 pub struct RouterLsa {
     pub flags: u16,
     pub num_links: u16,
@@ -559,7 +564,7 @@ impl From<RouterLsa> for OspfLsp {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 pub struct RouterLsaLink {
     pub link_id: Ipv4Addr,
     pub link_data: Ipv4Addr,
@@ -599,14 +604,23 @@ impl RouterLsaLink {
     }
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 pub struct NetworkLsa {
     pub netmask: Ipv4Addr,
     #[nom(Parse = "parse_ipv4addr_vec")]
     pub attached_routers: Vec<Ipv4Addr>,
 }
 
-#[derive(Debug, NomBE)]
+impl NetworkLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.netmask.octets()[..]);
+        for router in &self.attached_routers {
+            buf.put(&router.octets()[..]);
+        }
+    }
+}
+
+#[derive(Debug, Clone, NomBE)]
 pub struct SummaryLsa {
     pub netmask: Ipv4Addr,
     pub tos: u8,
@@ -616,14 +630,36 @@ pub struct SummaryLsa {
     pub tos_routes: Vec<TosRoute>,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 pub struct TosRoute {
     pub tos: u8,
     #[nom(Parse = "be_u24")]
     pub metric: u32,
 }
 
-#[derive(Debug, NomBE)]
+impl TosRoute {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.tos);
+        buf.put_u8(((self.metric >> 16) & 0xFF) as u8);
+        buf.put_u8(((self.metric >> 8) & 0xFF) as u8);
+        buf.put_u8((self.metric & 0xFF) as u8);
+    }
+}
+
+impl SummaryLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.netmask.octets()[..]);
+        buf.put_u8(self.tos);
+        buf.put_u8(((self.metric >> 16) & 0xFF) as u8);
+        buf.put_u8(((self.metric >> 8) & 0xFF) as u8);
+        buf.put_u8((self.metric & 0xFF) as u8);
+        for tos_route in &self.tos_routes {
+            tos_route.emit(buf);
+        }
+    }
+}
+
+#[derive(Debug, Clone, NomBE)]
 pub struct AsExternalLsa {
     pub netmask: Ipv4Addr,
     pub ext_and_resvd: u8,
@@ -635,7 +671,7 @@ pub struct AsExternalLsa {
     pub tos_list: Vec<ExternalTosRoute>,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 pub struct NssaAsExternalLsa {
     pub netmask: Ipv4Addr,
     pub ext_and_tos: u8,
@@ -647,7 +683,7 @@ pub struct NssaAsExternalLsa {
     pub tos_list: Vec<ExternalTosRoute>,
 }
 
-#[derive(Debug, NomBE)]
+#[derive(Debug, Clone, NomBE)]
 pub struct ExternalTosRoute {
     pub tos: u8,
     #[nom(Parse = "be_u24")]
@@ -656,9 +692,56 @@ pub struct ExternalTosRoute {
     pub external_route_tag: u32,
 }
 
-#[derive(Debug, NomBE)]
+impl ExternalTosRoute {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.tos);
+        buf.put_u8(((self.metric >> 16) & 0xFF) as u8);
+        buf.put_u8(((self.metric >> 8) & 0xFF) as u8);
+        buf.put_u8((self.metric & 0xFF) as u8);
+        buf.put_u32(self.forwarding_address);
+        buf.put_u32(self.external_route_tag);
+    }
+}
+
+impl AsExternalLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.netmask.octets()[..]);
+        buf.put_u8(self.ext_and_resvd);
+        buf.put_u8(((self.metric >> 16) & 0xFF) as u8);
+        buf.put_u8(((self.metric >> 8) & 0xFF) as u8);
+        buf.put_u8((self.metric & 0xFF) as u8);
+        buf.put(&self.forwarding_address.octets()[..]);
+        buf.put_u32(self.external_route_tag);
+        for tos in &self.tos_list {
+            tos.emit(buf);
+        }
+    }
+}
+
+impl NssaAsExternalLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.netmask.octets()[..]);
+        buf.put_u8(self.ext_and_tos);
+        buf.put_u8(((self.metric >> 16) & 0xFF) as u8);
+        buf.put_u8(((self.metric >> 8) & 0xFF) as u8);
+        buf.put_u8((self.metric & 0xFF) as u8);
+        buf.put(&self.forwarding_address.octets()[..]);
+        buf.put_u32(self.external_route_tag);
+        for tos in &self.tos_list {
+            tos.emit(buf);
+        }
+    }
+}
+
+#[derive(Debug, Clone, NomBE)]
 pub struct UnknownLsa {
     pub data: Vec<u8>,
+}
+
+impl UnknownLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.data[..]);
+    }
 }
 
 pub fn validate_checksum(input: &[u8]) -> IResult<&[u8], ()> {
