@@ -14,12 +14,14 @@ use super::{addr::OspfAddr, task::Timer};
 pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
 pub const OSPF_DEFAULT_HELLO_INTERVAL: u16 = 10;
 pub const OSPF_DEFAULT_DEAD_INTERVAL: u32 = 40;
+pub const OSPF_DEFAULT_RETRANSMIT_INTERVAL: u16 = 5;
 
 #[derive(Default)]
 pub struct LinkConfig {
     pub priority: Option<u8>,
     pub hello_interval: Option<u16>,
     pub dead_interval: Option<u32>,
+    pub retransmit_interval: Option<u16>,
 }
 
 pub struct OspfLink {
@@ -99,6 +101,12 @@ impl OspfLink {
         self.config
             .dead_interval
             .unwrap_or(OSPF_DEFAULT_DEAD_INTERVAL)
+    }
+
+    pub fn retransmit_interval(&self) -> u16 {
+        self.config
+            .retransmit_interval
+            .unwrap_or(OSPF_DEFAULT_RETRANSMIT_INTERVAL)
     }
 
     pub fn is_passive(&self) -> bool {

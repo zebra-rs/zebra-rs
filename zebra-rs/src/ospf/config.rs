@@ -59,6 +59,10 @@ impl Ospf {
             "/interface/dead-interval",
             config_ospf_interface_dead_interval,
         );
+        self.ospf_add(
+            "/interface/retransmit-interval",
+            config_ospf_interface_retransmit_interval,
+        );
         self.tracing_add("/packet", config_tracing_packet);
     }
 }
@@ -174,6 +178,20 @@ fn config_ospf_interface_dead_interval(
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
     link.config.dead_interval = Some(dead_interval);
+
+    Some(())
+}
+
+fn config_ospf_interface_retransmit_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let retransmit_interval = args.u16()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.retransmit_interval = Some(retransmit_interval);
 
     Some(())
 }
