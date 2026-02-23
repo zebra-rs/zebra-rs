@@ -51,6 +51,14 @@ impl Ospf {
         self.ospf_add("/router-id", config_ospf_router_id);
         self.ospf_add("/network/area", config_ospf_network);
         self.ospf_add("/interface/priority", config_ospf_interface_priority);
+        self.ospf_add(
+            "/interface/hello-interval",
+            config_ospf_interface_hello_interval,
+        );
+        self.ospf_add(
+            "/interface/dead-interval",
+            config_ospf_interface_dead_interval,
+        );
         self.tracing_add("/packet", config_tracing_packet);
     }
 }
@@ -138,6 +146,34 @@ fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, _op: ConfigOp
     let ifindex = link.index;
     link.tx
         .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
+
+    Some(())
+}
+
+fn config_ospf_interface_hello_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let hello_interval = args.u16()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.hello_interval = Some(hello_interval);
+
+    Some(())
+}
+
+fn config_ospf_interface_dead_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let dead_interval = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.dead_interval = Some(dead_interval);
 
     Some(())
 }

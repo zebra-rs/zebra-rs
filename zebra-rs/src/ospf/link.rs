@@ -12,10 +12,14 @@ use super::{Identity, IfsmState, Message, Neighbor};
 use super::{addr::OspfAddr, task::Timer};
 
 pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
+pub const OSPF_DEFAULT_HELLO_INTERVAL: u16 = 10;
+pub const OSPF_DEFAULT_DEAD_INTERVAL: u32 = 40;
 
 #[derive(Default)]
 pub struct LinkConfig {
     pub priority: Option<u8>,
+    pub hello_interval: Option<u16>,
+    pub dead_interval: Option<u32>,
 }
 
 pub struct OspfLink {
@@ -30,9 +34,6 @@ pub struct OspfLink {
     pub ostate: IfsmState,
     pub sock: Arc<AsyncFd<Socket>>,
     pub ident: Identity,
-    pub hello_interval: u16,
-    pub wait_interval: u16,
-    pub dead_interval: u32,
     pub tx: UnboundedSender<Message>,
     pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
     pub flags: OspfLinkFlags,
@@ -72,9 +73,6 @@ impl OspfLink {
             ostate: IfsmState::Down,
             sock,
             ident: Identity::new(router_id),
-            hello_interval: 1,
-            wait_interval: 4,
-            dead_interval: 4,
             tx,
             nbrs: BTreeMap::new(),
             flags: 0.into(),
@@ -89,6 +87,18 @@ impl OspfLink {
 
     pub fn priority(&self) -> u8 {
         self.config.priority.unwrap_or(OSPF_DEFAULT_PRIORITY)
+    }
+
+    pub fn hello_interval(&self) -> u16 {
+        self.config
+            .hello_interval
+            .unwrap_or(OSPF_DEFAULT_HELLO_INTERVAL)
+    }
+
+    pub fn dead_interval(&self) -> u32 {
+        self.config
+            .dead_interval
+            .unwrap_or(OSPF_DEFAULT_DEAD_INTERVAL)
     }
 
     pub fn is_passive(&self) -> bool {
