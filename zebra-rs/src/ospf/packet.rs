@@ -24,10 +24,10 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     };
     let mut hello = OspfHello::default();
     hello.netmask = addr.prefix.netmask();
-    hello.hello_interval = oi.hello_interval;
+    hello.hello_interval = oi.hello_interval();
     hello.options.set_external(true);
     hello.priority = oi.priority();
-    hello.router_dead_interval = oi.dead_interval;
+    hello.router_dead_interval = oi.dead_interval();
     for (_, nbr) in oi.nbrs.iter() {
         if nbr.state == NfsmState::Down {
             continue;
@@ -106,6 +106,7 @@ pub fn ospf_hello_recv(
     }
 
     let mut init = false;
+    let dead_interval = oi.dead_interval() as u64;
     let nbr = oi.nbrs.entry(*src).or_insert_with(|| {
         init = true;
         Neighbor::new(
@@ -113,7 +114,7 @@ pub fn ospf_hello_recv(
             oi.index,
             prefix,
             &packet.router_id,
-            oi.dead_interval as u64,
+            dead_interval,
             oi.ptx.clone(),
         )
     });

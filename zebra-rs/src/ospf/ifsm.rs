@@ -143,7 +143,7 @@ pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
     Timer::new(
-        Timer::second(oi.hello_interval.into()),
+        Timer::second(oi.hello_interval().into()),
         TimerType::Infinite,
         move || {
             let tx = tx.clone();
@@ -158,7 +158,7 @@ pub fn ospf_wait_timer(oi: &OspfLink) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
     Timer::new(
-        Timer::second(oi.wait_interval.into()),
+        Timer::second(oi.dead_interval().into()),
         TimerType::Infinite,
         move || {
             let tx = tx.clone();
