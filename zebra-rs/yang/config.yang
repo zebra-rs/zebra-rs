@@ -135,6 +135,16 @@ module config {
             type uint8;
           }
         }
+        list interface {
+          key "if-name";
+          leaf if-name {
+            ext:dynamic "rib:interface";
+            type string;
+          }
+          leaf priority {
+            type uint8;
+          }
+        }
         container tracing {
           leaf all {
             type boolean;

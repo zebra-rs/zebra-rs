@@ -26,7 +26,7 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     hello.netmask = addr.prefix.netmask();
     hello.hello_interval = oi.hello_interval;
     hello.options.set_external(true);
-    hello.priority = oi.priority;
+    hello.priority = oi.priority();
     hello.router_dead_interval = oi.dead_interval;
     for (_, nbr) in oi.nbrs.iter() {
         if nbr.state == NfsmState::Down {
