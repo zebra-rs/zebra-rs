@@ -13,6 +13,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
 
+use super::peer_map::PeerMap;
+
 use caps::CapAs4;
 use caps::CapRefresh;
 use caps::CapabilityPacket;
@@ -243,8 +245,7 @@ impl PeerStat {
 
 #[derive(Debug)]
 pub struct Peer {
-    pub ident: IpAddr,
-    pub idx: usize,
+    pub ident: usize,
     pub address: IpAddr,
     pub router_id: Ipv4Addr,
     pub local_identifier: Option<Ipv4Addr>,
@@ -287,8 +288,7 @@ pub struct Peer {
 
 impl Peer {
     pub fn new(
-        ident: IpAddr,
-        idx: usize,
+        ident: usize,
         local_as: u32,
         router_id: Ipv4Addr,
         peer_as: u32,
@@ -297,7 +297,6 @@ impl Peer {
     ) -> Self {
         let mut peer = Self {
             ident,
-            idx,
             router_id,
             local_as,
             peer_as,
@@ -347,7 +346,7 @@ impl Peer {
         peer
     }
 
-    pub fn event(&self, ident: IpAddr, event: Event) {
+    pub fn event(&self, ident: usize, event: Event) {
         let _ = self.tx.clone().send(Message::Event(ident, event));
     }
 
@@ -428,7 +427,7 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
     }
 }
 
-fn fsm_effect(id: IpAddr, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut BTreeMap<IpAddr, Peer>) {
+fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMap) {
     match effect {
         FsmEffect::None => {}
         FsmEffect::RouteUpdate(packet) => {
@@ -440,10 +439,10 @@ fn fsm_effect(id: IpAddr, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut BTree
     }
 }
 
-pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAddr, event: Event) {
+pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event) {
     // Phase 1: Compute new state (single match, only &mut Peer)
     let (prev_state, effect) = {
-        let peer = peer_map.get_mut(&id).unwrap();
+        let peer = peer_map.get_mut_by_idx(id).unwrap();
         let prev_state = peer.state;
         let (new_state, effect) = fsm_next_state(peer, event);
         peer.state = new_state;
@@ -455,7 +454,7 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAd
 
     // Phase 3: Handle state transition consequences
     {
-        let peer = peer_map.get_mut(&id).unwrap();
+        let peer = peer_map.get_mut_by_idx(id).unwrap();
         if prev_state == peer.state {
             return;
         }
@@ -470,8 +469,8 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut BTreeMap<IpAddr, Peer>, id: IpAd
     }
 
     // Phase 4: route_clean if leaving Established (needs peer_map)
-    if prev_state.is_established() && !peer_map.get(&id).unwrap().state.is_established() {
-        route_clean(id, bgp_ref, peer_map, false);
+    if prev_state.is_established() && !peer_map.get_by_idx(id).unwrap().state.is_established() {
+        route_clean(id, bgp_ref, peer_map);
     }
 }
 
@@ -627,7 +626,7 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
 
 pub async fn peer_packet_parse(
     rx: &[u8],
-    ident: IpAddr,
+    ident: usize,
     tx: mpsc::Sender<Message>,
     config: &mut PeerConfig,
     opt: &mut ParseOption,
@@ -659,7 +658,7 @@ pub async fn peer_packet_parse(
 }
 
 pub async fn peer_read(
-    ident: IpAddr,
+    ident: usize,
     tx: mpsc::Sender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,

@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    net::IpAddr,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Error, Result};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -33,13 +30,13 @@ pub enum Message {
     Register {
         proto: String,
         name: String,
-        ident: IpAddr,
+        ident: usize,
         policy_type: PolicyType,
     },
     Unregister {
         proto: String,
         name: String,
-        ident: IpAddr,
+        ident: usize,
         policy_type: PolicyType,
     },
 }
@@ -53,13 +50,13 @@ pub struct Subscription {
 pub enum PolicyRx {
     PrefixSet {
         name: String,
-        ident: IpAddr,
+        ident: usize,
         policy_type: PolicyType,
         prefix_set: Option<PrefixSet>,
     },
     PolicyList {
         name: String,
-        ident: IpAddr,
+        ident: usize,
         policy_type: PolicyType,
         policy_list: Option<PolicyList>,
     },
@@ -174,7 +171,7 @@ pub struct Policy {
 #[derive(Debug)]
 pub struct PolicyWatch {
     pub proto: String,
-    pub ident: IpAddr,
+    pub ident: usize,
     pub policy_type: PolicyType,
 }
 
