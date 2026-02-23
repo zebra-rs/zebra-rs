@@ -12,7 +12,8 @@ use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
 
 use super::cap::CapAfiMap;
-use super::peer::{BgpTop, Event, Peer, PeerMap, PeerType};
+use super::peer::{BgpTop, Event, Peer, PeerType};
+use super::peer_map::PeerMap;
 use super::timer::{start_adv_timer_ipv4, start_adv_timer_vpnv4};
 use super::{Bgp, InOut, Message};
 
