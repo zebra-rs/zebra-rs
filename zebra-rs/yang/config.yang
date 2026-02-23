@@ -150,6 +150,9 @@ module config {
           leaf dead-interval {
             type uint32;
           }
+          leaf retransmit-interval {
+            type uint16;
+          }
         }
         container tracing {
           leaf all {
