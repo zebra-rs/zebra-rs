@@ -109,7 +109,7 @@ fn start_idle_hold_timer(peer: &mut Peer) -> Timer {
         time as u64
     } else {
         if peer.first_start {
-            if peer.idx > 10 {
+            if peer.ident > 10 {
                 rand::rng().random_range(5..=60)
             } else {
                 peer.config.timer.idle_hold_time()

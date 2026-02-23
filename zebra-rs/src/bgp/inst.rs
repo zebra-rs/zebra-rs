@@ -1,5 +1,6 @@
 use super::BgpAttrStore;
 use super::peer::{BgpTop, Event, Peer, fsm};
+use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
@@ -14,8 +15,8 @@ use crate::policy::{self, PolicyRxChannel};
 use crate::rib;
 use crate::rib::api::{RibRx, RibRxChannel};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::{BTreeMap, HashMap};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
@@ -40,7 +41,7 @@ fn create_ipv6_listener() -> Result<TcpListener, std::io::Error> {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum Message {
-    Event(IpAddr, Event),
+    Event(usize, Event),
     Accept(TcpStream, SocketAddr),
     Show(Sender<String>),
 }
@@ -53,7 +54,7 @@ pub type ShowCallback = fn(&Bgp, Args, bool) -> std::result::Result<String, std:
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
-    pub peers: BTreeMap<IpAddr, Peer>,
+    pub peers: PeerMap,
     /// Bounded channel for BGP events (capacity: 8192)
     pub tx: mpsc::Sender<Message>,
     pub rx: mpsc::Receiver<Message>,
@@ -101,7 +102,7 @@ impl Bgp {
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
-            peers: BTreeMap::new(),
+            peers: PeerMap::new(),
             tx,
             rx,
             local_rib: LocalRib::default(),
@@ -339,7 +340,7 @@ impl Bgp {
                 policy_type,
                 prefix_set,
             } => {
-                let Some(peer) = self.peers.get_mut(&ident) else {
+                let Some(peer) = self.peers.get_mut_by_idx(ident) else {
                     return;
                 };
                 if policy_type == policy::PolicyType::PrefixSetIn {
@@ -356,7 +357,7 @@ impl Bgp {
                 policy_type,
                 policy_list,
             } => {
-                let Some(peer) = self.peers.get_mut(&ident) else {
+                let Some(peer) = self.peers.get_mut_by_idx(ident) else {
                     return;
                 };
                 match policy_type {
