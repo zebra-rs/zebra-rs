@@ -6,7 +6,7 @@ use prefix_trie::PrefixMap;
 
 use super::OspfLink;
 use super::area::OspfAreaMap;
-use super::ifsm::IfsmEvent;
+use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::tracing::config_tracing_packet;
 use super::{Ospf, addr::OspfAddr};
 
@@ -164,6 +164,10 @@ fn config_ospf_interface_hello_interval(
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
     link.config.hello_interval = Some(hello_interval);
+
+    if link.timer.hello.is_some() {
+        link.timer.hello = Some(ospf_hello_timer(link));
+    }
 
     Some(())
 }
