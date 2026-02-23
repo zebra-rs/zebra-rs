@@ -51,35 +51,22 @@ impl Lsdb {
 
     pub fn insert(&mut self, mut lsa: OspfLsa) {
         use OspfLsType::*;
+        let key = (lsa.h.ls_id, lsa.h.adv_router);
         match lsa.h.ls_type {
             Router => {
-                let typ = lsa.h.ls_type;
-                let key = (lsa.h.ls_id, lsa.h.adv_router);
                 lsa.update();
+                self.tables.get_mut(&Router).insert(key, lsa);
+            }
+            Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal => {
                 self.tables.get_mut(&lsa.h.ls_type).insert(key, lsa);
             }
-            _ => {
-                //
-            } // OspfLsp::Router(router_lsa) => self.tables.get_mut(OspfLsType::Router).insert(),
-              // OspfLsp::Network(network_lsa) => {
-              //     //
-              // }
-              // OspfLsp::Summary(summary_lsa) => {
-              //     //
-              // }
-              // OspfLsp::SummaryAsbr(summary_lsa) => {
-              //     //
-              // }
-              // OspfLsp::AsExternal(as_external_lsa) => {
-              //     //
-              // }
-              // OspfLsp::NssaAsExternal(nssa_as_external_lsa) => {
-              //     //
-              // }
-              // OspfLsp::Unknown(unknown_lsa) => {
-              //     //
-              // }
+            _ => {}
         }
+    }
+
+    pub fn insert_received(&mut self, lsa: OspfLsa) {
+        let key = (lsa.h.ls_id, lsa.h.adv_router);
+        self.tables.get_mut(&lsa.h.ls_type).insert(key, lsa);
     }
 
     pub fn is_empty(&self) -> bool {

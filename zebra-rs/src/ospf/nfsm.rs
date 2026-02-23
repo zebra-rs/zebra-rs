@@ -193,29 +193,19 @@ pub fn ospf_db_summary_isempty(nbr: &Neighbor) -> bool {
 }
 
 pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
-    // /* Clear Database Summary list. */
-    // if (!ospf_db_summary_isempty (nbr))
-    //   ospf_db_summary_clear (nbr);
+    // Clear Database Summary list.
+    nbr.db_sum.clear();
 
-    // /* Clear Link State Request list. */
-    // if (!ospf_ls_request_isempty (nbr))
-    //   ospf_ls_request_delete_all (nbr);
+    // Clear Link State Request list.
+    nbr.ls_req.clear();
+    nbr.ls_req_last = None;
 
-    // /* Clear Link State Retransmission list. */
-    // if (!ospf_ls_retransmit_isempty (nbr))
-    //   ospf_ls_retransmit_clear (nbr);
-
-    // /* Cleanup from the DD pending list.  */
-    // ospf_nbr_delete_dd_pending (nbr);
-
+    // Clear timers.
     nbr.timer.inactivity = None;
     nbr.timer.db_desc = None;
     nbr.timer.db_desc_free = None;
     nbr.timer.ls_upd = None;
-
-    // for (i = 0; i < OSPF_NFSM_EVENT_MAX; i++)
-    //   OSPF_NFSM_TIMER_OFF (nbr->t_events [i]);
-    // }
+    nbr.timer.ls_req = None;
 }
 
 pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {

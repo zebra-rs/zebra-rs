@@ -62,8 +62,8 @@ pub struct OspfInterface<'a> {
     pub ident: &'a Identity,
     pub addr: &'a Vec<OspfAddr>,
     pub db_desc_in: &'a mut usize,
-    pub lsdb: &'a Lsdb,
-    pub lsdb_as: &'a Lsdb,
+    pub lsdb: &'a mut Lsdb,
+    pub lsdb_as: &'a mut Lsdb,
     pub tracing: &'a OspfTracing,
 }
 
