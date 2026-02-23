@@ -11,6 +11,13 @@ use crate::rib::Link;
 use super::{Identity, IfsmState, Message, Neighbor};
 use super::{addr::OspfAddr, task::Timer};
 
+pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
+
+#[derive(Default)]
+pub struct LinkConfig {
+    pub priority: Option<u8>,
+}
+
 pub struct OspfLink {
     pub index: u32,
     pub name: String,
@@ -25,7 +32,6 @@ pub struct OspfLink {
     pub ident: Identity,
     pub hello_interval: u16,
     pub wait_interval: u16,
-    pub priority: u8,
     pub dead_interval: u32,
     pub tx: UnboundedSender<Message>,
     pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
@@ -35,6 +41,7 @@ pub struct OspfLink {
     pub db_desc_in: usize,
     pub full_nbr_count: usize,
     pub ptx: UnboundedSender<Message>,
+    pub config: LinkConfig,
 }
 
 #[derive(Default)]
@@ -67,7 +74,6 @@ impl OspfLink {
             ident: Identity::new(router_id),
             hello_interval: 1,
             wait_interval: 4,
-            priority: 1,
             dead_interval: 4,
             tx,
             nbrs: BTreeMap::new(),
@@ -77,7 +83,12 @@ impl OspfLink {
             db_desc_in: 0,
             full_nbr_count: 0,
             ptx,
+            config: LinkConfig::default(),
         }
+    }
+
+    pub fn priority(&self) -> u8 {
+        self.config.priority.unwrap_or(OSPF_DEFAULT_PRIORITY)
     }
 
     pub fn is_passive(&self) -> bool {
