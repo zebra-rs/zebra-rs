@@ -28,6 +28,20 @@ fn render_link(out: &mut String, oi: &OspfLink) {
         oi.ident.prefix, oi.state, oi.ident.priority, oi.ident.bd_router, oi.ident.bd_router
     )
     .unwrap();
+    writeln!(
+        out,
+        "   Timer intervals configured, Hello {}s, Dead {}s, Wait {}s, Retransmit {}s",
+        oi.hello_interval(),
+        oi.dead_interval(),
+        oi.dead_interval(),
+        oi.retransmit_interval(),
+    )
+    .unwrap();
+    if let Some(ref hello_timer) = oi.timer.hello {
+        let remaining = hello_timer.remaining();
+        let secs = remaining.as_secs_f64();
+        writeln!(out, "    Hello due in {:.3}s", secs).unwrap();
+    }
 }
 
 fn show_ospf_interface(
