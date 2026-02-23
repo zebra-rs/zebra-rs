@@ -1,5 +1,6 @@
 use super::BgpAttrStore;
-use super::peer::{BgpTop, Event, Peer, PeerMap, fsm};
+use super::peer::{BgpTop, Event, Peer, fsm};
+use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;

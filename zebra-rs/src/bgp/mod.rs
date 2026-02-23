@@ -6,6 +6,7 @@ pub use constant::*;
 
 pub mod config;
 pub mod peer;
+pub mod peer_map;
 pub mod show;
 
 pub mod cap;
