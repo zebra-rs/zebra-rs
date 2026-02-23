@@ -164,7 +164,7 @@ pub fn ospf_hello_recv(
 }
 
 pub fn ospf_hello_send(oi: &mut OspfLink) {
-    tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
+    // tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
 
     let packet = ospf_hello_packet(oi).unwrap();
     oi.ptx.send(Message::Send(packet, oi.index, None)).unwrap();
