@@ -5,11 +5,19 @@ use isis_packet::{IsLevel, Nsap};
 use crate::config::{Args, ConfigOp};
 
 use super::Isis;
+use super::inst::Callback;
 use super::link::Afis;
 use super::tracing::{PacketConfig, PacketDirection};
 use super::{Level, link};
 
 impl Isis {
+    const TRACING: &str = "/routing/isis/tracing";
+
+    pub fn tracing_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks
+            .insert(format!("{}{}", Self::TRACING, path), cb);
+    }
+
     pub fn callback_build(&mut self) {
         self.callback_add("/routing/isis/net", config_net);
         self.callback_add("/routing/isis/is-type", config_is_type);
@@ -17,14 +25,11 @@ impl Isis {
         self.callback_add("/routing/isis/timers/hold-time", config_hold_time);
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
-        self.callback_add("/routing/isis/tracing/event", config_tracing_event);
-        self.callback_add("/routing/isis/tracing/fsm", config_tracing_fsm);
-        self.callback_add("/routing/isis/tracing/packet", config_tracing_packet);
-        self.callback_add(
-            "/routing/isis/tracing/packet/direction",
-            config_tracing_packet,
-        );
-        self.callback_add("/routing/isis/tracing/database", config_tracing_database);
+        self.tracing_add("/event", config_tracing_event);
+        self.tracing_add("/fsm", config_tracing_fsm);
+        self.tracing_add("/packet", config_tracing_packet);
+        self.tracing_add("/packet/direction", config_tracing_packet);
+        self.tracing_add("/database", config_tracing_database);
         self.callback_add(
             "/routing/isis/interface/circuit-type",
             link::config_circuit_type,
