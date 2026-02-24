@@ -272,6 +272,26 @@ fn set_packet_config(config: &mut PacketConfig, op: ConfigOp, direction: PacketD
     }
 }
 
+pub fn config_tracing_fsm(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let typ = args.string()?;
+
+    match typ.as_str() {
+        "nfsm" => {
+            ospf.tracing.fsm.nfsm.enabled = op.is_set();
+        }
+        "ifsm" => {
+            ospf.tracing.fsm.ifsm.enabled = op.is_set();
+        }
+        "all" => {
+            ospf.tracing.fsm.nfsm.enabled = op.is_set();
+            ospf.tracing.fsm.ifsm.enabled = op.is_set();
+        }
+        _ => {}
+    }
+
+    Some(())
+}
+
 pub fn config_tracing_packet(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let typ = args.string()?;
     let direction = parse_direction(&mut args);
