@@ -7,7 +7,7 @@ use crate::ospf::ospf_db_desc_send;
 
 use super::{
     Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface,
-    ospf_ls_req_send, ospf_ls_request_isempty,
+    ospf_ls_req_send, ospf_ls_request_isempty, tracing::FsmType,
 };
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
@@ -507,6 +507,7 @@ fn ospf_nfsm_change_state(
     }
 }
 
+// TODO: please find a derive macro from @crates/ospf_macros for FSM for NFSM.
 pub fn ospf_nfsm(
     link: &mut OspfInterface,
     nbr: &mut Neighbor,
@@ -523,12 +524,14 @@ pub fn ospf_nfsm(
 
     // If a state transition occurs, update the state.
     if let Some(new_state) = next_state {
-        tracing::info!(
-            "[NFSM:State] {}: {:?} -> {:?}",
-            nbr.ident.router_id,
-            nbr.state,
-            new_state
-        );
+        if link.tracing.should_trace_fsm(FsmType::Nfsm, false) {
+            tracing::info!(
+                "[NFSM:State] {}: {:?} -> {:?}",
+                nbr.ident.router_id,
+                nbr.state,
+                new_state
+            );
+        }
         if new_state != nbr.state {
             ospf_nfsm_change_state(link, nbr, new_state, oident);
         }
