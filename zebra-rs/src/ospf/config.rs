@@ -7,7 +7,7 @@ use prefix_trie::PrefixMap;
 use super::OspfLink;
 use super::area::OspfAreaMap;
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
-use super::tracing::config_tracing_packet;
+use super::tracing::{config_tracing_fsm, config_tracing_packet};
 use super::{Ospf, addr::OspfAddr};
 
 use crate::config::{Args, ConfigOp};
@@ -63,6 +63,7 @@ impl Ospf {
             "/interface/retransmit-interval",
             config_ospf_interface_retransmit_interval,
         );
+        self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
     }
 }
