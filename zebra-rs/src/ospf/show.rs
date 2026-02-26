@@ -169,6 +169,23 @@ fn show_ospf_database(
                 lsp.links.len(),
             );
         }
+
+        writeln!(out)?;
+        writeln!(out, "Net Link States (Area {})", area.id)?;
+        writeln!(out)?;
+
+        let mut header = true;
+        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+            if header {
+                header = false;
+                writeln!(out, "Link ID         ADV Router      Age  Seq#       CkSum")?;
+            }
+            writeln!(
+                out,
+                "{:15} {:15} 0x{:08x} 0x{:04x}",
+                lsa_id, adv_router, lsa.h.ls_seq_number, lsa.h.ls_checksum,
+            );
+        }
     }
 
     Ok(out)
@@ -273,6 +290,39 @@ fn show_ospf_database_detail(
                 writeln!(out, "       TOS 0 Metric: {}", link.tos_0_metric)?;
                 writeln!(out)?;
             }
+        }
+
+        writeln!(out, "                Net Link States (Area {})", area.id)?;
+        writeln!(out)?;
+
+        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+            writeln!(out, "  LS age: {}", lsa.h.ls_age)?;
+            writeln!(out, "  Options: 0x{:02x}", lsa.h.options)?;
+            writeln!(out, "  LS Type: Network Links")?;
+            writeln!(
+                out,
+                "  Link State ID: {} (address of Designated Router)",
+                lsa_id
+            )?;
+            writeln!(out, "  Advertising Router: {}", adv_router)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.h.ls_seq_number)?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.h.ls_checksum)?;
+            writeln!(out, "  Length: {}", lsa.h.length)?;
+
+            let OspfLsp::Network(ref lsp) = lsa.lsp else {
+                continue;
+            };
+
+            writeln!(
+                out,
+                "  Network Mask: /{}",
+                u32::from(lsp.netmask).leading_ones()
+            )?;
+            writeln!(out, "        Attached Router: {}", adv_router)?;
+            for router in &lsp.attached_routers {
+                writeln!(out, "        Attached Router: {}", router)?;
+            }
+            writeln!(out)?;
         }
     }
 
