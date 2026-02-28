@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use ospf_packet::*;
 
-pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), OspfLsa>;
+pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), Lsa>;
 
 pub struct Lsdb {
     pub tables: LsTypes<LsTable>,
@@ -42,6 +42,20 @@ impl<T> LsTypes<T> {
     }
 }
 
+pub struct Lsa {
+    pub data: OspfLsa,
+    pub originated: bool,
+}
+
+impl Lsa {
+    pub fn new(ospf_lsa: OspfLsa) -> Self {
+        Self {
+            data: ospf_lsa,
+            originated: false,
+        }
+    }
+}
+
 impl Lsdb {
     pub fn new() -> Self {
         Self {
@@ -49,24 +63,27 @@ impl Lsdb {
         }
     }
 
-    pub fn insert(&mut self, mut lsa: OspfLsa) {
+    pub fn insert(&mut self, mut ospf_lsa: OspfLsa) {
         use OspfLsType::*;
-        let key = (lsa.h.ls_id, lsa.h.adv_router);
-        match lsa.h.ls_type {
+        let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
+        match ospf_lsa.h.ls_type {
             Router => {
-                lsa.update();
+                ospf_lsa.update();
+                let lsa = Lsa::new(ospf_lsa);
                 self.tables.get_mut(&Router).insert(key, lsa);
             }
             Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal => {
-                self.tables.get_mut(&lsa.h.ls_type).insert(key, lsa);
+                let lsa = Lsa::new(ospf_lsa);
+                self.tables.get_mut(&lsa.data.h.ls_type).insert(key, lsa);
             }
             _ => {}
         }
     }
 
-    pub fn insert_received(&mut self, lsa: OspfLsa) {
-        let key = (lsa.h.ls_id, lsa.h.adv_router);
-        self.tables.get_mut(&lsa.h.ls_type).insert(key, lsa);
+    pub fn insert_received(&mut self, ospf_lsa: OspfLsa) {
+        let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
+        let lsa = Lsa::new(ospf_lsa);
+        self.tables.get_mut(&lsa.data.h.ls_type).insert(key, lsa);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -81,6 +98,6 @@ impl Lsdb {
         adv_router: Ipv4Addr,
     ) -> Option<&OspfLsa> {
         let table = self.tables.get(&ls_type);
-        table.get(&(ls_id, adv_router))
+        table.get(&(ls_id, adv_router)).map(|lsa| &lsa.data)
     }
 }
