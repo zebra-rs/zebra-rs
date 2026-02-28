@@ -348,15 +348,15 @@ pub fn ospf_nfsm_negotiation_done(
 ) -> Option<NfsmState> {
     let table = oi.lsdb.tables.get(&OspfLsType::Router);
     for lsa in table.values() {
-        ospf_db_summary_add(nbr, lsa);
+        ospf_db_summary_add(nbr, &lsa.data);
     }
     let table = oi.lsdb.tables.get(&OspfLsType::Network);
     for lsa in table.values() {
-        ospf_db_summary_add(nbr, lsa);
+        ospf_db_summary_add(nbr, &lsa.data);
     }
     let table = oi.lsdb.tables.get(&OspfLsType::Summary);
     for lsa in table.values() {
-        ospf_db_summary_add(nbr, lsa);
+        ospf_db_summary_add(nbr, &lsa.data);
     }
     tracing::info!("[NFSM:NegotiationDone] DB Summary len {}", nbr.db_sum.len());
     None
@@ -461,7 +461,7 @@ pub fn ospf_nfsm_ll_down(
 }
 
 fn ospf_nfsm_change_state(
-    link: &mut OspfInterface,
+    oi: &mut OspfInterface,
     nbr: &mut Neighbor,
     state: NfsmState,
     oident: &Identity,
@@ -502,12 +502,11 @@ fn ospf_nfsm_change_state(
         nbr.dd.flags.set_more(true);
         nbr.dd.flags.set_init(true);
 
-        tracing::info!("DB_DESC from NFSM");
-        ospf_db_desc_send(link, nbr, oident);
+        tracing::info!("DB_DESC send from NFSM");
+        ospf_db_desc_send(oi, nbr, oident);
     }
 }
 
-// TODO: please find a derive macro from @crates/ospf_macros for FSM for NFSM.
 pub fn ospf_nfsm(
     link: &mut OspfInterface,
     nbr: &mut Neighbor,

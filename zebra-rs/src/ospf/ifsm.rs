@@ -142,16 +142,13 @@ pub fn ospf_ifsm_loop_ind(_oi: &mut OspfLink) -> Option<IfsmState> {
 pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
-    Timer::new(
-        Timer::second(oi.hello_interval().into()),
-        TimerType::Infinite,
-        move || {
-            let tx = tx.clone();
-            async move {
-                tx.send(Message::HelloTimer(index));
-            }
-        },
-    )
+    let timer: u64 = oi.hello_interval().into();
+    Timer::new(Timer::second(timer), TimerType::Infinite, move || {
+        let tx = tx.clone();
+        async move {
+            tx.send(Message::HelloTimer(index));
+        }
+    })
 }
 
 pub fn ospf_wait_timer(oi: &OspfLink) -> Timer {

@@ -132,12 +132,12 @@ pub fn ospf_hello_recv(
     nbr.ident.bd_router = hello.bd_router;
 
     if !ospf_hello_twoway_check(router_id, nbr, hello) {
-        tracing::info!("[NFSM:Event] OneWayReceived");
+        // tracing::info!("[NFSM:Event] OneWayReceived");
         oi.tx
             .send(Message::Nfsm(oi.index, *src, NfsmEvent::OneWayReceived))
             .unwrap();
     } else {
-        tracing::info!("[NFSM:Event] TwoWayReceived");
+        // tracing::info!("[NFSM:Event] TwoWayReceived");
         oi.tx
             .send(Message::Nfsm(oi.index, *src, NfsmEvent::TwoWayReceived))
             .unwrap();
@@ -183,7 +183,7 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
     let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
     let mut dd = OspfDbDesc::default();
 
-    tracing::info!("ospf_db_desc_send {:?}", nbr.dd.flags);
+    tracing::info!("DB_DESC: send {:?}", nbr.dd.flags);
 
     dd.if_mtu = 1500;
 
@@ -194,7 +194,7 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
     ospf_packet_db_desc_set(nbr, &mut dd);
 
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
-    tracing::info!("[DB Desc:Send]");
+    tracing::info!("DB_DESC: Send");
     tracing::info!("{}", packet);
     nbr.ptx
         .send(Message::Send(
@@ -270,7 +270,10 @@ fn ospf_ls_request_add(nbr: &mut Neighbor, ls_req: OspfLsRequestEntry) {
 }
 
 fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc) {
-    println!("ospf_db_desc_proc() {}", dd.lsa_headers.len());
+    println!(
+        "ospf_db_desc_proc() lsa_headers.len() {}",
+        dd.lsa_headers.len()
+    );
     nbr.dd.recv = dd.clone();
 
     for lsah in dd.lsa_headers.iter() {
@@ -306,6 +309,7 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         // information to be sent.
         if !dd.flags.more() && ospf_db_summary_isempty(nbr) {
             tracing::info!("[NFSM:Event] ExchangeDone");
+            nbr.dd.flags.set_more(false);
             nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
         }
 
@@ -333,10 +337,7 @@ pub fn ospf_db_desc_recv(
     src: &Ipv4Addr,
 ) {
     use NfsmState::*;
-    tracing::info!("[DB Desc:Recv] {}", src);
-    // println!("{}", packet);
-
-    tracing::info!("[DB Desc] From {}", nbr.ident.router_id);
+    tracing::info!("DB_DESC: Recv {}", src);
 
     // Get DD.
     let Ospfv2Payload::DbDesc(ref dd) = packet.payload else {
@@ -379,7 +380,7 @@ pub fn ospf_db_desc_recv(
         // ExStart
         ExStart => {
             tracing::info!(
-                "DbDesc: ExStart {} <-> {}",
+                "DB_DESC: Under ExStart {} <-> {}",
                 nbr.ident.router_id,
                 oi.router_id
             );
@@ -607,6 +608,7 @@ pub fn ospf_ls_upd_validate_proc(
     }
 }
 
+#[ospf_packet_handler(LsUpdate, Recv)]
 pub fn ospf_ls_upd_recv(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,

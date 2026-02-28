@@ -61,7 +61,7 @@ impl PacketDirection {
 // Event tracing configuration
 #[derive(Debug, Clone, Default)]
 pub struct EventTracing {
-    pub dis: EventConfig,
+    pub dr_selection: EventConfig,
     pub lsp_originate: EventConfig,
     pub lsp_refresh: EventConfig,
     pub lsp_purge: EventConfig,
