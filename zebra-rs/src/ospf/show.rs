@@ -156,16 +156,17 @@ fn show_ospf_database(
                     "Link ID         ADV Router      Age  Seq#       CkSum  Link count"
                 )?;
             }
-            let OspfLsp::Router(ref lsp) = lsa.lsp else {
+            let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                 continue;
             };
             writeln!(
                 out,
-                "{:15} {:15} 0x{:08x} 0x{:04x} {}",
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x} {}",
                 lsa_id,
                 adv_router,
-                lsa.h.ls_seq_number,
-                lsa.h.ls_checksum,
+                lsa.current_age(),
+                lsa.data.h.ls_seq_number,
+                lsa.data.h.ls_checksum,
                 lsp.links.len(),
             );
         }
@@ -182,8 +183,12 @@ fn show_ospf_database(
             }
             writeln!(
                 out,
-                "{:15} {:15} 0x{:08x} 0x{:04x}",
-                lsa_id, adv_router, lsa.h.ls_seq_number, lsa.h.ls_checksum,
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
+                lsa_id,
+                adv_router,
+                lsa.current_age(),
+                lsa.data.h.ls_seq_number,
+                lsa.data.h.ls_checksum,
             );
         }
     }
@@ -211,16 +216,16 @@ fn show_ospf_database_detail(
         writeln!(out)?;
 
         for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
-            writeln!(out, "  LS age: {}", lsa.h.ls_age)?;
-            writeln!(out, "  Options: 0x{:02x}", lsa.h.options)?;
+            writeln!(out, "  LS age: {}", lsa.current_age())?;
+            writeln!(out, "  Options: 0x{:02x}", lsa.data.h.options)?;
             writeln!(out, "  LS Type: Router Links")?;
             writeln!(out, "  Link State ID: {}", lsa_id)?;
             writeln!(out, "  Advertising Router: {}", adv_router)?;
-            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.h.ls_seq_number)?;
-            writeln!(out, "  Checksum: 0x{:04x}", lsa.h.ls_checksum)?;
-            writeln!(out, "  Length: {}", lsa.h.length)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
+            writeln!(out, "  Length: {}", lsa.data.h.length)?;
 
-            let OspfLsp::Router(ref lsp) = lsa.lsp else {
+            let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                 continue;
             };
 
@@ -296,8 +301,8 @@ fn show_ospf_database_detail(
         writeln!(out)?;
 
         for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
-            writeln!(out, "  LS age: {}", lsa.h.ls_age)?;
-            writeln!(out, "  Options: 0x{:02x}", lsa.h.options)?;
+            writeln!(out, "  LS age: {}", lsa.current_age())?;
+            writeln!(out, "  Options: 0x{:02x}", lsa.data.h.options)?;
             writeln!(out, "  LS Type: Network Links")?;
             writeln!(
                 out,
@@ -305,11 +310,11 @@ fn show_ospf_database_detail(
                 lsa_id
             )?;
             writeln!(out, "  Advertising Router: {}", adv_router)?;
-            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.h.ls_seq_number)?;
-            writeln!(out, "  Checksum: 0x{:04x}", lsa.h.ls_checksum)?;
-            writeln!(out, "  Length: {}", lsa.h.length)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
+            writeln!(out, "  Length: {}", lsa.data.h.length)?;
 
-            let OspfLsp::Network(ref lsp) = lsa.lsp else {
+            let OspfLsp::Network(ref lsp) = lsa.data.lsp else {
                 continue;
             };
 

@@ -26,6 +26,7 @@ use super::area::OspfAreaMap;
 use super::config::{Callback, OspfNetworkConfig};
 use super::ifsm::{IfsmEvent, ospf_ifsm};
 use super::link::OspfLink;
+use super::lsdb::{LsdbEvent, OspfLsaKey};
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
@@ -64,6 +65,7 @@ pub struct OspfInterface<'a> {
     pub db_desc_in: &'a mut usize,
     pub lsdb: &'a mut Lsdb,
     pub lsdb_as: &'a mut Lsdb,
+    pub area_id: Ipv4Addr,
     pub tracing: &'a OspfTracing,
 }
 
@@ -74,7 +76,8 @@ impl Ospf {
         src: &Ipv4Addr,
     ) -> Option<(OspfInterface<'a>, &'a mut Neighbor)> {
         self.links.get_mut(&ifindex).and_then(|link| {
-            self.areas.get_mut(link.area).and_then(|area| {
+            let link_area = link.area;
+            self.areas.get_mut(link_area).and_then(|area| {
                 link.nbrs.get_mut(&src).map(|nbr| {
                     (
                         OspfInterface {
@@ -85,6 +88,7 @@ impl Ospf {
                             db_desc_in: &mut link.db_desc_in,
                             lsdb: &mut area.lsdb,
                             lsdb_as: &mut self.lsdb_as,
+                            area_id: link_area,
                             tracing: &self.tracing,
                         },
                         nbr,
@@ -165,7 +169,39 @@ impl Ospf {
 
             let lsa = OspfLsa::from(lsah, r_lsa.into());
 
-            area.lsdb.insert(lsa);
+            area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+        }
+    }
+
+    fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
+        let (ls_type, ls_id, adv_router) = key;
+        let lsdb = if let Some(area_id) = area_id {
+            let Some(area) = self.areas.get_mut(area_id) else {
+                return;
+            };
+            &mut area.lsdb
+        } else {
+            &mut self.lsdb_as
+        };
+        match ev {
+            LsdbEvent::HoldTimerExpire => {
+                tracing::info!(
+                    "LSDB hold timer expired: type={} id={} adv={}",
+                    ls_type,
+                    ls_id,
+                    adv_router
+                );
+                lsdb.remove_lsa(ls_type, ls_id, adv_router);
+            }
+            LsdbEvent::RefreshTimerExpire => {
+                tracing::info!(
+                    "LSDB refresh timer expired: type={} id={} adv={}",
+                    ls_type,
+                    ls_id,
+                    adv_router
+                );
+                lsdb.refresh_lsa(ls_type, ls_id, adv_router, &self.tx, area_id);
+            }
         }
     }
 
@@ -305,9 +341,10 @@ impl Ospf {
                 };
                 ospf_hello_send(link);
             }
-            _ => {
-                //
+            Message::Lsdb(ev, area_id, key) => {
+                self.process_lsdb(ev, area_id, key);
             }
+            _ => {}
         }
     }
 
@@ -380,4 +417,5 @@ pub enum Message {
     HelloTimer(u32),
     Recv(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
     Send(Ospfv2Packet, u32, Option<Ipv4Addr>),
+    Lsdb(LsdbEvent, Option<Ipv4Addr>, OspfLsaKey),
 }

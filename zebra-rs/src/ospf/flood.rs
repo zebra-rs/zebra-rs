@@ -46,7 +46,8 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     ospf_flood_through(oi, nbr, lsa);
 
     // Install LSA into LSDB.
-    oi.lsdb.insert_received(lsa.clone());
+    oi.lsdb
+        .insert_received(lsa.clone(), oi.tx, Some(oi.area_id));
     tracing::info!(
         "[Flood] Installed LSA type={:?} id={} adv={}",
         lsa.h.ls_type,
