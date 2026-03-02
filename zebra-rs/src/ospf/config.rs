@@ -6,7 +6,8 @@ use prefix_trie::PrefixMap;
 
 use super::OspfLink;
 use super::area::OspfAreaMap;
-use super::tracing::config_tracing_packet;
+use super::ifsm::{IfsmEvent, ospf_hello_timer};
+use super::tracing::{config_tracing_fsm, config_tracing_packet};
 use super::{Ospf, addr::OspfAddr};
 
 use crate::config::{Args, ConfigOp};
@@ -49,6 +50,20 @@ impl Ospf {
     pub fn callback_build(&mut self) {
         self.ospf_add("/router-id", config_ospf_router_id);
         self.ospf_add("/network/area", config_ospf_network);
+        self.ospf_add("/interface/priority", config_ospf_interface_priority);
+        self.ospf_add(
+            "/interface/hello-interval",
+            config_ospf_interface_hello_interval,
+        );
+        self.ospf_add(
+            "/interface/dead-interval",
+            config_ospf_interface_dead_interval,
+        );
+        self.ospf_add(
+            "/interface/retransmit-interval",
+            config_ospf_interface_retransmit_interval,
+        );
+        self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
     }
 }
@@ -116,4 +131,72 @@ fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<
 fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
     let router_id = args.v4addr()?;
     None
+}
+
+fn ospf_link_get_mut_by_name<'a>(
+    links: &'a mut BTreeMap<u32, OspfLink>,
+    name: &str,
+) -> Option<&'a mut OspfLink> {
+    links.values_mut().find(|link| link.name == name)
+}
+
+fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let priority = args.u8()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.priority = Some(priority);
+    link.ident.priority = priority;
+
+    let ifindex = link.index;
+    link.tx
+        .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
+
+    Some(())
+}
+
+fn config_ospf_interface_hello_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let hello_interval = args.u16()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.hello_interval = Some(hello_interval);
+
+    if link.timer.hello.is_some() {
+        link.timer.hello = Some(ospf_hello_timer(link));
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_dead_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let dead_interval = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.dead_interval = Some(dead_interval);
+
+    Some(())
+}
+
+fn config_ospf_interface_retransmit_interval(
+    ospf: &mut Ospf,
+    mut args: Args,
+    _op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let retransmit_interval = args.u16()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.retransmit_interval = Some(retransmit_interval);
+
+    Some(())
 }

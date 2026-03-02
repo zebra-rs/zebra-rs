@@ -399,6 +399,22 @@ impl OspfLsa {
         }
     }
 
+    /// Verify the Fletcher checksum of a received LSA (RFC 2328).
+    /// Returns true if the checksum is valid.
+    pub fn verify_checksum(&self) -> bool {
+        let mut buf = BytesMut::with_capacity(self.h.length as usize);
+        self.h.emit(&mut buf);
+        self.emit_lsp(&mut buf);
+        if buf.len() < 18 {
+            return false;
+        }
+        // Zero out the checksum field before recalculating.
+        buf[16] = 0;
+        buf[17] = 0;
+        let computed = lsa_checksum_calc(&buf[2..], 14);
+        computed == self.h.ls_checksum
+    }
+
     /// Update the LSA length and calculate checksum according to RFC 2328.
     /// The checksum uses Fletcher algorithm over the LSA excluding the LS Age field.
     pub fn update(&mut self) {

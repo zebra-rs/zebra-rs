@@ -61,7 +61,7 @@ impl PacketDirection {
 // Event tracing configuration
 #[derive(Debug, Clone, Default)]
 pub struct EventTracing {
-    pub dis: EventConfig,
+    pub dr_selection: EventConfig,
     pub lsp_originate: EventConfig,
     pub lsp_refresh: EventConfig,
     pub lsp_purge: EventConfig,
@@ -270,6 +270,26 @@ fn set_packet_config(config: &mut PacketConfig, op: ConfigOp, direction: PacketD
         config.enabled = false;
         config.direction = PacketDirection::Both;
     }
+}
+
+pub fn config_tracing_fsm(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let typ = args.string()?;
+
+    match typ.as_str() {
+        "nfsm" => {
+            ospf.tracing.fsm.nfsm.enabled = op.is_set();
+        }
+        "ifsm" => {
+            ospf.tracing.fsm.ifsm.enabled = op.is_set();
+        }
+        "all" => {
+            ospf.tracing.fsm.nfsm.enabled = op.is_set();
+            ospf.tracing.fsm.ifsm.enabled = op.is_set();
+        }
+        _ => {}
+    }
+
+    Some(())
 }
 
 pub fn config_tracing_packet(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {

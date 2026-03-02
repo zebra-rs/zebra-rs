@@ -7,7 +7,7 @@ use crate::ospf::ospf_db_desc_send;
 
 use super::{
     Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface,
-    ospf_ls_req_send, ospf_ls_request_isempty,
+    ospf_ls_req_send, ospf_ls_request_isempty, tracing::FsmType,
 };
 
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
@@ -200,12 +200,16 @@ pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
     nbr.ls_req.clear();
     nbr.ls_req_last = None;
 
+    // Clear Retransmit list.
+    nbr.ls_rxmt.clear();
+
     // Clear timers.
     nbr.timer.inactivity = None;
     nbr.timer.db_desc = None;
     nbr.timer.db_desc_free = None;
     nbr.timer.ls_upd = None;
     nbr.timer.ls_req = None;
+    nbr.timer.ls_rxmt = None;
 }
 
 pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {
@@ -348,15 +352,15 @@ pub fn ospf_nfsm_negotiation_done(
 ) -> Option<NfsmState> {
     let table = oi.lsdb.tables.get(&OspfLsType::Router);
     for lsa in table.values() {
-        ospf_db_summary_add(nbr, lsa);
+        ospf_db_summary_add(nbr, &lsa.data);
     }
     let table = oi.lsdb.tables.get(&OspfLsType::Network);
     for lsa in table.values() {
-        ospf_db_summary_add(nbr, lsa);
+        ospf_db_summary_add(nbr, &lsa.data);
     }
     let table = oi.lsdb.tables.get(&OspfLsType::Summary);
     for lsa in table.values() {
-        ospf_db_summary_add(nbr, lsa);
+        ospf_db_summary_add(nbr, &lsa.data);
     }
     tracing::info!("[NFSM:NegotiationDone] DB Summary len {}", nbr.db_sum.len());
     None
@@ -461,7 +465,7 @@ pub fn ospf_nfsm_ll_down(
 }
 
 fn ospf_nfsm_change_state(
-    link: &mut OspfInterface,
+    oi: &mut OspfInterface,
     nbr: &mut Neighbor,
     state: NfsmState,
     oident: &Identity,
@@ -502,8 +506,8 @@ fn ospf_nfsm_change_state(
         nbr.dd.flags.set_more(true);
         nbr.dd.flags.set_init(true);
 
-        tracing::info!("DB_DESC from NFSM");
-        ospf_db_desc_send(link, nbr, oident);
+        tracing::info!("DB_DESC send from NFSM");
+        ospf_db_desc_send(oi, nbr, oident);
     }
 }
 
@@ -523,12 +527,14 @@ pub fn ospf_nfsm(
 
     // If a state transition occurs, update the state.
     if let Some(new_state) = next_state {
-        tracing::info!(
-            "[NFSM:State] {}: {:?} -> {:?}",
-            nbr.ident.router_id,
-            nbr.state,
-            new_state
-        );
+        if link.tracing.should_trace_fsm(FsmType::Nfsm, false) {
+            tracing::info!(
+                "[NFSM:State] {}: {:?} -> {:?}",
+                nbr.ident.router_id,
+                nbr.state,
+                new_state
+            );
+        }
         if new_state != nbr.state {
             ospf_nfsm_change_state(link, nbr, new_state, oident);
         }

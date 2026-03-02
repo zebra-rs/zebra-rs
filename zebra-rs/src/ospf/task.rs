@@ -38,6 +38,8 @@ impl<T> Drop for Task<T> {
 #[derive(Debug)]
 pub struct Timer {
     pub tx: UnboundedSender<TimerMessage>,
+    pub created_at: tokio::time::Instant,
+    pub duration: Duration,
 }
 
 #[derive(Debug)]
@@ -82,7 +84,11 @@ impl Timer {
                 }
             }
         });
-        Timer { tx }
+        Timer {
+            tx,
+            created_at: tokio::time::Instant::now(),
+            duration,
+        }
     }
 
     pub fn second(sec: u64) -> Duration {
@@ -91,5 +97,16 @@ impl Timer {
 
     pub fn refresh(&self) {
         let _ = self.tx.send(TimerMessage::Refresh);
+    }
+
+    pub fn remaining(&self) -> Duration {
+        let elapsed = self.created_at.elapsed();
+        let nanos = self.duration.as_nanos();
+        if nanos == 0 {
+            return Duration::ZERO;
+        }
+        let elapsed_nanos = elapsed.as_nanos();
+        let next_fire = ((elapsed_nanos / nanos) + 1) * nanos;
+        Duration::from_nanos((next_fire - elapsed_nanos) as u64)
     }
 }

@@ -28,6 +28,20 @@ fn render_link(out: &mut String, oi: &OspfLink) {
         oi.ident.prefix, oi.state, oi.ident.priority, oi.ident.bd_router, oi.ident.bd_router
     )
     .unwrap();
+    writeln!(
+        out,
+        "   Timer intervals configured, Hello {}s, Dead {}s, Wait {}s, Retransmit {}s",
+        oi.hello_interval(),
+        oi.dead_interval(),
+        oi.dead_interval(),
+        oi.retransmit_interval(),
+    )
+    .unwrap();
+    if let Some(ref hello_timer) = oi.timer.hello {
+        let remaining = hello_timer.remaining();
+        let secs = remaining.as_secs_f64();
+        writeln!(out, "    Hello due in {:.3}s", secs).unwrap();
+    }
 }
 
 fn show_ospf_interface(
@@ -142,17 +156,39 @@ fn show_ospf_database(
                     "Link ID         ADV Router      Age  Seq#       CkSum  Link count"
                 )?;
             }
-            let OspfLsp::Router(ref lsp) = lsa.lsp else {
+            let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                 continue;
             };
             writeln!(
                 out,
-                "{:15} {:15} 0x{:08x} 0x{:04x} {}",
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x} {}",
                 lsa_id,
                 adv_router,
-                lsa.h.ls_seq_number,
-                lsa.h.ls_checksum,
+                lsa.current_age(),
+                lsa.data.h.ls_seq_number,
+                lsa.data.h.ls_checksum,
                 lsp.links.len(),
+            );
+        }
+
+        writeln!(out)?;
+        writeln!(out, "Net Link States (Area {})", area.id)?;
+        writeln!(out)?;
+
+        let mut header = true;
+        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+            if header {
+                header = false;
+                writeln!(out, "Link ID         ADV Router      Age  Seq#       CkSum")?;
+            }
+            writeln!(
+                out,
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
+                lsa_id,
+                adv_router,
+                lsa.current_age(),
+                lsa.data.h.ls_seq_number,
+                lsa.data.h.ls_checksum,
             );
         }
     }
@@ -180,16 +216,16 @@ fn show_ospf_database_detail(
         writeln!(out)?;
 
         for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
-            writeln!(out, "  LS age: {}", lsa.h.ls_age)?;
-            writeln!(out, "  Options: 0x{:02x}", lsa.h.options)?;
+            writeln!(out, "  LS age: {}", lsa.current_age())?;
+            writeln!(out, "  Options: 0x{:02x}", lsa.data.h.options)?;
             writeln!(out, "  LS Type: Router Links")?;
             writeln!(out, "  Link State ID: {}", lsa_id)?;
             writeln!(out, "  Advertising Router: {}", adv_router)?;
-            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.h.ls_seq_number)?;
-            writeln!(out, "  Checksum: 0x{:04x}", lsa.h.ls_checksum)?;
-            writeln!(out, "  Length: {}", lsa.h.length)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
+            writeln!(out, "  Length: {}", lsa.data.h.length)?;
 
-            let OspfLsp::Router(ref lsp) = lsa.lsp else {
+            let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                 continue;
             };
 
@@ -259,6 +295,39 @@ fn show_ospf_database_detail(
                 writeln!(out, "       TOS 0 Metric: {}", link.tos_0_metric)?;
                 writeln!(out)?;
             }
+        }
+
+        writeln!(out, "                Net Link States (Area {})", area.id)?;
+        writeln!(out)?;
+
+        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+            writeln!(out, "  LS age: {}", lsa.current_age())?;
+            writeln!(out, "  Options: 0x{:02x}", lsa.data.h.options)?;
+            writeln!(out, "  LS Type: Network Links")?;
+            writeln!(
+                out,
+                "  Link State ID: {} (address of Designated Router)",
+                lsa_id
+            )?;
+            writeln!(out, "  Advertising Router: {}", adv_router)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
+            writeln!(out, "  Length: {}", lsa.data.h.length)?;
+
+            let OspfLsp::Network(ref lsp) = lsa.data.lsp else {
+                continue;
+            };
+
+            writeln!(
+                out,
+                "  Network Mask: /{}",
+                u32::from(lsp.netmask).leading_ones()
+            )?;
+            writeln!(out, "        Attached Router: {}", adv_router)?;
+            for router in &lsp.attached_routers {
+                writeln!(out, "        Attached Router: {}", router)?;
+            }
+            writeln!(out)?;
         }
     }
 

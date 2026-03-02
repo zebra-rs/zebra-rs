@@ -82,6 +82,20 @@ impl From<u8> for OspfLsType {
     }
 }
 
+impl PartialOrd for OspfLsType {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OspfLsType {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let a: u8 = (*self).into();
+        let b: u8 = (*other).into();
+        a.cmp(&b)
+    }
+}
+
 impl OspfLsType {
     pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, typ) = be_u8(input)?;
