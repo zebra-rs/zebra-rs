@@ -6,6 +6,7 @@ use bitfield_struct::bitfield;
 use ipnet::Ipv4Net;
 use ospf_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::Instant;
 
 use super::lsdb::OspfLsaKey;
 use super::task::Timer;
@@ -28,6 +29,7 @@ pub struct Neighbor {
     pub ls_req: Vec<OspfLsRequestEntry>,
     pub ls_req_last: Option<OspfLsRequest>,
     pub ls_rxmt: BTreeMap<OspfLsaKey, OspfLsa>,
+    pub uptime: Instant,
 }
 
 #[bitfield(u8, debug = true)]
@@ -90,6 +92,7 @@ impl Neighbor {
             ls_req: vec![],
             ls_req_last: None,
             ls_rxmt: BTreeMap::new(),
+            uptime: Instant::now(),
         };
         nbr.ident.prefix = prefix;
         nbr
