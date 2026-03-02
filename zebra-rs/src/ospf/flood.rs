@@ -1,8 +1,36 @@
+use std::time::Duration;
+
 use ospf_packet::*;
 
 use super::inst::Message;
-use super::lsdb::LsdbEvent;
+use super::link::OspfLink;
+use super::lsdb::{LsdbEvent, OSPF_MIN_LS_ARRIVAL, OspfLsaKey};
+use super::task::{Timer, TimerType};
 use super::{Neighbor, NfsmState, inst::OspfInterface, nfsm::ospf_nfsm_check_nbr_loading};
+
+#[derive(Debug, PartialEq)]
+pub enum FloodScope {
+    Area,
+    As,
+    Link,
+    Unknown,
+}
+
+pub fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
+    use OspfLsType::*;
+    match ls_type {
+        Router => FloodScope::Area,
+        Network => FloodScope::Area,
+        Summary => FloodScope::Area,
+        SummaryAsbr => FloodScope::Area,
+        AsExternal => FloodScope::As,
+        NssaAsExternal => FloodScope::Area,
+        OpaqueLinkLocal => FloodScope::Link,
+        OpaqueAreaLocal => FloodScope::Area,
+        OpaqueAsWide => FloodScope::As,
+        Unknown(_) => FloodScope::Unknown,
+    }
+}
 
 pub fn ospf_ls_request_count(nbr: &Neighbor) -> usize {
     nbr.ls_req.len()
@@ -72,12 +100,33 @@ pub fn ospf_flood_self_originated_lsa(oi: &OspfInterface, lsa: &OspfLsa) {
 }
 
 pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
-    // Flood through interfaces (check ls_req, etc.)
-    ospf_flood_through(oi, nbr, lsa);
+    let scope = lsa_flood_scope(lsa.h.ls_type);
+    let lsdb = match scope {
+        FloodScope::As => &mut *oi.lsdb_as,
+        _ => &mut *oi.lsdb,
+    };
 
-    // Install LSA into LSDB.
-    oi.lsdb
-        .insert_received(lsa.clone(), oi.tx, Some(oi.area_id));
+    // MinLSArrival check: if the same LSA was installed less than 1 second ago, discard.
+    if let Some(install_time) =
+        lsdb.lookup_install_time(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router)
+    {
+        if install_time.elapsed() < Duration::from_secs(OSPF_MIN_LS_ARRIVAL) {
+            tracing::info!(
+                "[Flood] MinLSArrival: discarding LSA type={:?} id={} adv={}",
+                lsa.h.ls_type,
+                lsa.h.ls_id,
+                lsa.h.adv_router
+            );
+            return;
+        }
+    }
+
+    // RFC 2328: Install into LSDB first, then flood.
+    let area_id = match scope {
+        FloodScope::As => None,
+        _ => Some(oi.area_id),
+    };
+    lsdb.insert_received(lsa.clone(), oi.tx, area_id);
     tracing::info!(
         "[Flood] Installed LSA type={:?} id={} adv={}",
         lsa.h.ls_type,
@@ -85,16 +134,71 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
         lsa.h.adv_router
     );
 
-    // RFC 2328 Section 13.3: Flood the LSA to all other eligible neighbors
-    // in the area, excluding the source neighbor that sent it to us.
-    let msg = Message::Flood(
-        oi.area_id,
-        lsa.clone(),
-        nbr.ifindex,
-        nbr.ident.prefix.addr(),
-    );
-    let _ = oi.tx.send(msg);
+    // Flood through interfaces (check ls_req, etc.)
+    ospf_flood_through(oi, nbr, lsa);
+
+    // RFC 2328 Section 13.3: Flood the LSA to all other eligible neighbors,
+    // excluding the source neighbor that sent it to us.
+    match scope {
+        FloodScope::As => {
+            let msg = Message::FloodAs(lsa.clone(), nbr.ifindex, nbr.ident.prefix.addr());
+            let _ = oi.tx.send(msg);
+        }
+        _ => {
+            let msg = Message::Flood(
+                oi.area_id,
+                lsa.clone(),
+                nbr.ifindex,
+                nbr.ident.prefix.addr(),
+            );
+            let _ = oi.tx.send(msg);
+        }
+    }
 
     // Check if neighbor should transition from Loading to Full.
     ospf_nfsm_check_nbr_loading(nbr);
+}
+
+// Retransmit list functions.
+
+pub fn ospf_retransmit_timer(nbr: &Neighbor, retransmit_interval: u16) -> Timer {
+    let tx = nbr.tx.clone();
+    let ifindex = nbr.ifindex;
+    let addr = nbr.ident.prefix.addr();
+    Timer::new(
+        Timer::second(retransmit_interval as u64),
+        TimerType::Once,
+        move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::Retransmit(ifindex, addr));
+            }
+        },
+    )
+}
+
+pub fn ospf_ls_retransmit_add(nbr: &mut Neighbor, lsa: &OspfLsa, retransmit_interval: u16) {
+    let key: OspfLsaKey = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    nbr.ls_rxmt.insert(key, lsa.clone());
+    if nbr.timer.ls_rxmt.is_none() {
+        nbr.timer.ls_rxmt = Some(ospf_retransmit_timer(nbr, retransmit_interval));
+    }
+}
+
+pub fn ospf_ls_retransmit_delete(nbr: &mut Neighbor, lsa: &OspfLsa) {
+    let key: OspfLsaKey = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    nbr.ls_rxmt.remove(&key);
+    if nbr.ls_rxmt.is_empty() {
+        nbr.timer.ls_rxmt = None;
+    }
+}
+
+pub fn ospf_ls_retransmit_lookup<'a>(nbr: &'a Neighbor, lsa: &OspfLsa) -> Option<&'a OspfLsa> {
+    let key: OspfLsaKey = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    nbr.ls_rxmt.get(&key)
+}
+
+pub fn ospf_ls_retransmit_clear(nbr: &mut Neighbor) {
+    nbr.ls_rxmt.clear();
+    nbr.timer.ls_rxmt = None;
 }

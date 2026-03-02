@@ -14,10 +14,10 @@ use crate::{
 };
 
 use super::{
-    Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::OspfInterface, lsdb::OSPF_MAX_AGE, lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ,
-    ospf_flood, ospf_flood_self_originated_lsa, ospf_is_self_originated, ospf_ls_request_lookup,
-    tracing::OspfTracing,
+    FloodScope, Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
+    inst::OspfInterface, lsa_flood_scope, lsdb::OSPF_MAX_AGE, lsdb::OSPF_MAX_AGE_DIFF,
+    lsdb::OSPF_MAX_LSA_SEQ, ospf_flood, ospf_flood_self_originated_lsa, ospf_is_self_originated,
+    ospf_ls_request_lookup, tracing::OspfTracing,
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -229,29 +229,6 @@ pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &I
             Some(nbr.ident.prefix.addr()),
         ))
         .unwrap();
-}
-
-enum FloodScope {
-    Area,
-    As,
-    Link,
-    Unknown,
-}
-
-fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
-    use OspfLsType::*;
-    match ls_type {
-        Router => FloodScope::Area,
-        Network => FloodScope::Area,
-        Summary => FloodScope::Area,
-        SummaryAsbr => FloodScope::Area,
-        AsExternal => FloodScope::As,
-        NssaAsExternal => FloodScope::Area,
-        OpaqueLinkLocal => FloodScope::Link,
-        OpaqueAreaLocal => FloodScope::Area,
-        OpaqueAsWide => FloodScope::As,
-        Unknown(_) => FloodScope::Unknown,
-    }
 }
 
 fn ospf_lsa_lookup<'a>(
@@ -579,15 +556,32 @@ fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, age1: u16, lsa2: &OspfLsaHeader, a
 
 // RFC 2328 Section 13: result of processing a single received LSA.
 enum LsaProcessResult {
-    Installed,     // Step 5: installed, caller should ack
-    AckAndDiscard, // Step 4 MaxAge / Step 7 same: ack, don't install
-    DiscardNoAck,  // Step 3 / Step 8 MaxAge+MaxSeq: no ack
-    DbCopyNewer,   // Step 8: DB copy sent back, no ack
-    BadLSReq,      // Step 6: stop processing entire packet
+    InstalledDirectAck,  // Step 5: installed, send direct ack
+    InstalledDelayedAck, // Step 5: installed, queue delayed ack
+    AckAndDiscard,       // Step 4 MaxAge / Step 7 same: ack, don't install
+    DiscardNoAck,        // Step 3 / Step 7 implied ack / Step 8 MaxAge+MaxSeq: no ack
+    DbCopyNewer,         // Step 8: DB copy sent back, no ack
+    BadLSReq,            // Step 6: stop processing entire packet
 }
 
 fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -> LsaProcessResult {
-    // Step 3: TODO - Discard AS-External LSAs in stub areas (needs area type tracking).
+    // Step 3: Discard AS-External LSAs in stub/NSSA areas.
+    use super::area::AreaType;
+    match lsa.h.ls_type {
+        OspfLsType::AsExternal | OspfLsType::SummaryAsbr => {
+            if oi.area_type != AreaType::Normal {
+                tracing::info!(
+                    "[LS Update] Step 3: Discarding {:?} LSA in {:?} area: id={} adv={}",
+                    lsa.h.ls_type,
+                    oi.area_type,
+                    lsa.h.ls_id,
+                    lsa.h.adv_router
+                );
+                return LsaProcessResult::DiscardNoAck;
+            }
+        }
+        _ => {}
+    }
 
     // Step 4: Look up current database copy, compute comparison result.
     // Use lookup_lsa() to get the Lsa wrapper so we can compute current_age().
@@ -606,10 +600,9 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     };
 
     // Step 4 special case: MaxAge LSA not in database.
-    // If no neighbors are in Exchange or Loading, ack and discard.
+    // If no neighbors in the area are in Exchange or Loading, ack and discard.
     if lsa.h.ls_age >= OSPF_MAX_AGE && current.is_none() {
-        // TODO: full check requires iterating ALL neighbors in the area.
-        if nbr.state < NfsmState::Exchange {
+        if oi.exchange_loading_count == 0 {
             tracing::info!(
                 "[LS Update] MaxAge not in DB, no Exchange/Loading neighbors: type={:?} id={} adv={}",
                 lsa.h.ls_type,
@@ -643,7 +636,9 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
             ospf_flood_self_originated_lsa(oi, lsa);
         }
 
-        return LsaProcessResult::Installed;
+        // RFC 2328: If the LSA was flooded back out the receiving interface,
+        // use delayed ack; otherwise use direct ack.
+        return LsaProcessResult::InstalledDelayedAck;
     }
 
     // Step 6: If LSA is on neighbor's request list, this is a BadLSReq event.
@@ -660,13 +655,19 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
 
     // Step 7: Same instance (duplicate).
     if ret == 0 {
-        // TODO: implied ack via retransmit list (needs retransmit list infrastructure).
         tracing::info!(
             "[LS Update] Same instance type={:?} id={} adv={}",
             lsa.h.ls_type,
             lsa.h.ls_id,
             lsa.h.adv_router
         );
+        // Check retransmit list for implied ack.
+        if super::ospf_ls_retransmit_lookup(nbr, lsa).is_some() {
+            super::ospf_ls_retransmit_delete(nbr, lsa);
+            // Implied acknowledgement -- treat as acked, no explicit ack needed.
+            return LsaProcessResult::DiscardNoAck;
+        }
+        // Not on retransmit list -- send direct ack.
         return LsaProcessResult::AckAndDiscard;
     }
 
@@ -701,13 +702,26 @@ pub fn ospf_ls_upd_validate_proc(
     ls_upd: &OspfLsUpdate,
     src: &Ipv4Addr,
 ) {
-    let mut ack_headers = Vec::new();
+    let mut direct_ack_headers = Vec::new();
+    let mut delayed_ack_headers = Vec::new();
 
     for lsa in ls_upd.lsas.iter() {
+        if !lsa.verify_checksum() {
+            tracing::warn!(
+                "[LS Update] Checksum mismatch, discarding LSA type={:?} id={} adv={}",
+                lsa.h.ls_type,
+                lsa.h.ls_id,
+                lsa.h.adv_router
+            );
+            continue;
+        }
         let result = ospf_ls_upd_proc(oi, nbr, lsa);
         match result {
-            LsaProcessResult::Installed | LsaProcessResult::AckAndDiscard => {
-                ack_headers.push(lsa.h.clone());
+            LsaProcessResult::InstalledDirectAck | LsaProcessResult::AckAndDiscard => {
+                direct_ack_headers.push(lsa.h.clone());
+            }
+            LsaProcessResult::InstalledDelayedAck => {
+                delayed_ack_headers.push(lsa.h.clone());
             }
             LsaProcessResult::BadLSReq => {
                 // Stop processing entire packet, no acks sent.
@@ -719,9 +733,15 @@ pub fn ospf_ls_upd_validate_proc(
         }
     }
 
-    // Send batch LS Ack for acknowledged LSAs.
-    if !ack_headers.is_empty() {
-        ospf_ls_ack_send(oi, nbr, ack_headers);
+    // Send direct LS Acks immediately.
+    if !direct_ack_headers.is_empty() {
+        ospf_ls_ack_send(oi, nbr, direct_ack_headers);
+    }
+
+    // Queue delayed acks for later transmission.
+    if !delayed_ack_headers.is_empty() {
+        let msg = Message::DelayedAckQueue(nbr.ifindex, delayed_ack_headers);
+        let _ = oi.tx.send(msg);
     }
 }
 
@@ -745,8 +765,7 @@ pub fn ospf_ls_upd_recv(
     ospf_ls_upd_validate_proc(oi, nbr, ls_upd, src);
 }
 
-// Minimal LS Ack receive handler.
-// TODO: retransmit list removal (deferred).
+// LS Ack receive handler -- RFC 2328 Section 13.7.
 pub fn ospf_ls_ack_recv(
     _oi: &mut OspfInterface,
     nbr: &mut Neighbor,
@@ -766,4 +785,19 @@ pub fn ospf_ls_ack_recv(
         src,
         ls_ack.lsa_headers.len()
     );
+
+    // Remove acknowledged LSAs from retransmit list.
+    for lsah in ls_ack.lsa_headers.iter() {
+        let key = (lsah.ls_type, lsah.ls_id, lsah.adv_router);
+        if let Some(rxmt_lsa) = nbr.ls_rxmt.get(&key) {
+            if rxmt_lsa.h.ls_seq_number == lsah.ls_seq_number
+                && rxmt_lsa.h.ls_checksum == lsah.ls_checksum
+            {
+                nbr.ls_rxmt.remove(&key);
+            }
+        }
+    }
+    if nbr.ls_rxmt.is_empty() {
+        nbr.timer.ls_rxmt = None;
+    }
 }

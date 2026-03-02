@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
@@ -7,6 +7,7 @@ use ipnet::Ipv4Net;
 use ospf_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::lsdb::OspfLsaKey;
 use super::task::Timer;
 use super::{Identity, Lsdb, Message, NfsmState};
 
@@ -26,6 +27,7 @@ pub struct Neighbor {
     pub db_sum: Vec<OspfLsaHeader>,
     pub ls_req: Vec<OspfLsRequestEntry>,
     pub ls_req_last: Option<OspfLsRequest>,
+    pub ls_rxmt: BTreeMap<OspfLsaKey, OspfLsa>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -42,6 +44,7 @@ pub struct NeighborTimer {
     pub db_desc: Option<Timer>,
     pub ls_upd: Option<Timer>,
     pub ls_req: Option<Timer>,
+    pub ls_rxmt: Option<Timer>,
 }
 
 #[derive(Debug)]
@@ -86,6 +89,7 @@ impl Neighbor {
             db_sum: vec![],
             ls_req: vec![],
             ls_req_last: None,
+            ls_rxmt: BTreeMap::new(),
         };
         nbr.ident.prefix = prefix;
         nbr

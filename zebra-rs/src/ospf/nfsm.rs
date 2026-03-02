@@ -200,12 +200,16 @@ pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
     nbr.ls_req.clear();
     nbr.ls_req_last = None;
 
+    // Clear Retransmit list.
+    nbr.ls_rxmt.clear();
+
     // Clear timers.
     nbr.timer.inactivity = None;
     nbr.timer.db_desc = None;
     nbr.timer.db_desc_free = None;
     nbr.timer.ls_upd = None;
     nbr.timer.ls_req = None;
+    nbr.timer.ls_rxmt = None;
 }
 
 pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {

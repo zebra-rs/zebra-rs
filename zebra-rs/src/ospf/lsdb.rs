@@ -11,6 +11,7 @@ pub const OSPF_MAX_AGE: u16 = 3600;
 pub const OSPF_MAX_AGE_DIFF: u16 = 900; // 15 minutes (RFC 2328 Section 13.1)
 pub const OSPF_LS_REFRESH_TIME: u64 = 1800;
 pub const OSPF_MAX_LSA_SEQ: u32 = 0x7FFFFFFF;
+pub const OSPF_MIN_LS_ARRIVAL: u64 = 1; // 1 second (RFC 2328)
 
 pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), Lsa>;
 pub type OspfLsaKey = (OspfLsType, Ipv4Addr, Ipv4Addr);
@@ -64,16 +65,19 @@ pub struct Lsa {
     pub data: OspfLsa,
     pub originated: bool,
     pub birth_time: tokio::time::Instant,
+    pub install_time: tokio::time::Instant,
     pub hold_timer: Option<Timer>,
     pub refresh_timer: Option<Timer>,
 }
 
 impl Lsa {
     pub fn new(ospf_lsa: OspfLsa) -> Self {
+        let now = tokio::time::Instant::now();
         Self {
             data: ospf_lsa,
             originated: false,
-            birth_time: tokio::time::Instant::now(),
+            birth_time: now,
+            install_time: now,
             hold_timer: None,
             refresh_timer: None,
         }
@@ -184,6 +188,30 @@ impl Lsdb {
         table.remove(&(ls_id, adv_router));
     }
 
+    /// Flush an LSA by setting its age to MaxAge and returning a clone for reflooding.
+    /// The refresh timer is cancelled, and a new hold timer is set.
+    pub fn flush_lsa(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+        tx: &UnboundedSender<Message>,
+        area_id: Option<Ipv4Addr>,
+    ) -> Option<OspfLsa> {
+        let table = self.tables.get_mut(&ls_type);
+        let key = (ls_id, adv_router);
+        if let Some(lsa) = table.get_mut(&key) {
+            lsa.data.h.ls_age = OSPF_MAX_AGE;
+            lsa.birth_time = tokio::time::Instant::now();
+            lsa.refresh_timer = None;
+            let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, OSPF_MAX_AGE));
+            Some(lsa.data.clone())
+        } else {
+            None
+        }
+    }
+
     pub fn refresh_lsa(
         &mut self,
         ls_type: OspfLsType,
@@ -230,6 +258,16 @@ impl Lsdb {
     ) -> Option<&Lsa> {
         let table = self.tables.get(&ls_type);
         table.get(&(ls_id, adv_router))
+    }
+
+    pub fn lookup_install_time(
+        &self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> Option<tokio::time::Instant> {
+        self.lookup_lsa(ls_type, ls_id, adv_router)
+            .map(|lsa| lsa.install_time)
     }
 
     pub fn refresh_lsa_with_seq(

@@ -24,7 +24,7 @@ use crate::{
 
 use super::area::OspfAreaMap;
 use super::config::{Callback, OspfNetworkConfig};
-use super::ifsm::{IfsmEvent, ospf_ifsm};
+use super::ifsm::{IfsmEvent, IfsmState, ospf_ifsm};
 use super::link::OspfLink;
 use super::lsdb::{LsdbEvent, OspfLsaKey};
 use super::network::{read_packet, write_packet};
@@ -67,6 +67,9 @@ pub struct OspfInterface<'a> {
     pub lsdb: &'a mut Lsdb,
     pub lsdb_as: &'a mut Lsdb,
     pub area_id: Ipv4Addr,
+    pub area_type: super::area::AreaType,
+    pub if_state: super::ifsm::IfsmState,
+    pub exchange_loading_count: usize,
     pub tracing: &'a OspfTracing,
 }
 
@@ -76,9 +79,13 @@ impl Ospf {
         ifindex: u32,
         src: &Ipv4Addr,
     ) -> Option<(OspfInterface<'a>, &'a mut Neighbor)> {
+        // Compute area-wide exchange/loading count before borrowing mutably.
+        let exchange_loading_count = self.count_exchange_loading_neighbors(ifindex);
         self.links.get_mut(&ifindex).and_then(|link| {
             let link_area = link.area;
+            let if_state = link.state;
             self.areas.get_mut(link_area).and_then(|area| {
+                let area_type = area.area_type;
                 link.nbrs.get_mut(&src).map(|nbr| {
                     (
                         OspfInterface {
@@ -90,6 +97,9 @@ impl Ospf {
                             lsdb: &mut area.lsdb,
                             lsdb_as: &mut self.lsdb_as,
                             area_id: link_area,
+                            area_type,
+                            if_state,
+                            exchange_loading_count,
                             tracing: &self.tracing,
                         },
                         nbr,
@@ -97,6 +107,28 @@ impl Ospf {
                 })
             })
         })
+    }
+
+    /// Count Exchange/Loading neighbors across all links in the same area.
+    fn count_exchange_loading_neighbors(&self, ifindex: u32) -> usize {
+        let Some(link) = self.links.get(&ifindex) else {
+            return 0;
+        };
+        let area_id = link.area;
+        let Some(area) = self.areas.get(area_id) else {
+            return 0;
+        };
+        let mut count = 0;
+        for &link_ifindex in area.links.iter() {
+            if let Some(area_link) = self.links.get(&link_ifindex) {
+                for (_, nbr) in area_link.nbrs.iter() {
+                    if nbr.state == NfsmState::Exchange || nbr.state == NfsmState::Loading {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
     }
 
     pub fn new(ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
@@ -310,31 +342,43 @@ impl Ospf {
                         "[Self-Originated] Flushing Network LSA id={} (no longer DR)",
                         ls_id
                     );
-                    // TODO: Full RFC flush requires setting MaxAge and reflooding.
                     if let Some(area_id) = area_id {
-                        if let Some(area) = self.areas.get_mut(area_id) {
-                            area.lsdb.remove_lsa(ls_type, ls_id, adv_router);
+                        let flushed = {
+                            let Some(area) = self.areas.get_mut(area_id) else {
+                                return;
+                            };
+                            area.lsdb
+                                .flush_lsa(ls_type, ls_id, adv_router, &self.tx, Some(area_id))
+                        };
+                        if let Some(lsa) = flushed {
+                            self.flood_self_originated_lsa(area_id, &lsa);
                         }
                     }
                 }
             }
             _ => {
-                // Summary/AS-External origination not yet implemented; flush.
+                // Summary/AS-External origination not yet implemented; flush with MaxAge.
                 tracing::info!(
                     "[Self-Originated] Flushing LSA type={:?} id={} (not re-originable)",
                     ls_type,
                     ls_id
                 );
-                // TODO: Full RFC flush requires setting MaxAge and reflooding.
-                let lsdb = if let Some(area_id) = area_id {
-                    let Some(area) = self.areas.get_mut(area_id) else {
-                        return;
+                let flushed = {
+                    let lsdb = if let Some(area_id) = area_id {
+                        let Some(area) = self.areas.get_mut(area_id) else {
+                            return;
+                        };
+                        &mut area.lsdb
+                    } else {
+                        &mut self.lsdb_as
                     };
-                    &mut area.lsdb
-                } else {
-                    &mut self.lsdb_as
+                    lsdb.flush_lsa(ls_type, ls_id, adv_router, &self.tx, area_id)
                 };
-                lsdb.remove_lsa(ls_type, ls_id, adv_router);
+                if let Some(lsa) = flushed {
+                    if let Some(area_id) = area_id {
+                        self.flood_self_originated_lsa(area_id, &lsa);
+                    }
+                }
             }
         }
     }
@@ -394,7 +438,7 @@ impl Ospf {
     /// (interface, address) pair is skipped (it sent us this LSA). When `source`
     /// is `None` (self-originated), no neighbor is skipped.
     fn flood_lsa_through_area(
-        &self,
+        &mut self,
         area_id: Ipv4Addr,
         lsa: &OspfLsa,
         source: Option<(u32, Ipv4Addr)>,
@@ -402,11 +446,36 @@ impl Ospf {
         let Some(area) = self.areas.get(area_id) else {
             return;
         };
-        for &ifindex in area.links.iter() {
-            let Some(link) = self.links.get(&ifindex) else {
+        let link_indices: Vec<u32> = area.links.iter().copied().collect();
+        for ifindex in link_indices {
+            let Some(link) = self.links.get_mut(&ifindex) else {
                 continue;
             };
-            for (_, nbr) in link.nbrs.iter() {
+            let retransmit_interval = link.retransmit_interval();
+            let link_state = link.state;
+
+            // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
+            let is_source_iface = source.map_or(false, |(src_if, _)| src_if == ifindex);
+
+            // RFC 2328 Section 13.3 Step 3: If interface state is Backup and
+            // LSA was received on this interface, do not flood back out.
+            if is_source_iface && link_state == IfsmState::Backup {
+                continue;
+            }
+
+            // RFC 2328 Section 13.3 Step 4: For broadcast/NBMA interfaces in
+            // state DROther, only flood if we received from DR or BDR.
+            if is_source_iface && link_state == IfsmState::DROther {
+                if let Some((_, src_addr)) = source {
+                    let dr = link.ident.d_router;
+                    let bdr = link.ident.bd_router;
+                    if src_addr != dr && src_addr != bdr {
+                        continue;
+                    }
+                }
+            }
+
+            for (_, nbr) in link.nbrs.iter_mut() {
                 // RFC 2328 Section 13.3 Step 1(a): Skip neighbors below Exchange.
                 if nbr.state < NfsmState::Exchange {
                     continue;
@@ -419,12 +488,16 @@ impl Ospf {
                     }
                 }
 
-                // TODO: RFC 2328 Section 13.3 Step 1(b): For neighbors in
-                // Exchange or Loading state, check if their ls_req list
-                // contains a more recent copy of this LSA. If so, skip.
+                // RFC 2328 Section 13.3 Step 1(b): For neighbors in
+                // Exchange or Loading state, remove from ls_req if present.
+                if nbr.state >= NfsmState::Exchange && nbr.state < NfsmState::Full {
+                    if let Some(idx) = super::ospf_ls_request_lookup(nbr, &lsa.h) {
+                        nbr.ls_req.remove(idx);
+                    }
+                }
 
-                // TODO: RFC 2328 Section 13.3 Step 1(d): Add LSA to
-                // neighbor's ls_rxmt (retransmit) list.
+                // RFC 2328 Section 13.3 Step 1(d): Add LSA to retransmit list.
+                super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
 
                 let ls_upd = OspfLsUpdate {
                     num_adv: 1,
@@ -452,8 +525,108 @@ impl Ospf {
     }
 
     /// Flood a self-originated LSA to all eligible neighbors in an area.
-    fn flood_self_originated_lsa(&self, area_id: Ipv4Addr, lsa: &OspfLsa) {
+    fn flood_self_originated_lsa(&mut self, area_id: Ipv4Addr, lsa: &OspfLsa) {
         self.flood_lsa_through_area(area_id, lsa, None);
+    }
+
+    /// Flood an AS-scoped LSA to all non-stub areas.
+    fn flood_lsa_through_as(&mut self, lsa: &OspfLsa, source: Option<(u32, Ipv4Addr)>) {
+        // Collect area IDs to avoid borrowing issues.
+        let area_ids: Vec<(Ipv4Addr, super::area::AreaType)> = self
+            .areas
+            .iter()
+            .map(|(&id, area)| (id, area.area_type))
+            .collect();
+        for (area_id, area_type) in area_ids {
+            if area_type != super::area::AreaType::Normal {
+                continue;
+            }
+            self.flood_lsa_through_area(area_id, lsa, source);
+        }
+    }
+
+    /// Handle retransmit timer firing for a neighbor.
+    fn process_retransmit(&mut self, ifindex: u32, addr: Ipv4Addr) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let retransmit_interval = link.retransmit_interval();
+        let Some(nbr) = link.nbrs.get_mut(&addr) else {
+            return;
+        };
+        if nbr.ls_rxmt.is_empty() {
+            nbr.timer.ls_rxmt = None;
+            return;
+        }
+        let lsas: Vec<OspfLsa> = nbr.ls_rxmt.values().cloned().collect();
+        tracing::info!("[Retransmit] Sending {} LSAs to {}", lsas.len(), addr);
+        let ls_upd = OspfLsUpdate {
+            num_adv: lsas.len() as u32,
+            lsas,
+        };
+        let packet = Ospfv2Packet::new(
+            &self.router_id,
+            &Ipv4Addr::UNSPECIFIED,
+            Ospfv2Payload::LsUpdate(ls_upd),
+        );
+        let _ = nbr.ptx.send(Message::Send(
+            packet,
+            nbr.ifindex,
+            Some(nbr.ident.prefix.addr()),
+        ));
+        // Restart retransmit timer.
+        nbr.timer.ls_rxmt = Some(super::flood::ospf_retransmit_timer(
+            nbr,
+            retransmit_interval,
+        ));
+    }
+
+    /// Handle delayed ack timer firing for an interface.
+    fn process_delayed_ack(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        if link.ls_ack_delayed.is_empty() {
+            return;
+        }
+        let ack_headers: Vec<OspfLsaHeader> = link.ls_ack_delayed.drain(..).collect();
+        tracing::info!(
+            "[DelayedAck] Sending {} acks on ifindex={}",
+            ack_headers.len(),
+            ifindex
+        );
+        let ls_ack = OspfLsAck {
+            lsa_headers: ack_headers,
+        };
+        let packet = Ospfv2Packet::new(
+            &self.router_id,
+            &Ipv4Addr::UNSPECIFIED,
+            Ospfv2Payload::LsAck(ls_ack),
+        );
+        // Send to AllSPFRouters multicast.
+        let _ = link.ptx.send(Message::Send(packet, ifindex, None));
+    }
+
+    /// Queue delayed ack headers and start delayed ack timer if needed.
+    fn queue_delayed_acks(&mut self, ifindex: u32, headers: Vec<OspfLsaHeader>) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.ls_ack_delayed.extend(headers);
+        // Start delayed ack timer if not already running (1 second interval).
+        if link.timer.ls_ack.is_none() {
+            let tx = self.tx.clone();
+            link.timer.ls_ack = Some(super::task::Timer::new(
+                std::time::Duration::from_secs(1),
+                super::task::TimerType::Once,
+                move || {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx.send(Message::DelayedAck(ifindex));
+                    }
+                },
+            ));
+        }
     }
 
     fn router_id_update(&mut self, router_id: Ipv4Addr) {
@@ -598,6 +771,18 @@ impl Ospf {
             Message::Flood(area_id, lsa, source_ifindex, source_nbr_addr) => {
                 self.flood_lsa_through_area(area_id, &lsa, Some((source_ifindex, source_nbr_addr)));
             }
+            Message::FloodAs(lsa, source_ifindex, source_nbr_addr) => {
+                self.flood_lsa_through_as(&lsa, Some((source_ifindex, source_nbr_addr)));
+            }
+            Message::Retransmit(ifindex, addr) => {
+                self.process_retransmit(ifindex, addr);
+            }
+            Message::DelayedAck(ifindex) => {
+                self.process_delayed_ack(ifindex);
+            }
+            Message::DelayedAckQueue(ifindex, headers) => {
+                self.queue_delayed_acks(ifindex, headers);
+            }
             _ => {}
         }
     }
@@ -675,4 +860,16 @@ pub enum Message {
     /// Flood LSA through area, excluding source neighbor.
     /// (area_id, lsa, source_ifindex, source_nbr_addr)
     Flood(Ipv4Addr, OspfLsa, u32, Ipv4Addr),
+    /// Flood AS-scoped LSA through all normal areas, excluding source neighbor.
+    /// (lsa, source_ifindex, source_nbr_addr)
+    FloodAs(OspfLsa, u32, Ipv4Addr),
+    /// Retransmit LSAs to a specific neighbor.
+    /// (ifindex, nbr_addr)
+    Retransmit(u32, Ipv4Addr),
+    /// Send delayed LS Acks on an interface.
+    /// (ifindex)
+    DelayedAck(u32),
+    /// Queue delayed ack headers on an interface.
+    /// (ifindex, headers)
+    DelayedAckQueue(u32, Vec<OspfLsaHeader>),
 }

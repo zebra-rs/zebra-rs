@@ -6,6 +6,8 @@ use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
 
+use ospf_packet::OspfLsaHeader;
+
 use crate::rib::Link;
 
 use super::{Identity, IfsmState, Message, Neighbor};
@@ -45,6 +47,7 @@ pub struct OspfLink {
     pub full_nbr_count: usize,
     pub ptx: UnboundedSender<Message>,
     pub config: LinkConfig,
+    pub ls_ack_delayed: Vec<OspfLsaHeader>,
 }
 
 #[derive(Default)]
@@ -84,6 +87,7 @@ impl OspfLink {
             full_nbr_count: 0,
             ptx,
             config: LinkConfig::default(),
+            ls_ack_delayed: Vec::new(),
         }
     }
 
