@@ -341,8 +341,7 @@ fn show_ospf_neighbor(
     Ok(buf)
 }
 
-fn format_options(options: &OspfOptions) -> String {
-    let raw = u8::from(*options);
+fn format_options_flags(options: &OspfOptions) -> String {
     let dn = if options.dn() { "DN" } else { "*" };
     let o = if options.o() { "O" } else { "-" };
     let dc = if options.demand_circuits() { "DC" } else { "-" };
@@ -351,10 +350,12 @@ fn format_options(options: &OspfOptions) -> String {
     let mc = if options.multicast() { "MC" } else { "-" };
     let e = if options.external() { "E" } else { "-" };
     let mt = if options.multi_toplogy() { "MT" } else { "-" };
-    format!(
-        "{} {}|{}|{}|{}|{}|{}|{}|{}",
-        raw, dn, o, dc, l, np, mc, e, mt
-    )
+    format!("{}|{}|{}|{}|{}|{}|{}|{}", dn, o, dc, l, np, mc, e, mt)
+}
+
+fn format_options(options: &OspfOptions) -> String {
+    let raw = u8::from(*options);
+    format!("{} {}", raw, format_options_flags(options))
 }
 
 fn nbr_role(nbr_addr: &Ipv4Addr, d_router: &Ipv4Addr, bd_router: &Ipv4Addr) -> &'static str {
@@ -583,7 +584,13 @@ fn show_ospf_database_detail(
 
         for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
             writeln!(out, "  LS age: {}", lsa.current_age())?;
-            writeln!(out, "  Options: 0x{:02x}", lsa.data.h.options)?;
+            let opts = OspfOptions::from(lsa.data.h.options);
+            writeln!(
+                out,
+                "  Options: 0x{:x}  : {}",
+                lsa.data.h.options,
+                format_options_flags(&opts)
+            )?;
             writeln!(out, "  LS Type: Router Links")?;
             writeln!(out, "  Link State ID: {}", lsa_id)?;
             writeln!(out, "  Advertising Router: {}", adv_router)?;
@@ -668,7 +675,13 @@ fn show_ospf_database_detail(
 
         for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
             writeln!(out, "  LS age: {}", lsa.current_age())?;
-            writeln!(out, "  Options: 0x{:02x}", lsa.data.h.options)?;
+            let opts = OspfOptions::from(lsa.data.h.options);
+            writeln!(
+                out,
+                "  Options: 0x{:x}  : {}",
+                lsa.data.h.options,
+                format_options_flags(&opts)
+            )?;
             writeln!(out, "  LS Type: Network Links")?;
             writeln!(
                 out,
@@ -689,7 +702,6 @@ fn show_ospf_database_detail(
                 "  Network Mask: /{}",
                 u32::from(lsp.netmask).leading_ones()
             )?;
-            writeln!(out, "        Attached Router: {}", adv_router)?;
             for router in &lsp.attached_routers {
                 writeln!(out, "        Attached Router: {}", router)?;
             }
