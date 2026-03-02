@@ -421,7 +421,11 @@ impl OspfLsa {
         // Calculate payload length.
         let lsp_len = match &self.lsp {
             OspfLsp::Router(lsp) => lsp.lsa_len(),
-            _ => 0,
+            OspfLsp::Network(lsp) => lsp.lsa_len(),
+            OspfLsp::Summary(lsp) | OspfLsp::SummaryAsbr(lsp) => lsp.lsa_len(),
+            OspfLsp::AsExternal(lsp) => lsp.lsa_len(),
+            OspfLsp::NssaAsExternal(lsp) => lsp.lsa_len(),
+            OspfLsp::Unknown(lsp) => lsp.lsa_len(),
         };
         let length = lsp_len + LSA_HEADER_LEN;
         self.h.length = length;
@@ -628,6 +632,11 @@ pub struct NetworkLsa {
 }
 
 impl NetworkLsa {
+    pub fn lsa_len(&self) -> u16 {
+        // netmask (4) + attached_routers (4 each)
+        4 + self.attached_routers.len() as u16 * 4
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.netmask.octets()[..]);
         for router in &self.attached_routers {
@@ -663,6 +672,11 @@ impl TosRoute {
 }
 
 impl SummaryLsa {
+    pub fn lsa_len(&self) -> u16 {
+        // netmask (4) + tos (1) + metric (3) + tos_routes (4 each)
+        8 + self.tos_routes.len() as u16 * 4
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.netmask.octets()[..]);
         buf.put_u8(self.tos);
@@ -720,6 +734,12 @@ impl ExternalTosRoute {
 }
 
 impl AsExternalLsa {
+    pub fn lsa_len(&self) -> u16 {
+        // netmask (4) + ext_and_resvd (1) + metric (3) + forwarding_address (4)
+        // + external_route_tag (4) + tos_list (12 each)
+        16 + self.tos_list.len() as u16 * 12
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.netmask.octets()[..]);
         buf.put_u8(self.ext_and_resvd);
@@ -735,6 +755,12 @@ impl AsExternalLsa {
 }
 
 impl NssaAsExternalLsa {
+    pub fn lsa_len(&self) -> u16 {
+        // netmask (4) + ext_and_tos (1) + metric (3) + forwarding_address (4)
+        // + external_route_tag (4) + tos_list (12 each)
+        16 + self.tos_list.len() as u16 * 12
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.netmask.octets()[..]);
         buf.put_u8(self.ext_and_tos);
@@ -755,6 +781,10 @@ pub struct UnknownLsa {
 }
 
 impl UnknownLsa {
+    pub fn lsa_len(&self) -> u16 {
+        self.data.len() as u16
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.data[..]);
     }
