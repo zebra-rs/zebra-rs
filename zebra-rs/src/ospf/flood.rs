@@ -1,5 +1,7 @@
 use ospf_packet::*;
 
+use super::inst::Message;
+use super::lsdb::LsdbEvent;
 use super::{Neighbor, NfsmState, inst::OspfInterface, nfsm::ospf_nfsm_check_nbr_loading};
 
 pub fn ospf_ls_request_count(nbr: &Neighbor) -> usize {
@@ -11,7 +13,7 @@ pub fn ospf_ls_request_isempty(nbr: &Neighbor) -> bool {
 }
 
 /// Look up an LSA in the neighbor's ls_req list and return its index if found.
-fn ospf_ls_request_lookup(nbr: &Neighbor, h: &OspfLsaHeader) -> Option<usize> {
+pub fn ospf_ls_request_lookup(nbr: &Neighbor, h: &OspfLsaHeader) -> Option<usize> {
     nbr.ls_req.iter().position(|req| {
         req.ls_type == u32::from(u8::from(h.ls_type))
             && req.ls_id == h.ls_id
@@ -39,6 +41,34 @@ pub fn ospf_flood_through_interface(oi: &mut OspfInterface, nbr: &mut Neighbor, 
 
 pub fn ospf_flood_through(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     ospf_flood_through_interface(oi, nbr, lsa);
+}
+
+/// Check if the LSA is self-originated by this router.
+/// RFC 2328 Section 13.4: A router detects self-originated LSAs when
+/// adv_router matches our router_id, or for Network LSAs when ls_id
+/// matches one of our interface addresses.
+pub fn ospf_is_self_originated(oi: &OspfInterface, lsa: &OspfLsa) -> bool {
+    if lsa.h.adv_router == *oi.router_id {
+        return true;
+    }
+    // For Network LSAs, ls_id is the interface IP of the DR that originated it.
+    if lsa.h.ls_type == OspfLsType::Network {
+        for addr in oi.addr.iter() {
+            if lsa.h.ls_id == addr.prefix.addr() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Signal that a self-originated LSA was received from a neighbor.
+/// The actual re-origination or flush is handled by the Ospf instance
+/// via the message channel, since it needs access to the full router state.
+pub fn ospf_flood_self_originated_lsa(oi: &OspfInterface, lsa: &OspfLsa) {
+    let key = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    let msg = Message::Lsdb(LsdbEvent::SelfOriginatedReceived, Some(oi.area_id), key);
+    oi.tx.send(msg);
 }
 
 pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {

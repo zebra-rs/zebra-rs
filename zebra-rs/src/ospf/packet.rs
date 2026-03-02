@@ -15,7 +15,9 @@ use crate::{
 
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::OspfInterface, ospf_flood, tracing::OspfTracing,
+    inst::OspfInterface, lsdb::OSPF_MAX_AGE, lsdb::OSPF_MAX_LSA_SEQ, ospf_flood,
+    ospf_flood_self_originated_lsa, ospf_is_self_originated, ospf_ls_request_lookup,
+    tracing::OspfTracing,
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -573,20 +575,120 @@ fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, lsa2: &OspfLsaHeader) -> i32 {
     0
 }
 
-pub fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
-    let is_newer = {
-        let current = oi
+// RFC 2328 Section 13: result of processing a single received LSA.
+enum LsaProcessResult {
+    Installed,     // Step 5: installed, caller should ack
+    AckAndDiscard, // Step 4 MaxAge / Step 7 same: ack, don't install
+    DiscardNoAck,  // Step 3 / Step 8 MaxAge+MaxSeq: no ack
+    DbCopyNewer,   // Step 8: DB copy sent back, no ack
+    BadLSReq,      // Step 6: stop processing entire packet
+}
+
+fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -> LsaProcessResult {
+    // Step 3: TODO - Discard AS-External LSAs in stub areas (needs area type tracking).
+
+    // Step 4: Look up current database copy, compute comparison result.
+    let (current, ret) = {
+        let db_lsa = oi
             .lsdb
             .lookup_by_id(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
-        match current {
-            None => true,
-            Some(current_lsa) => ospf_lsa_more_recent(&lsa.h, &current_lsa.h) > 0,
+        match db_lsa {
+            None => (None, 1i32), // No current copy: received is "newer".
+            Some(current_lsa) => {
+                let cmp = ospf_lsa_more_recent(&lsa.h, &current_lsa.h);
+                (Some(current_lsa.clone()), cmp)
+            }
         }
     };
 
-    if is_newer {
-        ospf_flood(oi, nbr, lsa);
+    // Step 4 special case: MaxAge LSA not in database.
+    // If no neighbors are in Exchange or Loading, ack and discard.
+    if lsa.h.ls_age >= OSPF_MAX_AGE && current.is_none() {
+        // TODO: full check requires iterating ALL neighbors in the area.
+        if nbr.state < NfsmState::Exchange {
+            tracing::info!(
+                "[LS Update] MaxAge not in DB, no Exchange/Loading neighbors: type={:?} id={} adv={}",
+                lsa.h.ls_type,
+                lsa.h.ls_id,
+                lsa.h.adv_router
+            );
+            return LsaProcessResult::AckAndDiscard;
+        }
     }
+
+    // Step 5: Received LSA is newer (or no current copy exists).
+    if current.is_none() || ret > 0 {
+        tracing::info!(
+            "[LS Update] Installing newer LSA type={:?} id={} adv={} seq={:#x}",
+            lsa.h.ls_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router,
+            lsa.h.ls_seq_number
+        );
+        ospf_flood(oi, nbr, lsa);
+
+        // RFC 2328 Section 13.4: Self-originated LSA check.
+        if ospf_is_self_originated(oi, lsa) {
+            tracing::info!(
+                "[Self-Originated] Received own LSA type={:?} id={} adv={} seq={:#x}",
+                lsa.h.ls_type,
+                lsa.h.ls_id,
+                lsa.h.adv_router,
+                lsa.h.ls_seq_number
+            );
+            ospf_flood_self_originated_lsa(oi, lsa);
+        }
+
+        return LsaProcessResult::Installed;
+    }
+
+    // Step 6: If LSA is on neighbor's request list, this is a BadLSReq event.
+    if ospf_ls_request_lookup(nbr, &lsa.h).is_some() {
+        tracing::info!(
+            "[LS Update] BadLSReq: LSA on request list type={:?} id={} adv={}",
+            lsa.h.ls_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router
+        );
+        nbr_sched_event(nbr, NfsmEvent::BadLSReq);
+        return LsaProcessResult::BadLSReq;
+    }
+
+    // Step 7: Same instance (duplicate).
+    if ret == 0 {
+        // TODO: implied ack via retransmit list (needs retransmit list infrastructure).
+        tracing::info!(
+            "[LS Update] Same instance type={:?} id={} adv={}",
+            lsa.h.ls_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router
+        );
+        return LsaProcessResult::AckAndDiscard;
+    }
+
+    // Step 8: Database copy is more recent (ret < 0).
+    let current = current.unwrap();
+    if current.h.ls_age >= OSPF_MAX_AGE && current.h.ls_seq_number == OSPF_MAX_LSA_SEQ {
+        // MaxAge + MaxSeqNumber: discard without acknowledging.
+        tracing::info!(
+            "[LS Update] DB copy at MaxAge+MaxSeq, discard: type={:?} id={} adv={}",
+            lsa.h.ls_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router
+        );
+        return LsaProcessResult::DiscardNoAck;
+    }
+
+    // Send database copy back to the neighbor.
+    tracing::info!(
+        "[LS Update] DB copy newer, sending back: type={:?} id={} adv={} seq={:#x}",
+        lsa.h.ls_type,
+        lsa.h.ls_id,
+        lsa.h.adv_router,
+        current.h.ls_seq_number
+    );
+    ospf_ls_upd_send(oi, nbr, vec![current]);
+    LsaProcessResult::DbCopyNewer
 }
 
 pub fn ospf_ls_upd_validate_proc(
@@ -598,11 +700,22 @@ pub fn ospf_ls_upd_validate_proc(
     let mut ack_headers = Vec::new();
 
     for lsa in ls_upd.lsas.iter() {
-        ack_headers.push(lsa.h.clone());
-        ospf_ls_upd_proc(oi, nbr, lsa);
+        let result = ospf_ls_upd_proc(oi, nbr, lsa);
+        match result {
+            LsaProcessResult::Installed | LsaProcessResult::AckAndDiscard => {
+                ack_headers.push(lsa.h.clone());
+            }
+            LsaProcessResult::BadLSReq => {
+                // Stop processing entire packet, no acks sent.
+                return;
+            }
+            LsaProcessResult::DiscardNoAck | LsaProcessResult::DbCopyNewer => {
+                // No ack for these cases.
+            }
+        }
     }
 
-    // Send direct LS Ack for received LSAs.
+    // Send batch LS Ack for acknowledged LSAs.
     if !ack_headers.is_empty() {
         ospf_ls_ack_send(oi, nbr, ack_headers);
     }

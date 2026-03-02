@@ -9,6 +9,7 @@ use super::task::{Timer, TimerType};
 
 pub const OSPF_MAX_AGE: u16 = 3600;
 pub const OSPF_LS_REFRESH_TIME: u64 = 1800;
+pub const OSPF_MAX_LSA_SEQ: u32 = 0x7FFFFFFF;
 
 pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), Lsa>;
 pub type OspfLsaKey = (OspfLsType, Ipv4Addr, Ipv4Addr);
@@ -17,6 +18,7 @@ pub type OspfLsaKey = (OspfLsType, Ipv4Addr, Ipv4Addr);
 pub enum LsdbEvent {
     RefreshTimerExpire,
     HoldTimerExpire,
+    SelfOriginatedReceived,
 }
 
 pub struct Lsdb {
@@ -217,5 +219,41 @@ impl Lsdb {
     ) -> Option<&OspfLsa> {
         let table = self.tables.get(&ls_type);
         table.get(&(ls_id, adv_router)).map(|lsa| &lsa.data)
+    }
+
+    pub fn lookup_lsa(
+        &self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> Option<&Lsa> {
+        let table = self.tables.get(&ls_type);
+        table.get(&(ls_id, adv_router))
+    }
+
+    pub fn refresh_lsa_with_seq(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+        min_seq: u32,
+        tx: &UnboundedSender<Message>,
+        area_id: Option<Ipv4Addr>,
+    ) {
+        let table = self.tables.get_mut(&ls_type);
+        let key = (ls_id, adv_router);
+        if let Some(old_lsa) = table.get(&key) {
+            let mut new_data = old_lsa.data.clone();
+            let next_seq = old_lsa.data.h.ls_seq_number.max(min_seq) + 1;
+            new_data.h.ls_seq_number = next_seq;
+            new_data.h.ls_age = 0;
+            new_data.update();
+            let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+            let mut lsa = Lsa::new(new_data);
+            lsa.originated = true;
+            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
+            lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
+            table.insert(key, lsa);
+        }
     }
 }
