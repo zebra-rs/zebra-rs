@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 use ospf_packet::*;
 use rand::Rng;
+use tokio::time::Instant;
 
 use crate::ospf::ospf_db_desc_send;
 
@@ -54,6 +55,28 @@ pub enum NfsmEvent {
     KillNbr,
     InactivityTimer,
     LLDown,
+}
+
+impl Display for NfsmEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use NfsmEvent::*;
+        let event = match self {
+            HelloReceived => "HelloReceived",
+            Start => "Start",
+            TwoWayReceived => "TwoWayReceived",
+            NegotiationDone => "NegotiationDone",
+            ExchangeDone => "ExchangeDone",
+            BadLSReq => "BadLSReq",
+            LoadingDone => "LoadingDone",
+            AdjOk => "AdjOk",
+            SeqNumberMismatch => "SeqNumberMismatch",
+            OneWayReceived => "OneWayReceived",
+            KillNbr => "KillNbr",
+            InactivityTimer => "InactivityTimer",
+            LLDown => "LLDown",
+        };
+        write!(f, "{event}")
+    }
 }
 
 pub type NfsmFunc = fn(&mut OspfInterface, &mut Neighbor, &Identity) -> Option<NfsmState>;
@@ -469,12 +492,21 @@ fn ospf_nfsm_change_state(
     nbr: &mut Neighbor,
     state: NfsmState,
     oident: &Identity,
+    event: NfsmEvent,
 ) {
     use NfsmState::*;
 
     nbr.ostate = nbr.state;
     nbr.state = state;
     nbr.state_change += 1;
+
+    if nbr.state > nbr.ostate {
+        nbr.last_progressive = Some(Instant::now());
+    }
+    if nbr.state < nbr.ostate {
+        nbr.last_regressive = Some(Instant::now());
+        nbr.last_regressive_reason = Some(event);
+    }
 
     if nbr.state < nbr.ostate {
         nbr.options = 0.into();
@@ -536,7 +568,7 @@ pub fn ospf_nfsm(
             );
         }
         if new_state != nbr.state {
-            ospf_nfsm_change_state(link, nbr, new_state, oident);
+            ospf_nfsm_change_state(link, nbr, new_state, oident, event);
         }
     }
     ospf_nfsm_timer_set(nbr);

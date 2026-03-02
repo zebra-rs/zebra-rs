@@ -20,6 +20,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf", show_ospf);
         self.show_add("/show/ip/ospf/interface", show_ospf_interface);
         self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor);
+        self.show_add("/show/ip/ospf/neighbor/detail", show_ospf_neighbor_detail);
         self.show_add("/show/ip/ospf/database", show_ospf_database);
         self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
     }
@@ -340,25 +341,141 @@ fn show_ospf_neighbor(
     Ok(buf)
 }
 
-#[allow(dead_code)]
-fn render_nbr_detail(out: &mut String, _src: &Ipv4Addr, nbr: &Neighbor) {
-    writeln!(
-        out,
-        r#" Neighbor {}, interface address {}
-    In the area XX via interface xx local interface IP xx
-    Neighbor priority is {}, state is {}
-    DR is {} BDR is {}"#,
-        nbr.ident.router_id,
-        nbr.ident.prefix.addr(),
-        nbr.ident.priority,
-        nbr.state,
-        nbr.ident.d_router,
-        nbr.ident.bd_router
+fn format_options(options: &OspfOptions) -> String {
+    let raw = u8::from(*options);
+    let dn = if options.dn() { "DN" } else { "*" };
+    let o = if options.o() { "O" } else { "-" };
+    let dc = if options.demand_circuits() { "DC" } else { "-" };
+    let l = if options.lls_data() { "L" } else { "-" };
+    let np = if options.nssa() { "N/P" } else { "-" };
+    let mc = if options.multicast() { "MC" } else { "-" };
+    let e = if options.external() { "E" } else { "-" };
+    let mt = if options.multi_toplogy() { "MT" } else { "-" };
+    format!(
+        "{} {}|{}|{}|{}|{}|{}|{}|{}",
+        raw, dn, o, dc, l, np, mc, e, mt
     )
-    .unwrap();
 }
 
-#[allow(dead_code)]
+fn nbr_role(nbr_addr: &Ipv4Addr, d_router: &Ipv4Addr, bd_router: &Ipv4Addr) -> &'static str {
+    if nbr_addr == d_router {
+        "DR"
+    } else if nbr_addr == bd_router {
+        "Backup"
+    } else {
+        "DROther"
+    }
+}
+
+fn find_router_id_by_addr(oi: &OspfLink, addr: Ipv4Addr) -> Ipv4Addr {
+    if addr == oi.ident.prefix.addr() {
+        return oi.ident.router_id;
+    }
+    for nbr in oi.nbrs.values() {
+        if nbr.ident.prefix.addr() == addr {
+            return nbr.ident.router_id;
+        }
+    }
+    Ipv4Addr::UNSPECIFIED
+}
+
+fn render_nbr_detail(out: &mut String, oi: &OspfLink, nbr: &Neighbor) {
+    // Line 1: Neighbor ID and interface address.
+    writeln!(
+        out,
+        " Neighbor {}, interface address {}",
+        nbr.ident.router_id,
+        nbr.ident.prefix.addr()
+    )
+    .unwrap();
+
+    // Line 2: Area, interface name, local IP.
+    writeln!(
+        out,
+        "    In the area {} via interface {} local interface IP {}",
+        oi.area_id,
+        oi.name,
+        oi.ident.prefix.addr()
+    )
+    .unwrap();
+
+    // Line 3: Priority, state/role, state changes.
+    let role = nbr_role(
+        &nbr.ident.prefix.addr(),
+        &oi.ident.d_router,
+        &oi.ident.bd_router,
+    );
+    writeln!(
+        out,
+        "    Neighbor priority is {}, State is {}/{}, Role is {}, {} state changes",
+        nbr.ident.priority, nbr.state, role, role, nbr.state_change
+    )
+    .unwrap();
+
+    // Line 4: LSA retransmissions.
+    writeln!(out, "    {} LSA retransmissions", nbr.ls_rxmt.len()).unwrap();
+
+    // Lines 5-7: State change statistics (only if we have data).
+    if nbr.last_progressive.is_some() || nbr.last_regressive.is_some() {
+        writeln!(out, "    Most recent state change statistics:").unwrap();
+        if let Some(ref progressive) = nbr.last_progressive {
+            let elapsed = progressive.elapsed();
+            writeln!(
+                out,
+                "      Progressive change {} ago",
+                format_uptime(elapsed)
+            )
+            .unwrap();
+        }
+        if let Some(ref regressive) = nbr.last_regressive {
+            let elapsed = regressive.elapsed();
+            let reason = nbr
+                .last_regressive_reason
+                .map(|e| format!(", due to {}", e))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "      Regressive change {} ago{}",
+                format_uptime(elapsed),
+                reason
+            )
+            .unwrap();
+        }
+    }
+
+    // Line 8: DR and BDR.
+    let dr_rid = find_router_id_by_addr(oi, oi.ident.d_router);
+    let bdr_rid = find_router_id_by_addr(oi, oi.ident.bd_router);
+    writeln!(out, "    DR is {},     BDR is {}", dr_rid, bdr_rid).unwrap();
+
+    // Line 9: Options.
+    writeln!(out, "    Options {}", format_options(&nbr.options)).unwrap();
+
+    // Line 10: Dead timer.
+    match nbr.timer.inactivity {
+        Some(ref timer) => {
+            let remaining = timer.remaining();
+            writeln!(out, "    Dead timer due in {:.3}s", remaining.as_secs_f64()).unwrap();
+        }
+        None => {
+            writeln!(out, "    Dead timer due in -").unwrap();
+        }
+    }
+
+    // Line 11-13: List counts.
+    writeln!(out, "    Database Summary List {}", nbr.db_sum.len()).unwrap();
+    writeln!(out, "    Link State Request List {}", nbr.ls_req.len()).unwrap();
+    writeln!(
+        out,
+        "    Link State Retransmission List {}",
+        nbr.ls_rxmt.len()
+    )
+    .unwrap();
+
+    // Blank line between neighbors.
+    writeln!(out).unwrap();
+}
+
 fn show_ospf_neighbor_detail(
     ospf: &Ospf,
     _args: Args,
@@ -367,10 +484,11 @@ fn show_ospf_neighbor_detail(
     let mut buf = String::new();
 
     for (_, oi) in ospf.links.iter() {
-        if oi.enabled {
-            for (src, nbr) in oi.nbrs.iter() {
-                render_nbr_detail(&mut buf, src, nbr);
-            }
+        if !oi.enabled {
+            continue;
+        }
+        for (_, nbr) in oi.nbrs.iter() {
+            render_nbr_detail(&mut buf, oi, nbr);
         }
     }
     Ok(buf)
