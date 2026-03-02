@@ -825,6 +825,7 @@ impl Ospf {
                     area.spf_timer = None;
                 }
                 tracing::info!("[SPF] Calculation triggered for area {}", area_id);
+                perform_spf_calculation(self, area_id);
             }
             _ => {}
         }
@@ -919,4 +920,122 @@ pub enum Message {
     SpfSchedule(Option<Ipv4Addr>),
     /// Timer-fired: perform SPF calculation for an area.
     SpfCalc(Ipv4Addr),
+}
+
+use crate::spf;
+
+struct NodeMap {
+    map: HashMap<Ipv4Addr, usize>,
+}
+
+impl NodeMap {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, router_id: Ipv4Addr) -> usize {
+        let len = self.map.len();
+        *self.map.entry(router_id).or_insert(len)
+    }
+}
+
+/// Build SPF graph from OSPF LSDB (Router-LSAs and Network-LSAs).
+fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
+    let mut graph = spf::Graph::new();
+    let mut source_node = None;
+    let mut node_map = NodeMap::new();
+
+    let Some(area) = top.areas.get(area_id) else {
+        return (graph, source_node);
+    };
+
+    // Collect Router-LSA data.
+    let mut router_lsas = Vec::new();
+    for ((_ls_id, adv_router), lsa) in area.lsdb.tables.router.iter() {
+        router_lsas.push((*adv_router, lsa.originated, lsa.data.clone()));
+    }
+
+    // Collect Network-LSA attached routers for transit network expansion.
+    let mut network_lsas: HashMap<Ipv4Addr, Vec<Ipv4Addr>> = HashMap::new();
+    for ((ls_id, _adv_router), lsa) in area.lsdb.tables.network.iter() {
+        if let OspfLsp::Network(ref net_lsa) = lsa.data.lsp {
+            network_lsas.insert(*ls_id, net_lsa.attached_routers.clone());
+        }
+    }
+
+    // Process each Router-LSA to build graph nodes and edges.
+    for (adv_router, originated, lsa_data) in &router_lsas {
+        let node_id = node_map.get(*adv_router);
+
+        if *originated {
+            source_node = Some(node_id);
+        }
+
+        let mut node = spf::Node {
+            id: node_id,
+            name: adv_router.to_string(),
+            sys_id: adv_router.to_string(),
+            ..Default::default()
+        };
+
+        if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
+            for link in &router_lsa.links {
+                match link.link_type {
+                    1 | 4 => {
+                        // Point-to-Point or Virtual Link: link_id = neighbor router ID.
+                        let to_id = node_map.get(link.link_id);
+                        node.olinks.push(spf::Link {
+                            from: node_id,
+                            to: to_id,
+                            cost: link.tos_0_metric as u32,
+                        });
+                    }
+                    2 => {
+                        // Transit Network: expand through the Network-LSA pseudo-node.
+                        // link_id = DR's interface IP, which is the Network-LSA's ls_id.
+                        if let Some(attached) = network_lsas.get(&link.link_id) {
+                            for attached_router in attached {
+                                if *attached_router != *adv_router {
+                                    let to_id = node_map.get(*attached_router);
+                                    node.olinks.push(spf::Link {
+                                        from: node_id,
+                                        to: to_id,
+                                        cost: link.tos_0_metric as u32,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Stub (3) and unknown: not part of the SPF graph.
+                    }
+                }
+            }
+        }
+
+        graph.insert(node_id, node);
+    }
+
+    (graph, source_node)
+}
+
+fn perform_spf_calculation(top: &Ospf, area_id: Ipv4Addr) {
+    let (graph, source_node) = graph(top, area_id);
+
+    if let Some(source) = source_node {
+        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+        tracing::info!("[SPF] area {} nodes: {}", area_id, spf_result.len());
+        for (node_id, path) in &spf_result {
+            if let Some(node) = graph.get(node_id) {
+                tracing::info!(
+                    "[SPF]   {} cost {} nexthops {}",
+                    node.name,
+                    path.cost,
+                    path.nexthops.len()
+                );
+            }
+        }
+    }
 }
