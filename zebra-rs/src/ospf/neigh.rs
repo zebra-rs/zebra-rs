@@ -10,7 +10,7 @@ use tokio::time::Instant;
 
 use super::lsdb::OspfLsaKey;
 use super::task::Timer;
-use super::{Identity, Lsdb, Message, NfsmState};
+use super::{Identity, Lsdb, Message, NfsmEvent, NfsmState};
 
 pub struct Neighbor {
     pub ifindex: u32,
@@ -30,6 +30,9 @@ pub struct Neighbor {
     pub ls_req_last: Option<OspfLsRequest>,
     pub ls_rxmt: BTreeMap<OspfLsaKey, OspfLsa>,
     pub uptime: Instant,
+    pub last_progressive: Option<Instant>,
+    pub last_regressive: Option<Instant>,
+    pub last_regressive_reason: Option<NfsmEvent>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -93,6 +96,9 @@ impl Neighbor {
             ls_req_last: None,
             ls_rxmt: BTreeMap::new(),
             uptime: Instant::now(),
+            last_progressive: None,
+            last_regressive: None,
+            last_regressive_reason: None,
         };
         nbr.ident.prefix = prefix;
         nbr
