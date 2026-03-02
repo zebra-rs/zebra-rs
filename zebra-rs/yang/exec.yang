@@ -127,9 +127,12 @@ module exec {
           ext:help "OSPF interface";
           type empty;
         }
-        leaf neighbor {
+        container neighbor {
           ext:help "OSPF neighbor";
-          type empty;
+          presence "OSPF neighbor";
+          leaf detail {
+            type empty;
+          }
         }
         container database {
           ext:help "OSPF database";
