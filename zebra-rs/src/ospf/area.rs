@@ -5,6 +5,14 @@ use super::Lsdb;
 
 pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub enum AreaType {
+    #[default]
+    Normal,
+    Stub,
+    Nssa,
+}
+
 pub struct OspfAreaMap(BTreeMap<Ipv4Addr, OspfArea>);
 
 impl OspfAreaMap {
@@ -35,11 +43,18 @@ impl OspfAreaMap {
             .entry(area_id)
             .or_insert_with(|| OspfArea::new(area_id))
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Ipv4Addr, &OspfArea)> {
+        self.0.iter()
+    }
 }
 
 pub struct OspfArea {
     // OSPF area id.  This value may be treated as IPv4 address.
     pub id: Ipv4Addr,
+
+    // Area type (Normal, Stub, NSSA).
+    pub area_type: AreaType,
 
     // Set of interfaces belongs to this area.
     pub links: BTreeSet<u32>,
@@ -52,6 +67,7 @@ impl OspfArea {
     pub fn new(id: Ipv4Addr) -> Self {
         Self {
             id,
+            area_type: AreaType::default(),
             links: BTreeSet::new(),
             lsdb: Lsdb::new(),
         }
