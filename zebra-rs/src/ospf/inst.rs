@@ -367,8 +367,17 @@ impl Ospf {
         false
     }
 
-    /// Flood a self-originated LSA to all Full neighbors in an area.
-    fn flood_self_originated_lsa(&self, area_id: Ipv4Addr, lsa: &OspfLsa) {
+    /// Flood an LSA to all eligible neighbors in an area (RFC 2328 Section 13.3).
+    ///
+    /// When `source` is `Some((ifindex, addr))`, the neighbor identified by that
+    /// (interface, address) pair is skipped (it sent us this LSA). When `source`
+    /// is `None` (self-originated), no neighbor is skipped.
+    fn flood_lsa_through_area(
+        &self,
+        area_id: Ipv4Addr,
+        lsa: &OspfLsa,
+        source: Option<(u32, Ipv4Addr)>,
+    ) {
         let Some(area) = self.areas.get(area_id) else {
             return;
         };
@@ -377,28 +386,53 @@ impl Ospf {
                 continue;
             };
             for (_, nbr) in link.nbrs.iter() {
-                if nbr.state >= NfsmState::Full {
-                    let ls_upd = OspfLsUpdate {
-                        num_adv: 1,
-                        lsas: vec![lsa.clone()],
-                    };
-                    let packet = Ospfv2Packet::new(
-                        &self.router_id,
-                        &Ipv4Addr::UNSPECIFIED,
-                        Ospfv2Payload::LsUpdate(ls_upd),
-                    );
-                    tracing::info!(
-                        "[LS Update:Send] Flooding self-originated LSA to {}",
-                        nbr.ident.prefix.addr()
-                    );
-                    let _ = nbr.ptx.send(Message::Send(
-                        packet,
-                        nbr.ifindex,
-                        Some(nbr.ident.prefix.addr()),
-                    ));
+                // RFC 2328 Section 13.3 Step 1(a): Skip neighbors below Exchange.
+                if nbr.state < NfsmState::Exchange {
+                    continue;
                 }
+
+                // RFC 2328 Section 13.3 Step 1(c): Skip the source neighbor.
+                if let Some((src_ifindex, src_addr)) = source {
+                    if nbr.ifindex == src_ifindex && nbr.ident.prefix.addr() == src_addr {
+                        continue;
+                    }
+                }
+
+                // TODO: RFC 2328 Section 13.3 Step 1(b): For neighbors in
+                // Exchange or Loading state, check if their ls_req list
+                // contains a more recent copy of this LSA. If so, skip.
+
+                // TODO: RFC 2328 Section 13.3 Step 1(d): Add LSA to
+                // neighbor's ls_rxmt (retransmit) list.
+
+                let ls_upd = OspfLsUpdate {
+                    num_adv: 1,
+                    lsas: vec![lsa.clone()],
+                };
+                let packet = Ospfv2Packet::new(
+                    &self.router_id,
+                    &Ipv4Addr::UNSPECIFIED,
+                    Ospfv2Payload::LsUpdate(ls_upd),
+                );
+                tracing::info!(
+                    "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
+                    lsa.h.ls_type,
+                    lsa.h.ls_id,
+                    lsa.h.adv_router,
+                    nbr.ident.prefix.addr()
+                );
+                let _ = nbr.ptx.send(Message::Send(
+                    packet,
+                    nbr.ifindex,
+                    Some(nbr.ident.prefix.addr()),
+                ));
             }
         }
+    }
+
+    /// Flood a self-originated LSA to all eligible neighbors in an area.
+    fn flood_self_originated_lsa(&self, area_id: Ipv4Addr, lsa: &OspfLsa) {
+        self.flood_lsa_through_area(area_id, lsa, None);
     }
 
     fn router_id_update(&mut self, router_id: Ipv4Addr) {
@@ -540,6 +574,9 @@ impl Ospf {
             Message::Lsdb(ev, area_id, key) => {
                 self.process_lsdb(ev, area_id, key);
             }
+            Message::Flood(area_id, lsa, source_ifindex, source_nbr_addr) => {
+                self.flood_lsa_through_area(area_id, &lsa, Some((source_ifindex, source_nbr_addr)));
+            }
             _ => {}
         }
     }
@@ -614,4 +651,7 @@ pub enum Message {
     Recv(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
     Send(Ospfv2Packet, u32, Option<Ipv4Addr>),
     Lsdb(LsdbEvent, Option<Ipv4Addr>, OspfLsaKey),
+    /// Flood LSA through area, excluding source neighbor.
+    /// (area_id, lsa, source_ifindex, source_nbr_addr)
+    Flood(Ipv4Addr, OspfLsa, u32, Ipv4Addr),
 }
