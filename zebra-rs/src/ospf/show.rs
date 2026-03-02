@@ -1,10 +1,12 @@
-use std::{fmt::Write, net::Ipv4Addr};
+use std::fmt::Write;
+use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use ospf_packet::*;
 
 use crate::config::Args;
 
-use super::{AREA0, Neighbor, Ospf, OspfLink, ShowCallback};
+use super::{AREA0, Neighbor, NfsmState, Ospf, OspfLink, ShowCallback};
 
 impl Ospf {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -14,7 +16,7 @@ impl Ospf {
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/ospf", show_ospf);
         self.show_add("/show/ip/ospf/interface", show_ospf_interface);
-        self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor_detail);
+        self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor);
         self.show_add("/show/ip/ospf/database", show_ospf_database);
         self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
     }
@@ -67,33 +69,105 @@ fn show_ospf(
     Ok(String::from("show ospf"))
 }
 
-fn render_nbr(out: &mut String, router_id: &Ipv4Addr, nbr: &Neighbor) {
-    writeln!(
-        out,
-        "{} {} {} {} DR: {} BDR: {}",
-        router_id,
-        nbr.ident.prefix,
-        nbr.ident.priority,
-        nbr.state,
-        nbr.ident.d_router,
-        nbr.ident.bd_router
-    )
-    .unwrap();
+fn nbr_state_string(
+    nbr_state: &NfsmState,
+    nbr_addr: &Ipv4Addr,
+    d_router: &Ipv4Addr,
+    bd_router: &Ipv4Addr,
+) -> String {
+    let role = if nbr_addr == d_router {
+        "DR"
+    } else if nbr_addr == bd_router {
+        "Backup"
+    } else {
+        "DROther"
+    };
+    format!("{}/{}", nbr_state, role)
 }
 
-fn show_ospf_neighbor(ospf: &Ospf, _args: Args, _json: bool) -> String {
+fn format_uptime(elapsed: Duration) -> String {
+    let total_secs = elapsed.as_secs();
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if days > 0 {
+        format!("{}d{:02}h{:02}m", days, hours, mins)
+    } else if hours > 0 {
+        format!("{}h{:02}m{:02}s", hours, mins, secs)
+    } else {
+        format!("{}m{:02}s", mins, secs)
+    }
+}
+
+fn format_dead_time(remaining: Duration) -> String {
+    let secs = remaining.as_secs_f64();
+    format!("{:.3}s", secs)
+}
+
+fn show_ospf_neighbor(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
+    writeln!(
+        buf,
+        "{:<15} {:>3} {:<15} {:>15} {:>10} {:<15} {:<32} {:>5} {:>5} {:>5}",
+        "Neighbor ID",
+        "Pri",
+        "State",
+        "Up Time",
+        "Dead Time",
+        "Address",
+        "Interface",
+        "RXmtL",
+        "RqstL",
+        "DBsmL"
+    )?;
+
     for (_, oi) in ospf.links.iter() {
-        if oi.enabled {
-            for (router_id, nbr) in oi.nbrs.iter() {
-                render_nbr(&mut buf, router_id, nbr);
-            }
+        if !oi.enabled {
+            continue;
+        }
+        for (_, nbr) in oi.nbrs.iter() {
+            let state = nbr_state_string(
+                &nbr.state,
+                &nbr.ident.prefix.addr(),
+                &oi.ident.d_router,
+                &oi.ident.bd_router,
+            );
+
+            let uptime = format_uptime(nbr.uptime.elapsed());
+
+            let dead_time = match nbr.timer.inactivity {
+                Some(ref timer) => format_dead_time(timer.remaining()),
+                None => "-".to_string(),
+            };
+
+            let iface = format!("{}:{}", oi.name, oi.ident.prefix.addr());
+
+            writeln!(
+                buf,
+                "{:<15} {:>3} {:<15} {:>15} {:>10} {:<15} {:<32} {:>5} {:>5} {:>5}",
+                nbr.ident.router_id,
+                nbr.ident.priority,
+                state,
+                uptime,
+                dead_time,
+                nbr.ident.prefix.addr(),
+                iface,
+                nbr.ls_rxmt.len(),
+                nbr.ls_req.len(),
+                nbr.db_sum.len(),
+            )?;
         }
     }
-    buf
+    Ok(buf)
 }
 
+#[allow(dead_code)]
 fn render_nbr_detail(out: &mut String, _src: &Ipv4Addr, nbr: &Neighbor) {
     writeln!(
         out,
@@ -111,6 +185,7 @@ fn render_nbr_detail(out: &mut String, _src: &Ipv4Addr, nbr: &Neighbor) {
     .unwrap();
 }
 
+#[allow(dead_code)]
 fn show_ospf_neighbor_detail(
     ospf: &Ospf,
     _args: Args,
