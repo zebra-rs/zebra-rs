@@ -2,6 +2,8 @@ use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 
+use super::link::OSPF_DEFAULT_PRIORITY;
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Identity {
     pub prefix: Ipv4Net,
@@ -18,7 +20,7 @@ impl Identity {
             router_id,
             d_router: Ipv4Addr::UNSPECIFIED,
             bd_router: Ipv4Addr::UNSPECIFIED,
-            priority: 1,
+            priority: OSPF_DEFAULT_PRIORITY,
         }
     }
 
