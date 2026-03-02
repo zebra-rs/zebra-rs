@@ -85,6 +85,16 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
         lsa.h.adv_router
     );
 
+    // RFC 2328 Section 13.3: Flood the LSA to all other eligible neighbors
+    // in the area, excluding the source neighbor that sent it to us.
+    let msg = Message::Flood(
+        oi.area_id,
+        lsa.clone(),
+        nbr.ifindex,
+        nbr.ident.prefix.addr(),
+    );
+    let _ = oi.tx.send(msg);
+
     // Check if neighbor should transition from Loading to Full.
     ospf_nfsm_check_nbr_loading(nbr);
 }
