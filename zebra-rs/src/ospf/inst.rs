@@ -22,7 +22,7 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::area::OspfAreaMap;
+use super::area::{OspfArea, OspfAreaMap};
 use super::config::{Callback, OspfNetworkConfig};
 use super::ifsm::{IfsmEvent, IfsmState, ospf_ifsm};
 use super::link::OspfLink;
@@ -30,6 +30,7 @@ use super::lsdb::{LsdbEvent, OspfLsaKey};
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
+use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
 use super::{
     AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
@@ -182,6 +183,22 @@ impl Ospf {
         }
     }
 
+    fn ospf_spf_timer(tx: &UnboundedSender<Message>, area_id: Ipv4Addr) -> Timer {
+        let tx = tx.clone();
+        Timer::new(Timer::second(1), TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::SpfCalc(area_id));
+            }
+        })
+    }
+
+    fn ospf_spf_schedule(tx: &UnboundedSender<Message>, area: &mut OspfArea) {
+        if area.spf_timer.is_none() {
+            area.spf_timer = Some(Self::ospf_spf_timer(tx, area.id));
+        }
+    }
+
     pub fn router_lsa_originate(&mut self) {
         let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
             tracing::info!("Router LSA Originate");
@@ -204,6 +221,7 @@ impl Ospf {
             let flood_lsa = lsa.clone();
 
             area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+            Self::ospf_spf_schedule(&self.tx, area);
             Some(flood_lsa)
         } else {
             None
@@ -253,25 +271,37 @@ impl Ospf {
             return;
         }
 
-        let lsdb = if let Some(area_id) = area_id {
-            let Some(area) = self.areas.get_mut(area_id) else {
-                return;
+        {
+            let lsdb = if let Some(area_id) = area_id {
+                let Some(area) = self.areas.get_mut(area_id) else {
+                    return;
+                };
+                &mut area.lsdb
+            } else {
+                &mut self.lsdb_as
             };
-            &mut area.lsdb
-        } else {
-            &mut self.lsdb_as
-        };
-        match ev {
-            LsdbEvent::HoldTimerExpire => {
-                tracing::info!(
-                    "LSDB hold timer expired: type={} id={} adv={}",
-                    ls_type,
-                    ls_id,
-                    adv_router
-                );
-                lsdb.remove_lsa(ls_type, ls_id, adv_router);
+            match ev {
+                LsdbEvent::HoldTimerExpire => {
+                    tracing::info!(
+                        "LSDB hold timer expired: type={} id={} adv={}",
+                        ls_type,
+                        ls_id,
+                        adv_router
+                    );
+                    lsdb.remove_lsa(ls_type, ls_id, adv_router);
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
+        }
+
+        if ev == LsdbEvent::HoldTimerExpire
+            && (ls_type == OspfLsType::Router || ls_type == OspfLsType::Network)
+        {
+            if let Some(area_id) = area_id {
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    Self::ospf_spf_schedule(&self.tx, area);
+                }
+            }
         }
     }
 
@@ -783,6 +813,19 @@ impl Ospf {
             Message::DelayedAckQueue(ifindex, headers) => {
                 self.queue_delayed_acks(ifindex, headers);
             }
+            Message::SpfSchedule(area_id) => {
+                if let Some(area_id) = area_id {
+                    if let Some(area) = self.areas.get_mut(area_id) {
+                        Self::ospf_spf_schedule(&self.tx, area);
+                    }
+                }
+            }
+            Message::SpfCalc(area_id) => {
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.spf_timer = None;
+                }
+                tracing::info!("[SPF] Calculation triggered for area {}", area_id);
+            }
             _ => {}
         }
     }
@@ -872,4 +915,8 @@ pub enum Message {
     /// Queue delayed ack headers on an interface.
     /// (ifindex, headers)
     DelayedAckQueue(u32, Vec<OspfLsaHeader>),
+    /// Request SPF scheduling for an area.
+    SpfSchedule(Option<Ipv4Addr>),
+    /// Timer-fired: perform SPF calculation for an area.
+    SpfCalc(Ipv4Addr),
 }
