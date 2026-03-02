@@ -8,6 +8,7 @@ use super::inst::Message;
 use super::task::{Timer, TimerType};
 
 pub const OSPF_MAX_AGE: u16 = 3600;
+pub const OSPF_MAX_AGE_DIFF: u16 = 900; // 15 minutes (RFC 2328 Section 13.1)
 pub const OSPF_LS_REFRESH_TIME: u64 = 1800;
 pub const OSPF_MAX_LSA_SEQ: u32 = 0x7FFFFFFF;
 

@@ -15,8 +15,8 @@ use crate::{
 
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::OspfInterface, lsdb::OSPF_MAX_AGE, lsdb::OSPF_MAX_LSA_SEQ, ospf_flood,
-    ospf_flood_self_originated_lsa, ospf_is_self_originated, ospf_ls_request_lookup,
+    inst::OspfInterface, lsdb::OSPF_MAX_AGE, lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ,
+    ospf_flood, ospf_flood_self_originated_lsa, ospf_is_self_originated, ospf_ls_request_lookup,
     tracing::OspfTracing,
 };
 
@@ -544,8 +544,10 @@ pub fn ospf_ls_req_recv(
     }
 }
 
-// Returns true if lsa1 is more recent than lsa2 (RFC2328 Section 13.1).
-fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, lsa2: &OspfLsaHeader) -> i32 {
+// Returns true if lsa1 is more recent than lsa2 (RFC 2328 Section 13.1).
+// age1/age2 are the current ages of the respective LSAs (callers must pass
+// dynamic current_age for database copies).
+fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, age1: u16, lsa2: &OspfLsaHeader, age2: u16) -> i32 {
     if lsa1.ls_seq_number > lsa2.ls_seq_number {
         return 1;
     }
@@ -558,17 +560,17 @@ fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, lsa2: &OspfLsaHeader) -> i32 {
     if lsa1.ls_checksum < lsa2.ls_checksum {
         return -1;
     }
-    if lsa1.ls_age == 3600 && lsa2.ls_age != 3600 {
+    if age1 == OSPF_MAX_AGE && age2 != OSPF_MAX_AGE {
         return 1;
     }
-    if lsa1.ls_age != 3600 && lsa2.ls_age == 3600 {
+    if age1 != OSPF_MAX_AGE && age2 == OSPF_MAX_AGE {
         return -1;
     }
-    if (lsa1.ls_age as i32 - lsa2.ls_age as i32).unsigned_abs() > 900 {
-        if lsa1.ls_age < lsa2.ls_age {
+    if (age1 as i32 - age2 as i32).unsigned_abs() > OSPF_MAX_AGE_DIFF as u32 {
+        if age1 < age2 {
             return 1;
         }
-        if lsa1.ls_age > lsa2.ls_age {
+        if age1 > age2 {
             return -1;
         }
     }
@@ -588,15 +590,17 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     // Step 3: TODO - Discard AS-External LSAs in stub areas (needs area type tracking).
 
     // Step 4: Look up current database copy, compute comparison result.
-    let (current, ret) = {
+    // Use lookup_lsa() to get the Lsa wrapper so we can compute current_age().
+    let (current, current_age, ret) = {
         let db_lsa = oi
             .lsdb
-            .lookup_by_id(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+            .lookup_lsa(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
         match db_lsa {
-            None => (None, 1i32), // No current copy: received is "newer".
+            None => (None, 0u16, 1i32), // No current copy: received is "newer".
             Some(current_lsa) => {
-                let cmp = ospf_lsa_more_recent(&lsa.h, &current_lsa.h);
-                (Some(current_lsa.clone()), cmp)
+                let age = current_lsa.current_age();
+                let cmp = ospf_lsa_more_recent(&lsa.h, lsa.h.ls_age, &current_lsa.data.h, age);
+                (Some(current_lsa.data.clone()), age, cmp)
             }
         }
     };
@@ -668,7 +672,7 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
 
     // Step 8: Database copy is more recent (ret < 0).
     let current = current.unwrap();
-    if current.h.ls_age >= OSPF_MAX_AGE && current.h.ls_seq_number == OSPF_MAX_LSA_SEQ {
+    if current_age >= OSPF_MAX_AGE && current.h.ls_seq_number == OSPF_MAX_LSA_SEQ {
         // MaxAge + MaxSeqNumber: discard without acknowledging.
         tracing::info!(
             "[LS Update] DB copy at MaxAge+MaxSeq, discard: type={:?} id={} adv={}",
