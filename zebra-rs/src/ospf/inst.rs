@@ -151,7 +151,7 @@ impl Ospf {
     }
 
     pub fn router_lsa_originate(&mut self) {
-        if let Some(area) = self.areas.get_mut(AREA0) {
+        let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
             tracing::info!("Router LSA Originate");
             let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
 
@@ -169,8 +169,15 @@ impl Ospf {
             r_lsa.num_links = r_lsa.links.len() as u16;
 
             let lsa = OspfLsa::from(lsah, r_lsa.into());
+            let flood_lsa = lsa.clone();
 
             area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+            Some(flood_lsa)
+        } else {
+            None
+        };
+        if let Some(lsa) = flood_lsa {
+            self.flood_self_originated_lsa(AREA0, &lsa);
         }
     }
 
@@ -280,7 +287,10 @@ impl Ospf {
                     );
                     // Re-originate by refreshing with min_seq from received LSA.
                     if let Some(area_id) = area_id {
-                        if let Some(area) = self.areas.get_mut(area_id) {
+                        let refreshed = {
+                            let Some(area) = self.areas.get_mut(area_id) else {
+                                return;
+                            };
                             area.lsdb.refresh_lsa_with_seq(
                                 ls_type,
                                 ls_id,
@@ -289,6 +299,10 @@ impl Ospf {
                                 &self.tx,
                                 Some(area_id),
                             );
+                            area.lsdb.lookup_by_id(ls_type, ls_id, adv_router).cloned()
+                        };
+                        if let Some(lsa) = refreshed {
+                            self.flood_self_originated_lsa(area_id, &lsa);
                         }
                     }
                 } else {
@@ -327,7 +341,7 @@ impl Ospf {
 
     /// Re-originate Router LSA with seq# >= min_seq + 1.
     fn router_lsa_reoriginate(&mut self, min_seq: u32) {
-        if let Some(area) = self.areas.get_mut(AREA0) {
+        let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
             tracing::info!("Router LSA Re-originate (min_seq={:#x})", min_seq);
             let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
 
@@ -347,8 +361,15 @@ impl Ospf {
             let mut lsa = OspfLsa::from(lsah, r_lsa.into());
             // Ensure seq# is at least min_seq + 1.
             lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(min_seq + 1);
+            let flood_lsa = lsa.clone();
 
             area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+            Some(flood_lsa)
+        } else {
+            None
+        };
+        if let Some(lsa) = flood_lsa {
+            self.flood_self_originated_lsa(AREA0, &lsa);
         }
     }
 
