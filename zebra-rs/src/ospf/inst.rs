@@ -32,7 +32,8 @@ use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
 use super::tracing::OspfTracing;
 use super::{
-    AREA0, Identity, Lsdb, Neighbor, ospf_ls_ack_recv, ospf_ls_req_recv, ospf_ls_upd_recv,
+    AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
+    ospf_ls_upd_recv,
 };
 
 pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
@@ -175,6 +176,44 @@ impl Ospf {
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
         let (ls_type, ls_id, adv_router) = key;
+
+        // Handle SelfOriginatedReceived before borrowing lsdb, since
+        // re-origination needs full &mut self access.
+        if ev == LsdbEvent::SelfOriginatedReceived {
+            self.process_self_originated_lsa(area_id, ls_type, ls_id, adv_router);
+            return;
+        }
+
+        // Handle RefreshTimerExpire: refresh in LSDB then flood to neighbors.
+        if ev == LsdbEvent::RefreshTimerExpire {
+            tracing::info!(
+                "LSDB refresh timer expired: type={} id={} adv={}",
+                ls_type,
+                ls_id,
+                adv_router
+            );
+            // Refresh the LSA and clone it for flooding.
+            let refreshed = {
+                let lsdb = if let Some(area_id) = area_id {
+                    let Some(area) = self.areas.get_mut(area_id) else {
+                        return;
+                    };
+                    &mut area.lsdb
+                } else {
+                    &mut self.lsdb_as
+                };
+                lsdb.refresh_lsa(ls_type, ls_id, adv_router, &self.tx, area_id);
+                lsdb.lookup_by_id(ls_type, ls_id, adv_router).cloned()
+            };
+            // Flood the refreshed LSA to all Full neighbors in the area.
+            if let Some(lsa) = refreshed {
+                if let Some(area_id) = area_id {
+                    self.flood_self_originated_lsa(area_id, &lsa);
+                }
+            }
+            return;
+        }
+
         let lsdb = if let Some(area_id) = area_id {
             let Some(area) = self.areas.get_mut(area_id) else {
                 return;
@@ -193,14 +232,171 @@ impl Ospf {
                 );
                 lsdb.remove_lsa(ls_type, ls_id, adv_router);
             }
-            LsdbEvent::RefreshTimerExpire => {
+            _ => unreachable!(),
+        }
+    }
+
+    /// Handle a self-originated LSA received from a neighbor (RFC 2328 Section 13.4).
+    /// If we still own this LSA, re-originate with seq# = max(current, received) + 1.
+    /// If we no longer own it, flush it from the LSDB.
+    fn process_self_originated_lsa(
+        &mut self,
+        area_id: Option<Ipv4Addr>,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) {
+        // Get the received seq# from the LSDB entry.
+        let received_seq = {
+            let lsdb = if let Some(area_id) = area_id {
+                let Some(area) = self.areas.get(area_id) else {
+                    return;
+                };
+                &area.lsdb
+            } else {
+                &self.lsdb_as
+            };
+            let Some(lsa) = lsdb.lookup_lsa(ls_type, ls_id, adv_router) else {
+                return;
+            };
+            lsa.data.h.ls_seq_number
+        };
+
+        match ls_type {
+            OspfLsType::Router => {
                 tracing::info!(
-                    "LSDB refresh timer expired: type={} id={} adv={}",
-                    ls_type,
+                    "[Self-Originated] Re-originating Router LSA id={} seq={:#x}",
                     ls_id,
-                    adv_router
+                    received_seq
                 );
-                lsdb.refresh_lsa(ls_type, ls_id, adv_router, &self.tx, area_id);
+                self.router_lsa_reoriginate(received_seq);
+            }
+            OspfLsType::Network => {
+                if self.is_dr_for_network_lsa(ls_id) {
+                    tracing::info!(
+                        "[Self-Originated] Re-originating Network LSA id={} seq={:#x}",
+                        ls_id,
+                        received_seq
+                    );
+                    // Re-originate by refreshing with min_seq from received LSA.
+                    if let Some(area_id) = area_id {
+                        if let Some(area) = self.areas.get_mut(area_id) {
+                            area.lsdb.refresh_lsa_with_seq(
+                                ls_type,
+                                ls_id,
+                                adv_router,
+                                received_seq,
+                                &self.tx,
+                                Some(area_id),
+                            );
+                        }
+                    }
+                } else {
+                    tracing::info!(
+                        "[Self-Originated] Flushing Network LSA id={} (no longer DR)",
+                        ls_id
+                    );
+                    // TODO: Full RFC flush requires setting MaxAge and reflooding.
+                    if let Some(area_id) = area_id {
+                        if let Some(area) = self.areas.get_mut(area_id) {
+                            area.lsdb.remove_lsa(ls_type, ls_id, adv_router);
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Summary/AS-External origination not yet implemented; flush.
+                tracing::info!(
+                    "[Self-Originated] Flushing LSA type={:?} id={} (not re-originable)",
+                    ls_type,
+                    ls_id
+                );
+                // TODO: Full RFC flush requires setting MaxAge and reflooding.
+                let lsdb = if let Some(area_id) = area_id {
+                    let Some(area) = self.areas.get_mut(area_id) else {
+                        return;
+                    };
+                    &mut area.lsdb
+                } else {
+                    &mut self.lsdb_as
+                };
+                lsdb.remove_lsa(ls_type, ls_id, adv_router);
+            }
+        }
+    }
+
+    /// Re-originate Router LSA with seq# >= min_seq + 1.
+    fn router_lsa_reoriginate(&mut self, min_seq: u32) {
+        if let Some(area) = self.areas.get_mut(AREA0) {
+            tracing::info!("Router LSA Re-originate (min_seq={:#x})", min_seq);
+            let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
+
+            let mut r_lsa = RouterLsa::default();
+
+            for (_, link) in self.links.iter() {
+                if !link.enabled {
+                    continue;
+                }
+                for addr in link.addr.iter() {
+                    let lsa_link = RouterLsaLink::new(addr.prefix, 10);
+                    r_lsa.links.push(lsa_link);
+                }
+            }
+            r_lsa.num_links = r_lsa.links.len() as u16;
+
+            let mut lsa = OspfLsa::from(lsah, r_lsa.into());
+            // Ensure seq# is at least min_seq + 1.
+            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(min_seq + 1);
+
+            area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+        }
+    }
+
+    /// Check if we are currently the DR for the network identified by ls_id.
+    fn is_dr_for_network_lsa(&self, ls_id: Ipv4Addr) -> bool {
+        for (_, link) in self.links.iter() {
+            if !link.enabled {
+                continue;
+            }
+            for addr in link.addr.iter() {
+                if addr.prefix.addr() == ls_id {
+                    return link.ident.is_declared_dr();
+                }
+            }
+        }
+        false
+    }
+
+    /// Flood a self-originated LSA to all Full neighbors in an area.
+    fn flood_self_originated_lsa(&self, area_id: Ipv4Addr, lsa: &OspfLsa) {
+        let Some(area) = self.areas.get(area_id) else {
+            return;
+        };
+        for &ifindex in area.links.iter() {
+            let Some(link) = self.links.get(&ifindex) else {
+                continue;
+            };
+            for (_, nbr) in link.nbrs.iter() {
+                if nbr.state >= NfsmState::Full {
+                    let ls_upd = OspfLsUpdate {
+                        num_adv: 1,
+                        lsas: vec![lsa.clone()],
+                    };
+                    let packet = Ospfv2Packet::new(
+                        &self.router_id,
+                        &Ipv4Addr::UNSPECIFIED,
+                        Ospfv2Payload::LsUpdate(ls_upd),
+                    );
+                    tracing::info!(
+                        "[LS Update:Send] Flooding self-originated LSA to {}",
+                        nbr.ident.prefix.addr()
+                    );
+                    let _ = nbr.ptx.send(Message::Send(
+                        packet,
+                        nbr.ifindex,
+                        Some(nbr.ident.prefix.addr()),
+                    ));
+                }
             }
         }
     }
