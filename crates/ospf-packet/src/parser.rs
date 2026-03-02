@@ -162,10 +162,6 @@ pub fn parse_router_links(input: &[u8]) -> IResult<&[u8], Vec<RouterLsaLink>> {
     many0_complete(RouterLsaLink::parse_be).parse(input)
 }
 
-pub fn parse_router_tos_routes(input: &[u8]) -> IResult<&[u8], Vec<OspfRouterTOS>> {
-    many0_complete(OspfRouterTOS::parse_be).parse(input)
-}
-
 #[derive(Debug, NomBE)]
 pub struct OspfHello {
     pub netmask: Ipv4Addr,
@@ -591,7 +587,7 @@ pub struct RouterLsaLink {
     pub link_type: u8,
     pub num_tos: u8,
     pub tos_0_metric: u16,
-    #[nom(Parse = "parse_router_tos_routes")]
+    #[nom(Count = "num_tos")]
     pub toses: Vec<OspfRouterTOS>,
 }
 
