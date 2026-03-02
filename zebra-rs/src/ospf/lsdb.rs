@@ -147,23 +147,16 @@ impl Lsdb {
     ) {
         use OspfLsType::*;
         let ls_type = ospf_lsa.h.ls_type;
-        let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
-        let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
         match ls_type {
-            Router => {
+            Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal => {
                 ospf_lsa.update();
+                let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
+                let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
                 let mut lsa = Lsa::new(ospf_lsa);
                 lsa.originated = true;
                 lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
                 lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-                self.tables.get_mut(&Router).insert(key, lsa);
-            }
-            Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal => {
-                let mut lsa = Lsa::new(ospf_lsa);
-                lsa.originated = true;
-                lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
-                lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-                self.tables.get_mut(&lsa.data.h.ls_type).insert(key, lsa);
+                self.tables.get_mut(&ls_type).insert(key, lsa);
             }
             _ => {}
         }
