@@ -4,12 +4,163 @@ use std::time::Duration;
 
 use netlink_packet_route::link::LinkFlags;
 use ospf_packet::*;
+use serde::Serialize;
 
 use crate::config::Args;
 use crate::rib::LinkFlagsExt;
 
 use super::ifsm::IfsmState;
 use super::{AREA0, Neighbor, NfsmState, Ospf, OspfLink, ShowCallback};
+
+// JSON output structs for show ip ospf interface.
+#[derive(Serialize)]
+struct OspfInterfaceJson {
+    name: String,
+    status: String,
+    ifindex: u32,
+    mtu: u32,
+    address: String,
+    broadcast: String,
+    area: String,
+    router_id: String,
+    network_type: String,
+    cost: u32,
+    transmit_delay: u16,
+    state: String,
+    priority: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dr_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dr_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bdr_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bdr_address: Option<String>,
+    hello_interval: u16,
+    dead_interval: u32,
+    retransmit_interval: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hello_due: Option<String>,
+    neighbor_count: usize,
+    adjacent_count: usize,
+}
+
+// JSON output structs for show ip ospf neighbor.
+#[derive(Serialize)]
+struct OspfNeighborJson {
+    neighbor_id: String,
+    priority: u8,
+    state: String,
+    up_time: String,
+    dead_time: String,
+    address: String,
+    interface: String,
+    retransmit_list: usize,
+    request_list: usize,
+    db_summary_list: usize,
+}
+
+// JSON output structs for show ip ospf neighbor detail.
+#[derive(Serialize)]
+struct OspfNeighborDetailJson {
+    neighbor_id: String,
+    interface_address: String,
+    area: String,
+    interface: String,
+    local_interface_ip: String,
+    priority: u8,
+    state: String,
+    role: String,
+    state_changes: usize,
+    lsa_retransmissions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_progressive_change: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_regressive_change: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_regressive_reason: Option<String>,
+    dr: String,
+    bdr: String,
+    options: String,
+    dead_timer: String,
+    db_summary_list: usize,
+    ls_request_list: usize,
+    ls_retransmission_list: usize,
+}
+
+// JSON output structs for show ip ospf database.
+#[derive(Serialize)]
+struct OspfDatabaseJson {
+    router_id: String,
+    areas: Vec<OspfAreaDatabaseJson>,
+}
+
+#[derive(Serialize)]
+struct OspfAreaDatabaseJson {
+    area_id: String,
+    router_lsas: Vec<OspfLsaSummaryJson>,
+    network_lsas: Vec<OspfLsaSummaryJson>,
+}
+
+#[derive(Serialize)]
+struct OspfLsaSummaryJson {
+    link_id: String,
+    adv_router: String,
+    age: u16,
+    seq_number: String,
+    checksum: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_count: Option<usize>,
+}
+
+// JSON output structs for show ip ospf database detail.
+#[derive(Serialize)]
+struct OspfDatabaseDetailJson {
+    router_id: String,
+    areas: Vec<OspfAreaDatabaseDetailJson>,
+}
+
+#[derive(Serialize)]
+struct OspfAreaDatabaseDetailJson {
+    area_id: String,
+    router_lsas: Vec<OspfRouterLsaDetailJson>,
+    network_lsas: Vec<OspfNetworkLsaDetailJson>,
+}
+
+#[derive(Serialize)]
+struct OspfRouterLsaDetailJson {
+    ls_age: u16,
+    options: String,
+    link_state_id: String,
+    advertising_router: String,
+    ls_seq_number: String,
+    checksum: String,
+    length: u16,
+    num_links: usize,
+    links: Vec<OspfRouterLinkDetailJson>,
+}
+
+#[derive(Serialize)]
+struct OspfRouterLinkDetailJson {
+    link_type: String,
+    link_id: String,
+    link_data: String,
+    num_tos: u8,
+    tos_0_metric: u16,
+}
+
+#[derive(Serialize)]
+struct OspfNetworkLsaDetailJson {
+    ls_age: u16,
+    options: String,
+    link_state_id: String,
+    advertising_router: String,
+    ls_seq_number: String,
+    checksum: String,
+    length: u16,
+    network_mask: String,
+    attached_routers: Vec<String>,
+}
 
 impl Ospf {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
@@ -223,8 +374,96 @@ fn render_link(out: &mut String, oi: &OspfLink, ospf: &Ospf) {
 fn show_ospf_interface(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut ifaces: Vec<OspfInterfaceJson> = Vec::new();
+        for (_, oi) in ospf.links.iter() {
+            if !oi.enabled {
+                continue;
+            }
+            let status = if oi.link_flags.is_up() { "up" } else { "down" }.to_string();
+
+            let (dr_id, dr_address) = if !oi.ident.d_router.is_unspecified() {
+                let rid = if oi.ident.prefix.addr() == oi.ident.d_router {
+                    oi.ident.router_id
+                } else {
+                    find_nbr_router_id(oi, oi.ident.d_router).unwrap_or(Ipv4Addr::UNSPECIFIED)
+                };
+                let addr = oi
+                    .nbrs
+                    .values()
+                    .find(|nbr| nbr.ident.prefix.addr() == oi.ident.d_router)
+                    .map(|nbr| nbr.ident.prefix)
+                    .unwrap_or(oi.ident.prefix);
+                (Some(rid.to_string()), Some(addr.to_string()))
+            } else {
+                (None, None)
+            };
+
+            let (bdr_id, bdr_address) = if !oi.ident.bd_router.is_unspecified() {
+                let rid = if oi.ident.prefix.addr() == oi.ident.bd_router {
+                    oi.ident.router_id
+                } else {
+                    find_nbr_router_id(oi, oi.ident.bd_router).unwrap_or(Ipv4Addr::UNSPECIFIED)
+                };
+                let addr = oi
+                    .nbrs
+                    .values()
+                    .find(|nbr| nbr.ident.prefix.addr() == oi.ident.bd_router)
+                    .map(|nbr| nbr.ident.prefix)
+                    .unwrap_or(oi.ident.prefix);
+                (Some(rid.to_string()), Some(addr.to_string()))
+            } else {
+                (None, None)
+            };
+
+            let hello_due = if oi.is_passive() {
+                None
+            } else {
+                oi.timer
+                    .hello
+                    .as_ref()
+                    .map(|t| format!("{:.3}s", t.remaining().as_secs_f64()))
+            };
+
+            let nbr_count = oi.nbrs.len();
+            let adj_count = oi
+                .nbrs
+                .values()
+                .filter(|nbr| nbr.state == NfsmState::Full)
+                .count();
+
+            ifaces.push(OspfInterfaceJson {
+                name: oi.name.clone(),
+                status,
+                ifindex: oi.index,
+                mtu: oi.mtu,
+                address: oi.ident.prefix.to_string(),
+                broadcast: oi.ident.prefix.broadcast().to_string(),
+                area: oi.area_id.to_string(),
+                router_id: oi.ident.router_id.to_string(),
+                network_type: oi.network_type.to_string(),
+                cost: oi.output_cost,
+                transmit_delay: oi.transmit_delay(),
+                state: oi.state.to_string(),
+                priority: oi.priority(),
+                dr_id,
+                dr_address,
+                bdr_id,
+                bdr_address,
+                hello_interval: oi.hello_interval(),
+                dead_interval: oi.dead_interval(),
+                retransmit_interval: oi.retransmit_interval(),
+                hello_due,
+                neighbor_count: nbr_count,
+                adjacent_count: adj_count,
+            });
+        }
+        return Ok(serde_json::to_string_pretty(&ifaces)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+
     let mut buf = String::new();
 
     for (_, oi) in ospf.links.iter() {
@@ -282,8 +521,45 @@ fn format_dead_time(remaining: Duration) -> String {
 fn show_ospf_neighbor(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut nbrs_json: Vec<OspfNeighborJson> = Vec::new();
+        for (_, oi) in ospf.links.iter() {
+            if !oi.enabled {
+                continue;
+            }
+            for (_, nbr) in oi.nbrs.iter() {
+                let state = nbr_state_string(
+                    &nbr.state,
+                    &nbr.ident.prefix.addr(),
+                    &oi.ident.d_router,
+                    &oi.ident.bd_router,
+                );
+                let uptime = format_uptime(nbr.uptime.elapsed());
+                let dead_time = match nbr.timer.inactivity {
+                    Some(ref timer) => format_dead_time(timer.remaining()),
+                    None => "-".to_string(),
+                };
+                let iface = format!("{}:{}", oi.name, oi.ident.prefix.addr());
+                nbrs_json.push(OspfNeighborJson {
+                    neighbor_id: nbr.ident.router_id.to_string(),
+                    priority: nbr.ident.priority,
+                    state,
+                    up_time: uptime,
+                    dead_time,
+                    address: nbr.ident.prefix.addr().to_string(),
+                    interface: iface,
+                    retransmit_list: nbr.ls_rxmt.len(),
+                    request_list: nbr.ls_req.len(),
+                    db_summary_list: nbr.db_sum.len(),
+                });
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&nbrs_json)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+
     let mut buf = String::new();
 
     writeln!(
@@ -480,8 +756,66 @@ fn render_nbr_detail(out: &mut String, oi: &OspfLink, nbr: &Neighbor) {
 fn show_ospf_neighbor_detail(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut nbrs_json: Vec<OspfNeighborDetailJson> = Vec::new();
+        for (_, oi) in ospf.links.iter() {
+            if !oi.enabled {
+                continue;
+            }
+            for (_, nbr) in oi.nbrs.iter() {
+                let role = nbr_role(
+                    &nbr.ident.prefix.addr(),
+                    &oi.ident.d_router,
+                    &oi.ident.bd_router,
+                )
+                .to_string();
+                let dr_rid = find_router_id_by_addr(oi, oi.ident.d_router);
+                let bdr_rid = find_router_id_by_addr(oi, oi.ident.bd_router);
+                let dead_timer = match nbr.timer.inactivity {
+                    Some(ref timer) => {
+                        format!("{:.3}s", timer.remaining().as_secs_f64())
+                    }
+                    None => "-".to_string(),
+                };
+                let last_progressive_change = nbr
+                    .last_progressive
+                    .as_ref()
+                    .map(|t| format_uptime(t.elapsed()));
+                let last_regressive_change = nbr
+                    .last_regressive
+                    .as_ref()
+                    .map(|t| format_uptime(t.elapsed()));
+                let last_regressive_reason = nbr.last_regressive_reason.map(|e| format!("{}", e));
+                nbrs_json.push(OspfNeighborDetailJson {
+                    neighbor_id: nbr.ident.router_id.to_string(),
+                    interface_address: nbr.ident.prefix.addr().to_string(),
+                    area: oi.area_id.to_string(),
+                    interface: oi.name.clone(),
+                    local_interface_ip: oi.ident.prefix.addr().to_string(),
+                    priority: nbr.ident.priority,
+                    state: format!("{}/{}", nbr.state, role),
+                    role: role.clone(),
+                    state_changes: nbr.state_change,
+                    lsa_retransmissions: nbr.ls_rxmt.len(),
+                    last_progressive_change,
+                    last_regressive_change,
+                    last_regressive_reason,
+                    dr: dr_rid.to_string(),
+                    bdr: bdr_rid.to_string(),
+                    options: format_options(&nbr.options),
+                    dead_timer,
+                    db_summary_list: nbr.db_sum.len(),
+                    ls_request_list: nbr.ls_req.len(),
+                    ls_retransmission_list: nbr.ls_rxmt.len(),
+                });
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&nbrs_json)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+
     let mut buf = String::new();
 
     for (_, oi) in ospf.links.iter() {
@@ -498,8 +832,58 @@ fn show_ospf_neighbor_detail(
 fn show_ospf_database(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        if ospf.router_id.is_unspecified() {
+            return Ok(serde_json::to_string_pretty(
+                &serde_json::json!({"error": "OSPF router ID is not specified"}),
+            )
+            .unwrap_or_default());
+        }
+        let mut areas = Vec::new();
+        if let Some(area) = ospf.areas.get(AREA0) {
+            let mut router_lsas = Vec::new();
+            for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+                let link_count = if let OspfLsp::Router(ref lsp) = lsa.data.lsp {
+                    Some(lsp.links.len())
+                } else {
+                    None
+                };
+                router_lsas.push(OspfLsaSummaryJson {
+                    link_id: lsa_id.to_string(),
+                    adv_router: adv_router.to_string(),
+                    age: lsa.current_age(),
+                    seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
+                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    link_count,
+                });
+            }
+            let mut network_lsas = Vec::new();
+            for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+                network_lsas.push(OspfLsaSummaryJson {
+                    link_id: lsa_id.to_string(),
+                    adv_router: adv_router.to_string(),
+                    age: lsa.current_age(),
+                    seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
+                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    link_count: None,
+                });
+            }
+            areas.push(OspfAreaDatabaseJson {
+                area_id: area.id.to_string(),
+                router_lsas,
+                network_lsas,
+            });
+        }
+        let db = OspfDatabaseJson {
+            router_id: ospf.router_id.to_string(),
+            areas,
+        };
+        return Ok(serde_json::to_string_pretty(&db)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+
     let mut out = String::new();
 
     if ospf.router_id.is_unspecified() {
@@ -566,8 +950,90 @@ fn show_ospf_database(
 fn show_ospf_database_detail(
     ospf: &Ospf,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        if ospf.router_id.is_unspecified() {
+            return Ok(serde_json::to_string_pretty(
+                &serde_json::json!({"error": "OSPF router ID is not specified"}),
+            )
+            .unwrap_or_default());
+        }
+        let mut areas = Vec::new();
+        if let Some(area) = ospf.areas.get(AREA0) {
+            let mut router_lsas = Vec::new();
+            for ((_lsa_id, _adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+                let opts = OspfOptions::from(lsa.data.h.options);
+                let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
+                    continue;
+                };
+                let links: Vec<OspfRouterLinkDetailJson> = lsp
+                    .links
+                    .iter()
+                    .map(|link| {
+                        let link_type = match link.link_type {
+                            1 => "Point-to-Point",
+                            2 => "Transit Network",
+                            3 => "Stub Network",
+                            4 => "Virtual Link",
+                            _ => "Unknown",
+                        }
+                        .to_string();
+                        OspfRouterLinkDetailJson {
+                            link_type,
+                            link_id: link.link_id.to_string(),
+                            link_data: link.link_data.to_string(),
+                            num_tos: link.num_tos,
+                            tos_0_metric: link.tos_0_metric,
+                        }
+                    })
+                    .collect();
+                router_lsas.push(OspfRouterLsaDetailJson {
+                    ls_age: lsa.current_age(),
+                    options: format_options_flags(&opts),
+                    link_state_id: lsa.data.h.ls_id.to_string(),
+                    advertising_router: lsa.data.h.adv_router.to_string(),
+                    ls_seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
+                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    length: lsa.data.h.length,
+                    num_links: lsp.links.len(),
+                    links,
+                });
+            }
+            let mut network_lsas = Vec::new();
+            for ((_lsa_id, _adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+                let opts = OspfOptions::from(lsa.data.h.options);
+                let OspfLsp::Network(ref lsp) = lsa.data.lsp else {
+                    continue;
+                };
+                let attached_routers: Vec<String> =
+                    lsp.attached_routers.iter().map(|r| r.to_string()).collect();
+                network_lsas.push(OspfNetworkLsaDetailJson {
+                    ls_age: lsa.current_age(),
+                    options: format_options_flags(&opts),
+                    link_state_id: lsa.data.h.ls_id.to_string(),
+                    advertising_router: lsa.data.h.adv_router.to_string(),
+                    ls_seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
+                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    length: lsa.data.h.length,
+                    network_mask: format!("/{}", u32::from(lsp.netmask).leading_ones()),
+                    attached_routers,
+                });
+            }
+            areas.push(OspfAreaDatabaseDetailJson {
+                area_id: area.id.to_string(),
+                router_lsas,
+                network_lsas,
+            });
+        }
+        let db = OspfDatabaseDetailJson {
+            router_id: ospf.router_id.to_string(),
+            areas,
+        };
+        return Ok(serde_json::to_string_pretty(&db)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
+    }
+
     let mut out = String::new();
 
     if ospf.router_id.is_unspecified() {
