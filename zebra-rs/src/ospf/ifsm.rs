@@ -175,6 +175,7 @@ pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
 
     // println!("ospf_join_if index {}", link.index);
     ospf_join_if(&link.sock, link.index);
+    link.multicast_memberships.set_all_routers(true);
 
     // Comment out until we support pointopoint interface.
     // if link.is_pointopoint() {
@@ -188,7 +189,8 @@ pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
     }
 }
 
-pub fn ospf_ifsm_interface_down(_oi: &mut OspfLink) -> Option<IfsmState> {
+pub fn ospf_ifsm_interface_down(oi: &mut OspfLink) -> Option<IfsmState> {
+    oi.multicast_memberships = 0.into();
     None
 }
 
@@ -321,10 +323,12 @@ fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
             && (new_state == IfsmState::DR || new_state == IfsmState::Backup)
         {
             ospf_join_alldrouters(&oi.sock, oi.index);
+            oi.multicast_memberships.set_all_drouters(true);
         } else if (prev_state == IfsmState::DR || prev_state == IfsmState::Backup)
             && (new_state != IfsmState::DR && new_state != IfsmState::Backup)
         {
             ospf_leave_alldrouters(&oi.sock, oi.index);
+            oi.multicast_memberships.set_all_drouters(false);
         }
     }
 

@@ -2,10 +2,13 @@ use std::fmt::Write;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use netlink_packet_route::link::LinkFlags;
 use ospf_packet::*;
 
 use crate::config::Args;
+use crate::rib::LinkFlagsExt;
 
+use super::ifsm::IfsmState;
 use super::{AREA0, Neighbor, NfsmState, Ospf, OspfLink, ShowCallback};
 
 impl Ospf {
@@ -22,28 +25,198 @@ impl Ospf {
     }
 }
 
-fn render_link(out: &mut String, oi: &OspfLink) {
-    writeln!(out, "{}", oi.name).unwrap();
+fn format_link_flags(flags: &LinkFlags) -> String {
+    let mut parts = Vec::new();
+    if (*flags & LinkFlags::Up) == LinkFlags::Up {
+        parts.push("UP");
+    }
+    if (*flags & LinkFlags::LowerUp) == LinkFlags::LowerUp {
+        parts.push("LOWER_UP");
+    }
+    if (*flags & LinkFlags::Broadcast) == LinkFlags::Broadcast {
+        parts.push("BROADCAST");
+    }
+    if (*flags & LinkFlags::Running) == LinkFlags::Running {
+        parts.push("RUNNING");
+    }
+    if (*flags & LinkFlags::Multicast) == LinkFlags::Multicast {
+        parts.push("MULTICAST");
+    }
+    if (*flags & LinkFlags::Loopback) == LinkFlags::Loopback {
+        parts.push("LOOPBACK");
+    }
+    if (*flags & LinkFlags::Pointopoint) == LinkFlags::Pointopoint {
+        parts.push("POINTOPOINT");
+    }
+    format!("<{}>", parts.join(","))
+}
+
+fn find_nbr_router_id(oi: &OspfLink, addr: Ipv4Addr) -> Option<Ipv4Addr> {
+    for nbr in oi.nbrs.values() {
+        if nbr.ident.prefix.addr() == addr {
+            return Some(nbr.ident.router_id);
+        }
+    }
+    None
+}
+
+fn render_link(out: &mut String, oi: &OspfLink, ospf: &Ospf) {
+    // Line 1: Interface name and status.
+    let status = if oi.link_flags.is_up() { "up" } else { "down" };
+    writeln!(out, "{} is {}", oi.name, status).unwrap();
+
+    // Line 2: ifindex, MTU, BW, flags.
     writeln!(
         out,
-        " {} {} {} DR: {} BDR: {}",
-        oi.ident.prefix, oi.state, oi.ident.priority, oi.ident.bd_router, oi.ident.bd_router
+        "  ifindex {}, MTU {} bytes, BW 0 Mbit {}",
+        oi.index,
+        oi.mtu,
+        format_link_flags(&oi.link_flags)
     )
     .unwrap();
+
+    // Line 3: Internet Address, Broadcast, Area.
     writeln!(
         out,
-        "   Timer intervals configured, Hello {}s, Dead {}s, Wait {}s, Retransmit {}s",
+        "  Internet Address {}, Broadcast {}, Area {}",
+        oi.ident.prefix,
+        oi.ident.prefix.broadcast(),
+        oi.area_id
+    )
+    .unwrap();
+
+    // Line 4: MTU mismatch detection.
+    writeln!(out, "  MTU mismatch detection: enabled").unwrap();
+
+    // Line 5: Router ID, Network Type, Cost.
+    writeln!(
+        out,
+        "  Router ID {}, Network Type {}, Cost: {}",
+        oi.ident.router_id, oi.network_type, oi.output_cost
+    )
+    .unwrap();
+
+    // Line 6: Transmit Delay, State, Priority.
+    writeln!(
+        out,
+        "  Transmit Delay is {} sec, State {}, Priority {}",
+        oi.transmit_delay(),
+        oi.state,
+        oi.priority()
+    )
+    .unwrap();
+
+    // Line 7: Designated Router.
+    if !oi.ident.d_router.is_unspecified() {
+        let dr_router_id = if oi.ident.prefix.addr() == oi.ident.d_router {
+            oi.ident.router_id
+        } else {
+            find_nbr_router_id(oi, oi.ident.d_router).unwrap_or(Ipv4Addr::UNSPECIFIED)
+        };
+        let dr_prefix = oi
+            .nbrs
+            .values()
+            .find(|nbr| nbr.ident.prefix.addr() == oi.ident.d_router)
+            .map(|nbr| nbr.ident.prefix)
+            .unwrap_or(oi.ident.prefix);
+        writeln!(
+            out,
+            "  Designated Router (ID) {} Interface Address {}",
+            dr_router_id, dr_prefix
+        )
+        .unwrap();
+    }
+
+    // Line 8: Backup Designated Router.
+    if !oi.ident.bd_router.is_unspecified() {
+        let bdr_router_id = if oi.ident.prefix.addr() == oi.ident.bd_router {
+            oi.ident.router_id
+        } else {
+            find_nbr_router_id(oi, oi.ident.bd_router).unwrap_or(Ipv4Addr::UNSPECIFIED)
+        };
+        let bdr_prefix = oi
+            .nbrs
+            .values()
+            .find(|nbr| nbr.ident.prefix.addr() == oi.ident.bd_router)
+            .map(|nbr| nbr.ident.prefix)
+            .unwrap_or(oi.ident.prefix);
+        writeln!(
+            out,
+            "  Backup Designated Router (ID) {}, Interface Address {}",
+            bdr_router_id, bdr_prefix
+        )
+        .unwrap();
+    }
+
+    // Line 9: Network-LSA sequence number (only when DR).
+    if oi.state == IfsmState::DR {
+        if let Some(area) = ospf.areas.get(oi.area_id) {
+            if let Some(lsa) =
+                area.lsdb
+                    .lookup_lsa(OspfLsType::Network, oi.ident.prefix.addr(), ospf.router_id)
+            {
+                writeln!(
+                    out,
+                    "  Saved Network-LSA sequence number 0x{:08x}",
+                    lsa.data.h.ls_seq_number
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    // Line 10: Multicast group memberships.
+    let mut groups = Vec::new();
+    if oi.multicast_memberships.all_routers() {
+        groups.push("OSPFAllRouters");
+    }
+    if oi.multicast_memberships.all_drouters() {
+        groups.push("OSPFDesignatedRouters");
+    }
+    if !groups.is_empty() {
+        writeln!(out, "  Multicast group memberships: {}", groups.join(" ")).unwrap();
+    }
+
+    // Line 11: Timer intervals.
+    writeln!(
+        out,
+        "  Timer intervals configured, Hello {}s, Dead {}s, Wait {}s, Retransmit {}",
         oi.hello_interval(),
         oi.dead_interval(),
         oi.dead_interval(),
         oi.retransmit_interval(),
     )
     .unwrap();
-    if let Some(ref hello_timer) = oi.timer.hello {
+
+    // Line 12: Hello due.
+    if oi.is_passive() {
+        writeln!(out, "    No Hellos (Passive interface)").unwrap();
+    } else if let Some(ref hello_timer) = oi.timer.hello {
         let remaining = hello_timer.remaining();
         let secs = remaining.as_secs_f64();
         writeln!(out, "    Hello due in {:.3}s", secs).unwrap();
     }
+
+    // Line 13: Neighbor counts.
+    let nbr_count = oi.nbrs.len();
+    let adj_count = oi
+        .nbrs
+        .values()
+        .filter(|nbr| nbr.state == NfsmState::Full)
+        .count();
+    writeln!(
+        out,
+        "  Neighbor Count is {}, Adjacent neighbor count is {}",
+        nbr_count, adj_count
+    )
+    .unwrap();
+
+    // Line 14: Graceful Restart hello delay.
+    writeln!(out, "  Graceful Restart hello delay: 10s").unwrap();
+
+    // Line 15: LSA retransmissions.
+    let rxmt_count: usize = oi.nbrs.values().map(|nbr| nbr.ls_rxmt.len()).sum();
+    writeln!(out, "  LSA retransmissions: {}", rxmt_count).unwrap();
 }
 
 fn show_ospf_interface(
@@ -55,7 +228,7 @@ fn show_ospf_interface(
 
     for (_, oi) in ospf.links.iter() {
         if oi.enabled {
-            render_link(&mut buf, oi);
+            render_link(&mut buf, oi, ospf);
         }
     }
     Ok(buf)

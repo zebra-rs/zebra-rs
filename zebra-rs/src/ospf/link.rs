@@ -1,7 +1,9 @@
+use std::fmt::Display;
 use std::sync::Arc;
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use bitfield_struct::bitfield;
+use netlink_packet_route::link::LinkFlags;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,6 +19,38 @@ pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
 pub const OSPF_DEFAULT_HELLO_INTERVAL: u16 = 10;
 pub const OSPF_DEFAULT_DEAD_INTERVAL: u32 = 40;
 pub const OSPF_DEFAULT_RETRANSMIT_INTERVAL: u16 = 5;
+pub const OSPF_DEFAULT_TRANSMIT_DELAY: u16 = 1;
+pub const OSPF_DEFAULT_OUTPUT_COST: u32 = 10;
+
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub enum OspfNetworkType {
+    #[default]
+    Broadcast,
+    NBMA,
+    PointToPoint,
+    PointToMultipoint,
+    VirtualLink,
+}
+
+impl Display for OspfNetworkType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OspfNetworkType::Broadcast => write!(f, "BROADCAST"),
+            OspfNetworkType::NBMA => write!(f, "NBMA"),
+            OspfNetworkType::PointToPoint => write!(f, "POINT_TO_POINT"),
+            OspfNetworkType::PointToMultipoint => write!(f, "POINT_TO_MULTIPOINT"),
+            OspfNetworkType::VirtualLink => write!(f, "VIRTUAL_LINK"),
+        }
+    }
+}
+
+#[bitfield(u8, debug = true)]
+pub struct OspfMulticastMembership {
+    pub all_routers: bool,
+    pub all_drouters: bool,
+    #[bits(6)]
+    pub resvd: usize,
+}
 
 #[derive(Default)]
 pub struct LinkConfig {
@@ -24,6 +58,7 @@ pub struct LinkConfig {
     pub hello_interval: Option<u16>,
     pub dead_interval: Option<u32>,
     pub retransmit_interval: Option<u16>,
+    pub transmit_delay: Option<u16>,
 }
 
 pub struct OspfLink {
@@ -41,6 +76,10 @@ pub struct OspfLink {
     pub tx: UnboundedSender<Message>,
     pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
     pub flags: OspfLinkFlags,
+    pub link_flags: LinkFlags,
+    pub network_type: OspfNetworkType,
+    pub output_cost: u32,
+    pub multicast_memberships: OspfMulticastMembership,
     pub timer: LinkTimer,
     pub state_change: usize,
     pub db_desc_in: usize,
@@ -81,6 +120,10 @@ impl OspfLink {
             tx,
             nbrs: BTreeMap::new(),
             flags: 0.into(),
+            link_flags: link.flags,
+            network_type: OspfNetworkType::default(),
+            output_cost: OSPF_DEFAULT_OUTPUT_COST,
+            multicast_memberships: 0.into(),
             timer: LinkTimer::default(),
             state_change: 0,
             db_desc_in: 0,
@@ -113,16 +156,25 @@ impl OspfLink {
             .unwrap_or(OSPF_DEFAULT_RETRANSMIT_INTERVAL)
     }
 
+    pub fn transmit_delay(&self) -> u16 {
+        self.config
+            .transmit_delay
+            .unwrap_or(OSPF_DEFAULT_TRANSMIT_DELAY)
+    }
+
     pub fn is_passive(&self) -> bool {
         false
     }
 
     pub fn is_multicast_if(&self) -> bool {
-        true
+        matches!(
+            self.network_type,
+            OspfNetworkType::Broadcast | OspfNetworkType::NBMA | OspfNetworkType::PointToMultipoint
+        )
     }
 
     pub fn is_nbma_if(&self) -> bool {
-        false
+        self.network_type == OspfNetworkType::NBMA
     }
 
     pub fn is_dr_election_ready(&self) -> bool {
