@@ -1154,62 +1154,40 @@ fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
             ..Default::default()
         };
 
-        for (net_id, attaches) in network_lsas.iter() {
-            let mut found = false;
-            for attach in attaches.iter() {
-                if adv_router == attach {
-                    println!("XXX attached {} <- {}", net_id, attach);
-                    found = true;
-                }
-            }
-            if found {
-                for attach in attaches.iter() {
-                    if adv_router != attach {
-                        let to_id = node_map.get(*attach);
+        if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
+            for link in &router_lsa.links {
+                match link.link_type {
+                    1 | 4 => {
+                        // Point-to-Point or Virtual Link: link_id = neighbor router ID.
+                        let to_id = node_map.get(link.link_id);
                         node.olinks.push(spf::Link {
                             from: node_id,
                             to: to_id,
-                            cost: 10,
+                            cost: link.tos_0_metric as u32,
                         });
+                    }
+                    2 => {
+                        // Transit Network: expand through the Network-LSA pseudo-node.
+                        // link_id = DR's interface IP, which is the Network-LSA's ls_id.
+                        if let Some(attached) = network_lsas.get(&link.link_id) {
+                            for attached_router in attached {
+                                if *attached_router != *adv_router {
+                                    let to_id = node_map.get(*attached_router);
+                                    node.olinks.push(spf::Link {
+                                        from: node_id,
+                                        to: to_id,
+                                        cost: link.tos_0_metric as u32,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Stub (3) and unknown: not part of the SPF graph.
                     }
                 }
             }
         }
-
-        // if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
-        //     for link in &router_lsa.links {
-        //         match link.link_type {
-        //             1 | 4 => {
-        //                 // Point-to-Point or Virtual Link: link_id = neighbor router ID.
-        //                 let to_id = node_map.get(link.link_id);
-        //                 node.olinks.push(spf::Link {
-        //                     from: node_id,
-        //                     to: to_id,
-        //                     cost: link.tos_0_metric as u32,
-        //                 });
-        //             }
-        //             2 => {
-        //                 // Transit Network: expand through the Network-LSA pseudo-node.
-        //                 // link_id = DR's interface IP, which is the Network-LSA's ls_id.
-        //                 if let Some(attached) = network_lsas.get(&link.link_id) {
-        //                     for attached_router in attached {
-        //                         if *attached_router != *adv_router {
-        //                             let to_id = node_map.get(*attached_router);
-        //                             node.olinks.push(spf::Link {
-        //                                 from: node_id,
-        //                                 to: to_id,
-        //                                 cost: link.tos_0_metric as u32,
-        //                             });
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //             _ => {
-        //                 // Stub (3) and unknown: not part of the SPF graph.
-        //             }
-        //         }
-        //     }
-        // }
 
         graph.insert(node_id, node);
     }
