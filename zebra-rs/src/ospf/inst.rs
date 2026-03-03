@@ -22,14 +22,15 @@ use crate::{
     rib::RibRxChannel,
 };
 
-use super::area::OspfAreaMap;
+use super::area::{OspfArea, OspfAreaMap};
 use super::config::{Callback, OspfNetworkConfig};
 use super::ifsm::{IfsmEvent, IfsmState, ospf_ifsm};
-use super::link::OspfLink;
+use super::link::{OspfLink, OspfNetworkType};
 use super::lsdb::{LsdbEvent, OspfLsaKey};
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
+use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
 use super::{
     AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
@@ -182,35 +183,116 @@ impl Ospf {
         }
     }
 
-    pub fn router_lsa_originate(&mut self) {
-        let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
-            tracing::info!("Router LSA Originate");
-            let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
-
-            let mut r_lsa = RouterLsa::default();
-
-            for (_, link) in self.links.iter() {
-                if !link.enabled {
-                    continue;
-                }
-                for addr in link.addr.iter() {
-                    let lsa_link = RouterLsaLink::new(addr.prefix, 10);
-                    r_lsa.links.push(lsa_link);
-                }
+    fn ospf_spf_timer(tx: &UnboundedSender<Message>, area_id: Ipv4Addr) -> Timer {
+        let tx = tx.clone();
+        Timer::new(Timer::second(1), TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::SpfCalc(area_id));
             }
-            r_lsa.num_links = r_lsa.links.len() as u16;
+        })
+    }
 
-            let lsa = OspfLsa::from(lsah, r_lsa.into());
+    fn ospf_spf_schedule(tx: &UnboundedSender<Message>, area: &mut OspfArea) {
+        if area.spf_timer.is_none() {
+            area.spf_timer = Some(Self::ospf_spf_timer(tx, area.id));
+        }
+    }
+
+    fn router_lsa_stub_link(prefix: Ipv4Net, metric: u16) -> RouterLsaLink {
+        RouterLsaLink {
+            link_id: prefix.network(),
+            link_data: prefix.netmask(),
+            link_type: OspfLinkType::Stub as u8,
+            num_tos: 0,
+            tos_0_metric: metric,
+            toses: vec![],
+        }
+    }
+
+    fn link_has_transit_adjacency(link: &OspfLink) -> bool {
+        if link.state == IfsmState::Waiting || link.full_nbr_count == 0 {
+            return false;
+        }
+        if link.ident.is_declared_dr() {
+            return true;
+        }
+        if let Some(dr_nbr) = link.nbrs.get(&link.ident.d_router) {
+            return dr_nbr.state == NfsmState::Full;
+        }
+        false
+    }
+
+    fn router_lsa_build(&self) -> RouterLsa {
+        let mut router_lsa = RouterLsa::default();
+
+        for link in self.links.values() {
+            if !link.enabled {
+                continue;
+            }
+
+            let metric = link.output_cost.min(u16::MAX as u32) as u16;
+            let use_transit = matches!(
+                link.network_type,
+                OspfNetworkType::Broadcast | OspfNetworkType::NBMA
+            ) && Self::link_has_transit_adjacency(link);
+
+            for addr in &link.addr {
+                let lsa_link = if use_transit {
+                    RouterLsaLink {
+                        // Transit link points to DR interface address.
+                        link_id: link.ident.d_router,
+                        link_data: addr.prefix.addr(),
+                        link_type: OspfLinkType::Transit as u8,
+                        num_tos: 0,
+                        tos_0_metric: metric,
+                        toses: vec![],
+                    }
+                } else {
+                    Self::router_lsa_stub_link(addr.prefix, metric)
+                };
+                router_lsa.links.push(lsa_link);
+            }
+        }
+
+        router_lsa.num_links = router_lsa.links.len() as u16;
+        router_lsa
+    }
+
+    fn router_lsa_originate_with_min_seq(&mut self, min_seq: Option<u32>) {
+        let router_lsa = self.router_lsa_build();
+        let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
+            let current_seq = area
+                .lsdb
+                .lookup_by_id(OspfLsType::Router, self.router_id, self.router_id)
+                .map(|lsa| lsa.h.ls_seq_number);
+
+            let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
+            let mut lsa = OspfLsa::from(lsah, router_lsa.into());
+
+            if let Some(seq) = current_seq {
+                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+            }
+            if let Some(seq) = min_seq {
+                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+            }
+
             let flood_lsa = lsa.clone();
-
             area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+            Self::ospf_spf_schedule(&self.tx, area);
             Some(flood_lsa)
         } else {
             None
         };
+
         if let Some(lsa) = flood_lsa {
             self.flood_self_originated_lsa(AREA0, &lsa);
         }
+    }
+
+    pub fn router_lsa_originate(&mut self) {
+        tracing::info!("Router LSA Originate");
+        self.router_lsa_originate_with_min_seq(None);
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
@@ -253,25 +335,37 @@ impl Ospf {
             return;
         }
 
-        let lsdb = if let Some(area_id) = area_id {
-            let Some(area) = self.areas.get_mut(area_id) else {
-                return;
+        {
+            let lsdb = if let Some(area_id) = area_id {
+                let Some(area) = self.areas.get_mut(area_id) else {
+                    return;
+                };
+                &mut area.lsdb
+            } else {
+                &mut self.lsdb_as
             };
-            &mut area.lsdb
-        } else {
-            &mut self.lsdb_as
-        };
-        match ev {
-            LsdbEvent::HoldTimerExpire => {
-                tracing::info!(
-                    "LSDB hold timer expired: type={} id={} adv={}",
-                    ls_type,
-                    ls_id,
-                    adv_router
-                );
-                lsdb.remove_lsa(ls_type, ls_id, adv_router);
+            match ev {
+                LsdbEvent::HoldTimerExpire => {
+                    tracing::info!(
+                        "LSDB hold timer expired: type={} id={} adv={}",
+                        ls_type,
+                        ls_id,
+                        adv_router
+                    );
+                    lsdb.remove_lsa(ls_type, ls_id, adv_router);
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
+        }
+
+        if ev == LsdbEvent::HoldTimerExpire
+            && (ls_type == OspfLsType::Router || ls_type == OspfLsType::Network)
+        {
+            if let Some(area_id) = area_id {
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    Self::ospf_spf_schedule(&self.tx, area);
+                }
+            }
         }
     }
 
@@ -385,35 +479,135 @@ impl Ospf {
 
     /// Re-originate Router LSA with seq# >= min_seq + 1.
     fn router_lsa_reoriginate(&mut self, min_seq: u32) {
-        let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
-            tracing::info!("Router LSA Re-originate (min_seq={:#x})", min_seq);
-            let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
+        tracing::info!("Router LSA Re-originate (min_seq={:#x})", min_seq);
+        self.router_lsa_originate_with_min_seq(Some(min_seq));
+    }
 
-            let mut r_lsa = RouterLsa::default();
+    fn update_network_lsa_by_interface(&mut self, ifindex: u32) {
+        let (area_id, ls_id, netmask, attached_routers, full_nbr_count) = {
+            let Some(link) = self.links.get_mut(&ifindex) else {
+                return;
+            };
+            if !link.enabled {
+                return;
+            }
 
-            for (_, link) in self.links.iter() {
-                if !link.enabled {
-                    continue;
-                }
-                for addr in link.addr.iter() {
-                    let lsa_link = RouterLsaLink::new(addr.prefix, 10);
-                    r_lsa.links.push(lsa_link);
+            let Some(primary_addr) = link.addr.first() else {
+                return;
+            };
+
+            let mut attached_routers = Vec::with_capacity(link.nbrs.len() + 1);
+            attached_routers.push(self.router_id);
+            for nbr in link.nbrs.values() {
+                if nbr.state == NfsmState::Full {
+                    attached_routers.push(nbr.ident.router_id);
                 }
             }
-            r_lsa.num_links = r_lsa.links.len() as u16;
+            attached_routers.sort_unstable();
+            attached_routers.dedup();
 
-            let mut lsa = OspfLsa::from(lsah, r_lsa.into());
-            // Ensure seq# is at least min_seq + 1.
-            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(min_seq + 1);
-            let flood_lsa = lsa.clone();
+            link.full_nbr_count = link
+                .nbrs
+                .values()
+                .filter(|nbr| nbr.state == NfsmState::Full)
+                .count();
 
-            area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
-            Some(flood_lsa)
+            (
+                link.area,
+                primary_addr.prefix.addr(),
+                primary_addr.prefix.netmask(),
+                attached_routers,
+                link.full_nbr_count,
+            )
+        };
+
+        let flood_lsa = if let Some(area) = self.areas.get_mut(area_id) {
+            if full_nbr_count == 0 {
+                area.lsdb.flush_lsa(
+                    OspfLsType::Network,
+                    ls_id,
+                    self.router_id,
+                    &self.tx,
+                    Some(area_id),
+                )
+            } else {
+                let current_seq = area
+                    .lsdb
+                    .lookup_by_id(OspfLsType::Network, ls_id, self.router_id)
+                    .map(|lsa| lsa.h.ls_seq_number);
+
+                let lsah = OspfLsaHeader::new(OspfLsType::Network, ls_id, self.router_id);
+                let mut lsa = OspfLsa::from(
+                    lsah,
+                    OspfLsp::Network(NetworkLsa {
+                        netmask,
+                        attached_routers,
+                    }),
+                );
+                if let Some(seq) = current_seq {
+                    lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+                }
+
+                let flood_lsa = lsa.clone();
+                area.lsdb
+                    .insert_self_originated(lsa, &self.tx, Some(area_id));
+                Some(flood_lsa)
+            }
         } else {
             None
         };
+
         if let Some(lsa) = flood_lsa {
-            self.flood_self_originated_lsa(AREA0, &lsa);
+            self.flood_self_originated_lsa(area_id, &lsa);
+            if let Some(area) = self.areas.get_mut(area_id) {
+                Self::ospf_spf_schedule(&self.tx, area);
+            }
+        }
+    }
+
+    fn process_neighbor_state_change(
+        &mut self,
+        ifindex: u32,
+        nbr_addr: Ipv4Addr,
+        old_state: NfsmState,
+        new_state: NfsmState,
+    ) {
+        if old_state == new_state {
+            return;
+        }
+
+        let full_state_changed = (old_state == NfsmState::Full && new_state != NfsmState::Full)
+            || (old_state != NfsmState::Full && new_state == NfsmState::Full);
+        if !full_state_changed {
+            return;
+        }
+
+        let if_state = {
+            let Some(link) = self.links.get_mut(&ifindex) else {
+                return;
+            };
+            link.full_nbr_count = link
+                .nbrs
+                .values()
+                .filter(|nbr| nbr.state == NfsmState::Full)
+                .count();
+            link.state
+        };
+
+        tracing::info!(
+            "[NFSM:FullTransition] ifindex={} nbr={} {} -> {}",
+            ifindex,
+            nbr_addr,
+            old_state,
+            new_state
+        );
+
+        // Router-LSA must be re-originated whenever Full adjacency count changes.
+        self.router_lsa_originate();
+
+        // DR updates/flushes its Network-LSA based on current full adjacency set.
+        if if_state == IfsmState::DR {
+            self.update_network_lsa_by_interface(ifindex);
         }
     }
 
@@ -586,6 +780,8 @@ impl Ospf {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
+        // This is a one-shot timer; clear the handle so future queued acks can re-arm it.
+        link.timer.ls_ack = None;
         if link.ls_ack_delayed.is_empty() {
             return;
         }
@@ -744,6 +940,12 @@ impl Ospf {
                 ospf_ifsm(link, ev);
             }
             Message::Nfsm(index, src, ev) => {
+                let old_state = self
+                    .links
+                    .get(&index)
+                    .and_then(|link| link.nbrs.get(&src))
+                    .map(|nbr| nbr.state);
+
                 if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
                     let ident = link.ident;
                     ospf_nfsm(&mut link, nbr, ev, ident);
@@ -751,13 +953,15 @@ impl Ospf {
                     println!("NFSM: Packet from unknown neighbor {}", src);
                 }
 
-                // let Some(link) = self.links.get_mut(&index) else {
-                //     return;
-                // };
-                // let Some(nbr) = link.nbrs.get_mut(&src) else {
-                //     return;
-                // };
-                // ospf_nfsm(nbr, ev, &link.ident);
+                let new_state = self
+                    .links
+                    .get(&index)
+                    .and_then(|link| link.nbrs.get(&src))
+                    .map(|nbr| nbr.state);
+
+                if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
+                    self.process_neighbor_state_change(index, src, old_state, new_state);
+                }
             }
             Message::HelloTimer(index) => {
                 let Some(link) = self.links.get_mut(&index) else {
@@ -782,6 +986,20 @@ impl Ospf {
             }
             Message::DelayedAckQueue(ifindex, headers) => {
                 self.queue_delayed_acks(ifindex, headers);
+            }
+            Message::SpfSchedule(area_id) => {
+                if let Some(area_id) = area_id {
+                    if let Some(area) = self.areas.get_mut(area_id) {
+                        Self::ospf_spf_schedule(&self.tx, area);
+                    }
+                }
+            }
+            Message::SpfCalc(area_id) => {
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.spf_timer = None;
+                }
+                tracing::info!("[SPF] Calculation triggered for area {}", area_id);
+                perform_spf_calculation(self, area_id);
             }
             _ => {}
         }
@@ -872,4 +1090,133 @@ pub enum Message {
     /// Queue delayed ack headers on an interface.
     /// (ifindex, headers)
     DelayedAckQueue(u32, Vec<OspfLsaHeader>),
+    /// Request SPF scheduling for an area.
+    SpfSchedule(Option<Ipv4Addr>),
+    /// Timer-fired: perform SPF calculation for an area.
+    SpfCalc(Ipv4Addr),
+}
+
+use crate::spf;
+
+struct NodeMap {
+    map: HashMap<Ipv4Addr, usize>,
+}
+
+impl NodeMap {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, router_id: Ipv4Addr) -> usize {
+        let len = self.map.len();
+        *self.map.entry(router_id).or_insert(len)
+    }
+}
+
+/// Build SPF graph from OSPF LSDB (Router-LSAs and Network-LSAs).
+fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
+    let mut graph = spf::Graph::new();
+    let mut source_node = None;
+    let mut node_map = NodeMap::new();
+
+    let Some(area) = top.areas.get(area_id) else {
+        return (graph, source_node);
+    };
+
+    // Collect Router-LSA data.
+    let mut router_lsas = Vec::new();
+    for ((_ls_id, adv_router), lsa) in area.lsdb.tables.router.iter() {
+        router_lsas.push((*adv_router, lsa.originated, lsa.data.clone()));
+    }
+
+    // Collect Network-LSA attached routers for transit network expansion.
+    let mut network_lsas: HashMap<Ipv4Addr, Vec<Ipv4Addr>> = HashMap::new();
+    for ((ls_id, _adv_router), lsa) in area.lsdb.tables.network.iter() {
+        if let OspfLsp::Network(ref net_lsa) = lsa.data.lsp {
+            network_lsas.insert(*ls_id, net_lsa.attached_routers.clone());
+        }
+    }
+
+    // Process each Router-LSA to build graph nodes and edges.
+    for (adv_router, originated, lsa_data) in &router_lsas {
+        let node_id = node_map.get(*adv_router);
+
+        if *originated {
+            source_node = Some(node_id);
+        }
+
+        let mut node = spf::Node {
+            id: node_id,
+            name: adv_router.to_string(),
+            sys_id: adv_router.to_string(),
+            ..Default::default()
+        };
+
+        if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
+            for link in &router_lsa.links {
+                match link.link_type {
+                    1 | 4 => {
+                        // Point-to-Point or Virtual Link: link_id = neighbor router ID.
+                        let to_id = node_map.get(link.link_id);
+                        node.olinks.push(spf::Link {
+                            from: node_id,
+                            to: to_id,
+                            cost: link.tos_0_metric as u32,
+                        });
+                    }
+                    2 => {
+                        // Transit Network: expand through the Network-LSA pseudo-node.
+                        // link_id = DR's interface IP, which is the Network-LSA's ls_id.
+                        if let Some(attached) = network_lsas.get(&link.link_id) {
+                            for attached_router in attached {
+                                if *attached_router != *adv_router {
+                                    let to_id = node_map.get(*attached_router);
+                                    node.olinks.push(spf::Link {
+                                        from: node_id,
+                                        to: to_id,
+                                        cost: link.tos_0_metric as u32,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Stub (3) and unknown: not part of the SPF graph.
+                    }
+                }
+            }
+        }
+
+        graph.insert(node_id, node);
+    }
+
+    (graph, source_node)
+}
+
+fn perform_spf_calculation(top: &Ospf, area_id: Ipv4Addr) {
+    let (graph, source_node) = graph(top, area_id);
+
+    for (id, node) in graph.iter() {
+        println!("Node: {}", id);
+        for olink in node.olinks.iter() {
+            println!(" -> {}", olink.to);
+        }
+    }
+
+    if let Some(source) = source_node {
+        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+        println!("[SPF] area {} nodes: {}", area_id, spf_result.len());
+        for (node_id, path) in &spf_result {
+            if let Some(node) = graph.get(node_id) {
+                println!(
+                    "[SPF]   {} cost {} nexthops {}",
+                    node.name,
+                    path.cost,
+                    path.nexthops.len()
+                );
+            }
+        }
+    }
 }
