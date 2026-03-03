@@ -1200,23 +1200,14 @@ fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
 fn perform_spf_calculation(top: &Ospf, area_id: Ipv4Addr) {
     let (graph, source_node) = graph(top, area_id);
 
-    for (id, node) in graph.iter() {
-        println!("Node: {}", id);
-        for olink in node.olinks.iter() {
-            println!(" -> {}", olink.to);
-        }
-    }
-
     if let Some(source) = source_node {
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
         println!("[SPF] area {} nodes: {}", area_id, spf_result.len());
         for (node_id, path) in &spf_result {
             if let Some(node) = graph.get(node_id) {
                 println!(
-                    "[SPF]   {} cost {} nexthops {}",
-                    node.name,
-                    path.cost,
-                    path.nexthops.len()
+                    "[SPF]   {} cost {} nexthops {:?}",
+                    node.name, path.cost, path.nexthops
                 );
             }
         }
