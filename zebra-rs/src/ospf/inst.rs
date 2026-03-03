@@ -277,6 +277,7 @@ impl Ospf {
                 lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
             }
 
+            lsa.update();
             let flood_lsa = lsa.clone();
             area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
             Self::ospf_spf_schedule(&self.tx, area);
@@ -548,6 +549,7 @@ impl Ospf {
                     lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
                 }
 
+                lsa.update();
                 let flood_lsa = lsa.clone();
                 area.lsdb
                     .insert_self_originated(lsa, &self.tx, Some(area_id));
