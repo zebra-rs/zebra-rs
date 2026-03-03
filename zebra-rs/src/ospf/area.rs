@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use super::Lsdb;
+use super::task::Timer;
 
 pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 
@@ -61,6 +62,9 @@ pub struct OspfArea {
 
     // LSDB of this area.
     pub lsdb: Lsdb,
+
+    // SPF calculation timer.
+    pub spf_timer: Option<Timer>,
 }
 
 impl OspfArea {
@@ -70,6 +74,7 @@ impl OspfArea {
             area_type: AreaType::default(),
             links: BTreeSet::new(),
             lsdb: Lsdb::new(),
+            spf_timer: None,
         }
     }
 }
