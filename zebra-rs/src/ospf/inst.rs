@@ -1272,15 +1272,51 @@ fn build_rib_from_spf(
         {
             if let OspfLsp::Router(ref router_lsa) = lsa.lsp {
                 for link in &router_lsa.links {
+                    let route = |prefix: Ipv4Net| SpfRoute {
+                        metric: nhops.cost + link.tos_0_metric as u32,
+                        nhops: spf_nhops.clone(),
+                        sid: None,
+                    };
+                    let insert = |rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
+                                  prefix: Ipv4Net,
+                                  route: SpfRoute| {
+                        if let Some(curr) = rib.get_mut(&prefix) {
+                            if curr.metric > route.metric {
+                                *curr = route;
+                            } else if curr.metric == route.metric {
+                                for (addr, nhop) in route.nhops {
+                                    curr.nhops.insert(addr, nhop);
+                                }
+                            }
+                        } else {
+                            rib.insert(prefix, route);
+                        }
+                    };
                     match link.link_type {
                         2 => {
-                            // Transit Network.
-                            // TODO: Lookup Network LSA, create a prefix from it.
+                            // Transit Network: look up Network-LSA to get the
+                            // network prefix (link_id = DR's interface IP).
+                            for ((_ls_id, _adv), nlsa) in area.lsdb.tables.network.iter() {
+                                if let OspfLsp::Network(ref net) = nlsa.data.lsp {
+                                    if nlsa.data.h.ls_id == link.link_id {
+                                        let mask = u32::from(net.netmask).leading_ones() as u8;
+                                        if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
+                                            let prefix = prefix.trunc();
+                                            insert(&mut rib, prefix, route(prefix));
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         3 => {
-                            // Stub Network.
-                            // TODO: create prefic from link.link_id, link.link_data.
-                            println!("Stub: {}/{}", link.link_id, link.link_data);
+                            // Stub Network: link_id = network addr,
+                            // link_data = netmask.
+                            let mask = u32::from(link.link_data).leading_ones() as u8;
+                            if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
+                                let prefix = prefix.trunc();
+                                insert(&mut rib, prefix, route(prefix));
+                            }
                         }
                         _ => {
                             // Just ignore.
