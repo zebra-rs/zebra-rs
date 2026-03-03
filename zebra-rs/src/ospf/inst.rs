@@ -780,6 +780,8 @@ impl Ospf {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
+        // This is a one-shot timer; clear the handle so future queued acks can re-arm it.
+        link.timer.ls_ack = None;
         if link.ls_ack_delayed.is_empty() {
             return;
         }
