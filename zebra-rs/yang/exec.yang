@@ -141,6 +141,9 @@ module exec {
             type empty;
           }
         }
+        leaf route {
+          type empty;
+        }
       }
     }
 
