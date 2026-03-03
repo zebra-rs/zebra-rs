@@ -55,6 +55,7 @@ pub struct Ospf {
     pub sock: Arc<AsyncFd<Socket>>,
     pub router_id: Ipv4Addr,
     pub lsdb_as: Lsdb,
+    pub lsp_map: LspMap,
     pub tracing: OspfTracing,
 }
 
@@ -158,6 +159,7 @@ impl Ospf {
             show_cb: HashMap::new(),
             router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
             lsdb_as: Lsdb::new(),
+            lsp_map: LspMap::default(),
             tracing: OspfTracing::default(),
             sock,
         };
@@ -1100,28 +1102,33 @@ pub enum Message {
 
 use crate::spf;
 
-struct NodeMap {
+#[derive(Default)]
+pub struct LspMap {
     map: HashMap<Ipv4Addr, usize>,
+    val: Vec<Ipv4Addr>,
 }
 
-impl NodeMap {
-    fn new() -> Self {
-        Self {
-            map: HashMap::new(),
+impl LspMap {
+    fn get(&mut self, router_id: Ipv4Addr) -> usize {
+        if let Some(index) = self.map.get(&router_id) {
+            return *index;
+        } else {
+            let index = self.val.len();
+            self.map.insert(router_id, index);
+            self.val.push(router_id);
+            return index;
         }
     }
 
-    fn get(&mut self, router_id: Ipv4Addr) -> usize {
-        let len = self.map.len();
-        *self.map.entry(router_id).or_insert(len)
+    pub fn resolve(&self, id: usize) -> Option<&Ipv4Addr> {
+        self.val.get(id)
     }
 }
 
 /// Build SPF graph from OSPF LSDB (Router-LSAs and Network-LSAs).
-fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
+fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
     let mut graph = spf::Graph::new();
     let mut source_node = None;
-    let mut node_map = NodeMap::new();
 
     let Some(area) = top.areas.get(area_id) else {
         return (graph, source_node);
@@ -1143,7 +1150,7 @@ fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
 
     // Process each Router-LSA to build graph nodes and edges.
     for (adv_router, originated, lsa_data) in &router_lsas {
-        let node_id = node_map.get(*adv_router);
+        let node_id = top.lsp_map.get(*adv_router);
 
         if *originated {
             source_node = Some(node_id);
@@ -1161,7 +1168,7 @@ fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                 match link.link_type {
                     1 | 4 => {
                         // Point-to-Point or Virtual Link: link_id = neighbor router ID.
-                        let to_id = node_map.get(link.link_id);
+                        let to_id = top.lsp_map.get(link.link_id);
                         node.olinks.push(spf::Link {
                             from: node_id,
                             to: to_id,
@@ -1174,7 +1181,7 @@ fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                         if let Some(attached) = network_lsas.get(&link.link_id) {
                             for attached_router in attached {
                                 if *attached_router != *adv_router {
-                                    let to_id = node_map.get(*attached_router);
+                                    let to_id = top.lsp_map.get(*attached_router);
                                     node.olinks.push(spf::Link {
                                         from: node_id,
                                         to: to_id,
@@ -1197,7 +1204,155 @@ fn graph(top: &Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
     (graph, source_node)
 }
 
-fn perform_spf_calculation(top: &Ospf, area_id: Ipv4Addr) {
+#[derive(Debug, PartialEq)]
+pub struct SpfRoute {
+    pub metric: u32,
+    pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
+    pub sid: Option<u32>,
+    // pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpfNexthop {
+    pub ifindex: u32,
+    pub adjacency: bool,
+    pub router_id: Option<Ipv4Addr>,
+}
+
+fn build_rib_from_spf(
+    top: &Ospf,
+    area_id: Ipv4Addr,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> PrefixMap<Ipv4Net, SpfRoute> {
+    let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
+
+    let Some(area) = top.areas.get(area_id) else {
+        return rib;
+    };
+
+    // Process each node in the SPF result
+    for (node, nhops) in spf_result {
+        // Skip self node
+        if *node == source {
+            continue;
+        }
+
+        // Resolve node to system ID
+        let Some(router_id) = top.lsp_map.resolve(*node) else {
+            continue;
+        };
+
+        // Build nexthop map
+        let mut spf_nhops = BTreeMap::new();
+        for p in &nhops.nexthops {
+            // p.is_empty() means myself
+            if !p.is_empty() {
+                if let Some(nhop_id) = top.lsp_map.resolve(p[0]) {
+                    // Find nhop from links
+                    for (ifindex, link) in top.links.iter() {
+                        if let Some(nbr) = link.nbrs.get(nhop_id) {
+                            let addr = nbr.ident.prefix.addr();
+                            let nhop = SpfNexthop {
+                                ifindex: *ifindex,
+                                adjacency: p[0] == *node,
+                                router_id: Some(*nhop_id),
+                            };
+                            spf_nhops.insert(addr, nhop);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process reachability entries for this node.
+        if let Some(lsa) = area
+            .lsdb
+            .lookup_by_id(OspfLsType::Router, *router_id, *router_id)
+        {
+            if let OspfLsp::Router(ref router_lsa) = lsa.lsp {
+                for link in &router_lsa.links {
+                    match link.link_type {
+                        2 => {
+                            // Transit Network.
+                            // TODO: Lookup Network LSA, create a prefix from it.
+                        }
+                        3 => {
+                            // Stub Network.
+                            // TODO: create prefic from link.link_id, link.link_data.
+                            println!("Stub: {}/{}", link.link_id, link.link_data);
+                        }
+                        _ => {
+                            // Just ignore.
+                        }
+                    }
+                }
+            }
+        }
+
+        // if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) {
+        //     for entry in entries.iter() {
+        //         let sid = if let Some(prefix_sid) = entry.prefix_sid() {
+        //             match prefix_sid.sid {
+        //                 // Prefix SID label.
+        //                 SidLabelValue::Index(index) => {
+        //                     if let Some(block) = top.label_map.get(&level).get(&sys_id) {
+        //                         Some(block.global.start + index)
+        //                     } else {
+        //                         None
+        //                     }
+        //                 }
+        //                 SidLabelValue::Label(label) => Some(label),
+        //             }
+        //         } else {
+        //             None
+        //         };
+
+        //         let prefix_sid = if let Some(prefix_sid) = entry.prefix_sid()
+        //             && let Some(block) = top.label_map.get(&level).get(&sys_id)
+        //         {
+        //             Some((prefix_sid.sid.clone(), block.clone()))
+        //         } else {
+        //             None
+        //         };
+
+        //         let route = SpfRoute {
+        //             metric: nhops.cost + entry.metric,
+        //             nhops: spf_nhops.clone(),
+        //             sid,
+        //             prefix_sid,
+        //         };
+
+        //         if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
+        //             if curr.metric > route.metric {
+        //                 // New route has better metric, replace the existing one
+        //                 *curr = route;
+        //             } else if curr.metric == route.metric {
+        //                 // Equal metric - merge nexthops for ECMP
+        //                 for (addr, nhop) in route.nhops {
+        //                     curr.nhops.insert(addr, nhop);
+        //                 }
+        //                 // Update SID if current doesn't have one but new route does
+        //                 if curr.sid.is_none() && route.sid.is_some() {
+        //                     curr.sid = route.sid;
+        //                 }
+        //                 if curr.prefix_sid.is_none() && route.prefix_sid.is_some() {
+        //                     curr.prefix_sid = route.prefix_sid;
+        //                 }
+        //             }
+        //             // If curr.metric < route.metric, do nothing (keep better route)
+        //         } else {
+        //             // No existing route, insert the new one
+        //             rib.insert(entry.prefix.trunc(), route);
+        //         }
+        //     }
+        // }
+    }
+
+    rib
+}
+
+fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
     let (graph, source_node) = graph(top, area_id);
 
     if let Some(source) = source_node {
@@ -1211,5 +1366,7 @@ fn perform_spf_calculation(top: &Ospf, area_id: Ipv4Addr) {
                 );
             }
         }
+
+        let rib = build_rib_from_spf(top, area_id, source, &spf_result);
     }
 }
