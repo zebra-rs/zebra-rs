@@ -174,6 +174,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf/neighbor/detail", show_ospf_neighbor_detail);
         self.show_add("/show/ip/ospf/database", show_ospf_database);
         self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
+        self.show_add("/show/ip/ospf/route", show_ospf_route);
     }
 }
 
@@ -1176,4 +1177,51 @@ fn show_ospf_database_detail(
     }
 
     Ok(out)
+}
+
+fn show_ospf_route(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+
+    for (prefix, route) in ospf.rib.iter() {
+        let mut shown = false;
+        for (addr, nhop) in route.nhops.iter() {
+            // let sid = if let Some(sid) = route.sid {
+            //     if nhop.adjacency {
+            //         format!(", label {} implicit null", sid)
+            //     } else {
+            //         format!(", label {}", sid)
+            //     }
+            // } else {
+            //     String::from("")
+            // };
+            let sid = String::from("");
+            if !shown {
+                writeln!(
+                    buf,
+                    "{:<20} [{}] via {}, {}{}",
+                    prefix.to_string(),
+                    route.metric,
+                    addr,
+                    ospf.ifname(nhop.ifindex),
+                    sid
+                )?;
+                shown = true;
+            } else {
+                writeln!(
+                    buf,
+                    "                     [{}] via {}, {}{}",
+                    route.metric,
+                    addr,
+                    ospf.ifname(nhop.ifindex),
+                    sid
+                )?;
+            }
+        }
+    }
+
+    Ok(buf)
 }

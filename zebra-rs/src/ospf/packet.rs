@@ -197,7 +197,7 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
     tracing::info!("DB_DESC: Send");
-    tracing::info!("{}", packet);
+    // tracing::info!("{}", packet);
     nbr.ptx
         .send(Message::Send(
             packet,
