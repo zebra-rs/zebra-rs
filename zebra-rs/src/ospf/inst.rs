@@ -1355,8 +1355,9 @@ fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
     if let Some(source) = source_node {
         let start = Instant::now();
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
-        top.spf_duration = Some(start.elapsed());
-        top.spf_last = Some(Instant::now());
+        let end = Instant::now();
+        top.spf_duration = Some(end.duration_since(start));
+        top.spf_last = Some(end);
         // println!("[SPF] area {} nodes: {}", area_id, spf_result.len());
         // for (node_id, path) in &spf_result {
         //     if let Some(node) = graph.get(node_id) {
