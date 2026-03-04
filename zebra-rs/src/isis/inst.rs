@@ -1134,91 +1134,8 @@ pub struct SpfNexthop {
     pub sys_id: Option<IsisSysId>,
 }
 
-/// Generic result for table diff operations
-#[derive(Debug)]
-pub struct TableDiffResult<'a, K, V> {
-    pub only_curr: Vec<(&'a K, &'a V)>,
-    pub only_next: Vec<(&'a K, &'a V)>,
-    pub different: Vec<(&'a K, &'a V, &'a V)>,
-    pub identical: Vec<(&'a K, &'a V)>,
-}
-
-/// Generic table diff implementation
-fn table_diff_impl<'a, K, V, I>(curr_iter: I, next_iter: I) -> TableDiffResult<'a, K, V>
-where
-    K: Ord,
-    V: PartialEq,
-    I: Iterator<Item = (&'a K, &'a V)>,
-{
-    let mut res = TableDiffResult {
-        only_curr: vec![],
-        only_next: vec![],
-        different: vec![],
-        identical: vec![],
-    };
-
-    let mut curr_iter = curr_iter.peekable();
-    let mut next_iter = next_iter.peekable();
-
-    while let (Some(&(curr_key, curr_value)), Some(&(next_key, next_value))) =
-        (curr_iter.peek(), next_iter.peek())
-    {
-        match curr_key.cmp(next_key) {
-            std::cmp::Ordering::Less => {
-                // curr_key is only in curr
-                res.only_curr.push((curr_key, curr_value));
-                curr_iter.next();
-            }
-            std::cmp::Ordering::Greater => {
-                // next_key is only in next
-                res.only_next.push((next_key, next_value));
-                next_iter.next();
-            }
-            std::cmp::Ordering::Equal => {
-                // keys are equal; compare values
-                if curr_value == next_value {
-                    res.identical.push((curr_key, curr_value));
-                } else {
-                    res.different.push((curr_key, curr_value, next_value));
-                }
-                curr_iter.next();
-                next_iter.next();
-            }
-        }
-    }
-
-    // Deal with the rest of curr
-    for (key, value) in curr_iter {
-        res.only_curr.push((key, value));
-    }
-
-    // Deal with the rest of next
-    for (key, value) in next_iter {
-        res.only_next.push((key, value));
-    }
-
-    res
-}
-
-/// Type aliases for backward compatibility
-pub type DiffResult<'a> = TableDiffResult<'a, Ipv4Net, SpfRoute>;
-pub type DiffIlmResult<'a> = TableDiffResult<'a, u32, SpfIlm>;
-
-/// Convenience function for SPF route diffs (backward compatibility)
-pub fn diff<'a>(
-    curr: &'a PrefixMap<Ipv4Net, SpfRoute>,
-    next: &'a PrefixMap<Ipv4Net, SpfRoute>,
-) -> DiffResult<'a> {
-    table_diff_impl(curr.iter(), next.iter())
-}
-
-/// Convenience function for ILM diffs (backward compatibility)
-pub fn diff_ilm<'a>(
-    curr: &'a BTreeMap<u32, SpfIlm>,
-    next: &'a BTreeMap<u32, SpfIlm>,
-) -> DiffIlmResult<'a> {
-    table_diff_impl(curr.iter(), next.iter())
-}
+pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
+pub type DiffIlmResult<'a> = spf::TableDiffResult<'a, u32, SpfIlm>;
 
 fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
     let mut mpls = vec![];
@@ -1568,14 +1485,14 @@ fn apply_routing_updates(
 ) {
     // Update MPLS ILM
     if top.config.distribute.rib {
-        let ilm_diff = diff_ilm(top.ilm.get(&level), &ilm);
-        diff_ilm_apply(top.rib_tx.clone(), &ilm_diff);
+        let diff = spf::table_diff(top.ilm.get(&level).iter(), ilm.iter());
+        diff_ilm_apply(top.rib_tx.clone(), &diff);
     }
     *top.ilm.get_mut(&level) = ilm;
 
     // Update RIB
     if top.config.distribute.rib {
-        let diff = diff(top.rib.get(&level), &rib);
+        let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
         diff_apply(top.rib_tx.clone(), &diff);
     }
     *top.rib.get_mut(&level) = rib;
