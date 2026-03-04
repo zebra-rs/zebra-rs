@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ipnet::{IpNet, Ipv4Net};
+use isis_packet::SidLabelValue;
 use netlink_packet_route::link::LinkFlags;
 use ospf_packet::*;
 use prefix_trie::PrefixMap;
@@ -13,6 +14,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
+use crate::isis::srmpls::LabelConfig;
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::api::RibRx;
@@ -1297,7 +1299,7 @@ pub struct SpfRoute {
     pub metric: u32,
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
     pub sid: Option<u32>,
-    // pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+    pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1366,6 +1368,7 @@ fn build_rib_from_spf(
                         metric: nhops.cost,
                         nhops: spf_nhops.clone(),
                         sid: None,
+                        prefix_sid: None,
                     };
                     let insert = |rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
                                   prefix: Ipv4Net,
