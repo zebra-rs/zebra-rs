@@ -1370,14 +1370,6 @@ fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
 
 pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
 
-/// Convenience function for SPF route diffs (backward compatibility)
-pub fn diff<'a>(
-    curr: &'a PrefixMap<Ipv4Net, SpfRoute>,
-    next: &'a PrefixMap<Ipv4Net, SpfRoute>,
-) -> DiffResult<'a> {
-    spf::table_diff(curr.iter(), next.iter())
-}
-
 fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
     let mut mpls = vec![];
     if let Some(sid) = route.sid {
@@ -1452,7 +1444,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
 /// Apply routing updates to RIB subsystem
 fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     // Update RIB
-    let diff = diff(&top.rib, &rib);
+    let diff = spf::table_diff(top.rib.iter(), rib.iter());
     diff_apply(top.rib_tx.clone(), &diff);
 
     top.rib = rib;

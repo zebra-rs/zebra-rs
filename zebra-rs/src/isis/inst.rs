@@ -1137,22 +1137,6 @@ pub struct SpfNexthop {
 pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
 pub type DiffIlmResult<'a> = spf::TableDiffResult<'a, u32, SpfIlm>;
 
-/// Convenience function for SPF route diffs (backward compatibility)
-pub fn diff<'a>(
-    curr: &'a PrefixMap<Ipv4Net, SpfRoute>,
-    next: &'a PrefixMap<Ipv4Net, SpfRoute>,
-) -> DiffResult<'a> {
-    spf::table_diff(curr.iter(), next.iter())
-}
-
-/// Convenience function for ILM diffs (backward compatibility)
-pub fn diff_ilm<'a>(
-    curr: &'a BTreeMap<u32, SpfIlm>,
-    next: &'a BTreeMap<u32, SpfIlm>,
-) -> DiffIlmResult<'a> {
-    spf::table_diff(curr.iter(), next.iter())
-}
-
 fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
     let mut mpls = vec![];
     if let Some(sid) = route.sid {
@@ -1501,14 +1485,14 @@ fn apply_routing_updates(
 ) {
     // Update MPLS ILM
     if top.config.distribute.rib {
-        let ilm_diff = diff_ilm(top.ilm.get(&level), &ilm);
-        diff_ilm_apply(top.rib_tx.clone(), &ilm_diff);
+        let diff = spf::table_diff(top.ilm.get(&level).iter(), ilm.iter());
+        diff_ilm_apply(top.rib_tx.clone(), &diff);
     }
     *top.ilm.get_mut(&level) = ilm;
 
     // Update RIB
     if top.config.distribute.rib {
-        let diff = diff(top.rib.get(&level), &rib);
+        let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
         diff_apply(top.rib_tx.clone(), &diff);
     }
     *top.rib.get_mut(&level) = rib;
