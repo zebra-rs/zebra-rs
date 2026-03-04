@@ -13,9 +13,9 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
-use crate::rib::Link;
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
+use crate::rib::{self, Link, RibType};
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Context,
@@ -46,6 +46,7 @@ pub struct Ospf {
     pub ptx: UnboundedSender<Message>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
+    pub rib_tx: UnboundedSender<rib::Message>,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink>,
     pub areas: OspfAreaMap,
@@ -56,6 +57,8 @@ pub struct Ospf {
     pub router_id: Ipv4Addr,
     pub lsdb_as: Lsdb,
     pub lsp_map: LspMap,
+    pub spf_result: Option<BTreeMap<usize, Path>>,
+    pub rib: PrefixMap<Ipv4Net, SpfRoute>,
     pub tracing: OspfTracing,
 }
 
@@ -133,6 +136,12 @@ impl Ospf {
         count
     }
 
+    pub fn ifname(&self, ifindex: u32) -> String {
+        self.links
+            .get(&ifindex)
+            .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
+    }
+
     pub fn new(ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
         let chan = RibRxChannel::new();
         let msg = crate::rib::Message::Subscribe {
@@ -152,6 +161,7 @@ impl Ospf {
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
             rib_rx: chan.rx,
+            rib_tx,
             links: BTreeMap::new(),
             areas: OspfAreaMap::new(),
             table: PrefixMap::new(),
@@ -160,6 +170,8 @@ impl Ospf {
             router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
             lsdb_as: Lsdb::new(),
             lsp_map: LspMap::default(),
+            spf_result: None,
+            rib: PrefixMap::new(),
             tracing: OspfTracing::default(),
             sock,
         };
@@ -1100,7 +1112,7 @@ pub enum Message {
     SpfCalc(Ipv4Addr),
 }
 
-use crate::spf;
+use crate::spf::{self, Path};
 
 #[derive(Default)]
 pub struct LspMap {
@@ -1251,14 +1263,16 @@ fn build_rib_from_spf(
                 if let Some(nhop_id) = top.lsp_map.resolve(p[0]) {
                     // Find nhop from links
                     for (ifindex, link) in top.links.iter() {
-                        if let Some(nbr) = link.nbrs.get(nhop_id) {
-                            let addr = nbr.ident.prefix.addr();
-                            let nhop = SpfNexthop {
-                                ifindex: *ifindex,
-                                adjacency: p[0] == *node,
-                                router_id: Some(*nhop_id),
-                            };
-                            spf_nhops.insert(addr, nhop);
+                        for (_, nbr) in link.nbrs.iter() {
+                            if *nhop_id == nbr.ident.router_id {
+                                let addr = nbr.ident.prefix.addr();
+                                let nhop = SpfNexthop {
+                                    ifindex: *ifindex,
+                                    adjacency: p[0] == *node,
+                                    router_id: Some(*nhop_id),
+                                };
+                                spf_nhops.insert(addr, nhop);
+                            }
                         }
                     }
                 }
@@ -1273,7 +1287,7 @@ fn build_rib_from_spf(
             if let OspfLsp::Router(ref router_lsa) = lsa.lsp {
                 for link in &router_lsa.links {
                     let route = |prefix: Ipv4Net| SpfRoute {
-                        metric: nhops.cost + link.tos_0_metric as u32,
+                        metric: nhops.cost,
                         nhops: spf_nhops.clone(),
                         sid: None,
                     };
@@ -1295,7 +1309,7 @@ fn build_rib_from_spf(
                     match link.link_type {
                         2 => {
                             // Transit Network: look up Network-LSA to get the
-                            // network prefix (link_id = DR's interface IP).
+                            // network prefix (link_id = dr's interface ip).
                             for ((_ls_id, _adv), nlsa) in area.lsdb.tables.network.iter() {
                                 if let OspfLsp::Network(ref net) = nlsa.data.lsp {
                                     if nlsa.data.h.ls_id == link.link_id {
@@ -1325,64 +1339,6 @@ fn build_rib_from_spf(
                 }
             }
         }
-
-        // if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) {
-        //     for entry in entries.iter() {
-        //         let sid = if let Some(prefix_sid) = entry.prefix_sid() {
-        //             match prefix_sid.sid {
-        //                 // Prefix SID label.
-        //                 SidLabelValue::Index(index) => {
-        //                     if let Some(block) = top.label_map.get(&level).get(&sys_id) {
-        //                         Some(block.global.start + index)
-        //                     } else {
-        //                         None
-        //                     }
-        //                 }
-        //                 SidLabelValue::Label(label) => Some(label),
-        //             }
-        //         } else {
-        //             None
-        //         };
-
-        //         let prefix_sid = if let Some(prefix_sid) = entry.prefix_sid()
-        //             && let Some(block) = top.label_map.get(&level).get(&sys_id)
-        //         {
-        //             Some((prefix_sid.sid.clone(), block.clone()))
-        //         } else {
-        //             None
-        //         };
-
-        //         let route = SpfRoute {
-        //             metric: nhops.cost + entry.metric,
-        //             nhops: spf_nhops.clone(),
-        //             sid,
-        //             prefix_sid,
-        //         };
-
-        //         if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
-        //             if curr.metric > route.metric {
-        //                 // New route has better metric, replace the existing one
-        //                 *curr = route;
-        //             } else if curr.metric == route.metric {
-        //                 // Equal metric - merge nexthops for ECMP
-        //                 for (addr, nhop) in route.nhops {
-        //                     curr.nhops.insert(addr, nhop);
-        //                 }
-        //                 // Update SID if current doesn't have one but new route does
-        //                 if curr.sid.is_none() && route.sid.is_some() {
-        //                     curr.sid = route.sid;
-        //                 }
-        //                 if curr.prefix_sid.is_none() && route.prefix_sid.is_some() {
-        //                     curr.prefix_sid = route.prefix_sid;
-        //                 }
-        //             }
-        //             // If curr.metric < route.metric, do nothing (keep better route)
-        //         } else {
-        //             // No existing route, insert the new one
-        //             rib.insert(entry.prefix.trunc(), route);
-        //         }
-        //     }
-        // }
     }
 
     rib
@@ -1393,16 +1349,177 @@ fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
 
     if let Some(source) = source_node {
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
-        println!("[SPF] area {} nodes: {}", area_id, spf_result.len());
-        for (node_id, path) in &spf_result {
-            if let Some(node) = graph.get(node_id) {
-                println!(
-                    "[SPF]   {} cost {} nexthops {:?}",
-                    node.name, path.cost, path.nexthops
-                );
-            }
-        }
+        // println!("[SPF] area {} nodes: {}", area_id, spf_result.len());
+        // for (node_id, path) in &spf_result {
+        //     if let Some(node) = graph.get(node_id) {
+        //         println!(
+        //             "[SPF]   {} cost {} nexthops {:?}",
+        //             node.name, path.cost, path.nexthops
+        //         );
+        //     }
+        // }
 
         let rib = build_rib_from_spf(top, area_id, source, &spf_result);
+
+        // Store the SPF result in OSPF instance.
+        top.spf_result = Some(spf_result);
+
+        apply_routing_updates(top, rib);
     }
+}
+
+/// Generic result for table diff operations
+#[derive(Debug)]
+pub struct TableDiffResult<'a, K, V> {
+    pub only_curr: Vec<(&'a K, &'a V)>,
+    pub only_next: Vec<(&'a K, &'a V)>,
+    pub different: Vec<(&'a K, &'a V, &'a V)>,
+    pub identical: Vec<(&'a K, &'a V)>,
+}
+
+pub type DiffResult<'a> = TableDiffResult<'a, Ipv4Net, SpfRoute>;
+
+/// Convenience function for SPF route diffs (backward compatibility)
+pub fn diff<'a>(
+    curr: &'a PrefixMap<Ipv4Net, SpfRoute>,
+    next: &'a PrefixMap<Ipv4Net, SpfRoute>,
+) -> DiffResult<'a> {
+    table_diff_impl(curr.iter(), next.iter())
+}
+
+/// Generic table diff implementation
+fn table_diff_impl<'a, K, V, I>(curr_iter: I, next_iter: I) -> TableDiffResult<'a, K, V>
+where
+    K: Ord,
+    V: PartialEq,
+    I: Iterator<Item = (&'a K, &'a V)>,
+{
+    let mut res = TableDiffResult {
+        only_curr: vec![],
+        only_next: vec![],
+        different: vec![],
+        identical: vec![],
+    };
+
+    let mut curr_iter = curr_iter.peekable();
+    let mut next_iter = next_iter.peekable();
+
+    while let (Some(&(curr_key, curr_value)), Some(&(next_key, next_value))) =
+        (curr_iter.peek(), next_iter.peek())
+    {
+        match curr_key.cmp(next_key) {
+            std::cmp::Ordering::Less => {
+                // curr_key is only in curr
+                res.only_curr.push((curr_key, curr_value));
+                curr_iter.next();
+            }
+            std::cmp::Ordering::Greater => {
+                // next_key is only in next
+                res.only_next.push((next_key, next_value));
+                next_iter.next();
+            }
+            std::cmp::Ordering::Equal => {
+                // keys are equal; compare values
+                if curr_value == next_value {
+                    res.identical.push((curr_key, curr_value));
+                } else {
+                    res.different.push((curr_key, curr_value, next_value));
+                }
+                curr_iter.next();
+                next_iter.next();
+            }
+        }
+    }
+
+    // Deal with the rest of curr
+    for (key, value) in curr_iter {
+        res.only_curr.push((key, value));
+    }
+
+    // Deal with the rest of next
+    for (key, value) in next_iter {
+        res.only_next.push((key, value));
+    }
+
+    res
+}
+
+fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
+    let mut mpls = vec![];
+    if let Some(sid) = route.sid {
+        mpls.push(if value.adjacency {
+            rib::Label::Implicit(sid)
+        } else {
+            rib::Label::Explicit(sid)
+        });
+    }
+    rib::NexthopUni::from(*key, route.metric, mpls)
+}
+
+fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
+    let mut rib = rib::entry::RibEntry::new(RibType::Ospf);
+    rib.distance = 110;
+    rib.metric = route.metric;
+
+    rib.nexthop = if route.nhops.len() == 1 {
+        if let Some((key, value)) = route.nhops.iter().next() {
+            rib::Nexthop::Uni(nhop_to_nexthop_uni(key, route, value))
+        } else {
+            rib::Nexthop::default()
+        }
+    } else {
+        let mut multi = rib::NexthopMulti::default();
+        multi.metric = route.metric;
+        for (key, value) in route.nhops.iter() {
+            multi.nexthops.push(nhop_to_nexthop_uni(key, route, value));
+        }
+        rib::Nexthop::Multi(multi)
+    };
+
+    rib
+}
+
+pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
+    // Delete.
+    for (prefix, route) in diff.only_curr.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry(route);
+            let msg = rib::Message::Ipv4Del {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    // Add (changed).
+    for (prefix, _, route) in diff.different.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry(route);
+            let msg = rib::Message::Ipv4Add {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    // Add (new).
+    for (prefix, route) in diff.only_next.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry(route);
+            let msg = rib::Message::Ipv4Add {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+}
+
+/// Apply routing updates to RIB subsystem
+fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
+    // Update RIB
+    let diff = diff(&top.rib, &rib);
+    diff_apply(top.rib_tx.clone(), &diff);
+
+    top.rib = rib;
 }
