@@ -885,6 +885,31 @@ impl Ospf {
         link.ident.prefix = *prefix;
     }
 
+    fn addr_del(&mut self, addr: LinkAddr) {
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+        let IpNet::V4(prefix) = &addr.addr else {
+            return;
+        };
+        link.addr.retain(|a| a.prefix != *prefix);
+
+        // Re-evaluate enable state after address removal.
+        let (next, next_id) = super::config::link_should_enable(link, &self.table);
+        super::config::apply_link_enable_transition(link, next, next_id);
+    }
+
+    fn link_del(&mut self, link: Link) {
+        let Some(ospf_link) = self.links.get(&link.index) else {
+            return;
+        };
+        if ospf_link.enabled {
+            let area_id = ospf_link.area_id;
+            ospf_link.tx.send(Message::Disable(link.index, area_id));
+        }
+        self.links.remove(&link.index);
+    }
+
     async fn process_recv(
         &mut self,
         packet: Ospfv2Packet,
@@ -1036,8 +1061,14 @@ impl Ospf {
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
+            RibRx::LinkDel(link) => {
+                self.link_del(link);
+            }
             RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
+            }
+            RibRx::AddrDel(addr) => {
+                self.addr_del(addr);
             }
             _ => {
                 //
