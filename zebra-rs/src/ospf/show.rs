@@ -175,6 +175,8 @@ impl Ospf {
         self.show_add("/show/ip/ospf/database", show_ospf_database);
         self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
         self.show_add("/show/ip/ospf/route", show_ospf_route);
+        self.show_add("/show/ip/ospf/spf", show_ospf_spf);
+        self.show_add("/show/ip/ospf/graps", show_ospf_graph);
     }
 }
 
@@ -1237,4 +1239,20 @@ fn show_ospf_route(
     }
 
     Ok(buf)
+}
+
+fn show_ospf_spf(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::new())
+}
+
+fn show_ospf_graph(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::new())
 }
