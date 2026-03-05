@@ -71,7 +71,7 @@ impl Ospf {
 /// Determine whether an OSPF link should be enabled and its area ID.
 /// A link is enabled if either the explicit per-interface enable is set
 /// or the network table matches one of its addresses.
-fn link_should_enable(
+pub(super) fn link_should_enable(
     link: &OspfLink,
     table: &PrefixMap<Ipv4Net, OspfNetworkConfig>,
 ) -> (bool, Ipv4Addr) {
@@ -89,7 +89,7 @@ fn link_should_enable(
     (false, Ipv4Addr::UNSPECIFIED)
 }
 
-fn apply_link_enable_transition(link: &OspfLink, next: bool, next_id: Ipv4Addr) {
+pub(super) fn apply_link_enable_transition(link: &OspfLink, next: bool, next_id: Ipv4Addr) {
     let curr = link.enabled;
     let curr_id = link.area_id;
 
