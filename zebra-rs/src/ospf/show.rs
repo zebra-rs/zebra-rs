@@ -1245,9 +1245,13 @@ fn show_ospf_route(
 fn show_ospf_spf(
     ospf: &Ospf,
     _args: Args,
-    json: bool,
+    _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok(String::new())
+    let mut buf = String::new();
+    if let Some(spf) = &ospf.spf_result {
+        spf::disp_out(&mut buf, spf, false);
+    }
+    Ok(buf)
 }
 
 // JSON structures for OSPF graph.
