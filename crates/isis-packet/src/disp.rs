@@ -3,11 +3,11 @@ use std::fmt::{Display, Formatter, Result};
 use itertools::Itertools;
 
 use crate::{
-    Algo, IsLevel, IsisCsnp, IsisHello, IsisLsp, IsisLspEntry, IsisLspId, IsisNeighborId,
-    IsisP2pHello, IsisPacket, IsisPdu, IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr,
-    IsisTlvHostname, IsisTlvIpv4IfAddr, IsisTlvIpv6GlobalIfAddr, IsisTlvIpv6IfAddr,
-    IsisTlvIpv6TeRouterId, IsisTlvIsNeighbor, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding,
-    IsisTlvProtoSupported, IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
+    IsLevel, IsisCsnp, IsisHello, IsisLsp, IsisLspEntry, IsisLspId, IsisNeighborId, IsisP2pHello,
+    IsisPacket, IsisPdu, IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvHostname,
+    IsisTlvIpv4IfAddr, IsisTlvIpv6GlobalIfAddr, IsisTlvIpv6IfAddr, IsisTlvIpv6TeRouterId,
+    IsisTlvIsNeighbor, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding, IsisTlvProtoSupported,
+    IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
 };
 
 impl Display for IsisPacket {
@@ -390,18 +390,6 @@ impl Display for SidLabelValue {
             SidLabelValue::Index(v) => {
                 write!(f, "{}", v)
             }
-        }
-    }
-}
-
-impl Display for Algo {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        use Algo::*;
-        match self {
-            Spf => write!(f, "SPF(0)"),
-            StrictSpf => write!(f, "StrictSPF(1)"),
-            FlexAlgo(v) => write!(f, "FlexAlgo({})", v),
-            Unknown(v) => write!(f, "Unknown({})", v),
         }
     }
 }
