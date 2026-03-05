@@ -1,6 +1,6 @@
 use std::fmt::Write;
 use std::net::Ipv4Addr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use netlink_packet_route::link::LinkFlags;
 use ospf_packet::*;
@@ -175,6 +175,8 @@ impl Ospf {
         self.show_add("/show/ip/ospf/database", show_ospf_database);
         self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
         self.show_add("/show/ip/ospf/route", show_ospf_route);
+        self.show_add("/show/ip/ospf/spf", show_ospf_spf);
+        self.show_add("/show/ip/ospf/graps", show_ospf_graph);
     }
 }
 
@@ -476,11 +478,24 @@ fn show_ospf_interface(
 }
 
 fn show_ospf(
-    _ospf: &Ospf,
+    ospf: &Ospf,
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok(String::from("show ospf"))
+    let mut buf = String::new();
+    writeln!(buf, " OSPF Routing Process, Router ID: {}", ospf.router_id)?;
+    if let Some(spf_last) = ospf.spf_last {
+        let elapsed = Instant::now().duration_since(spf_last);
+        writeln!(
+            buf,
+            " SPF algorithm last executed {} ago",
+            format_uptime(elapsed)
+        )?;
+    }
+    if let Some(spf_duration) = ospf.spf_duration {
+        writeln!(buf, " Last SPF duration {} usecs", spf_duration.as_micros())?;
+    }
+    Ok(buf)
 }
 
 fn nbr_state_string(
@@ -1224,4 +1239,20 @@ fn show_ospf_route(
     }
 
     Ok(buf)
+}
+
+fn show_ospf_spf(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::new())
+}
+
+fn show_ospf_graph(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok(String::new())
 }
