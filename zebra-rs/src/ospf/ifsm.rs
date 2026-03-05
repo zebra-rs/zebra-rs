@@ -190,7 +190,24 @@ pub fn ospf_ifsm_interface_up(link: &mut OspfLink) -> Option<IfsmState> {
 }
 
 pub fn ospf_ifsm_interface_down(oi: &mut OspfLink) -> Option<IfsmState> {
+    // Kill all neighbors.
+    for nbr in oi.nbrs.values_mut() {
+        super::nfsm::ospf_nfsm_reset_nbr(nbr);
+        nbr.state = super::NfsmState::Down;
+    }
+    oi.nbrs.clear();
+    oi.full_nbr_count = 0;
+
+    // Clear delayed LS Ack list.
+    oi.ls_ack_delayed.clear();
+
+    // Reset DR and BDR.
+    oi.ident.d_router = Ipv4Addr::UNSPECIFIED;
+    oi.ident.bd_router = Ipv4Addr::UNSPECIFIED;
+
+    // Reset multicast memberships.
     oi.multicast_memberships = 0.into();
+
     None
 }
 
