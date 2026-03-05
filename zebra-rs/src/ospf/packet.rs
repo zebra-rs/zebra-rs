@@ -324,6 +324,14 @@ pub fn ospf_db_desc_recv(
     };
 
     // MTU check.
+    if !oi.mtu_ignore && dd.if_mtu > oi.mtu as u16 {
+        tracing::warn!(
+            "DB_DESC: From {}: MTU size is too large ({})",
+            src,
+            dd.if_mtu
+        );
+        return;
+    }
 
     *oi.db_desc_in += 1;
 
