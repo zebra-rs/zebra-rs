@@ -62,6 +62,7 @@ pub struct Ospf {
     pub graph: Option<spf::Graph>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
     pub tracing: OspfTracing,
+    pub segment_routing: super::srmpls::SegmentRoutingMode,
     pub spf_last: Option<Instant>,
     pub spf_duration: Option<Duration>,
 }
@@ -182,6 +183,7 @@ impl Ospf {
             graph: None,
             rib: PrefixMap::new(),
             tracing: OspfTracing::default(),
+            segment_routing: super::srmpls::SegmentRoutingMode::default(),
             spf_last: None,
             spf_duration: None,
             sock,
