@@ -61,6 +61,13 @@ pub struct LinkConfig {
     pub retransmit_interval: Option<u16>,
     pub transmit_delay: Option<u16>,
     pub mtu_ignore: bool,
+    pub prefix_sid: Option<PrefixSid>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PrefixSid {
+    Index(u32),
+    Absolute(u32),
 }
 
 pub struct OspfLink {
