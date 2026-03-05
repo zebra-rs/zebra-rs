@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ipnet::{IpNet, Ipv4Net};
+use netlink_packet_route::link::LinkFlags;
 use ospf_packet::*;
 use prefix_trie::PrefixMap;
 use socket2::Socket;
@@ -73,6 +74,7 @@ pub struct OspfInterface<'a> {
     pub router_id: &'a Ipv4Addr,
     pub ident: &'a Identity,
     pub addr: &'a Vec<OspfAddr>,
+    pub mtu: u32,
     pub db_desc_in: &'a mut usize,
     pub lsdb: &'a mut Lsdb,
     pub lsdb_as: &'a mut Lsdb,
@@ -105,6 +107,7 @@ impl Ospf {
                             router_id: &self.router_id,
                             ident: &link.ident,
                             addr: &link.addr,
+                            mtu: link.mtu,
                             db_desc_in: &mut link.db_desc_in,
                             lsdb: &mut area.lsdb,
                             lsdb_as: &mut self.lsdb_as,
@@ -916,6 +919,31 @@ impl Ospf {
         self.links.remove(&link.index);
     }
 
+    fn link_up(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.link_flags |= LinkFlags::Up | LinkFlags::LowerUp;
+
+        // If OSPF is enabled on this link, bring it up.
+        if link.enabled {
+            self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+        }
+    }
+
+    fn link_down(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.link_flags &= !LinkFlags::LowerUp;
+
+        // If OSPF is enabled on this link, bring it down.
+        if link.enabled {
+            let area_id = link.area_id;
+            self.tx.send(Message::Disable(ifindex, area_id));
+        }
+    }
+
     async fn process_recv(
         &mut self,
         packet: Ospfv2Packet,
@@ -1069,6 +1097,12 @@ impl Ospf {
             }
             RibRx::LinkDel(link) => {
                 self.link_del(link);
+            }
+            RibRx::LinkUp(ifindex) => {
+                self.link_up(ifindex);
+            }
+            RibRx::LinkDown(ifindex) => {
+                self.link_down(ifindex);
             }
             RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
