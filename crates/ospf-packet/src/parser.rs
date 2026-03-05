@@ -5,13 +5,13 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
-use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::error::{ErrorKind, make_error};
+use nom::number::complete::{be_u8, be_u24, be_u64};
 use nom::{Err, IResult};
 use nom_derive::*;
 
 use super::util::{Emit, ParseBe};
-use super::{many0_complete, OspfLsType, OspfType};
+use super::{OspfLsType, OspfType, many0_complete};
 
 // OSPF version.
 const OSPF_VERSION: u8 = 2;
@@ -365,7 +365,7 @@ impl OspfLsaHeader {
 #[derive(Debug, Clone, NomBE)]
 pub struct OspfLsa {
     pub h: OspfLsaHeader,
-    #[nom(Parse = "{ |x| OspfLsp::parse_lsa_with_length(x, h.ls_type, h.length) }")]
+    #[nom(Parse = "{ |x| OspfLsp::parse_lsa_with_length(x, h.ls_type, h.length, h.ls_id) }")]
     pub lsp: OspfLsp,
 }
 
@@ -391,6 +391,9 @@ impl OspfLsa {
             OspfLsp::Summary(lsp) | OspfLsp::SummaryAsbr(lsp) => lsp.emit(buf),
             OspfLsp::AsExternal(lsp) => lsp.emit(buf),
             OspfLsp::NssaAsExternal(lsp) => lsp.emit(buf),
+            OspfLsp::OpaqueAreaRouterInfo(_) => {}
+            OspfLsp::OpaqueAreaExtPrefix(_) => {}
+            OspfLsp::OpaqueAreaExtLink(_) => {}
             OspfLsp::Unknown(lsp) => lsp.emit(buf),
         }
     }
@@ -421,6 +424,9 @@ impl OspfLsa {
             OspfLsp::Summary(lsp) | OspfLsp::SummaryAsbr(lsp) => lsp.lsa_len(),
             OspfLsp::AsExternal(lsp) => lsp.lsa_len(),
             OspfLsp::NssaAsExternal(lsp) => lsp.lsa_len(),
+            OspfLsp::OpaqueAreaRouterInfo(_) => 0,
+            OspfLsp::OpaqueAreaExtPrefix(_) => 0,
+            OspfLsp::OpaqueAreaExtLink(_) => 0,
             OspfLsp::Unknown(lsp) => lsp.lsa_len(),
         };
         let length = lsp_len + LSA_HEADER_LEN;
@@ -463,58 +469,75 @@ fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
     ((c0 as u16) << 8) | (c1 as u16)
 }
 
+/// Selector for OspfLsp parsing that carries both the LS type and opaque type.
+/// For non-opaque LSA types, the opaque_type field is ignored in comparison.
+/// For OpaqueAreaLocal, the opaque_type (first octet of ls_id) is also compared.
+struct LspSelector(OspfLsType, u8);
+
+impl PartialEq for LspSelector {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0 != other.0 {
+            return false;
+        }
+        if self.0 == OspfLsType::OpaqueAreaLocal {
+            return self.1 == other.1;
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, NomBE)]
-#[nom(Selector = "OspfLsType")]
+#[nom(Selector = "LspSelector")]
 pub enum OspfLsp {
-    #[nom(Selector = "OspfLsType::Router")]
+    #[nom(Selector = "LspSelector(OspfLsType::Router, 0)")]
     Router(RouterLsa),
-    #[nom(Selector = "OspfLsType::Network")]
+    #[nom(Selector = "LspSelector(OspfLsType::Network, 0)")]
     Network(NetworkLsa),
-    #[nom(Selector = "OspfLsType::Summary")]
+    #[nom(Selector = "LspSelector(OspfLsType::Summary, 0)")]
     Summary(SummaryLsa),
-    #[nom(Selector = "OspfLsType::SummaryAsbr")]
+    #[nom(Selector = "LspSelector(OspfLsType::SummaryAsbr, 0)")]
     SummaryAsbr(SummaryLsa),
-    #[nom(Selector = "OspfLsType::AsExternal")]
+    #[nom(Selector = "LspSelector(OspfLsType::AsExternal, 0)")]
     AsExternal(AsExternalLsa),
-    #[nom(Selector = "OspfLsType::NssaAsExternal")]
+    #[nom(Selector = "LspSelector(OspfLsType::NssaAsExternal, 0)")]
     NssaAsExternal(NssaAsExternalLsa),
-    // OpaqueLink(OpaqueLinkLsa),
-    // OpaqueArea(OpaqueAreaLsa),
-    // OpaqueAs(OpaqueAsLsa),
+    #[nom(Selector = "LspSelector(OspfLsType::OpaqueAreaLocal, 4)")]
+    OpaqueAreaRouterInfo(RouterInfoLsa),
+    #[nom(Selector = "LspSelector(OspfLsType::OpaqueAreaLocal, 7)")]
+    OpaqueAreaExtPrefix(ExtPrefixLsa),
+    #[nom(Selector = "LspSelector(OspfLsType::OpaqueAreaLocal, 8)")]
+    OpaqueAreaExtLink(ExtLinkLsa),
     #[nom(Selector = "_")]
     Unknown(UnknownLsa),
 }
 
 impl OspfLsp {
-    pub fn parse_lsa(input: &[u8], typ: OspfLsType) -> IResult<&[u8], Self> {
-        OspfLsp::parse_be(input, typ)
-    }
-
     pub fn parse_lsa_with_length(
         input: &[u8],
         typ: OspfLsType,
         total_length: u16,
+        ls_id: Ipv4Addr,
     ) -> IResult<&[u8], Self> {
         use nom::bytes::complete::take;
 
-        // LSA header is 20 bytes, so payload length is total_length - 20
         let payload_length = total_length.saturating_sub(20) as usize;
-
-        // Take exactly payload_length bytes from input
         let (remaining_input, payload_input) = take(payload_length)(input)?;
 
-        // Try to parse the payload within the exact byte boundary
-        match OspfLsp::parse_be(payload_input, typ) {
+        let opaque_type = if typ == OspfLsType::OpaqueAreaLocal {
+            ls_id.octets()[0]
+        } else {
+            0
+        };
+        let selector = LspSelector(typ, opaque_type);
+
+        match OspfLsp::parse_be(payload_input, selector) {
             Ok((_, parsed_payload)) => Ok((remaining_input, parsed_payload)),
-            Err(_) => {
-                // If parsing fails, treat it as unknown LSA
-                Ok((
-                    remaining_input,
-                    OspfLsp::Unknown(UnknownLsa {
-                        data: payload_input.to_vec(),
-                    }),
-                ))
-            }
+            Err(_) => Ok((
+                remaining_input,
+                OspfLsp::Unknown(UnknownLsa {
+                    data: payload_input.to_vec(),
+                }),
+            )),
         }
     }
 }
@@ -769,6 +792,39 @@ impl NssaAsExternalLsa {
             tos.emit(buf);
         }
     }
+}
+
+#[repr(u8)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum OpaqueLsaType {
+    RouterInfo = 4,
+    ExtPrefix = 7,
+    ExtLink = 8,
+}
+
+impl From<OpaqueLsaType> for u8 {
+    fn from(typ: OpaqueLsaType) -> u8 {
+        match typ {
+            OpaqueLsaType::RouterInfo => 4,
+            OpaqueLsaType::ExtPrefix => 7,
+            OpaqueLsaType::ExtLink => 8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, NomBE)]
+pub struct RouterInfoLsa {
+    val: u16,
+}
+
+#[derive(Debug, Clone, NomBE)]
+pub struct ExtPrefixLsa {
+    val: u16,
+}
+
+#[derive(Debug, Clone, NomBE)]
+pub struct ExtLinkLsa {
+    val: u16,
 }
 
 #[derive(Debug, Clone, NomBE)]
