@@ -63,6 +63,7 @@ impl Ospf {
             "/interface/retransmit-interval",
             config_ospf_interface_retransmit_interval,
         );
+        self.ospf_add("/interface/mtu-ignore", config_ospf_interface_mtu_ignore);
         self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
     }
@@ -240,6 +241,20 @@ fn config_ospf_interface_retransmit_interval(
         link.config.retransmit_interval = Some(retransmit_interval);
     } else {
         link.config.retransmit_interval = None;
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_mtu_ignore(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let mtu_ignore = args.boolean()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() && mtu_ignore {
+        link.config.mtu_ignore = true;
+    } else {
+        link.config.mtu_ignore = false;
     }
 
     Some(())
