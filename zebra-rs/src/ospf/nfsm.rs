@@ -464,11 +464,12 @@ pub fn ospf_nfsm_oneway_received(
 pub fn ospf_nfsm_kill_nbr(
     _oi: &mut OspfInterface,
     nbr: &mut Neighbor,
-    oident: &Identity,
+    _oident: &Identity,
 ) -> Option<NfsmState> {
-    // ospf_nfsm_change_state(nbr, NfsmState::Down, oident);
+    // Reset neighbor state (clear lists and timers).
+    ospf_nfsm_reset_nbr(nbr);
 
-    None
+    Some(NfsmState::Down)
 }
 
 pub fn ospf_nfsm_inactivity_timer(
@@ -556,6 +557,12 @@ pub fn ospf_nfsm(
     // Determine the next state by prioritizing the computed state over the
     // FSM-provided next state.
     let next_state = fsm_func(link, nbr, oident).or(fsm_next_state);
+
+    // When event is KillNbr or InactivityTimer, the neighbor is being
+    // removed. Skip state change and timer set — the caller will delete it.
+    if matches!(event, NfsmEvent::KillNbr | NfsmEvent::InactivityTimer) {
+        return;
+    }
 
     // If a state transition occurs, update the state.
     if let Some(new_state) = next_state {

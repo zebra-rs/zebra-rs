@@ -141,6 +141,9 @@ module config {
             ext:dynamic "rib:interface";
             type string;
           }
+          leaf enable {
+            type boolean;
+          }
           leaf priority {
             type uint8;
           }
