@@ -159,6 +159,20 @@ module config {
           leaf mtu-ignore {
             type boolean;
           }
+          container prefix-sid {
+            leaf index {
+              type uint32;
+            }
+            leaf absolute {
+              type uint32;
+            }
+          }
+        }
+        leaf segment-routing {
+          type enumeration {
+            enum mpls;
+            enum srv6;
+          }
         }
         container tracing {
           leaf all {

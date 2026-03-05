@@ -64,6 +64,15 @@ impl Ospf {
             config_ospf_interface_retransmit_interval,
         );
         self.ospf_add("/interface/mtu-ignore", config_ospf_interface_mtu_ignore);
+        self.ospf_add(
+            "/interface/prefix-sid/index",
+            config_ospf_interface_prefix_sid_index,
+        );
+        self.ospf_add(
+            "/interface/prefix-sid/absolute",
+            config_ospf_interface_prefix_sid_absolute,
+        );
+        self.ospf_add("/segment-routing", config_ospf_segment_routing);
         self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
     }
@@ -255,6 +264,59 @@ fn config_ospf_interface_mtu_ignore(ospf: &mut Ospf, mut args: Args, op: ConfigO
         link.config.mtu_ignore = true;
     } else {
         link.config.mtu_ignore = false;
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_prefix_sid_index(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let index = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.prefix_sid = Some(super::link::PrefixSid::Index(index));
+    } else {
+        link.config.prefix_sid = None;
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_prefix_sid_absolute(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let absolute = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.prefix_sid = Some(super::link::PrefixSid::Absolute(absolute));
+    } else {
+        link.config.prefix_sid = None;
+    }
+
+    Some(())
+}
+
+fn config_ospf_segment_routing(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let mode = args.string()?;
+
+    use super::srmpls::SegmentRoutingMode;
+    if op.is_set() {
+        ospf.segment_routing = match mode.as_str() {
+            "mpls" => SegmentRoutingMode::Mpls,
+            "srv6" => SegmentRoutingMode::Srv6,
+            _ => SegmentRoutingMode::None,
+        };
+    } else {
+        ospf.segment_routing = SegmentRoutingMode::None;
     }
 
     Some(())
