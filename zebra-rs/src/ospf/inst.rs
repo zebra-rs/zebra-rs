@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ipnet::{IpNet, Ipv4Net};
 use ospf_packet::*;
@@ -60,6 +61,8 @@ pub struct Ospf {
     pub spf_result: Option<BTreeMap<usize, Path>>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
     pub tracing: OspfTracing,
+    pub spf_last: Option<Instant>,
+    pub spf_duration: Option<Duration>,
 }
 
 // OSPF inteface structure which points out upper layer struct members.
@@ -173,6 +176,8 @@ impl Ospf {
             spf_result: None,
             rib: PrefixMap::new(),
             tracing: OspfTracing::default(),
+            spf_last: None,
+            spf_duration: None,
             sock,
         };
         ospf.callback_build();
@@ -1348,7 +1353,11 @@ fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
     let (graph, source_node) = graph(top, area_id);
 
     if let Some(source) = source_node {
+        let start = Instant::now();
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+        let end = Instant::now();
+        top.spf_duration = Some(end.duration_since(start));
+        top.spf_last = Some(end);
         // println!("[SPF] area {} nodes: {}", area_id, spf_result.len());
         // for (node_id, path) in &spf_result {
         //     if let Some(node) = graph.get(node_id) {
