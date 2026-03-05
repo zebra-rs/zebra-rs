@@ -50,6 +50,8 @@ impl RibRxChannel {
 pub enum RibRx {
     LinkAdd(Link),
     LinkDel(Link),
+    LinkUp(u32),
+    LinkDown(u32),
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
     RouterIdUpdate(Ipv4Addr),
@@ -61,6 +63,18 @@ impl Rib {
         for tx in self.redists.iter() {
             let link = RibRx::LinkAdd(link.clone());
             let _ = tx.send(link);
+        }
+    }
+
+    pub fn api_link_up(&self, ifindex: u32) {
+        for tx in self.redists.iter() {
+            let _ = tx.send(RibRx::LinkUp(ifindex));
+        }
+    }
+
+    pub fn api_link_down(&self, ifindex: u32) {
+        for tx in self.redists.iter() {
+            let _ = tx.send(RibRx::LinkDown(ifindex));
         }
     }
 
