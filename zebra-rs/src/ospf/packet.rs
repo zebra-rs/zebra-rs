@@ -28,6 +28,7 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     hello.netmask = addr.prefix.netmask();
     hello.hello_interval = oi.hello_interval();
     hello.options.set_external(true);
+    hello.options.set_o(true);
     hello.priority = oi.priority();
     hello.router_dead_interval = oi.dead_interval();
     for (_, nbr) in oi.nbrs.iter() {
@@ -192,6 +193,7 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
     dd.flags = nbr.dd.flags;
     dd.seqnum = nbr.dd.seqnum;
     dd.options.set_external(true);
+    dd.options.set_o(true);
 
     ospf_packet_db_desc_set(nbr, &mut dd);
 

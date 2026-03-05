@@ -144,6 +144,9 @@ module config {
           leaf enable {
             type boolean;
           }
+          leaf area {
+            type uint8;
+          }
           leaf priority {
             type uint8;
           }
