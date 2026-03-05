@@ -7,11 +7,12 @@ use nom::number::complete::{be_u8, be_u16, be_u24};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use serde::{Deserialize, Serialize};
+use sr_packet::Algo;
 
 use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
 use crate::{
-    Algo, IPV4_ADDR_LEN, IPV6_ADDR_LEN, IsisNeighborId, IsisSysId, IsisTlv, IsisTlvType,
-    SidLabelValue, many0_complete,
+    IPV4_ADDR_LEN, IPV6_ADDR_LEN, IsisNeighborId, IsisSysId, IsisTlv, IsisTlvType, SidLabelValue,
+    many0_complete,
 };
 
 use super::{Behavior, IsisCodeLen, IsisNeighCode, IsisSub2Tlv, IsisSubTlvUnknown};
