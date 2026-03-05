@@ -19,7 +19,9 @@ impl Rib {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        // println!("link down: {}", link.name);
+
+        // Notify protocol daemons.
+        self.api_link_down(ifindex);
 
         // Remove connected route.
         for addr4 in link.addr4.iter() {
@@ -107,7 +109,9 @@ impl Rib {
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
-        // println!("LinkUp {} ipv4 addr count {}", link.name, link.addr4.len());
+
+        // Notify protocol daemons.
+        self.api_link_up(ifindex);
 
         // Add connected IPv4 routes when link comes up
         for addr4 in link.addr4.iter() {
