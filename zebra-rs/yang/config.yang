@@ -156,6 +156,9 @@ module config {
           leaf retransmit-interval {
             type uint16;
           }
+          leaf mtu-ignore {
+            type boolean;
+          }
         }
         container tracing {
           leaf all {
