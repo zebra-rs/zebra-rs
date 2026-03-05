@@ -187,7 +187,7 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 
     tracing::info!("DB_DESC: send {:?}", nbr.dd.flags);
 
-    dd.if_mtu = 1500;
+    dd.if_mtu = link.mtu as u16;
 
     dd.flags = nbr.dd.flags;
     dd.seqnum = nbr.dd.seqnum;
