@@ -101,6 +101,8 @@ struct OspfAreaDatabaseJson {
     area_id: String,
     router_lsas: Vec<OspfLsaSummaryJson>,
     network_lsas: Vec<OspfLsaSummaryJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    opaque_area_lsas: Vec<OspfLsaSummaryJson>,
 }
 
 #[derive(Serialize)]
@@ -887,10 +889,24 @@ fn show_ospf_database(
                     link_count: None,
                 });
             }
+            let mut opaque_area_lsas = Vec::new();
+            for ((lsa_id, adv_router), lsa) in
+                area.lsdb.tables.get(&OspfLsType::OpaqueAreaLocal).iter()
+            {
+                opaque_area_lsas.push(OspfLsaSummaryJson {
+                    link_id: lsa_id.to_string(),
+                    adv_router: adv_router.to_string(),
+                    age: lsa.current_age(),
+                    seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
+                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    link_count: None,
+                });
+            }
             areas.push(OspfAreaDatabaseJson {
                 area_id: area.id.to_string(),
                 router_lsas,
                 network_lsas,
+                opaque_area_lsas,
             });
         }
         let db = OspfDatabaseJson {
@@ -958,6 +974,29 @@ fn show_ospf_database(
                 lsa.data.h.ls_seq_number,
                 lsa.data.h.ls_checksum,
             );
+        }
+
+        let opaque_table = area.lsdb.tables.get(&OspfLsType::OpaqueAreaLocal);
+        if !opaque_table.is_empty() {
+            writeln!(out)?;
+            writeln!(
+                out,
+                "                Area-Local Opaque-LSA (Area {})",
+                area.id
+            )?;
+            writeln!(out)?;
+            writeln!(out, "Opaque-Type/Id  ADV Router      Age  Seq#       CkSum")?;
+            for ((lsa_id, adv_router), lsa) in opaque_table.iter() {
+                writeln!(
+                    out,
+                    "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
+                    lsa_id,
+                    adv_router,
+                    lsa.current_age(),
+                    lsa.data.h.ls_seq_number,
+                    lsa.data.h.ls_checksum,
+                );
+            }
         }
     }
 

@@ -34,6 +34,7 @@ pub struct LsTypes<T> {
     pub summary: T,
     pub summary_asbr: T,
     pub as_external: T,
+    pub opaque_area: T,
     pub unknown: T,
 }
 
@@ -45,6 +46,7 @@ impl<T> LsTypes<T> {
             OspfLsType::Summary => &self.summary,
             OspfLsType::SummaryAsbr => &self.summary_asbr,
             OspfLsType::AsExternal => &self.as_external,
+            OspfLsType::OpaqueAreaLocal => &self.opaque_area,
             _ => &self.unknown,
         }
     }
@@ -56,6 +58,7 @@ impl<T> LsTypes<T> {
             OspfLsType::Summary => &mut self.summary,
             OspfLsType::SummaryAsbr => &mut self.summary_asbr,
             OspfLsType::AsExternal => &mut self.as_external,
+            OspfLsType::OpaqueAreaLocal => &mut self.opaque_area,
             _ => &mut self.unknown,
         }
     }
@@ -148,7 +151,8 @@ impl Lsdb {
         use OspfLsType::*;
         let ls_type = ospf_lsa.h.ls_type;
         match ls_type {
-            Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal => {
+            Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal
+            | OpaqueAreaLocal => {
                 ospf_lsa.update();
                 let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
                 let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
