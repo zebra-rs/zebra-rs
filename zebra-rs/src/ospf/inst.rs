@@ -82,7 +82,6 @@ pub struct OspfInterface<'a> {
     pub area_type: super::area::AreaType,
     pub if_state: super::ifsm::IfsmState,
     pub exchange_loading_count: usize,
-    pub mtu: u32,
     pub mtu_ignore: bool,
     pub tracing: &'a OspfTracing,
 }
@@ -115,7 +114,6 @@ impl Ospf {
                             area_type,
                             if_state,
                             exchange_loading_count,
-                            mtu: link.mtu,
                             mtu_ignore: link.config.mtu_ignore,
                             tracing: &self.tracing,
                         },
