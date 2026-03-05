@@ -54,6 +54,7 @@ pub struct OspfMulticastMembership {
 
 #[derive(Default)]
 pub struct LinkConfig {
+    pub enable: bool,
     pub priority: Option<u8>,
     pub hello_interval: Option<u16>,
     pub dead_interval: Option<u32>,
