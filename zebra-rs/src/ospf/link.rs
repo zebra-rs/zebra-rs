@@ -60,6 +60,7 @@ pub struct LinkConfig {
     pub dead_interval: Option<u32>,
     pub retransmit_interval: Option<u16>,
     pub transmit_delay: Option<u16>,
+    pub mtu_ignore: bool,
 }
 
 pub struct OspfLink {
