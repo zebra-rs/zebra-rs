@@ -740,7 +740,7 @@ fn render_nbr_detail(out: &mut String, oi: &OspfLink, nbr: &Neighbor) {
     // Line 8: DR and BDR.
     let dr_rid = find_router_id_by_addr(oi, oi.ident.d_router);
     let bdr_rid = find_router_id_by_addr(oi, oi.ident.bd_router);
-    writeln!(out, "    DR is {},     BDR is {}", dr_rid, bdr_rid).unwrap();
+    writeln!(out, "    DR is {}, BDR is {}", dr_rid, bdr_rid).unwrap();
 
     // Line 9: Options.
     writeln!(out, "    Options {}", format_options(&nbr.options)).unwrap();
