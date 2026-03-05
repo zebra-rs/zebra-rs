@@ -7,7 +7,7 @@ use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::error::{make_error, ErrorKind};
 use nom::number::complete::{be_u24, be_u64, be_u8};
-use nom::{Err, IResult};
+use nom::{Err, IResult, Needed};
 use nom_derive::*;
 
 use super::util::{Emit, ParseBe};
@@ -806,16 +806,6 @@ impl OpaqueLsaType {
     pub const ROUTER_INFO: u8 = 4;
     pub const EXT_PREFIX: u8 = 7;
     pub const EXT_LINK: u8 = 8;
-}
-
-impl From<OpaqueLsaType> for u8 {
-    fn from(typ: OpaqueLsaType) -> u8 {
-        match typ {
-            OpaqueLsaType::RouterInfo => 4,
-            OpaqueLsaType::ExtPrefix => 7,
-            OpaqueLsaType::ExtLink => 8,
-        }
-    }
 }
 
 #[derive(Debug, Clone, NomBE)]

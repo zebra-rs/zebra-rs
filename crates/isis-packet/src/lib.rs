@@ -1,4 +1,4 @@
-mod algo;
+//mod algo;
 mod checksum;
 mod disp;
 mod error;
@@ -10,12 +10,12 @@ mod tlv_type;
 mod typ;
 mod util;
 
-pub use algo::*;
 pub use checksum::*;
 pub use disp::*;
 pub use error::*;
 pub use nsap::Nsap;
 pub use parser::*;
+pub use sr_packet::Algo;
 pub use sub::*;
 pub use tlv_type::IsisTlvType;
 pub use typ::IsisType;

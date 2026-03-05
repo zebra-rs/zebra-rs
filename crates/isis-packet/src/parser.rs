@@ -4,7 +4,7 @@ use bitfield_struct::bitfield;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use nom::bytes::complete::take;
-use nom::number::complete::{be_u8, be_u24, be_u32, be_u128};
+use nom::number::complete::{be_u8, be_u24, be_u32};
 use nom::{AsBytes, Err, IResult, Needed};
 use nom_derive::*;
 use serde::{Deserialize, Serialize, Serializer};
@@ -1025,26 +1025,6 @@ impl TlvEmitter for IsisTlvUnknown {
         buf.put_u8(self.typ());
         buf.put_u8(self.len);
         buf.put(self.values.as_bytes());
-    }
-}
-
-impl ParseBe<Ipv4Addr> for Ipv4Addr {
-    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        if input.len() < 4 {
-            return Err(Err::Incomplete(Needed::new(4)));
-        }
-        let (input, addr) = be_u32(input)?;
-        Ok((input, Self::from(addr)))
-    }
-}
-
-impl ParseBe<Ipv6Addr> for Ipv6Addr {
-    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        if input.len() < 16 {
-            return Err(Err::Incomplete(Needed::new(4)));
-        }
-        let (input, bits) = be_u128(input)?;
-        Ok((input, Self::from_bits(bits)))
     }
 }
 
