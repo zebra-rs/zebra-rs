@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::config::Args;
 use crate::rib::LinkFlagsExt;
+use crate::spf;
 
 use super::ifsm::IfsmState;
 use super::{AREA0, Neighbor, NfsmState, Ospf, OspfLink, ShowCallback};
@@ -176,7 +177,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
         self.show_add("/show/ip/ospf/route", show_ospf_route);
         self.show_add("/show/ip/ospf/spf", show_ospf_spf);
-        self.show_add("/show/ip/ospf/graps", show_ospf_graph);
+        self.show_add("/show/ip/ospf/graph", show_ospf_graph);
     }
 }
 
@@ -1244,9 +1245,65 @@ fn show_ospf_route(
 fn show_ospf_spf(
     ospf: &Ospf,
     _args: Args,
-    json: bool,
+    _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok(String::new())
+    let mut buf = String::new();
+    if let Some(spf) = &ospf.spf_result {
+        spf::disp_out(&mut buf, spf, false);
+    }
+    Ok(buf)
+}
+
+// JSON structures for OSPF graph.
+#[derive(Serialize)]
+struct GraphJson {
+    pub area: String,
+    pub nodes: Vec<GraphNodeJson>,
+}
+
+#[derive(Serialize)]
+struct GraphNodeJson {
+    pub id: usize,
+    pub name: String,
+    pub links: Vec<GraphLinkJson>,
+}
+
+#[derive(Serialize)]
+struct GraphLinkJson {
+    pub to_id: usize,
+    pub to_name: String,
+    pub cost: u32,
+}
+
+fn format_ospf_graph(graph: &spf::Graph) -> Option<GraphJson> {
+    let mut nodes = Vec::new();
+
+    for (id, node) in graph.iter() {
+        let mut node_links = Vec::new();
+        for link in &node.olinks {
+            if let Some(to_node) = graph.get(&link.to) {
+                node_links.push(GraphLinkJson {
+                    to_id: link.to,
+                    to_name: to_node.name.clone(),
+                    cost: link.cost,
+                });
+            }
+        }
+        nodes.push(GraphNodeJson {
+            id: *id,
+            name: node.name.clone(),
+            links: node_links,
+        });
+    }
+
+    if nodes.is_empty() {
+        None
+    } else {
+        Some(GraphJson {
+            area: "0.0.0.0".to_string(),
+            nodes,
+        })
+    }
 }
 
 fn show_ospf_graph(
@@ -1254,5 +1311,30 @@ fn show_ospf_graph(
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok(String::new())
+    let graph_data = ospf.graph.as_ref().and_then(format_ospf_graph);
+
+    if json {
+        match graph_data {
+            Some(data) => Ok(serde_json::to_string_pretty(&data)
+                .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))),
+            None => Ok("{}".to_string()),
+        }
+    } else {
+        let Some(data) = graph_data else {
+            return Ok(String::from("No OSPF graph data available"));
+        };
+        let mut buf = String::new();
+        writeln!(buf, "\nOSPF Graph (Area {}):", data.area)?;
+        writeln!(buf, "\nNodes:")?;
+        for node in &data.nodes {
+            writeln!(buf, "  {} (id: {})", node.name, node.id)?;
+            if !node.links.is_empty() {
+                writeln!(buf, "    Links:")?;
+                for link in &node.links {
+                    writeln!(buf, "      -> {} (cost: {})", link.to_name, link.cost)?;
+                }
+            }
+        }
+        Ok(buf)
+    }
 }

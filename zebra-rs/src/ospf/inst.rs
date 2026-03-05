@@ -59,6 +59,7 @@ pub struct Ospf {
     pub lsdb_as: Lsdb,
     pub lsp_map: LspMap,
     pub spf_result: Option<BTreeMap<usize, Path>>,
+    pub graph: Option<spf::Graph>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
     pub tracing: OspfTracing,
     pub spf_last: Option<Instant>,
@@ -174,6 +175,7 @@ impl Ospf {
             lsdb_as: Lsdb::new(),
             lsp_map: LspMap::default(),
             spf_result: None,
+            graph: None,
             rib: PrefixMap::new(),
             tracing: OspfTracing::default(),
             spf_last: None,
@@ -1370,8 +1372,9 @@ fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
 
         let rib = build_rib_from_spf(top, area_id, source, &spf_result);
 
-        // Store the SPF result in OSPF instance.
+        // Store the SPF result and graph in OSPF instance.
         top.spf_result = Some(spf_result);
+        top.graph = Some(graph);
 
         apply_routing_updates(top, rib);
     }
