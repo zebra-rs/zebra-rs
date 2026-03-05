@@ -168,13 +168,17 @@ fn config_ospf_interface_enable(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
-fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
+fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let priority = args.u8()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.priority = Some(priority);
-    link.ident.priority = priority;
+    if op.is_set() {
+        link.config.priority = Some(priority);
+    } else {
+        link.config.priority = None;
+    }
+    link.ident.priority = link.priority();
 
     let ifindex = link.index;
     link.tx
@@ -186,13 +190,17 @@ fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, _op: ConfigOp
 fn config_ospf_interface_hello_interval(
     ospf: &mut Ospf,
     mut args: Args,
-    _op: ConfigOp,
+    op: ConfigOp,
 ) -> Option<()> {
     let name = args.string()?;
     let hello_interval = args.u16()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.hello_interval = Some(hello_interval);
+    if op.is_set() {
+        link.config.hello_interval = Some(hello_interval);
+    } else {
+        link.config.hello_interval = None;
+    }
 
     if link.timer.hello.is_some() {
         link.timer.hello = Some(ospf_hello_timer(link));
@@ -204,13 +212,17 @@ fn config_ospf_interface_hello_interval(
 fn config_ospf_interface_dead_interval(
     ospf: &mut Ospf,
     mut args: Args,
-    _op: ConfigOp,
+    op: ConfigOp,
 ) -> Option<()> {
     let name = args.string()?;
     let dead_interval = args.u32()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.dead_interval = Some(dead_interval);
+    if op.is_set() {
+        link.config.dead_interval = Some(dead_interval);
+    } else {
+        link.config.dead_interval = None;
+    }
 
     Some(())
 }
@@ -218,13 +230,17 @@ fn config_ospf_interface_dead_interval(
 fn config_ospf_interface_retransmit_interval(
     ospf: &mut Ospf,
     mut args: Args,
-    _op: ConfigOp,
+    op: ConfigOp,
 ) -> Option<()> {
     let name = args.string()?;
     let retransmit_interval = args.u16()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.retransmit_interval = Some(retransmit_interval);
+    if op.is_set() {
+        link.config.retransmit_interval = Some(retransmit_interval);
+    } else {
+        link.config.retransmit_interval = None;
+    }
 
     Some(())
 }
