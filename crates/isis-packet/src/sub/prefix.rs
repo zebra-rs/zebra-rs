@@ -546,6 +546,9 @@ impl ParseBe<IsisTlvExtIpReachEntry> for IsisTlvExtIpReachEntry {
             return Ok((input, tlv));
         }
         let (input, sublen) = be_u8(input)?;
+        if input.len() < sublen as usize {
+            return Err(nom::Err::Incomplete(Needed::new(sublen as usize)));
+        }
         let (sub, input) = input.split_at(sublen as usize);
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
@@ -570,6 +573,9 @@ impl ParseBe<IsisTlvIpv6ReachEntry> for IsisTlvIpv6ReachEntry {
             return Ok((input, tlv));
         }
         let (input, sublen) = be_u8(input)?;
+        if input.len() < sublen as usize {
+            return Err(nom::Err::Incomplete(Needed::new(sublen as usize)));
+        }
         let (sub, input) = input.split_at(sublen as usize);
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
@@ -646,6 +652,9 @@ impl ParseBe<Srv6Locator> for Srv6Locator {
         let (input, sublen) = be_u8(input)?;
         if sublen == 0 {
             return Ok((input, tlv));
+        }
+        if input.len() < sublen as usize {
+            return Err(nom::Err::Incomplete(Needed::new(sublen as usize)));
         }
         let (sub, input) = input.split_at(sublen as usize);
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
