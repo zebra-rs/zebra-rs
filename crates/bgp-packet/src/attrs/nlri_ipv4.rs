@@ -37,7 +37,11 @@ pub fn parse_bgp_nlri_ipv4(
     length: u16,
     add_path: bool,
 ) -> IResult<&[u8], Vec<Ipv4Nlri>> {
-    let (nlri, input) = input.split_at(length as usize);
+    let len = length as usize;
+    if input.len() < len {
+        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+    }
+    let (nlri, input) = input.split_at(len);
     let (_, nlris) = many0_complete(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(nlri)?;
     Ok((input, nlris))
 }

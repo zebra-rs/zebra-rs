@@ -818,7 +818,7 @@ pub struct TlvTypeLen {
 #[derive(Debug, Clone, NomBE)]
 pub struct RouterInfoLsa {
     #[nom(Parse = "RouterInfoTlv::parse_tlvs")]
-    tlvs: Vec<RouterInfoTlv>,
+    _tlvs: Vec<RouterInfoTlv>,
 }
 
 #[repr(u16)]
@@ -916,12 +916,12 @@ impl RouterInfoTlv {
 
 #[derive(Debug, Clone, NomBE)]
 pub struct ExtPrefixLsa {
-    val: u16,
+    _val: u16,
 }
 
 #[derive(Debug, Clone, NomBE)]
 pub struct ExtLinkLsa {
-    val: u16,
+    _val: u16,
 }
 
 #[derive(Debug, Clone, NomBE)]
