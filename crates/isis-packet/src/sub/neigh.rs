@@ -81,6 +81,9 @@ impl ParseBe<IsisTlvExtIsReachEntry> for IsisTlvExtIsReachEntry {
         let (input, neighbor_id) = take(7usize)(input)?;
         let (input, metric) = be_u24(input)?;
         let (input, sublen) = be_u8(input)?;
+        if input.len() < sublen as usize {
+            return Err(Err::Incomplete(Needed::new(sublen as usize)));
+        }
         let (sub, input) = input.split_at(sublen as usize);
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
 

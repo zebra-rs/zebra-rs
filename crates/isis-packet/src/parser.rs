@@ -95,7 +95,7 @@ impl IsisPacket {
             L2Psnp(v) => v.emit(buf),
             Unknown(_) => {}
         }
-        if self.pdu_type.is_lsp() {
+        if self.pdu_type.is_lsp() && buf.len() >= 26 {
             let checksum = checksum_calc(&buf[12..]);
             buf[24..26].copy_from_slice(&checksum);
         }

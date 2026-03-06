@@ -1,8 +1,14 @@
 pub fn is_valid_checksum(input: &[u8]) -> bool {
+    if input.len() < 12 {
+        return false;
+    }
     fletcher::calc_fletcher16(&input[12..]) == 0
 }
 
 pub fn checksum_calc(data: &[u8]) -> [u8; 2] {
+    if data.len() < 13 {
+        return [0, 0];
+    }
     let checksum = fletcher::calc_fletcher16(data);
     let mut c0 = (checksum & 0x00FF) as i32;
     let mut c1 = ((checksum >> 8) & 0x00FF) as i32;
