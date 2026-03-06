@@ -6,6 +6,7 @@ mod util;
 
 pub use ls_type::OspfLsType;
 pub use parser::*;
+pub use sr_packet::Algo;
 pub use typ::OspfType;
 
 pub mod many0;

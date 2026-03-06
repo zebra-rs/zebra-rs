@@ -1,4 +1,3 @@
-//mod algo;
 mod checksum;
 mod disp;
 mod error;

@@ -5,13 +5,14 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
-use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::error::{ErrorKind, make_error};
+use nom::number::complete::{be_u8, be_u24, be_u64};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
+use sr_packet::Algo;
 
 use super::util::{Emit, ParseBe};
-use super::{many0_complete, OspfLsType, OspfType};
+use super::{OspfLsType, OspfType, many0_complete};
 
 // OSPF version.
 const OSPF_VERSION: u8 = 2;
@@ -808,9 +809,109 @@ impl OpaqueLsaType {
     pub const EXT_LINK: u8 = 8;
 }
 
+#[derive(NomBE)]
+pub struct TlvTypeLen {
+    pub typ: u16,
+    pub len: u16,
+}
+
 #[derive(Debug, Clone, NomBE)]
 pub struct RouterInfoLsa {
-    val: u16,
+    #[nom(Parse = "RouterInfoTlv::parse_tlvs")]
+    tlvs: Vec<RouterInfoTlv>,
+}
+
+#[repr(u16)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum RouterInfoTlvType {
+    #[default]
+    Cap = 1,
+    Algo = 8,
+    SidLabelRange = 9,
+    LocalBlock = 14,
+    Unknown(u16),
+}
+
+impl From<u16> for RouterInfoTlvType {
+    fn from(typ: u16) -> Self {
+        use RouterInfoTlvType::*;
+        match typ {
+            1 => Cap,
+            8 => Algo,
+            9 => SidLabelRange,
+            14 => LocalBlock,
+            x => Unknown(x),
+        }
+    }
+}
+
+impl RouterInfoTlvType {
+    pub fn is_known(&self) -> bool {
+        use RouterInfoTlvType::*;
+        matches!(self, Algo)
+    }
+}
+
+#[derive(Debug, NomBE, Clone, PartialEq)]
+#[nom(Selector = "RouterInfoTlvType")]
+pub enum RouterInfoTlv {
+    #[nom(Selector = "RouterInfoTlvType::Cap")]
+    RouterInfo(RouterInfoTlvCap),
+    #[nom(Selector = "RouterInfoTlvType::Algo")]
+    Algo(RouterInfoTlvAlgo),
+    #[nom(Selector = "_")]
+    Unknown(RouterInfoTlvUnknown),
+}
+
+#[derive(Debug, Default, NomBE, Clone, PartialEq)]
+pub struct RouterInfoTlvCap {
+    pub caps: u32,
+}
+
+pub fn parse_algo(input: &[u8]) -> IResult<&[u8], Vec<Algo>> {
+    many0_complete(Algo::parse_be).parse(input)
+}
+
+#[derive(Debug, Default, NomBE, Clone, PartialEq)]
+pub struct RouterInfoTlvAlgo {
+    // #[nom(Parse = "parse_algo")]
+    pub algos: u8,
+}
+
+#[derive(Debug, Default, NomBE, Clone, PartialEq)]
+pub struct RouterInfoTlvUnknown {
+    pub typ: u16,
+    pub len: u16,
+    pub values: Vec<u8>,
+}
+
+impl RouterInfoTlvUnknown {
+    pub fn parse_tlv(input: &[u8], tl: TlvTypeLen) -> IResult<&[u8], Self> {
+        let tlv = Self {
+            typ: tl.typ,
+            len: tl.len,
+            values: Vec::new(),
+        };
+        Ok((input, tlv))
+    }
+}
+
+impl RouterInfoTlv {
+    pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let typ: RouterInfoTlvType = tl.typ.into();
+        println!("XXX RouteInfoTlvType {:?} {}", typ, tl.len);
+        if input.len() < tl.len as usize {
+            return Err(Err::Incomplete(Needed::new(tl.len as usize)));
+        }
+        let (tlv, input) = input.split_at(tl.len as usize);
+        let (_, val) = Self::parse_be(tlv, typ)?;
+        Ok((input, val))
+    }
+
+    pub fn parse_tlvs(input: &[u8]) -> IResult<&[u8], Vec<Self>> {
+        many0_complete(Self::parse_tlv).parse(input)
+    }
 }
 
 #[derive(Debug, Clone, NomBE)]
