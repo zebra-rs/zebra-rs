@@ -2,8 +2,9 @@
 
 ## Summary
 
-Found **7 issues** in the crate. The most critical are unchecked slice indexing
-in checksum/validation functions and integer overflow in LSA length calculations.
+Found **7 issues** in the crate. **3 critical/high issues have been fixed.**
+The most critical were unchecked slice indexing in checksum/validation functions
+and integer overflow in LSA length calculations.
 
 ## Critical (CRASH/Panic from malformed packets)
 
@@ -24,7 +25,7 @@ in checksum/validation functions and integer overflow in LSA length calculations
 - **Problem:** No bounds check before slicing. `input[24..]` panics if
   `input.len() < 24`.
 - **Trigger:** Any OSPF packet shorter than 24 bytes.
-- **Fix:** Return error if `input.len() < 24`.
+- **Fix:** Return error if `input.len() < 24`. **FIXED.**
 
 ### 2. Unchecked buffer indexing in verify_checksum()
 
@@ -65,7 +66,7 @@ in checksum/validation functions and integer overflow in LSA length calculations
   has `len >= 16`, making `16 - 14 - 1 = 1` safe. However, the function is
   `pub(crate)` and has no internal validation.
 - **Trigger:** Calling `lsa_checksum_calc()` with `data.len() < cksum_offset + 1`.
-- **Fix:** Add `assert!(data.len() > cksum_offset)` or return 0 for short data.
+- **Fix:** Add `assert!(data.len() > cksum_offset)` or return 0 for short data. **FIXED.**
 
 ### 4. Unchecked buffer indexing in Ospfv2Packet::emit()
 
@@ -127,7 +128,7 @@ base, all as `u16`. These overflow silently if the count is large enough.
   ```
 - **Problem:** Debug print left in production code. Not a security issue but
   causes unnecessary I/O and leaks internal parsing state.
-- **Fix:** Remove the `println!`.
+- **Fix:** Remove the `println!`. **FIXED.**
 
 ## Medium
 

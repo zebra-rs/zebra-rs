@@ -450,6 +450,9 @@ impl OspfLsa {
 /// Calculate LSA checksum according to RFC 2328 using Fletcher algorithm.
 /// The checksum is calculated over the data with the checksum field at `cksum_offset`.
 fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
+    if data.len() <= cksum_offset {
+        return 0;
+    }
     let checksum = fletcher::calc_fletcher16(data);
     let mut c0 = (checksum & 0x00FF) as i32;
     let mut c1 = ((checksum >> 8) & 0x00FF) as i32;
@@ -900,7 +903,6 @@ impl RouterInfoTlv {
     pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, tl) = TlvTypeLen::parse_be(input)?;
         let typ: RouterInfoTlvType = tl.typ.into();
-        println!("XXX RouteInfoTlvType {:?} {}", typ, tl.len);
         if input.len() < tl.len as usize {
             return Err(Err::Incomplete(Needed::new(tl.len as usize)));
         }
@@ -942,6 +944,9 @@ impl UnknownLsa {
 pub fn validate_checksum(input: &[u8]) -> IResult<&[u8], ()> {
     const AUTH_RANGE: std::ops::Range<usize> = 16..24;
 
+    if input.len() < AUTH_RANGE.end {
+        return Err(Err::Error(make_error(input, ErrorKind::Verify)));
+    }
     let mut cksum = Checksum::new();
     cksum.add_bytes(&input[0..AUTH_RANGE.start]);
     cksum.add_bytes(&input[AUTH_RANGE.end..]);
