@@ -277,7 +277,14 @@ impl UpdatePacket {
         packet.bgp_attr = bgp_attr;
         packet.mp_update = mp_update;
         packet.mp_withdraw = mp_withdraw;
-        let nlri_len = packet.header.length - BGP_HEADER_LEN - 2 - withdraw_len - 2 - attr_len;
+        let nlri_len = packet
+            .header
+            .length
+            .saturating_sub(BGP_HEADER_LEN)
+            .saturating_sub(2)
+            .saturating_sub(withdraw_len)
+            .saturating_sub(2)
+            .saturating_sub(attr_len);
         let (input, mut updates) = parse_bgp_nlri_ipv4(input, nlri_len, add_path)?;
         packet.ipv4_update.append(&mut updates);
         Ok((input, packet))
