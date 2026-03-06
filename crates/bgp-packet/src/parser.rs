@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::convert::TryInto;
 
 use nom::combinator::peek;
 use nom_derive::*;
@@ -50,7 +49,7 @@ pub fn nlri_psize(plen: u8) -> usize {
 
 pub fn peek_bgp_length(input: &[u8]) -> usize {
     if let Some(len) = input.get(16..18) {
-        u16::from_be_bytes(len.try_into().unwrap()) as usize
+        u16::from_be_bytes([len[0], len[1]]) as usize
     } else {
         0
     }

@@ -1,6 +1,6 @@
 [package]
 name = "isis-packet"
-version = "0.8.9"
+version = "0.9.0"
 description = "Parser for the IS-IS protocol"
 license = "MIT/Apache-2.0"
 keywords = ["IS-IS","routing","protocol","parser","nom"]
@@ -21,6 +21,7 @@ include = [
 ]
 
 [dependencies]
+sr-packet = { path = "../sr-packet" }
 bitfield-struct = "0.11"
 byteorder = "1.5"
 bytes = "1.9"

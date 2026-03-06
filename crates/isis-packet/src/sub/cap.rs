@@ -6,9 +6,10 @@ use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use serde::{Deserialize, Serialize};
+use sr_packet::Algo;
 
 use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
-use crate::{Algo, IsisTlv, IsisTlvType, many0_complete};
+use crate::{IsisTlv, IsisTlvType, many0_complete};
 
 use super::{IsisCapCode, IsisCodeLen, IsisSubTlvUnknown};
 

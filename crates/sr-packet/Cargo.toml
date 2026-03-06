@@ -1,11 +1,11 @@
 [package]
-name = "bgp-packet"
+name = "sr-packet"
 version = "0.9.0"
-description = "Parser for the BGP protocol"
+description = "Parser for common segment routing"
 license = "MIT/Apache-2.0"
-keywords = ["BGP","routing","protocol","parser","nom"]
-homepage = "https://github.com/zebra-rs/bgp-packet"
-repository = "https://github.com/zebra-rs/bgp-packet.git"
+keywords = ["segment","routing","protocol","parser","nom"]
+homepage = "https://github.com/zebra-rs/zebra-rs"
+repository = "https://github.com/zebra-rs/zebra-rs.git"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
 categories = ["parser-implementations"]
 readme = "README.md"
@@ -20,19 +20,16 @@ include = [
   "tests/*.rs",
 ]
 
-
 [dependencies]
-bitfield-struct = "0.11.0"
-bitflags = "2.6.0"
+bitfield-struct = "0.11"
 byteorder = "1.5"
 bytes = "1.9"
-fixedbuf = { path = "../fixedbuf" }
+fletcher = "1.0.0"
+hex = "0.4.3"
 ipnet = { version = "2.10", features = ["serde"] }
 itertools = "0.14.0"
 nom = "8"
 nom-derive = { git = "https://github.com/rust-bakery/nom-derive", branch = "master" }
-num_enum = "0.7.5"
-regex = "1.11.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 strum = "0.27.2"
