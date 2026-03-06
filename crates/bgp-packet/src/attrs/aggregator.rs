@@ -116,8 +116,8 @@ impl From<Aggregator2> for Aggregator {
 // Aggregator to Aggregator2.
 impl From<Aggregator> for Aggregator2 {
     fn from(value: Aggregator) -> Self {
-        let asn: u16 = if value.asn <= 65536 {
-            value.asn.try_into().unwrap()
+        let asn: u16 = if value.asn <= u16::MAX as u32 {
+            value.asn as u16
         } else {
             AS_TRANS
         };

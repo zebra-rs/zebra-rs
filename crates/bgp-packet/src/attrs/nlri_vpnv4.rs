@@ -27,6 +27,11 @@ impl ParseNlri<Vpnv4Nlri> for Vpnv4Nlri {
         // MPLS Label (3 octets) + RD (8 octets) + IPv4 Prefix (0-4 octets).
         let (input, mut plen) = be_u8(input)?;
 
+        // Validate plen >= 88 (label 24 + RD 64) before parsing label and RD.
+        if plen < 88 {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+        }
+
         let psize = nlri_psize(plen);
         if input.len() < psize {
             return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
@@ -39,10 +44,6 @@ impl ParseNlri<Vpnv4Nlri> for Vpnv4Nlri {
         let (input, rd) = RouteDistinguisher::parse_be(input)?;
 
         // Adjust plen to MPLS Label and Route Distinguisher.
-        if plen < 88 {
-            // Prefix length must be >= 88.
-            return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
-        }
         plen -= 88;
         let psize = nlri_psize(plen);
 

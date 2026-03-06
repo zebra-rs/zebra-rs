@@ -404,7 +404,11 @@ impl From<NotificationPacket> for BytesMut {
 impl NotificationPacket {
     pub fn parse_packet(input: &[u8]) -> IResult<&[u8], NotificationPacket> {
         let (input, packet) = NotificationPacket::parse_be(input)?;
-        let len = packet.header.length - BGP_HEADER_LEN - 2;
+        let len = packet
+            .header
+            .length
+            .saturating_sub(BGP_HEADER_LEN)
+            .saturating_sub(2);
         let (input, _data) = take(len as usize).parse(input)?;
         Ok((input, packet))
     }

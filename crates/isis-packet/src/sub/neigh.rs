@@ -7,11 +7,12 @@ use nom::number::complete::{be_u8, be_u16, be_u24};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use serde::{Deserialize, Serialize};
+use sr_packet::Algo;
 
 use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
 use crate::{
-    Algo, IPV4_ADDR_LEN, IPV6_ADDR_LEN, IsisNeighborId, IsisSysId, IsisTlv, IsisTlvType,
-    SidLabelValue, many0_complete,
+    IPV4_ADDR_LEN, IPV6_ADDR_LEN, IsisNeighborId, IsisSysId, IsisTlv, IsisTlvType, SidLabelValue,
+    many0_complete,
 };
 
 use super::{Behavior, IsisCodeLen, IsisNeighCode, IsisSub2Tlv, IsisSubTlvUnknown};
@@ -80,6 +81,9 @@ impl ParseBe<IsisTlvExtIsReachEntry> for IsisTlvExtIsReachEntry {
         let (input, neighbor_id) = take(7usize)(input)?;
         let (input, metric) = be_u24(input)?;
         let (input, sublen) = be_u8(input)?;
+        if input.len() < sublen as usize {
+            return Err(Err::Incomplete(Needed::new(sublen as usize)));
+        }
         let (sub, input) = input.split_at(sublen as usize);
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
 

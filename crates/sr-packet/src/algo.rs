@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter, Result};
+
 use nom::IResult;
 use nom::number::complete::be_u8;
 use serde::{Deserialize, Serialize};
@@ -50,5 +52,17 @@ impl ParseBe<Algo> for Algo {
         let (input, val) = be_u8(input)?;
         let algo: Algo = val.into();
         Ok((input, algo))
+    }
+}
+
+impl Display for Algo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        use Algo::*;
+        match self {
+            Spf => write!(f, "SPF(0)"),
+            StrictSpf => write!(f, "StrictSPF(1)"),
+            FlexAlgo(v) => write!(f, "FlexAlgo({})", v),
+            Unknown(v) => write!(f, "Unknown({})", v),
+        }
     }
 }

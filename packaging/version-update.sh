@@ -2,6 +2,7 @@
 
 for file in ../Cargo.toml \
                 ../crates/bgp-packet/Cargo.toml \
+                ../crates/sr-packet/Cargo.toml \
                 ../crates/ospf-packet/Cargo.toml \
                 ../crates/isis-packet/Cargo.toml
 do

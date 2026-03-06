@@ -211,7 +211,7 @@ impl Attr {
     ) -> Result<(&'a [u8], Attr), BgpParseError> {
         // Parse the attribute flags and type code
         let (input, flags_byte) = be_u8(input)?;
-        let flags = AttributeFlags::from_bits(flags_byte).unwrap();
+        let flags = AttributeFlags::from_bits_truncate(flags_byte);
         let (input, attr_type_byte) = be_u8(input)?;
         let attr_type: AttrType = attr_type_byte.into();
 
