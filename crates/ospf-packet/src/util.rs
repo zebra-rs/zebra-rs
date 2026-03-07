@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-pub use sr_packet::ParseBe;
+pub use packet_utils::ParseBe;
 
 pub trait Emit {
     fn emit(&self, buf: &mut BytesMut);

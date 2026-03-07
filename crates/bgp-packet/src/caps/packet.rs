@@ -60,13 +60,7 @@ impl CapabilityPacket {
     pub fn parse_cap(input: &[u8]) -> IResult<&[u8], CapabilityPacket> {
         let (input, cap_header) = CapabilityHeader::parse_be(input)?;
         let len = cap_header.length as usize;
-        if input.len() < len {
-            return Err(nom::Err::Error(nom::error::make_error(
-                input,
-                nom::error::ErrorKind::Eof,
-            )));
-        }
-        let (cap, input) = input.split_at(len);
+        let (input, cap) = packet_utils::safe_split_at(input, len)?;
         let (_, cap) = CapabilityPacket::parse_be(cap, cap_header.code.into())?;
         Ok((input, cap))
     }

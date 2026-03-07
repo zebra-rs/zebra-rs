@@ -61,7 +61,7 @@ impl OpenPacket {
         if input.len() != len as usize {
             return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
         }
-        let (opts, input) = input.split_at(len as usize);
+        let (input, opts) = packet_utils::safe_split_at(input, len as usize)?;
         let (_, caps) = many0_complete(parse_caps).parse(opts)?;
         let bgp_cap = BgpCap::from(caps);
         packet.bgp_cap = bgp_cap;
@@ -72,10 +72,7 @@ impl OpenPacket {
 fn parse_caps(input: &[u8]) -> IResult<&[u8], Vec<CapabilityPacket>> {
     let (input, header) = CapabilityHeader::parse_be(input)?;
     let len = header.length as usize;
-    if input.len() < len {
-        return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
-    }
-    let (opts, input) = input.split_at(len);
+    let (input, opts) = packet_utils::safe_split_at(input, len)?;
     let (_, caps) = many0_complete(CapabilityPacket::parse_cap).parse(opts)?;
     Ok((input, caps))
 }

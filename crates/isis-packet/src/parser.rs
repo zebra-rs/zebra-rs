@@ -1105,10 +1105,7 @@ impl ParseBe<SidLabelValue> for SidLabelValue {
 impl IsisTlv {
     pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, tl) = IsisTypeLen::parse_be(input)?;
-        if input.len() < tl.len as usize {
-            return Err(Err::Incomplete(Needed::new(tl.len as usize)));
-        }
-        let (tlv, input) = input.split_at(tl.len as usize);
+        let (input, tlv) = packet_utils::safe_split_at(input, tl.len as usize)?;
         if tl.typ.is_known() {
             let (_, val) = Self::parse_be(tlv, tl.typ)?;
             Ok((input, val))
