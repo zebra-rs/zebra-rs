@@ -9,8 +9,9 @@ pub struct IsisCodeLen {
 pub mod cap;
 pub use cap::{
     IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap,
-    IsisSubSegmentRoutingLB, IsisSubSrv6, IsisTlvRouterCap, SegmentRoutingCapFlags, SidLabelTlv,
+    IsisSubSegmentRoutingLB, IsisSubSrv6, IsisTlvRouterCap, SegmentRoutingCapFlags,
 };
+pub use packet_utils::SidLabelTlv;
 pub mod cap_code;
 pub use cap_code::IsisCapCode;
 pub mod cap_disp;

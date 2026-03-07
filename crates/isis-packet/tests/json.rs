@@ -78,15 +78,15 @@ pub fn json_round_trip_test() {
     let deserialized: srv6::Behavior = serde_json::from_str(&serialized).unwrap();
     assert_eq!(behavior, deserialized);
 
-    // Test cap::SidLabelTlv
-    let sid_label = cap::SidLabelTlv::Label(16001);
+    // Test packet_utils::SidLabelTlv
+    let sid_label = packet_utils::SidLabelTlv::Label(16001);
     let serialized = serde_json::to_string(&sid_label).unwrap();
-    let deserialized: cap::SidLabelTlv = serde_json::from_str(&serialized).unwrap();
+    let deserialized: packet_utils::SidLabelTlv = serde_json::from_str(&serialized).unwrap();
     assert_eq!(sid_label, deserialized);
 
-    let sid_label = cap::SidLabelTlv::Index(1000);
+    let sid_label = packet_utils::SidLabelTlv::Index(1000);
     let serialized = serde_json::to_string(&sid_label).unwrap();
-    let deserialized: cap::SidLabelTlv = serde_json::from_str(&serialized).unwrap();
+    let deserialized: packet_utils::SidLabelTlv = serde_json::from_str(&serialized).unwrap();
     assert_eq!(sid_label, deserialized);
 
     // Test complex structure: IsisTlvAreaAddr
