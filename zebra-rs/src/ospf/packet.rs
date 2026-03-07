@@ -171,7 +171,10 @@ pub fn ospf_hello_send(oi: &mut OspfLink) {
     // tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
 
     let packet = ospf_hello_packet(oi).unwrap();
-    oi.ptx.send(Message::Send(packet, oi.index, None)).unwrap();
+    if let Err(e) = oi.ptx.send(Message::Send(packet, oi.index, None)) {
+        tracing::warn!("[Hello:Send] channel send failed: {}", e);
+        return;
+    }
 
     oi.flags.set_hello_sent(true);
 }
@@ -716,15 +719,6 @@ pub fn ospf_ls_upd_validate_proc(
     let mut delayed_ack_headers = Vec::new();
 
     for lsa in ls_upd.lsas.iter() {
-        if !lsa.verify_checksum() {
-            tracing::warn!(
-                "[LS Update] Checksum mismatch, discarding LSA type={:?} id={} adv={}",
-                lsa.h.ls_type,
-                lsa.h.ls_id,
-                lsa.h.adv_router
-            );
-            continue;
-        }
         let result = ospf_ls_upd_proc(oi, nbr, lsa);
         match result {
             LsaProcessResult::InstalledDirectAck | LsaProcessResult::AckAndDiscard => {
