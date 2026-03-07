@@ -1,9 +1,9 @@
 [package]
-name = "sr-packet"
+name = "packet-utils"
 version = "0.9.0"
-description = "Parser for common segment routing"
+description = "Common utilities for protocol packet parsing"
 license = "MIT/Apache-2.0"
-keywords = ["segment","routing","protocol","parser","nom"]
+keywords = ["packet","routing","protocol","parser","nom"]
 homepage = "https://github.com/zebra-rs/zebra-rs"
 repository = "https://github.com/zebra-rs/zebra-rs.git"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]

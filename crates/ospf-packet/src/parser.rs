@@ -6,14 +6,14 @@ use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::bytes::complete::take;
-use nom::error::{ErrorKind, make_error};
-use nom::number::complete::{be_u8, be_u24, be_u64};
-use nom::{Err, IResult, Needed};
+use nom::error::{make_error, ErrorKind};
+use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::{Err, IResult};
 use nom_derive::*;
-use sr_packet::Algo;
+use packet_utils::Algo;
 
 use super::util::{Emit, ParseBe};
-use super::{OspfLsType, OspfType, many0_complete};
+use super::{many0_complete, OspfLsType, OspfType};
 
 // OSPF version.
 const OSPF_VERSION: u8 = 2;
@@ -904,10 +904,7 @@ impl RouterInfoTlv {
         let (input, tl) = TlvTypeLen::parse_be(input)?;
         let typ: RouterInfoTlvType = tl.typ.into();
         let len = tl.len as usize;
-        if input.len() < len {
-            return Err(Err::Incomplete(Needed::new(len)));
-        }
-        let (tlv, input) = input.split_at(len);
+        let (input, tlv) = packet_utils::safe_split_at(input, len)?;
         let (_, val) = Self::parse_be(tlv, typ)?;
         // Skip padding to 4-byte alignment.
         let padded = (len + 3) & !3;
