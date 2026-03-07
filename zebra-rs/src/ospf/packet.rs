@@ -100,7 +100,7 @@ pub fn ospf_hello_recv(
     let prefix = Ipv4Net::new(*src, prefixlen).unwrap();
 
     if addr.prefix.prefix_len() != prefixlen {
-        println!(
+        tracing::info!(
             "prefixlen mismatch hello {} ifaddr {}",
             prefixlen,
             addr.prefix.prefix_len()
@@ -254,17 +254,11 @@ fn ospf_ls_request_add(nbr: &mut Neighbor, ls_req: OspfLsRequestEntry) {
 }
 
 fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc) {
-    println!(
-        "ospf_db_desc_proc() lsa_headers.len() {}",
-        dd.lsa_headers.len()
-    );
     nbr.dd.recv = dd.clone();
 
     for lsah in dd.lsa_headers.iter() {
-        println!("LSA: ID {} Adv {}", lsah.ls_id, lsah.adv_router);
         let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router);
         if find.is_none() {
-            println!("We don't have LSA");
             let lsr = ospf_ls_rquest_new(lsah);
             ospf_ls_request_add(nbr, lsr);
             ospf_nfsm_ls_req_timer_on(nbr);
@@ -272,7 +266,6 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
     }
 
     if nbr.dd.flags.master() {
-        println!("DB_DESC packet as master");
         nbr.dd.seqnum += 1;
 
         // When both side does not have more, exchange is done.
@@ -405,7 +398,6 @@ pub fn ospf_db_desc_recv(
                 nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
                 tracing::info!("[DB Desc] Becoming Master {:?}", nbr.dd.flags);
             } else {
-                println!("RECV[DD]:Negotioation fails.");
                 return;
             }
             ospf_nfsm(oi, nbr, NfsmEvent::NegotiationDone, oi.ident);
@@ -422,24 +414,20 @@ pub fn ospf_db_desc_recv(
                 return;
             }
             if dd.flags.master() && !nbr.dd.recv.flags.master() {
-                println!("XXX MS-bit mismatch.");
                 nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
                 return;
             }
             if dd.flags.init() {
-                println!("XXX Initi bit set");
                 nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
                 return;
             }
             if dd.options != nbr.dd.recv.options {
-                println!("XXX Option mismatch");
                 nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
                 return;
             }
             if (nbr.dd.flags.master() && dd.seqnum != nbr.dd.seqnum)
                 || (!nbr.dd.flags.master() && dd.seqnum != nbr.dd.seqnum + 1)
             {
-                println!("XXX From {} Sequence number mismatch", src);
                 nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
                 return;
             }
