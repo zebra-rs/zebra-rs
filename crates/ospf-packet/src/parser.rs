@@ -7,7 +7,7 @@ use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::bytes::complete::take;
 use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
+use nom::number::complete::{be_u24, be_u32, be_u64, be_u8};
 use nom::{Err, IResult};
 use nom_derive::*;
 use packet_utils::Algo;
@@ -865,19 +865,41 @@ pub enum RouterInfoTlv {
     Unknown(RouterInfoTlvUnknown),
 }
 
+#[bitfield(u32, debug = true)]
+#[derive(PartialEq)]
+pub struct RouterCapability {
+    #[bits(26)]
+    pub resvd: u32,
+    pub exp: bool,
+    pub p2p_lan: bool,
+    pub te: bool,
+    pub stub: bool,
+    pub gr_helper: bool,
+    pub gr_capable: bool,
+}
+
+impl ParseBe<RouterCapability> for RouterCapability {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], RouterCapability> {
+        let (input, val) = be_u32(input)?;
+        Ok((input, val.into()))
+    }
+}
+
 #[derive(Debug, Default, NomBE, Clone, PartialEq)]
 pub struct RouterInfoTlvCap {
-    pub caps: u32,
+    pub caps: RouterCapability,
 }
 
-pub fn parse_algo(input: &[u8]) -> IResult<&[u8], Vec<Algo>> {
-    many0_complete(Algo::parse_be).parse(input)
-}
-
-#[derive(Debug, Default, NomBE, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct RouterInfoTlvAlgo {
-    // #[nom(Parse = "parse_algo")]
-    pub algos: u8,
+    pub algos: Vec<Algo>,
+}
+
+impl RouterInfoTlvAlgo {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, algos) = many0_complete(Algo::parse_be).parse(input)?;
+        Ok((input, Self { algos }))
+    }
 }
 
 #[derive(Debug, Default, NomBE, Clone, PartialEq)]
@@ -906,6 +928,7 @@ impl RouterInfoTlv {
         let len = tl.len as usize;
         let (input, tlv) = packet_utils::safe_split_at(input, len)?;
         let (_, val) = Self::parse_be(tlv, typ)?;
+        println!("{:?}", val);
         // Skip padding to 4-byte alignment.
         let padded = (len + 3) & !3;
         let (input, _) = take(padded - len)(input)?;

@@ -47,7 +47,15 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
-            let Ok(packet) = ospf_packet::parse(&input[IPV4_HEADER_LEN..]) else {
+            // RFC 2328: Header verification.
+
+            // RFC 2328: Authentication and checksum verification.
+            let ospf_input = &input[IPV4_HEADER_LEN..];
+            if ospf_packet::validate_checksum(ospf_input).is_err() {
+                return Err(ErrorKind::InvalidData.into());
+            }
+
+            let Ok(packet) = ospf_packet::parse(ospf_input) else {
                 return Err(ErrorKind::UnexpectedEof.into());
             };
 
@@ -59,6 +67,8 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
             //     ifindex,
             //     ifaddr
             // );
+
+            // We will verify Area later.
 
             tx.send(Message::Recv(packet.1, src.ip(), group, ifindex, ifaddr))
                 .unwrap();
@@ -93,17 +103,18 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
         };
         let cmsg = [socket::ControlMessage::Ipv4PacketInfo(&pktinfo)];
 
-        sock.async_io(Interest::WRITABLE, |sock| {
-            socket::sendmsg(
-                sock.as_raw_fd(),
-                &iov,
-                &cmsg,
-                socket::MsgFlags::empty(),
-                Some(&sockaddr),
-            )
-            .unwrap();
-            Ok(())
-        })
-        .await;
+        let _ = sock
+            .async_io(Interest::WRITABLE, |sock| {
+                socket::sendmsg(
+                    sock.as_raw_fd(),
+                    &iov,
+                    &cmsg,
+                    socket::MsgFlags::empty(),
+                    Some(&sockaddr),
+                )
+                .map_err(|e| std::io::Error::from(e))?;
+                Ok(())
+            })
+            .await;
     }
 }
