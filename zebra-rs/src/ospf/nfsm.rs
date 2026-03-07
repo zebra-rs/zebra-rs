@@ -276,7 +276,6 @@ pub fn ospf_ls_req_timer(nbr: &Neighbor) -> Timer {
         use NfsmEvent::*;
         let tx = tx.clone();
         async move {
-            println!("ospf_ls_req_timer");
             tx.send(Message::Nfsm(ifindex, prefix.addr(), InactivityTimer))
                 .unwrap();
         }
@@ -300,7 +299,6 @@ pub fn ospf_nfsm_ignore(
     _nbr: &mut Neighbor,
     _oident: &Identity,
 ) -> Option<NfsmState> {
-    // println!("ospf_nfsm_ignore is called");
     None
 }
 
@@ -323,8 +321,6 @@ pub fn ospf_nfsm_hello_received(
     nbr: &mut Neighbor,
     _oident: &Identity,
 ) -> Option<NfsmState> {
-    // println!("ospf_nfsm_hello_received");
-
     // Start or Restart Inactivity Timer.
     nbr.timer.inactivity = Some(ospf_inactivity_timer(nbr));
 
@@ -336,7 +332,6 @@ pub fn ospf_nfsm_start(
     _nbr: &mut Neighbor,
     _oident: &Identity,
 ) -> Option<NfsmState> {
-    // println!("XXX ospf_nfsm_start");
     None
 }
 
@@ -345,7 +340,6 @@ pub fn ospf_nfsm_twoway_received(
     nbr: &mut Neighbor,
     oident: &Identity,
 ) -> Option<NfsmState> {
-    // println!("XXX ospf_nfsm_twoway_received");
     let mut next_state = NfsmState::TwoWay;
 
     // If interface is pointopoint.
@@ -456,7 +450,6 @@ pub fn ospf_nfsm_oneway_received(
     nbr: &mut Neighbor,
     _oident: &Identity,
 ) -> Option<NfsmState> {
-    // println!("ospf_nfsm_oneway_received");
     ospf_nfsm_reset_nbr(nbr);
     None
 }

@@ -1031,8 +1031,6 @@ impl Ospf {
                 if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
                     let ident = link.ident;
                     ospf_nfsm(&mut link, nbr, ev, ident);
-                } else {
-                    println!("NFSM: Packet from unknown neighbor {}", src);
                 }
 
                 let new_state = self

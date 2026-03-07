@@ -7,10 +7,10 @@ use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::bytes::complete::take;
 use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u64, be_u8};
-use nom::{Err, IResult};
+use nom::number::complete::{be_u24, be_u32, be_u64, be_u8};
+use nom::{Err, IResult, Needed};
 use nom_derive::*;
-use packet_utils::Algo;
+use packet_utils::{Algo, SidLabelTlv};
 
 use super::util::{Emit, ParseBe};
 use super::{many0_complete, OspfLsType, OspfType};
@@ -509,8 +509,10 @@ pub enum OspfLsp {
     #[nom(Selector = "LspSelector(OspfLsType::OpaqueAreaLocal, OpaqueLsaType::ROUTER_INFO)")]
     OpaqueAreaRouterInfo(RouterInfoLsa),
     #[nom(Selector = "LspSelector(OspfLsType::OpaqueAreaLocal, OpaqueLsaType::EXT_PREFIX)")]
+    #[nom(Parse = "ExtPrefixLsa::parse_be")]
     OpaqueAreaExtPrefix(ExtPrefixLsa),
     #[nom(Selector = "LspSelector(OspfLsType::OpaqueAreaLocal, OpaqueLsaType::EXT_LINK)")]
+    #[nom(Parse = "ExtLinkLsa::parse_be")]
     OpaqueAreaExtLink(ExtLinkLsa),
     #[nom(Selector = "_")]
     Unknown(UnknownLsa),
@@ -820,7 +822,7 @@ pub struct TlvTypeLen {
 #[derive(Debug, Clone, NomBE)]
 pub struct RouterInfoLsa {
     #[nom(Parse = "RouterInfoTlv::parse_tlvs")]
-    _tlvs: Vec<RouterInfoTlv>,
+    pub tlvs: Vec<RouterInfoTlv>,
 }
 
 #[repr(u16)]
@@ -861,23 +863,101 @@ pub enum RouterInfoTlv {
     RouterInfo(RouterInfoTlvCap),
     #[nom(Selector = "RouterInfoTlvType::Algo")]
     Algo(RouterInfoTlvAlgo),
+    #[nom(Selector = "RouterInfoTlvType::SidLabelRange")]
+    SidLabelRnage(RouterInfoTlvSidLabelRange),
+    #[nom(Selector = "RouterInfoTlvType::LocalBlock")]
+    LocalBlock(RouterInfoTlvLocalBlock),
     #[nom(Selector = "_")]
     Unknown(RouterInfoTlvUnknown),
 }
 
+#[bitfield(u32, debug = true)]
+#[derive(PartialEq)]
+pub struct RouterCapability {
+    #[bits(26)]
+    pub resvd: u32,
+    pub exp: bool,
+    pub p2p_lan: bool,
+    pub te: bool,
+    pub stub: bool,
+    pub gr_helper: bool,
+    pub gr_capable: bool,
+}
+
+impl ParseBe<RouterCapability> for RouterCapability {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], RouterCapability> {
+        let (input, val) = be_u32(input)?;
+        Ok((input, val.into()))
+    }
+}
+
 #[derive(Debug, Default, NomBE, Clone, PartialEq)]
 pub struct RouterInfoTlvCap {
-    pub caps: u32,
+    pub caps: RouterCapability,
 }
 
-pub fn parse_algo(input: &[u8]) -> IResult<&[u8], Vec<Algo>> {
-    many0_complete(Algo::parse_be).parse(input)
-}
-
-#[derive(Debug, Default, NomBE, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct RouterInfoTlvAlgo {
-    // #[nom(Parse = "parse_algo")]
-    pub algos: u8,
+    pub algos: Vec<Algo>,
+}
+
+impl RouterInfoTlvAlgo {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, algos) = many0_complete(Algo::parse_be).parse(input)?;
+        Ok((input, Self { algos }))
+    }
+}
+
+// RFC 8665 Section 3.2. SID/Label Range TLV
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouterInfoTlvSidLabelRange {
+    pub range: u32,
+    pub sid_label: SidLabelTlv,
+}
+
+/// Parse OSPF SID/Label value after TlvTypeLen (2+2 byte header) has been consumed.
+/// Length 3 = Label (24-bit), Length 4 = Index (32-bit).
+fn parse_ospf_sid_label(input: &[u8], len: u16) -> IResult<&[u8], SidLabelTlv> {
+    match len {
+        3 => {
+            let (input, label) = be_u24(input)?;
+            Ok((input, SidLabelTlv::Label(label)))
+        }
+        4 => {
+            let (input, index) = be_u32(input)?;
+            Ok((input, SidLabelTlv::Index(index)))
+        }
+        _ => Err(Err::Incomplete(Needed::new(len as usize))),
+    }
+}
+
+impl RouterInfoTlvSidLabelRange {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, range) = be_u24(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        // OSPF Sub-TLV header: 2-byte type + 2-byte length.
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let (input, sid_label) = parse_ospf_sid_label(input, tl.len)?;
+        Ok((input, Self { range, sid_label }))
+    }
+}
+
+// RFC 8665 Section 3.3. SR Local Block TLV
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouterInfoTlvLocalBlock {
+    pub range: u32,
+    pub sid_label: SidLabelTlv,
+}
+
+impl RouterInfoTlvLocalBlock {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, range) = be_u24(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        // OSPF Sub-TLV header: 2-byte type + 2-byte length.
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let (input, sid_label) = parse_ospf_sid_label(input, tl.len)?;
+        Ok((input, Self { range, sid_label }))
+    }
 }
 
 #[derive(Debug, Default, NomBE, Clone, PartialEq)]
@@ -917,14 +997,430 @@ impl RouterInfoTlv {
     }
 }
 
-#[derive(Debug, Clone, NomBE)]
+// RFC 7684 §2.1 OSPFv2 Extended Prefix Opaque LSA
+#[derive(Debug, Clone)]
 pub struct ExtPrefixLsa {
-    _val: u16,
+    pub tlvs: Vec<ExtPrefixTlv>,
 }
 
-#[derive(Debug, Clone, NomBE)]
+impl ExtPrefixLsa {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tlvs) = many0_complete(ExtPrefixTlv::parse_tlv).parse(input)?;
+        Ok((input, Self { tlvs }))
+    }
+}
+
+// RFC 7684 §2.1 Extended Prefix TLV type.
+#[repr(u16)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum ExtPrefixTlvType {
+    #[default]
+    ExtPrefix = 1,
+    Unknown(u16),
+}
+
+impl From<u16> for ExtPrefixTlvType {
+    fn from(typ: u16) -> Self {
+        match typ {
+            1 => ExtPrefixTlvType::ExtPrefix,
+            x => ExtPrefixTlvType::Unknown(x),
+        }
+    }
+}
+
+// RFC 7684 §2.1 Extended Prefix TLV
+#[derive(Debug, Clone)]
+pub struct ExtPrefixTlv {
+    pub route_type: u8,
+    pub prefix: Ipv4Net,
+    pub af: u8,
+    pub flags: u8,
+    pub subs: Vec<ExtPrefixSubTlv>,
+}
+
+impl ExtPrefixTlv {
+    pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let len = tl.len as usize;
+        let (input, tlv_data) = packet_utils::safe_split_at(input, len)?;
+
+        let (tlv_data, route_type) = be_u8(tlv_data)?;
+        let (tlv_data, prefix_len) = be_u8(tlv_data)?;
+        let (tlv_data, af) = be_u8(tlv_data)?;
+        let (tlv_data, flags) = be_u8(tlv_data)?;
+
+        // Prefix is padded to 4-byte boundary.
+        let prefix_bytes = ((prefix_len as usize) + 7) / 8;
+        let padded_prefix_bytes = (prefix_bytes + 3) & !3;
+        let (tlv_data, prefix_data) = packet_utils::safe_split_at(tlv_data, padded_prefix_bytes)?;
+
+        let mut addr_bytes = [0u8; 4];
+        for (i, b) in prefix_data.iter().take(prefix_bytes).enumerate() {
+            addr_bytes[i] = *b;
+        }
+        let prefix =
+            Ipv4Net::new(Ipv4Addr::from(addr_bytes), prefix_len).unwrap_or(Ipv4Net::default());
+
+        let (_, subs) = many0_complete(ExtPrefixSubTlv::parse_sub).parse(tlv_data)?;
+
+        // Skip padding to 4-byte alignment.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+
+        Ok((
+            input,
+            Self {
+                route_type,
+                prefix,
+                af,
+                flags,
+                subs,
+            },
+        ))
+    }
+}
+
+// Extended Prefix Sub-TLV types.
+#[repr(u16)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum ExtPrefixSubTlvType {
+    #[default]
+    PrefixSid = 2,
+    Unknown(u16),
+}
+
+impl From<u16> for ExtPrefixSubTlvType {
+    fn from(typ: u16) -> Self {
+        match typ {
+            2 => ExtPrefixSubTlvType::PrefixSid,
+            x => ExtPrefixSubTlvType::Unknown(x),
+        }
+    }
+}
+
+// Extended Prefix Sub-TLV enum.
+#[derive(Debug, Clone)]
+pub enum ExtPrefixSubTlv {
+    PrefixSid(ExtPrefixSidSubTlv),
+    Unknown(RouterInfoTlvUnknown),
+}
+
+impl ExtPrefixSubTlv {
+    pub fn parse_sub(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let len = tl.len as usize;
+        let (input, sub_data) = packet_utils::safe_split_at(input, len)?;
+        let typ: ExtPrefixSubTlvType = tl.typ.into();
+
+        let val = match typ {
+            ExtPrefixSubTlvType::PrefixSid => {
+                let (_, sid) = ExtPrefixSidSubTlv::parse_be(sub_data)?;
+                ExtPrefixSubTlv::PrefixSid(sid)
+            }
+            ExtPrefixSubTlvType::Unknown(_) => ExtPrefixSubTlv::Unknown(RouterInfoTlvUnknown {
+                typ: tl.typ,
+                len: tl.len,
+                values: sub_data.to_vec(),
+            }),
+        };
+
+        // Skip padding to 4-byte alignment.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+
+        Ok((input, val))
+    }
+}
+
+// RFC 8665 §4 Prefix SID Sub-TLV flags.
+#[bitfield(u8, debug = true)]
+#[derive(PartialEq)]
+pub struct PrefixSidFlags {
+    #[bits(3)]
+    pub resvd: u8,
+    pub l_flag: bool,
+    pub v_flag: bool,
+    pub e_flag: bool,
+    pub m_flag: bool,
+    pub np_flag: bool,
+}
+
+impl ParseBe<PrefixSidFlags> for PrefixSidFlags {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u8(input)?;
+        Ok((input, flags.into()))
+    }
+}
+
+// RFC 8665 §4 Prefix SID Sub-TLV (type 2).
+#[derive(Debug, Clone)]
+pub struct ExtPrefixSidSubTlv {
+    pub flags: PrefixSidFlags,
+    pub mt_id: u8,
+    pub algo: Algo,
+    pub sid: SidLabelTlv,
+}
+
+impl ExtPrefixSidSubTlv {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = PrefixSidFlags::parse_be(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        let (input, mt_id) = be_u8(input)?;
+        let (input, algo) = Algo::parse_be(input)?;
+        // Remaining bytes determine Label (3) vs Index (4).
+        let sid_len = input.len();
+        let (input, sid) = match sid_len {
+            3 => {
+                let (input, label) = be_u24(input)?;
+                (input, SidLabelTlv::Label(label))
+            }
+            4 => {
+                let (input, index) = be_u32(input)?;
+                (input, SidLabelTlv::Index(index))
+            }
+            _ => return Err(Err::Incomplete(Needed::new(sid_len))),
+        };
+        Ok((
+            input,
+            Self {
+                flags,
+                mt_id,
+                algo,
+                sid,
+            },
+        ))
+    }
+}
+
+// RFC 7684 §3 OSPFv2 Extended Link Opaque LSA
+#[derive(Debug, Clone)]
 pub struct ExtLinkLsa {
-    _val: u16,
+    pub tlvs: Vec<ExtLinkTlv>,
+}
+
+impl ExtLinkLsa {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tlvs) = many0_complete(ExtLinkTlv::parse_tlv).parse(input)?;
+        Ok((input, Self { tlvs }))
+    }
+}
+
+// RFC 7684 §3 Extended Link TLV type.
+#[repr(u16)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum ExtLinkTlvType {
+    #[default]
+    ExtLink = 1,
+    Unknown(u16),
+}
+
+impl From<u16> for ExtLinkTlvType {
+    fn from(typ: u16) -> Self {
+        match typ {
+            1 => ExtLinkTlvType::ExtLink,
+            x => ExtLinkTlvType::Unknown(x),
+        }
+    }
+}
+
+// RFC 7684 §3 Extended Link TLV
+#[derive(Debug, Clone)]
+pub struct ExtLinkTlv {
+    pub link_type: u8,
+    pub link_id: Ipv4Addr,
+    pub link_data: Ipv4Addr,
+    pub subs: Vec<ExtLinkSubTlv>,
+}
+
+impl ExtLinkTlv {
+    pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let len = tl.len as usize;
+        let (input, tlv_data) = packet_utils::safe_split_at(input, len)?;
+
+        let (tlv_data, link_type) = be_u8(tlv_data)?;
+        let (tlv_data, _reserved) = be_u24(tlv_data)?;
+        let (tlv_data, link_id) = Ipv4Addr::parse_be(tlv_data)?;
+        let (tlv_data, link_data) = Ipv4Addr::parse_be(tlv_data)?;
+
+        let (_, subs) = many0_complete(ExtLinkSubTlv::parse_sub).parse(tlv_data)?;
+
+        // Skip padding to 4-byte alignment.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+
+        Ok((
+            input,
+            Self {
+                link_type,
+                link_id,
+                link_data,
+                subs,
+            },
+        ))
+    }
+}
+
+// Extended Link Sub-TLV types.
+#[repr(u16)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum ExtLinkSubTlvType {
+    #[default]
+    AdjSid = 2,
+    LanAdjSid = 3,
+    Unknown(u16),
+}
+
+impl From<u16> for ExtLinkSubTlvType {
+    fn from(typ: u16) -> Self {
+        match typ {
+            2 => ExtLinkSubTlvType::AdjSid,
+            3 => ExtLinkSubTlvType::LanAdjSid,
+            x => ExtLinkSubTlvType::Unknown(x),
+        }
+    }
+}
+
+// Extended Link Sub-TLV enum.
+#[derive(Debug, Clone)]
+pub enum ExtLinkSubTlv {
+    AdjSid(AdjSidSubTlv),
+    LanAdjSid(LanAdjSidSubTlv),
+    Unknown(RouterInfoTlvUnknown),
+}
+
+impl ExtLinkSubTlv {
+    pub fn parse_sub(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let len = tl.len as usize;
+        let (input, sub_data) = packet_utils::safe_split_at(input, len)?;
+        let typ: ExtLinkSubTlvType = tl.typ.into();
+
+        let val = match typ {
+            ExtLinkSubTlvType::AdjSid => {
+                let (_, adj) = AdjSidSubTlv::parse_be(sub_data)?;
+                ExtLinkSubTlv::AdjSid(adj)
+            }
+            ExtLinkSubTlvType::LanAdjSid => {
+                let (_, lan) = LanAdjSidSubTlv::parse_be(sub_data)?;
+                ExtLinkSubTlv::LanAdjSid(lan)
+            }
+            ExtLinkSubTlvType::Unknown(_) => ExtLinkSubTlv::Unknown(RouterInfoTlvUnknown {
+                typ: tl.typ,
+                len: tl.len,
+                values: sub_data.to_vec(),
+            }),
+        };
+
+        // Skip padding to 4-byte alignment.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+
+        Ok((input, val))
+    }
+}
+
+// RFC 8665 §5 Adj-SID Sub-TLV flags.
+#[bitfield(u8, debug = true)]
+#[derive(PartialEq)]
+pub struct AdjSidFlags {
+    #[bits(3)]
+    pub resvd: u8,
+    pub p_flag: bool,
+    pub g_flag: bool,
+    pub l_flag: bool,
+    pub v_flag: bool,
+    pub b_flag: bool,
+}
+
+impl ParseBe<AdjSidFlags> for AdjSidFlags {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u8(input)?;
+        Ok((input, flags.into()))
+    }
+}
+
+// RFC 8665 §5 Adj-SID Sub-TLV (type 2).
+#[derive(Debug, Clone)]
+pub struct AdjSidSubTlv {
+    pub flags: AdjSidFlags,
+    pub mt_id: u8,
+    pub weight: u8,
+    pub sid: SidLabelTlv,
+}
+
+impl AdjSidSubTlv {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = AdjSidFlags::parse_be(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        let (input, mt_id) = be_u8(input)?;
+        let (input, weight) = be_u8(input)?;
+        // Remaining bytes determine Label (3) vs Index (4).
+        let sid_len = input.len();
+        let (input, sid) = match sid_len {
+            3 => {
+                let (input, label) = be_u24(input)?;
+                (input, SidLabelTlv::Label(label))
+            }
+            4 => {
+                let (input, index) = be_u32(input)?;
+                (input, SidLabelTlv::Index(index))
+            }
+            _ => return Err(Err::Incomplete(Needed::new(sid_len))),
+        };
+        Ok((
+            input,
+            Self {
+                flags,
+                mt_id,
+                weight,
+                sid,
+            },
+        ))
+    }
+}
+
+// RFC 8665 §6 LAN Adj-SID Sub-TLV (type 3).
+#[derive(Debug, Clone)]
+pub struct LanAdjSidSubTlv {
+    pub flags: AdjSidFlags,
+    pub mt_id: u8,
+    pub weight: u8,
+    pub neighbor_id: Ipv4Addr,
+    pub sid: SidLabelTlv,
+}
+
+impl LanAdjSidSubTlv {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = AdjSidFlags::parse_be(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        let (input, mt_id) = be_u8(input)?;
+        let (input, weight) = be_u8(input)?;
+        let (input, neighbor_id) = Ipv4Addr::parse_be(input)?;
+        // Remaining bytes determine Label (3) vs Index (4).
+        let sid_len = input.len();
+        let (input, sid) = match sid_len {
+            3 => {
+                let (input, label) = be_u24(input)?;
+                (input, SidLabelTlv::Label(label))
+            }
+            4 => {
+                let (input, index) = be_u32(input)?;
+                (input, SidLabelTlv::Index(index))
+            }
+            _ => return Err(Err::Incomplete(Needed::new(sid_len))),
+        };
+        Ok((
+            input,
+            Self {
+                flags,
+                mt_id,
+                weight,
+                neighbor_id,
+                sid,
+            },
+        ))
+    }
 }
 
 #[derive(Debug, Clone, NomBE)]
