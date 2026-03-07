@@ -27,6 +27,7 @@ bitflags = "2.6.0"
 byteorder = "1.5"
 bytes = "1.9"
 fixedbuf = { path = "../fixedbuf" }
+packet-utils = { path = "../packet-utils" }
 ipnet = { version = "2.10", features = ["serde"] }
 itertools = "0.14.0"
 nom = "8"
