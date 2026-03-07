@@ -2,12 +2,12 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bitfield_struct::bitfield;
 use bytes::{BufMut, BytesMut};
+use nom::IResult;
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16, be_u24};
-use nom::{Err, IResult, Needed};
 use nom_derive::*;
+use packet_utils::Algo;
 use serde::{Deserialize, Serialize};
-use sr_packet::Algo;
 
 use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
 use crate::{
@@ -81,10 +81,7 @@ impl ParseBe<IsisTlvExtIsReachEntry> for IsisTlvExtIsReachEntry {
         let (input, neighbor_id) = take(7usize)(input)?;
         let (input, metric) = be_u24(input)?;
         let (input, sublen) = be_u8(input)?;
-        if input.len() < sublen as usize {
-            return Err(Err::Incomplete(Needed::new(sublen as usize)));
-        }
-        let (sub, input) = input.split_at(sublen as usize);
+        let (input, sub) = packet_utils::safe_split_at(input, sublen as usize)?;
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
 
         let mut tlv = Self::default();
@@ -125,10 +122,7 @@ pub enum IsisSubTlv {
 impl IsisSubTlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
-        if input.len() < cl.len as usize {
-            return Err(Err::Incomplete(Needed::new(cl.len as usize)));
-        }
-        let (sub, input) = input.split_at(cl.len as usize);
+        let (input, sub) = packet_utils::safe_split_at(input, cl.len as usize)?;
         let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
         if let IsisSubTlv::Unknown(ref mut v) = val {
             v.code = cl.code;

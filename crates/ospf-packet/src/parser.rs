@@ -5,11 +5,12 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
+use nom::bytes::complete::take;
 use nom::error::{make_error, ErrorKind};
 use nom::number::complete::{be_u24, be_u64, be_u8};
-use nom::{Err, IResult, Needed};
+use nom::{Err, IResult};
 use nom_derive::*;
-use sr_packet::Algo;
+use packet_utils::Algo;
 
 use super::util::{Emit, ParseBe};
 use super::{many0_complete, OspfLsType, OspfType};
@@ -522,8 +523,6 @@ impl OspfLsp {
         total_length: u16,
         ls_id: Ipv4Addr,
     ) -> IResult<&[u8], Self> {
-        use nom::bytes::complete::take;
-
         let payload_length = total_length.saturating_sub(20) as usize;
         let (remaining_input, payload_input) = take(payload_length)(input)?;
 
@@ -899,15 +898,17 @@ impl RouterInfoTlvUnknown {
     }
 }
 
+// TLV
 impl RouterInfoTlv {
     pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, tl) = TlvTypeLen::parse_be(input)?;
         let typ: RouterInfoTlvType = tl.typ.into();
-        if input.len() < tl.len as usize {
-            return Err(Err::Incomplete(Needed::new(tl.len as usize)));
-        }
-        let (tlv, input) = input.split_at(tl.len as usize);
+        let len = tl.len as usize;
+        let (input, tlv) = packet_utils::safe_split_at(input, len)?;
         let (_, val) = Self::parse_be(tlv, typ)?;
+        // Skip padding to 4-byte alignment.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
         Ok((input, val))
     }
 
