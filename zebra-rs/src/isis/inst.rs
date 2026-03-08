@@ -719,7 +719,19 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             }
         }
 
+        // Test.
+        let mut asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![],
+            udabm: vec![],
+            subs: vec![],
+        };
+        let te_metric = IsisSubTeMetric { metric: 100 };
+        asla.subs.push(te_metric.into());
+        is_reach.subs.push(asla.into());
+
         ext_is_reach.entries.push(is_reach);
+
         lsp.tlvs.push(ext_is_reach.into());
     }
 

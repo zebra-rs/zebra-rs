@@ -105,8 +105,10 @@ pub enum IsisSubTlv {
     Ipv6IfAddr(IsisSubIpv6IfAddr),
     #[nom(Selector = "IsisNeighCode::Ipv6NeighAddr")]
     Ipv6NeighAddr(IsisSubIpv6NeighAddr),
-    #[nom(Selector = "IsisNeighCode::WideMetric")]
-    WideMetric(IsisSubWideMetric),
+    #[nom(Selector = "IsisNeighCode::Asla")]
+    Asla(IsisSubAsla),
+    #[nom(Selector = "IsisNeighCode::TeMetric")]
+    TeMetric(IsisSubTeMetric),
     #[nom(Selector = "IsisNeighCode::AdjSid")]
     AdjSid(IsisSubAdjSid),
     #[nom(Selector = "IsisNeighCode::LanAdjSid")]
@@ -138,7 +140,8 @@ impl IsisSubTlv {
             Ipv4NeighAddr(v) => v.len(),
             Ipv6IfAddr(v) => v.len(),
             Ipv6NeighAddr(v) => v.len(),
-            WideMetric(v) => v.len(),
+            Asla(v) => v.len(),
+            TeMetric(v) => v.len(),
             AdjSid(v) => v.len(),
             LanAdjSid(v) => v.len(),
             Srv6EndXSid(v) => v.len(),
@@ -158,7 +161,8 @@ impl IsisSubTlv {
             Ipv4NeighAddr(v) => v.tlv_emit(buf),
             Ipv6IfAddr(v) => v.tlv_emit(buf),
             Ipv6NeighAddr(v) => v.tlv_emit(buf),
-            WideMetric(v) => v.tlv_emit(buf),
+            Asla(v) => v.tlv_emit(buf),
+            TeMetric(v) => v.tlv_emit(buf),
             AdjSid(v) => v.tlv_emit(buf),
             LanAdjSid(v) => v.tlv_emit(buf),
             Srv6EndXSid(v) => v.tlv_emit(buf),
@@ -244,15 +248,85 @@ impl TlvEmitter for IsisSubIpv6NeighAddr {
     }
 }
 
+// RFC 9479 IS-IS Application-Specific Link Attributes
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubAsla {
+    pub l_flag: bool,
+    pub sabm: Vec<u8>,
+    pub udabm: Vec<u8>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subs: Vec<IsisSubTlv>,
+}
+
+impl ParseBe<IsisSubAsla> for IsisSubAsla {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, first_byte) = be_u8(input)?;
+        let l_flag = (first_byte & 0x80) != 0;
+        let sabm_len = (first_byte & 0x7F) as usize;
+        let (input, udabm_len) = be_u8(input)?;
+        let udabm_len = udabm_len as usize;
+
+        // RFC 9479 §4: When L-flag is set, SABM and UDABM are each 1 byte
+        // (legacy format) regardless of the length fields.
+        let (eff_sabm_len, eff_udabm_len) = if l_flag {
+            (sabm_len.max(1), udabm_len.max(1))
+        } else {
+            (sabm_len, udabm_len)
+        };
+
+        let (input, sabm) = take(eff_sabm_len)(input)?;
+        let (input, udabm) = take(eff_udabm_len)(input)?;
+        let (input, subs) = many0_complete(IsisSubTlv::parse_subs).parse(input)?;
+
+        Ok((
+            input,
+            Self {
+                l_flag,
+                sabm: sabm.to_vec(),
+                udabm: udabm.to_vec(),
+                subs,
+            },
+        ))
+    }
+}
+
+impl TlvEmitter for IsisSubAsla {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::Asla.into()
+    }
+
+    fn len(&self) -> u8 {
+        let sub_len: u8 = self.subs.iter().map(|sub| sub.len() + 2).sum();
+        2 + self.sabm.len() as u8 + self.udabm.len() as u8 + sub_len
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let first_byte = if self.l_flag { 0x80 } else { 0 } | (self.sabm.len() as u8 & 0x7F);
+        buf.put_u8(first_byte);
+        buf.put_u8(self.udabm.len() as u8);
+        buf.put(&self.sabm[..]);
+        buf.put(&self.udabm[..]);
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+    }
+}
+
+impl From<IsisSubAsla> for IsisSubTlv {
+    fn from(value: IsisSubAsla) -> Self {
+        IsisSubTlv::Asla(value)
+    }
+}
+
 #[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
-pub struct IsisSubWideMetric {
+pub struct IsisSubTeMetric {
     #[nom(Parse = "be_u24")]
     pub metric: u32,
 }
 
-impl TlvEmitter for IsisSubWideMetric {
+impl TlvEmitter for IsisSubTeMetric {
     fn typ(&self) -> u8 {
-        IsisNeighCode::WideMetric.into()
+        IsisNeighCode::TeMetric.into()
     }
 
     fn len(&self) -> u8 {
@@ -261,6 +335,12 @@ impl TlvEmitter for IsisSubWideMetric {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put(&u32_u8_3(self.metric)[..]);
+    }
+}
+
+impl From<IsisSubTeMetric> for IsisSubTlv {
+    fn from(value: IsisSubTeMetric) -> Self {
+        IsisSubTlv::TeMetric(value)
     }
 }
 

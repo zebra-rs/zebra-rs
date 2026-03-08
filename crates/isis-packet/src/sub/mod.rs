@@ -18,9 +18,9 @@ pub mod cap_disp;
 
 pub mod neigh;
 pub use neigh::{
-    AdjSidFlags, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr, IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr,
-    IsisSubLanAdjSid, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid, IsisSubWideMetric,
-    IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
+    AdjSidFlags, IsisSubAsla, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr, IsisSubIpv6IfAddr,
+    IsisSubIpv6NeighAddr, IsisSubLanAdjSid, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid,
+    IsisSubTeMetric, IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
 };
 pub mod neigh_code;
 pub use neigh_code::IsisNeighCode;

@@ -1,9 +1,9 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::neigh::{IsisSubAdjSid, IsisSubTlv};
+use super::neigh::{IsisSubAdjSid, IsisSubAsla, IsisSubTlv};
 use super::{
     AdjSidFlags, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr, IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr,
-    IsisSubLanAdjSid, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid, IsisSubWideMetric,
+    IsisSubLanAdjSid, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid, IsisSubTeMetric,
     IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
 };
 
@@ -39,10 +39,11 @@ impl Display for IsisSubTlv {
             Ipv4NeighAddr(v) => write!(f, "{}", v),
             Ipv6IfAddr(v) => write!(f, "{}", v),
             Ipv6NeighAddr(v) => write!(f, "{}", v),
-            WideMetric(v) => write!(f, "{}", v),
+            TeMetric(v) => write!(f, "{}", v),
             AdjSid(v) => write!(f, "{}", v),
             LanAdjSid(v) => write!(f, "{}", v),
             Srv6EndXSid(v) => write!(f, "{}", v),
+            Asla(v) => write!(f, "{}", v),
             Srv6LanEndXSid(v) => write!(f, "{}", v),
             Unknown(v) => write!(f, "    Unknown: ({:?})", v.code),
         }
@@ -73,7 +74,7 @@ impl Display for IsisSubIpv6NeighAddr {
     }
 }
 
-impl Display for IsisSubWideMetric {
+impl Display for IsisSubTeMetric {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "    Wide Metric: {}", self.metric)
     }
@@ -118,6 +119,42 @@ impl Display for IsisSubLanAdjSid {
 impl Display for IsisSubSrv6EndXSid {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "    End.X SID: {}", self.sid)
+    }
+}
+
+impl Display for IsisSubAsla {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        let sabm_bits = self.sabm.first().copied().unwrap_or(0);
+        let mut apps = Vec::new();
+        if sabm_bits & 0x80 != 0 {
+            apps.push("RSVP-TE");
+        }
+        if sabm_bits & 0x40 != 0 {
+            apps.push("SR-Policy");
+        }
+        if sabm_bits & 0x20 != 0 {
+            apps.push("LFA");
+        }
+        if sabm_bits & 0x10 != 0 {
+            apps.push("Flex-Algo");
+        }
+        let app_str = if apps.is_empty() {
+            "none".to_string()
+        } else {
+            apps.join(", ")
+        };
+        write!(
+            f,
+            "    Application Specific Link Attributes:\n     L:{} SABM: 0x{} UDABM: 0x{}\n     Applications: {}",
+            self.l_flag as u8,
+            hex::encode(&self.sabm),
+            hex::encode(&self.udabm),
+            app_str
+        )?;
+        for sub in &self.subs {
+            write!(f, "\n  {}", sub)?;
+        }
+        Ok(())
     }
 }
 
