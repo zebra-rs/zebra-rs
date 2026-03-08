@@ -1281,6 +1281,9 @@ fn show_ospf_database_detail(
                     OspfLsp::OpaqueAreaExtPrefix(ep) => {
                         show_ext_prefix_detail(&mut out, ep)?;
                     }
+                    OspfLsp::OpaqueAreaExtLink(el) => {
+                        show_ext_link_detail(&mut out, el)?;
+                    }
                     _ => {}
                 }
                 writeln!(out)?;
@@ -1383,6 +1386,60 @@ fn show_ext_prefix_detail(
                     writeln!(out, "      MT-ID: {}", sid.mt_id)?;
                 }
                 ExtPrefixSubTlv::Unknown(u) => {
+                    writeln!(out, "    Unknown Sub-TLV: type={} len={}", u.typ, u.len)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn show_ext_link_detail(
+    out: &mut String,
+    el: &ExtLinkLsa,
+) -> std::result::Result<(), std::fmt::Error> {
+    for tlv in &el.tlvs {
+        let link_type_name = match tlv.link_type {
+            1 => "Point-to-Point",
+            2 => "Transit Network",
+            3 => "Stub Network",
+            4 => "Virtual Link",
+            _ => "Unknown",
+        };
+        writeln!(
+            out,
+            "  Extended Link TLV: Link Type: {} ({})",
+            tlv.link_type, link_type_name
+        )?;
+        writeln!(out, "    Link ID: {}", tlv.link_id)?;
+        writeln!(out, "    Link Data: {}", tlv.link_data)?;
+
+        for sub in &tlv.subs {
+            match sub {
+                ExtLinkSubTlv::AdjSid(adj) => {
+                    writeln!(out, "    Adj-SID Sub-TLV:")?;
+                    writeln!(out, "      Flags: 0x{:02x}", u8::from(adj.flags))?;
+                    writeln!(out, "      MT-ID: {}", adj.mt_id)?;
+                    writeln!(out, "      Weight: {}", adj.weight)?;
+                    let sid_val = match &adj.sid {
+                        SidLabelTlv::Label(v) => format!("Label: {}", v),
+                        SidLabelTlv::Index(v) => format!("Index: {}", v),
+                    };
+                    writeln!(out, "      SID/Label: {}", sid_val)?;
+                }
+                ExtLinkSubTlv::LanAdjSid(lan) => {
+                    writeln!(out, "    LAN Adj-SID Sub-TLV:")?;
+                    writeln!(out, "      Flags: 0x{:02x}", u8::from(lan.flags))?;
+                    writeln!(out, "      MT-ID: {}", lan.mt_id)?;
+                    writeln!(out, "      Weight: {}", lan.weight)?;
+                    writeln!(out, "      Neighbor ID: {}", lan.neighbor_id)?;
+                    let sid_val = match &lan.sid {
+                        SidLabelTlv::Label(v) => format!("Label: {}", v),
+                        SidLabelTlv::Index(v) => format!("Index: {}", v),
+                    };
+                    writeln!(out, "      SID/Label: {}", sid_val)?;
+                }
+                ExtLinkSubTlv::Unknown(u) => {
                     writeln!(out, "    Unknown Sub-TLV: type={} len={}", u.typ, u.len)?;
                 }
             }
