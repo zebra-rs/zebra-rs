@@ -720,6 +720,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         }
 
         ext_is_reach.entries.push(is_reach);
+
         lsp.tlvs.push(ext_is_reach.into());
     }
 
