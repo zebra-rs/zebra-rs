@@ -721,13 +721,13 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
 
         // Test.
         let mut asla = IsisSubAsla {
-            l_flag: false,
+            l_flag: true,
             sabm: vec![],
             udabm: vec![],
             subs: vec![],
         };
-        let te_metric = IsisSubTeMetric { metric: 100 };
-        asla.subs.push(te_metric.into());
+        let admin = IsisSubAdminGrp { groups: vec![100] };
+        asla.subs.push(admin.into());
         is_reach.subs.push(asla.into());
 
         ext_is_reach.entries.push(is_reach);

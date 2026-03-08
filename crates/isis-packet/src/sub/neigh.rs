@@ -4,7 +4,7 @@ use bitfield_struct::bitfield;
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
 use nom::bytes::complete::take;
-use nom::number::complete::{be_u8, be_u16, be_u24};
+use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
 use packet_utils::Algo;
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,8 @@ pub enum IsisSubTlv {
     Ipv6IfAddr(IsisSubIpv6IfAddr),
     #[nom(Selector = "IsisNeighCode::Ipv6NeighAddr")]
     Ipv6NeighAddr(IsisSubIpv6NeighAddr),
+    #[nom(Selector = "IsisNeighCode::AdminGrp")]
+    AdminGrp(IsisSubAdminGrp),
     #[nom(Selector = "IsisNeighCode::Asla")]
     Asla(IsisSubAsla),
     #[nom(Selector = "IsisNeighCode::TeMetric")]
@@ -140,6 +142,7 @@ impl IsisSubTlv {
             Ipv4NeighAddr(v) => v.len(),
             Ipv6IfAddr(v) => v.len(),
             Ipv6NeighAddr(v) => v.len(),
+            AdminGrp(v) => v.len(),
             Asla(v) => v.len(),
             TeMetric(v) => v.len(),
             AdjSid(v) => v.len(),
@@ -161,6 +164,7 @@ impl IsisSubTlv {
             Ipv4NeighAddr(v) => v.tlv_emit(buf),
             Ipv6IfAddr(v) => v.tlv_emit(buf),
             Ipv6NeighAddr(v) => v.tlv_emit(buf),
+            AdminGrp(v) => v.tlv_emit(buf),
             Asla(v) => v.tlv_emit(buf),
             TeMetric(v) => v.tlv_emit(buf),
             AdjSid(v) => v.tlv_emit(buf),
@@ -245,6 +249,41 @@ impl TlvEmitter for IsisSubIpv6NeighAddr {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.addr.octets()[..]);
+    }
+}
+
+// RFC 7308 Extended Administrative Groups (sub-TLV 14)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubAdminGrp {
+    pub groups: Vec<u32>,
+}
+
+impl ParseBe<IsisSubAdminGrp> for IsisSubAdminGrp {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, groups) = many0_complete(be_u32).parse(input)?;
+        Ok((input, Self { groups }))
+    }
+}
+
+impl TlvEmitter for IsisSubAdminGrp {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::AdminGrp.into()
+    }
+
+    fn len(&self) -> u8 {
+        (self.groups.len() * 4) as u8
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        for group in &self.groups {
+            buf.put_u32(*group);
+        }
+    }
+}
+
+impl From<IsisSubAdminGrp> for IsisSubTlv {
+    fn from(value: IsisSubAdminGrp) -> Self {
+        IsisSubTlv::AdminGrp(value)
     }
 }
 
