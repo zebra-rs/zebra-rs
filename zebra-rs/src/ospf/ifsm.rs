@@ -423,10 +423,6 @@ pub fn ospf_ifsm(oi: &mut OspfLink, event: IfsmEvent) {
 
     // If a state transition occurs, update the state.
     if let Some(new_state) = next_state {
-        println!(
-            "IFSM State Transition on {}: {:?} -> {:?}",
-            oi.name, oi.state, new_state
-        );
         if new_state != oi.state {
             ospf_ifsm_change_state(oi, new_state);
         }
