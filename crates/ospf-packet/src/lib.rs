@@ -6,6 +6,7 @@ mod util;
 
 pub use ls_type::OspfLsType;
 pub use packet_utils::Algo;
+pub use packet_utils::SidLabelTlv;
 pub use parser::*;
 pub use typ::OspfType;
 

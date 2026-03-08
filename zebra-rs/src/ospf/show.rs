@@ -1229,9 +1229,166 @@ fn show_ospf_database_detail(
             }
             writeln!(out)?;
         }
+
+        let opaque_table = area.lsdb.tables.get(&OspfLsType::OpaqueAreaLocal);
+        if !opaque_table.is_empty() {
+            writeln!(
+                out,
+                "                Area-Local Opaque-LSA (Area {})",
+                area.id
+            )?;
+            writeln!(out)?;
+
+            for ((lsa_id, adv_router), lsa) in opaque_table.iter() {
+                let octets = lsa_id.octets();
+                let opaque_type = octets[0];
+                let opaque_id =
+                    ((octets[1] as u32) << 16) | ((octets[2] as u32) << 8) | (octets[3] as u32);
+
+                writeln!(out, "  LS age: {}", lsa.current_age())?;
+                let opts = OspfOptions::from(lsa.data.h.options);
+                writeln!(
+                    out,
+                    "  Options: 0x{:x}  : {}",
+                    lsa.data.h.options,
+                    format_options_flags(&opts)
+                )?;
+                let opaque_type_name = match opaque_type {
+                    4 => "Router Information LSA",
+                    7 => "Extended Prefix LSA",
+                    8 => "Extended Link LSA",
+                    _ => "Unknown",
+                };
+                writeln!(
+                    out,
+                    "  LS Type: Area-Local Opaque-LSA (Opaque Type {})",
+                    opaque_type
+                )?;
+                writeln!(out, "  Opaque-Type {} ({})", opaque_type, opaque_type_name)?;
+                writeln!(out, "  Opaque-ID   0x{:x}", opaque_id)?;
+                writeln!(out, "  Advertising Router: {}", adv_router)?;
+                writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
+                writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
+                writeln!(out, "  Length: {}", lsa.data.h.length)?;
+
+                let payload_len = lsa.data.h.length.saturating_sub(20);
+                writeln!(out, "  Opaque-Info: {} octets of data", payload_len)?;
+
+                match &lsa.data.lsp {
+                    OspfLsp::OpaqueAreaRouterInfo(ri) => {
+                        show_router_info_detail(&mut out, ri)?;
+                    }
+                    OspfLsp::OpaqueAreaExtPrefix(ep) => {
+                        show_ext_prefix_detail(&mut out, ep)?;
+                    }
+                    _ => {}
+                }
+                writeln!(out)?;
+            }
+        }
     }
 
     Ok(out)
+}
+
+fn show_router_info_detail(
+    out: &mut String,
+    ri: &RouterInfoLsa,
+) -> std::result::Result<(), std::fmt::Error> {
+    for tlv in &ri.tlvs {
+        match tlv {
+            RouterInfoTlv::RouterInfo(cap) => {
+                writeln!(out, "  Router Capabilities: 0x{:08x}", u32::from(cap.caps))?;
+                let bits: [(bool, &str); 6] = [
+                    (cap.caps.gr_capable(), "Graceful Restart capable"),
+                    (cap.caps.gr_helper(), "Graceful Restart helper"),
+                    (cap.caps.stub(), "Stub Router support"),
+                    (cap.caps.te(), "Traffic Engineering support"),
+                    (cap.caps.p2p_lan(), "Point-to-point over LAN"),
+                    (cap.caps.exp(), "Experimental TE"),
+                ];
+                for (bit, (set, name)) in bits.iter().enumerate() {
+                    if *set {
+                        writeln!(out, "    Bit {}: {}", bit, name)?;
+                    }
+                }
+            }
+            RouterInfoTlv::Algo(algo_tlv) => {
+                writeln!(out, "  Segment Routing Algorithm TLV:")?;
+                for algo in &algo_tlv.algos {
+                    let algo_name = match algo {
+                        Algo::Spf => "SPF",
+                        Algo::StrictSpf => "Strict SPF",
+                        _ => "Unknown",
+                    };
+                    writeln!(out, "    Algorithm {}: {}", u8::from(*algo), algo_name)?;
+                }
+            }
+            RouterInfoTlv::SidLabelRnage(range) => {
+                writeln!(out, "  Segment Routing Global Range TLV:")?;
+                writeln!(out, "    Range Size = {}", range.range)?;
+                let sid_val = match &range.sid_label {
+                    SidLabelTlv::Label(v) => *v,
+                    SidLabelTlv::Index(v) => *v,
+                };
+                writeln!(out, "    SID Label = {}", sid_val)?;
+            }
+            RouterInfoTlv::LocalBlock(lb) => {
+                writeln!(out, "  Segment Routing Local Range TLV:")?;
+                writeln!(out, "    Range Size = {}", lb.range)?;
+                let sid_val = match &lb.sid_label {
+                    SidLabelTlv::Label(v) => *v,
+                    SidLabelTlv::Index(v) => *v,
+                };
+                writeln!(out, "    SID Label = {}", sid_val)?;
+            }
+            RouterInfoTlv::Unknown(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn show_ext_prefix_detail(
+    out: &mut String,
+    ep: &ExtPrefixLsa,
+) -> std::result::Result<(), std::fmt::Error> {
+    for tlv in &ep.tlvs {
+        let route_type_name = match tlv.route_type {
+            1 => "Intra-Area",
+            3 => "Inter-Area",
+            5 => "External",
+            7 => "NSSA External",
+            _ => "Unknown",
+        };
+        writeln!(
+            out,
+            "  Extended Prefix TLV: Route Type: {} ({})",
+            tlv.route_type, route_type_name
+        )?;
+        writeln!(out, "    Prefix: {}", tlv.prefix)?;
+        writeln!(out, "    AF: {}", tlv.af)?;
+        writeln!(out, "    Flags: 0x{:02x}", tlv.flags)?;
+
+        for sub in &tlv.subs {
+            match sub {
+                ExtPrefixSubTlv::PrefixSid(sid) => {
+                    writeln!(out, "    Prefix SID Sub-TLV:")?;
+                    writeln!(out, "      Algorithm: {}", sid.algo)?;
+                    let sid_val = match &sid.sid {
+                        SidLabelTlv::Label(v) => format!("Label: {}", v),
+                        SidLabelTlv::Index(v) => format!("Index: {}", v),
+                    };
+                    writeln!(out, "      SID/Label: {}", sid_val)?;
+                    writeln!(out, "      Flags: 0x{:02x}", u8::from(sid.flags))?;
+                    writeln!(out, "      MT-ID: {}", sid.mt_id)?;
+                }
+                ExtPrefixSubTlv::Unknown(u) => {
+                    writeln!(out, "    Unknown Sub-TLV: type={} len={}", u.typ, u.len)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn show_ospf_route(
