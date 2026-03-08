@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::neigh::{IsisSubAdjSid, IsisSubAsla, IsisSubTlv};
+use super::neigh::{IsisSubAdjSid, IsisSubAdminGrp, IsisSubAsla, IsisSubTlv};
 use super::{
     AdjSidFlags, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr, IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr,
     IsisSubLanAdjSid, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid, IsisSubTeMetric,
@@ -39,6 +39,7 @@ impl Display for IsisSubTlv {
             Ipv4NeighAddr(v) => write!(f, "{}", v),
             Ipv6IfAddr(v) => write!(f, "{}", v),
             Ipv6NeighAddr(v) => write!(f, "{}", v),
+            AdminGrp(v) => write!(f, "{}", v),
             TeMetric(v) => write!(f, "{}", v),
             AdjSid(v) => write!(f, "{}", v),
             LanAdjSid(v) => write!(f, "{}", v),
@@ -71,6 +72,16 @@ impl Display for IsisSubIpv6IfAddr {
 impl Display for IsisSubIpv6NeighAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "    IPv6 Neighbor Address: {}", self.addr)
+    }
+}
+
+impl Display for IsisSubAdminGrp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "    Admin Group:")?;
+        for (i, group) in self.groups.iter().enumerate() {
+            write!(f, " [{}] 0x{:08x}", i, group)?;
+        }
+        Ok(())
     }
 }
 
