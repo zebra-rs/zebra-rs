@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::Ipv4Addr;
 
 use bitfield_struct::bitfield;
@@ -548,12 +549,58 @@ impl OspfLsp {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum OspfLinkType {
     P2p = 1,
+    #[default]
     Transit = 2,
     Stub = 3,
-    Virtual = 4,
+    VirtualLink = 4,
+}
+
+impl ParseBe<OspfLinkType> for OspfLinkType {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], OspfLinkType> {
+        let (input, val) = be_u8(input)?;
+        let link_type: OspfLinkType = val.into();
+        Ok((input, link_type))
+    }
+}
+
+impl From<OspfLinkType> for u8 {
+    fn from(value: OspfLinkType) -> Self {
+        use OspfLinkType::*;
+        match value {
+            P2p => 1,
+            Transit => 2,
+            Stub => 3,
+            VirtualLink => 4,
+        }
+    }
+}
+
+impl From<u8> for OspfLinkType {
+    fn from(value: u8) -> Self {
+        use OspfLinkType::*;
+        match value {
+            1 => P2p,
+            2 => Transit,
+            3 => Stub,
+            4 => VirtualLink,
+            _ => Stub,
+        }
+    }
+}
+
+impl fmt::Display for OspfLinkType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use OspfLinkType::*;
+        match self {
+            P2p => write!(f, "point-to-point"),
+            Transit => write!(f, "transit"),
+            Stub => write!(f, "stub"),
+            VirtualLink => write!(f, "virtual-link"),
+        }
+    }
 }
 
 // #[derive(Debug, PartialEq, Eq, Clone, Copy, NomBE)]
@@ -612,7 +659,7 @@ impl From<RouterLsa> for OspfLsp {
 pub struct RouterLsaLink {
     pub link_id: Ipv4Addr,
     pub link_data: Ipv4Addr,
-    pub link_type: u8,
+    pub link_type: OspfLinkType,
     pub num_tos: u8,
     pub tos_0_metric: u16,
     #[nom(Count = "num_tos")]
@@ -624,7 +671,7 @@ impl RouterLsaLink {
         Self {
             link_id: prefix.addr(),
             link_data: prefix.netmask(),
-            link_type: OspfLinkType::Stub as u8,
+            link_type: OspfLinkType::default(),
             num_tos: 0,
             tos_0_metric: metric,
             toses: vec![],
@@ -639,7 +686,7 @@ impl RouterLsaLink {
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.link_id.octets()[..]);
         buf.put(&self.link_data.octets()[..]);
-        buf.put_u8(self.link_type);
+        buf.put_u8(self.link_type.into());
         buf.put_u8(self.num_tos);
         buf.put_u16(self.tos_0_metric);
         for tos in &self.toses {
