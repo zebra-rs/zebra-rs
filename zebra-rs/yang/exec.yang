@@ -150,6 +150,9 @@ module exec {
         leaf spf {
           type empty;
         }
+        leaf segment-routing {
+          type empty;
+        }
       }
     }
 

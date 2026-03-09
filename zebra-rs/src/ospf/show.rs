@@ -180,6 +180,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf/route", show_ospf_route);
         self.show_add("/show/ip/ospf/spf", show_ospf_spf);
         self.show_add("/show/ip/ospf/graph", show_ospf_graph);
+        self.show_add("/show/ip/ospf/segment-routing", show_ospf_segment_routing);
     }
 }
 
@@ -1557,6 +1558,126 @@ fn format_ospf_graph(graph: &spf::Graph) -> Option<GraphJson> {
             nodes,
         })
     }
+}
+
+fn format_algo_list(ri: &RouterInfoLsa) -> String {
+    for tlv in &ri.tlvs {
+        if let RouterInfoTlv::Algo(a) = tlv {
+            let names: Vec<&str> = a
+                .algos
+                .iter()
+                .map(|algo| match algo {
+                    Algo::Spf => "SPF",
+                    Algo::StrictSpf => "StrictSPF",
+                    _ => "Unknown",
+                })
+                .collect();
+            return names.join(", ");
+        }
+    }
+    String::new()
+}
+
+fn show_ospf_segment_routing(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(buf)?;
+    writeln!(
+        buf,
+        "        OSPF Segment Routing database for ID {}",
+        ospf.router_id
+    )?;
+
+    for (_, area) in ospf.areas.iter() {
+        let lsdb = &area.lsdb;
+
+        for (router_id, label_config) in lsdb.label_map.iter() {
+            writeln!(buf)?;
+            writeln!(buf)?;
+
+            // Look up Router Info LSA for this router to get algorithm info.
+            let algo_str = lsdb
+                .tables
+                .opaque_area
+                .values()
+                .find_map(|lsa| {
+                    if lsa.data.h.adv_router == *router_id {
+                        if let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.data.lsp {
+                            return Some(format_algo_list(ri));
+                        }
+                    }
+                    None
+                })
+                .unwrap_or_default();
+
+            let srgb = &label_config.global;
+            let srlb_str = if let Some(ref lb) = label_config.local {
+                format!("    SRLB: [{}/{}]", lb.start, lb.end - 1)
+            } else {
+                String::new()
+            };
+
+            writeln!(
+                buf,
+                "SR-Node: {}    SRGB: [{}/{}]{}    Algo.(s): {}",
+                router_id, srgb.start, srgb.end, srlb_str, algo_str
+            )?;
+
+            writeln!(buf)?;
+            writeln!(
+                buf,
+                "    {:>18}  {:>21}  {:>20}  {:>9}  {:>15}",
+                "Prefix or Link", "Node or Adj. SID", "Label Operation", "Interface", "Nexthop"
+            )?;
+            writeln!(
+                buf,
+                "{}  {}  {}  {}  {}",
+                "-".repeat(18),
+                "-".repeat(21),
+                "-".repeat(20),
+                "-".repeat(9),
+                "-".repeat(15)
+            )?;
+
+            // Find Extended Prefix LSAs from this router.
+            for (_, lsa) in lsdb.tables.opaque_area.iter() {
+                if lsa.data.h.adv_router != *router_id {
+                    continue;
+                }
+                if let OspfLsp::OpaqueAreaExtPrefix(ref ep) = lsa.data.lsp {
+                    for tlv in &ep.tlvs {
+                        for sub in &tlv.subs {
+                            if let ExtPrefixSubTlv::PrefixSid(sid) = sub {
+                                let sid_str = match sid.sid {
+                                    SidLabelTlv::Index(idx) => {
+                                        format!("SR Pfx (idx {})", idx)
+                                    }
+                                    SidLabelTlv::Label(label) => {
+                                        format!("SR Pfx (lbl {})", label)
+                                    }
+                                };
+                                writeln!(
+                                    buf,
+                                    "    {:>14}  {:>21}  {:>20}  {:>9}  {:>15}",
+                                    format!("{}", tlv.prefix),
+                                    sid_str,
+                                    "",
+                                    "",
+                                    ""
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    writeln!(buf)?;
+    Ok(buf)
 }
 
 fn show_ospf_graph(

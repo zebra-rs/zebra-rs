@@ -14,12 +14,12 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::isis::srmpls::LabelConfig;
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, RibType};
+use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Context,

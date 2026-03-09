@@ -4,8 +4,12 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 use ospf_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::spf::label_block::{LabelBlock, LabelConfig, LabelMap};
+
 use super::inst::Message;
 use super::task::{Timer, TimerType};
+
+pub type OspfLabelMap = LabelMap<Ipv4Addr>;
 
 pub const OSPF_MAX_AGE: u16 = 3600;
 pub const OSPF_MAX_AGE_DIFF: u16 = 900; // 15 minutes (RFC 2328 Section 13.1)
@@ -25,6 +29,7 @@ pub enum LsdbEvent {
 
 pub struct Lsdb {
     pub tables: LsTypes<LsTable>,
+    pub label_map: OspfLabelMap,
 }
 
 #[derive(Default, Debug)]
@@ -139,6 +144,7 @@ impl Lsdb {
     pub fn new() -> Self {
         Self {
             tables: LsTypes::<LsTable>::default(),
+            label_map: OspfLabelMap::default(),
         }
     }
 
@@ -175,9 +181,43 @@ impl Lsdb {
         let ls_type = ospf_lsa.h.ls_type;
         let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
         let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
+
+        self.update_lsa(&ospf_lsa);
+
         let mut lsa = Lsa::new(ospf_lsa);
         lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
+
         self.tables.get_mut(&lsa.data.h.ls_type).insert(key, lsa);
+    }
+
+    pub fn update_lsa(&mut self, lsa: &OspfLsa) {
+        if let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.lsp {
+            if lsa.h.ls_age == OSPF_MAX_AGE {
+                self.label_map.remove(&lsa.h.adv_router);
+                return;
+            }
+            let mut global = None;
+            let mut local = None;
+            for tlv in &ri.tlvs {
+                match tlv {
+                    RouterInfoTlv::SidLabelRnage(r) => {
+                        if let SidLabelTlv::Label(start) = r.sid_label {
+                            global = Some(LabelBlock::new(start, r.range));
+                        }
+                    }
+                    RouterInfoTlv::LocalBlock(lb) => {
+                        if let SidLabelTlv::Label(start) = lb.sid_label {
+                            local = Some(LabelBlock::new(start, lb.range));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(global) = global {
+                let label_config = LabelConfig { global, local };
+                self.label_map.insert(lsa.h.adv_router, label_config);
+            }
+        }
     }
 
     pub fn remove_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
