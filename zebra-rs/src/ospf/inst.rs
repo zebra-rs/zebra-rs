@@ -1422,6 +1422,20 @@ pub struct SpfNexthop {
     pub router_id: Option<Ipv4Addr>,
 }
 
+fn rib_insert(rib: &mut PrefixMap<Ipv4Net, SpfRoute>, prefix: Ipv4Net, route: SpfRoute) {
+    if let Some(curr) = rib.get_mut(&prefix) {
+        if curr.metric > route.metric {
+            *curr = route;
+        } else if curr.metric == route.metric {
+            for (addr, nhop) in route.nhops {
+                curr.nhops.insert(addr, nhop);
+            }
+        }
+    } else {
+        rib.insert(prefix, route);
+    }
+}
+
 fn build_rib_from_spf(
     top: &Ospf,
     area_id: Ipv4Addr,
@@ -1477,27 +1491,6 @@ fn build_rib_from_spf(
         {
             if let OspfLsp::Router(ref router_lsa) = lsa.lsp {
                 for link in &router_lsa.links {
-                    let route = |prefix: Ipv4Net| SpfRoute {
-                        metric: nhops.cost,
-                        nhops: spf_nhops.clone(),
-                        sid: None,
-                        prefix_sid: None,
-                    };
-                    let insert = |rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
-                                  prefix: Ipv4Net,
-                                  route: SpfRoute| {
-                        if let Some(curr) = rib.get_mut(&prefix) {
-                            if curr.metric > route.metric {
-                                *curr = route;
-                            } else if curr.metric == route.metric {
-                                for (addr, nhop) in route.nhops {
-                                    curr.nhops.insert(addr, nhop);
-                                }
-                            }
-                        } else {
-                            rib.insert(prefix, route);
-                        }
-                    };
                     match link.link_type {
                         2 => {
                             // Transit Network: look up Network-LSA to get the
@@ -1508,7 +1501,13 @@ fn build_rib_from_spf(
                                         let mask = u32::from(net.netmask).leading_ones() as u8;
                                         if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                                             let prefix = prefix.trunc();
-                                            insert(&mut rib, prefix, route(prefix));
+                                            let spf_route = SpfRoute {
+                                                metric: nhops.cost,
+                                                nhops: spf_nhops.clone(),
+                                                sid: None,
+                                                prefix_sid: None,
+                                            };
+                                            rib_insert(&mut rib, prefix, spf_route);
                                         }
                                         break;
                                     }
@@ -1521,12 +1520,16 @@ fn build_rib_from_spf(
                             let mask = u32::from(link.link_data).leading_ones() as u8;
                             if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                                 let prefix = prefix.trunc();
-                                insert(&mut rib, prefix, route(prefix));
+                                let spf_route = SpfRoute {
+                                    metric: nhops.cost,
+                                    nhops: spf_nhops.clone(),
+                                    sid: None,
+                                    prefix_sid: None,
+                                };
+                                rib_insert(&mut rib, prefix, spf_route);
                             }
                         }
-                        _ => {
-                            // Just ignore.
-                        }
+                        _ => {}
                     }
                 }
             }
