@@ -233,7 +233,7 @@ impl Ospf {
         RouterLsaLink {
             link_id: prefix.network(),
             link_data: prefix.netmask(),
-            link_type: OspfLinkType::Stub as u8,
+            link_type: OspfLinkType::Stub,
             num_tos: 0,
             tos_0_metric: metric,
             toses: vec![],
@@ -277,7 +277,7 @@ impl Ospf {
                         // Transit link points to DR interface address.
                         link_id: link.ident.d_router,
                         link_data: addr.prefix.addr(),
-                        link_type: OspfLinkType::Transit as u8,
+                        link_type: OspfLinkType::Transit,
                         num_tos: 0,
                         tos_0_metric: metric,
                         toses: vec![],
@@ -1369,7 +1369,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
         if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
             for link in &router_lsa.links {
                 match link.link_type {
-                    1 | 4 => {
+                    OspfLinkType::P2p | OspfLinkType::VirtualLink => {
                         // Point-to-Point or Virtual Link: link_id = neighbor router ID.
                         let to_id = top.lsp_map.get(link.link_id);
                         node.olinks.push(spf::Link {
@@ -1378,7 +1378,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                             cost: link.tos_0_metric as u32,
                         });
                     }
-                    2 => {
+                    OspfLinkType::Transit => {
                         // Transit Network: expand through the Network-LSA pseudo-node.
                         // link_id = DR's interface IP, which is the Network-LSA's ls_id.
                         if let Some(attached) = network_lsas.get(&link.link_id) {
@@ -1394,7 +1394,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                             }
                         }
                     }
-                    _ => {
+                    OspfLinkType::Stub => {
                         // Stub (3) and unknown: not part of the SPF graph.
                     }
                 }
@@ -1492,7 +1492,7 @@ fn build_rib_from_spf(
             if let OspfLsp::Router(ref router_lsa) = lsa.lsp {
                 for link in &router_lsa.links {
                     match link.link_type {
-                        2 => {
+                        OspfLinkType::Transit => {
                             // Transit Network: look up Network-LSA to get the
                             // network prefix (link_id = dr's interface ip).
                             for ((_ls_id, _adv), nlsa) in area.lsdb.tables.network.iter() {
@@ -1514,7 +1514,7 @@ fn build_rib_from_spf(
                                 }
                             }
                         }
-                        3 => {
+                        OspfLinkType::Stub => {
                             // Stub Network: link_id = network addr,
                             // link_data = netmask.
                             let mask = u32::from(link.link_data).leading_ones() as u8;

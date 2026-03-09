@@ -1029,11 +1029,10 @@ fn show_ospf_database_detail(
                     .iter()
                     .map(|link| {
                         let link_type = match link.link_type {
-                            1 => "Point-to-Point",
-                            2 => "Transit Network",
-                            3 => "Stub Network",
-                            4 => "Virtual Link",
-                            _ => "Unknown",
+                            OspfLinkType::P2p => "Point-to-Point",
+                            OspfLinkType::Transit => "Transit Network",
+                            OspfLinkType::Stub => "Stub Network",
+                            OspfLinkType::VirtualLink => "Virtual Link",
                         }
                         .to_string();
                         OspfRouterLinkDetailJson {
@@ -1130,15 +1129,14 @@ fn show_ospf_database_detail(
 
             for link in &lsp.links {
                 let link_type_str = match link.link_type {
-                    1 => "Point-to-Point",
-                    2 => "Transit Network",
-                    3 => "Stub Network",
-                    4 => "Virtual Link",
-                    _ => "Unknown",
+                    OspfLinkType::P2p => "Point-to-Point",
+                    OspfLinkType::Transit => "Transit Network",
+                    OspfLinkType::Stub => "Stub Network",
+                    OspfLinkType::VirtualLink => "Virtual Link",
                 };
                 writeln!(out, "    Link connected to: {}", link_type_str)?;
                 match link.link_type {
-                    1 => {
+                    OspfLinkType::P2p | OspfLinkType::VirtualLink => {
                         writeln!(
                             out,
                             "     (Link ID) Neighboring Router ID: {}",
@@ -1150,7 +1148,7 @@ fn show_ospf_database_detail(
                             link.link_data
                         )?;
                     }
-                    2 => {
+                    OspfLinkType::Transit => {
                         writeln!(
                             out,
                             "     (Link ID) Designated Router address: {}",
@@ -1162,29 +1160,13 @@ fn show_ospf_database_detail(
                             link.link_data
                         )?;
                     }
-                    3 => {
+                    OspfLinkType::Stub => {
                         writeln!(
                             out,
                             "     (Link ID) Network/subnet number: {}",
                             link.link_id
                         )?;
                         writeln!(out, "     (Link Data) Network Mask: {}", link.link_data)?;
-                    }
-                    4 => {
-                        writeln!(
-                            out,
-                            "     (Link ID) Neighboring Router ID: {}",
-                            link.link_id
-                        )?;
-                        writeln!(
-                            out,
-                            "     (Link Data) Router Interface address: {}",
-                            link.link_data
-                        )?;
-                    }
-                    _ => {
-                        writeln!(out, "     (Link ID) {}", link.link_id)?;
-                        writeln!(out, "     (Link Data) {}", link.link_data)?;
                     }
                 }
                 writeln!(out, "      Number of TOS metrics: {}", link.num_tos)?;
