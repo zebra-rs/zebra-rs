@@ -393,8 +393,8 @@ impl OspfLsa {
             OspfLsp::Summary(lsp) | OspfLsp::SummaryAsbr(lsp) => lsp.emit(buf),
             OspfLsp::AsExternal(lsp) => lsp.emit(buf),
             OspfLsp::NssaAsExternal(lsp) => lsp.emit(buf),
-            OspfLsp::OpaqueAreaRouterInfo(_) => {}
-            OspfLsp::OpaqueAreaExtPrefix(_) => {}
+            OspfLsp::OpaqueAreaRouterInfo(lsp) => lsp.emit(buf),
+            OspfLsp::OpaqueAreaExtPrefix(lsp) => lsp.emit(buf),
             OspfLsp::OpaqueAreaExtLink(_) => {}
             OspfLsp::Unknown(lsp) => lsp.emit(buf),
         }
@@ -426,8 +426,8 @@ impl OspfLsa {
             OspfLsp::Summary(lsp) | OspfLsp::SummaryAsbr(lsp) => lsp.lsa_len(),
             OspfLsp::AsExternal(lsp) => lsp.lsa_len(),
             OspfLsp::NssaAsExternal(lsp) => lsp.lsa_len(),
-            OspfLsp::OpaqueAreaRouterInfo(_) => 0,
-            OspfLsp::OpaqueAreaExtPrefix(_) => 0,
+            OspfLsp::OpaqueAreaRouterInfo(lsp) => lsp.lsa_len(),
+            OspfLsp::OpaqueAreaExtPrefix(lsp) => lsp.lsa_len(),
             OspfLsp::OpaqueAreaExtLink(_) => 0,
             OspfLsp::Unknown(lsp) => lsp.lsa_len(),
         };
@@ -997,6 +997,105 @@ impl RouterInfoTlv {
     }
 }
 
+/// Emit an OSPF-style SID/Label sub-TLV (2-byte type + 2-byte length).
+fn emit_ospf_sid_label(buf: &mut BytesMut, sid_label: &SidLabelTlv) {
+    buf.put_u16(1); // SID/Label sub-TLV type.
+    match sid_label {
+        SidLabelTlv::Label(v) => {
+            buf.put_u16(3);
+            buf.put(&packet_utils::u32_u8_3(*v)[..]);
+        }
+        SidLabelTlv::Index(v) => {
+            buf.put_u16(4);
+            buf.put_u32(*v);
+        }
+    }
+}
+
+/// Return wire length of OSPF SID/Label sub-TLV (4 byte header + value).
+fn ospf_sid_label_len(sid_label: &SidLabelTlv) -> u16 {
+    4 + match sid_label {
+        SidLabelTlv::Label(_) => 3,
+        SidLabelTlv::Index(_) => 4,
+    }
+}
+
+impl RouterInfoLsa {
+    pub fn lsa_len(&self) -> u16 {
+        self.tlvs.iter().map(|tlv| tlv.wire_len()).sum()
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for tlv in &self.tlvs {
+            tlv.emit(buf);
+        }
+    }
+}
+
+impl RouterInfoTlv {
+    /// Total wire length including 4-byte TLV header, padded to 4-byte alignment.
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    /// Value length (excluding TLV header).
+    fn value_len(&self) -> u16 {
+        match self {
+            RouterInfoTlv::RouterInfo(_) => 4,
+            RouterInfoTlv::Algo(a) => a.algos.len() as u16,
+            RouterInfoTlv::SidLabelRnage(r) => 4 + ospf_sid_label_len(&r.sid_label),
+            RouterInfoTlv::LocalBlock(r) => 4 + ospf_sid_label_len(&r.sid_label),
+            RouterInfoTlv::Unknown(u) => u.len,
+        }
+    }
+
+    fn tlv_type(&self) -> u16 {
+        match self {
+            RouterInfoTlv::RouterInfo(_) => 1,
+            RouterInfoTlv::Algo(_) => 8,
+            RouterInfoTlv::SidLabelRnage(_) => 9,
+            RouterInfoTlv::LocalBlock(_) => 14,
+            RouterInfoTlv::Unknown(u) => u.typ,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let typ = self.tlv_type();
+        let len = self.value_len();
+        buf.put_u16(typ);
+        buf.put_u16(len);
+        match self {
+            RouterInfoTlv::RouterInfo(cap) => {
+                buf.put_u32(cap.caps.into());
+            }
+            RouterInfoTlv::Algo(a) => {
+                for algo in &a.algos {
+                    buf.put_u8((*algo).into());
+                }
+            }
+            RouterInfoTlv::SidLabelRnage(r) => {
+                buf.put(&packet_utils::u32_u8_3(r.range)[..]);
+                buf.put_u8(0); // reserved
+                emit_ospf_sid_label(buf, &r.sid_label);
+            }
+            RouterInfoTlv::LocalBlock(r) => {
+                buf.put(&packet_utils::u32_u8_3(r.range)[..]);
+                buf.put_u8(0); // reserved
+                emit_ospf_sid_label(buf, &r.sid_label);
+            }
+            RouterInfoTlv::Unknown(u) => {
+                buf.put(&u.values[..]);
+            }
+        }
+        // Pad to 4-byte alignment.
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
 // RFC 7684 §2.1 OSPFv2 Extended Prefix Opaque LSA
 #[derive(Debug, Clone)]
 pub struct ExtPrefixLsa {
@@ -1189,6 +1288,115 @@ impl ExtPrefixSidSubTlv {
                 sid,
             },
         ))
+    }
+}
+
+impl ExtPrefixLsa {
+    pub fn lsa_len(&self) -> u16 {
+        self.tlvs.iter().map(|tlv| tlv.wire_len()).sum()
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for tlv in &self.tlvs {
+            tlv.emit(buf);
+        }
+    }
+}
+
+impl ExtPrefixTlv {
+    /// Total wire length including 4-byte TLV header.
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    fn value_len(&self) -> u16 {
+        let prefix_bytes = ((self.prefix.prefix_len() as usize) + 7) / 8;
+        let padded_prefix_bytes = ((prefix_bytes + 3) & !3) as u16;
+        let sub_len: u16 = self.subs.iter().map(|s| s.wire_len()).sum();
+        4 + padded_prefix_bytes + sub_len
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let len = self.value_len();
+        buf.put_u16(1); // Extended Prefix TLV type.
+        buf.put_u16(len);
+        buf.put_u8(self.route_type);
+        buf.put_u8(self.prefix.prefix_len());
+        buf.put_u8(self.af);
+        buf.put_u8(self.flags);
+
+        // Prefix bytes padded to 4-byte boundary.
+        let prefix_bytes = ((self.prefix.prefix_len() as usize) + 7) / 8;
+        let padded_prefix_bytes = (prefix_bytes + 3) & !3;
+        let addr_bytes = self.prefix.addr().octets();
+        buf.put(&addr_bytes[..prefix_bytes]);
+        for _ in prefix_bytes..padded_prefix_bytes {
+            buf.put_u8(0);
+        }
+
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+
+        // Pad TLV to 4-byte alignment.
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
+impl ExtPrefixSubTlv {
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    fn value_len(&self) -> u16 {
+        match self {
+            ExtPrefixSubTlv::PrefixSid(s) => s.value_len(),
+            ExtPrefixSubTlv::Unknown(u) => u.len,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let (typ, len) = match self {
+            ExtPrefixSubTlv::PrefixSid(_) => (2u16, self.value_len()),
+            ExtPrefixSubTlv::Unknown(u) => (u.typ, u.len),
+        };
+        buf.put_u16(typ);
+        buf.put_u16(len);
+        match self {
+            ExtPrefixSubTlv::PrefixSid(s) => s.emit(buf),
+            ExtPrefixSubTlv::Unknown(u) => buf.put(&u.values[..]),
+        }
+        // Pad to 4-byte alignment.
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
+impl ExtPrefixSidSubTlv {
+    fn value_len(&self) -> u16 {
+        // flags(1) + reserved(1) + mt_id(1) + algo(1) + sid(3 or 4)
+        4 + match &self.sid {
+            SidLabelTlv::Label(_) => 3,
+            SidLabelTlv::Index(_) => 4,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags.into());
+        buf.put_u8(0); // reserved
+        buf.put_u8(self.mt_id);
+        buf.put_u8(self.algo.into());
+        match &self.sid {
+            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
+            SidLabelTlv::Index(v) => buf.put_u32(*v),
+        }
     }
 }
 
