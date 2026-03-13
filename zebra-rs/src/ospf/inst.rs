@@ -37,7 +37,7 @@ use super::socket::ospf_socket_ipv4;
 use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
 use super::{
-    AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
+    AREA0, Identity, Lsdb, Neighbor, NfsmState, ReachMap, ospf_ls_ack_recv, ospf_ls_req_recv,
     ospf_ls_upd_recv,
 };
 
@@ -1501,6 +1501,10 @@ fn build_rib_from_spf(
                                         let mask = u32::from(net.netmask).leading_ones() as u8;
                                         if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                                             let prefix = prefix.trunc();
+
+                                            // sid?
+                                            // prefix_sid?
+
                                             let spf_route = SpfRoute {
                                                 metric: nhops.cost,
                                                 nhops: spf_nhops.clone(),
