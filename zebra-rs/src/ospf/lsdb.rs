@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::spf::label_block::{LabelBlock, LabelConfig, LabelMap};
 
+use super::ReachMap;
 use super::inst::Message;
 use super::task::{Timer, TimerType};
 
@@ -30,6 +31,7 @@ pub enum LsdbEvent {
 pub struct Lsdb {
     pub tables: LsTypes<LsTable>,
     pub label_map: OspfLabelMap,
+    pub reach_map: ReachMap,
 }
 
 #[derive(Default, Debug)]
@@ -145,6 +147,7 @@ impl Lsdb {
         Self {
             tables: LsTypes::<LsTable>::default(),
             label_map: OspfLabelMap::default(),
+            reach_map: ReachMap::default(),
         }
     }
 
@@ -216,6 +219,11 @@ impl Lsdb {
             if let Some(global) = global {
                 let label_config = LabelConfig { global, local };
                 self.label_map.insert(lsa.h.adv_router, label_config);
+            }
+        }
+        if let OspfLsp::OpaqueAreaExtPrefix(ref lsp) = lsa.lsp {
+            for tlv in lsp.tlvs.iter() {
+                self.reach_map.insert(tlv.prefix, tlv.subs.clone());
             }
         }
     }
