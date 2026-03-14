@@ -53,12 +53,12 @@ pub struct As2Path {
 }
 
 impl As2Path {
-    /// Calculate AS Path length from segments according to RFC 4271 and RFC 5065.
-    fn calculate_length(&self) -> u32 {
-        self.segs
+    pub fn update_length(&mut self) {
+        self.length = self
+            .segs
             .iter()
             .map(|seg| calculate_segment_length(seg.typ, seg.asn.len()))
-            .sum()
+            .sum();
     }
 }
 
@@ -66,7 +66,7 @@ impl ParseBe<As2Path> for As2Path {
     fn parse_be(input: &[u8]) -> IResult<&[u8], As2Path> {
         let (input, segs) = many0_complete(parse_bgp_attr_as2_segment).parse(input)?;
         let mut path = As2Path { segs, length: 0 };
-        path.length = path.calculate_length();
+        path.update_length();
         Ok((input, path))
     }
 }
@@ -192,7 +192,7 @@ impl ParseBe<As4Path> for As4Path {
             segs: segs.into(),
             length: 0,
         };
-        path.length = path.calculate_length();
+        path.update_length();
         Ok((input, path))
     }
 }
@@ -295,8 +295,7 @@ impl FromStr for As4Path {
             aspath.segs.push_back(segment);
         }
 
-        // Calculate total length after parsing
-        aspath.length = aspath.calculate_length();
+        aspath.update_length();
 
         Ok(aspath)
     }
@@ -318,14 +317,6 @@ impl As4Path {
             segs: VecDeque::from(vec![seg]),
             length,
         }
-    }
-
-    /// Calculate AS Path length from segments according to RFC 4271 and RFC 5065.
-    fn calculate_length(&self) -> u32 {
-        self.segs
-            .iter()
-            .map(|seg| calculate_segment_length(seg.typ, seg.asn.len()))
-            .sum()
     }
 
     pub fn update_length(&mut self) {
