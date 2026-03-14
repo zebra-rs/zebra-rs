@@ -438,6 +438,24 @@ impl As4Path {
             .find(|seg| seg.typ == AS_SEQ)
             .and_then(|seg| seg.asn.first().copied())
     }
+
+    /// Consolidate continuous AS_SEQUENCE segments into one.
+    pub fn consolidate(&mut self) {
+        let mut consolidated = VecDeque::new();
+        for seg in self.segs.drain(..) {
+            if seg.typ == AS_SEQ {
+                if let Some(last) = consolidated.back_mut() {
+                    let last: &mut As4Segment = last;
+                    if last.typ == AS_SEQ {
+                        last.asn.extend(seg.asn);
+                        continue;
+                    }
+                }
+            }
+            consolidated.push_back(seg);
+        }
+        self.segs = consolidated;
+    }
 }
 
 impl Default for As4Path {
@@ -477,6 +495,45 @@ mod tests {
 
         let aspath: As4Path = As4Path::from_str("<1 2> <5> (6 7)").unwrap();
         println!("{}", aspath.as_path_display());
+    }
+
+    #[test]
+    fn consolidate_adjacent_seq() {
+        // Two adjacent AS_SEQ segments merged into one.
+        let mut aspath: As4Path = As4Path::from_str("<1 2> <3 4>").unwrap();
+        assert_eq!(aspath.as_path_explicit(), "<1 2> <3 4>");
+        aspath.consolidate();
+        assert_eq!(aspath.as_path_explicit(), "<1 2 3 4>");
+        assert_eq!(aspath.as_path_display(), "1 2 3 4");
+    }
+
+    #[test]
+    fn consolidate_with_other_segments() {
+        // AS_SEQ segments separated by other types are not merged.
+        let mut aspath: As4Path = As4Path::from_str("<1> <2 2> {3} <4 5>").unwrap();
+        aspath.consolidate();
+        assert_eq!(aspath.as_path_explicit(), "<1 2 2> {3} <4 5>");
+
+        // Adjacent AS_SEQ before and after non-SEQ are merged independently.
+        let mut aspath: As4Path = As4Path::from_str("<1> <2> <2> {3} <4> <5>").unwrap();
+        aspath.consolidate();
+        assert_eq!(aspath.as_path_explicit(), "<1 2 2> {3} <4 5>");
+    }
+
+    #[test]
+    fn consolidate_single_segment() {
+        // Single segment: no change.
+        let mut aspath: As4Path = As4Path::from_str("1 2 3").unwrap();
+        aspath.consolidate();
+        assert_eq!(aspath.as_path_display(), "1 2 3");
+    }
+
+    #[test]
+    fn consolidate_no_seq() {
+        // No AS_SEQ segments: no change.
+        let mut aspath: As4Path = As4Path::from_str("{1 2} (3 4)").unwrap();
+        aspath.consolidate();
+        assert_eq!(aspath.as_path_explicit(), "{1 2} (3 4)");
     }
 
     #[test]
