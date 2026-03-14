@@ -1,6 +1,8 @@
 #[derive(Debug, PartialEq)]
 pub enum Token {
     As(u32),
+    AsSeqStart,
+    AsSeqEnd,
     AsSetStart,
     AsSetEnd,
     AsConfedSetStart,
@@ -57,6 +59,8 @@ pub fn tokenizer(input: String) -> Result<Vec<Token>, TokenizerError> {
                 }
                 tokens.push(Token::As(val.unwrap()));
             }
+            '<' => tokens.push(Token::AsSeqStart),
+            '>' => tokens.push(Token::AsSeqEnd),
             '{' => tokens.push(Token::AsSetStart),
             '}' => tokens.push(Token::AsSetEnd),
             '[' => tokens.push(Token::AsConfedSetStart),
@@ -83,5 +87,39 @@ mod tests {
 
         let tokens = tokenizer(String::from(".100"));
         assert!(tokens.is_err());
+    }
+
+    #[test]
+    fn token_as_seq_delimiters() {
+        let tokens = tokenizer(String::from("<100 200>")).unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::AsSeqStart,
+                Token::As(100),
+                Token::As(200),
+                Token::AsSeqEnd
+            ]
+        );
+
+        let tokens = tokenizer(String::from("<1 2> {3} (4) [5]")).unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::AsSeqStart,
+                Token::As(1),
+                Token::As(2),
+                Token::AsSeqEnd,
+                Token::AsSetStart,
+                Token::As(3),
+                Token::AsSetEnd,
+                Token::AsConfedSeqStart,
+                Token::As(4),
+                Token::AsConfedSeqEnd,
+                Token::AsConfedSetStart,
+                Token::As(5),
+                Token::AsConfedSetEnd,
+            ]
+        );
     }
 }

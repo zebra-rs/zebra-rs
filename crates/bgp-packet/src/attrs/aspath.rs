@@ -122,8 +122,8 @@ pub fn asn_to_string(val: u32) -> String {
     }
 }
 
-impl fmt::Display for As4Segment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl As4Segment {
+    fn format_display(&self) -> String {
         let v = self
             .asn
             .iter()
@@ -131,12 +131,33 @@ impl fmt::Display for As4Segment {
             .collect::<Vec<String>>()
             .join(" ");
         match self.typ {
-            AS_SET => write!(f, "{{{v}}}"),
-            AS_CONFED_SEQ => write!(f, "({v})"),
-            AS_CONFED_SET => write!(f, "[{v}]"),
-            AS_SEQ => write!(f, "{v}"),
-            _ => write!(f, "{v}"),
+            AS_SET => format!("{{{v}}}"),
+            AS_CONFED_SEQ => format!("({v})"),
+            AS_CONFED_SET => format!("[{v}]"),
+            _ => v,
         }
+    }
+
+    fn format_explicit(&self) -> String {
+        let v = self
+            .asn
+            .iter()
+            .map(|x| asn_to_string(*x))
+            .collect::<Vec<String>>()
+            .join(" ");
+        match self.typ {
+            AS_SET => format!("{{{v}}}"),
+            AS_CONFED_SEQ => format!("({v})"),
+            AS_CONFED_SET => format!("[{v}]"),
+            AS_SEQ => format!("<{v}>"),
+            _ => v,
+        }
+    }
+}
+
+impl fmt::Display for As4Segment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.format_display())
     }
 }
 
@@ -176,15 +197,29 @@ impl ParseBe<As4Path> for As4Path {
     }
 }
 
+impl As4Path {
+    /// Display AS-Path without delimiters for AS_SEQUENCE (conventional BGP CLI format).
+    pub fn as_path_display(&self) -> String {
+        self.segs
+            .iter()
+            .map(|x| x.format_display())
+            .collect::<Vec<String>>()
+            .join(" ")
+    }
+
+    /// Display AS-Path with explicit `<>` delimiters for AS_SEQUENCE.
+    pub fn as_path_explicit(&self) -> String {
+        self.segs
+            .iter()
+            .map(|x| x.format_explicit())
+            .collect::<Vec<String>>()
+            .join(" ")
+    }
+}
+
 impl fmt::Display for As4Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let v = self
-            .segs
-            .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<String>>()
-            .join(" ");
-        write!(f, "{v}")
+        write!(f, "{}", self.as_path_display())
     }
 }
 
@@ -222,6 +257,18 @@ impl FromStr for As4Path {
             match token {
                 Token::As(asn) => {
                     segment.asn.push(*asn);
+                }
+                Token::AsSeqStart => {
+                    segment_reset!(segment_type, AS_SEQ, AS_SEQ, segment, aspath);
+                }
+                Token::AsSeqEnd => {
+                    if segment_type != AS_SEQ {
+                        return Err(());
+                    }
+                    if !segment.asn.is_empty() {
+                        aspath.segs.push_back(segment);
+                        segment = As4Segment::new(AS_SEQ);
+                    }
                 }
                 Token::AsSetStart => {
                     segment_reset!(segment_type, AS_SEQ, AS_SET, segment, aspath);
@@ -416,6 +463,31 @@ mod tests {
 
         let aspath: As4Path = As4Path::from_str("1 2 3 [4 5] 6 (7)").unwrap();
         assert_eq!(aspath.to_string(), "1 2 3 [4 5] 6 (7)");
+    }
+
+    #[test]
+    fn parse_explicit_seq() {
+        let aspath: As4Path = As4Path::from_str("<1 2 3>").unwrap();
+        assert_eq!(aspath.as_path_display(), "1 2 3");
+        assert_eq!(aspath.as_path_explicit(), "<1 2 3>");
+
+        let aspath: As4Path = As4Path::from_str("<1 2> {3 4} <5> (6 7)").unwrap();
+        assert_eq!(aspath.as_path_display(), "1 2 {3 4} 5 (6 7)");
+        assert_eq!(aspath.as_path_explicit(), "<1 2> {3 4} <5> (6 7)");
+
+        let aspath: As4Path = As4Path::from_str("<1 2> <5> (6 7)").unwrap();
+        println!("{}", aspath.as_path_display());
+    }
+
+    #[test]
+    fn display_vs_explicit() {
+        let aspath: As4Path = As4Path::from_str("1 2 3 {4 5} (6) [7]").unwrap();
+        assert_eq!(aspath.as_path_display(), "1 2 3 {4 5} (6) [7]");
+        assert_eq!(aspath.as_path_explicit(), "<1 2 3> {4 5} (6) [7]");
+
+        let aspath: As4Path = As4Path::from_str("100 200").unwrap();
+        assert_eq!(aspath.as_path_display(), "100 200");
+        assert_eq!(aspath.as_path_explicit(), "<100 200>");
     }
 
     #[test]
