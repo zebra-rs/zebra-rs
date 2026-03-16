@@ -14,12 +14,12 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::isis::srmpls::LabelConfig;
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, RibType};
+use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Context,
@@ -37,7 +37,7 @@ use super::socket::ospf_socket_ipv4;
 use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
 use super::{
-    AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
+    AREA0, Identity, Lsdb, Neighbor, NfsmState, ReachMap, ospf_ls_ack_recv, ospf_ls_req_recv,
     ospf_ls_upd_recv,
 };
 
@@ -233,7 +233,7 @@ impl Ospf {
         RouterLsaLink {
             link_id: prefix.network(),
             link_data: prefix.netmask(),
-            link_type: OspfLinkType::Stub as u8,
+            link_type: OspfLinkType::Stub,
             num_tos: 0,
             tos_0_metric: metric,
             toses: vec![],
@@ -268,12 +268,16 @@ impl Ospf {
             ) && Self::link_has_transit_adjacency(link);
 
             for addr in &link.addr {
+                // Skip loopback addresses (127.0.0.0/8).
+                if addr.prefix.addr().octets()[0] == 127 {
+                    continue;
+                }
                 let lsa_link = if use_transit {
                     RouterLsaLink {
                         // Transit link points to DR interface address.
                         link_id: link.ident.d_router,
                         link_data: addr.prefix.addr(),
-                        link_type: OspfLinkType::Transit as u8,
+                        link_type: OspfLinkType::Transit,
                         num_tos: 0,
                         tos_0_metric: metric,
                         toses: vec![],
@@ -324,6 +328,112 @@ impl Ospf {
     pub fn router_lsa_originate(&mut self) {
         tracing::info!("Router LSA Originate");
         self.router_lsa_originate_with_min_seq(None);
+    }
+
+    pub fn router_info_lsa_originate(&mut self) {
+        use super::srmpls::SegmentRoutingMode;
+
+        let ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | 0);
+
+        if self.segment_routing == SegmentRoutingMode::Mpls {
+            let mut lsa = super::srmpls::router_info_lsa_build(self.router_id);
+
+            // Preserve sequence number if re-originating.
+            if let Some(area) = self.areas.get(AREA0) {
+                if let Some(existing) =
+                    area.lsdb
+                        .lookup_by_id(OspfLsType::OpaqueAreaLocal, ls_id, self.router_id)
+                {
+                    lsa.h.ls_seq_number = lsa
+                        .h
+                        .ls_seq_number
+                        .max(existing.h.ls_seq_number.saturating_add(1));
+                }
+            }
+            lsa.update();
+
+            let flood_lsa = lsa.clone();
+            if let Some(area) = self.areas.get_mut(AREA0) {
+                area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+            }
+            self.flood_self_originated_lsa(AREA0, &flood_lsa);
+        } else {
+            // Flush Router Info LSA when SR is disabled.
+            let flushed = if let Some(area) = self.areas.get_mut(AREA0) {
+                area.lsdb.flush_lsa(
+                    OspfLsType::OpaqueAreaLocal,
+                    ls_id,
+                    self.router_id,
+                    &self.tx,
+                    Some(AREA0),
+                )
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(AREA0, &lsa);
+            }
+        }
+    }
+
+    pub fn ext_prefix_lsa_originate(&mut self, ifindex: u32) {
+        use super::srmpls::SegmentRoutingMode;
+
+        let opaque_id = ifindex & 0x00FF_FFFF;
+        let ls_id = Ipv4Addr::from(((OpaqueLsaType::EXT_PREFIX as u32) << 24) | opaque_id);
+
+        let link = self.links.get(&ifindex);
+        let should_originate = self.segment_routing == SegmentRoutingMode::Mpls
+            && link.is_some_and(|l| l.enabled && l.config.prefix_sid.is_some());
+
+        if should_originate {
+            let link = link.unwrap();
+            let prefix_sid = link.config.prefix_sid.unwrap();
+            // Use the first non-loopback address as a /32 host prefix.
+            let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback()) else {
+                return;
+            };
+            let prefix = ipnet::Ipv4Net::new(addr.prefix.addr(), 32).unwrap_or(addr.prefix);
+
+            let mut lsa =
+                super::srmpls::ext_prefix_lsa_build(self.router_id, prefix, &prefix_sid, opaque_id);
+
+            // Preserve sequence number if re-originating.
+            if let Some(area) = self.areas.get(AREA0) {
+                if let Some(existing) =
+                    area.lsdb
+                        .lookup_by_id(OspfLsType::OpaqueAreaLocal, ls_id, self.router_id)
+                {
+                    lsa.h.ls_seq_number = lsa
+                        .h
+                        .ls_seq_number
+                        .max(existing.h.ls_seq_number.saturating_add(1));
+                }
+            }
+            lsa.update();
+
+            let flood_lsa = lsa.clone();
+            if let Some(area) = self.areas.get_mut(AREA0) {
+                area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+            }
+            self.flood_self_originated_lsa(AREA0, &flood_lsa);
+        } else {
+            // Flush Extended Prefix LSA when SR is disabled or prefix-sid removed.
+            let flushed = if let Some(area) = self.areas.get_mut(AREA0) {
+                area.lsdb.flush_lsa(
+                    OspfLsType::OpaqueAreaLocal,
+                    ls_id,
+                    self.router_id,
+                    &self.tx,
+                    Some(AREA0),
+                )
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(AREA0, &lsa);
+            }
+        }
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
@@ -952,6 +1062,11 @@ impl Ospf {
         index: u32,
         _dest: Ipv4Addr,
     ) {
+        // Drop self-originated packets (e.g. received on loopback interface).
+        if packet.router_id == self.router_id {
+            return;
+        }
+
         match packet.typ {
             OspfType::Hello => {
                 let Some(link) = self.links.get_mut(&index) else {
@@ -1254,7 +1369,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
         if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
             for link in &router_lsa.links {
                 match link.link_type {
-                    1 | 4 => {
+                    OspfLinkType::P2p | OspfLinkType::VirtualLink => {
                         // Point-to-Point or Virtual Link: link_id = neighbor router ID.
                         let to_id = top.lsp_map.get(link.link_id);
                         node.olinks.push(spf::Link {
@@ -1263,7 +1378,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                             cost: link.tos_0_metric as u32,
                         });
                     }
-                    2 => {
+                    OspfLinkType::Transit => {
                         // Transit Network: expand through the Network-LSA pseudo-node.
                         // link_id = DR's interface IP, which is the Network-LSA's ls_id.
                         if let Some(attached) = network_lsas.get(&link.link_id) {
@@ -1279,7 +1394,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                             }
                         }
                     }
-                    _ => {
+                    OspfLinkType::Stub => {
                         // Stub (3) and unknown: not part of the SPF graph.
                     }
                 }
@@ -1305,6 +1420,20 @@ pub struct SpfNexthop {
     pub ifindex: u32,
     pub adjacency: bool,
     pub router_id: Option<Ipv4Addr>,
+}
+
+fn rib_insert(rib: &mut PrefixMap<Ipv4Net, SpfRoute>, prefix: Ipv4Net, route: SpfRoute) {
+    if let Some(curr) = rib.get_mut(&prefix) {
+        if curr.metric > route.metric {
+            *curr = route;
+        } else if curr.metric == route.metric {
+            for (addr, nhop) in route.nhops {
+                curr.nhops.insert(addr, nhop);
+            }
+        }
+    } else {
+        rib.insert(prefix, route);
+    }
 }
 
 fn build_rib_from_spf(
@@ -1362,29 +1491,8 @@ fn build_rib_from_spf(
         {
             if let OspfLsp::Router(ref router_lsa) = lsa.lsp {
                 for link in &router_lsa.links {
-                    let route = |prefix: Ipv4Net| SpfRoute {
-                        metric: nhops.cost,
-                        nhops: spf_nhops.clone(),
-                        sid: None,
-                        prefix_sid: None,
-                    };
-                    let insert = |rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
-                                  prefix: Ipv4Net,
-                                  route: SpfRoute| {
-                        if let Some(curr) = rib.get_mut(&prefix) {
-                            if curr.metric > route.metric {
-                                *curr = route;
-                            } else if curr.metric == route.metric {
-                                for (addr, nhop) in route.nhops {
-                                    curr.nhops.insert(addr, nhop);
-                                }
-                            }
-                        } else {
-                            rib.insert(prefix, route);
-                        }
-                    };
                     match link.link_type {
-                        2 => {
+                        OspfLinkType::Transit => {
                             // Transit Network: look up Network-LSA to get the
                             // network prefix (link_id = dr's interface ip).
                             for ((_ls_id, _adv), nlsa) in area.lsdb.tables.network.iter() {
@@ -1393,25 +1501,39 @@ fn build_rib_from_spf(
                                         let mask = u32::from(net.netmask).leading_ones() as u8;
                                         if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                                             let prefix = prefix.trunc();
-                                            insert(&mut rib, prefix, route(prefix));
+
+                                            // sid?
+                                            // prefix_sid?
+
+                                            let spf_route = SpfRoute {
+                                                metric: nhops.cost,
+                                                nhops: spf_nhops.clone(),
+                                                sid: None,
+                                                prefix_sid: None,
+                                            };
+                                            rib_insert(&mut rib, prefix, spf_route);
                                         }
                                         break;
                                     }
                                 }
                             }
                         }
-                        3 => {
+                        OspfLinkType::Stub => {
                             // Stub Network: link_id = network addr,
                             // link_data = netmask.
                             let mask = u32::from(link.link_data).leading_ones() as u8;
                             if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                                 let prefix = prefix.trunc();
-                                insert(&mut rib, prefix, route(prefix));
+                                let spf_route = SpfRoute {
+                                    metric: nhops.cost,
+                                    nhops: spf_nhops.clone(),
+                                    sid: None,
+                                    prefix_sid: None,
+                                };
+                                rib_insert(&mut rib, prefix, spf_route);
                             }
                         }
-                        _ => {
-                            // Just ignore.
-                        }
+                        _ => {}
                     }
                 }
             }

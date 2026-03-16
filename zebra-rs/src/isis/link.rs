@@ -24,7 +24,7 @@ use super::inst::{PacketMessage, ReachMap};
 use super::neigh::Neighbor;
 use super::network::{P2P_ISS, read_packet, write_packet};
 use super::socket::isis_socket;
-use super::srmpls::LabelMap;
+use super::srmpls::IsisLabelMap;
 use super::tracing::IsisTracing;
 use super::{Hostname, IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 
@@ -126,7 +126,7 @@ pub struct LinkTop<'a> {
     pub local_pool: &'a mut Option<LabelPool>,
     pub hostname: &'a mut Levels<Hostname>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
-    pub label_map: &'a mut Levels<LabelMap>,
+    pub label_map: &'a mut Levels<IsisLabelMap>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
 }
 
