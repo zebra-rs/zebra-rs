@@ -35,7 +35,7 @@ use super::ifsm::{csnp_timer, has_level};
 use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
 use super::lsdb::insert_self_originate;
 use super::nfsm::nbr_hold_timer_expire;
-use super::srmpls::{LabelConfig, LabelMap};
+use super::srmpls::{IsisLabelMap, LabelConfig};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_for_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
@@ -61,7 +61,7 @@ pub struct Isis {
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
     pub reach_map: Levels<Afis<ReachMap>>,
-    pub label_map: Levels<LabelMap>,
+    pub label_map: Levels<IsisLabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
@@ -80,7 +80,7 @@ pub struct IsisTop<'a> {
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
-    pub label_map: &'a mut Levels<LabelMap>,
+    pub label_map: &'a mut Levels<IsisLabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
@@ -127,7 +127,7 @@ impl Isis {
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
             reach_map: Levels::<Afis<ReachMap>>::default(),
-            label_map: Levels::<LabelMap>::default(),
+            label_map: Levels::<IsisLabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),

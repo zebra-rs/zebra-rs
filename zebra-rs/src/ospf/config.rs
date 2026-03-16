@@ -283,6 +283,9 @@ fn config_ospf_interface_prefix_sid_index(
     } else {
         link.config.prefix_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.ext_prefix_lsa_originate(ifindex);
 
     Some(())
 }
@@ -301,6 +304,9 @@ fn config_ospf_interface_prefix_sid_absolute(
     } else {
         link.config.prefix_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.ext_prefix_lsa_originate(ifindex);
 
     Some(())
 }
@@ -312,11 +318,23 @@ fn config_ospf_segment_routing(ospf: &mut Ospf, mut args: Args, op: ConfigOp) ->
     if op.is_set() {
         ospf.segment_routing = match mode.as_str() {
             "mpls" => SegmentRoutingMode::Mpls,
-            "srv6" => SegmentRoutingMode::Srv6,
             _ => SegmentRoutingMode::None,
         };
     } else {
         ospf.segment_routing = SegmentRoutingMode::None;
+    }
+
+    ospf.router_info_lsa_originate();
+
+    // Originate/flush Extended Prefix LSAs for all links with prefix-sid.
+    let ifindexes: Vec<u32> = ospf
+        .links
+        .iter()
+        .filter(|(_, link)| link.config.prefix_sid.is_some())
+        .map(|(ifindex, _)| *ifindex)
+        .collect();
+    for ifindex in ifindexes {
+        ospf.ext_prefix_lsa_originate(ifindex);
     }
 
     Some(())

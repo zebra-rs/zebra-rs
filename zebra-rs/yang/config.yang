@@ -174,7 +174,6 @@ module config {
         leaf segment-routing {
           type enumeration {
             enum mpls;
-            enum srv6;
           }
         }
         container tracing {
