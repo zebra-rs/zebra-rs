@@ -1,0 +1,5 @@
+routing:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1

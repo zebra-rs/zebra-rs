@@ -12,6 +12,7 @@ members = [
   "crates/ospf-packet",
   "crates/ospf-macros",
   "crates/fixedbuf",
+  "zebra-test",
 ]
 
 [workspace.package]

@@ -1,0 +1,640 @@
+community-set:
+- name: 198.18.37.16/28
+  member:
+  - rt:^64371:.*$
+- name: 198.18.37.80/28
+  member:
+  - rt:^456:.*$
+- name: 198.18.39.80/28
+  member:
+  - rt:^31746:.*$
+- name: 198.18.39.96/28
+  member:
+  - rt:^14815:.*$
+- name: 198.18.39.128/28
+  member:
+  - rt:^2481:.*$
+- name: 198.18.39.144/28
+  member:
+  - rt:^10334:.*$
+- name: 198.18.39.160/28
+  member:
+  - rt:^51451:.*$
+- name: TENANT-RTS-20e08c2f48cf46e686beed9691459776
+  member:
+  - rt:^5882:.*$
+policy-options:
+  policy:
+  - name: 198.18.37.16/28
+    entry:
+    - number: 10
+      match:
+        community-set: 198.18.37.16/28
+  - name: 198.18.37.80/28
+    entry:
+    - number: 10
+      match:
+        community-set: 198.18.37.80/28
+  - name: 198.18.39.80/28
+    entry:
+    - number: 10
+      match:
+        community-set: 198.18.39.80/28
+  - name: 198.18.39.96/28
+    entry:
+    - number: 10
+      match:
+        community-set: 198.18.39.96/28
+  - name: 198.18.39.128/28
+    entry:
+    - number: 10
+      match:
+        community-set: 198.18.39.128/28
+  - name: 198.18.39.144/28
+    entry:
+    - number: 10
+      match:
+        community-set: 198.18.39.144/28
+  - name: 198.18.39.160/28
+    entry:
+    - number: 10
+      match:
+        community-set: 198.18.39.160/28
+routing:
+  bgp:
+    global:
+      as: 64512
+      identifier: 198.18.39.94
+    neighbor:
+    - remote-address: 198.18.37.17
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.16/28
+        out: 198.18.37.16/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.30
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.16/28
+        out: 198.18.37.16/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.81
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.82
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.83
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.88
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.89
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.90
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.91
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.92
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.93
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.37.94
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.37.80/28
+        out: 198.18.37.80/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.97
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.96/28
+        out: 198.18.39.96/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.110
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.96/28
+        out: 198.18.39.96/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.129
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.130
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.131
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.136
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.137
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.138
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.139
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.140
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.141
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.142
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.128/28
+        out: 198.18.39.128/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.145
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.144/28
+        out: 198.18.39.144/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true
+    - remote-address: 198.18.39.158
+      afi-safi:
+      - name: l3vpn-ipv4-unicast
+        enabled: true
+        add-path: send
+        graceful-restart:
+          enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 172800
+      apply-policy:
+        in: 198.18.39.144/28
+        out: 198.18.39.144/28
+      enabled: true
+      graceful-restart:
+        enabled: true
+        long-lived-enabled: true
+      peer-as: 64512
+      route-reflector:
+        client: true
+        cluster-id: 198.18.39.94
+      rtc: true

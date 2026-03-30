@@ -1,0 +1,16 @@
+routing:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4-unicast
+        enabled: true
+      enabled: true
+      peer-as: 65001
+    afi-safi:
+    - name: ipv4-unicast
+      network:
+      - prefix: 10.0.0.1/32
