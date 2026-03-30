@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 // OSPF-specific conditional tracing system
 //
 // This module provides a comprehensive conditional tracing system for OSPF protocol

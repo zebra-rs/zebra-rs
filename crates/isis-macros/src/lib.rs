@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{ItemFn, Token, parse_macro_input};
