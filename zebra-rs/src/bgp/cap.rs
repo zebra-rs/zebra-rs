@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 // Capability for sent and received.
 
 use std::collections::{BTreeSet, HashMap};

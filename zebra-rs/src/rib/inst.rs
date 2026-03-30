@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 use super::api::{RibRx, RibTx};
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 /// RIB types.
 const RIB_KERNEL: u8 = 0;
 const RIB_CONNECTED: u8 = 1;
