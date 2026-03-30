@@ -27,3 +27,9 @@ perf.data
 perf.data.old
 
 ref/
+
+# zebra-test
+*.log
+allure-report/
+allure-results/
+.allure/
