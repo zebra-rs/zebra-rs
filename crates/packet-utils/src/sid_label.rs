@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 use bytes::{BufMut, BytesMut};
 use nom::number::complete::{be_u8, be_u24, be_u32};
 use nom::{Err, IResult, Needed};

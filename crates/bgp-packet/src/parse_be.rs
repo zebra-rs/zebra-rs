@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 use std::net::Ipv4Addr;
 
 use nom::{IResult, number::complete::be_u32};

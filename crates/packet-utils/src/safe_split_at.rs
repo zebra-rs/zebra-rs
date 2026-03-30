@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 use nom::{Err, IResult, Needed};
 
 /// Split `input` at position `len`, returning `(remaining, head)` as an `IResult`.
