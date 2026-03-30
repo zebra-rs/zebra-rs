@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 /// BGP-specific tracing macros that automatically include proto="bgp" field
 ///
 /// This module provides convenience macros for BGP protocol logging that automatically

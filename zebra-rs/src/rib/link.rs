@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 use anyhow::{Context, Result};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};

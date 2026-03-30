@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2025-2026 Kunihiro Ishiguro
+
 // IP address and prefix match include partial match. It is required to perform
 // CLI completion with partial input.
 
