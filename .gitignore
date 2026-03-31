@@ -27,3 +27,9 @@ perf.data
 perf.data.old
 
 ref/
+
+# bdd
+*.log
+allure-report/
+allure-results/
+.allure/
