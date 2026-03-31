@@ -12,6 +12,7 @@ members = [
   "crates/ospf-packet",
   "crates/ospf-macros",
   "crates/fixedbuf",
+  "bdd",
 ]
 
 [workspace.package]
