@@ -28,7 +28,7 @@ perf.data.old
 
 ref/
 
-# zebra-test
+# bdd
 *.log
 allure-report/
 allure-results/

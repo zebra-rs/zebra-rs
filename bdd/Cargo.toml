@@ -1,5 +1,5 @@
 [package]
-name = "zebra-test"
+name = "bdd"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

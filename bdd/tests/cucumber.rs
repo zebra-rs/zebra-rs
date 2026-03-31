@@ -3,10 +3,10 @@
 
 use std::fs;
 
+use bdd::netns;
 use cucumber::{World, WriterExt, given, then, when, writer};
 use serde_json::Value;
 use tokio::process::Command;
-use zebra_test::netns;
 
 #[derive(Debug, Default, World)]
 pub struct BgpWorld {
