@@ -97,7 +97,8 @@ impl ParseBe<IsisSubSrv6EndSid> for IsisSubSrv6EndSid {
         if sub2_len == 0 {
             return Ok((input, sub));
         }
-        let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(input)?;
+        let (input, sub2_data) = packet_utils::safe_split_at(input, sub2_len as usize)?;
+        let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(sub2_data)?;
         sub.sub2s = sub2s;
         Ok((input, sub))
     }
