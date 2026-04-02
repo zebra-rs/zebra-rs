@@ -22,6 +22,8 @@ The following issues from the prior audit have been addressed:
   which returns `Err::Incomplete` instead of panicking.
 - `ptake` now validates `prefixlen <= 32` before computing `psize` (issue 1).
 - `ptakev6` now validates `prefixlen <= 128` before computing `psize` (issue 2).
+- SRv6 sub2 parsing now uses `safe_split_at(input, sub2_len)` to honor the
+  wire-format length field (issue 3).
 
 ---
 
@@ -75,7 +77,7 @@ The following issues from the prior audit have been addressed:
 
 ## High (Data corruption / incorrect wire encoding)
 
-### 3. SRv6 `sub2_len` field is ignored during parsing
+### 3. SRv6 `sub2_len` field is ignored during parsing — **FIXED**
 
 - **Files:**
   - `src/sub/neigh.rs:488-502` (`IsisSubSrv6EndXSid::parse_be`)
