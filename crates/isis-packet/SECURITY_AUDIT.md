@@ -20,12 +20,14 @@ The following issues from the prior audit have been addressed:
 - `checksum_calc` now returns `[0, 0]` when `data.len() < 13`.
 - All `split_at()` calls have been replaced with `packet_utils::safe_split_at()`
   which returns `Err::Incomplete` instead of panicking.
+- `ptake` now validates `prefixlen <= 32` before computing `psize` (issue 1).
+- `ptakev6` now validates `prefixlen <= 128` before computing `psize` (issue 2).
 
 ---
 
 ## Critical (CRASH / Panic from malformed packets)
 
-### 1. `ptake` panics on IPv4 prefix length > 32
+### 1. `ptake` panics on IPv4 prefix length > 32 — **FIXED**
 
 - **File:** `src/sub/prefix.rs:493-507`
 - **Code:**
@@ -48,7 +50,7 @@ The following issues from the prior audit have been addressed:
 - **Fix:** Validate `prefixlen <= 32` before computing `psize`, or clamp
   `psize` to `min(psize, 4)`.
 
-### 2. `ptakev6` panics on IPv6 prefix length > 128
+### 2. `ptakev6` panics on IPv6 prefix length > 128 — **FIXED**
 
 - **File:** `src/sub/prefix.rs:510-524`
 - **Code:**

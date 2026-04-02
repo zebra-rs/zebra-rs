@@ -497,6 +497,12 @@ pub fn ptake(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv4Net> {
     if prefixlen == 0 {
         return Ok((input, Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap()));
     }
+    if prefixlen > 32 {
+        return Err(nom::Err::Error(nom::error::make_error(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
     let psize = psize(prefixlen);
     if input.len() < psize {
         return Err(nom::Err::Incomplete(Needed::new(psize)));
@@ -513,6 +519,12 @@ pub fn ptake(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv4Net> {
 pub fn ptakev6(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv6Net> {
     if prefixlen == 0 {
         return Ok((input, Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap()));
+    }
+    if prefixlen > 128 {
+        return Err(nom::Err::Error(nom::error::make_error(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
     }
     let psize = psize(prefixlen);
     if input.len() < psize {
