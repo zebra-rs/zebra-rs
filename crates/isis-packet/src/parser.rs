@@ -707,7 +707,8 @@ impl TlvEmitter for IsisTlvLspEntries {
     }
 
     fn len(&self) -> u8 {
-        (self.entries.len() * std::mem::size_of::<IsisLspEntry>()) as u8
+        // Wire format: hold_time(2) + lsp_id(8) + seq_number(4) + checksum(2) = 16.
+        (self.entries.len() * 16) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
