@@ -1037,7 +1037,7 @@ impl ParseBe<IsisTlvHostname> for IsisTlvHostname {
         let hostname = Self {
             hostname: String::from_utf8_lossy(input).to_string(),
         };
-        Ok((input, hostname))
+        Ok((&input[input.len()..], hostname))
     }
 }
 
