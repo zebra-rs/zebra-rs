@@ -25,6 +25,7 @@ The following issues from the prior audit have been addressed:
 - SRv6 sub2 parsing now uses `safe_split_at(input, sub2_len)` to honor the
   wire-format length field (issue 3).
 - `IsisTlvUnknown::parse_tlv` now preserves payload data and consumes input (issue 4).
+- `IsisTlvLspEntries::len()` uses wire-format constant 16 instead of `mem::size_of` (issue 5).
 
 ---
 
@@ -126,7 +127,7 @@ The following issues from the prior audit have been addressed:
   parsed and re-serialized (e.g., LSP flooding).
 - **Fix:** `values: input.to_vec()`.
 
-### 5. `IsisTlvLspEntries::len()` uses `mem::size_of` instead of wire size
+### 5. `IsisTlvLspEntries::len()` uses `mem::size_of` instead of wire size — **FIXED**
 
 - **File:** `src/parser.rs:706-707`
 - **Code:**
