@@ -26,6 +26,7 @@ The following issues from the prior audit have been addressed:
   wire-format length field (issue 3).
 - `IsisTlvUnknown::parse_tlv` now preserves payload data and consumes input (issue 4).
 - `IsisTlvLspEntries::len()` uses wire-format constant 16 instead of `mem::size_of` (issue 5).
+- `IsisTlvHostname::parse_be` now consumes all input bytes (issue 7).
 
 ---
 
@@ -173,7 +174,7 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
 - **Fix:** Use `u8::try_from(...).expect("TLV exceeds max length")` or
   split into multiple TLVs when the total exceeds 255.
 
-### 7. `IsisTlvHostname::parse_be` does not consume input
+### 7. `IsisTlvHostname::parse_be` does not consume input — **FIXED**
 
 - **File:** `src/parser.rs:1031-1037`
 - **Code:**
