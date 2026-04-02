@@ -24,6 +24,7 @@ The following issues from the prior audit have been addressed:
 - `ptakev6` now validates `prefixlen <= 128` before computing `psize` (issue 2).
 - SRv6 sub2 parsing now uses `safe_split_at(input, sub2_len)` to honor the
   wire-format length field (issue 3).
+- `IsisTlvUnknown::parse_tlv` now preserves payload data and consumes input (issue 4).
 
 ---
 
@@ -103,7 +104,7 @@ The following issues from the prior audit have been addressed:
 - **Fix:** Add `let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;`
   before parsing sub2 TLVs.
 
-### 4. `IsisTlvUnknown` loses TLV payload data on parse
+### 4. `IsisTlvUnknown` loses TLV payload data on parse — **FIXED**
 
 - **File:** `src/parser.rs:1005-1012`
 - **Code:**

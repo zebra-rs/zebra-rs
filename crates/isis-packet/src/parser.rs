@@ -1009,9 +1009,9 @@ impl IsisTlvUnknown {
         let tlv = IsisTlvUnknown {
             typ: tl.typ,
             len: tl.len,
-            values: Vec::new(),
+            values: input.to_vec(),
         };
-        Ok((input, tlv))
+        Ok((&input[input.len()..], tlv))
     }
 }
 
