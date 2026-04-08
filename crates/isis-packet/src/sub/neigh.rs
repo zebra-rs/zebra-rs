@@ -9,10 +9,10 @@ use nom::IResult;
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
-use packet_utils::Algo;
+use packet_utils::{Algo, safe_split_at};
 use serde::{Deserialize, Serialize};
 
-use crate::util::{ParseBe, TlvEmitter, u32_u8_3};
+use crate::util::{ParseBe, TlvEmitter, emit_sub_tlvs, u32_u8_3};
 use crate::{
     IPV4_ADDR_LEN, IPV6_ADDR_LEN, IsisNeighborId, IsisSysId, IsisTlv, IsisTlvType, SidLabelValue,
     many0_complete,
@@ -84,7 +84,7 @@ impl ParseBe<IsisTlvExtIsReachEntry> for IsisTlvExtIsReachEntry {
         let (input, neighbor_id) = take(7usize)(input)?;
         let (input, metric) = be_u24(input)?;
         let (input, sublen) = be_u8(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, sublen as usize)?;
+        let (input, sub) = safe_split_at(input, sublen as usize)?;
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
 
         let mut tlv = Self::default();
@@ -129,7 +129,7 @@ pub enum IsisSubTlv {
 impl IsisSubTlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, cl.len as usize)?;
+        let (input, sub) = safe_split_at(input, cl.len as usize)?;
         let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
         if let IsisSubTlv::Unknown(ref mut v) = val {
             v.code = cl.code;
@@ -274,11 +274,12 @@ impl TlvEmitter for IsisSubAdminGrp {
     }
 
     fn len(&self) -> u8 {
-        (self.groups.len() * 4) as u8
+        // Up to 63 groups (63 * 4 = 252), capped to 255.
+        (self.groups.len().min(63) * 4) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        for group in &self.groups {
+        for group in self.groups.iter().take(63) {
             buf.put_u32(*group);
         }
     }
@@ -500,7 +501,7 @@ impl ParseBe<IsisSubSrv6EndXSid> for IsisSubSrv6EndXSid {
         if sub2_len == 0 {
             return Ok((input, sub));
         }
-        let (input, sub2_data) = packet_utils::safe_split_at(input, sub2_len as usize)?;
+        let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;
         let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(sub2_data)?;
         sub.sub2s = sub2s;
         Ok((input, sub))
@@ -524,13 +525,11 @@ impl TlvEmitter for IsisSubSrv6EndXSid {
         buf.put_u8(self.weight);
         buf.put_u16(self.behavior.into());
         buf.put(&self.sid.octets()[..]);
-        // Temporary Sub-Sub TLVs.
-        buf.put_u8(0);
-        let pp = buf.len();
-        for sub2 in &self.sub2s {
-            sub2.emit(buf);
-        }
-        buf[pp - 1] = (buf.len() - pp) as u8;
+        emit_sub_tlvs(buf, |buf| {
+            for sub2 in &self.sub2s {
+                sub2.emit(buf);
+            }
+        });
     }
 }
 
@@ -567,7 +566,7 @@ impl ParseBe<IsisSubSrv6LanEndXSid> for IsisSubSrv6LanEndXSid {
         if sub2_len == 0 {
             return Ok((input, sub));
         }
-        let (input, sub2_data) = packet_utils::safe_split_at(input, sub2_len as usize)?;
+        let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;
         let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(sub2_data)?;
         sub.sub2s = sub2s;
         Ok((input, sub))
@@ -592,12 +591,43 @@ impl TlvEmitter for IsisSubSrv6LanEndXSid {
         buf.put_u8(self.weight);
         buf.put_u16(self.behavior.into());
         buf.put(&self.sid.octets()[..]);
-        // Temporary Sub-Sub TLVs.
-        buf.put_u8(0);
-        let pp = buf.len();
-        for sub2 in &self.sub2s {
-            sub2.emit(buf);
-        }
-        buf[pp - 1] = (buf.len() - pp) as u8;
+        emit_sub_tlvs(buf, |buf| {
+            for sub2 in &self.sub2s {
+                sub2.emit(buf);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_grp_len_truncates_at_63_groups() {
+        let short = IsisSubAdminGrp {
+            groups: vec![1, 2, 3],
+        };
+        assert_eq!(short.len(), 12);
+
+        let exact = IsisSubAdminGrp {
+            groups: vec![0u32; 63],
+        };
+        assert_eq!(exact.len(), 252);
+
+        let long = IsisSubAdminGrp {
+            groups: vec![0u32; 100],
+        };
+        assert_eq!(long.len(), 252);
+    }
+
+    #[test]
+    fn admin_grp_emit_truncates_at_63_groups() {
+        let long = IsisSubAdminGrp {
+            groups: vec![0u32; 100],
+        };
+        let mut buf = BytesMut::new();
+        long.emit(&mut buf);
+        assert_eq!(buf.len(), 252);
     }
 }
