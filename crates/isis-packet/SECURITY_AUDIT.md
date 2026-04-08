@@ -27,6 +27,8 @@ The following issues from the prior audit have been addressed:
 - `IsisTlvUnknown::parse_tlv` now preserves payload data and consumes input (issue 4).
 - `IsisTlvLspEntries::len()` uses wire-format constant 16 instead of `mem::size_of` (issue 5).
 - `IsisTlvHostname::parse_be` now consumes all input bytes (issue 7).
+- Back-patched sub2 length fields now use `.min(255)` to prevent truncation (issue 8).
+- `Ipv4Net::new().unwrap()` and `Ipv6Net::new().unwrap()` replaced with `expect()` (issue 10).
 
 ---
 
@@ -157,13 +159,13 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
 
 | File | Line | Expression |
 |------|------|------------|
-| `src/parser.rs:593` | `(self.area_addr.len() + 1) as u8` |
+| `src/parser.rs:593` | `(self.area_addr.len() + 1) as u8` | **FIXED** |
 | `src/parser.rs:635` | `(self.neighbors.len() * 6) as u8` |
-| `src/parser.rs:662` | `self.padding.len() as u8` |
-| `src/parser.rs:765` | `self.nlpids.len() as u8` |
-| `src/parser.rs:840` | `self.hostname.len() as u8` |
-| `src/sub/neigh.rs:274` | `(self.groups.len() * 4) as u8` |
-| `src/sub/cap.rs:141` | `self.algo.len() as u8` |
+| `src/parser.rs:662` | `self.padding.len() as u8` | **FIXED** |
+| `src/parser.rs:765` | `self.nlpids.len() as u8` | **FIXED** |
+| `src/parser.rs:840` | `self.hostname.len() as u8` | **FIXED** |
+| `src/sub/neigh.rs:274` | `(self.groups.len() * 4) as u8` | **FIXED** |
+| `src/sub/cap.rs:141` | `self.algo.len() as u8` | **FIXED** |
 
 - **Problem:** IS-IS TLV length is u8 (max 255). If programmatic
   construction creates data exceeding 255 bytes, the cast wraps silently,
@@ -192,7 +194,7 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
   bytes with `_`, but it breaks the nom parser contract.
 - **Fix:** `Ok((&input[input.len()..], hostname))` or `Ok((&[], hostname))`.
 
-### 8. Back-patching emit with `as u8` truncation
+### 8. Back-patching emit with `as u8` truncation — **FIXED**
 
 - **Files:**
   - `src/sub/neigh.rs:529` (`IsisSubSrv6EndXSid::emit`)
@@ -237,7 +239,7 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
   not incomplete.
 - **Fix:** Return `Err::Error(nom::error::make_error(input, ErrorKind::LengthValue))`.
 
-### 10. `Ipv4Net::new().unwrap()` in prefix parsers
+### 10. `Ipv4Net::new().unwrap()` in prefix parsers — **FIXED**
 
 - **File:** `src/sub/prefix.rs:495,513,504,521`
 - **Code:**

@@ -10,10 +10,10 @@ use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16, be_u32};
 use nom::{IResult, Needed};
 use nom_derive::*;
-use packet_utils::Algo;
+use packet_utils::{Algo, safe_split_at};
 use serde::{Deserialize, Serialize};
 
-use crate::util::{ParseBe, TlvEmitter};
+use crate::util::{ParseBe, TlvEmitter, emit_sub_tlvs};
 use crate::{IsisTlv, IsisTlvType, SidLabelValue, many0_complete};
 
 use super::{Behavior, IsisCodeLen, IsisPrefixCode, IsisSrv6SidSub2Code, IsisSubTlvUnknown};
@@ -97,7 +97,7 @@ impl ParseBe<IsisSubSrv6EndSid> for IsisSubSrv6EndSid {
         if sub2_len == 0 {
             return Ok((input, sub));
         }
-        let (input, sub2_data) = packet_utils::safe_split_at(input, sub2_len as usize)?;
+        let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;
         let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(sub2_data)?;
         sub.sub2s = sub2s;
         Ok((input, sub))
@@ -119,13 +119,11 @@ impl TlvEmitter for IsisSubSrv6EndSid {
         buf.put_u8(self.flags);
         buf.put_u16(self.behavior.into());
         buf.put(&self.sid.octets()[..]);
-        // Temporary Sub-Sub TLVs.
-        buf.put_u8(0);
-        let pp = buf.len();
-        for sub2 in &self.sub2s {
-            sub2.emit(buf);
-        }
-        buf[pp - 1] = (buf.len() - pp) as u8;
+        emit_sub_tlvs(buf, |buf| {
+            for sub2 in &self.sub2s {
+                sub2.emit(buf);
+            }
+        });
     }
 }
 
@@ -167,7 +165,7 @@ pub enum IsisSub2Tlv {
 impl IsisSub2Tlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, cl.len as usize)?;
+        let (input, sub) = safe_split_at(input, cl.len as usize)?;
         let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
         if let IsisSub2Tlv::Unknown(ref mut v) = val {
             v.code = cl.code;
@@ -200,7 +198,7 @@ impl IsisSub2Tlv {
 impl IsisSubTlv {
     pub fn parse_subs(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, cl) = IsisCodeLen::parse_be(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, cl.len as usize)?;
+        let (input, sub) = safe_split_at(input, cl.len as usize)?;
         let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
         if let IsisSubTlv::Unknown(ref mut v) = val {
             v.code = cl.code;
@@ -496,7 +494,10 @@ pub fn psize(plen: u8) -> usize {
 
 pub fn ptake(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv4Net> {
     if prefixlen == 0 {
-        return Ok((input, Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap()));
+        return Ok((
+            input,
+            Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("prefix length 0 is always valid"),
+        ));
     }
     if prefixlen > 32 {
         return Err(nom::Err::Error(nom::error::make_error(
@@ -519,7 +520,10 @@ pub fn ptake(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv4Net> {
 
 pub fn ptakev6(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv6Net> {
     if prefixlen == 0 {
-        return Ok((input, Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap()));
+        return Ok((
+            input,
+            Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).expect("prefix length 0 is always valid"),
+        ));
     }
     if prefixlen > 128 {
         return Err(nom::Err::Error(nom::error::make_error(
@@ -556,7 +560,7 @@ impl ParseBe<IsisTlvExtIpReachEntry> for IsisTlvExtIpReachEntry {
             return Ok((input, tlv));
         }
         let (input, sublen) = be_u8(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, sublen as usize)?;
+        let (input, sub) = safe_split_at(input, sublen as usize)?;
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
         Ok((input, tlv))
@@ -580,7 +584,7 @@ impl ParseBe<IsisTlvIpv6ReachEntry> for IsisTlvIpv6ReachEntry {
             return Ok((input, tlv));
         }
         let (input, sublen) = be_u8(input)?;
-        let (input, sub) = packet_utils::safe_split_at(input, sublen as usize)?;
+        let (input, sub) = safe_split_at(input, sublen as usize)?;
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
         Ok((input, tlv))
@@ -629,13 +633,11 @@ impl Srv6Locator {
         if plen != 0 {
             buf.put(&self.locator.addr().octets()[..plen]);
         }
-        // Temporary sub TLVs len.
-        buf.put_u8(0);
-        let pp = buf.len();
-        for sub in &self.subs {
-            sub.emit(buf);
-        }
-        buf[pp - 1] = (buf.len() - pp) as u8;
+        emit_sub_tlvs(buf, |buf| {
+            for sub in &self.subs {
+                sub.emit(buf);
+            }
+        });
     }
 }
 
@@ -657,7 +659,7 @@ impl ParseBe<Srv6Locator> for Srv6Locator {
         if sublen == 0 {
             return Ok((input, tlv));
         }
-        let (input, sub) = packet_utils::safe_split_at(input, sublen as usize)?;
+        let (input, sub) = safe_split_at(input, sublen as usize)?;
         let (_, subs) = many0_complete(IsisSubTlv::parse_subs).parse(sub)?;
         tlv.subs = subs;
         Ok((input, tlv))
