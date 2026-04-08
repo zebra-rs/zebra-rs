@@ -593,12 +593,14 @@ impl TlvEmitter for IsisTlvAreaAddr {
     }
 
     fn len(&self) -> u8 {
-        (self.area_addr.len() + 1) as u8
+        // Length(1) + Area Address, capped to 255.
+        (self.area_addr.len() + 1).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.area_addr.len() as u8);
-        buf.put(&self.area_addr[..]);
+        let max_addr_len = self.area_addr.len().min(254);
+        buf.put_u8(max_addr_len as u8);
+        buf.put(&self.area_addr[..max_addr_len]);
     }
 }
 
@@ -662,11 +664,11 @@ impl TlvEmitter for IsisTlvPadding {
     }
 
     fn len(&self) -> u8 {
-        self.padding.len() as u8
+        self.padding.len().min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put(&self.padding[..]);
+        buf.put(&self.padding[..self.padding.len().min(255)]);
     }
 }
 
@@ -707,7 +709,8 @@ impl TlvEmitter for IsisTlvLspEntries {
     }
 
     fn len(&self) -> u8 {
-        (self.entries.len() * std::mem::size_of::<IsisLspEntry>()) as u8
+        // Wire format: hold_time(2) + lsp_id(8) + seq_number(4) + checksum(2) = 16.
+        (self.entries.len() * 16) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -765,11 +768,11 @@ impl TlvEmitter for IsisTlvProtoSupported {
     }
 
     fn len(&self) -> u8 {
-        self.nlpids.len() as u8
+        self.nlpids.len().min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put(self.nlpids.as_bytes());
+        buf.put(&self.nlpids[..self.nlpids.len().min(255)]);
     }
 }
 
@@ -840,11 +843,12 @@ impl TlvEmitter for IsisTlvHostname {
     }
 
     fn len(&self) -> u8 {
-        self.hostname.len() as u8
+        self.hostname.len().min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put(self.hostname.as_bytes());
+        let bytes = self.hostname.as_bytes();
+        buf.put(&bytes[..bytes.len().min(255)]);
     }
 }
 
@@ -1009,9 +1013,9 @@ impl IsisTlvUnknown {
         let tlv = IsisTlvUnknown {
             typ: tl.typ,
             len: tl.len,
-            values: Vec::new(),
+            values: input.to_vec(),
         };
-        Ok((input, tlv))
+        Ok((&input[input.len()..], tlv))
     }
 }
 
@@ -1036,7 +1040,7 @@ impl ParseBe<IsisTlvHostname> for IsisTlvHostname {
         let hostname = Self {
             hostname: String::from_utf8_lossy(input).to_string(),
         };
-        Ok((input, hostname))
+        Ok((&input[input.len()..], hostname))
     }
 }
 
@@ -1125,4 +1129,126 @@ impl IsisTlv {
 
 pub fn parse(input: &[u8]) -> IResult<&[u8], IsisPacket> {
     IsisPacket::parse_be(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hostname_len_truncates_at_255() {
+        let short = IsisTlvHostname {
+            hostname: "router1".to_string(),
+        };
+        assert_eq!(short.len(), 7);
+
+        let exact = IsisTlvHostname {
+            hostname: "a".repeat(255),
+        };
+        assert_eq!(exact.len(), 255);
+
+        let long = IsisTlvHostname {
+            hostname: "a".repeat(300),
+        };
+        assert_eq!(long.len(), 255);
+    }
+
+    #[test]
+    fn hostname_emit_truncates_at_255() {
+        let long = IsisTlvHostname {
+            hostname: "a".repeat(300),
+        };
+        let mut buf = BytesMut::new();
+        long.emit(&mut buf);
+        assert_eq!(buf.len(), 255);
+    }
+
+    #[test]
+    fn area_addr_len_truncates_at_255() {
+        let short = IsisTlvAreaAddr {
+            area_addr: vec![0x49, 0x00, 0x01],
+        };
+        // 1 (length byte) + 3 (address) = 4.
+        assert_eq!(short.len(), 4);
+
+        let exact = IsisTlvAreaAddr {
+            area_addr: vec![0xAA; 254],
+        };
+        // 1 + 254 = 255.
+        assert_eq!(exact.len(), 255);
+
+        let long = IsisTlvAreaAddr {
+            area_addr: vec![0xAA; 300],
+        };
+        // Capped to 255.
+        assert_eq!(long.len(), 255);
+    }
+
+    #[test]
+    fn area_addr_emit_truncates_at_255() {
+        let long = IsisTlvAreaAddr {
+            area_addr: vec![0xAA; 300],
+        };
+        let mut buf = BytesMut::new();
+        long.emit(&mut buf);
+        // 1 (length byte) + 254 (address data) = 255.
+        assert_eq!(buf.len(), 255);
+        assert_eq!(buf[0], 254);
+    }
+
+    #[test]
+    fn padding_len_truncates_at_255() {
+        let short = IsisTlvPadding {
+            padding: vec![0u8; 100],
+        };
+        assert_eq!(short.len(), 100);
+
+        let exact = IsisTlvPadding {
+            padding: vec![0u8; 255],
+        };
+        assert_eq!(exact.len(), 255);
+
+        let long = IsisTlvPadding {
+            padding: vec![0u8; 300],
+        };
+        assert_eq!(long.len(), 255);
+    }
+
+    #[test]
+    fn padding_emit_truncates_at_255() {
+        let long = IsisTlvPadding {
+            padding: vec![0u8; 300],
+        };
+        let mut buf = BytesMut::new();
+        long.emit(&mut buf);
+        assert_eq!(buf.len(), 255);
+    }
+
+    #[test]
+    fn proto_supported_len_truncates_at_255() {
+        let short = IsisTlvProtoSupported {
+            nlpids: vec![0xCC, 0x8E],
+        };
+        assert_eq!(short.len(), 2);
+
+        let exact = IsisTlvProtoSupported {
+            nlpids: vec![0xCC; 255],
+        };
+        assert_eq!(exact.len(), 255);
+
+        let long = IsisTlvProtoSupported {
+            nlpids: vec![0xCC; 300],
+        };
+        assert_eq!(long.len(), 255);
+    }
+
+    #[test]
+    fn proto_supported_emit_truncates_at_255() {
+        let long = IsisTlvProtoSupported {
+            nlpids: vec![0xCC; 300],
+        };
+        let mut buf = BytesMut::new();
+        long.emit(&mut buf);
+        assert_eq!(buf.len(), 255);
+    }
 }

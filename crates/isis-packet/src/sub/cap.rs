@@ -141,12 +141,12 @@ impl TlvEmitter for IsisSubSegmentRoutingAlgo {
     }
 
     fn len(&self) -> u8 {
-        self.algo.len() as u8
+        self.algo.len().min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        for algo in self.algo.clone() {
-            buf.put_u8(algo.into());
+        for algo in self.algo.iter().take(255) {
+            buf.put_u8((*algo).into());
         }
     }
 }
@@ -308,5 +308,38 @@ impl TlvEmitter for IsisSubSrv6 {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u16(self.flags.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sr_algo_len_truncates_at_255() {
+        let short = IsisSubSegmentRoutingAlgo {
+            algo: vec![Algo::Spf, Algo::StrictSpf],
+        };
+        assert_eq!(short.len(), 2);
+
+        let exact = IsisSubSegmentRoutingAlgo {
+            algo: vec![Algo::Spf; 255],
+        };
+        assert_eq!(exact.len(), 255);
+
+        let long = IsisSubSegmentRoutingAlgo {
+            algo: vec![Algo::Spf; 300],
+        };
+        assert_eq!(long.len(), 255);
+    }
+
+    #[test]
+    fn sr_algo_emit_truncates_at_255() {
+        let long = IsisSubSegmentRoutingAlgo {
+            algo: vec![Algo::Spf; 300],
+        };
+        let mut buf = BytesMut::new();
+        long.emit(&mut buf);
+        assert_eq!(buf.len(), 255);
     }
 }
