@@ -20,12 +20,21 @@ The following issues from the prior audit have been addressed:
 - `checksum_calc` now returns `[0, 0]` when `data.len() < 13`.
 - All `split_at()` calls have been replaced with `packet_utils::safe_split_at()`
   which returns `Err::Incomplete` instead of panicking.
+- `ptake` now validates `prefixlen <= 32` before computing `psize` (issue 1).
+- `ptakev6` now validates `prefixlen <= 128` before computing `psize` (issue 2).
+- SRv6 sub2 parsing now uses `safe_split_at(input, sub2_len)` to honor the
+  wire-format length field (issue 3).
+- `IsisTlvUnknown::parse_tlv` now preserves payload data and consumes input (issue 4).
+- `IsisTlvLspEntries::len()` uses wire-format constant 16 instead of `mem::size_of` (issue 5).
+- `IsisTlvHostname::parse_be` now consumes all input bytes (issue 7).
+- Back-patched sub2 length fields now use `.min(255)` to prevent truncation (issue 8).
+- `Ipv4Net::new().unwrap()` and `Ipv6Net::new().unwrap()` replaced with `expect()` (issue 10).
 
 ---
 
 ## Critical (CRASH / Panic from malformed packets)
 
-### 1. `ptake` panics on IPv4 prefix length > 32
+### 1. `ptake` panics on IPv4 prefix length > 32 — **FIXED**
 
 - **File:** `src/sub/prefix.rs:493-507`
 - **Code:**
@@ -48,7 +57,7 @@ The following issues from the prior audit have been addressed:
 - **Fix:** Validate `prefixlen <= 32` before computing `psize`, or clamp
   `psize` to `min(psize, 4)`.
 
-### 2. `ptakev6` panics on IPv6 prefix length > 128
+### 2. `ptakev6` panics on IPv6 prefix length > 128 — **FIXED**
 
 - **File:** `src/sub/prefix.rs:510-524`
 - **Code:**
@@ -73,7 +82,7 @@ The following issues from the prior audit have been addressed:
 
 ## High (Data corruption / incorrect wire encoding)
 
-### 3. SRv6 `sub2_len` field is ignored during parsing
+### 3. SRv6 `sub2_len` field is ignored during parsing — **FIXED**
 
 - **Files:**
   - `src/sub/neigh.rs:488-502` (`IsisSubSrv6EndXSid::parse_be`)
@@ -99,7 +108,7 @@ The following issues from the prior audit have been addressed:
 - **Fix:** Add `let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;`
   before parsing sub2 TLVs.
 
-### 4. `IsisTlvUnknown` loses TLV payload data on parse
+### 4. `IsisTlvUnknown` loses TLV payload data on parse — **FIXED**
 
 - **File:** `src/parser.rs:1005-1012`
 - **Code:**
@@ -121,7 +130,7 @@ The following issues from the prior audit have been addressed:
   parsed and re-serialized (e.g., LSP flooding).
 - **Fix:** `values: input.to_vec()`.
 
-### 5. `IsisTlvLspEntries::len()` uses `mem::size_of` instead of wire size
+### 5. `IsisTlvLspEntries::len()` uses `mem::size_of` instead of wire size — **FIXED**
 
 - **File:** `src/parser.rs:706-707`
 - **Code:**
@@ -150,13 +159,13 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
 
 | File | Line | Expression |
 |------|------|------------|
-| `src/parser.rs:593` | `(self.area_addr.len() + 1) as u8` |
+| `src/parser.rs:593` | `(self.area_addr.len() + 1) as u8` | **FIXED** |
 | `src/parser.rs:635` | `(self.neighbors.len() * 6) as u8` |
-| `src/parser.rs:662` | `self.padding.len() as u8` |
-| `src/parser.rs:765` | `self.nlpids.len() as u8` |
-| `src/parser.rs:840` | `self.hostname.len() as u8` |
-| `src/sub/neigh.rs:274` | `(self.groups.len() * 4) as u8` |
-| `src/sub/cap.rs:141` | `self.algo.len() as u8` |
+| `src/parser.rs:662` | `self.padding.len() as u8` | **FIXED** |
+| `src/parser.rs:765` | `self.nlpids.len() as u8` | **FIXED** |
+| `src/parser.rs:840` | `self.hostname.len() as u8` | **FIXED** |
+| `src/sub/neigh.rs:274` | `(self.groups.len() * 4) as u8` | **FIXED** |
+| `src/sub/cap.rs:141` | `self.algo.len() as u8` | **FIXED** |
 
 - **Problem:** IS-IS TLV length is u8 (max 255). If programmatic
   construction creates data exceeding 255 bytes, the cast wraps silently,
@@ -167,7 +176,7 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
 - **Fix:** Use `u8::try_from(...).expect("TLV exceeds max length")` or
   split into multiple TLVs when the total exceeds 255.
 
-### 7. `IsisTlvHostname::parse_be` does not consume input
+### 7. `IsisTlvHostname::parse_be` does not consume input — **FIXED**
 
 - **File:** `src/parser.rs:1031-1037`
 - **Code:**
@@ -185,7 +194,7 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
   bytes with `_`, but it breaks the nom parser contract.
 - **Fix:** `Ok((&input[input.len()..], hostname))` or `Ok((&[], hostname))`.
 
-### 8. Back-patching emit with `as u8` truncation
+### 8. Back-patching emit with `as u8` truncation — **FIXED**
 
 - **Files:**
   - `src/sub/neigh.rs:529` (`IsisSubSrv6EndXSid::emit`)
@@ -230,7 +239,7 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
   not incomplete.
 - **Fix:** Return `Err::Error(nom::error::make_error(input, ErrorKind::LengthValue))`.
 
-### 10. `Ipv4Net::new().unwrap()` in prefix parsers
+### 10. `Ipv4Net::new().unwrap()` in prefix parsers — **FIXED**
 
 - **File:** `src/sub/prefix.rs:495,513,504,521`
 - **Code:**
