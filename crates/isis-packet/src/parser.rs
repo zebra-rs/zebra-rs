@@ -8,12 +8,13 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u24, be_u32};
-use nom::{AsBytes, Err, IResult, Needed};
+use nom::{AsBytes, Err, IResult};
 use nom_derive::*;
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::Display;
 
 use super::checksum_calc;
+use super::error::{IsisIResult, IsisParseError};
 use super::util::{ParseBe, TlvEmitter, u32_u8_3};
 use super::{
     IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvMtIpReach, IsisTlvMtIpv6Reach,
@@ -1104,7 +1105,10 @@ impl ParseBe<SidLabelValue> for SidLabelValue {
                 let (input, index) = be_u32(input)?;
                 Ok((input, SidLabelValue::Index(index)))
             }
-            _ => Err(Err::Incomplete(Needed::new(input.len()))),
+            _ => Err(Err::Error(nom::error::make_error(
+                input,
+                nom::error::ErrorKind::LengthValue,
+            ))),
         }
     }
 }
@@ -1127,8 +1131,9 @@ impl IsisTlv {
     }
 }
 
-pub fn parse(input: &[u8]) -> IResult<&[u8], IsisPacket> {
-    IsisPacket::parse_be(input)
+/// Parse an IS-IS packet, returning IsisParseError on failure.
+pub fn parse(input: &[u8]) -> IsisIResult<&[u8], IsisPacket> {
+    IsisPacket::parse_be(input).map_err(|e| e.map(IsisParseError::from))
 }
 
 #[cfg(test)]
