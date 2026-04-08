@@ -29,6 +29,7 @@ The following issues from the prior audit have been addressed:
 - `IsisTlvHostname::parse_be` now consumes all input bytes (issue 7).
 - Back-patched sub2 length fields now use `.min(255)` to prevent truncation (issue 8).
 - `Ipv4Net::new().unwrap()` and `Ipv6Net::new().unwrap()` replaced with `expect()` (issue 10).
+- `SidLabelValue::parse_be` now returns `Err::Error` instead of `Err::Incomplete` (issue 9).
 
 ---
 
@@ -218,7 +219,7 @@ Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
 
 ## Low
 
-### 9. `SidLabelValue::parse_be` error reporting for unexpected sizes
+### 9. `SidLabelValue::parse_be` error reporting for unexpected sizes — **FIXED**
 
 - **File:** `src/parser.rs:1089-1103`
 - **Code:**

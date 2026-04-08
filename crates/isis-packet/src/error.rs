@@ -143,6 +143,12 @@ impl<I> ParseError<I> for IsisParseError {
     }
 }
 
+impl From<nom::error::Error<&[u8]>> for IsisParseError {
+    fn from(err: nom::error::Error<&[u8]>) -> Self {
+        Self::nom_error(format!("Nom error: {:?}", err))
+    }
+}
+
 impl From<nom::Err<nom::error::Error<&[u8]>>> for IsisParseError {
     fn from(err: nom::Err<nom::error::Error<&[u8]>>) -> Self {
         match err {
