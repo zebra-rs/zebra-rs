@@ -513,7 +513,10 @@ pub fn ptake(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv4Net> {
     addr[..psize].copy_from_slice(&input[..psize]);
     let (input, _) = take(psize)(input)?;
     let Ok(prefix) = Ipv4Net::new(Ipv4Addr::from(addr), prefixlen) else {
-        return Err(nom::Err::Incomplete(Needed::new(psize)));
+        return Err(nom::Err::Error(nom::error::make_error(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
     };
     Ok((input, prefix))
 }
@@ -539,7 +542,10 @@ pub fn ptakev6(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv6Net> {
     addr[..psize].copy_from_slice(&input[..psize]);
     let (input, _) = take(psize)(input)?;
     let Ok(prefix) = Ipv6Net::new(Ipv6Addr::from(addr), prefixlen) else {
-        return Err(nom::Err::Incomplete(Needed::new(psize)));
+        return Err(nom::Err::Error(nom::error::make_error(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
     };
     Ok((input, prefix))
 }
