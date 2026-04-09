@@ -3,6 +3,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use super::prefix::MultiTopologyId;
 use bitfield_struct::bitfield;
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
@@ -49,6 +50,48 @@ impl TlvEmitter for IsisTlvExtIsReach {
 
     fn emit(&self, buf: &mut BytesMut) {
         self.entries.iter().for_each(|entry| entry.emit(buf));
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisTlvMtIsReach {
+    pub mt: MultiTopologyId,
+    pub entries: Vec<IsisTlvExtIsReachEntry>,
+}
+
+impl ParseBe<IsisTlvMtIsReach> for IsisTlvMtIsReach {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, mt) = be_u16(input)?;
+        let (input, entries) = many0_complete(IsisTlvExtIsReachEntry::parse_be).parse(input)?;
+        Ok((
+            input,
+            Self {
+                mt: mt.into(),
+                entries,
+            },
+        ))
+    }
+}
+
+impl TlvEmitter for IsisTlvMtIsReach {
+    fn typ(&self) -> u8 {
+        IsisTlvType::MtIsReach.into()
+    }
+
+    fn len(&self) -> u8 {
+        let len: u8 = self.entries.iter().map(|entry| entry.len()).sum();
+        len + 2
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.mt.into());
+        self.entries.iter().for_each(|entry| entry.emit(buf));
+    }
+}
+
+impl From<IsisTlvMtIsReach> for IsisTlv {
+    fn from(tlv: IsisTlvMtIsReach) -> Self {
+        IsisTlv::MtIsReach(tlv)
     }
 }
 

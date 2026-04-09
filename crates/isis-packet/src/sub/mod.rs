@@ -24,6 +24,7 @@ pub use neigh::{
     AdjSidFlags, IsisSubAdminGrp, IsisSubAsla, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr,
     IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr, IsisSubLanAdjSid, IsisSubSrv6EndXSid,
     IsisSubSrv6LanEndXSid, IsisSubTeMetric, IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
+    IsisTlvMtIsReach,
 };
 pub mod neigh_code;
 pub use neigh_code::IsisNeighCode;
@@ -32,7 +33,8 @@ pub mod neigh_disp;
 pub mod prefix;
 pub use prefix::{
     IsisSub2Tlv, IsisSubPrefixSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvIpv6Reach,
-    IsisTlvIpv6ReachEntry, IsisTlvMtIpReach, IsisTlvMtIpv6Reach, IsisTlvSrv6, PrefixSidFlags,
+    IsisTlvIpv6ReachEntry, IsisTlvMtIpReach, IsisTlvMtIpv6Reach, IsisTlvMultiTopology, IsisTlvSrv6,
+    MultiTopologyId, PrefixSidFlags,
 };
 pub mod prefix_code;
 pub use prefix_code::{IsisPrefixCode, IsisSrv6SidSub2Code};

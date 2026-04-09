@@ -185,6 +185,7 @@ impl Display for IsisTlv {
             Padding(v) => write!(f, "{}", v),
             LspEntries(v) => write!(f, "{}", v),
             ExtIsReach(v) => write!(f, "{}", v),
+            MtIsReach(v) => write!(f, "{}", v),
             Srv6(v) => write!(f, "{}", v),
             ProtoSupported(v) => write!(f, "{}", v),
             Ipv4IfAddr(v) => write!(f, "{}", v),
@@ -196,8 +197,9 @@ impl Display for IsisTlv {
             Ipv6GlobalIfAddr(v) => write!(f, "{}", v),
             Ipv6Reach(v) => write!(f, "{}", v),
             RouterCap(v) => write!(f, "{}", v),
-            MtIpReach(_) => write!(f, ""),
-            MtIpv6Reach(_) => write!(f, ""),
+            MultiTopology(v) => write!(f, "{}", v),
+            MtIpReach(v) => write!(f, "{}", v),
+            MtIpv6Reach(v) => write!(f, "{}", v),
             P2p3Way(v) => write!(f, "{}", v),
             Unknown(v) => {
                 write!(f, "  {:?}", v.typ)

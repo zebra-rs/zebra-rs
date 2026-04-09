@@ -16,6 +16,7 @@ pub enum IsisTlvType {
     Padding = 8,
     LspEntries = 9,
     ExtIsReach = 22,
+    MtIsReach = 222,
     Srv6 = 27,
     ProtSupported = 129,
     Ipv4IfAddr = 132,
@@ -25,6 +26,7 @@ pub enum IsisTlvType {
     Ipv6TeRouterId = 140,
     Ipv6IfAddr = 232,
     Ipv6GlobalIfAddr = 233,
+    MultiTopology = 229,
     MtIpReach = 235,
     Ipv6Reach = 236,
     MtIpv6Reach = 237,
@@ -51,6 +53,7 @@ impl IsisTlvType {
                 | Padding
                 | LspEntries
                 | ExtIsReach
+                | MtIsReach
                 | Srv6
                 | ProtSupported
                 | Ipv4IfAddr
@@ -60,6 +63,7 @@ impl IsisTlvType {
                 | Ipv6TeRouterId
                 | Ipv6IfAddr
                 | Ipv6GlobalIfAddr
+                | MultiTopology
                 | MtIpReach
                 | Ipv6Reach
                 | MtIpv6Reach
@@ -78,6 +82,7 @@ impl From<IsisTlvType> for u8 {
             Padding => 8,
             LspEntries => 9,
             ExtIsReach => 22,
+            MtIsReach => 222,
             Srv6 => 27,
             ProtSupported => 129,
             Ipv4IfAddr => 132,
@@ -87,6 +92,7 @@ impl From<IsisTlvType> for u8 {
             Ipv6TeRouterId => 140,
             Ipv6IfAddr => 232,
             Ipv6GlobalIfAddr => 233,
+            MultiTopology => 229,
             MtIpReach => 235,
             Ipv6Reach => 236,
             MtIpv6Reach => 237,
@@ -106,6 +112,7 @@ impl From<u8> for IsisTlvType {
             8 => Padding,
             9 => LspEntries,
             22 => ExtIsReach,
+            222 => MtIsReach,
             27 => Srv6,
             129 => ProtSupported,
             132 => Ipv4IfAddr,
@@ -115,6 +122,7 @@ impl From<u8> for IsisTlvType {
             140 => Ipv6TeRouterId,
             232 => Ipv6IfAddr,
             233 => Ipv6GlobalIfAddr,
+            229 => MultiTopology,
             235 => MtIpReach,
             236 => Ipv6Reach,
             237 => MtIpv6Reach,

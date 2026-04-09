@@ -399,6 +399,44 @@ pub struct MultiTopologyId {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisTlvMultiTopology {
+    pub entries: Vec<MultiTopologyId>,
+}
+
+impl ParseBe<IsisTlvMultiTopology> for IsisTlvMultiTopology {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, entries) = many0_complete(|i| {
+            let (i, mt) = be_u16(i)?;
+            Ok((i, mt.into()))
+        })
+        .parse(input)?;
+        Ok((input, Self { entries }))
+    }
+}
+
+impl TlvEmitter for IsisTlvMultiTopology {
+    fn typ(&self) -> u8 {
+        IsisTlvType::MultiTopology.into()
+    }
+
+    fn len(&self) -> u8 {
+        (self.entries.len() * 2) as u8
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        for entry in &self.entries {
+            buf.put_u16((*entry).into());
+        }
+    }
+}
+
+impl From<IsisTlvMultiTopology> for IsisTlv {
+    fn from(tlv: IsisTlvMultiTopology) -> Self {
+        IsisTlv::MultiTopology(tlv)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvMtIpv6Reach {
     pub mt: MultiTopologyId,
     pub entries: Vec<IsisTlvIpv6ReachEntry>,
