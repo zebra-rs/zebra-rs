@@ -22,6 +22,9 @@ impl ParseNlri<Ipv4Nlri> for Ipv4Nlri {
     fn parse_nlri(input: &[u8], add_path: bool) -> IResult<&[u8], Ipv4Nlri> {
         let (input, id) = if add_path { be_u32(input)? } else { (input, 0) };
         let (input, plen) = be_u8(input)?;
+        if plen > 32 {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+        }
         let psize = nlri_psize(plen);
         if input.len() < psize {
             return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
@@ -44,4 +47,16 @@ pub fn parse_bgp_nlri_ipv4(
     let (input, nlri) = packet_utils::safe_split_at(input, len)?;
     let (_, nlris) = many0_complete(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(nlri)?;
     Ok((input, nlris))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ipv4Nlri;
+    use crate::ParseNlri;
+
+    #[test]
+    fn parse_nlri_rejects_prefixlen_over_32() {
+        let input = [33, 192, 0, 2, 1, 0];
+        assert!(Ipv4Nlri::parse_nlri(&input, false).is_err());
+    }
 }

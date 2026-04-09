@@ -234,12 +234,8 @@ impl Attr {
         let as4_opt = matches!(attr_type, AttrType::AsPath | AttrType::Aggregator).then_some(as4);
 
         // Split out the payload for this attribute
-        if input.len() < attr_len as usize {
-            return Err(BgpParseError::IncompleteData {
-                needed: attr_len as usize - input.len(),
-            });
-        }
-        let (attr_payload, input) = input.split_at(attr_len as usize);
+        let (input, attr_payload) =
+            packet_utils::safe_split_at(input, attr_len as usize).map_err(BgpParseError::from)?;
 
         // Parse the attribute using the appropriate selector with error context
         let (_, attr) = match attr_type {
@@ -289,7 +285,8 @@ pub fn parse_bgp_update_attribute(
     as4: bool,
     opt: Option<ParseOption>,
 ) -> ParsedAttributes<'_> {
-    let (attr, input) = input.split_at(length as usize);
+    let length = length as usize;
+    let (input, attr) = packet_utils::safe_split_at(input, length).map_err(BgpParseError::from)?;
     let mut remaining = attr;
     let mut bgp_attr = BgpAttr::default();
     let mut mp_update: Option<MpReachAttr> = None;
@@ -377,4 +374,20 @@ pub fn parse_bgp_update_attribute(
     }
 
     Ok((input, Some(bgp_attr), mp_update, mp_withdraw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bgp_update_attribute;
+    use crate::BgpParseError;
+
+    #[test]
+    fn parse_bgp_update_attribute_rejects_oversized_length() {
+        let err = parse_bgp_update_attribute(&[0xff, 0xee, 0xdd], 4, false, None)
+            .expect_err("oversized attribute block length must fail");
+        match err {
+            BgpParseError::IncompleteData { needed } => assert_eq!(needed, 4),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }
