@@ -771,7 +771,7 @@ fn route_advertise_to_peers(
 
 // Send BGP withdrawal for a prefix
 fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: Ipv4Net, id: u32) {
-    let mut update = UpdatePacket::new();
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
 
     match rd {
         Some(rd) => {
@@ -1215,7 +1215,7 @@ pub fn route_update_ipv4(
 }
 
 pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
-    let mut update = UpdatePacket::new();
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.bgp_attr = Some(bgp_attr);
     update.ipv4_update.push(nlri);
     peer.send_packet(update.into());
@@ -1256,8 +1256,9 @@ impl Peer {
     // Flush BGP update.
     pub fn flush_ipv4(&mut self) {
         let packet_tx = self.packet_tx.clone();
+        let max_size = self.max_packet_size();
         for (attr, nlris) in self.cache_ipv4.drain() {
-            let mut update = UpdatePacket::new();
+            let mut update = UpdatePacket::with_max_packet_size(max_size);
             update.bgp_attr = Some((*attr).clone());
             update.ipv4_update = nlris.into_iter().collect();
 
@@ -1300,8 +1301,9 @@ impl Peer {
     // Flush BGP update.
     pub fn flush_vpnv4(&mut self) {
         let packet_tx = self.packet_tx.clone();
+        let max_size = self.max_packet_size();
         for (attr, nlris) in self.cache_vpnv4.drain() {
-            let mut update = UpdatePacket::new();
+            let mut update = UpdatePacket::with_max_packet_size(max_size);
 
             if let Some(BgpNexthop::Vpnv4(nhop)) = attr.nexthop.as_ref() {
                 let vpnv4reach = Vpnv4Reach {
@@ -1324,7 +1326,7 @@ impl Peer {
 }
 
 pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
-    let mut update = UpdatePacket::new();
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     if let Some(BgpNexthop::Vpnv4(nhop)) = bgp_attr.nexthop.as_ref() {
         let nlri = Vpnv4Reach {
             snpa: 0,
@@ -1495,20 +1497,20 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
 
 // Send End-of-RIB marker for IPv4 Unicast.
 fn send_eor_ipv4_unicast(peer: &mut Peer) {
-    let update = UpdatePacket::new();
+    let update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     peer.send_packet(update.into());
 }
 
 // Send End-of-RIB marker for VPNv4 Unicast.
 fn send_eor_vpnv4_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::new();
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Vpnv4Eor);
     peer.send_packet(update.into());
 }
 
 // Send wildcard RTCv4.
 fn send_default_rtcv4_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::new();
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
 
     let mut attrs = BgpAttr::new();
     if peer.is_ibgp() {
@@ -1527,7 +1529,7 @@ fn send_default_rtcv4_unicast(peer: &mut Peer) {
 
 // Send End-of-RIB marker for RTCv4.
 fn send_eor_rtcv4_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::new();
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Rtcv4Eor);
     peer.send_packet(update.into());
 }

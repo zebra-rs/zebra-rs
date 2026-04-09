@@ -7,6 +7,7 @@ use nom_derive::*;
 use crate::{NotificationPacket, OpenPacket, UpdatePacket};
 
 pub const BGP_PACKET_LEN: usize = 4096;
+pub const BGP_EXTENDED_PACKET_LEN: usize = 65535;
 pub const BGP_HEADER_LEN: u16 = 19;
 
 #[repr(u8)]
