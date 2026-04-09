@@ -22,6 +22,9 @@ impl ParseNlri<Ipv6Nlri> for Ipv6Nlri {
     fn parse_nlri(input: &[u8], add_path: bool) -> IResult<&[u8], Ipv6Nlri> {
         let (input, id) = if add_path { be_u32(input)? } else { (input, 0) };
         let (input, plen) = be_u8(input)?;
+        if plen > 128 {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+        }
         let psize = nlri_psize(plen);
         if input.len() < psize {
             return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
@@ -38,6 +41,9 @@ impl ParseNlri<Ipv6Nlri> for Ipv6Nlri {
 impl ParseBe<Ipv6Net> for Ipv6Net {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Ipv6Net> {
         let (input, plen) = be_u8(input)?;
+        if plen > 128 {
+            return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+        }
         let psize = nlri_psize(plen);
         if input.len() < psize {
             return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
@@ -48,5 +54,32 @@ impl ParseBe<Ipv6Net> for Ipv6Net {
         let prefix = Ipv6Net::new(Ipv6Addr::from(paddr), plen).expect("Ipv6Net create error");
 
         Ok((input, prefix))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ipv6Nlri;
+    use crate::{ParseBe, ParseNlri};
+    use ipnet::Ipv6Net;
+
+    #[test]
+    fn parse_nlri_rejects_prefixlen_over_128() {
+        let input = [
+            129, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert!(Ipv6Nlri::parse_nlri(&input, false).is_err());
+    }
+
+    #[test]
+    fn parse_ipv6net_rejects_prefixlen_over_128() {
+        let input = [
+            129, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert!(Ipv6Net::parse_be(&input).is_err());
     }
 }
