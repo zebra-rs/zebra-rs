@@ -8,7 +8,8 @@ use super::prefix::{
 };
 use super::{
     IsisSubPrefixSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvIpv6Reach,
-    IsisTlvIpv6ReachEntry,
+    IsisTlvIpv6ReachEntry, IsisTlvMtIpReach, IsisTlvMtIpv6Reach, IsisTlvMultiTopology,
+    MultiTopologyId,
 };
 
 impl Display for IsisTlvExtIpReach {
@@ -130,5 +131,47 @@ impl Display for IsisSub2SidStructure {
             "LB Len: {}, LN Len: {}, Func Len: {}, Arg Len: {}",
             self.lb_len, self.ln_len, self.fun_len, self.arg_len
         )
+    }
+}
+
+impl Display for MultiTopologyId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "{}", self.id())
+    }
+}
+
+impl Display for IsisTlvMultiTopology {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  Multi-Topology:")?;
+        for entry in &self.entries {
+            write!(f, " {}", entry)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for IsisTlvMtIpReach {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  MT IP Reachability (MT-ID {}):", self.mt.id())?;
+        for (pos, entry) in self.entries.iter().enumerate() {
+            if pos != 0 {
+                writeln!(f)?;
+            }
+            write!(f, "\n{}", entry)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for IsisTlvMtIpv6Reach {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  MT IPv6 Reachability (MT-ID {}):", self.mt.id())?;
+        for (pos, entry) in self.entries.iter().enumerate() {
+            if pos != 0 {
+                writeln!(f)?;
+            }
+            write!(f, "\n{}", entry)?;
+        }
+        Ok(())
     }
 }
