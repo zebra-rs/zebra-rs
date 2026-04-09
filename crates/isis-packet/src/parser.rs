@@ -18,7 +18,8 @@ use super::error::{IsisIResult, IsisParseError};
 use super::util::{ParseBe, TlvEmitter, u32_u8_3};
 use super::{
     IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvMtIpReach, IsisTlvMtIpv6Reach,
-    IsisTlvRouterCap, IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
+    IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRouterCap, IsisTlvSrv6, IsisTlvType, IsisType,
+    many0_complete,
 };
 
 // IS-IS discriminator.
@@ -523,6 +524,8 @@ pub enum IsisTlv {
     LspEntries(IsisTlvLspEntries),
     #[nom(Selector = "IsisTlvType::ExtIsReach")]
     ExtIsReach(IsisTlvExtIsReach),
+    #[nom(Selector = "IsisTlvType::MtIsReach")]
+    MtIsReach(IsisTlvMtIsReach),
     #[nom(Selector = "IsisTlvType::Srv6")]
     Srv6(IsisTlvSrv6),
     #[nom(Selector = "IsisTlvType::ProtSupported")]
@@ -541,6 +544,8 @@ pub enum IsisTlv {
     Ipv6IfAddr(IsisTlvIpv6IfAddr),
     #[nom(Selector = "IsisTlvType::Ipv6GlobalIfAddr")]
     Ipv6GlobalIfAddr(IsisTlvIpv6GlobalIfAddr),
+    #[nom(Selector = "IsisTlvType::MultiTopology")]
+    MultiTopology(IsisTlvMultiTopology),
     #[nom(Selector = "IsisTlvType::MtIpReach")]
     MtIpReach(IsisTlvMtIpReach),
     #[nom(Selector = "IsisTlvType::Ipv6Reach")]
@@ -564,6 +569,7 @@ impl IsisTlv {
             Padding(v) => v.tlv_emit(buf),
             LspEntries(v) => v.tlv_emit(buf),
             ExtIsReach(v) => v.tlv_emit(buf),
+            MtIsReach(v) => v.tlv_emit(buf),
             Srv6(v) => v.tlv_emit(buf),
             ProtoSupported(v) => v.tlv_emit(buf),
             Ipv4IfAddr(v) => v.tlv_emit(buf),
@@ -573,6 +579,7 @@ impl IsisTlv {
             Ipv6TeRouterId(v) => v.tlv_emit(buf),
             Ipv6IfAddr(v) => v.tlv_emit(buf),
             Ipv6GlobalIfAddr(v) => v.tlv_emit(buf),
+            MultiTopology(v) => v.tlv_emit(buf),
             MtIpReach(v) => v.tlv_emit(buf),
             Ipv6Reach(v) => v.tlv_emit(buf),
             MtIpv6Reach(v) => v.tlv_emit(buf),

@@ -7,7 +7,7 @@ use super::neigh::{IsisSubAdjSid, IsisSubAdminGrp, IsisSubAsla, IsisSubTlv};
 use super::{
     AdjSidFlags, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr, IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr,
     IsisSubLanAdjSid, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid, IsisSubTeMetric,
-    IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
+    IsisTlvExtIsReach, IsisTlvExtIsReachEntry, IsisTlvMtIsReach,
 };
 
 impl Display for IsisTlvExtIsReach {
@@ -186,6 +186,16 @@ impl Display for IsisSubSrv6LanEndXSid {
         )?;
         for sub2 in &self.sub2s {
             write!(f, "\n      {}", sub2)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for IsisTlvMtIsReach {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  MT IS Reachability (MT-ID {}):", self.mt.id())?;
+        for entry in self.entries.iter() {
+            write!(f, "\n{}", entry)?;
         }
         Ok(())
     }
