@@ -59,10 +59,10 @@ impl MpReachAttr {
         }
     }
 
-    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut) {
+    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_size: usize) {
         match self {
             MpReachAttr::Vpnv4(attr) => {
-                attr.attr_emit_mut(buf);
+                attr.attr_emit_mut(buf, max_size);
             }
             _ => {
                 //

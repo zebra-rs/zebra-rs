@@ -123,6 +123,7 @@ pub struct PeerTransportConfig {
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
     pub four_octet: bool,
+    pub extended_message: bool,
     pub mp: AfiSafis<bool>,
     pub restart: AfiSafis<RestartValue>,
     pub llgr: AfiSafis<LlgrValue>,
@@ -137,6 +138,7 @@ impl Default for PeerConfig {
         Self {
             transport: Default::default(),
             four_octet: Default::default(),
+            extended_message: true,
             mp: Default::default(),
             restart: AfiSafis::new(),
             llgr: AfiSafis::new(),
@@ -357,6 +359,14 @@ impl Peer {
         self.config.transport.passive
     }
 
+    pub fn max_packet_size(&self) -> usize {
+        if self.opt.extended_message {
+            BGP_EXTENDED_PACKET_LEN
+        } else {
+            BGP_PACKET_LEN
+        }
+    }
+
     pub fn start(&mut self) {
         if self.peer_as != 0 && !self.address.is_unspecified() && !self.active {
             timer::update_timers(self);
@@ -516,6 +526,7 @@ pub fn open_asn(packet: &OpenPacket) -> u32 {
     }
 }
 
+//
 pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     peer.counter[BgpType::Open as usize].rcvd += 1;
 
@@ -565,7 +576,12 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     // Register add path caps.
     cap_addpath_recv(&packet.bgp_cap, &mut peer.opt, &peer.config.addpath);
 
-    // Register graceful restart.
+    // Extended message negotiation (RFC 8654).
+    if peer.cap_send.extended.is_some() && packet.bgp_cap.extended.is_some() {
+        peer.opt.extended_message = true;
+    }
+
+    // Record received capability.
     peer.cap_recv = packet.bgp_cap;
 
     State::Established
@@ -638,8 +654,10 @@ pub async fn peer_packet_parse(
         Ok((_, p)) => {
             match p {
                 BgpPacket::Open(p) => {
-                    // config.cap_recv = p.bgp_cap.clone();
                     cap_addpath_recv(&p.bgp_cap, opt, &config.addpath);
+                    if config.extended_message && p.bgp_cap.extended.is_some() {
+                        opt.extended_message = true;
+                    }
                     let _ = tx.send(Message::Event(ident, Event::BGPOpen(*p))).await;
                 }
                 BgpPacket::Keepalive(_) => {
@@ -667,7 +685,7 @@ pub async fn peer_read(
     mut config: PeerConfig,
     mut opt: ParseOption,
 ) {
-    let mut buf = BytesMut::with_capacity(BGP_PACKET_LEN * 2);
+    let mut buf = BytesMut::with_capacity(BGP_EXTENDED_PACKET_LEN);
     loop {
         match read_half.read_buf(&mut buf).await {
             Ok(read_len) => {
@@ -678,8 +696,14 @@ pub async fn peer_read(
                 while buf.len() >= BGP_HEADER_LEN as usize && buf.len() >= peek_bgp_length(&buf) {
                     let length = peek_bgp_length(&buf);
 
+                    // Validate message length (RFC 8654).
+                    if length < BGP_HEADER_LEN as usize || length > opt.max_message_len() {
+                        let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
+                        return;
+                    }
+
                     let mut remain = buf.split_off(length);
-                    remain.reserve(BGP_PACKET_LEN * 2);
+                    remain.reserve(BGP_EXTENDED_PACKET_LEN);
 
                     match peer_packet_parse(&buf, ident, tx.clone(), &mut config, &mut opt).await {
                         Ok(_) => {
@@ -767,6 +791,9 @@ pub fn peer_send_open(peer: &mut Peer) {
         let cap = CapRefresh::default();
         bgp_cap.refresh = Some(cap);
     }
+    if peer.config.extended_message {
+        bgp_cap.extended = Some(CapExtended::default());
+    }
     for (key, addpath) in peer.config.addpath.iter() {
         bgp_cap.addpath.insert(key.clone(), addpath.clone());
     }
@@ -800,7 +827,13 @@ pub fn peer_send_notification(peer: &mut Peer, code: NotifyCode, sub_code: u8, d
         return;
     };
     let notification = NotificationPacket::new(code, sub_code, data);
-    let bytes: BytesMut = notification.into();
+    let mut bytes: BytesMut = notification.into();
+    // RFC 8654: NOTIFICATION to non-extended peer MUST NOT exceed 4096.
+    if !peer.opt.extended_message && bytes.len() > BGP_PACKET_LEN {
+        bytes.truncate(BGP_PACKET_LEN);
+        let length = bytes.len() as u16;
+        bytes[16..18].copy_from_slice(&length.to_be_bytes());
+    }
     peer.counter[BgpType::Notification as usize].sent += 1;
     let _ = packet_tx.send(bytes);
 }
