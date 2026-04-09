@@ -151,7 +151,7 @@ impl AttrEmitter for Vpnv4Reach {
 }
 
 impl Vpnv4Reach {
-    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut) {
+    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_size: usize) {
         let flags = self.attr_flags();
         let attr_type = self.attr_type();
         let emit_header = |buf: &mut BytesMut, len: usize, extended: bool| {
@@ -170,11 +170,11 @@ impl Vpnv4Reach {
             // Length is known.
             let extended = len > 255;
             emit_header(buf, len, extended);
-            self.emit_mut(buf);
+            self.emit_mut(buf, max_size);
         } else {
             // Buffer the attribute to determine its length.
             let mut attr_buf = BytesMut::new();
-            self.emit_mut(&mut attr_buf);
+            self.emit_mut(&mut attr_buf, max_size);
             let len = attr_buf.len();
             let extended = len > 255;
             emit_header(buf, len, extended);
@@ -182,7 +182,7 @@ impl Vpnv4Reach {
         }
     }
 
-    fn emit_mut(&mut self, buf: &mut BytesMut) {
+    fn emit_mut(&mut self, buf: &mut BytesMut, max_size: usize) {
         // AFI/SAFI.
         buf.put_u16(u16::from(Afi::Ip));
         buf.put_u8(u8::from(Safi::MplsVpn));
@@ -212,7 +212,7 @@ impl Vpnv4Reach {
             // Prefix.
             nlri_len += nlri_psize(update.nlri.prefix.prefix_len());
 
-            if nlri_len + buf.len() > 4096 {
+            if nlri_len + buf.len() > max_size {
                 self.updates.push(update);
                 return;
             }
