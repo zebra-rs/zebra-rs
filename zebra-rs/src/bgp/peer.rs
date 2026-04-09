@@ -516,6 +516,7 @@ pub fn open_asn(packet: &OpenPacket) -> u32 {
     }
 }
 
+//
 pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     peer.counter[BgpType::Open as usize].rcvd += 1;
 
@@ -565,7 +566,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     // Register add path caps.
     cap_addpath_recv(&packet.bgp_cap, &mut peer.opt, &peer.config.addpath);
 
-    // Register graceful restart.
+    // Record received capability.
     peer.cap_recv = packet.bgp_cap;
 
     State::Established
