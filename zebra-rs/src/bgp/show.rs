@@ -1212,7 +1212,8 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             write!(out, "    4 Octet AS:")?;
             if neighbor.cap_send.as4.is_some() {
                 write!(out, " advertised")?;
-            } else if neighbor.cap_recv.as4.is_some() {
+            }
+            if neighbor.cap_recv.as4.is_some() {
                 if neighbor.cap_send.as4.is_some() {
                     write!(out, " and")?;
                 }
