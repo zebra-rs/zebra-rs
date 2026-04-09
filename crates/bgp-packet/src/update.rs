@@ -9,8 +9,9 @@ use nom::number::complete::be_u16;
 use nom_derive::*;
 
 use crate::{
-    Afi, BGP_HEADER_LEN, BgpAttr, BgpHeader, BgpParseError, BgpType, Ipv4Nlri, MpReachAttr,
-    MpUnreachAttr, ParseOption, Safi, nlri_psize, parse_bgp_nlri_ipv4, parse_bgp_update_attribute,
+    Afi, BGP_HEADER_LEN, BGP_PACKET_LEN, BgpAttr, BgpHeader, BgpParseError, BgpType, Ipv4Nlri,
+    MpReachAttr, MpUnreachAttr, ParseOption, Safi, nlri_psize, parse_bgp_nlri_ipv4,
+    parse_bgp_update_attribute,
 };
 
 #[derive(NomBE)]
@@ -34,6 +35,13 @@ impl UpdatePacket {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn with_max_packet_size(max_packet_size: usize) -> Self {
+        Self {
+            max_packet_size,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for UpdatePacket {
@@ -45,7 +53,7 @@ impl Default for UpdatePacket {
             ipv4_withdraw: Vec::new(),
             mp_update: None,
             mp_withdraw: None,
-            max_packet_size: 4096,
+            max_packet_size: BGP_PACKET_LEN,
         }
     }
 }
@@ -138,7 +146,7 @@ impl UpdatePacket {
         }
 
         // MP reach.
-        mp_update.attr_emit_mut(&mut buf.get_mut());
+        mp_update.attr_emit_mut(&mut buf.get_mut(), self.max_packet_size);
 
         // Fill in attr length.
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;

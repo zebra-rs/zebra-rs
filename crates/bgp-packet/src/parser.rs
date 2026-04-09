@@ -7,8 +7,8 @@ use nom::combinator::peek;
 use nom_derive::*;
 
 use crate::{
-    Afi, AfiSafi, BgpHeader, BgpPacket, BgpParseError, BgpType, NotificationPacket, OpenPacket,
-    Safi, UpdatePacket,
+    Afi, AfiSafi, BGP_EXTENDED_PACKET_LEN, BGP_PACKET_LEN, BgpHeader, BgpPacket, BgpParseError,
+    BgpType, NotificationPacket, OpenPacket, Safi, UpdatePacket,
 };
 
 #[derive(Default, Debug, Clone)]
@@ -23,6 +23,8 @@ pub struct ParseOption {
     pub as4: Direct,
     // AddPath
     pub add_path: BTreeMap<AfiSafi, Direct>,
+    // Extended Message (RFC 8654)
+    pub extended_message: bool,
 }
 
 impl ParseOption {
@@ -40,9 +42,18 @@ impl ParseOption {
         self.add_path.get(&key).is_some_and(|direct| direct.send)
     }
 
+    pub fn max_message_len(&self) -> usize {
+        if self.extended_message {
+            BGP_EXTENDED_PACKET_LEN
+        } else {
+            BGP_PACKET_LEN
+        }
+    }
+
     pub fn clear(&mut self) {
         self.as4 = Direct::default();
         self.add_path.clear();
+        self.extended_message = false;
     }
 }
 
