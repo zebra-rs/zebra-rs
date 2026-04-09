@@ -1,278 +1,217 @@
-# isis-packet Security Audit: Buffer Overrun and Crash Issues
+# isis-packet Security Audit
 
-**Audit date:** 2026-03-19
-**Crate version:** 0.9.0
-**nom version:** 8.0.0
+**Audit date:** 2026-04-09  
+**Crate version:** 0.9.0  
+**nom version:** 8.0.0  
+**Scope:** current workspace tree under `crates/isis-packet/`
 
 ## Summary
 
-Found **10 issues** across the crate. Two are critical crash bugs reachable
-from crafted network input. The most common remaining patterns are unchecked
-prefix-length values leading to slice panics, ignored sub-TLV length fields,
-`as u8` cast truncation in length calculations, and data-loss bugs in
-serialization round-trips.
+This revision supersedes the earlier 2026-03-19 audit.
 
-### Previously reported issues now fixed
+The previously reported crash bugs around checksum indexing, unchecked
+`split_at()`, and overlong IPv4/IPv6 prefix lengths are fixed in the current
+tree. I did not find a current packet-triggered panic in this pass.
 
-The following issues from the prior audit have been addressed:
-- `is_valid_checksum` now checks `input.len() < 12` before indexing.
-- `IsisPacket::emit` now checks `buf.len() >= 26` before writing LSP checksum.
-- `checksum_calc` now returns `[0, 0]` when `data.len() < 13`.
-- All `split_at()` calls have been replaced with `packet_utils::safe_split_at()`
-  which returns `Err::Incomplete` instead of panicking.
-- `ptake` now validates `prefixlen <= 32` before computing `psize` (issue 1).
-- `ptakev6` now validates `prefixlen <= 128` before computing `psize` (issue 2).
-- SRv6 sub2 parsing now uses `safe_split_at(input, sub2_len)` to honor the
-  wire-format length field (issue 3).
-- `IsisTlvUnknown::parse_tlv` now preserves payload data and consumes input (issue 4).
-- `IsisTlvLspEntries::len()` uses wire-format constant 16 instead of `mem::size_of` (issue 5).
-- `IsisTlvHostname::parse_be` now consumes all input bytes (issue 7).
-- Back-patched sub2 length fields now use `.min(255)` to prevent truncation (issue 8).
-- `Ipv4Net::new().unwrap()` and `Ipv6Net::new().unwrap()` replaced with `expect()` (issue 10).
-- `SidLabelValue::parse_be` now returns `Err::Error` instead of `Err::Incomplete` (issue 9).
+The remaining security-relevant issues are:
 
----
+1. **High:** PDU wire-length fields are parsed but not enforced.
+2. **Medium:** TLV/sub-TLV parsers accept trailing garbage inside
+   length-bounded payloads and silently discard it.
+3. **Medium:** `emit_sub_tlvs()` clamps the nested length field to 255 without
+   truncating the emitted payload.
 
-## Critical (CRASH / Panic from malformed packets)
+There are also a few lower-priority unchecked `u8` length calculations that can
+still produce malformed packets when the library is used to construct oversized
+TLVs programmatically.
 
-### 1. `ptake` panics on IPv4 prefix length > 32 — **FIXED**
+## Status Since Prior Audit
 
-- **File:** `src/sub/prefix.rs:493-507`
-- **Code:**
-  ```rust
-  pub fn ptake(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv4Net> {
-      // ...
-      let psize = psize(prefixlen);      // e.g., prefixlen=33 → psize=5
-      // ...
-      let mut addr = [0u8; 4];
-      addr[..psize].copy_from_slice(&input[..psize]);  // PANIC: 5 > 4
-  ```
-- **Problem:** `psize(33)` returns 5, but `addr` is `[u8; 4]`. The slice
-  `addr[..5]` panics with index-out-of-bounds.
-- **Trigger:** An IS-IS Extended IP Reachability TLV (type 135) or MT IP
-  Reachability TLV (type 235) with a crafted `prefixlen` field in the
-  6-bit `Ipv4ControlInfo` bitfield set to any value 33–63. The bitfield
-  allows values 0–63.
-- **Impact:** Daemon crash from a single crafted LSP received from any
-  IS-IS neighbor (or injected on the wire).
-- **Fix:** Validate `prefixlen <= 32` before computing `psize`, or clamp
-  `psize` to `min(psize, 4)`.
+The following items from the earlier report are now addressed:
 
-### 2. `ptakev6` panics on IPv6 prefix length > 128 — **FIXED**
+- `is_valid_checksum()` validates short input before indexing.
+- `IsisPacket::emit()` guards the LSP checksum write with `buf.len() >= 26`.
+- `checksum_calc()` returns `[0, 0]` for too-short input.
+- direct `split_at()` use in parsing paths was replaced with
+  `packet_utils::safe_split_at()`.
+- `ptake()` now rejects IPv4 prefix lengths greater than 32.
+- `ptakev6()` now rejects IPv6 prefix lengths greater than 128.
+- SRv6 sub2 parsing now respects the wire-format `sub2_len` field.
+- unknown TLV parsing preserves payload bytes.
+- `IsisTlvLspEntries::len()` uses the 16-byte wire size.
+- `IsisTlvHostname::parse_be()` now consumes its full input.
+- `SidLabelValue::parse_be()` now returns `Err::Error` for malformed lengths.
+- the old unchecked sub2 back-patch sites were consolidated into
+  `emit_sub_tlvs()`.
 
-- **File:** `src/sub/prefix.rs:510-524`
-- **Code:**
-  ```rust
-  pub fn ptakev6(input: &[u8], prefixlen: u8) -> IResult<&[u8], Ipv6Net> {
-      // ...
-      let psize = psize(prefixlen);      // e.g., prefixlen=129 → psize=17
-      // ...
-      let mut addr = [0u8; 16];
-      addr[..psize].copy_from_slice(&input[..psize]);  // PANIC: 17 > 16
-  ```
-- **Problem:** Same pattern as issue 1. `psize(129)` returns 17, but `addr`
-  is `[u8; 16]`.
-- **Trigger:** An IS-IS IPv6 Reachability TLV (type 236), MT IPv6
-  Reachability TLV (type 237), or SRv6 Locator TLV (type 27) with a
-  `prefixlen` byte in range 129–255.
-- **Impact:** Daemon crash from a single crafted LSP.
-- **Fix:** Validate `prefixlen <= 128` before computing `psize`, or clamp
-  `psize` to `min(psize, 16)`.
+## Current Findings
 
----
+### 1. PDU wire-length fields are not enforced
 
-## High (Data corruption / incorrect wire encoding)
-
-### 3. SRv6 `sub2_len` field is ignored during parsing — **FIXED**
-
+- **Severity:** High
 - **Files:**
-  - `src/sub/neigh.rs:488-502` (`IsisSubSrv6EndXSid::parse_be`)
-  - `src/sub/neigh.rs:553-568` (`IsisSubSrv6LanEndXSid::parse_be`)
-  - `src/sub/prefix.rs:87-100` (`IsisSubSrv6EndSid::parse_be`)
-- **Code (representative):**
-  ```rust
-  let (input, sub2_len) = be_u8(input)?;
-  // sub2_len is read but NOT used to bound parsing
-  if sub2_len == 0 {
-      return Ok((input, sub));
-  }
-  let (_, sub2s) = many0_complete(IsisSub2Tlv::parse_subs).parse(input)?;
-  ```
-- **Problem:** The `sub2_len` field is read from the wire but never passed
-  to `safe_split_at()` to bound sub-sub-TLV parsing. Instead,
-  `many0_complete` consumes all remaining bytes in the parent-bounded
-  slice. If the parent TLV has additional data after the sub2 region,
-  it would be incorrectly parsed as sub2 TLVs.
-- **Mitigation:** The parent `parse_subs` call already bounds input via
-  `safe_split_at(input, cl.len)`, which limits the blast radius. However,
-  the sub2 boundary within that bounded region is not enforced.
-- **Fix:** Add `let (input, sub2_data) = safe_split_at(input, sub2_len as usize)?;`
-  before parsing sub2 TLVs.
+  - `src/parser.rs`
+- **Relevant code:**
+  - `IsisPacket` parses `length_indicator` and then directly dispatches to
+    `IsisPdu::parse_be`.
+  - the concrete PDU structs (`IsisLsp`, `IsisHello`, `IsisP2pHello`,
+    `IsisCsnp`, `IsisPsnp`) parse TLVs with `IsisTlv::parse_tlvs`.
+  - `IsisTlv::parse_tlvs()` continues until end-of-input.
 
-### 4. `IsisTlvUnknown` loses TLV payload data on parse — **FIXED**
+Representative snippets:
 
-- **File:** `src/parser.rs:1005-1012`
-- **Code:**
-  ```rust
-  pub fn parse_tlv(input: &[u8], tl: IsisTypeLen) -> IResult<&[u8], Self> {
-      let tlv = IsisTlvUnknown {
-          typ: tl.typ,
-          len: tl.len,
-          values: Vec::new(),   // ← payload data is NOT preserved
-      };
-      Ok((input, tlv))
-  }
-  ```
-- **Problem:** The `input` parameter contains `tl.len` bytes of TLV payload,
-  but `values` is set to an empty Vec. When re-emitted via `emit()`, the
-  TLV is written with type + length + zero payload bytes, producing a
-  malformed packet.
-- **Impact:** Any IS-IS packet containing unknown TLVs will be corrupted if
-  parsed and re-serialized (e.g., LSP flooding).
-- **Fix:** `values: input.to_vec()`.
+```rust
+pub struct IsisPacket {
+    pub length_indicator: u8,
+    #[nom(Parse = "{ |x| IsisPdu::parse_be(x, pdu_type) }")]
+    pub pdu: IsisPdu,
+}
 
-### 5. `IsisTlvLspEntries::len()` uses `mem::size_of` instead of wire size — **FIXED**
+pub struct IsisLsp {
+    pub pdu_len: u16,
+    #[nom(Parse = "IsisTlv::parse_tlvs")]
+    pub tlvs: Vec<IsisTlv>,
+}
+```
 
-- **File:** `src/parser.rs:706-707`
-- **Code:**
-  ```rust
-  fn len(&self) -> u8 {
-      (self.entries.len() * std::mem::size_of::<IsisLspEntry>()) as u8
-  }
-  ```
-- **Problem:** `mem::size_of::<IsisLspEntry>()` returns the Rust struct's
-  in-memory size, which may include alignment padding and differs from
-  the 16-byte wire format (hold_time:2 + lsp_id:8 + seq_number:4 +
-  checksum:2). Without `#[repr(C)]` or `#[repr(packed)]`, the compiler
-  may reorder fields and add padding.
-- **Impact:** If `size_of` ever returns a value other than 16, the TLV
-  length field will be wrong, causing incorrect packet encoding.
-- **Fix:** Use a constant `const LSP_ENTRY_WIRE_SIZE: usize = 16;` instead
-  of `mem::size_of`.
+- **Problem:** The parser reads `length_indicator` and the per-PDU `pdu_len`
+  fields, but it never uses them to bound parsing. Once the fixed fields are
+  read, TLVs are parsed to the end of the caller-provided slice.
+- **Impact:** A crafted packet can advertise a shorter wire length while still
+  appending extra TLVs. This crate accepts those bytes as part of the PDU,
+  while a stricter implementation may stop at the declared boundary. That
+  parser differential matters for any caller that treats `parse()` as a
+  complete structural validation step.
+- **Recommendation:** Split the PDU body using the declared wire length before
+  calling `IsisTlv::parse_tlvs()`, and reject any non-empty remainder inside
+  that bounded slice.
 
----
+### 2. Length-bounded TLV and sub-TLV parsers discard trailing bytes
 
-## Medium
-
-### 6. `as u8` silent truncation in multiple `len()` methods
-
-Multiple `len()` methods use `as u8` casts that silently wrap on overflow:
-
-| File | Line | Expression |
-|------|------|------------|
-| `src/parser.rs:593` | `(self.area_addr.len() + 1) as u8` | **FIXED** |
-| `src/parser.rs:635` | `(self.neighbors.len() * 6) as u8` |
-| `src/parser.rs:662` | `self.padding.len() as u8` | **FIXED** |
-| `src/parser.rs:765` | `self.nlpids.len() as u8` | **FIXED** |
-| `src/parser.rs:840` | `self.hostname.len() as u8` | **FIXED** |
-| `src/sub/neigh.rs:274` | `(self.groups.len() * 4) as u8` | **FIXED** |
-| `src/sub/cap.rs:141` | `self.algo.len() as u8` | **FIXED** |
-
-- **Problem:** IS-IS TLV length is u8 (max 255). If programmatic
-  construction creates data exceeding 255 bytes, the cast wraps silently,
-  causing the emitted TLV length to be incorrect. Downstream parsers
-  would then read wrong boundaries.
-- **Trigger:** Constructing TLVs programmatically with many entries
-  (e.g., 43+ IS-Neighbors, 16+ LSP entries).
-- **Fix:** Use `u8::try_from(...).expect("TLV exceeds max length")` or
-  split into multiple TLVs when the total exceeds 255.
-
-### 7. `IsisTlvHostname::parse_be` does not consume input — **FIXED**
-
-- **File:** `src/parser.rs:1031-1037`
-- **Code:**
-  ```rust
-  fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-      let hostname = Self {
-          hostname: String::from_utf8_lossy(input).to_string(),
-      };
-      Ok((input, hostname))  // returns unconsumed input
-  }
-  ```
-- **Problem:** The function reads the entire input into `hostname` but
-  returns the original `input` as remaining (should return `&[]`).
-  This is safe because the caller (`parse_tlv`) discards the remaining
-  bytes with `_`, but it breaks the nom parser contract.
-- **Fix:** `Ok((&input[input.len()..], hostname))` or `Ok((&[], hostname))`.
-
-### 8. Back-patching emit with `as u8` truncation — **FIXED**
-
+- **Severity:** Medium
 - **Files:**
-  - `src/sub/neigh.rs:529` (`IsisSubSrv6EndXSid::emit`)
-  - `src/sub/neigh.rs:596` (`IsisSubSrv6LanEndXSid::emit`)
-  - `src/sub/prefix.rs:124` (`IsisSubSrv6EndSid::emit`)
-  - `src/sub/prefix.rs:622` (`Srv6Locator::emit`)
-- **Code:**
-  ```rust
-  buf.put_u8(0);
-  let pp = buf.len();
-  for sub2 in &self.sub2s { sub2.emit(buf); }
-  buf[pp - 1] = (buf.len() - pp) as u8;
-  ```
-- **Problem:** `(buf.len() - pp) as u8` silently truncates if sub-sub-TLV
-  data exceeds 255 bytes, writing an incorrect length.
-- **Note:** `pp` is always > 0 here because preceding writes ensure the
-  buffer is non-empty, so `pp - 1` does not underflow.
-- **Fix:** Assert or check that `buf.len() - pp <= 255`.
+  - `src/parser.rs`
+  - `src/sub/cap.rs`
+  - `src/sub/neigh.rs`
+  - `src/sub/prefix.rs`
 
----
+Representative snippets:
 
-## Low
+```rust
+let (input, tlv) = packet_utils::safe_split_at(input, tl.len as usize)?;
+let (_, val) = Self::parse_be(tlv, tl.typ)?;
 
-### 9. `SidLabelValue::parse_be` error reporting for unexpected sizes — **FIXED**
+let (input, sub) = safe_split_at(input, cl.len as usize)?;
+let (_, mut val) = Self::parse_be(sub, cl.code.into())?;
+```
 
-- **File:** `src/parser.rs:1089-1103`
-- **Code:**
-  ```rust
-  fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-      match input.len() {
-          3 => { /* Label */ }
-          4 => { /* Index */ }
-          _ => Err(Err::Incomplete(Needed::new(input.len()))),
-      }
-  }
-  ```
-- **Problem:** For `input.len() == 0`, `Needed::new(0)` returns
-  `Needed::Unknown` (not a crash in nom 8, but semantically wrong).
-  For `input.len() > 4`, the error says "need N more bytes" where
-  N is the current length, which is misleading. The error type should
-  be `Err::Error`, not `Err::Incomplete`, since the data is malformed,
-  not incomplete.
-- **Fix:** Return `Err::Error(nom::error::make_error(input, ErrorKind::LengthValue))`.
+- **Problem:** The outer parser correctly slices out the declared TLV/sub-TLV
+  payload, but it ignores the inner parser's remainder. As a result, malformed
+  payloads with valid leading data and trailing garbage are accepted.
+- **Examples:**
+  - `IsisSubAdminGrp::parse_be()` reads `u32` values with
+    `many0_complete(be_u32)`, so a 5-byte payload is accepted as one group plus
+    one silently dropped byte.
+  - `IsisTlvMultiTopology::parse_be()` accepts odd-length payloads and drops the
+    final byte.
+  - `IsisTlvP2p3Way::parse_be()` accepts 1-3 trailing bytes after the optional
+    fields.
+- **Impact:** Malformed packets normalize into a different in-memory object than
+  the original wire payload. On re-emit, the discarded bytes disappear. This is
+  a classic parser-canonicalization issue and can hide malformed data from later
+  validation layers.
+- **Recommendation:** Require full consumption of every length-bounded slice.
+  Replace `let (_, val) = ...` with a checked pattern such as:
 
-### 10. `Ipv4Net::new().unwrap()` in prefix parsers — **FIXED**
+```rust
+let (rest, val) = Self::parse_be(tlv, tl.typ)?;
+if !rest.is_empty() {
+    return Err(...);
+}
+```
 
-- **File:** `src/sub/prefix.rs:495,513,504,521`
-- **Code:**
-  ```rust
-  Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap()
-  Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap()
-  ```
-- **Problem:** `.unwrap()` is used, though these specific calls are
-  guaranteed to succeed (UNSPECIFIED with prefix_len=0 is always valid).
-- **Note:** The `Ipv4Net::new` calls for parsed addresses (lines 504, 521)
-  use `let Ok(prefix) = ... else { return Err(...) }`, which is correct.
-- **Fix:** No action needed, but consider `expect("UNSPECIFIED/0 is always valid")`
-  for documentation.
+Apply the same rule to TLVs, sub-TLVs, and sub2-TLVs.
 
----
+### 3. `emit_sub_tlvs()` writes more data than its back-patched length allows
 
-## Recommendations
+- **Severity:** Medium
+- **Files:**
+  - `src/util.rs`
+  - call sites in `src/sub/prefix.rs` and `src/sub/neigh.rs`
 
-### Priority 1 — Fix before next release
-1. Add prefix-length validation in `ptake` (≤ 32) and `ptakev6` (≤ 128)
-   to prevent crash from crafted LSPs. This is remotely exploitable.
-2. Use `safe_split_at(input, sub2_len)` in SRv6 sub2 parsing to honor the
-   wire-format length field.
+Current helper:
 
-### Priority 2 — Address soon
-3. Preserve unknown TLV payload in `IsisTlvUnknown::parse_tlv` to prevent
-   data loss on re-serialization.
-4. Replace `mem::size_of::<IsisLspEntry>()` with a wire-format constant (16).
-5. Fix `IsisTlvHostname::parse_be` to consume input properly.
+```rust
+pub fn emit_sub_tlvs(buf: &mut BytesMut, emit_fn: impl FnOnce(&mut BytesMut)) {
+    buf.put_u8(0);
+    let pp = buf.len();
+    emit_fn(buf);
+    buf[pp - 1] = (buf.len() - pp).min(255) as u8;
+}
+```
 
-### Priority 3 — Harden
-6. Replace `as u8` casts in `len()` methods with checked arithmetic.
-7. Add `debug_assert!` guards on back-patching emit code for sub2 length.
-8. Consider fuzz testing with `cargo-fuzz` on `isis_packet::parse()` to
-   catch further edge cases in the nom-based parser chain.
+- **Problem:** When `emit_fn()` writes more than 255 bytes, the length byte is
+  clamped to `255` but the payload itself is not truncated or rejected. The
+  resulting encoding contains hidden trailing bytes beyond the declared nested
+  length.
+- **Impact:** A local caller can emit malformed packets that peer parsers may
+  interpret inconsistently. This is not currently reachable from untrusted
+  network input alone, but it is still an encoder correctness issue in a packet
+  construction library.
+- **Recommendation:** Make this path checked rather than saturating:
+  - reject nested payloads larger than 255 bytes, or
+  - truncate the emitted nested bytes to 255 before patching the length field.
+
+## Residual Hardening Issues
+
+These issues are lower severity because they are tied to local packet
+construction rather than parsing untrusted wire input:
+
+- unchecked `u8` length arithmetic remains in a few places, including
+  `IsisTlvIsNeighbor::len()` in `src/parser.rs`,
+  `IsisTlvLspEntries::len()` in `src/parser.rs`,
+  `IsisTlvMultiTopology::len()` in `src/sub/prefix.rs`, and
+  `IsisSubAsla::len()` in `src/sub/neigh.rs`.
+- several `sub_len()` helpers sum `u8` lengths directly. Oversized collections
+  can therefore wrap in release builds and produce malformed wire output.
+
+Recommended follow-up:
+
+1. replace `as u8` casts with `u8::try_from(...)` where oversize data should be
+   rejected.
+2. use `checked_add()` or compute lengths in `usize` and convert once at the
+   boundary.
+3. add regression tests for oversized local constructors.
+
+## Recommended Priority
+
+### Priority 1
+
+1. Enforce PDU wire boundaries using the declared PDU lengths.
+2. Make all TLV/sub-TLV parsers require full consumption of their bounded
+   payloads.
+
+### Priority 2
+
+3. Change `emit_sub_tlvs()` from saturating behavior to checked behavior.
+4. Convert the remaining local-construction length arithmetic to checked
+   arithmetic.
+
+### Priority 3
+
+5. Add negative tests for:
+   - TLVs with valid prefixes and trailing garbage
+   - PDUs with extra TLVs beyond declared `pdu_len`
+   - oversized nested sub-TLV emission
+6. Add fuzzing around `isis_packet::parse()` with malformed length fields and
+   partially valid nested TLVs.
+
+## Verification
+
+The current tree was validated with:
+
+```sh
+cargo test -p isis-packet
+```
+
+All tests passed at the time of this revision.
