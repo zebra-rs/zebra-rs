@@ -351,11 +351,132 @@ impl LocalRibTable {
     }
 }
 
+/// Per-RD Loc-RIB table for EVPN routes.
+///
+/// Mirrors `LocalRibTable` but uses an exact-match `BTreeMap<EvpnPrefix, _>`
+/// rather than `prefix-trie`'s `PrefixMap`, since EVPN keys are not subject
+/// to longest-prefix matching.
+#[derive(Debug, Default)]
+pub struct LocalRibEvpnTable {
+    /// Candidate paths per prefix.
+    pub cands: BTreeMap<EvpnPrefix, Vec<BgpRib>>,
+    /// Selected best path per prefix.
+    pub selected: BTreeMap<EvpnPrefix, BgpRib>,
+}
+
+impl LocalRibEvpnTable {
+    pub fn update(&mut self, prefix: EvpnPrefix, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        let cands = self.cands.entry(prefix.clone()).or_default();
+
+        // Find if we're replacing an existing route (same peer ident and path ID)
+        let existing_local_id = cands
+            .iter()
+            .find(|r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .map(|r| r.local_id);
+
+        // Extract routes being replaced
+        let replaced: Vec<BgpRib> = cands
+            .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .collect();
+
+        // Allocate local_id for the new/updated rib
+        let mut next_id = 1u32;
+        let mut new_rib = rib.clone();
+        if let Some(local_id) = existing_local_id {
+            new_rib.local_id = local_id;
+        } else {
+            let used_ids: std::collections::HashSet<u32> =
+                cands.iter().map(|r| r.local_id).collect();
+            while used_ids.contains(&next_id) {
+                next_id += 1;
+            }
+            new_rib.local_id = next_id;
+        }
+
+        next_id = new_rib.local_id;
+
+        cands.push(new_rib);
+
+        let selected = self.select_best_path(&prefix);
+
+        (replaced, selected, next_id)
+    }
+
+    pub fn remove(&mut self, prefix: &EvpnPrefix, id: u32, ident: usize) -> Vec<BgpRib> {
+        let cands = self.cands.entry(prefix.clone()).or_default();
+        cands
+            .extract_if(.., |r| r.ident == ident && r.remote_id == id)
+            .collect()
+    }
+
+    pub fn remove_peer_routes(&mut self, ident: usize) -> Vec<BgpRib> {
+        let mut all_removed: Vec<BgpRib> = Vec::new();
+        for (_prefix, cands) in self.cands.iter_mut() {
+            let mut removed: Vec<BgpRib> = cands.extract_if(.., |r| r.ident == ident).collect();
+            all_removed.append(&mut removed);
+        }
+        all_removed
+    }
+
+    pub fn select_best_path(&mut self, prefix: &EvpnPrefix) -> Vec<BgpRib> {
+        let mut selected = Vec::new();
+
+        if !self.cands.contains_key(prefix) {
+            self.selected.remove(prefix);
+            return selected;
+        }
+
+        let is_empty = self
+            .cands
+            .get(prefix)
+            .map(|cands| cands.is_empty())
+            .unwrap_or(true);
+
+        if is_empty {
+            self.cands.remove(prefix);
+            self.selected.remove(prefix);
+            return selected;
+        }
+
+        let best = {
+            let cands = self.cands.get_mut(prefix).expect("prefix checked above");
+
+            let mut best_index = 0usize;
+            let mut best_reason = Reason::Default;
+            for index in 1..cands.len() {
+                // Reuse the IPv4 best-path comparator — it operates only on
+                // BgpRib fields and is NLRI-agnostic.
+                let (better, reason) = LocalRibTable::is_better(&cands[index], &cands[best_index]);
+                if better {
+                    best_index = index;
+                }
+                best_reason = reason;
+            }
+
+            for rib in cands.iter_mut() {
+                rib.best_path = false;
+                rib.best_reason = Reason::NotSelected;
+            }
+            cands[best_index].best_path = true;
+            cands[best_index].best_reason = best_reason;
+            cands[best_index].clone()
+        };
+
+        self.selected.insert(prefix.clone(), best.clone());
+        selected.push(best);
+
+        selected
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LocalRib {
     pub v4: LocalRibTable,
 
     pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable>,
+
+    /// Per-RD EVPN Loc-RIB tables.
+    pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 }
 
 impl LocalRib {
@@ -404,6 +525,44 @@ impl LocalRib {
             .entry(rd.clone())
             .or_default()
             .select_best_path(prefix)
+    }
+
+    // EVPN dispatch ----------------------------------------------------------
+
+    pub fn update_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: EvpnPrefix,
+        rib: BgpRib,
+    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.evpn.entry(rd).or_default().update(prefix, rib)
+    }
+
+    pub fn remove_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: &EvpnPrefix,
+        id: u32,
+        ident: usize,
+    ) -> Vec<BgpRib> {
+        self.evpn.entry(rd).or_default().remove(prefix, id, ident)
+    }
+
+    pub fn remove_peer_routes_evpn(&mut self, ident: usize) -> Vec<BgpRib> {
+        let mut all_removed: Vec<BgpRib> = Vec::new();
+        for (_rd, table) in self.evpn.iter_mut() {
+            let mut removed = table.remove_peer_routes(ident);
+            all_removed.append(&mut removed);
+        }
+        all_removed
+    }
+
+    pub fn select_best_path_evpn(
+        &mut self,
+        rd: &RouteDistinguisher,
+        prefix: &EvpnPrefix,
+    ) -> Vec<BgpRib> {
+        self.evpn.entry(*rd).or_default().select_best_path(prefix)
     }
 }
 
