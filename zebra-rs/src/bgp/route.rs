@@ -1009,6 +1009,100 @@ pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.eor.clear();
 }
 
+/// Install one EVPN route received in an MP_REACH_NLRI into Adj-RIB-In and
+/// the Loc-RIB. Mirrors `route_ipv4_update` but takes the parsed
+/// `EvpnRoute` directly.
+///
+/// The `_nhop` parameter (the per-MpReach EVPN nexthop) is currently
+/// unused: `BgpRib::new` only carries a `Vpnv4Nexthop`, which is IPv4-only
+/// and RD-bound. The EVPN nexthop is recoverable from `peer.address` for
+/// display purposes; threading it through `BgpRib` is a follow-up tied to
+/// the show command (Step 5).
+pub fn route_evpn_update(
+    ident: usize,
+    route: &EvpnRoute,
+    _nhop: IpAddr,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let (rd, prefix) = EvpnPrefix::from_route(route);
+    let id = match route {
+        EvpnRoute::Mac(m) => m.id,
+        EvpnRoute::Multicast(m) => m.id,
+    };
+
+    // Loop detection mirrors route_ipv4_update — drop the route silently
+    // (no eprintln) on local-AS / ORIGINATOR_ID / CLUSTER_LIST hits.
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(&bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    let rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        id,
+        0, // weight
+        attr,
+        None, // label (not applicable to EVPN at this layer)
+        None, // nexthop — see function doc
+        stale,
+    );
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_evpn(rd, prefix.clone(), rib.clone());
+    }
+
+    let _ = bgp.local_rib.update_evpn(rd, prefix, rib);
+}
+
+/// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
+/// and the Loc-RIB, then re-run best-path selection.
+pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let (rd, prefix) = EvpnPrefix::from_route(route);
+    let id = match route {
+        EvpnRoute::Mac(m) => m.id,
+        EvpnRoute::Multicast(m) => m.id,
+    };
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_evpn(rd, &prefix, id);
+    }
+
+    let _ = bgp.local_rib.remove_evpn(rd, &prefix, id, ident);
+    let _ = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+}
+
 pub fn route_from_peer(
     peer_id: usize,
     packet: UpdatePacket,
@@ -1055,6 +1149,15 @@ pub fn route_from_peer(
                     route_ipv4_rtc_update(peer_id, update, peers);
                 }
             }
+            MpReachAttr::Evpn {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                for route in updates.iter() {
+                    route_evpn_update(peer_id, route, nhop, bgp_attr, bgp, peers, false);
+                }
+            }
             _ => {
                 //
             }
@@ -1084,6 +1187,17 @@ pub fn route_from_peer(
             MpUnreachAttr::Rtcv4Eor => {
                 // If peer's EoR is true.
                 route_rtcv4_sync(peer_id, bgp, peers);
+            }
+            MpUnreachAttr::Evpn(withdrawals) => {
+                for route in withdrawals.iter() {
+                    route_evpn_withdraw(peer_id, route, bgp, peers);
+                }
+            }
+            MpUnreachAttr::EvpnEor => {
+                let afi_safi = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
             }
             _ => {
                 //
