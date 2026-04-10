@@ -16,8 +16,78 @@ use super::peer::{Peer, PeerCounter, PeerParam, State};
 use crate::bgp::{AdjRibTable, BgpRibType, RibDirection};
 use crate::config::Args;
 
-fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
-    // Calculate message counters
+/// Human-readable label for an (AFI, SAFI) pair, used as the "<label>
+/// Summary:" header in `show ip bgp summary`.
+fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
+    match (afi, safi) {
+        (Afi::Ip, Safi::Unicast) => "IPv4 Unicast",
+        (Afi::Ip, Safi::MplsLabel) => "IPv4 Labeled Unicast",
+        (Afi::Ip, Safi::MplsVpn) => "VPNv4 Unicast",
+        (Afi::Ip, Safi::Rtc) => "IPv4 Route Target Constrain",
+        (Afi::Ip6, Safi::Unicast) => "IPv6 Unicast",
+        (Afi::Ip6, Safi::MplsLabel) => "IPv6 Labeled Unicast",
+        (Afi::Ip6, Safi::MplsVpn) => "VPNv6 Unicast",
+        (Afi::L2vpn, Safi::Evpn) => "L2VPN EVPN",
+        _ => "Unknown AFI/SAFI",
+    }
+}
+
+/// Collect the set of AFI/SAFIs that are configured on at least one peer,
+/// sorted deterministically by `(afi, safi)` ascending. Falls back to
+/// `[IPv4 Unicast]` when no peer has explicitly configured an AFI/SAFI.
+fn configured_afi_safis(bgp: &Bgp) -> Vec<AfiSafi> {
+    let mut set: std::collections::BTreeSet<AfiSafi> = std::collections::BTreeSet::new();
+    for (_, peer) in bgp.peers.iter() {
+        for (afi_safi, _) in peer.config.mp.0.iter() {
+            set.insert(*afi_safi);
+        }
+    }
+    if set.is_empty() {
+        set.insert(AfiSafi::new(Afi::Ip, Safi::Unicast));
+    }
+    set.into_iter().collect()
+}
+
+/// Count Loc-RIB entries for a given AFI/SAFI.
+fn rib_entries_count(bgp: &Bgp, afi_safi: &AfiSafi) -> usize {
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::Unicast) => bgp.local_rib.v4.0.len(),
+        (Afi::Ip, Safi::MplsVpn) => bgp.local_rib.v4vpn.values().map(|t| t.0.len()).sum(),
+        (Afi::L2vpn, Safi::Evpn) => bgp.local_rib.evpn.values().map(|t| t.cands.len()).sum(),
+        _ => 0,
+    }
+}
+
+/// Has this peer negotiated a given AFI/SAFI? True iff we advertised the
+/// capability AND the peer advertised it back.
+fn peer_has_negotiated(peer: &Peer, afi: Afi, safi: Safi) -> bool {
+    let mp = CapMultiProtocol::new(&afi, &safi);
+    peer.cap_map
+        .get(&mp)
+        .map(|sr| sr.send && sr.recv)
+        .unwrap_or(false)
+}
+
+fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
+    writeln!(
+        buf,
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} {}",
+        "Neighbor",
+        "V",
+        "AS",
+        "MsgRcvd",
+        "MsgSent",
+        "TblVer",
+        "InQ",
+        "OutQ",
+        "Up/Down",
+        "State/PfxRcd",
+        "PfxSnt",
+        "Desc",
+    )
+}
+
+fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -> std::fmt::Result {
     let mut msg_sent: u64 = 0;
     let mut msg_rcvd: u64 = 0;
     for counter in peer.counter.iter() {
@@ -25,60 +95,72 @@ fn show_peer_summary(buf: &mut String, peer: &Peer) -> std::fmt::Result {
         msg_rcvd += counter.rcvd;
     }
 
-    // Count routes: received from peer (adj_rib_in) and sent to peer (adj_rib_out)
-    // let pfx_rcvd = peer.adj_rib_in.v4.0.len() as u64;
-    // let pfx_sent = peer.adj_rib_out.v4.0.len() as u64;
-    let pfx_rcvd = peer.adj_in.count(Afi::Ip, Safi::MplsVpn) as u64;
-    let pfx_sent = peer.adj_out.count(Afi::Ip, Safi::MplsVpn) as u64;
+    let up_down = uptime(&peer.instant);
+    let negotiated = peer_has_negotiated(peer, afi, safi);
 
-    let updown = uptime(&peer.instant);
-    let state = if peer.state != State::Established {
-        peer.state.to_str().to_string()
+    let (pfx_rcvd_str, pfx_sent_str) = if !negotiated {
+        ("NoNeg".to_string(), "NoNeg".to_string())
+    } else if peer.state != State::Established {
+        // Show the FSM state in place of the prefix count; PfxSnt is
+        // meaningless before the session is up, so render "0".
+        (peer.state.to_str().to_string(), "0".to_string())
     } else {
-        // peer.stat.rx(Afi::Ip, Safi::Unicast).to_string()
-        pfx_rcvd.to_string()
+        let pr = peer.adj_in.count(afi, safi);
+        let ps = peer.adj_out.count(afi, safi);
+        (pr.to_string(), ps.to_string())
     };
 
     writeln!(
         buf,
-        "{:16} {:11} {:8} {:8} {:>8} {:>12} {:8}",
-        peer.address, peer.peer_as, msg_rcvd, msg_sent, updown, state, pfx_sent
-    )?;
-    Ok(())
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} {}",
+        peer.address.to_string(),
+        "4",
+        peer.peer_as,
+        msg_rcvd,
+        msg_sent,
+        "0", // TblVer — not tracked today
+        "0", // InQ — not tracked today
+        "0", // OutQ — not tracked today
+        up_down,
+        pfx_rcvd_str,
+        pfx_sent_str,
+        "N/A", // Desc — peer description not modeled today
+    )
 }
 
-fn show_bgp_instance(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
-    let mut buf = String::new();
+fn write_summary_section(buf: &mut String, bgp: &Bgp, afi_safi: AfiSafi) -> std::fmt::Result {
+    let label = afi_safi_summary_label(afi_safi.afi, afi_safi.safi);
+    let router_id = if bgp.router_id.is_unspecified() {
+        "Not Configured".to_string()
+    } else {
+        bgp.router_id.to_string()
+    };
     let asn = if bgp.asn == 0 {
         "Not Configured".to_string()
     } else {
         bgp.asn.to_string()
     };
-    let identifier = if bgp.router_id.is_unspecified() {
-        "Not Configured".to_string()
-    } else {
-        bgp.router_id.to_string()
-    };
+    let rib_entries = rib_entries_count(bgp, &afi_safi);
+    let peer_count = bgp.peers.iter().count();
+
+    writeln!(buf, "{} Summary:", label)?;
     writeln!(
         buf,
-        "BGP router identifier {}, local AS number {}",
-        identifier, asn
+        "BGP router identifier {}, local AS number {} VRF default vrf-id 0",
+        router_id, asn
     )?;
+    writeln!(buf, "RIB entries {}", rib_entries)?;
+    writeln!(buf, "Peers {}", peer_count)?;
     writeln!(buf)?;
 
-    if bgp.peers.is_empty() {
-        writeln!(buf, "No neighbor has been configured")?;
-    } else {
-        writeln!(
-            buf,
-            "Neighbor                  AS  MsgRcvd  MsgSent  Up/Down State/PfxRcd   PfxSnt"
-        )?;
-        for (_, peer) in bgp.peers.iter() {
-            show_peer_summary(&mut buf, peer)?;
-        }
+    write_summary_header_row(buf)?;
+    for (_, peer) in bgp.peers.iter() {
+        write_summary_peer_row(buf, peer, afi_safi.afi, afi_safi.safi)?;
     }
 
-    Ok(buf)
+    writeln!(buf)?;
+    writeln!(buf, "Total number of neighbors {}", peer_count)?;
+    Ok(())
 }
 
 static SHOW_BGP_HEADER: &str = r#"Status codes:  s suppressed, d damped, h history, u unsorted,
@@ -980,7 +1062,40 @@ fn show_bgp_summary(
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize summary: {}\"}}", e)));
     }
 
-    show_bgp_instance(bgp)
+    let mut buf = String::new();
+
+    if bgp.peers.is_empty() {
+        let router_id = if bgp.router_id.is_unspecified() {
+            "Not Configured".to_string()
+        } else {
+            bgp.router_id.to_string()
+        };
+        let asn = if bgp.asn == 0 {
+            "Not Configured".to_string()
+        } else {
+            bgp.asn.to_string()
+        };
+        writeln!(
+            buf,
+            "BGP router identifier {}, local AS number {} VRF default vrf-id 0",
+            router_id, asn
+        )?;
+        writeln!(buf)?;
+        writeln!(buf, "No neighbor has been configured")?;
+        return Ok(buf);
+    }
+
+    // One section per locally-configured AFI/SAFI, separated by a blank
+    // line. Sections are sorted by (afi, safi) ascending so that the
+    // output is deterministic across runs.
+    for (i, afi_safi) in configured_afi_safis(bgp).into_iter().enumerate() {
+        if i > 0 {
+            writeln!(buf)?;
+        }
+        write_summary_section(&mut buf, bgp, afi_safi)?;
+    }
+
+    Ok(buf)
 }
 
 #[derive(Serialize, Debug)]
@@ -1783,6 +1898,41 @@ mod evpn_show_tests {
             val: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
         };
         assert_eq!(format_evpn_ecom_value(&v), "0x4002deadbeef0001");
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    /// The header row must match this exact string so the downstream
+    /// column positions (picked to match the examples in the docs) stay
+    /// locked. If this test breaks, the data-row format likely drifted
+    /// too — both use the same column widths.
+    #[test]
+    fn header_row_matches_expected_layout() {
+        let mut buf = String::new();
+        write_summary_header_row(&mut buf).unwrap();
+        let expected = "\
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc\n";
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn afi_safi_labels() {
+        assert_eq!(
+            afi_safi_summary_label(Afi::Ip, Safi::Unicast),
+            "IPv4 Unicast"
+        );
+        assert_eq!(afi_safi_summary_label(Afi::L2vpn, Safi::Evpn), "L2VPN EVPN");
+        assert_eq!(
+            afi_safi_summary_label(Afi::Ip6, Safi::Unicast),
+            "IPv6 Unicast"
+        );
+        assert_eq!(
+            afi_safi_summary_label(Afi::Ip, Safi::MplsVpn),
+            "VPNv4 Unicast"
+        );
     }
 }
 
