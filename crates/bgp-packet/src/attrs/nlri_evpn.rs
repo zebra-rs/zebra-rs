@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use nom::IResult;
@@ -71,6 +72,7 @@ pub struct EvpnMac {
 
 #[derive(Debug, Clone)]
 pub struct EvpnMulticast {
+    pub id: u32,
     pub rd: RouteDistinguisher,
     pub ether_tag: u32,
     pub addr: IpAddr,
@@ -79,6 +81,148 @@ pub struct EvpnMulticast {
 impl Evpn {
     pub fn rd(&self) -> &RouteDistinguisher {
         &self.rd
+    }
+}
+
+/// EVPN NLRI key, with the Route Distinguisher stripped off, used to index
+/// the EVPN RIB tables.
+///
+/// Variant declaration order matches RFC 7432 Route Type ordering so that
+/// the derived `Ord` impl yields Type 2 → Type 3 in iteration (and thus in
+/// `show ip bgp evpn` output).
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum EvpnPrefix {
+    /// Route Type 2 — MAC/IP Advertisement Route.
+    ///
+    /// Wire format: `[2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]`. The IP
+    /// component is optional in RFC 7432; when absent the prefix renders
+    /// as `[2]:[EthTag]:[48]:[MAC]`.
+    MacIp {
+        eth_tag: u32,
+        mac: [u8; 6],
+        ip: Option<IpAddr>,
+    },
+    /// Route Type 3 — Inclusive Multicast Ethernet Tag Route.
+    ///
+    /// Wire format: `[3]:[EthTag]:[IPlen]:[OrigIP]`.
+    InclusiveMulticast { eth_tag: u32, orig: IpAddr },
+}
+
+impl EvpnPrefix {
+    /// RFC 7432 route type number (2 or 3).
+    pub fn route_type(&self) -> u8 {
+        match self {
+            EvpnPrefix::MacIp { .. } => 2,
+            EvpnPrefix::InclusiveMulticast { .. } => 3,
+        }
+    }
+
+    /// Split a parsed `EvpnRoute` into its `RouteDistinguisher` and the
+    /// RD-stripped key suitable for indexing the EVPN RIB.
+    pub fn from_route(route: &EvpnRoute) -> (RouteDistinguisher, EvpnPrefix) {
+        match route {
+            EvpnRoute::Mac(m) => (
+                m.rd,
+                EvpnPrefix::MacIp {
+                    eth_tag: m.ether_tag,
+                    mac: m.mac,
+                    // The current Type 2 parser (parse_nlri above) reads
+                    // and discards the IP component. Once the parser is
+                    // updated to preserve it, populate this field.
+                    ip: None,
+                },
+            ),
+            EvpnRoute::Multicast(m) => (
+                m.rd,
+                EvpnPrefix::InclusiveMulticast {
+                    eth_tag: m.ether_tag,
+                    orig: m.addr,
+                },
+            ),
+        }
+    }
+}
+
+impl fmt::Display for EvpnPrefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EvpnPrefix::MacIp { eth_tag, mac, ip } => {
+                write!(
+                    f,
+                    "[2]:[{}]:[48]:[{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}]",
+                    eth_tag, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                )?;
+                if let Some(ip) = ip {
+                    let plen = match ip {
+                        IpAddr::V4(_) => 32,
+                        IpAddr::V6(_) => 128,
+                    };
+                    write!(f, ":[{plen}]:[{ip}]")?;
+                }
+                Ok(())
+            }
+            EvpnPrefix::InclusiveMulticast { eth_tag, orig } => {
+                let plen = match orig {
+                    IpAddr::V4(_) => 32,
+                    IpAddr::V6(_) => 128,
+                };
+                write!(f, "[3]:[{eth_tag}]:[{plen}]:[{orig}]")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod evpn_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn display_macip_no_ip() {
+        let p = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0xfe, 0xb2, 0x14, 0x6c, 0x11, 0x6c],
+            ip: None,
+        };
+        assert_eq!(p.to_string(), "[2]:[0]:[48]:[fe:b2:14:6c:11:6c]");
+    }
+
+    #[test]
+    fn display_macip_with_v4() {
+        let p = EvpnPrefix::MacIp {
+            eth_tag: 100,
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+        };
+        assert_eq!(
+            p.to_string(),
+            "[2]:[100]:[48]:[00:11:22:33:44:55]:[32]:[10.0.0.1]"
+        );
+    }
+
+    #[test]
+    fn display_inclusive_multicast_v4() {
+        let p = EvpnPrefix::InclusiveMulticast {
+            eth_tag: 0,
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        assert_eq!(p.to_string(), "[3]:[0]:[32]:[10.0.0.5]");
+    }
+
+    #[test]
+    fn route_type_numbers() {
+        let m = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0; 6],
+            ip: None,
+        };
+        let i = EvpnPrefix::InclusiveMulticast {
+            eth_tag: 0,
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        assert_eq!(m.route_type(), 2);
+        assert_eq!(i.route_type(), 3);
+        // Type 2 sorts before Type 3 (variant order).
+        assert!(m < i);
     }
 }
 
@@ -142,6 +286,7 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                     (input, nhop)
                 };
                 let evpn = EvpnMulticast {
+                    id,
                     rd,
                     ether_tag,
                     addr,
