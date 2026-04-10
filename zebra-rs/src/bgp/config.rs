@@ -392,6 +392,37 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let peer_addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    let peer = bgp.peers.get_mut(&peer_addr)?;
+
+    if op == ConfigOp::Set {
+        let source = if let Some(addr) = args.v4addr() {
+            IpAddr::V4(addr)
+        } else if let Some(addr) = args.v6addr() {
+            IpAddr::V6(addr)
+        } else {
+            return None;
+        };
+        // Address family of the source must match the peer.
+        if source.is_ipv4() != peer_addr.is_ipv4() {
+            return None;
+        }
+        peer.config.transport.update_source = Some(source);
+    } else {
+        peer.config.transport.update_source = None;
+    }
+
+    Some(())
+}
+
 fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let category = args.string()?;
     let enable = op == ConfigOp::Set;
@@ -443,6 +474,7 @@ impl Bgp {
         self.callback_peer("/peer-as", config_peer_as);
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
+        self.callback_peer("/transport/local-address", config_transport_local_address);
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
         self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);
