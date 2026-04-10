@@ -161,7 +161,10 @@ the rationale. Numbering of Steps 4–7 is preserved to keep existing
 commit-message references valid.
 
 ### Step 4 — UPDATE / WITHDRAW dispatch
-**File:** `zebra-rs/src/bgp/route.rs:878` (`route_update`)
+
+**Status:** Implemented in commit `e56b2c8`.
+
+**File:** `zebra-rs/src/bgp/route.rs` (`route_from_peer`)
 
 1. Add `MpReachAttr::Evpn { snpa, nhop, updates }` arm:
    - Store `nhop` on a per-route `BgpAttr` (reuse the existing nexthop pathway used by VPNv4).
@@ -169,8 +172,27 @@ commit-message references valid.
 2. Add the symmetric `MpUnreachAttr::Evpn(routes)` arm in the withdrawal block — same `from_route` split, then withdraw from both adj-in and loc-rib, recompute best-path.
 3. Add `MpUnreachAttr::EvpnEor` arm — mark EOR for `(L2vpn, Evpn)` in the existing `peer.eor` map (already an `AfiSafi`-keyed map).
 
+**Note on the EVPN nexthop:** the `nhop` field of `MpReachAttr::Evpn` is
+passed into `route_evpn_update` but not stored on `BgpRib` — `BgpRib::new`
+takes `Option<Vpnv4Nexthop>`, which is IPv4-only and RD-bound. This was
+flagged as a Step 5 follow-up, but turned out to need no follow-up at all:
+the attribute parser already stores the EVPN nexthop on
+`bgp_attr.nexthop` as `BgpNexthop::Evpn(IpAddr)` (see
+`crates/bgp-packet/src/attrs/attr.rs:345`), and `show_nexthop` already
+handles that variant, so the Step 5 show command recovers the nexthop
+from `rib.attr.nexthop` automatically.
+
 ### Step 5 — `show ip bgp evpn`
-**File:** `zebra-rs/src/bgp/show.rs:1639` (existing empty stub)
+
+**Status:** Implemented in commit `866317a`. The same commit also fixes
+two pre-existing test-only sites in `zebra-rs/src/rib/link.rs` that were
+broken by a `netlink_packet_route::link::LinkFlags` upgrade making the
+type `non_exhaustive` (replaced `LinkFlags(IFF_UP | IFF_RUNNING)` with
+`LinkFlags::empty()`, since the affected tests do not read `link.flags`).
+With that fix `cargo test -p zebra-rs` reports 56/56 passing including
+the 3 new EVPN show tests.
+
+**File:** `zebra-rs/src/bgp/show.rs` (replaces the empty `show_bgp_l2vpn_evpn` stub)
 
 1. Implement `show_bgp_l2vpn_evpn()` to walk `bgp.local_rib.evpn`. Rendered output must match this layout exactly:
 
@@ -202,11 +224,43 @@ commit-message references valid.
 
 ### Step 6 — Capability / config plumbing (small)
 
-For the initial slice, no per-peer config UI changes are strictly required: `LocalRib::evpn` will simply remain empty for any peer that does not negotiate `(L2vpn, Evpn)`. However, for the feature to be actually exercised end-to-end:
+**Status:** No code change needed — every layer was already in place
+when this branch started. The plan's exploration assumed this might be
+the case ("exploration suggests yes") and turned out to be right at
+every checkpoint. End-to-end trace, with file:line evidence:
 
-1. Verify `cap_register_send` / `cap_register_recv` in `crates/bgp-packet/src/bgp_cap.rs` already round-trips `(Afi::L2vpn, Safi::Evpn)` via the generic `CapMultiProtocol` path. (Exploration suggests yes.)
-2. Add a config handler arm in `config_afi_safi` that accepts `l2vpn-evpn` so users can enable it via `set routing bgp neighbor X.X.X.X afi-safi l2vpn-evpn enabled true`.
-3. **Verify the YANG `afi-safi` enum allows `l2vpn-evpn` before writing the handler** — if not, add it to the relevant YANG file under `zebra-rs/yang/`.
+| Layer | Evidence |
+|---|---|
+| YANG identity `l2vpn-evpn` (`base afi-safi-type`) | `zebra-rs/yang/iana-bgp-types@2023-07-05.yang:357` |
+| YANG `name` leaf is `identityref { base bt:afi-safi-type; }`, so `l2vpn-evpn` validates | `zebra-rs/yang/ietf-bgp-common-multiprotocol@2023-07-05.yang:142` |
+| YANG `l2vpn-evpn` container under `mp-all-afi-safi-list-contents` | `zebra-rs/yang/ietf-bgp-common-multiprotocol@2023-07-05.yang:278` |
+| `args.afi_safi()` parses `"l2vpn-evpn"` → `AfiSafi { L2vpn, Evpn }` | `zebra-rs/src/config/configs.rs:135` |
+| `config_afi_safi` is generic — accepts any `AfiSafi` from `args.afi_safi()` and stores it in `peer.config.mp` | `zebra-rs/src/bgp/config.rs:236` |
+| `CapAfiMap::new()` pre-registers `(L2vpn, Evpn)` so send/recv flags can be tracked | `zebra-rs/src/bgp/cap.rs:40, 49` |
+| `peer_send_open` iterates `peer.config.mp.0` and emits a `CapMultiProtocol` for each entry | `zebra-rs/src/bgp/peer.rs:810-812` |
+| `cap_register_send` invoked after sending OPEN | `zebra-rs/src/bgp/peer.rs:839` |
+| `cap_register_recv` invoked when peer's OPEN is parsed | `zebra-rs/src/bgp/peer.rs:575` |
+| Per-neighbor capability display already shows `"L2VPN/EVPN"` | `zebra-rs/src/bgp/show.rs:1275, 1323, 1379, 1428` |
+
+**End-to-end flow** for `set routing bgp neighbor X.X.X.X afi-safi l2vpn-evpn enabled true`:
+
+1. YANG validates the identityref → command accepted.
+2. Callback `/routing/bgp/neighbor/afi-safi/enabled` → `config_afi_safi`.
+3. `args.afi_safi()` returns `AfiSafi { L2vpn, Evpn }`.
+4. `peer.config.mp.set(key, true)`.
+5. Next `peer_send_open` iterates `peer.config.mp.0` → emits
+   `CapMultiProtocol(L2vpn, Evpn)` in OPEN.
+6. `cap_register_send` flags `(L2vpn, Evpn)` as `send=true` in `peer.cap_map`.
+7. Peer responds with their OPEN → `cap_register_recv` flags `recv=true`.
+8. Subsequent EVPN UPDATE messages flow through the `MpReach::Evpn` arm
+   added in Step 4 → `route_evpn_update` → `peer.adj_in.add_evpn` +
+   `bgp.local_rib.update_evpn`.
+9. `show ip bgp evpn` (Step 5) walks `bgp.local_rib.evpn` and displays them.
+
+The likely reason this was already in place: the `mpevpn` line in
+`cap.rs:40` and the `"l2vpn-evpn"` arm in `configs.rs:135` predate this
+branch — they were added as preparatory work before the EVPN feature
+was started.
 
 ### Step 7 — Build & format
 1. `cargo build --bin zebra-rs` — must compile clean.
