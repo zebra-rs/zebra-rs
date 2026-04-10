@@ -87,6 +87,12 @@ module exec {
             type inet:ipv4-address;
           }
         }
+        container l2vpn {
+          presence "BGP L2VPN RIB";
+          leaf evpn {
+            type empty;
+          }
+        }
         leaf summary {
           ext:help "BGP summary information";
           type empty;

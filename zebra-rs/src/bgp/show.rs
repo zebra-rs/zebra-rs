@@ -1636,13 +1636,154 @@ fn show_bgp_neighbor(
     Ok(out)
 }
 
+/// Format one extended community value the way `show ip bgp evpn` expects.
+///
+/// Decodes the well-known EVPN-relevant subtypes:
+/// - Two-octet AS Route Target (high=0x00, low=0x02) -> `RT:<asn>:<u32>`
+/// - Encapsulation extended community (high=0x03, low=0x0c) ->
+///   `ET:<tunnel-type>` (tunnel-type 8 == VXLAN per RFC 8365)
+/// Falls back to a hex dump for unrecognized subtypes.
+fn format_evpn_ecom_value(v: &ExtCommunityValue) -> String {
+    match (v.high_type, v.low_type) {
+        // Two-octet AS Route Target — RFC 4360 §4
+        (0x00, 0x02) => {
+            let asn = u16::from_be_bytes([v.val[0], v.val[1]]);
+            let val = u32::from_be_bytes([v.val[2], v.val[3], v.val[4], v.val[5]]);
+            format!("RT:{asn}:{val}")
+        }
+        // Encapsulation extended community — RFC 5512 §4.5
+        (0x03, 0x0c) => {
+            let tunnel_type = u16::from_be_bytes([v.val[4], v.val[5]]);
+            format!("ET:{tunnel_type}")
+        }
+        _ => format!(
+            "0x{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            v.high_type, v.low_type, v.val[0], v.val[1], v.val[2], v.val[3], v.val[4], v.val[5]
+        ),
+    }
+}
+
+fn show_evpn_ecom(attr: &BgpAttr) -> String {
+    let Some(ecom) = &attr.ecom else {
+        return String::new();
+    };
+    ecom.0
+        .iter()
+        .map(format_evpn_ecom_value)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn show_bgp_l2vpn_evpn(
-    _bgp: &Bgp,
+    bgp: &Bgp,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let out = String::new();
-    Ok(out)
+    if json {
+        // JSON rendering for EVPN is intentionally out of scope for the
+        // initial slice; return an empty array so callers can detect "no
+        // EVPN routes" without parsing errors.
+        return Ok(String::from("[]"));
+    }
+
+    let mut buf = String::new();
+
+    // Legend — describes the wire-format layout of each EVPN route type.
+    writeln!(
+        buf,
+        "EVPN type-1 prefix: [1]:[EthTag]:[ESI]:[IPlen]:[VTEP-IP]:[Frag-id]"
+    )?;
+    writeln!(
+        buf,
+        "EVPN type-2 prefix: [2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]"
+    )?;
+    writeln!(buf, "EVPN type-3 prefix: [3]:[EthTag]:[IPlen]:[OrigIP]")?;
+    writeln!(buf, "EVPN type-4 prefix: [4]:[ESI]:[IPlen]:[OrigIP]")?;
+    writeln!(buf, "EVPN type-5 prefix: [5]:[EthTag]:[IPlen]:[IP]")?;
+    writeln!(buf)?;
+
+    // Column header.
+    writeln!(
+        buf,
+        "   Network          Next Hop            Metric LocPrf Weight Path"
+    )?;
+
+    // Walk per-RD EVPN Loc-RIB tables in BTree (sorted) order.
+    for (rd, table) in bgp.local_rib.evpn.iter() {
+        if table.selected.is_empty() {
+            continue;
+        }
+        writeln!(buf, "Route Distinguisher: {}", rd)?;
+
+        for (prefix, rib) in table.selected.iter() {
+            let valid = "*";
+            let best = if rib.best_path { ">" } else { " " };
+            // Line 1: status flags + prefix on its own line (the EVPN
+            // prefix string is variable-length and rarely fits a fixed
+            // column).
+            writeln!(buf, " {valid}{best}  {prefix}")?;
+
+            // Line 2: next hop, metric, local-pref, weight, AS-path, origin.
+            // The 20-space indent aligns under the "Next Hop" column header.
+            let nexthop = show_nexthop(&rib.attr);
+            let med = show_med(&rib.attr);
+            let local_pref = show_local_pref(&rib.attr);
+            let weight = rib.weight;
+            let mut aspath = show_aspath(&rib.attr);
+            if !aspath.is_empty() {
+                aspath.push(' ');
+            }
+            let origin = show_origin(&rib.attr);
+            writeln!(
+                buf,
+                "                    {:20} {:>7} {:>6} {:>6} {}{}",
+                nexthop, med, local_pref, weight, aspath, origin
+            )?;
+
+            // Line 3: extended communities (ET, RT, ...) only if present.
+            let ecom = show_evpn_ecom(&rib.attr);
+            if !ecom.is_empty() {
+                writeln!(buf, "                    {}", ecom)?;
+            }
+        }
+    }
+
+    Ok(buf)
+}
+
+#[cfg(test)]
+mod evpn_show_tests {
+    use super::*;
+
+    #[test]
+    fn ecom_route_target_two_octet_as() {
+        let v = ExtCommunityValue {
+            high_type: 0x00,
+            low_type: 0x02,
+            val: [0xff, 0xfd, 0x00, 0x00, 0x02, 0x26], // ASN=65533, val=550
+        };
+        assert_eq!(format_evpn_ecom_value(&v), "RT:65533:550");
+    }
+
+    #[test]
+    fn ecom_encapsulation_vxlan() {
+        let v = ExtCommunityValue {
+            high_type: 0x03,
+            low_type: 0x0c,
+            val: [0, 0, 0, 0, 0, 8], // tunnel type 8 = VXLAN
+        };
+        assert_eq!(format_evpn_ecom_value(&v), "ET:8");
+    }
+
+    #[test]
+    fn ecom_unknown_falls_back_to_hex() {
+        let v = ExtCommunityValue {
+            high_type: 0x40,
+            low_type: 0x02,
+            val: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        };
+        assert_eq!(format_evpn_ecom_value(&v), "0x4002deadbeef0001");
+    }
 }
 
 fn show_evpn_vni_all(
