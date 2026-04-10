@@ -351,11 +351,132 @@ impl LocalRibTable {
     }
 }
 
+/// Per-RD Loc-RIB table for EVPN routes.
+///
+/// Mirrors `LocalRibTable` but uses an exact-match `BTreeMap<EvpnPrefix, _>`
+/// rather than `prefix-trie`'s `PrefixMap`, since EVPN keys are not subject
+/// to longest-prefix matching.
+#[derive(Debug, Default)]
+pub struct LocalRibEvpnTable {
+    /// Candidate paths per prefix.
+    pub cands: BTreeMap<EvpnPrefix, Vec<BgpRib>>,
+    /// Selected best path per prefix.
+    pub selected: BTreeMap<EvpnPrefix, BgpRib>,
+}
+
+impl LocalRibEvpnTable {
+    pub fn update(&mut self, prefix: EvpnPrefix, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        let cands = self.cands.entry(prefix.clone()).or_default();
+
+        // Find if we're replacing an existing route (same peer ident and path ID)
+        let existing_local_id = cands
+            .iter()
+            .find(|r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .map(|r| r.local_id);
+
+        // Extract routes being replaced
+        let replaced: Vec<BgpRib> = cands
+            .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .collect();
+
+        // Allocate local_id for the new/updated rib
+        let mut next_id = 1u32;
+        let mut new_rib = rib.clone();
+        if let Some(local_id) = existing_local_id {
+            new_rib.local_id = local_id;
+        } else {
+            let used_ids: std::collections::HashSet<u32> =
+                cands.iter().map(|r| r.local_id).collect();
+            while used_ids.contains(&next_id) {
+                next_id += 1;
+            }
+            new_rib.local_id = next_id;
+        }
+
+        next_id = new_rib.local_id;
+
+        cands.push(new_rib);
+
+        let selected = self.select_best_path(&prefix);
+
+        (replaced, selected, next_id)
+    }
+
+    pub fn remove(&mut self, prefix: &EvpnPrefix, id: u32, ident: usize) -> Vec<BgpRib> {
+        let cands = self.cands.entry(prefix.clone()).or_default();
+        cands
+            .extract_if(.., |r| r.ident == ident && r.remote_id == id)
+            .collect()
+    }
+
+    pub fn remove_peer_routes(&mut self, ident: usize) -> Vec<BgpRib> {
+        let mut all_removed: Vec<BgpRib> = Vec::new();
+        for (_prefix, cands) in self.cands.iter_mut() {
+            let mut removed: Vec<BgpRib> = cands.extract_if(.., |r| r.ident == ident).collect();
+            all_removed.append(&mut removed);
+        }
+        all_removed
+    }
+
+    pub fn select_best_path(&mut self, prefix: &EvpnPrefix) -> Vec<BgpRib> {
+        let mut selected = Vec::new();
+
+        if !self.cands.contains_key(prefix) {
+            self.selected.remove(prefix);
+            return selected;
+        }
+
+        let is_empty = self
+            .cands
+            .get(prefix)
+            .map(|cands| cands.is_empty())
+            .unwrap_or(true);
+
+        if is_empty {
+            self.cands.remove(prefix);
+            self.selected.remove(prefix);
+            return selected;
+        }
+
+        let best = {
+            let cands = self.cands.get_mut(prefix).expect("prefix checked above");
+
+            let mut best_index = 0usize;
+            let mut best_reason = Reason::Default;
+            for index in 1..cands.len() {
+                // Reuse the IPv4 best-path comparator — it operates only on
+                // BgpRib fields and is NLRI-agnostic.
+                let (better, reason) = LocalRibTable::is_better(&cands[index], &cands[best_index]);
+                if better {
+                    best_index = index;
+                }
+                best_reason = reason;
+            }
+
+            for rib in cands.iter_mut() {
+                rib.best_path = false;
+                rib.best_reason = Reason::NotSelected;
+            }
+            cands[best_index].best_path = true;
+            cands[best_index].best_reason = best_reason;
+            cands[best_index].clone()
+        };
+
+        self.selected.insert(prefix.clone(), best.clone());
+        selected.push(best);
+
+        selected
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LocalRib {
     pub v4: LocalRibTable,
 
     pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable>,
+
+    /// Per-RD EVPN Loc-RIB tables.
+    pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 }
 
 impl LocalRib {
@@ -404,6 +525,44 @@ impl LocalRib {
             .entry(rd.clone())
             .or_default()
             .select_best_path(prefix)
+    }
+
+    // EVPN dispatch ----------------------------------------------------------
+
+    pub fn update_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: EvpnPrefix,
+        rib: BgpRib,
+    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.evpn.entry(rd).or_default().update(prefix, rib)
+    }
+
+    pub fn remove_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: &EvpnPrefix,
+        id: u32,
+        ident: usize,
+    ) -> Vec<BgpRib> {
+        self.evpn.entry(rd).or_default().remove(prefix, id, ident)
+    }
+
+    pub fn remove_peer_routes_evpn(&mut self, ident: usize) -> Vec<BgpRib> {
+        let mut all_removed: Vec<BgpRib> = Vec::new();
+        for (_rd, table) in self.evpn.iter_mut() {
+            let mut removed = table.remove_peer_routes(ident);
+            all_removed.append(&mut removed);
+        }
+        all_removed
+    }
+
+    pub fn select_best_path_evpn(
+        &mut self,
+        rd: &RouteDistinguisher,
+        prefix: &EvpnPrefix,
+    ) -> Vec<BgpRib> {
+        self.evpn.entry(*rd).or_default().select_best_path(prefix)
     }
 }
 
@@ -850,6 +1009,100 @@ pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.eor.clear();
 }
 
+/// Install one EVPN route received in an MP_REACH_NLRI into Adj-RIB-In and
+/// the Loc-RIB. Mirrors `route_ipv4_update` but takes the parsed
+/// `EvpnRoute` directly.
+///
+/// The `_nhop` parameter (the per-MpReach EVPN nexthop) is currently
+/// unused: `BgpRib::new` only carries a `Vpnv4Nexthop`, which is IPv4-only
+/// and RD-bound. The EVPN nexthop is recoverable from `peer.address` for
+/// display purposes; threading it through `BgpRib` is a follow-up tied to
+/// the show command (Step 5).
+pub fn route_evpn_update(
+    ident: usize,
+    route: &EvpnRoute,
+    _nhop: IpAddr,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let (rd, prefix) = EvpnPrefix::from_route(route);
+    let id = match route {
+        EvpnRoute::Mac(m) => m.id,
+        EvpnRoute::Multicast(m) => m.id,
+    };
+
+    // Loop detection mirrors route_ipv4_update — drop the route silently
+    // (no eprintln) on local-AS / ORIGINATOR_ID / CLUSTER_LIST hits.
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(&bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    let rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        id,
+        0, // weight
+        attr,
+        None, // label (not applicable to EVPN at this layer)
+        None, // nexthop — see function doc
+        stale,
+    );
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_evpn(rd, prefix.clone(), rib.clone());
+    }
+
+    let _ = bgp.local_rib.update_evpn(rd, prefix, rib);
+}
+
+/// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
+/// and the Loc-RIB, then re-run best-path selection.
+pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let (rd, prefix) = EvpnPrefix::from_route(route);
+    let id = match route {
+        EvpnRoute::Mac(m) => m.id,
+        EvpnRoute::Multicast(m) => m.id,
+    };
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_evpn(rd, &prefix, id);
+    }
+
+    let _ = bgp.local_rib.remove_evpn(rd, &prefix, id, ident);
+    let _ = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+}
+
 pub fn route_from_peer(
     peer_id: usize,
     packet: UpdatePacket,
@@ -896,6 +1149,15 @@ pub fn route_from_peer(
                     route_ipv4_rtc_update(peer_id, update, peers);
                 }
             }
+            MpReachAttr::Evpn {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                for route in updates.iter() {
+                    route_evpn_update(peer_id, route, nhop, bgp_attr, bgp, peers, false);
+                }
+            }
             _ => {
                 //
             }
@@ -925,6 +1187,17 @@ pub fn route_from_peer(
             MpUnreachAttr::Rtcv4Eor => {
                 // If peer's EoR is true.
                 route_rtcv4_sync(peer_id, bgp, peers);
+            }
+            MpUnreachAttr::Evpn(withdrawals) => {
+                for route in withdrawals.iter() {
+                    route_evpn_withdraw(peer_id, route, bgp, peers);
+                }
+            }
+            MpUnreachAttr::EvpnEor => {
+                let afi_safi = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
             }
             _ => {
                 //

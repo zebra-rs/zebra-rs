@@ -87,6 +87,59 @@ impl<D: RibDirection> AdjRibTable<D> {
     }
 }
 
+/// Per-RD Adj-RIB-In/Out table for EVPN routes.
+///
+/// Mirrors `AdjRibTable<D>` but keyed on `EvpnPrefix` (exact match) instead
+/// of `Ipv4Net`. The `D` type parameter selects which path-id field to use
+/// for AddPath disambiguation, exactly as for the IPv4 table.
+#[derive(Debug)]
+pub struct AdjRibEvpnTable<D: RibDirection>(pub BTreeMap<EvpnPrefix, Vec<BgpRib>>, PhantomData<D>);
+
+impl<D: RibDirection> AdjRibEvpnTable<D> {
+    pub fn new() -> Self {
+        Self(BTreeMap::new(), PhantomData)
+    }
+
+    pub fn add(&mut self, prefix: EvpnPrefix, route: BgpRib) -> Option<BgpRib> {
+        let candidates = self.0.entry(prefix).or_default();
+
+        let route_id = D::get_id(&route);
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == route_id) {
+            let old_route = candidates[pos].clone();
+            candidates[pos] = route;
+            Some(old_route)
+        } else {
+            candidates.push(route);
+            None
+        }
+    }
+
+    pub fn remove(&mut self, prefix: &EvpnPrefix, id: u32) -> Option<BgpRib> {
+        let candidates = self.0.get_mut(prefix)?;
+
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == id) {
+            let removed_route = candidates.remove(pos);
+
+            if candidates.is_empty() {
+                self.0.remove(prefix);
+            }
+
+            Some(removed_route)
+        } else if id == 0 {
+            self.0.remove(prefix);
+            None
+        } else {
+            None
+        }
+    }
+}
+
+impl<D: RibDirection> Default for AdjRibEvpnTable<D> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // BGP Adj-RIB - stores routes with direction-specific ID handling
 #[derive(Debug)]
 pub struct AdjRib<D: RibDirection> {
@@ -94,6 +147,8 @@ pub struct AdjRib<D: RibDirection> {
     pub v4: AdjRibTable<D>,
     // IPv4 VPN
     pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
+    // EVPN, per Route Distinguisher
+    pub evpn: BTreeMap<RouteDistinguisher, AdjRibEvpnTable<D>>,
 }
 
 impl<D: RibDirection> AdjRib<D> {
@@ -101,6 +156,7 @@ impl<D: RibDirection> AdjRib<D> {
         Self {
             v4: AdjRibTable::new(),
             v4vpn: BTreeMap::new(),
+            evpn: BTreeMap::new(),
         }
     }
 }
@@ -139,10 +195,31 @@ impl AdjRib<In> {
         }
     }
 
+    // EVPN add/remove ---------------------------------------------------------
+
+    pub fn add_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: EvpnPrefix,
+        route: BgpRib,
+    ) -> Option<BgpRib> {
+        self.evpn.entry(rd).or_default().add(prefix, route)
+    }
+
+    pub fn remove_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: &EvpnPrefix,
+        id: u32,
+    ) -> Option<BgpRib> {
+        self.evpn.entry(rd).or_default().remove(prefix, id)
+    }
+
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
+            (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
             (_, _) => 0,
         }
     }
@@ -153,6 +230,10 @@ impl AdjRib<In> {
             Some(rd) => self.v4vpn.entry(rd).or_default().0.contains_key(prefix),
             None => self.v4.0.contains_key(prefix),
         }
+    }
+
+    pub fn contains_key_evpn(&mut self, rd: RouteDistinguisher, prefix: &EvpnPrefix) -> bool {
+        self.evpn.entry(rd).or_default().0.contains_key(prefix)
     }
 }
 
@@ -183,10 +264,31 @@ impl AdjRib<Out> {
         }
     }
 
+    // EVPN add/remove ---------------------------------------------------------
+
+    pub fn add_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: EvpnPrefix,
+        route: BgpRib,
+    ) -> Option<BgpRib> {
+        self.evpn.entry(rd).or_default().add(prefix, route)
+    }
+
+    pub fn remove_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: &EvpnPrefix,
+        id: u32,
+    ) -> Option<BgpRib> {
+        self.evpn.entry(rd).or_default().remove(prefix, id)
+    }
+
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
+            (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
             (_, _) => 0,
         }
     }
@@ -197,5 +299,9 @@ impl AdjRib<Out> {
             Some(rd) => self.v4vpn.entry(rd).or_default().0.contains_key(prefix),
             None => self.v4.0.contains_key(prefix),
         }
+    }
+
+    pub fn contains_key_evpn(&mut self, rd: RouteDistinguisher, prefix: &EvpnPrefix) -> bool {
+        self.evpn.entry(rd).or_default().0.contains_key(prefix)
     }
 }
