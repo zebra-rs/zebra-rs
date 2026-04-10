@@ -263,9 +263,35 @@ branch — they were added as preparatory work before the EVPN feature
 was started.
 
 ### Step 7 — Build & format
-1. `cargo build --bin zebra-rs` — must compile clean.
-2. `cargo fmt --all`.
-3. Manual smoke test: bring up two zebra-rs instances with `l2vpn-evpn` enabled; inject a Type 2 / Type 3 from one (or peer with FRR/GoBGP); verify `show ip bgp evpn` on the other matches the layout above.
+
+**Status:** Automated checks all green; manual smoke test outstanding.
+
+| Check | Result |
+|---|---|
+| `cargo build --bin zebra-rs --release` | clean |
+| `cargo fmt --all -- --check` | clean |
+| `cargo test --workspace --exclude bdd` | all passing (175+ tests, 0 failures) |
+| `cargo test -p bgp-packet evpn_prefix_tests` | 4/4 (Step 1) |
+| `cargo test -p zebra-rs evpn_show_tests` | 3/3 (Step 5) |
+| `cargo test -p zebra-rs` (full crate) | 56/56 — includes the 3 new EVPN show tests and the 2 `link.rs` tests unbroken in Step 5 |
+
+**Pre-existing issue, NOT touched on this branch:** `cargo test -p bdd`
+panics at `bdd/tests/cucumber.rs:335` because the `bdd/allure-results/`
+directory does not exist. This code was last touched in commit
+`aa107f89` on 2026-03-31, well before this branch; `git log feature/bgp-evpn ^main -- bdd/`
+returns nothing. The fix is a one-line `fs::create_dir_all("allure-results").ok();`
+immediately before the `fs::File::create` call. Out of scope here — left
+for a separate cleanup commit.
+
+**Outstanding (requires human action):**
+
+- **Manual smoke test.** Bring up two zebra-rs instances (or zebra-rs +
+  FRR / GoBGP), enable `l2vpn-evpn` on the session
+  (`set routing bgp neighbor X.X.X.X afi-safi l2vpn-evpn enabled true`),
+  inject a Type 2 (MAC/IP) and a Type 3 (Inclusive Multicast) route from
+  one side, and verify that `show ip bgp evpn` on the other side matches
+  the layout shown in the Step 5 example output. This is the only thing
+  not exercised by the automated test suite.
 
 ---
 
