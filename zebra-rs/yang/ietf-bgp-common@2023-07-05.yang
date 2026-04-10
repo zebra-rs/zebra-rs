@@ -417,8 +417,8 @@ submodule ietf-bgp-common {
 
     leaf local-address {
       type union {
-        type inet:ip-address;
-        type if:interface-ref;
+        type inet:ipv4-address;
+        type inet:ipv6-address;
       }
       description
         "Set the local IP (either IPv4 or IPv6) address to use for
