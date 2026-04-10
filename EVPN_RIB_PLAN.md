@@ -99,6 +99,9 @@ EVPN best-path has type-specific tiebreaks (e.g., MAC mobility sequence number f
 ## 3. Step-by-step implementation plan
 
 ### Step 1 — `bgp-packet` additions
+
+**Status:** Implemented in commit `db2d0ce`.
+
 **File:** `crates/bgp-packet/src/attrs/nlri_evpn.rs`
 
 1. Add `EvpnPrefix` enum (D1) with `MacIp` and `InclusiveMulticast` variants. Derive `Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash`.
@@ -110,36 +113,52 @@ EVPN best-path has type-specific tiebreaks (e.g., MAC mobility sequence number f
 3. Implement `EvpnPrefix::from_route(&EvpnRoute) -> (RouteDistinguisher, EvpnPrefix)`.
 4. **Cleanup:** remove the stray `println!` at `crates/bgp-packet/src/attrs/mp_reach.rs:137`.
 
-### Step 2 — New RIB table types
-**File:** `zebra-rs/src/bgp/route.rs` (or split out into `zebra-rs/src/bgp/route_evpn.rs` for clarity)
+### Step 2 — New RIB table types and wiring
+
+**Status:** Implemented in commit `67ea95e`. Steps 2 and 3 of the original plan
+were bundled because the table type definitions and the `LocalRib`/`AdjRib`
+field additions are inseparable in Rust — defining `LocalRibEvpnTable` without
+a use site triggers dead-code warnings, and adding `LocalRib.evpn` requires
+the type to exist. Step 3 below is preserved as a placeholder so existing
+commit-message references to "Step 4 / 5 / 6 / 7" remain accurate.
+
+**File:** `zebra-rs/src/bgp/route.rs`
 
 1. Define `LocalRibEvpnTable`:
    ```rust
    pub struct LocalRibEvpnTable {
-       pub ribs: BTreeMap<EvpnPrefix, Vec<BgpRib>>, // candidate paths
-       pub selected: BTreeMap<EvpnPrefix, BgpRib>,  // best path per prefix
+       pub cands: BTreeMap<EvpnPrefix, Vec<BgpRib>>, // candidate paths
+       pub selected: BTreeMap<EvpnPrefix, BgpRib>,   // best path per prefix
    }
    ```
-2. Mirror the methods used by the IPv4 path: `update`, `withdraw`, `iter`, `len`, `clear`, `select_best`. Implementations are direct ports replacing `PrefixMap` with `BTreeMap`.
+2. Mirror the methods used by the IPv4 path: `update`, `remove`,
+   `remove_peer_routes`, `select_best_path`. Best-path selection delegates to
+   `LocalRibTable::is_better`, which is module-private but visible to
+   `LocalRibEvpnTable` since both live in `route.rs` — no API change to
+   `LocalRibTable`.
+3. Add field on `LocalRib`: `pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>`.
+4. Add `LocalRib` dispatch helpers: `update_evpn`, `remove_evpn`,
+   `remove_peer_routes_evpn`, `select_best_path_evpn`. Mirrors the existing
+   `update(rd: Option<RD>, ...)` shape but takes `RouteDistinguisher` directly
+   (EVPN is always RD-scoped, so the `Option` is unnecessary).
 
 **File:** `zebra-rs/src/bgp/adj_rib.rs`
 
-3. Define `AdjRibEvpnTable<D: RibDirection>`:
-   ```rust
-   pub struct AdjRibEvpnTable<D: RibDirection> {
-       pub map: BTreeMap<EvpnPrefix, Vec<BgpRib>>,
-       _phantom: PhantomData<D>,
-   }
-   ```
+5. Define `AdjRibEvpnTable<D: RibDirection>` as a tuple struct mirroring
+   `AdjRibTable<D>`, keyed on `EvpnPrefix`. `add` / `remove` use the same
+   direction-aware path-id pattern (`D::get_id`) and the same `id == 0`
+   sentinel for "remove all candidates" as the IPv4 table.
+6. Add field on `AdjRib<D>`: `pub evpn: BTreeMap<RouteDistinguisher, AdjRibEvpnTable<D>>`.
+7. Both `AdjRib<In>` and `AdjRib<Out>` impls gain `add_evpn` / `remove_evpn` /
+   `contains_key_evpn`. The existing `count(afi, safi)` method gains an
+   `(L2vpn, Evpn)` arm so existing callers can query EVPN counts via the same
+   API.
 
 ### Step 3 — Wire into existing `LocalRib` and `AdjRib`
 
-**File:** `zebra-rs/src/bgp/route.rs:355` (`LocalRib`)
-- Add field: `pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>`.
-- Add `LocalRib::update_evpn(&mut self, rd, prefix, rib)` and `withdraw_evpn` helpers, mirroring the existing `update(rd: Option<RD>, ...)` shape. Initialize the per-RD `LocalRibEvpnTable` lazily.
-
-**File:** `zebra-rs/src/bgp/adj_rib.rs:92` (`AdjRib<D>`)
-- Add field: `pub evpn: BTreeMap<RouteDistinguisher, AdjRibEvpnTable<D>>` plus parallel helpers.
+**Status:** Merged into Step 2 — see the status note at the top of Step 2 for
+the rationale. Numbering of Steps 4–7 is preserved to keep existing
+commit-message references valid.
 
 ### Step 4 — UPDATE / WITHDRAW dispatch
 **File:** `zebra-rs/src/bgp/route.rs:878` (`route_update`)
