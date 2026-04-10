@@ -10,8 +10,8 @@ use std::time::Instant;
 use bytes::BytesMut;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
@@ -117,6 +117,7 @@ pub struct PeerCounter {
 #[derive(Debug, Default, Clone)]
 pub struct PeerTransportConfig {
     pub passive: bool,
+    pub update_source: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone)]
@@ -748,23 +749,50 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let address = peer.address;
+    let update_source = peer.config.transport.update_source;
     Task::spawn(async move {
         let tx = tx.clone();
-        let addr = match address {
-            IpAddr::V4(addr) => format!("{}:{}", addr, BGP_PORT),
-            IpAddr::V6(addr) => format!("[{}]:{}", addr, BGP_PORT),
+        let remote: SocketAddr = match address {
+            IpAddr::V4(addr) => SocketAddr::new(IpAddr::V4(addr), BGP_PORT),
+            IpAddr::V6(addr) => SocketAddr::new(IpAddr::V6(addr), BGP_PORT),
         };
-        let result = TcpStream::connect(addr).await;
+        let result = peer_connect(remote, update_source).await;
         match result {
             Ok(stream) => {
-                //
                 let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
             }
-            Err(err) => {
+            Err(_err) => {
                 let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
             }
         };
     })
+}
+
+async fn peer_connect(
+    remote: SocketAddr,
+    update_source: Option<IpAddr>,
+) -> std::io::Result<TcpStream> {
+    // Address family of the source must match the remote when specified.
+    if let Some(src) = update_source
+        && src.is_ipv4() != remote.is_ipv4()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "update-source address family does not match peer address",
+        ));
+    }
+
+    let socket = if remote.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+
+    if let Some(src) = update_source {
+        socket.bind(SocketAddr::new(src, 0))?;
+    }
+
+    socket.connect(remote).await
 }
 
 pub fn peer_send_open(peer: &mut Peer) {
