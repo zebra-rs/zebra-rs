@@ -1072,17 +1072,17 @@ impl FibHandle {
         // Add Port (NDA_PORT)
         msg.attributes.push(NeighbourAttribute::Port(4789));
 
-        // TODO (Phase 3B): Add remote VTEP support
-        // Currently, the tunnel_endpoint is available but cannot be set via standard
-        // netlink attributes. The kernel expects this to be configured separately
-        // via the VXLAN interface remote endpoint.
-        // Future: Extend netlink-packet-route with remote VTEP attribute support.
-        if tunnel_endpoint.is_some() {
-            eprintln!(
-                "Warning: Remote VTEP endpoint available but not installed (Phase 3B required). \
-                 Configure VXLAN remote endpoints via: ip link set {} remote <IP>",
-                vxlan_ifindex
-            );
+        // Add tunnel endpoint (NDA_DST for VXLAN remote VTEP)
+        // This attribute is interpreted differently in AF_BRIDGE context:
+        // In AF_BRIDGE with VXLAN, NDA_DST specifies the remote tunnel endpoint IP
+        if let Some(endpoint) = tunnel_endpoint {
+            use netlink_packet_route::neighbour::NeighbourAddress;
+            let addr = match endpoint {
+                IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
+                IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
+            };
+            msg.attributes
+                .push(NeighbourAttribute::TunnelEndpoint(addr));
         }
 
         // Build netlink request
