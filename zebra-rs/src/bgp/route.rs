@@ -62,6 +62,8 @@ pub struct BgpRib {
     pub nexthop: Option<Vpnv4Nexthop>,
     // Stale.
     pub stale: bool,
+    // Phase 4D: EVPN ESI (Ethernet Segment Identifier) for multi-homing
+    pub esi: Option<[u8; 10]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +122,7 @@ impl BgpRib {
             label,
             nexthop,
             stale,
+            esi: None,
         }
     }
 
@@ -1124,7 +1127,7 @@ fn route_evpn_export_selected(
                     tunnel_endpoint: extract_tunnel_endpoint(best),
                     flags: extract_flags_from_attr(&best.attr),
                     seq: extract_mac_mobility_seq(&best.attr),
-                    esi: None, // Phase 4: extract ESI from extended community
+                    esi: best.esi, // Phase 4D: Extracted from EVPN route
                 };
                 let _ = bgp.rib_tx.send(msg);
             }
@@ -1203,7 +1206,7 @@ pub fn route_evpn_update(
         (peer.ident, peer.remote_id, typ)
     };
 
-    let rib = BgpRib::new(
+    let mut rib = BgpRib::new(
         peer_ident,
         peer_router_id,
         typ,
@@ -1214,6 +1217,11 @@ pub fn route_evpn_update(
         None, // nexthop — see function doc
         stale,
     );
+
+    // Phase 4D: Extract ESI from EVPN Type 2 route for multi-homing support
+    if let EvpnRoute::Mac(m) = route {
+        rib.esi = Some(m.esi);
+    }
 
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");

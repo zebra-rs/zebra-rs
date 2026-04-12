@@ -93,6 +93,7 @@ pub enum FibMessage {
         tunnel_endpoint: Option<IpAddr>,
         flags: u8,
         seq: u32,
+        esi: Option<[u8; 10]>,
     },
     MacDel {
         vni: u32,

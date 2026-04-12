@@ -389,9 +389,10 @@ impl Rib {
                 tunnel_endpoint,
                 flags,
                 seq,
+                esi,
             } => {
                 self.fib_handle
-                    .mac_add(vni, &mac, tunnel_endpoint, flags, seq)
+                    .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi)
                     .await;
             }
             FibMessage::MacDel { vni, mac } => {
@@ -512,6 +513,13 @@ impl Rib {
         seq: u32,
         esi: Option<[u8; 10]>,
     ) {
+        // MAC Mobility: ignore stale duplicates (lower sequence number)
+        if let Some(existing) = self.mac_table.get(&(vni, mac)) {
+            if seq < existing.seq {
+                return; // Ignore stale duplicate
+            }
+        }
+
         let entry = MacEntry {
             vni,
             mac,
@@ -524,10 +532,17 @@ impl Rib {
         };
 
         self.mac_table.insert((vni, mac), entry);
+
+        // Forward to kernel FIB
+        self.fib_handle
+            .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi)
+            .await;
     }
 
     async fn mac_del(&mut self, vni: u32, mac: MacAddr) {
         self.mac_table.remove(&(vni, mac));
+        // Forward deletion to kernel FIB
+        self.fib_handle.mac_del(vni, &mac).await;
     }
 
     async fn mdb_add(
