@@ -13,7 +13,6 @@ members = [
   "crates/ospf-macros",
   "crates/fixedbuf",
   "bdd",
-  "netlink-packet-route",
 ]
 
 [workspace.package]
