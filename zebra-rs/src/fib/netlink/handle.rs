@@ -1036,6 +1036,7 @@ impl FibHandle {
         tunnel_endpoint: Option<IpAddr>,
         flags: u8,
         seq: u32,
+        esi: Option<[u8; 10]>,
     ) {
         // Resolve VNI to VXLAN interface index using the registered mapping
         // If not found, use VNI as fallback (for testing/simple configs)
@@ -1085,6 +1086,15 @@ impl FibHandle {
                 .push(NeighbourAttribute::TunnelEndpoint(addr));
         }
 
+        // Phase 4D: ESI received and stored. Kernel multi-homing via NDA_NH_ID
+        // will be wired in Phase 5 when ECMP nexthop groups are supported.
+        if let Some(esi_val) = esi {
+            if esi_val != [0u8; 10] {
+                // ESI[0] is the ESI type. ESI[1..9] is the type-specific value.
+                eprintln!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
+            }
+        }
+
         // Build netlink request
         use netlink_packet_route::RouteNetlinkMessage;
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
@@ -1101,8 +1111,8 @@ impl FibHandle {
 
     /// Delete EVPN MAC entry from bridge FDB
     pub async fn mac_del(&self, vni: u32, mac: &MacAddr) {
-        // Resolve VNI to VXLAN interface index (placeholder)
-        let vxlan_ifindex = vni;
+        // Resolve VNI to VXLAN interface index using the registered mapping
+        let vxlan_ifindex = self.vni_ifindex_map.get(&vni).copied().unwrap_or(vni);
 
         // Build delete request via netlink
         use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
