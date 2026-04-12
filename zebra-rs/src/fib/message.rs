@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
+use std::net::IpAddr;
+
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_route::link::LinkFlags;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -85,4 +87,15 @@ pub enum FibMessage {
     DelAddr(FibAddr),
     NewRoute(FibRoute),
     DelRoute(FibRoute),
+    MacAdd {
+        vni: u32,
+        mac: MacAddr,
+        tunnel_endpoint: Option<IpAddr>,
+        flags: u8,
+        seq: u32,
+    },
+    MacDel {
+        vni: u32,
+        mac: MacAddr,
+    },
 }

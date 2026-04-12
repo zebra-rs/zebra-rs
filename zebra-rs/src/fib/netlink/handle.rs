@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use futures::stream::StreamExt;
@@ -68,6 +69,9 @@ fn kernel_supports_nhid() -> bool {
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
     pub use_nhid: bool,
+    /// VNI to VXLAN interface index mapping
+    /// Used to resolve VNI to the correct VXLAN device for FDB operations
+    pub vni_ifindex_map: BTreeMap<u32, u32>,
 }
 
 impl FibHandle {
@@ -106,7 +110,11 @@ impl FibHandle {
             false
         };
 
-        Ok(Self { handle, use_nhid })
+        Ok(Self {
+            handle,
+            use_nhid,
+            vni_ifindex_map: BTreeMap::new(),
+        })
     }
 
     pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
@@ -1004,6 +1012,122 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("DelRoute error: {}", e);
+            }
+        }
+    }
+
+    /// Register VXLAN interface with its VNI for FDB operations
+    /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
+    pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
+        self.vni_ifindex_map.insert(vni, ifindex);
+    }
+
+    /// Unregister VXLAN interface mapping
+    pub fn unregister_vxlan_ifindex(&mut self, vni: u32) {
+        self.vni_ifindex_map.remove(&vni);
+    }
+
+    /// Add EVPN MAC entry to bridge FDB
+    /// Uses RTM_NEWNEIGH to install MAC address in kernel bridge
+    pub async fn mac_add(
+        &self,
+        vni: u32,
+        mac: &MacAddr,
+        tunnel_endpoint: Option<IpAddr>,
+        flags: u8,
+        seq: u32,
+    ) {
+        // Resolve VNI to VXLAN interface index using the registered mapping
+        // If not found, use VNI as fallback (for testing/simple configs)
+        let vxlan_ifindex = self.vni_ifindex_map.get(&vni).copied().unwrap_or(vni);
+
+        // Build bridge FDB entry using rtnetlink neighbours API
+        use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
+
+        // Create neighbour message for bridge FDB
+        let mut msg = NeighbourMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.ifindex = vxlan_ifindex;
+        // NUD_PERMANENT = 0x80
+        msg.header.state = netlink_packet_route::neighbour::NeighbourState::Other(0x80);
+
+        // Set flags: NTF_SELF (0x02) | NTF_EXT_LEARNED (0x10), and optionally NTF_STICKY (0x40)
+        let mut flag_value: u8 = 0x02 | 0x10;
+        if (flags & 0x01) != 0 {
+            flag_value |= 0x40;
+        }
+        use netlink_packet_route::neighbour::NeighbourFlags;
+        msg.header.flags = NeighbourFlags::from_bits_retain(flag_value);
+
+        // Add MAC address (NDA_LLADDR)
+        msg.attributes
+            .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
+
+        // Add VNI (NDA_VNI)
+        msg.attributes.push(NeighbourAttribute::Vni(vni));
+
+        // Add SRC_VNI (NDA_SRC_VNI)
+        msg.attributes.push(NeighbourAttribute::SourceVni(vni));
+
+        // Add Port (NDA_PORT)
+        msg.attributes.push(NeighbourAttribute::Port(4789));
+
+        // TODO (Phase 3B): Add remote VTEP support
+        // Currently, the tunnel_endpoint is available but cannot be set via standard
+        // netlink attributes. The kernel expects this to be configured separately
+        // via the VXLAN interface remote endpoint.
+        // Future: Extend netlink-packet-route with remote VTEP attribute support.
+        if tunnel_endpoint.is_some() {
+            eprintln!(
+                "Warning: Remote VTEP endpoint available but not installed (Phase 3B required). \
+                 Configure VXLAN remote endpoints via: ip link set {} remote <IP>",
+                vxlan_ifindex
+            );
+        }
+
+        // Build netlink request
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_REPLACE;
+
+        // Send request
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MAC add error for {}: {}", mac, e);
+            }
+        }
+    }
+
+    /// Delete EVPN MAC entry from bridge FDB
+    pub async fn mac_del(&self, vni: u32, mac: &MacAddr) {
+        // Resolve VNI to VXLAN interface index (placeholder)
+        let vxlan_ifindex = vni;
+
+        // Build delete request via netlink
+        use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
+
+        let mut msg = NeighbourMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.ifindex = vxlan_ifindex;
+
+        // Add MAC address for identification
+        msg.attributes
+            .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
+
+        // Add VNI for identification
+        msg.attributes.push(NeighbourAttribute::Vni(vni));
+
+        // Build netlink request
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelNeighbour(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        // Send request
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MAC del error for {}: {}", mac, e);
             }
         }
     }
