@@ -98,4 +98,17 @@ pub enum FibMessage {
         vni: u32,
         mac: MacAddr,
     },
+    MdbAdd {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+        seq: u32,
+    },
+    MdbDel {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+    },
 }

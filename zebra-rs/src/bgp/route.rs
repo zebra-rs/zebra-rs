@@ -1086,13 +1086,27 @@ fn route_evpn_export_selected(
 ) {
     // If no selected path exists, send delete
     if selected.is_empty() {
-        if let EvpnPrefix::MacIp { mac, .. } = prefix {
-            if let Some(vni) = extract_vni_from_rd(rd) {
-                let msg = rib::Message::MacDel {
-                    vni,
-                    mac: MacAddr::from(*mac),
-                };
-                let _ = bgp.rib_tx.send(msg);
+        match prefix {
+            EvpnPrefix::MacIp { mac, .. } => {
+                if let Some(vni) = extract_vni_from_rd(rd) {
+                    let msg = rib::Message::MacDel {
+                        vni,
+                        mac: MacAddr::from(*mac),
+                    };
+                    let _ = bgp.rib_tx.send(msg);
+                }
+            }
+            EvpnPrefix::InclusiveMulticast { orig, .. } => {
+                // Phase 4B: Type 3 multicast route withdrawal
+                if let Some(vni) = extract_vni_from_rd(rd) {
+                    let msg = rib::Message::MdbDel {
+                        vni,
+                        group: *orig,
+                        source: None,
+                        ifindex: 0,
+                    };
+                    let _ = bgp.rib_tx.send(msg);
+                }
             }
         }
         return;
@@ -1101,17 +1115,34 @@ fn route_evpn_export_selected(
     // Extract best path (last entry in selected vector)
     let best = &selected[selected.len() - 1];
 
-    if let EvpnPrefix::MacIp { mac, .. } = prefix {
-        if let Some(vni) = extract_vni_from_rd(rd) {
-            let msg = rib::Message::MacAdd {
-                vni,
-                mac: MacAddr::from(*mac),
-                tunnel_endpoint: extract_tunnel_endpoint(best),
-                flags: extract_flags_from_attr(&best.attr),
-                seq: extract_mac_mobility_seq(&best.attr),
-                esi: None, // Phase 4: extract ESI from extended community
-            };
-            let _ = bgp.rib_tx.send(msg);
+    match prefix {
+        EvpnPrefix::MacIp { mac, .. } => {
+            if let Some(vni) = extract_vni_from_rd(rd) {
+                let msg = rib::Message::MacAdd {
+                    vni,
+                    mac: MacAddr::from(*mac),
+                    tunnel_endpoint: extract_tunnel_endpoint(best),
+                    flags: extract_flags_from_attr(&best.attr),
+                    seq: extract_mac_mobility_seq(&best.attr),
+                    esi: None, // Phase 4: extract ESI from extended community
+                };
+                let _ = bgp.rib_tx.send(msg);
+            }
+        }
+        EvpnPrefix::InclusiveMulticast { orig, .. } => {
+            // Phase 4B: Type 3 Inclusive Multicast route installation
+            // This route indicates that a multicast group (*,G) should be replicated to
+            // all VTEPs that have advertised this route.
+            if let Some(vni) = extract_vni_from_rd(rd) {
+                let msg = rib::Message::MdbAdd {
+                    vni,
+                    group: *orig,
+                    source: None,
+                    ifindex: 0,
+                    seq: extract_mac_mobility_seq(&best.attr),
+                };
+                let _ = bgp.rib_tx.send(msg);
+            }
         }
     }
 }

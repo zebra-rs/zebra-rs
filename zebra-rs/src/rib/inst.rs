@@ -82,6 +82,19 @@ pub enum Message {
         vni: u32,
         mac: MacAddr,
     },
+    MdbAdd {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+        seq: u32,
+    },
+    MdbDel {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -311,6 +324,23 @@ impl Rib {
             Message::MacDel { vni, mac } => {
                 self.mac_del(vni, mac).await;
             }
+            Message::MdbAdd {
+                vni,
+                group,
+                source,
+                ifindex,
+                seq,
+            } => {
+                self.mdb_add(vni, group, source, ifindex, seq).await;
+            }
+            Message::MdbDel {
+                vni,
+                group,
+                source,
+                ifindex,
+            } => {
+                self.mdb_del(vni, group, source, ifindex).await;
+            }
         }
     }
 
@@ -366,6 +396,25 @@ impl Rib {
             }
             FibMessage::MacDel { vni, mac } => {
                 self.fib_handle.mac_del(vni, &mac).await;
+            }
+            FibMessage::MdbAdd {
+                vni,
+                group,
+                source,
+                ifindex,
+                seq,
+            } => {
+                self.fib_handle
+                    .mdb_add(vni, group, source, ifindex, seq)
+                    .await;
+            }
+            FibMessage::MdbDel {
+                vni,
+                group,
+                source,
+                ifindex,
+            } => {
+                self.fib_handle.mdb_del(vni, group, source, ifindex).await;
             }
         }
     }
@@ -479,6 +528,25 @@ impl Rib {
 
     async fn mac_del(&mut self, vni: u32, mac: MacAddr) {
         self.mac_table.remove(&(vni, mac));
+    }
+
+    async fn mdb_add(
+        &mut self,
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+        seq: u32,
+    ) {
+        // Phase 4B: Forward MDB add request to FIB
+        self.fib_handle
+            .mdb_add(vni, group, source, ifindex, seq)
+            .await;
+    }
+
+    async fn mdb_del(&mut self, vni: u32, group: IpAddr, source: Option<IpAddr>, ifindex: u32) {
+        // Phase 4B: Forward MDB delete request to FIB
+        self.fib_handle.mdb_del(vni, group, source, ifindex).await;
     }
 
     pub async fn event_loop(&mut self) {

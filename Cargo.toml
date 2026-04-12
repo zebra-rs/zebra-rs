@@ -29,3 +29,6 @@ tokio-stream = "0.1"
 tonic = "0.13"
 tonic-build = "0.13"
 clap = { version = "4", features = ["derive"] }
+
+[patch."https://github.com/zebra-rs/netlink-packet-route"]
+netlink-packet-route = { path = "./netlink-packet-route" }
