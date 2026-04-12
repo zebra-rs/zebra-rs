@@ -1131,6 +1131,112 @@ impl FibHandle {
             }
         }
     }
+
+    /// Add EVPN Type 3 (Inclusive Multicast) entry to kernel MDB
+    ///
+    /// This creates a multicast database entry for a multicast group that should
+    /// be replicated to remote VTEPs. The group and source are encoded in the MDB
+    /// entry for kernel multicast forwarding.
+    pub async fn mdb_add(
+        &self,
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+        seq: u32,
+    ) {
+        use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
+
+        // Resolve VNI to VXLAN interface index
+        let vxlan_ifindex = ifindex;
+
+        let mut msg = MdbMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.index = vxlan_ifindex;
+
+        // Encode multicast group and source into MDB entry
+        // Format: group_addr (4/16 bytes) + optional source_addr (4/16 bytes)
+        let mut mdb_entry_data = Vec::new();
+        match group {
+            IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+            IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+        }
+        if let Some(src) = source {
+            match src {
+                IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+                IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+            }
+        }
+
+        msg.attributes.push(MdbAttribute::MdbEntry(mdb_entry_data));
+
+        // Build netlink request with RTM_NEWMDB
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewMdb(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
+        req.header.sequence_number = seq;
+
+        // Send request
+        let mut response = match self.handle.clone().request(req) {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("MDB add request error for group {}: {}", group, e);
+                return;
+            }
+        };
+
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MDB add error for group {} on VNI {}: {}", group, vni, e);
+            }
+        }
+    }
+
+    /// Delete EVPN Type 3 (Inclusive Multicast) entry from kernel MDB
+    pub async fn mdb_del(&self, vni: u32, group: IpAddr, source: Option<IpAddr>, ifindex: u32) {
+        use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
+
+        let vxlan_ifindex = ifindex;
+
+        let mut msg = MdbMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.index = vxlan_ifindex;
+
+        // Encode multicast group and source for deletion
+        let mut mdb_entry_data = Vec::new();
+        match group {
+            IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+            IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+        }
+        if let Some(src) = source {
+            match src {
+                IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+                IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+            }
+        }
+
+        msg.attributes.push(MdbAttribute::MdbEntry(mdb_entry_data));
+
+        // Build netlink request with RTM_DELMDB
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelMdb(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        // Send request
+        let mut response = match self.handle.clone().request(req) {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("MDB del request error for group {}: {}", group, e);
+                return;
+            }
+        };
+
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MDB del error for group {} on VNI {}: {}", group, vni, e);
+            }
+        }
+    }
 }
 
 fn link_type_msg(link_type: LinkLayerType) -> link::LinkType {
@@ -1380,6 +1486,13 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                     tx.send(msg).unwrap();
                 }
             }
+            // TODO: Phase 4B - Add MDB message handling when netlink-packet-route supports it
+            // RouteNetlinkMessage::NewMdb(_) => {
+            //     // Parse MDB message and send MdbAdd message
+            // }
+            // RouteNetlinkMessage::DelMdb(_) => {
+            //     // Parse MDB message and send MdbDel message
+            // }
             _ => {}
         }
     }
