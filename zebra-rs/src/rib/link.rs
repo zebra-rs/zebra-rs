@@ -421,6 +421,14 @@ impl Rib {
             sysctl_mpls_enable(&link.name);
             self.api_link_add(&link);
             self.links.insert(link.index, link.clone());
+
+            // Register VXLAN interface with FIB for MAC FDB operations
+            if let Some(vxlan) = self.vxlan.get(&link.name) {
+                if let Some(vni) = vxlan.vni {
+                    self.fib_handle.register_vxlan_ifindex(vni, link.index);
+                }
+            }
+
             if !link.is_up() {
                 self.make_link_up(link.index).await;
             }
@@ -428,6 +436,12 @@ impl Rib {
     }
 
     pub fn link_delete(&mut self, oslink: FibLink) {
+        // Unregister VXLAN interface from FIB if applicable
+        if let Some(vxlan) = self.vxlan.get(&oslink.name) {
+            if let Some(vni) = vxlan.vni {
+                self.fib_handle.unregister_vxlan_ifindex(vni);
+            }
+        }
         self.links.remove(&oslink.index);
     }
 
