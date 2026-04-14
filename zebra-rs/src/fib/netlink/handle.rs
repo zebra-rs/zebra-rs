@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use futures::stream::StreamExt;
@@ -68,6 +69,9 @@ fn kernel_supports_nhid() -> bool {
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
     pub use_nhid: bool,
+    /// VNI to VXLAN interface index mapping
+    /// Used to resolve VNI to the correct VXLAN device for FDB operations
+    pub vni_ifindex_map: BTreeMap<u32, u32>,
 }
 
 impl FibHandle {
@@ -106,7 +110,11 @@ impl FibHandle {
             false
         };
 
-        Ok(Self { handle, use_nhid })
+        Ok(Self {
+            handle,
+            use_nhid,
+            vni_ifindex_map: BTreeMap::new(),
+        })
     }
 
     pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
@@ -1007,6 +1015,238 @@ impl FibHandle {
             }
         }
     }
+
+    /// Register VXLAN interface with its VNI for FDB operations
+    /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
+    pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
+        self.vni_ifindex_map.insert(vni, ifindex);
+    }
+
+    /// Unregister VXLAN interface mapping
+    pub fn unregister_vxlan_ifindex(&mut self, vni: u32) {
+        self.vni_ifindex_map.remove(&vni);
+    }
+
+    /// Add EVPN MAC entry to bridge FDB
+    /// Uses RTM_NEWNEIGH to install MAC address in kernel bridge
+    pub async fn mac_add(
+        &self,
+        vni: u32,
+        mac: &MacAddr,
+        tunnel_endpoint: Option<IpAddr>,
+        flags: u8,
+        seq: u32,
+        esi: Option<[u8; 10]>,
+    ) {
+        // Resolve VNI to VXLAN interface index using the registered mapping
+        // If not found, use VNI as fallback (for testing/simple configs)
+        let vxlan_ifindex = self.vni_ifindex_map.get(&vni).copied().unwrap_or(vni);
+
+        // Build bridge FDB entry using rtnetlink neighbours API
+        use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
+
+        // Create neighbour message for bridge FDB
+        let mut msg = NeighbourMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.ifindex = vxlan_ifindex;
+        // NUD_PERMANENT = 0x80
+        msg.header.state = netlink_packet_route::neighbour::NeighbourState::Other(0x80);
+
+        // Set flags: NTF_SELF (0x02) | NTF_EXT_LEARNED (0x10), and optionally NTF_STICKY (0x40)
+        let mut flag_value: u8 = 0x02 | 0x10;
+        if (flags & 0x01) != 0 {
+            flag_value |= 0x40;
+        }
+        use netlink_packet_route::neighbour::NeighbourFlags;
+        msg.header.flags = NeighbourFlags::from_bits_retain(flag_value);
+
+        // Add MAC address (NDA_LLADDR)
+        msg.attributes
+            .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
+
+        // Add VNI (NDA_VNI)
+        msg.attributes.push(NeighbourAttribute::Vni(vni));
+
+        // Add SRC_VNI (NDA_SRC_VNI)
+        msg.attributes.push(NeighbourAttribute::SourceVni(vni));
+
+        // Add Port (NDA_PORT)
+        msg.attributes.push(NeighbourAttribute::Port(4789));
+
+        // Add tunnel endpoint (NDA_DST for VXLAN remote VTEP)
+        // This attribute is interpreted differently in AF_BRIDGE context:
+        // In AF_BRIDGE with VXLAN, NDA_DST specifies the remote tunnel endpoint IP
+        if let Some(endpoint) = tunnel_endpoint {
+            use netlink_packet_route::neighbour::NeighbourAddress;
+            let addr = match endpoint {
+                IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
+                IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
+            };
+            msg.attributes
+                .push(NeighbourAttribute::TunnelEndpoint(addr));
+        }
+
+        // Phase 4D: ESI received and stored. Kernel multi-homing via NDA_NH_ID
+        // will be wired in Phase 5 when ECMP nexthop groups are supported.
+        if let Some(esi_val) = esi {
+            if esi_val != [0u8; 10] {
+                // ESI[0] is the ESI type. ESI[1..9] is the type-specific value.
+                eprintln!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
+            }
+        }
+
+        // Build netlink request
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_REPLACE;
+
+        // Send request
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MAC add error for {}: {}", mac, e);
+            }
+        }
+    }
+
+    /// Delete EVPN MAC entry from bridge FDB
+    pub async fn mac_del(&self, vni: u32, mac: &MacAddr) {
+        // Resolve VNI to VXLAN interface index using the registered mapping
+        let vxlan_ifindex = self.vni_ifindex_map.get(&vni).copied().unwrap_or(vni);
+
+        // Build delete request via netlink
+        use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
+
+        let mut msg = NeighbourMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.ifindex = vxlan_ifindex;
+
+        // Add MAC address for identification
+        msg.attributes
+            .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
+
+        // Add VNI for identification
+        msg.attributes.push(NeighbourAttribute::Vni(vni));
+
+        // Build netlink request
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelNeighbour(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        // Send request
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MAC del error for {}: {}", mac, e);
+            }
+        }
+    }
+
+    /// Add EVPN Type 3 (Inclusive Multicast) entry to kernel MDB
+    ///
+    /// This creates a multicast database entry for a multicast group that should
+    /// be replicated to remote VTEPs. The group and source are encoded in the MDB
+    /// entry for kernel multicast forwarding.
+    pub async fn mdb_add(
+        &self,
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+        seq: u32,
+    ) {
+        use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
+
+        // Resolve VNI to VXLAN interface index
+        let vxlan_ifindex = ifindex;
+
+        let mut msg = MdbMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.index = vxlan_ifindex;
+
+        // Encode multicast group and source into MDB entry
+        // Format: group_addr (4/16 bytes) + optional source_addr (4/16 bytes)
+        let mut mdb_entry_data = Vec::new();
+        match group {
+            IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+            IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+        }
+        if let Some(src) = source {
+            match src {
+                IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+                IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+            }
+        }
+
+        msg.attributes.push(MdbAttribute::MdbEntry(mdb_entry_data));
+
+        // Build netlink request with RTM_NEWMDB
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewMdb(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
+        req.header.sequence_number = seq;
+
+        // Send request
+        let mut response = match self.handle.clone().request(req) {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("MDB add request error for group {}: {}", group, e);
+                return;
+            }
+        };
+
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MDB add error for group {} on VNI {}: {}", group, vni, e);
+            }
+        }
+    }
+
+    /// Delete EVPN Type 3 (Inclusive Multicast) entry from kernel MDB
+    pub async fn mdb_del(&self, vni: u32, group: IpAddr, source: Option<IpAddr>, ifindex: u32) {
+        use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
+
+        let vxlan_ifindex = ifindex;
+
+        let mut msg = MdbMessage::default();
+        msg.header.family = AddressFamily::Bridge;
+        msg.header.index = vxlan_ifindex;
+
+        // Encode multicast group and source for deletion
+        let mut mdb_entry_data = Vec::new();
+        match group {
+            IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+            IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+        }
+        if let Some(src) = source {
+            match src {
+                IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
+                IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
+            }
+        }
+
+        msg.attributes.push(MdbAttribute::MdbEntry(mdb_entry_data));
+
+        // Build netlink request with RTM_DELMDB
+        use netlink_packet_route::RouteNetlinkMessage;
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelMdb(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        // Send request
+        let mut response = match self.handle.clone().request(req) {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("MDB del request error for group {}: {}", group, e);
+                return;
+            }
+        };
+
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                eprintln!("MDB del error for group {} on VNI {}: {}", group, vni, e);
+            }
+        }
+    }
 }
 
 fn link_type_msg(link_type: LinkLayerType) -> link::LinkType {
@@ -1256,6 +1496,13 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                     tx.send(msg).unwrap();
                 }
             }
+            // TODO: Phase 4B - Add MDB message handling when netlink-packet-route supports it
+            // RouteNetlinkMessage::NewMdb(_) => {
+            //     // Parse MDB message and send MdbAdd message
+            // }
+            // RouteNetlinkMessage::DelMdb(_) => {
+            //     // Parse MDB message and send MdbDel message
+            // }
             _ => {}
         }
     }

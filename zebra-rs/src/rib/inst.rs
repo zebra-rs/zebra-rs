@@ -5,8 +5,8 @@ use super::api::{RibRx, RibTx};
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
-    BridgeBuilder, BridgeConfig, Link, MplsConfig, Nexthop, NexthopMap, RibTxChannel, RibType,
-    StaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
+    BridgeBuilder, BridgeConfig, Link, MacAddr, MplsConfig, Nexthop, NexthopMap, RibTxChannel,
+    RibType, StaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -19,7 +19,7 @@ use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, HashMap};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -70,6 +70,31 @@ pub enum Message {
     VxlanDel {
         name: String,
     },
+    MacAdd {
+        vni: u32,
+        mac: MacAddr,
+        tunnel_endpoint: Option<IpAddr>,
+        flags: u8,
+        seq: u32,
+        esi: Option<[u8; 10]>,
+    },
+    MacDel {
+        vni: u32,
+        mac: MacAddr,
+    },
+    MdbAdd {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+        seq: u32,
+    },
+    MdbDel {
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+    },
     Shutdown {
         tx: oneshot::Sender<()>,
     },
@@ -105,6 +130,18 @@ impl IlmEntry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MacEntry {
+    pub vni: u32,
+    pub mac: MacAddr,
+    pub tunnel_endpoint: Option<IpAddr>,
+    pub flags: u8,
+    pub seq: u32,
+    pub esi: Option<[u8; 10]>,
+    pub ifindex: Option<u32>,
+    pub installed: bool,
+}
+
 pub struct Rib {
     pub api: RibTxChannel,
     pub cm: ConfigChannel,
@@ -119,6 +156,7 @@ pub struct Rib {
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
+    pub mac_table: BTreeMap<(u32, MacAddr), MacEntry>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub static_config: StaticConfig,
@@ -149,6 +187,7 @@ impl Rib {
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
+            mac_table: BTreeMap::new(),
             tx,
             rx,
             static_config: StaticConfig::new(),
@@ -271,6 +310,37 @@ impl Rib {
             Message::Subscribe { tx, proto } => {
                 self.subscribe(tx, proto);
             }
+            Message::MacAdd {
+                vni,
+                mac,
+                tunnel_endpoint,
+                flags,
+                seq,
+                esi,
+            } => {
+                self.mac_add(vni, mac, tunnel_endpoint, flags, seq, esi)
+                    .await;
+            }
+            Message::MacDel { vni, mac } => {
+                self.mac_del(vni, mac).await;
+            }
+            Message::MdbAdd {
+                vni,
+                group,
+                source,
+                ifindex,
+                seq,
+            } => {
+                self.mdb_add(vni, group, source, ifindex, seq).await;
+            }
+            Message::MdbDel {
+                vni,
+                group,
+                source,
+                ifindex,
+            } => {
+                self.mdb_del(vni, group, source, ifindex).await;
+            }
         }
     }
 
@@ -312,6 +382,40 @@ impl Rib {
                 if let IpNet::V4(prefix) = route.prefix {
                     self.ipv4_route_del(&prefix, route.entry).await;
                 }
+            }
+            FibMessage::MacAdd {
+                vni,
+                mac,
+                tunnel_endpoint,
+                flags,
+                seq,
+                esi,
+            } => {
+                self.fib_handle
+                    .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi)
+                    .await;
+            }
+            FibMessage::MacDel { vni, mac } => {
+                self.fib_handle.mac_del(vni, &mac).await;
+            }
+            FibMessage::MdbAdd {
+                vni,
+                group,
+                source,
+                ifindex,
+                seq,
+            } => {
+                self.fib_handle
+                    .mdb_add(vni, group, source, ifindex, seq)
+                    .await;
+            }
+            FibMessage::MdbDel {
+                vni,
+                group,
+                source,
+                ifindex,
+            } => {
+                self.fib_handle.mdb_del(vni, group, source, ifindex).await;
             }
         }
     }
@@ -398,6 +502,66 @@ impl Rib {
                 // TODO: Implement nexthop unregistration
             }
         }
+    }
+
+    async fn mac_add(
+        &mut self,
+        vni: u32,
+        mac: MacAddr,
+        tunnel_endpoint: Option<IpAddr>,
+        flags: u8,
+        seq: u32,
+        esi: Option<[u8; 10]>,
+    ) {
+        // MAC Mobility: ignore stale duplicates (lower sequence number)
+        if let Some(existing) = self.mac_table.get(&(vni, mac)) {
+            if seq < existing.seq {
+                return; // Ignore stale duplicate
+            }
+        }
+
+        let entry = MacEntry {
+            vni,
+            mac,
+            tunnel_endpoint,
+            flags,
+            seq,
+            esi,
+            ifindex: None,
+            installed: false,
+        };
+
+        self.mac_table.insert((vni, mac), entry);
+
+        // Forward to kernel FIB
+        self.fib_handle
+            .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi)
+            .await;
+    }
+
+    async fn mac_del(&mut self, vni: u32, mac: MacAddr) {
+        self.mac_table.remove(&(vni, mac));
+        // Forward deletion to kernel FIB
+        self.fib_handle.mac_del(vni, &mac).await;
+    }
+
+    async fn mdb_add(
+        &mut self,
+        vni: u32,
+        group: IpAddr,
+        source: Option<IpAddr>,
+        ifindex: u32,
+        seq: u32,
+    ) {
+        // Phase 4B: Forward MDB add request to FIB
+        self.fib_handle
+            .mdb_add(vni, group, source, ifindex, seq)
+            .await;
+    }
+
+    async fn mdb_del(&mut self, vni: u32, group: IpAddr, source: Option<IpAddr>, ifindex: u32) {
+        // Phase 4B: Forward MDB delete request to FIB
+        self.fib_handle.mdb_del(vni, group, source, ifindex).await;
     }
 
     pub async fn event_loop(&mut self) {

@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct MacAddr {
     octets: [u8; 6],
 }

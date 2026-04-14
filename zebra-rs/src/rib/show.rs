@@ -746,6 +746,99 @@ fn find_route_for_nexthop<'a>(
     None
 }
 
+#[derive(Serialize)]
+pub struct MacJson {
+    pub vni: u32,
+    pub mac: String,
+    pub tunnel_endpoint: Option<String>,
+    pub flags: String,
+    pub seq: u32,
+    pub installed: bool,
+}
+
+#[derive(Serialize)]
+pub struct MacTable {
+    pub entries: Vec<MacJson>,
+}
+
+pub fn mac_show(rib: &Rib, _args: Args, json: bool) -> String {
+    if json {
+        let mut entries = Vec::new();
+
+        for ((vni, mac), entry) in rib.mac_table.iter() {
+            entries.push(MacJson {
+                vni: *vni,
+                mac: mac.to_string(),
+                tunnel_endpoint: entry.tunnel_endpoint.map(|addr| addr.to_string()),
+                flags: format_mac_flags(entry.flags),
+                seq: entry.seq,
+                installed: entry.installed,
+            });
+        }
+
+        let mac_table = MacTable { entries };
+        serde_json::to_string_pretty(&mac_table)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize MAC table: {}\"}}", e))
+    } else {
+        let mut buf = String::new();
+
+        if rib.mac_table.is_empty() {
+            writeln!(buf, "No MAC entries").unwrap();
+            return buf;
+        }
+
+        // Add header
+        writeln!(
+            buf,
+            "VNI    MAC Address       Tunnel Endpoint       Flags Seq    Installed"
+        )
+        .unwrap();
+        writeln!(
+            buf,
+            "------ ------------------- --------------------- ----- ------ ---------",
+        )
+        .unwrap();
+
+        for ((vni, mac), entry) in rib.mac_table.iter() {
+            let tunnel_endpoint = entry
+                .tunnel_endpoint
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let flags = format_mac_flags(entry.flags);
+            let installed = if entry.installed { "Yes" } else { "No" };
+
+            writeln!(
+                buf,
+                "{:<6} {:<19} {:<21} {:<5} {:<6} {}",
+                vni, mac, tunnel_endpoint, flags, entry.seq, installed
+            )
+            .unwrap();
+        }
+
+        buf
+    }
+}
+
+fn format_mac_flags(flags: u8) -> String {
+    let mut flag_str = String::new();
+    if (flags & 0x01) != 0 {
+        flag_str.push('S'); // Sticky
+    }
+    if (flags & 0x02) != 0 {
+        flag_str.push('G'); // Gateway
+    }
+    if (flags & 0x04) != 0 {
+        flag_str.push('R'); // Router
+    }
+    if (flags & 0x08) != 0 {
+        flag_str.push('Y'); // sYnc
+    }
+    if flag_str.is_empty() {
+        flag_str.push('-');
+    }
+    flag_str
+}
+
 impl Rib {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -757,5 +850,6 @@ impl Rib {
         self.show_add("/show/ipv6/route", rib6_show);
         self.show_add("/show/nexthop", nexthop_show);
         self.show_add("/show/mpls/ilm", ilm_show);
+        self.show_add("/show/l2/mac/table", mac_show);
     }
 }
