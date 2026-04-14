@@ -13,6 +13,7 @@ use prefix_trie::PrefixMap;
 
 use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
+use crate::rib::{self, MacAddr};
 
 use super::cap::CapAfiMap;
 use super::peer::{BgpTop, Event, Peer, PeerType};
@@ -61,6 +62,8 @@ pub struct BgpRib {
     pub nexthop: Option<Vpnv4Nexthop>,
     // Stale.
     pub stale: bool,
+    // Phase 4D: EVPN ESI (Ethernet Segment Identifier) for multi-homing
+    pub esi: Option<[u8; 10]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +122,7 @@ impl BgpRib {
             label,
             nexthop,
             stale,
+            esi: None,
         }
     }
 
@@ -1009,6 +1013,143 @@ pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.eor.clear();
 }
 
+/// Extract VNI from Route Distinguisher
+/// For EVPN routes, VNI is typically encoded in the lower 3 bytes of the RD value.
+/// RFC 7432 uses RD Type 0 (ASN) with format: [2 bytes ASN][3 bytes VNI][1 byte index]
+fn extract_vni_from_rd(rd: &RouteDistinguisher) -> Option<u32> {
+    // RouteDistinguisher has: typ (RouteDistinguisherType) and val ([u8; 6])
+    // For Type 0 (ASN): val = [2 bytes ASN][4 bytes value]
+    // VNI is typically in bytes 2-4 of val (3 bytes = 24-bit VNI)
+    let vni = ((rd.val[2] as u32) << 16) | ((rd.val[3] as u32) << 8) | (rd.val[4] as u32);
+
+    // Only return VNI if it's non-zero (valid)
+    if vni > 0 && vni < 0x1000000 {
+        Some(vni)
+    } else {
+        None
+    }
+}
+
+/// Extract flags (sticky, gateway, router) from extended communities
+fn extract_flags_from_attr(attr: &BgpAttr) -> u8 {
+    let mut flags = 0u8;
+
+    if let Some(ecom) = &attr.ecom {
+        for ec in &ecom.0 {
+            // Check for Sticky MAC (Type 0x09, Sub-type 0x00)
+            if ec.high_type == 0x09 && ec.low_type == 0x00 {
+                // Sticky MAC flag
+                flags |= 0x01;
+            }
+            // Check for Gateway MAC (Type 0x09, Sub-type 0x01)
+            if ec.high_type == 0x09 && ec.low_type == 0x01 {
+                // Gateway MAC flag
+                flags |= 0x02;
+            }
+            // Check for Router flag (Type 0x09, Sub-type 0x03)
+            if ec.high_type == 0x09 && ec.low_type == 0x03 {
+                // Router flag
+                flags |= 0x04;
+            }
+        }
+    }
+
+    flags
+}
+
+/// Extract MAC mobility sequence number from extended communities
+fn extract_mac_mobility_seq(attr: &BgpAttr) -> u32 {
+    if let Some(ecom) = &attr.ecom {
+        for ec in &ecom.0 {
+            // Check for MAC Mobility (Type 0x06, Sub-type 0x00)
+            if ec.high_type == 0x06 && ec.low_type == 0x00 {
+                // Sequence number is in bytes 4-5
+                return u32::from_be_bytes([ec.val[2], ec.val[3], ec.val[4], ec.val[5]]);
+            }
+        }
+    }
+    0
+}
+
+/// Extract tunnel endpoint from BgpRib nexthop
+fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
+    rib.nexthop.as_ref().map(|nh| {
+        // Vpnv4Nexthop has nhop field (not nexthop) containing the VTEP IP
+        IpAddr::V4(nh.nhop)
+    })
+}
+
+/// Export selected EVPN MAC entry to RIB for kernel installation
+/// Called after best path selection to send MACs to the RIB layer
+fn route_evpn_export_selected(
+    rd: &RouteDistinguisher,
+    prefix: &EvpnPrefix,
+    selected: &[BgpRib],
+    bgp: &mut BgpTop,
+) {
+    // If no selected path exists, send delete
+    if selected.is_empty() {
+        match prefix {
+            EvpnPrefix::MacIp { mac, .. } => {
+                if let Some(vni) = extract_vni_from_rd(rd) {
+                    let msg = rib::Message::MacDel {
+                        vni,
+                        mac: MacAddr::from(*mac),
+                    };
+                    let _ = bgp.rib_tx.send(msg);
+                }
+            }
+            EvpnPrefix::InclusiveMulticast { orig, .. } => {
+                // Phase 4B: Type 3 multicast route withdrawal
+                if let Some(vni) = extract_vni_from_rd(rd) {
+                    let msg = rib::Message::MdbDel {
+                        vni,
+                        group: *orig,
+                        source: None,
+                        ifindex: 0,
+                    };
+                    let _ = bgp.rib_tx.send(msg);
+                }
+            }
+        }
+        return;
+    }
+
+    // Extract best path (last entry in selected vector)
+    let best = &selected[selected.len() - 1];
+
+    match prefix {
+        EvpnPrefix::MacIp { mac, .. } => {
+            if let Some(vni) = extract_vni_from_rd(rd) {
+                let msg = rib::Message::MacAdd {
+                    vni,
+                    mac: MacAddr::from(*mac),
+                    tunnel_endpoint: extract_tunnel_endpoint(best),
+                    flags: extract_flags_from_attr(&best.attr),
+                    seq: extract_mac_mobility_seq(&best.attr),
+                    esi: best.esi, // Phase 4D: Extracted from EVPN route
+                };
+                let _ = bgp.rib_tx.send(msg);
+            }
+        }
+        EvpnPrefix::InclusiveMulticast { orig, .. } => {
+            // Phase 4B: Type 3 Inclusive Multicast route installation
+            // This route indicates that a multicast group (*,G) should be replicated to
+            // all VTEPs that have advertised this route.
+            if let Some(vni) = extract_vni_from_rd(rd) {
+                let msg = rib::Message::MdbAdd {
+                    vni,
+                    group: *orig,
+                    source: None,
+                    ifindex: 0,
+                    seq: extract_mac_mobility_seq(&best.attr),
+                };
+                let _ = bgp.rib_tx.send(msg);
+            }
+        }
+    }
+}
+
 /// Install one EVPN route received in an MP_REACH_NLRI into Adj-RIB-In and
 /// the Loc-RIB. Mirrors `route_ipv4_update` but takes the parsed
 /// `EvpnRoute` directly.
@@ -1065,7 +1206,7 @@ pub fn route_evpn_update(
         (peer.ident, peer.remote_id, typ)
     };
 
-    let rib = BgpRib::new(
+    let mut rib = BgpRib::new(
         peer_ident,
         peer_router_id,
         typ,
@@ -1077,12 +1218,21 @@ pub fn route_evpn_update(
         stale,
     );
 
+    // Phase 4D: Extract ESI from EVPN Type 2 route for multi-homing support
+    if let EvpnRoute::Mac(m) = route {
+        rib.esi = Some(m.esi);
+    }
+
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         peer.adj_in.add_evpn(rd, prefix.clone(), rib.clone());
     }
 
-    let _ = bgp.local_rib.update_evpn(rd, prefix, rib);
+    let _ = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
+
+    // After updating Loc-RIB, re-run best path selection and export to RIB
+    let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+    route_evpn_export_selected(&rd, &prefix, &selected, bgp);
 }
 
 /// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
@@ -1100,7 +1250,10 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     }
 
     let _ = bgp.local_rib.remove_evpn(rd, &prefix, id, ident);
-    let _ = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+    let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+
+    // After best path selection, export to RIB (sends MacDel if no paths remain)
+    route_evpn_export_selected(&rd, &prefix, &selected, bgp);
 }
 
 pub fn route_from_peer(

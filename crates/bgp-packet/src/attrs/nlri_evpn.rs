@@ -64,7 +64,7 @@ pub enum EvpnRoute {
 pub struct EvpnMac {
     pub id: u32,
     pub rd: RouteDistinguisher,
-    pub esi_type: u8,
+    pub esi: [u8; 10],
     pub ether_tag: u32,
     pub mac: [u8; 6],
     pub vni: u32,
@@ -238,8 +238,9 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
             MacIpAdvRoute => {
                 let (input, rd) = RouteDistinguisher::parse_be(input)?;
 
-                let (input, esi_type) = be_u8(input)?;
-                let (input, _esi) = take(9usize).parse(input)?;
+                let (input, esi_raw) = take(10usize).parse(input)?;
+                let mut esi = [0u8; 10];
+                esi.copy_from_slice(esi_raw);
                 let (input, ether_tag) = be_u32(input)?;
 
                 let (input, mac_len) = be_u8(input)?;
@@ -260,7 +261,7 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                 let mut evpn = EvpnMac {
                     id,
                     rd,
-                    esi_type,
+                    esi,
                     ether_tag,
                     mac: [0u8; 6],
                     vni,
