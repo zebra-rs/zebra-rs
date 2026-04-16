@@ -1019,7 +1019,10 @@ impl FibHandle {
     /// Register VXLAN interface with its VNI for FDB operations
     /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
     pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
-        eprintln!("[FIB] Registered VXLAN VNI {} with ifindex {}", vni, ifindex);
+        eprintln!(
+            "[FIB] Registered VXLAN VNI {} with ifindex {}",
+            vni, ifindex
+        );
         self.vni_ifindex_map.insert(vni, ifindex);
     }
 
@@ -1223,7 +1226,9 @@ impl FibHandle {
                     "MDB add error for group {} on VNI {} (ifindex {}, source: {:?}): {}",
                     group, vni, ifindex, source, e
                 );
-                eprintln!("  → Likely cause: VXLAN interface not created or MDB entry format invalid");
+                eprintln!(
+                    "  → Likely cause: VXLAN interface not created or MDB entry format invalid"
+                );
                 eprintln!("  → Check if VXLAN interface exists: ip link show");
                 eprintln!("  → Check if interface supports MDB: bridge mdb show");
             }
