@@ -1019,11 +1019,13 @@ impl FibHandle {
     /// Register VXLAN interface with its VNI for FDB operations
     /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
     pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
+        eprintln!("[FIB] Registered VXLAN VNI {} with ifindex {}", vni, ifindex);
         self.vni_ifindex_map.insert(vni, ifindex);
     }
 
     /// Unregister VXLAN interface mapping
     pub fn unregister_vxlan_ifindex(&mut self, vni: u32) {
+        eprintln!("[FIB] Unregistered VXLAN VNI {}", vni);
         self.vni_ifindex_map.remove(&vni);
     }
 
@@ -1104,7 +1106,17 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                eprintln!("MAC add error for {}: {}", mac, e);
+                let has_mapping = self.vni_ifindex_map.contains_key(&vni);
+                eprintln!(
+                    "MAC add error for {} (VNI {}, ifindex {}, vni_ifindex_map exists: {}): {}",
+                    mac, vni, vxlan_ifindex, has_mapping, e
+                );
+                if !has_mapping {
+                    eprintln!(
+                        "  → VNI {} not registered in vni_ifindex_map (did VXLAN interface register?)",
+                        vni
+                    );
+                }
             }
         }
     }
@@ -1137,7 +1149,17 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                eprintln!("MAC del error for {}: {}", mac, e);
+                let has_mapping = self.vni_ifindex_map.contains_key(&vni);
+                eprintln!(
+                    "MAC del error for {} (VNI {}, ifindex {}, vni_ifindex_map exists: {}): {}",
+                    mac, vni, vxlan_ifindex, has_mapping, e
+                );
+                if !has_mapping {
+                    eprintln!(
+                        "  → VNI {} not registered in vni_ifindex_map (did VXLAN interface register?)",
+                        vni
+                    );
+                }
             }
         }
     }
@@ -1197,7 +1219,13 @@ impl FibHandle {
 
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                eprintln!("MDB add error for group {} on VNI {}: {}", group, vni, e);
+                eprintln!(
+                    "MDB add error for group {} on VNI {} (ifindex {}, source: {:?}): {}",
+                    group, vni, ifindex, source, e
+                );
+                eprintln!("  → Likely cause: VXLAN interface not created or MDB entry format invalid");
+                eprintln!("  → Check if VXLAN interface exists: ip link show");
+                eprintln!("  → Check if interface supports MDB: bridge mdb show");
             }
         }
     }
