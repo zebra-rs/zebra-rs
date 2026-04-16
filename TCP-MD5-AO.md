@@ -1,0 +1,242 @@
+# BGP TCP MD5 authentication and Authentication Option
+
+Design and development plan for adding TCP MD5 (RFC 2385) and TCP
+Authentication Option / TCP-AO (RFC 5925, RFC 5926) support to the
+BGP implementation in zebra-rs.
+
+Working branch: `feature/bgp-tcp-md5-and-ao-auth`.
+
+## Development plan (phased)
+
+| Phase | Deliverable | Lands as |
+|-------|-------------|----------|
+| 1 | RFC specification summary (this document) | doc-only commit |
+| 2 | Standalone TCP MD5 and TCP-AO example binaries | `zebra-rs/examples/` |
+| 3 | YANG model extensions for MD5 password and AO key chain | `zebra-rs/yang/` |
+| 4 | BGP integration: `PeerTransportConfig`, socket hooks, config callbacks | `zebra-rs/src/bgp/` |
+| 5 | Architecture doc, CLI tests, interop notes | `cli/tests/`, this doc |
+
+Phases 1 and 2 are intended to land first as a reviewable reference.
+Phases 3–5 depend on phase 2 and can land together or split.
+
+# Specification
+
+## RFC 2385 — TCP MD5 Signature Option
+
+- Adds a TCP option (kind 19, length 18) carrying a 16-byte MD5 digest
+  computed over: the TCP pseudo-header, the TCP header (with checksum
+  and digest-option zeroed), the TCP segment data, and a shared secret.
+- One key per peer. No in-band key rotation — rekey requires tearing
+  the session down.
+- Obsoleted as "historic" by RFC 5925 but still the most widely
+  deployed BGP session authentication mechanism in practice.
+- Linux kernel API: `setsockopt(TCP_MD5SIG_EXT)` with a
+  `struct tcp_md5sig` that carries peer address, optional prefix
+  length (for listening sockets serving multiple peers), key length,
+  and up to 80 bytes of key material.
+- Placement is asymmetric between the two sides of a session:
+  - Active side: on the `TcpSocket` after creation, before `connect()`.
+  - Passive side: on the **listening** socket, keyed by peer address
+    or prefix, installed **before the peer's SYN arrives**. The MD5
+    check runs during the three-way handshake, so by the time
+    `accept()` returns the handshake is already over — a post-`accept()`
+    setsockopt has no effect on authentication of that session.
+
+## RFC 5925 — TCP Authentication Option (TCP-AO) and RFC 5926 — Cryptographic Algorithms
+
+- Replaces MD5. Uses TCP option kind 29 carrying a KeyID, RNextKeyID,
+  and a truncated MAC (96 bits by default).
+- Master Key Tuples (MKTs) bind SendID/RecvID, traffic keys, and a MAC
+  algorithm to a connection. Multiple MKTs per connection allow
+  in-band, seamless key rollover via the RNextKeyID field.
+- RFC 5926 mandates HMAC-SHA-1-96 and AES-128-CMAC-96; traffic keys
+  are derived via a KDF from the master key and connection identifiers
+  (ISN pair), so MACs are not vulnerable to the same replay and
+  cross-connection attacks as MD5.
+- Linux kernel API (≥ 6.7): `setsockopt(TCP_AO_ADD_KEY)`,
+  `TCP_AO_DEL_KEY`, `TCP_AO_INFO`, `TCP_AO_REPAIR`, and
+  `TCP_AO_GET_KEYS`. Each key carries algorithm name, SendID, RecvID,
+  address/prefix, and key material.
+
+## Kernel availability
+
+- `TCP_MD5SIG` / `TCP_MD5SIG_EXT`: available for many years, stable.
+- `TCP_AO_*`: Linux 6.7+. Absence is detected at runtime — fall back
+  to logging a configuration error if AO is configured on a kernel
+  that does not support it.
+- macOS / BSD: not supported in this phase. Configuring MD5 or AO on
+  non-Linux targets should log a warning and leave the socket
+  un-authenticated, rather than fail hard.
+
+# Example code
+
+Small standalone binaries under `zebra-rs/examples/` that exercise the
+setsockopt plumbing end-to-end, independent of BGP. These are the
+reference for phase 4 and a regression harness for kernel-API changes.
+
+Linux-only; guarded with `#[cfg(target_os = "linux")]`.
+
+## TCP MD5 server & client
+
+- `examples/tcp_md5_server.rs` — binds a `TcpListener` on a chosen
+  port, sets `TCP_MD5SIG_EXT` for an expected peer address and shared
+  key, accepts one connection, echoes bytes.
+- `examples/tcp_md5_client.rs` — creates a `TcpSocket`, sets
+  `TCP_MD5SIG_EXT` for the server address and the same key, connects,
+  sends a line.
+- Uses `libc` / `nix` crate for setsockopt; no dependency on tokio to
+  keep the example minimal.
+
+## TCP AO server & client
+
+- `examples/tcp_ao_server.rs` and `examples/tcp_ao_client.rs` —
+  equivalent structure, using `TCP_AO_ADD_KEY` to install one MKT per
+  direction with SendID/RecvID and HMAC-SHA-1-96.
+- Demonstrates key-rollover by calling `TCP_AO_ADD_KEY` a second time
+  mid-session and switching via RNextKeyID.
+
+# BGP integration
+
+## Configuration sample for TCP MD5
+
+```
+router bgp 65001
+ neighbor 10.0.0.2 remote-as 65002
+ neighbor 10.0.0.2 password s3cret
+```
+
+Equivalent YANG-level leaf: a single `password` string under the
+neighbor's transport container.
+
+## Configuration sample for TCP AO
+
+```
+key chain KC-BGP
+ key 1
+  key-string hexadecimal 0123456789abcdef...
+  cryptographic-algorithm hmac-sha1-96
+  send-id 100
+  recv-id 100
+
+router bgp 65001
+ neighbor 10.0.0.2 remote-as 65002
+ neighbor 10.0.0.2 ao key-chain KC-BGP
+```
+
+The key-chain model should reuse `ietf-key-chain@2017-06-15` if
+already vendored; otherwise a minimal inline grouping with
+`send-id`, `recv-id`, `algorithm`, `key-string`.
+
+# Architecture design in zebra-rs's BGP
+
+## Touchpoints
+
+Current state (verified on `feature/bgp-tcp-md5-and-ao-auth`):
+
+- `zebra-rs/src/bgp/peer.rs:118` — `PeerTransportConfig`
+  (`passive`, `update_source`). Extend with
+  `md5_password: Option<String>` and `ao_keychain: Option<AoKeychain>`.
+- `zebra-rs/src/bgp/peer.rs:771` — `peer_connect()` creates the
+  active `TcpSocket` and calls `connect()`. Insert setsockopt calls
+  between socket creation and connect.
+- `zebra-rs/src/bgp/inst.rs:245` — IPv4 `TcpListener::bind` on
+  `0.0.0.0:179`.
+- `zebra-rs/src/bgp/inst.rs:27–42` — `create_ipv6_listener()` using
+  `socket2::Socket`. Apply MD5/AO keys per peer on the listening
+  socket via `TCP_MD5SIG_EXT` / `TCP_AO_ADD_KEY` with peer prefix, so
+  a single listener can serve many peers with distinct keys.
+- `zebra-rs/src/bgp/config.rs:38–68` — add
+  `config_peer_password()` and `config_peer_keychain()` callbacks
+  mirroring the existing `config_peer_as()` pattern.
+
+## Passive vs active side placement
+
+Where the MD5 / AO key goes is not symmetric, and getting this wrong
+on the passive side silently drops the peer's SYN with no log at the
+BGP layer.
+
+- **Active side** (`peer_connect()` in `peer.rs`): after the
+  `TcpSocket` is created and before `connect()`, install
+  `TCP_MD5SIG_EXT` / `TCP_AO_ADD_KEY` bound to the remote peer's
+  address. The key is used when sending the SYN.
+- **Passive side** (listener in `inst.rs`): install the key on the
+  `TcpListener` socket itself, keyed by the peer's address or prefix
+  via the `tcpm_prefixlen` field. This must happen **before the
+  peer's SYN arrives**.
+
+The reason the passive side cannot recover after `accept()`:
+
+1. The peer's SYN carries a TCP MD5 option.
+2. The kernel looks up the matching key on the **listening** socket.
+3. If no key matches, or the digest does not validate, the kernel
+   silently drops the SYN. No SYN-ACK is sent, no child socket is
+   created, `accept()` never fires.
+4. Only if the digest validates does the handshake complete and
+   `accept()` return a new fd. By that point the handshake is
+   already over — a subsequent setsockopt on the child socket only
+   affects segments going forward, and a mismatched key immediately
+   kills the session.
+
+Operational implications:
+
+- **Config ordering**: each peer's key is installed on the listener
+  at peer-creation time, not lazily on first connection. A SYN that
+  arrives before the key is installed is dropped with no BGP-layer
+  signal.
+- **Listen-range / dynamic peers**: cannot use MD5 without
+  per-prefix keys installed in advance. Not a regression today
+  (zebra-rs does not support listen-range), but a constraint to
+  remember if that feature is added later.
+- **Key removal**: de-configuring a password must also issue
+  `TCP_MD5SIG_EXT` with an empty key on the listener for that peer,
+  in addition to tearing down any active session.
+
+## Data flow
+
+```
+YANG config change
+   -> libyang validation
+   -> bgp::config callback (password / keychain)
+   -> Peer.config.transport update
+   -> setsockopt on the shared listener for this peer's address
+      (passive path: must happen before the peer's next SYN)
+   -> if peer is up: FSM back to Idle, re-establish
+   -> peer_connect() creates a fresh TcpSocket, applies setsockopt,
+      then connects (active path)
+```
+
+## Key lifecycle
+
+- Initial configuration: applied at peer creation, before first
+  connect / before listener starts accepting that peer's prefix.
+- Key change on a running session:
+  - MD5: tear the FSM down to Idle and reconnect (kernel does not
+    support in-place rekey for TCP_MD5SIG).
+  - AO: supports in-band rollover via RNextKeyID; for the initial
+    implementation we use the same tear-down path for simplicity and
+    defer seamless rollover to a follow-up.
+- Key removal: explicit `TCP_MD5SIG_EXT` / `TCP_AO_DEL_KEY` on the
+  listener socket for that peer, plus tear-down of the active session
+  if any.
+
+## Platform guards
+
+All setsockopt plumbing sits behind `#[cfg(target_os = "linux")]`.
+Non-Linux builds compile a stub that logs a warning and returns `Ok`
+so that configuration with MD5/AO still parses but does not enforce
+authentication. This matches zebra-rs's existing Linux-primary
+posture.
+
+# Open questions
+
+1. **PR granularity** — land phases 1 + 2 first as a reference, then
+   3–5 together? Recommended: yes.
+2. **TCP-AO kernel floor** — require Linux ≥ 6.7 unconditionally, or
+   add a feature flag to compile-out AO? Recommended: runtime detect,
+   no feature flag.
+3. **Key chain model** — reuse `ietf-key-chain@2017-06-15` if
+   vendored, otherwise inline minimal grouping. To be resolved in
+   phase 3.
+4. **macOS / BSD** — stub with warning log, or compile error?
+   Recommended: stub + warning, matching zebra-rs's current
+   platform posture.
