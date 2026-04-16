@@ -1016,18 +1016,40 @@ pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
 /// Extract VNI from Route Distinguisher
 /// For EVPN routes, VNI is typically encoded in the lower 3 bytes of the RD value.
 /// RFC 7432 uses RD Type 0 (ASN) with format: [2 bytes ASN][3 bytes VNI][1 byte index]
-fn extract_vni_from_rd(rd: &RouteDistinguisher) -> Option<u32> {
-    // RouteDistinguisher has: typ (RouteDistinguisherType) and val ([u8; 6])
-    // For Type 0 (ASN): val = [2 bytes ASN][4 bytes value]
-    // VNI is typically in bytes 2-4 of val (3 bytes = 24-bit VNI)
-    let vni = ((rd.val[2] as u32) << 16) | ((rd.val[3] as u32) << 8) | (rd.val[4] as u32);
 
-    // Only return VNI if it's non-zero (valid)
-    if vni > 0 && vni < 0x1000000 {
-        Some(vni)
-    } else {
-        None
+/// Extract VNI from Route Target (RT) extended community
+///
+/// RFC 8365 Section 5.1: "Each VXLAN EVPN instance is associated with a VXLAN VNI.
+/// The VNI is encoded in the Route Target extended community."
+///
+/// RFC 4360: Route Target Type 0x0002 (transitive)
+/// Value format: [2 bytes ASN][4 bytes value]
+/// VNI = lower 3 bytes of value (24-bit, bytes [2:5])
+///
+/// Example: RT 65501:550
+///   - ASN: 65501 (0xFF8D)
+///   - Value: 550 (0x000226)
+///   - Bytes [2:5]: [0x02, 0x26, 0x00] → VNI 550
+fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
+    if let Some(ecom) = &attr.ecom {
+        for ec in &ecom.0 {
+            // RFC 4360: Route Target Type is high_type 0x00, low_type 0x02
+            if ec.high_type == 0x00 && ec.low_type == 0x02 {
+                // RT value: [2 bytes ASN][4 bytes target]
+                // VNI is lower 3 bytes of the 4-byte target value
+                // Extract from bytes [2:5] (skip 2-byte ASN)
+                let vni = ((ec.val[2] as u32) << 16)
+                    | ((ec.val[3] as u32) << 8)
+                    | (ec.val[4] as u32);
+
+                if vni > 0 && vni < 0x1000000 {
+                    eprintln!("[BGP] Extracted VNI {} from Route Target (RFC 8365)", vni);
+                    return Some(vni);
+                }
+            }
+        }
     }
+    None
 }
 
 /// Extract flags (sticky, gateway, router) from extended communities
@@ -1091,17 +1113,25 @@ fn route_evpn_export_selected(
     if selected.is_empty() {
         match prefix {
             EvpnPrefix::MacIp { mac, .. } => {
-                if let Some(vni) = extract_vni_from_rd(rd) {
+                // RFC 8365: VNI must come from Route Target extended community
+                if let Some(vni) = selected.first().and_then(|p| extract_vni_from_attr(&p.attr)) {
                     let msg = rib::Message::MacDel {
                         vni,
                         mac: MacAddr::from(*mac),
                     };
                     let _ = bgp.rib_tx.send(msg);
+                } else {
+                    eprintln!(
+                        "[ERROR] EVPN Type 2 route missing Route Target (RFC 8365). \
+                         VNI required from RT extended community. RD: {:?}",
+                        rd
+                    );
                 }
             }
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
                 // Phase 4B: Type 3 multicast route withdrawal
-                if let Some(vni) = extract_vni_from_rd(rd) {
+                // RFC 8365: VNI must come from Route Target extended community
+                if let Some(vni) = selected.first().and_then(|p| extract_vni_from_attr(&p.attr)) {
                     let msg = rib::Message::MdbDel {
                         vni,
                         group: *orig,
@@ -1109,6 +1139,12 @@ fn route_evpn_export_selected(
                         ifindex: 0,
                     };
                     let _ = bgp.rib_tx.send(msg);
+                } else {
+                    eprintln!(
+                        "[ERROR] EVPN Type 3 route missing Route Target (RFC 8365). \
+                         VNI required from RT extended community. RD: {:?}",
+                        rd
+                    );
                 }
             }
         }
@@ -1120,7 +1156,8 @@ fn route_evpn_export_selected(
 
     match prefix {
         EvpnPrefix::MacIp { mac, .. } => {
-            if let Some(vni) = extract_vni_from_rd(rd) {
+            // RFC 8365: VNI must come from Route Target extended community
+            if let Some(vni) = extract_vni_from_attr(&best.attr) {
                 let msg = rib::Message::MacAdd {
                     vni,
                     mac: MacAddr::from(*mac),
@@ -1130,13 +1167,20 @@ fn route_evpn_export_selected(
                     esi: best.esi, // Phase 4D: Extracted from EVPN route
                 };
                 let _ = bgp.rib_tx.send(msg);
+            } else {
+                eprintln!(
+                    "[ERROR] EVPN Type 2 route missing Route Target (RFC 8365). \
+                     VNI required from RT extended community. RD: {:?}",
+                    rd
+                );
             }
         }
         EvpnPrefix::InclusiveMulticast { orig, .. } => {
             // Phase 4B: Type 3 Inclusive Multicast route installation
             // This route indicates that a multicast group (*,G) should be replicated to
             // all VTEPs that have advertised this route.
-            if let Some(vni) = extract_vni_from_rd(rd) {
+            // RFC 8365: VNI must come from Route Target extended community
+            if let Some(vni) = extract_vni_from_attr(&best.attr) {
                 let msg = rib::Message::MdbAdd {
                     vni,
                     group: *orig,
@@ -1145,6 +1189,12 @@ fn route_evpn_export_selected(
                     seq: extract_mac_mobility_seq(&best.attr),
                 };
                 let _ = bgp.rib_tx.send(msg);
+            } else {
+                eprintln!(
+                    "[ERROR] EVPN Type 3 route missing Route Target (RFC 8365). \
+                     VNI required from RT extended community. RD: {:?}",
+                    rd
+                );
             }
         }
     }
