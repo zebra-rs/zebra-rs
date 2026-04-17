@@ -1,0 +1,298 @@
+module zebra-bgp-auth {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-auth";
+  prefix "zba";
+
+  import ietf-key-chain {
+    prefix kc;
+    reference "RFC 8177: YANG Data Model for Key Chains.";
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Zebra-rs YANG extensions for BGP session authentication.
+
+     Adds two things to the zebra-rs CLI tree:
+
+     1. A top-level `key-chains` container under /configure:set (and
+        /configure:delete), reusing ietf-key-chain's crypto-algorithm
+        identities but carrying TCP-AO SendID/RecvID per key (RFC 5925
+        §3.1). RFC 8177's `key-id` remains the local administrative
+        handle.
+
+     2. Two per-neighbor presence containers on each BGP neighbor:
+
+        - `tcp-md5`: IOS-XR-style flat per-neighbor shared secret
+          (RFC 2385). Encoding (clear/encrypted) and 1..80 byte
+          password. Does not use a key chain.
+
+        - `tcp-ao`: key-chain name reference, plus an
+          `include-tcp-options` boolean that maps to the Linux
+          TCP_AO_KEYF_EXCLUDE_OPT flag (inverted polarity).
+
+     Mutual exclusion (MD5 xor AO per neighbor) is enforced by the
+     zebra-rs commit validator, not by YANG.";
+
+  revision 2026-04-16 {
+    description "Initial revision.";
+    reference "RFC 2385, RFC 5925, RFC 5926, RFC 8177.";
+  }
+
+  /* =========================================================
+   * Types
+   * ========================================================= */
+
+  typedef password-encoding {
+    type enumeration {
+      enum clear {
+        description
+          "Password is input and stored in cleartext.";
+      }
+      enum encrypted {
+        description
+          "Password is stored in zebra-rs's obfuscated form. Treat
+           as reversible; do not rely on it for secrecy at rest.";
+      }
+    }
+    description
+      "Encoding tag for a BGP neighbor TCP MD5 password.";
+  }
+
+  /* =========================================================
+   * Key-chains grouping
+   *
+   * Used from config.yang via `uses zba:key-chains-group` so the
+   * container appears at /configure:set/key-chains and
+   * /configure:delete/key-chains.
+   * ========================================================= */
+
+  grouping key-chains-group {
+    description
+      "Zebra-rs shaped key-chains container for TCP-AO. Reuses
+       ietf-key-chain's crypto-algorithm identities. A subset of RFC
+       8177 functionality is modeled — accept-tolerance, aes-key-wrap,
+       and the independent-send-accept-lifetime case are omitted
+       pending a real deployment need.";
+    reference "RFC 8177, RFC 5925";
+
+    container key-chains {
+      ext:help "Key chains for TCP-AO authentication";
+      description
+        "All configured key-chains on this system.";
+
+      list key-chain {
+        key "name";
+        description
+          "A named key chain.";
+
+        leaf name {
+          type string;
+          description
+            "Key chain name, referenced from a BGP neighbor's
+             tcp-ao/key-chain leaf.";
+        }
+
+        leaf description {
+          type string;
+          description
+            "Human-readable description.";
+        }
+
+        list key {
+          key "key-id";
+          description
+            "A single key within the chain. `key-id` is a local
+             administrative identifier per RFC 8177 and is distinct
+             from the on-the-wire SendID/RecvID.";
+
+          leaf key-id {
+            type uint64;
+            description
+              "Local administrative identifier for this key within
+               the chain.";
+          }
+
+          leaf crypto-algorithm {
+            type identityref {
+              base kc:crypto-algorithm;
+            }
+            mandatory true;
+            description
+              "MAC algorithm. For TCP-AO the MUST-implement choices
+               per RFC 5926 are hmac-sha-1 (HMAC-SHA-1-96) and
+               aes-cmac-prf-128 (AES-128-CMAC-96). For TCP MD5 use
+               md5 — but note that zebra-rs's TCP MD5 path uses
+               tcp-md5/password on the neighbor, not a key chain.";
+            reference "RFC 5926, RFC 8177";
+          }
+
+          container key-string {
+            description
+              "The key material.";
+            choice key-string-style {
+              description
+                "Key string encoding.";
+              case keystring {
+                leaf keystring {
+                  type string;
+                  description
+                    "Key material in ASCII.";
+                }
+              }
+              case hexadecimal {
+                leaf hexadecimal-string {
+                  type string;
+                  description
+                    "Key material in hexadecimal form. Even number
+                     of hex digits expected; validated at commit.";
+                }
+              }
+            }
+          }
+
+          leaf send-id {
+            type uint8;
+            description
+              "TCP-AO SendID written into outgoing TCP-AO option
+               headers for this MKT. For the session to come up,
+               this must equal the peer's RecvID for the same key.";
+            reference "RFC 5925 §3.1";
+          }
+
+          leaf recv-id {
+            type uint8;
+            description
+              "TCP-AO RecvID expected in incoming TCP-AO option
+               headers for this MKT. Typically equals the peer's
+               SendID for the same key.";
+            reference "RFC 5925 §3.1";
+          }
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Per-neighbor authentication grouping
+   *
+   * Used via augment into /configure:set/.../bgp:neighbor and
+   * /configure:delete/.../bgp:neighbor.
+   * ========================================================= */
+
+  grouping bgp-neighbor-auth-extension {
+    description
+      "Presence containers on a BGP neighbor for TCP MD5 and TCP-AO.
+       Mutual exclusion is enforced at commit time by zebra-rs
+       (not by YANG).";
+
+    container tcp-md5 {
+      ext:help "TCP MD5 authentication (RFC 2385)";
+      presence "Enable TCP MD5 on this neighbor";
+      description
+        "IOS-XR-style flat per-neighbor shared secret. Not routed
+         through a key chain — a single password bound to the
+         neighbor.";
+      reference "RFC 2385";
+
+      leaf encoding {
+        ext:help "Password encoding";
+        type password-encoding;
+        default "clear";
+        description
+          "How `password` is stored in the configuration.";
+      }
+
+      leaf password {
+        ext:help "Shared MD5 secret";
+        type string {
+          length "1..80";
+        }
+        mandatory true;
+        description
+          "Shared MD5 secret. Max 80 bytes matches Linux's
+           TCP_MD5SIG_MAXKEYLEN. Both peers MUST configure identical
+           bytes or the TCP SYNs are silently dropped by the kernel
+           and the session never establishes.";
+      }
+    }
+
+    container tcp-ao {
+      ext:help "TCP Authentication Option (RFC 5925)";
+      presence "Enable TCP-AO on this neighbor";
+      description
+        "TCP Authentication Option with per-peer key-chain reference
+         and option-coverage knob.";
+      reference "RFC 5925, RFC 5926";
+
+      leaf key-chain {
+        ext:help "Key chain name";
+        type string;
+        mandatory true;
+        description
+          "Name of a key chain defined under /key-chains. Resolved
+           at commit time by zebra-rs; libyang does not enforce
+           existence (the path differs between set and delete
+           subtrees).";
+      }
+
+      leaf include-tcp-options {
+        ext:help "Include TCP options in MAC";
+        type boolean;
+        default "true";
+        description
+          "If true (default), the TCP-AO MAC covers all TCP options
+           other than TCP-AO itself (RFC 5925 §3.1 default, Cisco's
+           `include-tcp-options enable`).
+
+           If false, the MAC covers only the fixed 20-byte TCP
+           header and data. Use this only when middleboxes rewrite
+           TCP options in flight. Maps to Linux
+           TCP_AO_KEYF_EXCLUDE_OPT (inverted polarity). Both
+           endpoints MUST agree.";
+        reference "RFC 5925 §3.1, RFC 5925 §5.1";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:routing"
+        + "/bgp:bgp/bgp:neighbors/bgp:neighbor" {
+    description
+      "Attach tcp-md5 and tcp-ao containers to BGP neighbors in the
+       candidate-set subtree.";
+    uses bgp-neighbor-auth-extension;
+  }
+
+  augment "/configure:delete/config:routing"
+        + "/bgp:bgp/bgp:neighbors/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so `delete routing bgp
+       neighbors neighbor X tcp-md5` etc. is path-valid.";
+    uses bgp-neighbor-auth-extension;
+  }
+}

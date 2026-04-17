@@ -28,11 +28,17 @@ module config {
     prefix policy;
   }
 
+  import zebra-bgp-auth {
+    prefix zba;
+  }
+
   import openconfig-isis-types {
     prefix isis;
   }
 
   grouping config {
+    uses "zba:key-chains-group";
+
     container logging {
       leaf output {
         type enumeration {
