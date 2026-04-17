@@ -10,6 +10,7 @@ use crate::config::{Args, ConfigOp};
 use crate::policy;
 use crate::policy::com_list::*;
 
+use super::auth::{AoConfig, CryptoAlgorithm, Key, KeyChain};
 use super::peer::BgpTop;
 use super::route_clean;
 use super::{
@@ -488,6 +489,176 @@ fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
+// ---------- TCP-AO per-neighbor callbacks ----------
+
+fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op == ConfigOp::Set {
+        let chain_name = args.string()?;
+        let ao = peer
+            .config
+            .transport
+            .ao_config
+            .get_or_insert_with(AoConfig::default);
+        ao.key_chain = chain_name;
+    } else {
+        peer.config.transport.ao_config = None;
+    }
+    Some(())
+}
+
+fn config_peer_tcp_ao_include_tcp_options(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    let peer = bgp.peers.get_mut(&addr)?;
+    let ao = peer
+        .config
+        .transport
+        .ao_config
+        .get_or_insert_with(AoConfig::default);
+    if op == ConfigOp::Set {
+        ao.include_tcp_options = args.boolean()?;
+    } else {
+        ao.include_tcp_options = true;
+    }
+    Some(())
+}
+
+// ---------- Key-chain callbacks ----------
+
+fn config_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op == ConfigOp::Set {
+        bgp.key_chains
+            .entry(name.clone())
+            .or_insert_with(|| KeyChain::new(name));
+    } else {
+        bgp.key_chains.remove(&name);
+    }
+    Some(())
+}
+
+fn config_key_chain_description(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let chain = bgp.key_chains.get_mut(&name)?;
+    chain.description = if op == ConfigOp::Set {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    Some(())
+}
+
+fn config_key_chain_key(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    let chain = bgp.key_chains.get_mut(&chain_name)?;
+    if op == ConfigOp::Set {
+        chain.keys.entry(key_id).or_insert_with(|| Key::new(key_id));
+    } else {
+        chain.keys.remove(&key_id);
+    }
+    Some(())
+}
+
+fn config_key_chain_key_crypto_algorithm(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    let chain = bgp.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if op == ConfigOp::Set {
+        let algo = args.string()?;
+        key.crypto_algorithm = CryptoAlgorithm::from_identity(&algo);
+    } else {
+        key.crypto_algorithm = None;
+    }
+    Some(())
+}
+
+fn config_key_chain_key_keystring(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    let chain = bgp.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if op == ConfigOp::Set {
+        key.key_material = args.string()?.into_bytes();
+    } else {
+        key.key_material.clear();
+    }
+    Some(())
+}
+
+fn config_key_chain_key_hex_string(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    let chain = bgp.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if op == ConfigOp::Set {
+        let hex = args.string()?;
+        // Accept with or without whitespace / colons; ignore
+        // non-hex-digit separators at commit time for operator
+        // friendliness.
+        let cleaned: String = hex
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != ':')
+            .collect();
+        let decoded = hex::decode(&cleaned).ok()?;
+        key.key_material = decoded;
+    } else {
+        key.key_material.clear();
+    }
+    Some(())
+}
+
+fn config_key_chain_key_send_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    let chain = bgp.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if op == ConfigOp::Set {
+        key.send_id = Some(args.u8()?);
+    } else {
+        key.send_id = None;
+    }
+    Some(())
+}
+
+fn config_key_chain_key_recv_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    let chain = bgp.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if op == ConfigOp::Set {
+        key.recv_id = Some(args.u8()?);
+    } else {
+        key.recv_id = None;
+    }
+    Some(())
+}
+
 fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let category = args.string()?;
     let enable = op == ConfigOp::Set;
@@ -542,6 +713,39 @@ impl Bgp {
         self.callback_peer("/transport/local-address", config_transport_local_address);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
+        self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);
+        self.callback_peer(
+            "/tcp-ao/include-tcp-options",
+            config_peer_tcp_ao_include_tcp_options,
+        );
+
+        // Key-chains (RFC 8177) for TCP-AO.
+        self.callback_add("/key-chains/key-chain", config_key_chain);
+        self.callback_add(
+            "/key-chains/key-chain/description",
+            config_key_chain_description,
+        );
+        self.callback_add("/key-chains/key-chain/key", config_key_chain_key);
+        self.callback_add(
+            "/key-chains/key-chain/key/crypto-algorithm",
+            config_key_chain_key_crypto_algorithm,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/key-string/keystring",
+            config_key_chain_key_keystring,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/key-string/hexadecimal-string",
+            config_key_chain_key_hex_string,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/send-id",
+            config_key_chain_key_send_id,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/recv-id",
+            config_key_chain_key_recv_id,
+        );
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
         self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);

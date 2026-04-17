@@ -83,6 +83,10 @@ pub struct Bgp {
     // "Passive vs active side placement".
     pub listen_fd_v4: Option<std::os::fd::RawFd>,
     pub listen_fd_v6: Option<std::os::fd::RawFd>,
+    // RFC 8177 key-chain registry, indexed by chain name. Populated
+    // by config callbacks for /key-chains/... and referenced from a
+    // peer's AoConfig.key_chain leafref.
+    pub key_chains: HashMap<String, super::auth::KeyChain>,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
@@ -131,6 +135,7 @@ impl Bgp {
             listen_err: None,
             listen_fd_v4: None,
             listen_fd_v6: None,
+            key_chains: HashMap::new(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
