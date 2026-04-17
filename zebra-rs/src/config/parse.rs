@@ -304,6 +304,13 @@ fn match_builder() -> MatchMap {
         .exec(|m, entry, input, node| {
             m.process(entry, match_string(input, node), cleaf(entry));
         })
+        .kind(YangType::Leafref)
+        .exec(|m, entry, input, node| {
+            // Accept any non-empty word; the target is resolved at
+            // commit time. A future enhancement will enumerate valid
+            // values from the candidate config via `TypeNode.path`.
+            m.process(entry, match_string(input, node), cleaf(entry));
+        })
         .build()
 }
 
@@ -320,18 +327,12 @@ pub fn ytype_from_typedef(typedef: &Option<String>) -> Option<YangType> {
 }
 
 fn is_choice_case(entry: &Rc<Entry>) -> Option<(String, String)> {
-    // Check for choice-test subnet choice
-    if entry.name == "prefix-length" || entry.name == "netmask" {
-        return Some(("choice-test-subnet".to_string(), entry.name.clone()));
-    }
-
-    // Add more choice patterns here as needed
-    // Example for routing policy choices:
-    // if entry.name == "protocol-eq" || entry.name == "protocol-neq" {
-    //     return Some(("policy-protocol".to_string(), entry.name.clone()));
-    // }
-
-    None
+    // Choice/case metadata is set by libyang when flattening case
+    // children into the choice's parent `dir` (see libyang's
+    // `choice_entry`). Both must be present.
+    let choice = entry.choice.borrow().clone()?;
+    let case = entry.case.borrow().clone()?;
+    Some((choice, case))
 }
 
 fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State) {

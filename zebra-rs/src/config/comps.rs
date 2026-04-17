@@ -102,6 +102,11 @@ pub fn cleaf(entry: &Rc<Entry>) -> Completion {
             ytype_str(&ytype).to_string()
         } else if let Some(range) = &node.range {
             range.to_string()
+        } else if node.kind == YangType::Leafref {
+            match &node.path {
+                Some(path) => format!("<{} -> {}>", entry.name, path),
+                None => format!("<{}:leafref>", entry.name),
+            }
         } else {
             format!("<{}:{}>", entry.name, ytype_str(&node.kind))
         }
