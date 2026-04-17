@@ -132,6 +132,11 @@ pub struct PeerTransportConfig {
     // zebra-bgp-auth.yang `tcp-md5`.
     pub md5_password: Option<String>,
     pub md5_encoding: PasswordEncoding,
+    // TCP-AO (RFC 5925 / RFC 5926) configuration. When Some, the key
+    // chain is resolved at connect/listen time and installed via
+    // TCP_AO_ADD_KEY. MD5 and AO are mutually exclusive per session;
+    // enforcement is at commit.
+    pub ao_config: Option<super::auth::AoConfig>,
 }
 
 #[derive(Debug, Clone)]
