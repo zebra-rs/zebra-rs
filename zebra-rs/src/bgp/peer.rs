@@ -137,6 +137,10 @@ pub struct PeerTransportConfig {
     // TCP_AO_ADD_KEY. MD5 and AO are mutually exclusive per session;
     // enforcement is at commit.
     pub ao_config: Option<super::auth::AoConfig>,
+    // Resolved AO key selected from `ao_config`'s referenced chain.
+    // Recomputed whenever ao_config or the chain changes; the active
+    // side in peer_connect applies it directly.
+    pub resolved_ao_key: Option<super::auth::ResolvedAoKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -770,13 +774,14 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let address = peer.address;
     let update_source = peer.config.transport.update_source;
     let md5_password = peer.config.transport.md5_password.clone();
+    let ao_key = peer.config.transport.resolved_ao_key.clone();
     Task::spawn(async move {
         let tx = tx.clone();
         let remote: SocketAddr = match address {
             IpAddr::V4(addr) => SocketAddr::new(IpAddr::V4(addr), BGP_PORT),
             IpAddr::V6(addr) => SocketAddr::new(IpAddr::V6(addr), BGP_PORT),
         };
-        let result = peer_connect(remote, update_source, md5_password.as_deref()).await;
+        let result = peer_connect(remote, update_source, md5_password.as_deref(), ao_key).await;
         match result {
             Ok(stream) => {
                 let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
@@ -792,6 +797,7 @@ async fn peer_connect(
     remote: SocketAddr,
     update_source: Option<IpAddr>,
     md5_password: Option<&str>,
+    ao_key: Option<super::auth::ResolvedAoKey>,
 ) -> std::io::Result<TcpStream> {
     // Address family of the source must match the remote when specified.
     if let Some(src) = update_source
@@ -809,13 +815,24 @@ async fn peer_connect(
         TcpSocket::new_v6()?
     };
 
-    // Install TCP MD5 key BEFORE connect() so the outgoing SYN carries
-    // a valid MD5 option. A mismatched or missing key on the peer's
-    // listener causes the SYN to be silently dropped by the kernel
-    // (no log, no SYN-ACK).
+    // Install TCP MD5 / TCP-AO key BEFORE connect() so the outgoing
+    // SYN carries a valid auth option. A mismatched or missing key
+    // on the peer's listener causes the SYN to be silently dropped
+    // by the kernel (no log, no SYN-ACK).
+    use std::os::fd::AsRawFd;
     if let Some(password) = md5_password {
-        use std::os::fd::AsRawFd;
         super::auth::set_tcp_md5_key(socket.as_raw_fd(), remote.ip(), password.as_bytes())?;
+    }
+    if let Some(key) = ao_key {
+        super::auth::set_tcp_ao_key(
+            socket.as_raw_fd(),
+            remote.ip(),
+            key.alg_name,
+            &key.key_material,
+            key.send_id,
+            key.recv_id,
+            key.include_tcp_options,
+        )?;
     }
 
     if let Some(src) = update_source {

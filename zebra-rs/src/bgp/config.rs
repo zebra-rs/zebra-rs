@@ -489,6 +489,63 @@ fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
+/// Re-resolve TCP-AO keys for every peer whose `ao_config` is set,
+/// cache the result on the peer's transport config, and install the
+/// resolved key on the appropriate listener (IPv4 or IPv6) via
+/// `setsockopt(TCP_AO_ADD_KEY)`.
+///
+/// Called from every TCP-AO callback (peer-side and key-chain-side)
+/// after the change has been absorbed into `Bgp`. Stale listener
+/// keys from previous configurations are not removed in this initial
+/// implementation — a daemon restart clears them; explicit del is a
+/// follow-up.
+fn apply_ao_refresh_all(bgp: &mut Bgp) {
+    let fd_v4 = bgp.listen_fd_v4;
+    let fd_v6 = bgp.listen_fd_v6;
+    // Snapshot key_chains to release the immutable borrow before
+    // iterating peers mutably.
+    let key_chains = bgp.key_chains.clone();
+
+    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
+    for addr in addrs {
+        let Some(peer) = bgp.peers.get_mut(&addr) else {
+            continue;
+        };
+        let resolved = peer
+            .config
+            .transport
+            .ao_config
+            .as_ref()
+            .and_then(|ao| ao.resolve(&key_chains));
+        peer.config.transport.resolved_ao_key = resolved.clone();
+
+        let Some(r) = resolved else {
+            continue;
+        };
+        let fd = match addr {
+            IpAddr::V4(_) => fd_v4,
+            IpAddr::V6(_) => fd_v6,
+        };
+        if let Some(fd) = fd {
+            if let Err(e) = super::auth::set_tcp_ao_key(
+                fd,
+                addr,
+                r.alg_name,
+                &r.key_material,
+                r.send_id,
+                r.recv_id,
+                r.include_tcp_options,
+            ) {
+                tracing::warn!(
+                    peer = %addr,
+                    error = %e,
+                    "TCP-AO setsockopt on listener failed; incoming SYNs from this peer will be dropped"
+                );
+            }
+        }
+    }
+}
+
 // ---------- TCP-AO per-neighbor callbacks ----------
 
 fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -500,19 +557,22 @@ fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         return None;
     };
 
-    let peer = bgp.peers.get_mut(&addr)?;
-
-    if op == ConfigOp::Set {
-        let chain_name = args.string()?;
-        let ao = peer
-            .config
-            .transport
-            .ao_config
-            .get_or_insert_with(AoConfig::default);
-        ao.key_chain = chain_name;
-    } else {
-        peer.config.transport.ao_config = None;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if op == ConfigOp::Set {
+            let chain_name = args.string()?;
+            let ao = peer
+                .config
+                .transport
+                .ao_config
+                .get_or_insert_with(AoConfig::default);
+            ao.key_chain = chain_name;
+        } else {
+            peer.config.transport.ao_config = None;
+            peer.config.transport.resolved_ao_key = None;
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
@@ -529,17 +589,20 @@ fn config_peer_tcp_ao_include_tcp_options(
         return None;
     };
 
-    let peer = bgp.peers.get_mut(&addr)?;
-    let ao = peer
-        .config
-        .transport
-        .ao_config
-        .get_or_insert_with(AoConfig::default);
-    if op == ConfigOp::Set {
-        ao.include_tcp_options = args.boolean()?;
-    } else {
-        ao.include_tcp_options = true;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        let ao = peer
+            .config
+            .transport
+            .ao_config
+            .get_or_insert_with(AoConfig::default);
+        if op == ConfigOp::Set {
+            ao.include_tcp_options = args.boolean()?;
+        } else {
+            ao.include_tcp_options = true;
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
@@ -554,6 +617,7 @@ fn config_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     } else {
         bgp.key_chains.remove(&name);
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
@@ -571,12 +635,15 @@ fn config_key_chain_description(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
 fn config_key_chain_key(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let chain_name = args.string()?;
     let key_id = args.u64()?;
-    let chain = bgp.key_chains.get_mut(&chain_name)?;
-    if op == ConfigOp::Set {
-        chain.keys.entry(key_id).or_insert_with(|| Key::new(key_id));
-    } else {
-        chain.keys.remove(&key_id);
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        if op == ConfigOp::Set {
+            chain.keys.entry(key_id).or_insert_with(|| Key::new(key_id));
+        } else {
+            chain.keys.remove(&key_id);
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
@@ -587,75 +654,87 @@ fn config_key_chain_key_crypto_algorithm(
 ) -> Option<()> {
     let chain_name = args.string()?;
     let key_id = args.u64()?;
-    let chain = bgp.key_chains.get_mut(&chain_name)?;
-    let key = chain.keys.get_mut(&key_id)?;
-    if op == ConfigOp::Set {
-        let algo = args.string()?;
-        key.crypto_algorithm = CryptoAlgorithm::from_identity(&algo);
-    } else {
-        key.crypto_algorithm = None;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            let algo = args.string()?;
+            key.crypto_algorithm = CryptoAlgorithm::from_identity(&algo);
+        } else {
+            key.crypto_algorithm = None;
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
 fn config_key_chain_key_keystring(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let chain_name = args.string()?;
     let key_id = args.u64()?;
-    let chain = bgp.key_chains.get_mut(&chain_name)?;
-    let key = chain.keys.get_mut(&key_id)?;
-    if op == ConfigOp::Set {
-        key.key_material = args.string()?.into_bytes();
-    } else {
-        key.key_material.clear();
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            key.key_material = args.string()?.into_bytes();
+        } else {
+            key.key_material.clear();
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
 fn config_key_chain_key_hex_string(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let chain_name = args.string()?;
     let key_id = args.u64()?;
-    let chain = bgp.key_chains.get_mut(&chain_name)?;
-    let key = chain.keys.get_mut(&key_id)?;
-    if op == ConfigOp::Set {
-        let hex = args.string()?;
-        // Accept with or without whitespace / colons; ignore
-        // non-hex-digit separators at commit time for operator
-        // friendliness.
-        let cleaned: String = hex
-            .chars()
-            .filter(|c| !c.is_whitespace() && *c != ':')
-            .collect();
-        let decoded = hex::decode(&cleaned).ok()?;
-        key.key_material = decoded;
-    } else {
-        key.key_material.clear();
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            let hex = args.string()?;
+            let cleaned: String = hex
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != ':')
+                .collect();
+            let decoded = hex::decode(&cleaned).ok()?;
+            key.key_material = decoded;
+        } else {
+            key.key_material.clear();
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
 fn config_key_chain_key_send_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let chain_name = args.string()?;
     let key_id = args.u64()?;
-    let chain = bgp.key_chains.get_mut(&chain_name)?;
-    let key = chain.keys.get_mut(&key_id)?;
-    if op == ConfigOp::Set {
-        key.send_id = Some(args.u8()?);
-    } else {
-        key.send_id = None;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            key.send_id = Some(args.u8()?);
+        } else {
+            key.send_id = None;
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
 fn config_key_chain_key_recv_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let chain_name = args.string()?;
     let key_id = args.u64()?;
-    let chain = bgp.key_chains.get_mut(&chain_name)?;
-    let key = chain.keys.get_mut(&key_id)?;
-    if op == ConfigOp::Set {
-        key.recv_id = Some(args.u8()?);
-    } else {
-        key.recv_id = None;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            key.recv_id = Some(args.u8()?);
+        } else {
+            key.recv_id = None;
+        }
     }
+    apply_ao_refresh_all(bgp);
     Some(())
 }
 
