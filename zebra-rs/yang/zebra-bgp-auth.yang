@@ -281,7 +281,7 @@ module zebra-bgp-auth {
    * ========================================================= */
 
   augment "/configure:set/config:routing"
-        + "/bgp:bgp/bgp:neighbors/bgp:neighbor" {
+        + "/bgp:bgp/bgp:neighbor" {
     description
       "Attach tcp-md5 and tcp-ao containers to BGP neighbors in the
        candidate-set subtree.";
@@ -289,10 +289,10 @@ module zebra-bgp-auth {
   }
 
   augment "/configure:delete/config:routing"
-        + "/bgp:bgp/bgp:neighbors/bgp:neighbor" {
+        + "/bgp:bgp/bgp:neighbor" {
     description
       "Same attachment for the delete subtree so `delete routing bgp
-       neighbors neighbor X tcp-md5` etc. is path-valid.";
+       neighbor X tcp-md5` etc. is path-valid.";
     uses bgp-neighbor-auth-extension;
   }
 }
