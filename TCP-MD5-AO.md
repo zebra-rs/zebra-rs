@@ -58,6 +58,70 @@ Phases 3–5 depend on phase 2 and can land together or split.
   `TCP_AO_GET_KEYS`. Each key carries algorithm name, SendID, RecvID,
   address/prefix, and key material.
 
+## Option coverage flag: `TCP_AO_KEYF_EXCLUDE_OPT`
+
+`TCP_AO_KEYF_EXCLUDE_OPT` (bit 1 of `tcp_ao_add.keyflags` in
+`<linux/tcp.h>`) controls whether TCP options other than TCP-AO itself
+are covered by the MAC computation. Per-key, per-direction setting —
+both endpoints must agree, and a mismatch produces silent segment
+drops.
+
+### What the MAC covers in each mode
+
+TCP-AO MAC input (RFC 5925 §3.1) always contains:
+
+1. Pseudo-header (src IP, dst IP, proto, length).
+2. TCP header with the checksum zeroed.
+3. TCP segment data.
+
+The TCP-AO option itself is always zeroed in the MAC input (you cannot
+MAC over a field you are about to write). The difference is how the
+**other** TCP options are treated:
+
+| Flag | Other TCP options in MAC | Header range covered |
+|------|--------------------------|----------------------|
+| Unset (default) | **Included** | Full TCP header — MSS, timestamps, SACK, WScale, etc. |
+| Set (`TCP_AO_KEYF_EXCLUDE_OPT`) | **Excluded** (zeroed in MAC input) | Fixed 20-byte TCP header only |
+
+### Why exclude exists — middleboxes
+
+TCP middleboxes sometimes rewrite options in flight: NAT, MSS clamping
+(common at PPPoE / IPsec edges), option-stripping firewalls, timestamp
+rewriters. When the MAC covers those options, any in-flight
+modification breaks the MAC and kills the session. Excluding options
+allows the session to survive, at the cost of MAC coverage over the
+option fields. The fixed header and payload remain covered, so replay
+protection and spoofing resistance are preserved.
+
+RFC 5925 §5.1 warns that excluding options weakens the authentication
+binding and should only be used when operationally necessary.
+
+### Polarity — name inversion across layers
+
+| Layer | Name | True means |
+|-------|------|------------|
+| Linux kernel | `TCP_AO_KEYF_EXCLUDE_OPT` | exclude options |
+| Cisco CLI | `include-tcp-options disable` | exclude options |
+| Cisco CLI | `include-tcp-options enable` | include options (default) |
+| zebra-bgp-ao YANG | `include-tcp-options: true` | include options (default) |
+
+Translation in the BGP integration code:
+
+```rust
+let mut keyflags: u8 = 0;
+if !include_tcp_options {
+    keyflags |= TCP_AO_KEYF_EXCLUDE_OPT;
+}
+```
+
+### Operational guidance
+
+- **Default (include)** for iBGP and direct-link eBGP — highest
+  security.
+- **Exclude** for eBGP across middleboxes that touch TCP options,
+  only when include-mode fails to establish and exclude-mode works.
+- Both sides of a session must be configured identically per MKT.
+
 ## Kernel availability
 
 - `TCP_MD5SIG` / `TCP_MD5SIG_EXT`: available for many years, stable.
