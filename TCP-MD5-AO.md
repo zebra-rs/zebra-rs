@@ -161,35 +161,98 @@ Linux-only; guarded with `#[cfg(target_os = "linux")]`.
 
 # BGP integration
 
-## Configuration sample for TCP MD5
+## Configuration sample for TCP MD5 (YAML)
 
-```
-router bgp 65001
- neighbor 10.0.0.2 remote-as 65002
- neighbor 10.0.0.2 password s3cret
-```
-
-Equivalent YANG-level leaf: a single `password` string under the
-neighbor's transport container.
-
-## Configuration sample for TCP AO
-
-```
-key chain KC-BGP
- key 1
-  key-string hexadecimal 0123456789abcdef...
-  cryptographic-algorithm hmac-sha1-96
-  send-id 100
-  recv-id 100
-
-router bgp 65001
- neighbor 10.0.0.2 remote-as 65002
- neighbor 10.0.0.2 ao key-chain KC-BGP
+```yaml
+routing:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      peer-as: 65002
+      enabled: true
+      afi-safi:
+      - name: ipv4-unicast
+        enabled: true
+      tcp-md5:
+        encoding: clear
+        password: "shared-md5-secret"
 ```
 
-The key-chain model should reuse `ietf-key-chain@2017-06-15` if
-already vendored; otherwise a minimal inline grouping with
-`send-id`, `recv-id`, `algorithm`, `key-string`.
+`encoding` is `clear` (cleartext) or `encrypted` (zebra-rs
+obfuscated form). Maximum password length: 80 bytes, matching
+Linux's `TCP_MD5SIG_MAXKEYLEN`.
+
+## Configuration sample for TCP-AO (YAML)
+
+```yaml
+key-chains:
+  key-chain:
+  - name: BGP-AO
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "shared-ao-secret"
+
+routing:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      peer-as: 65002
+      enabled: true
+      afi-safi:
+      - name: ipv4-unicast
+        enabled: true
+      tcp-ao:
+        key-chain: BGP-AO
+        include-tcp-options: true
+```
+
+The key-chain reuses RFC 8177 (`ietf-key-chain@2017-06-15`)
+vendored in `zebra-rs/yang/`, augmented by `zebra-bgp-auth.yang`
+with per-key `send-id` / `recv-id` (RFC 5925 SendID / RecvID,
+uint8). Keys can alternatively be specified in hex via
+`hexadecimal-string`.
+
+## Manual verification
+
+BDD scaffolding under `bdd/tests/`:
+- `features/bgp_tcp_md5_auth.feature` + `data/bgp_tcp_md5_auth/`
+  — matching-password establish + mismatch drop + restore.
+- `features/bgp_tcp_ao_auth.feature` + `data/bgp_tcp_ao_auth/`
+  — matching-MKT establish (requires kernel ≥ 6.7).
+
+The BDD harness needs root (netns creation) and the zebra-rs
+binary with `cap_net_bind_service,cap_net_admin` granted — see
+`Makefile`'s `run` target.
+
+Lightweight manual trace when a full BDD run is not available:
+
+```
+# Build + capabilities
+make cap
+
+# Run in one terminal with strace
+sudo strace -e trace=setsockopt -f -p $(pgrep zebra-rs)
+
+# Apply tcp-md5 config in another terminal (vtysh or API). You
+# should see setsockopt(..., IPPROTO_TCP, TCP_MD5SIG (14), ...)
+# calls on both the listening fd and the active TcpSocket.
+```
+
+A mismatched password on one side matches RFC 2385 behavior: the
+kernel silently drops the offending peer's SYN, so the session
+stays in `Active` / `Idle` flap with no log on the receiving side.
+zebra-rs's connect-side logs the TCP timeout when the SYN-ACK
+never arrives.
 
 # Architecture design in zebra-rs's BGP
 
