@@ -432,13 +432,32 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         return None;
     };
 
-    let peer = bgp.peers.get_mut(&addr)?;
-
-    if op == ConfigOp::Set {
+    let password_bytes: Vec<u8> = if op == ConfigOp::Set {
         let password = args.string()?;
-        peer.config.transport.md5_password = Some(password);
+        let bytes = password.as_bytes().to_vec();
+        bgp.peers.get_mut(&addr)?.config.transport.md5_password = Some(password);
+        bytes
     } else {
-        peer.config.transport.md5_password = None;
+        bgp.peers.get_mut(&addr)?.config.transport.md5_password = None;
+        Vec::new()
+    };
+
+    // Install (or remove, with an empty key) on the listener for this
+    // peer's address family. The kernel requires the key to be on the
+    // listener before the peer's SYN arrives — a post-accept() call
+    // is too late.
+    let listen_fd = match addr {
+        IpAddr::V4(_) => bgp.listen_fd_v4,
+        IpAddr::V6(_) => bgp.listen_fd_v6,
+    };
+    if let Some(fd) = listen_fd {
+        if let Err(e) = super::auth::set_tcp_md5_key(fd, addr, &password_bytes) {
+            tracing::warn!(
+                peer = %addr,
+                error = %e,
+                "TCP MD5 setsockopt on listener failed; incoming SYNs from this peer will be dropped"
+            );
+        }
     }
 
     Some(())
