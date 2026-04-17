@@ -15,7 +15,7 @@ use super::route_clean;
 use super::{
     Bgp,
     inst::Callback,
-    peer::{Peer, PeerType},
+    peer::{PasswordEncoding, Peer, PeerType},
     timer,
 };
 
@@ -423,6 +423,52 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
+fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op == ConfigOp::Set {
+        let password = args.string()?;
+        peer.config.transport.md5_password = Some(password);
+    } else {
+        peer.config.transport.md5_password = None;
+    }
+
+    Some(())
+}
+
+fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op == ConfigOp::Set {
+        let encoding = args.string()?;
+        peer.config.transport.md5_encoding = match encoding.as_str() {
+            "clear" => PasswordEncoding::Clear,
+            "encrypted" => PasswordEncoding::Encrypted,
+            _ => return None,
+        };
+    } else {
+        peer.config.transport.md5_encoding = PasswordEncoding::Clear;
+    }
+
+    Some(())
+}
+
 fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let category = args.string()?;
     let enable = op == ConfigOp::Set;
@@ -475,6 +521,8 @@ impl Bgp {
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/transport/local-address", config_transport_local_address);
+        self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
+        self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
         self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);
