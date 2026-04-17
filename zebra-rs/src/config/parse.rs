@@ -304,6 +304,13 @@ fn match_builder() -> MatchMap {
         .exec(|m, entry, input, node| {
             m.process(entry, match_string(input, node), cleaf(entry));
         })
+        .kind(YangType::Leafref)
+        .exec(|m, entry, input, node| {
+            // Accept any non-empty word; the target is resolved at
+            // commit time. A future enhancement will enumerate valid
+            // values from the candidate config via `TypeNode.path`.
+            m.process(entry, match_string(input, node), cleaf(entry));
+        })
         .build()
 }
 
