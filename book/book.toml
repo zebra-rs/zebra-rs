@@ -2,5 +2,4 @@
 title = "The Zebra Routing Software"
 authors = ["Kunihiro Ishiguro"]
 language = "en"
-multilingual = false
 src = "src"
