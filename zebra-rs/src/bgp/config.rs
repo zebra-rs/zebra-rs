@@ -53,6 +53,13 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             Some(peer) => peer.ident,
             None => return None,
         };
+
+        // Defensively clear any listener auth entries associated with
+        // this peer before removing it, in case the per-leaf delete
+        // callbacks didn't fire (e.g., whole-neighbor delete without
+        // explicit tcp-md5 / tcp-ao deletions first).
+        clear_peer_listener_auth(bgp, &addr);
+
         let mut bgp_ref = BgpTop {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
@@ -64,6 +71,52 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         bgp.peers.remove(&addr);
     }
     Some(())
+}
+
+/// Remove any TCP MD5 / TCP-AO entries for `addr` from the
+/// appropriate listening socket. Best-effort: logs warnings on
+/// failure but does not propagate them, since the peer is being
+/// torn down either way.
+fn clear_peer_listener_auth(bgp: &mut Bgp, addr: &IpAddr) {
+    let fd = match addr {
+        IpAddr::V4(_) => bgp.listen_fd_v4,
+        IpAddr::V6(_) => bgp.listen_fd_v6,
+    };
+    let Some(fd) = fd else { return };
+
+    // MD5: setsockopt with an empty key removes the entry for this
+    // peer address. Only issue the call if the peer had a password
+    // configured.
+    let had_md5 = bgp
+        .peers
+        .get(addr)
+        .and_then(|p| p.config.transport.md5_password.as_ref())
+        .is_some();
+    if had_md5 {
+        if let Err(e) = super::auth::set_tcp_md5_key(fd, *addr, &[]) {
+            tracing::warn!(
+                peer = %addr,
+                error = %e,
+                "TCP MD5 del on listener failed during peer cleanup"
+            );
+        }
+    }
+
+    // TCP-AO: needs the exact (send_id, recv_id) used at install
+    // time, remembered on the peer.
+    if let Some(peer) = bgp.peers.get_mut(addr)
+        && let Some((send_id, recv_id)) = peer.last_ao_installed.take()
+    {
+        if let Err(e) = super::auth::del_tcp_ao_key(fd, *addr, send_id, recv_id) {
+            tracing::warn!(
+                peer = %addr,
+                send_id,
+                recv_id,
+                error = %e,
+                "TCP-AO del on listener failed during peer cleanup"
+            );
+        }
+    }
 }
 
 fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -489,16 +542,16 @@ fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
-/// Re-resolve TCP-AO keys for every peer whose `ao_config` is set,
-/// cache the result on the peer's transport config, and install the
-/// resolved key on the appropriate listener (IPv4 or IPv6) via
-/// `setsockopt(TCP_AO_ADD_KEY)`.
+/// Re-resolve TCP-AO keys for every peer whose `ao_config` is set
+/// and reconcile the listener state. If the previously installed
+/// (send_id, recv_id) pair differs from the newly resolved one (or
+/// disappears), the old entry is removed via
+/// `setsockopt(TCP_AO_DEL_KEY)` before the new one is installed —
+/// the kernel keys MKTs by (address, send_id, recv_id) and has no
+/// wildcard delete.
 ///
 /// Called from every TCP-AO callback (peer-side and key-chain-side)
-/// after the change has been absorbed into `Bgp`. Stale listener
-/// keys from previous configurations are not removed in this initial
-/// implementation — a daemon restart clears them; explicit del is a
-/// follow-up.
+/// after the change has been absorbed into `Bgp`.
 fn apply_ao_refresh_all(bgp: &mut Bgp) {
     let fd_v4 = bgp.listen_fd_v4;
     let fd_v6 = bgp.listen_fd_v6;
@@ -511,6 +564,12 @@ fn apply_ao_refresh_all(bgp: &mut Bgp) {
         let Some(peer) = bgp.peers.get_mut(&addr) else {
             continue;
         };
+
+        let fd = match addr {
+            IpAddr::V4(_) => fd_v4,
+            IpAddr::V6(_) => fd_v6,
+        };
+
         let resolved = peer
             .config
             .transport
@@ -519,23 +578,42 @@ fn apply_ao_refresh_all(bgp: &mut Bgp) {
             .and_then(|ao| ao.resolve(&key_chains));
         peer.config.transport.resolved_ao_key = resolved.clone();
 
+        let new_ids = resolved.as_ref().map(|r| (r.send_id, r.recv_id));
+
+        // Remove the stale listener entry if the resolved key now
+        // disappears or uses different SendID/RecvID.
+        if let (Some(prev_ids), Some(fd)) = (peer.last_ao_installed, fd)
+            && new_ids != Some(prev_ids)
+        {
+            if let Err(e) = super::auth::del_tcp_ao_key(fd, addr, prev_ids.0, prev_ids.1) {
+                tracing::warn!(
+                    peer = %addr,
+                    send_id = prev_ids.0,
+                    recv_id = prev_ids.1,
+                    error = %e,
+                    "TCP-AO del on listener failed; entry may be stale",
+                );
+            }
+            peer.last_ao_installed = None;
+        }
+
         let Some(r) = resolved else {
             continue;
         };
-        let fd = match addr {
-            IpAddr::V4(_) => fd_v4,
-            IpAddr::V6(_) => fd_v6,
+        let Some(fd) = fd else {
+            continue;
         };
-        if let Some(fd) = fd {
-            if let Err(e) = super::auth::set_tcp_ao_key(
-                fd,
-                addr,
-                r.alg_name,
-                &r.key_material,
-                r.send_id,
-                r.recv_id,
-                r.include_tcp_options,
-            ) {
+        match super::auth::set_tcp_ao_key(
+            fd,
+            addr,
+            r.alg_name,
+            &r.key_material,
+            r.send_id,
+            r.recv_id,
+            r.include_tcp_options,
+        ) {
+            Ok(()) => peer.last_ao_installed = Some((r.send_id, r.recv_id)),
+            Err(e) => {
                 tracing::warn!(
                     peer = %addr,
                     error = %e,
