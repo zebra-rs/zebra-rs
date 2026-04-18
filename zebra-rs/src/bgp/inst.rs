@@ -74,6 +74,19 @@ pub struct Bgp {
     pub listen_task: Option<Task<()>>,
     pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
+    // Raw fds of the IPv4 / IPv6 BGP listening sockets, captured in
+    // listen() before the TcpListeners are moved into their accept
+    // tasks. Used by config callbacks to install or remove TCP MD5 /
+    // TCP-AO keys per-peer on the passive side — the kernel requires
+    // the key to be on the listener before the peer's SYN arrives;
+    // a post-accept() setsockopt is too late. See TCP-MD5-AO.md
+    // "Passive vs active side placement".
+    pub listen_fd_v4: Option<std::os::fd::RawFd>,
+    pub listen_fd_v6: Option<std::os::fd::RawFd>,
+    // RFC 8177 key-chain registry, indexed by chain name. Populated
+    // by config callbacks for /key-chains/... and referenced from a
+    // peer's AoConfig.key_chain leafref.
+    pub key_chains: HashMap<String, super::auth::KeyChain>,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
@@ -120,6 +133,9 @@ impl Bgp {
             listen_task: None,
             listen_task6: None,
             listen_err: None,
+            listen_fd_v4: None,
+            listen_fd_v6: None,
+            key_chains: HashMap::new(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
@@ -246,6 +262,8 @@ impl Bgp {
             Ok(listener) => {
                 ipv4_bound = true;
                 // println!("Successfully bound to IPv4 0.0.0.0:179");
+                use std::os::fd::AsRawFd;
+                self.listen_fd_v4 = Some(listener.as_raw_fd());
                 let tx_ipv4 = tx.clone();
                 self.listen_task = Some(Task::spawn(async move {
                     // println!("BGP listening on 0.0.0.0:179");
@@ -279,6 +297,8 @@ impl Bgp {
             Ok(listener) => {
                 ipv6_bound = true;
                 // println!("Successfully bound to IPv6 [::]:179");
+                use std::os::fd::AsRawFd;
+                self.listen_fd_v6 = Some(listener.as_raw_fd());
                 let tx_ipv6 = tx_clone;
                 self.listen_task6 = Some(Task::spawn(async move {
                     // println!("BGP listening on [::]:179");

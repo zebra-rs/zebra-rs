@@ -80,6 +80,10 @@ impl Args {
         arg_parse_type!(self, u32);
     }
 
+    pub fn u64(&mut self) -> Option<u64> {
+        arg_parse_type!(self, u64);
+    }
+
     pub fn v4addr(&mut self) -> Option<Ipv4Addr> {
         arg_parse_type!(self, Ipv4Addr);
     }
