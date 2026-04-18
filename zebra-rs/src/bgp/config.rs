@@ -10,12 +10,13 @@ use crate::config::{Args, ConfigOp};
 use crate::policy;
 use crate::policy::com_list::*;
 
+use super::auth::{AoConfig, CryptoAlgorithm, Key, KeyChain};
 use super::peer::BgpTop;
 use super::route_clean;
 use super::{
     Bgp,
     inst::Callback,
-    peer::{Peer, PeerType},
+    peer::{PasswordEncoding, Peer, PeerType},
     timer,
 };
 
@@ -423,6 +424,320 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     Some(())
 }
 
+fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    let password_bytes: Vec<u8> = if op == ConfigOp::Set {
+        let password = args.string()?;
+        let bytes = password.as_bytes().to_vec();
+        bgp.peers.get_mut(&addr)?.config.transport.md5_password = Some(password);
+        bytes
+    } else {
+        bgp.peers.get_mut(&addr)?.config.transport.md5_password = None;
+        Vec::new()
+    };
+
+    // Install (or remove, with an empty key) on the listener for this
+    // peer's address family. The kernel requires the key to be on the
+    // listener before the peer's SYN arrives — a post-accept() call
+    // is too late.
+    let listen_fd = match addr {
+        IpAddr::V4(_) => bgp.listen_fd_v4,
+        IpAddr::V6(_) => bgp.listen_fd_v6,
+    };
+    if let Some(fd) = listen_fd {
+        if let Err(e) = super::auth::set_tcp_md5_key(fd, addr, &password_bytes) {
+            tracing::warn!(
+                peer = %addr,
+                error = %e,
+                "TCP MD5 setsockopt on listener failed; incoming SYNs from this peer will be dropped"
+            );
+        }
+    }
+
+    Some(())
+}
+
+fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op == ConfigOp::Set {
+        let encoding = args.string()?;
+        peer.config.transport.md5_encoding = match encoding.as_str() {
+            "clear" => PasswordEncoding::Clear,
+            "encrypted" => PasswordEncoding::Encrypted,
+            _ => return None,
+        };
+    } else {
+        peer.config.transport.md5_encoding = PasswordEncoding::Clear;
+    }
+
+    Some(())
+}
+
+/// Re-resolve TCP-AO keys for every peer whose `ao_config` is set,
+/// cache the result on the peer's transport config, and install the
+/// resolved key on the appropriate listener (IPv4 or IPv6) via
+/// `setsockopt(TCP_AO_ADD_KEY)`.
+///
+/// Called from every TCP-AO callback (peer-side and key-chain-side)
+/// after the change has been absorbed into `Bgp`. Stale listener
+/// keys from previous configurations are not removed in this initial
+/// implementation — a daemon restart clears them; explicit del is a
+/// follow-up.
+fn apply_ao_refresh_all(bgp: &mut Bgp) {
+    let fd_v4 = bgp.listen_fd_v4;
+    let fd_v6 = bgp.listen_fd_v6;
+    // Snapshot key_chains to release the immutable borrow before
+    // iterating peers mutably.
+    let key_chains = bgp.key_chains.clone();
+
+    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
+    for addr in addrs {
+        let Some(peer) = bgp.peers.get_mut(&addr) else {
+            continue;
+        };
+        let resolved = peer
+            .config
+            .transport
+            .ao_config
+            .as_ref()
+            .and_then(|ao| ao.resolve(&key_chains));
+        peer.config.transport.resolved_ao_key = resolved.clone();
+
+        let Some(r) = resolved else {
+            continue;
+        };
+        let fd = match addr {
+            IpAddr::V4(_) => fd_v4,
+            IpAddr::V6(_) => fd_v6,
+        };
+        if let Some(fd) = fd {
+            if let Err(e) = super::auth::set_tcp_ao_key(
+                fd,
+                addr,
+                r.alg_name,
+                &r.key_material,
+                r.send_id,
+                r.recv_id,
+                r.include_tcp_options,
+            ) {
+                tracing::warn!(
+                    peer = %addr,
+                    error = %e,
+                    "TCP-AO setsockopt on listener failed; incoming SYNs from this peer will be dropped"
+                );
+            }
+        }
+    }
+}
+
+// ---------- TCP-AO per-neighbor callbacks ----------
+
+fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if op == ConfigOp::Set {
+            let chain_name = args.string()?;
+            let ao = peer
+                .config
+                .transport
+                .ao_config
+                .get_or_insert_with(AoConfig::default);
+            ao.key_chain = chain_name;
+        } else {
+            peer.config.transport.ao_config = None;
+            peer.config.transport.resolved_ao_key = None;
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+fn config_peer_tcp_ao_include_tcp_options(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        let ao = peer
+            .config
+            .transport
+            .ao_config
+            .get_or_insert_with(AoConfig::default);
+        if op == ConfigOp::Set {
+            ao.include_tcp_options = args.boolean()?;
+        } else {
+            ao.include_tcp_options = true;
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+// ---------- Key-chain callbacks ----------
+
+fn config_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op == ConfigOp::Set {
+        bgp.key_chains
+            .entry(name.clone())
+            .or_insert_with(|| KeyChain::new(name));
+    } else {
+        bgp.key_chains.remove(&name);
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+fn config_key_chain_description(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let chain = bgp.key_chains.get_mut(&name)?;
+    chain.description = if op == ConfigOp::Set {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    Some(())
+}
+
+fn config_key_chain_key(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        if op == ConfigOp::Set {
+            chain.keys.entry(key_id).or_insert_with(|| Key::new(key_id));
+        } else {
+            chain.keys.remove(&key_id);
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+fn config_key_chain_key_crypto_algorithm(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            let algo = args.string()?;
+            key.crypto_algorithm = CryptoAlgorithm::from_identity(&algo);
+        } else {
+            key.crypto_algorithm = None;
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+fn config_key_chain_key_keystring(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            key.key_material = args.string()?.into_bytes();
+        } else {
+            key.key_material.clear();
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+fn config_key_chain_key_hex_string(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            let hex = args.string()?;
+            let cleaned: String = hex
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != ':')
+                .collect();
+            let decoded = hex::decode(&cleaned).ok()?;
+            key.key_material = decoded;
+        } else {
+            key.key_material.clear();
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+fn config_key_chain_key_send_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            key.send_id = Some(args.u8()?);
+        } else {
+            key.send_id = None;
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
+fn config_key_chain_key_recv_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let chain_name = args.string()?;
+    let key_id = args.u64()?;
+    {
+        let chain = bgp.key_chains.get_mut(&chain_name)?;
+        let key = chain.keys.get_mut(&key_id)?;
+        if op == ConfigOp::Set {
+            key.recv_id = Some(args.u8()?);
+        } else {
+            key.recv_id = None;
+        }
+    }
+    apply_ao_refresh_all(bgp);
+    Some(())
+}
+
 fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let category = args.string()?;
     let enable = op == ConfigOp::Set;
@@ -475,6 +790,41 @@ impl Bgp {
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/transport/local-address", config_transport_local_address);
+        self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
+        self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
+        self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);
+        self.callback_peer(
+            "/tcp-ao/include-tcp-options",
+            config_peer_tcp_ao_include_tcp_options,
+        );
+
+        // Key-chains (RFC 8177) for TCP-AO.
+        self.callback_add("/key-chains/key-chain", config_key_chain);
+        self.callback_add(
+            "/key-chains/key-chain/description",
+            config_key_chain_description,
+        );
+        self.callback_add("/key-chains/key-chain/key", config_key_chain_key);
+        self.callback_add(
+            "/key-chains/key-chain/key/crypto-algorithm",
+            config_key_chain_key_crypto_algorithm,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/key-string/keystring",
+            config_key_chain_key_keystring,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/key-string/hexadecimal-string",
+            config_key_chain_key_hex_string,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/send-id",
+            config_key_chain_key_send_id,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/recv-id",
+            config_key_chain_key_recv_id,
+        );
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
         self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);

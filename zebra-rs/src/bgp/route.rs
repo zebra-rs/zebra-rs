@@ -1038,9 +1038,8 @@ fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
                 // RT value: [2 bytes ASN][4 bytes target]
                 // VNI is lower 3 bytes of the 4-byte target value
                 // Extract from bytes [2:5] (skip 2-byte ASN)
-                let vni = ((ec.val[2] as u32) << 16)
-                    | ((ec.val[3] as u32) << 8)
-                    | (ec.val[4] as u32);
+                let vni =
+                    ((ec.val[2] as u32) << 16) | ((ec.val[3] as u32) << 8) | (ec.val[4] as u32);
 
                 if vni > 0 && vni < 0x1000000 {
                     eprintln!("[BGP] Extracted VNI {} from Route Target (RFC 8365)", vni);
@@ -1114,7 +1113,10 @@ fn route_evpn_export_selected(
         match prefix {
             EvpnPrefix::MacIp { mac, .. } => {
                 // RFC 8365: VNI must come from Route Target extended community
-                if let Some(vni) = selected.first().and_then(|p| extract_vni_from_attr(&p.attr)) {
+                if let Some(vni) = selected
+                    .first()
+                    .and_then(|p| extract_vni_from_attr(&p.attr))
+                {
                     let msg = rib::Message::MacDel {
                         vni,
                         mac: MacAddr::from(*mac),
@@ -1131,7 +1133,10 @@ fn route_evpn_export_selected(
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
                 // Phase 4B: Type 3 multicast route withdrawal
                 // RFC 8365: VNI must come from Route Target extended community
-                if let Some(vni) = selected.first().and_then(|p| extract_vni_from_attr(&p.attr)) {
+                if let Some(vni) = selected
+                    .first()
+                    .and_then(|p| extract_vni_from_attr(&p.attr))
+                {
                     let msg = rib::Message::MdbDel {
                         vni,
                         group: *orig,

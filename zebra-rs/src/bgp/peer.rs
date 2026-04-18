@@ -114,10 +114,33 @@ pub struct PeerCounter {
     pub rcvd: u64,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordEncoding {
+    #[default]
+    Clear,
+    Encrypted,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PeerTransportConfig {
     pub passive: bool,
     pub update_source: Option<IpAddr>,
+    // TCP MD5 (RFC 2385) shared secret. When Some, installed on the
+    // listening socket (for the peer's address) and on the active
+    // TcpSocket before connect(). The encoding determines how the
+    // bytes are interpreted when the kernel key is derived. See
+    // zebra-bgp-auth.yang `tcp-md5`.
+    pub md5_password: Option<String>,
+    pub md5_encoding: PasswordEncoding,
+    // TCP-AO (RFC 5925 / RFC 5926) configuration. When Some, the key
+    // chain is resolved at connect/listen time and installed via
+    // TCP_AO_ADD_KEY. MD5 and AO are mutually exclusive per session;
+    // enforcement is at commit.
+    pub ao_config: Option<super::auth::AoConfig>,
+    // Resolved AO key selected from `ao_config`'s referenced chain.
+    // Recomputed whenever ao_config or the chain changes; the active
+    // side in peer_connect applies it directly.
+    pub resolved_ao_key: Option<super::auth::ResolvedAoKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -750,13 +773,15 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let tx = peer.tx.clone();
     let address = peer.address;
     let update_source = peer.config.transport.update_source;
+    let md5_password = peer.config.transport.md5_password.clone();
+    let ao_key = peer.config.transport.resolved_ao_key.clone();
     Task::spawn(async move {
         let tx = tx.clone();
         let remote: SocketAddr = match address {
             IpAddr::V4(addr) => SocketAddr::new(IpAddr::V4(addr), BGP_PORT),
             IpAddr::V6(addr) => SocketAddr::new(IpAddr::V6(addr), BGP_PORT),
         };
-        let result = peer_connect(remote, update_source).await;
+        let result = peer_connect(remote, update_source, md5_password.as_deref(), ao_key).await;
         match result {
             Ok(stream) => {
                 let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
@@ -771,6 +796,8 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
 async fn peer_connect(
     remote: SocketAddr,
     update_source: Option<IpAddr>,
+    md5_password: Option<&str>,
+    ao_key: Option<super::auth::ResolvedAoKey>,
 ) -> std::io::Result<TcpStream> {
     // Address family of the source must match the remote when specified.
     if let Some(src) = update_source
@@ -787,6 +814,26 @@ async fn peer_connect(
     } else {
         TcpSocket::new_v6()?
     };
+
+    // Install TCP MD5 / TCP-AO key BEFORE connect() so the outgoing
+    // SYN carries a valid auth option. A mismatched or missing key
+    // on the peer's listener causes the SYN to be silently dropped
+    // by the kernel (no log, no SYN-ACK).
+    use std::os::fd::AsRawFd;
+    if let Some(password) = md5_password {
+        super::auth::set_tcp_md5_key(socket.as_raw_fd(), remote.ip(), password.as_bytes())?;
+    }
+    if let Some(key) = ao_key {
+        super::auth::set_tcp_ao_key(
+            socket.as_raw_fd(),
+            remote.ip(),
+            key.alg_name,
+            &key.key_material,
+            key.send_id,
+            key.recv_id,
+            key.include_tcp_options,
+        )?;
+    }
 
     if let Some(src) = update_source {
         socket.bind(SocketAddr::new(src, 0))?;

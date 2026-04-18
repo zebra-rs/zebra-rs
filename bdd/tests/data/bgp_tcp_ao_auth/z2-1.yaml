@@ -1,0 +1,26 @@
+key-chains:
+  key-chain:
+  - name: BGP-AO
+    key:
+    - key-id: 100
+      crypto-algorithm: hmac-sha-1
+      send-id: 100
+      recv-id: 100
+      key-string:
+        keystring: "shared-ao-secret"
+
+routing:
+  bgp:
+    global:
+      as: 65002
+      identifier: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4-unicast
+        enabled: true
+      enabled: true
+      peer-as: 65001
+      tcp-ao:
+        key-chain: BGP-AO
+        include-tcp-options: true
