@@ -14,7 +14,6 @@
 
 - [BGP](ch-02-00-what-is-bgp.md)
   - [Dynamic Neighbors](ch-02-01-dynamic-neighbors.md)
-  - [IPv6 link-local Dynamic Neighbors](ch-02-01-dynamic-neighbors.md)
 
 ## Logging and Monitoring
 
