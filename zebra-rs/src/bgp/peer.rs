@@ -313,6 +313,13 @@ pub struct Peer {
     pub cache_vpnv4_rev: HashMap<Vpnv4Nlri, Arc<BgpAttr>>,
     pub cache_ipv4_timer: Option<Timer>,
     pub cache_vpnv4_timer: Option<Timer>,
+    // Runtime bookkeeping for TCP-AO listener state: the (send_id,
+    // recv_id) pair most recently installed via TCP_AO_ADD_KEY for
+    // this peer. Needed because TCP_AO_DEL_KEY requires the exact
+    // IDs — we can't "wildcard-delete" by address. Cleared after a
+    // successful removal or when no AO key is present for this
+    // peer.
+    pub last_ao_installed: Option<(u8, u8)>,
 }
 
 impl Peer {
@@ -365,6 +372,7 @@ impl Peer {
             cache_vpnv4_rev: HashMap::default(),
             cache_ipv4_timer: None,
             cache_vpnv4_timer: None,
+            last_ao_installed: None,
         };
         peer.config
             .mp
