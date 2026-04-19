@@ -247,7 +247,7 @@ pub fn comps_add_all(
     }
     comps.sort_by(|a, b| a.name.cmp(&b.name));
 
-    if ymatch_complete(ymatch, list_presence) {
+    if ymatch_complete(ymatch, list_presence, s.delete) {
         comps_add_cr(comps);
     }
 }
