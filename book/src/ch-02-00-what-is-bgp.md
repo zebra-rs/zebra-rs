@@ -1,1 +1,1 @@
-# BGP - Boarder Gateway Protocl
+# BGP - Boarder Gateway Protocol
