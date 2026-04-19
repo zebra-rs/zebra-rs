@@ -453,12 +453,13 @@ fn ymatch_next(entry: &Rc<Entry>, ymatch: YangMatch) -> YangMatch {
     }
 }
 
-pub fn ymatch_complete(ymatch: YangMatch, list_presence: bool) -> bool {
+pub fn ymatch_complete(ymatch: YangMatch, list_presence: bool, is_delete: bool) -> bool {
     (ymatch == YangMatch::Key && list_presence)
         || ymatch == YangMatch::DirMatched
         || ymatch == YangMatch::KeyMatched
         || ymatch == YangMatch::LeafMatched
         || ymatch == YangMatch::LeafListMatched
+        || (is_delete && ymatch == YangMatch::LeafList)
 }
 
 fn matched_enumeration(mx: &Match) -> Option<String> {
@@ -582,7 +583,7 @@ pub fn parse(
         .get("ext:sort")
         .map_or_else(|| 0, |v| v.parse::<i32>().unwrap_or(0));
 
-    let path = if ymatch_complete(s.ymatch, mx.matched_entry.presence) {
+    let path = if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
         let sub = if let Some(sub) = matched_enumeration(&mx) {
             sub
         } else {
@@ -627,7 +628,9 @@ pub fn parse(
     }
     s.paths.push(path);
 
-    if ymatch_complete(s.ymatch, mx.matched_entry.presence) && mx.matched_type == MatchType::Exact {
+    if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete)
+        && mx.matched_type == MatchType::Exact
+    {
         comps_add_cr(&mut mx.comps);
     }
 
@@ -664,7 +667,7 @@ pub fn parse(
         if key_presence {
             return (ExecCode::Success, mx.comps, s);
         }
-        if !ymatch_complete(s.ymatch, mx.matched_entry.presence) {
+        if !ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
             return (ExecCode::Incomplete, mx.comps, s);
         }
         if mx.matched_type == MatchType::Incomplete {

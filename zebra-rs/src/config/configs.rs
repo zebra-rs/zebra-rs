@@ -9,7 +9,7 @@ use super::parse::{Match, MatchType};
 use super::vtysh::{CommandPath, YangMatch};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::{cell::RefCell, rc::Rc};
 
@@ -627,6 +627,7 @@ fn config_delete(config: Rc<Config>, name: &String) {
 }
 
 pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
+    let mut had_list_value = false;
     for path in paths.iter() {
         match ymatch_enum(path.ymatch) {
             YangMatch::Dir | YangMatch::DirMatched | YangMatch::Leaf | YangMatch::Key => {
@@ -656,15 +657,21 @@ pub fn delete(paths: Vec<CommandPath>, mut config: Rc<Config>) {
                 }
             }
             YangMatch::LeafListMatched => {
+                had_list_value = true;
                 let mut lists = config.list.borrow_mut();
                 if let Some(remove_index) = lists.iter().position(|x| *x == path.name) {
                     lists.remove(remove_index);
                 }
-                if !lists.is_empty() {
-                    return;
-                }
             }
         }
+    }
+
+    // If specific leaf-list values were deleted but others remain, keep the
+    // leaf-list node in place. Only cascade cleanup when the list is empty
+    // (including the no-value `delete <leaf-list>` path, where
+    // had_list_value stays false and cascade removes the whole node).
+    if had_list_value && !config.list.borrow().is_empty() {
+        return;
     }
 
     while let Some(parent) = config.parent.as_ref() {
@@ -705,8 +712,14 @@ fn config_match_value(config: &Rc<Config>, input: &str, mx: &mut Match) {
     if config.list.borrow().is_empty() {
         config_match_keyword(config, &config.value.borrow(), input, mx);
     } else {
+        // Leaf-lists intentionally allow duplicate entries (e.g. MPLS label
+        // stacks). Dedupe per distinct value so a repeated entry doesn't
+        // inflate mx.count and misreport the input as Ambiguous.
+        let mut seen: HashSet<String> = HashSet::new();
         for value in config.list.borrow().iter() {
-            config_match_keyword(config, value, input, mx);
+            if seen.insert(value.clone()) {
+                config_match_keyword(config, value, input, mx);
+            }
         }
     }
 }
@@ -778,6 +791,207 @@ mod tests {
         assert!(output.contains("    10.0.0.1/32;"));
         assert!(output.contains("    10.0.0.2/32;"));
         assert!(output.contains("  }"));
+    }
+
+    #[test]
+    fn test_leaf_list_delete_all() {
+        // Build: prefix-test { member 10.0.0.1/32 10.0.0.2/32 10.0.0.3/32; other 42; }
+        let root = Rc::new(Config::new("".to_string(), None));
+
+        for value in ["10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32"] {
+            let paths = vec![
+                CommandPath {
+                    name: "prefix-test".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: "member".to_string(),
+                    ymatch: YangMatch::LeafList as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: value.to_string(),
+                    ymatch: YangMatch::LeafListMatched as i32,
+                    ..Default::default()
+                },
+            ];
+            set(paths, root.clone());
+        }
+
+        let sibling_paths = vec![
+            CommandPath {
+                name: "prefix-test".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "other".to_string(),
+                ymatch: YangMatch::Leaf as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "42".to_string(),
+                ymatch: YangMatch::LeafMatched as i32,
+                ..Default::default()
+            },
+        ];
+        set(sibling_paths, root.clone());
+
+        // Pre-delete sanity.
+        let pre_delete = {
+            let prefix_test = root.lookup(&"prefix-test".to_string()).unwrap();
+            let member = prefix_test.lookup(&"member".to_string()).unwrap();
+            member.list.borrow().clone()
+        };
+        assert_eq!(
+            pre_delete,
+            vec!["10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32"]
+        );
+
+        // Delete the whole leaf-list by referencing only the leaf-list node.
+        let delete_paths = vec![
+            CommandPath {
+                name: "prefix-test".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "member".to_string(),
+                ymatch: YangMatch::LeafList as i32,
+                ..Default::default()
+            },
+        ];
+        delete(delete_paths, root.clone());
+
+        // `member` should be gone; `other` (sibling leaf) must remain untouched.
+        let prefix_test = root.lookup(&"prefix-test".to_string()).unwrap();
+        assert!(prefix_test.lookup(&"member".to_string()).is_none());
+        let other = prefix_test.lookup(&"other".to_string()).unwrap();
+        assert_eq!(*other.value.borrow(), "42");
+    }
+
+    fn build_label_fixture() -> Rc<Config> {
+        let root = Rc::new(Config::new("".to_string(), None));
+        for value in ["100", "200", "100"] {
+            set(
+                vec![
+                    CommandPath {
+                        name: "lsp".to_string(),
+                        ymatch: YangMatch::Dir as i32,
+                        ..Default::default()
+                    },
+                    CommandPath {
+                        name: "label".to_string(),
+                        ymatch: YangMatch::LeafList as i32,
+                        ..Default::default()
+                    },
+                    CommandPath {
+                        name: value.to_string(),
+                        ymatch: YangMatch::LeafListMatched as i32,
+                        ..Default::default()
+                    },
+                ],
+                root.clone(),
+            );
+        }
+        // sibling leaf so cascade stops at the parent
+        set(
+            vec![
+                CommandPath {
+                    name: "lsp".to_string(),
+                    ymatch: YangMatch::Dir as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: "nexthop".to_string(),
+                    ymatch: YangMatch::Leaf as i32,
+                    ..Default::default()
+                },
+                CommandPath {
+                    name: "192.168.100.2".to_string(),
+                    ymatch: YangMatch::LeafMatched as i32,
+                    ..Default::default()
+                },
+            ],
+            root.clone(),
+        );
+        root
+    }
+
+    fn delete_label_values(root: &Rc<Config>, values: &[&str]) {
+        let mut paths = vec![
+            CommandPath {
+                name: "lsp".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "label".to_string(),
+                ymatch: YangMatch::LeafList as i32,
+                ..Default::default()
+            },
+        ];
+        for v in values {
+            paths.push(CommandPath {
+                name: v.to_string(),
+                ymatch: YangMatch::LeafListMatched as i32,
+                ..Default::default()
+            });
+        }
+        delete(paths, root.clone());
+    }
+
+    #[test]
+    fn test_leaf_list_delete_one_duplicate() {
+        let root = build_label_fixture();
+        delete_label_values(&root, &["100"]);
+
+        let lsp = root.lookup(&"lsp".to_string()).unwrap();
+        let label = lsp.lookup(&"label".to_string()).unwrap();
+        assert_eq!(
+            *label.list.borrow(),
+            vec!["200".to_string(), "100".to_string()]
+        );
+        // sibling intact
+        assert_eq!(
+            *lsp.lookup(&"nexthop".to_string()).unwrap().value.borrow(),
+            "192.168.100.2"
+        );
+    }
+
+    #[test]
+    fn test_leaf_list_delete_two_values() {
+        let root = build_label_fixture();
+        delete_label_values(&root, &["100", "200"]);
+
+        let lsp = root.lookup(&"lsp".to_string()).unwrap();
+        let label = lsp.lookup(&"label".to_string()).unwrap();
+        assert_eq!(*label.list.borrow(), vec!["100".to_string()]);
+    }
+
+    #[test]
+    fn test_leaf_list_delete_all_enumerated() {
+        let root = build_label_fixture();
+        delete_label_values(&root, &["100", "200", "100"]);
+
+        let lsp = root.lookup(&"lsp".to_string()).unwrap();
+        assert!(lsp.lookup(&"label".to_string()).is_none());
+        assert_eq!(
+            *lsp.lookup(&"nexthop".to_string()).unwrap().value.borrow(),
+            "192.168.100.2"
+        );
+    }
+
+    #[test]
+    fn test_leaf_list_delete_extra_value_is_noop() {
+        // Deleting more copies of "100" than exist leaves the unmatched ones untouched.
+        let root = build_label_fixture();
+        delete_label_values(&root, &["100", "100", "100"]);
+
+        let lsp = root.lookup(&"lsp".to_string()).unwrap();
+        let label = lsp.lookup(&"label".to_string()).unwrap();
+        assert_eq!(*label.list.borrow(), vec!["200".to_string()]);
     }
 
     #[test]
