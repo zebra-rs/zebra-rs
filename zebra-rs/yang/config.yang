@@ -592,7 +592,7 @@ module config {
             leaf prefix {
               type inet:ipv4-prefix;
             }
-            leaf-list encap {
+            leaf-list label {
               type uint32;
             }
             leaf "nexthop" {
