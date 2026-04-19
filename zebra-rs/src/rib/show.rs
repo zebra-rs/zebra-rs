@@ -335,13 +335,14 @@ pub fn rib_entry_show(
                 };
                 write!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
                 if !uni.mpls.is_empty() {
+                    write!(buf, ", label").unwrap();
                     for mpls in uni.mpls.iter() {
                         match mpls {
                             Label::Implicit(label) => {
-                                write!(buf, ", label {} implicit-null", label).unwrap();
+                                write!(buf, " {}(implicit-null)", label).unwrap();
                             }
                             Label::Explicit(label) => {
-                                write!(buf, ", label {}", label).unwrap();
+                                write!(buf, " {}", label).unwrap();
                             }
                         }
                     }
@@ -355,13 +356,14 @@ pub fn rib_entry_show(
                     }
                     write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
                     if !uni.mpls.is_empty() {
+                        write!(buf, ", label").unwrap();
                         for mpls in uni.mpls.iter() {
                             match mpls {
                                 Label::Implicit(label) => {
-                                    write!(buf, ", label {} implicit-null", label).unwrap();
+                                    write!(buf, " {} implicit-null", label).unwrap();
                                 }
                                 Label::Explicit(label) => {
-                                    write!(buf, ", label {}", label).unwrap();
+                                    write!(buf, " {}", label).unwrap();
                                 }
                             }
                         }
@@ -435,13 +437,14 @@ pub fn rib_entry_show_v6(
                 };
                 write!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
                 if !uni.mpls.is_empty() {
+                    write!(buf, ", label").unwrap();
                     for mpls in uni.mpls.iter() {
                         match mpls {
                             Label::Implicit(label) => {
-                                write!(buf, ", label {} implicit-null", label).unwrap();
+                                write!(buf, " {} implicit-null", label).unwrap();
                             }
                             Label::Explicit(label) => {
-                                write!(buf, ", label {}", label).unwrap();
+                                write!(buf, " {}", label).unwrap();
                             }
                         }
                     }
@@ -455,13 +458,14 @@ pub fn rib_entry_show_v6(
                     }
                     write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
                     if !uni.mpls.is_empty() {
+                        write!(buf, ", label").unwrap();
                         for mpls in uni.mpls.iter() {
                             match mpls {
                                 Label::Implicit(label) => {
-                                    write!(buf, ", label {} implicit-null", label).unwrap();
+                                    write!(buf, " {} implicit-null", label).unwrap();
                                 }
                                 Label::Explicit(label) => {
-                                    write!(buf, ", label {}", label).unwrap();
+                                    write!(buf, " {}", label).unwrap();
                                 }
                             }
                         }

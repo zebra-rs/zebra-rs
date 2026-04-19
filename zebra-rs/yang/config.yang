@@ -514,6 +514,9 @@ module config {
                 type uint8;
                 description "Weight of ECMP route.";
               }
+              leaf-list label {
+                type uint32;
+              }
             }
             leaf distance {
               type uint8;
@@ -584,24 +587,6 @@ module config {
             }
             leaf nflen {
               type uint8;
-            }
-          }
-
-          list lsp {
-            key "prefix";
-            leaf prefix {
-              type inet:ipv4-prefix;
-            }
-            leaf-list label {
-              type uint32;
-            }
-            leaf "nexthop" {
-              type inet:ipv4-address;
-              description "Nexthop of the route";
-            }
-            leaf metric {
-              type uint32;
-              description "Metric of the route.";
             }
           }
         }

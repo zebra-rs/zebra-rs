@@ -376,18 +376,22 @@ impl FibHandle {
                     let attr = NexthopAttribute::EncapType(RouteLwEnCapType::Mpls.into());
                     msg.attributes.push(attr);
 
-                    if let Some(&label) = uni.labels.get(0) {
-                        let label = MplsLabel {
+                    let last = uni.labels.len() - 1;
+                    let stack: Vec<MplsLabel> = uni
+                        .labels
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &label)| MplsLabel {
                             label,
                             traffic_class: 0,
-                            bottom_of_stack: true,
+                            bottom_of_stack: i == last,
                             ttl: 0,
-                        };
-                        let mpls = RouteMplsIpTunnel::Destination(vec![label]);
-                        let encap = RouteLwTunnelEncap::Mpls(mpls);
-                        let attr = NexthopAttribute::Encap(vec![encap]);
-                        msg.attributes.push(attr);
-                    }
+                        })
+                        .collect();
+                    let mpls = RouteMplsIpTunnel::Destination(stack);
+                    let encap = RouteLwTunnelEncap::Mpls(mpls);
+                    let attr = NexthopAttribute::Encap(vec![encap]);
+                    msg.attributes.push(attr);
                 }
             }
             Group::Multi(multi) => {
