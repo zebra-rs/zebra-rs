@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use crate::rib::entry::RibEntry;
-use crate::rib::nexthop::NexthopUni;
+use crate::rib::nexthop::{Label, NexthopUni};
 use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType};
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
     pub metric: Option<u32>,
     pub weight: Option<u8>,
+    pub labels: Vec<u32>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -39,6 +40,8 @@ impl StaticRoute {
                 addr: std::net::IpAddr::V4(*p),
                 metric: n.metric.unwrap_or(metric),
                 weight: n.weight.unwrap_or(1),
+                mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
+                mpls_label: n.labels.clone(),
                 ..Default::default()
             };
             entry.nexthop = Nexthop::Uni(nhop);
@@ -66,6 +69,8 @@ impl StaticRoute {
                     addr: std::net::IpAddr::V4(*p),
                     metric: n.metric.unwrap_or(metric),
                     weight: n.weight.unwrap_or(1),
+                    mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
+                    mpls_label: n.labels.clone(),
                     ..Default::default()
                 };
                 multi.nexthops.push(nhop);
@@ -82,6 +87,8 @@ impl StaticRoute {
                     addr: std::net::IpAddr::V4(*p),
                     metric: *metric,
                     weight: n.weight.unwrap_or(1),
+                    mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
+                    mpls_label: n.labels.clone(),
                     ..Default::default()
                 };
                 pro.nexthops.push(nhop);
@@ -89,5 +96,96 @@ impl StaticRoute {
             entry.nexthop = Nexthop::List(pro);
         }
         Some(entry)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nh(labels: Vec<u32>, metric: Option<u32>) -> StaticNexthop {
+        StaticNexthop {
+            metric,
+            weight: None,
+            labels,
+        }
+    }
+
+    fn as_uni(entry: &RibEntry) -> &crate::rib::nexthop::NexthopUni {
+        match &entry.nexthop {
+            Nexthop::Uni(u) => u,
+            _ => panic!("expected Nexthop::Uni"),
+        }
+    }
+
+    fn as_multi(entry: &RibEntry) -> &crate::rib::NexthopMulti {
+        match &entry.nexthop {
+            Nexthop::Multi(m) => m,
+            _ => panic!("expected Nexthop::Multi"),
+        }
+    }
+
+    #[test]
+    fn single_nexthop_with_labels() {
+        let mut r = StaticRoute::default();
+        r.nexthops.insert(
+            Ipv4Addr::new(192, 168, 100, 2),
+            nh(vec![16200, 16300], None),
+        );
+        let entry = r.to_entry().expect("entry built");
+        let uni = as_uni(&entry);
+        assert_eq!(uni.mpls_label, vec![16200, 16300]);
+        assert_eq!(
+            uni.mpls,
+            vec![Label::Explicit(16200), Label::Explicit(16300)]
+        );
+    }
+
+    #[test]
+    fn ecmp_distinct_stacks_per_leg() {
+        let mut r = StaticRoute::default();
+        r.nexthops
+            .insert(Ipv4Addr::new(192, 168, 100, 2), nh(vec![100, 200], None));
+        r.nexthops
+            .insert(Ipv4Addr::new(192, 168, 100, 3), nh(vec![300], None));
+        let entry = r.to_entry().expect("entry built");
+        let multi = as_multi(&entry);
+        assert_eq!(multi.nexthops.len(), 2);
+        let leg_a = multi
+            .nexthops
+            .iter()
+            .find(|u| u.addr == std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 100, 2)))
+            .expect("leg A");
+        let leg_b = multi
+            .nexthops
+            .iter()
+            .find(|u| u.addr == std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 100, 3)))
+            .expect("leg B");
+        assert_eq!(leg_a.mpls_label, vec![100, 200]);
+        assert_eq!(leg_b.mpls_label, vec![300]);
+    }
+
+    #[test]
+    fn ecmp_one_leg_labeled_one_bare() {
+        let mut r = StaticRoute::default();
+        r.nexthops
+            .insert(Ipv4Addr::new(192, 168, 100, 2), nh(vec![100], None));
+        r.nexthops
+            .insert(Ipv4Addr::new(192, 168, 100, 3), nh(vec![], None));
+        let entry = r.to_entry().expect("entry built");
+        let multi = as_multi(&entry);
+        let labeled = multi
+            .nexthops
+            .iter()
+            .find(|u| u.addr == std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 100, 2)))
+            .expect("labeled leg");
+        let bare = multi
+            .nexthops
+            .iter()
+            .find(|u| u.addr == std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 100, 3)))
+            .expect("bare leg");
+        assert_eq!(labeled.mpls_label, vec![100]);
+        assert!(bare.mpls_label.is_empty());
+        assert!(bare.mpls.is_empty());
     }
 }

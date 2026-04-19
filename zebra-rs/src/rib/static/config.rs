@@ -216,4 +216,22 @@ fn config_builder() -> ConfigBuilder {
             n.weight = None;
             Ok(())
         })
+        .path("/routing/static/ipv4/route/nexthop/label")
+        .set(|config, cache, prefix, args| {
+            let s = cache_get(config, cache, prefix).context(CONFIG_ERR)?;
+            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
+            let n = s.nexthops.entry(naddr).or_default();
+            n.labels.clear();
+            while let Some(label) = args.u32() {
+                n.labels.push(label);
+            }
+            Ok(())
+        })
+        .del(|config, cache, prefix, args| {
+            let s = cache_lookup(config, cache, prefix).context(CONFIG_ERR)?;
+            let naddr = args.v4addr().context(NEXTHOP_ERR)?;
+            let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
+            n.labels.clear();
+            Ok(())
+        })
 }
