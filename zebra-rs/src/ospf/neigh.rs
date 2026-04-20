@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
@@ -13,7 +13,7 @@ use tokio::time::Instant;
 
 use super::lsdb::OspfLsaKey;
 use super::task::Timer;
-use super::{Identity, Lsdb, Message, NfsmEvent, NfsmState};
+use super::{Identity, Message, NfsmEvent, NfsmState};
 
 pub struct Neighbor {
     pub ifindex: u32,
@@ -21,7 +21,6 @@ pub struct Neighbor {
     pub state: NfsmState,
     pub ostate: NfsmState,
     pub timer: NeighborTimer,
-    pub v_inactivity: u64,
     pub options: OspfOptions,
     pub flags: NeighborFlags,
     pub tx: UnboundedSender<Message>,
@@ -78,7 +77,7 @@ impl Neighbor {
         ifindex: u32,
         prefix: Ipv4Net,
         router_id: &Ipv4Addr,
-        dead_interval: u64,
+        _dead_interval: u64,
         ptx: UnboundedSender<Message>,
     ) -> Self {
         let mut nbr = Self {
@@ -86,7 +85,6 @@ impl Neighbor {
             state: NfsmState::Down,
             ostate: NfsmState::Down,
             timer: NeighborTimer::default(),
-            v_inactivity: dead_interval,
             ident: Identity::new(*router_id),
             options: 0.into(),
             flags: 0.into(),

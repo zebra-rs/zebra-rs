@@ -7,10 +7,10 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
+use super::Ospf;
 use super::OspfLink;
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
-use super::{Ospf, addr::OspfAddr};
 
 use crate::config::{Args, ConfigOp};
 use crate::ospf::Message;
@@ -18,14 +18,12 @@ use crate::rib::util::*;
 
 pub struct OspfNetworkConfig {
     pub area_id: Ipv4Addr,
-    pub addr: Option<OspfAddr>,
 }
 
 impl Default for OspfNetworkConfig {
     fn default() -> Self {
         Self {
             area_id: Ipv4Addr::UNSPECIFIED,
-            addr: None,
         }
     }
 }
@@ -35,10 +33,6 @@ pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 impl Ospf {
     const OSPF: &str = "/routing/ospf";
     const TRACING: &str = "/routing/ospf/tracing";
-
-    pub fn callback_add(&mut self, path: &str, cb: Callback) {
-        self.callbacks.insert(path.to_string(), cb);
-    }
 
     pub fn ospf_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(format!("{}{}", Self::OSPF, path), cb);
@@ -110,16 +104,16 @@ pub(super) fn apply_link_enable_transition(link: &OspfLink, next: bool, next_id:
         if next {
             if curr_id != next_id {
                 // Enabled -> Enabled (area change).
-                link.tx.send(Message::Disable(link.index, curr_id));
-                link.tx.send(Message::Enable(link.index, next_id));
+                let _ = link.tx.send(Message::Disable(link.index, curr_id));
+                let _ = link.tx.send(Message::Enable(link.index, next_id));
             }
         } else {
             // Enabled -> Disabled.
-            link.tx.send(Message::Disable(link.index, curr_id));
+            let _ = link.tx.send(Message::Disable(link.index, curr_id));
         }
     } else if next {
         // Disabled -> Enabled.
-        link.tx.send(Message::Enable(link.index, next_id));
+        let _ = link.tx.send(Message::Enable(link.index, next_id));
     }
 }
 
@@ -152,7 +146,7 @@ fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<
 }
 
 fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
-    let router_id = args.v4addr()?;
+    let _router_id = args.v4addr()?;
     None
 }
 
@@ -194,7 +188,8 @@ fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, op: ConfigOp)
     link.ident.priority = link.priority();
 
     let ifindex = link.index;
-    link.tx
+    let _ = link
+        .tx
         .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
 
     Some(())

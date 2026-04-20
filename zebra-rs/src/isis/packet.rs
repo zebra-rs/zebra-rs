@@ -5,26 +5,23 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use anyhow::{Context, Error};
-use bytes::BytesMut;
+use anyhow::Error;
 use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
-use crate::isis::inst::{csnp_generate, lsp_emit};
+use crate::isis::inst::csnp_generate;
 use crate::isis::link::DisStatus;
-use crate::isis::lsdb::{insert_self_originate, insert_self_originate_link};
 use crate::isis::neigh::Neighbor;
 use crate::isis::nfsm::nfsm_hold_timer;
 use crate::isis::{IfsmEvent, Message, NfsmState};
+use crate::isis_pdu_trace;
 use crate::rib::MacAddr;
-use crate::{isis_database_trace, isis_event_trace, isis_pdu_trace};
 
 use super::flood;
 use super::ifsm::has_level;
-use super::inst::{IsisTop, NeighborTop, Packet, PacketMessage};
+use super::inst::{Packet, PacketMessage};
 use super::link::{LinkTop, LinkType};
 use super::lsdb;
-use super::nfsm::NfsmEvent;
 use super::{LabelPool, Level};
 
 #[derive(Debug)]
@@ -75,7 +72,7 @@ pub fn nbr_hello_interpret(
             IsisTlv::P2p3Way(tlv) => {
                 nbr.circuit_id = Some(tlv.circuit_id);
                 if let Some(neighbor_id) = tlv.neighbor_id {
-                    has_my_sys_id = (sys_id == neighbor_id);
+                    has_my_sys_id = sys_id == neighbor_id;
                 }
             }
             IsisTlv::Ipv4IfAddr(ifaddr) => {
@@ -321,7 +318,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
                 link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
 
                 nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-                link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
+                let _ = link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
             }
         }
 
@@ -476,7 +473,7 @@ fn csnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
         Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
     };
-    link.ptx.send(PacketMessage::Send(
+    let _ = link.ptx.send(PacketMessage::Send(
         Packet::Packet(packet),
         link.ifindex,
         level,
@@ -660,7 +657,7 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
     };
-    link.ptx.send(PacketMessage::Send(
+    let _ = link.ptx.send(PacketMessage::Send(
         Packet::Packet(packet),
         link.ifindex,
         level,
@@ -671,7 +668,7 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
 pub fn process_packet(
     link: &mut LinkTop,
     packet: IsisPacket,
-    ifindex: u32,
+    _ifindex: u32,
     mac: Option<MacAddr>,
 ) -> Result<(), Error> {
     match packet.pdu_type {

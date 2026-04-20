@@ -319,7 +319,7 @@ pub fn rib_entry_show(
     } else {
         match &e.nexthop {
             Nexthop::Link(_ifindex) => {
-                writeln!(buf, " via {}", rib.link_name(e.ifindex));
+                let _ = writeln!(buf, " via {}", rib.link_name(e.ifindex));
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
@@ -421,7 +421,7 @@ pub fn rib_entry_show_v6(
     } else {
         match &e.nexthop {
             Nexthop::Link(_ifindex) => {
-                writeln!(buf, " via {}", rib.link_name(e.ifindex));
+                let _ = writeln!(buf, " via {}", rib.link_name(e.ifindex));
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);

@@ -30,9 +30,6 @@ pub enum OspfNetworkType {
     #[default]
     Broadcast,
     NBMA,
-    PointToPoint,
-    PointToMultipoint,
-    VirtualLink,
 }
 
 impl Display for OspfNetworkType {
@@ -40,9 +37,6 @@ impl Display for OspfNetworkType {
         match self {
             OspfNetworkType::Broadcast => write!(f, "BROADCAST"),
             OspfNetworkType::NBMA => write!(f, "NBMA"),
-            OspfNetworkType::PointToPoint => write!(f, "POINT_TO_POINT"),
-            OspfNetworkType::PointToMultipoint => write!(f, "POINT_TO_MULTIPOINT"),
-            OspfNetworkType::VirtualLink => write!(f, "VIRTUAL_LINK"),
         }
     }
 }
@@ -181,20 +175,12 @@ impl OspfLink {
     pub fn is_multicast_if(&self) -> bool {
         matches!(
             self.network_type,
-            OspfNetworkType::Broadcast | OspfNetworkType::NBMA | OspfNetworkType::PointToMultipoint
+            OspfNetworkType::Broadcast | OspfNetworkType::NBMA
         )
     }
 
     pub fn is_nbma_if(&self) -> bool {
         self.network_type == OspfNetworkType::NBMA
-    }
-
-    pub fn is_dr_election_ready(&self) -> bool {
-        self.flags.hello_sent()
-    }
-
-    pub fn event(&mut self, msg: Message) {
-        self.tx.send(msg);
     }
 }
 

@@ -24,61 +24,62 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
     let mut cmsgspace = nix::cmsg_space!(libc::in_pktinfo);
 
     loop {
-        sock.async_io(Interest::READABLE, |sock| {
-            let msg = socket::recvmsg::<SockaddrIn>(
-                sock.as_raw_fd(),
-                &mut iov,
-                Some(&mut cmsgspace),
-                socket::MsgFlags::empty(),
-            )?;
+        let _ = sock
+            .async_io(Interest::READABLE, |sock| {
+                let msg = socket::recvmsg::<SockaddrIn>(
+                    sock.as_raw_fd(),
+                    &mut iov,
+                    Some(&mut cmsgspace),
+                    socket::MsgFlags::empty(),
+                )?;
 
-            let mut cmsgs = msg.cmsgs()?;
+                let mut cmsgs = msg.cmsgs()?;
 
-            let Some(src) = msg.address else {
-                return Err(ErrorKind::AddrNotAvailable.into());
-            };
+                let Some(src) = msg.address else {
+                    return Err(ErrorKind::AddrNotAvailable.into());
+                };
 
-            let Some(ControlMessageOwned::Ipv4PacketInfo(pktinfo)) = cmsgs.next() else {
-                return Err(ErrorKind::AddrNotAvailable.into());
-            };
+                let Some(ControlMessageOwned::Ipv4PacketInfo(pktinfo)) = cmsgs.next() else {
+                    return Err(ErrorKind::AddrNotAvailable.into());
+                };
 
-            let ifaddr: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_spec_dst.s_addr.to_be());
-            let group: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_be());
-            let ifindex = pktinfo.ipi_ifindex as u32;
+                let ifaddr: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_spec_dst.s_addr.to_be());
+                let group: Ipv4Addr = Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_be());
+                let ifindex = pktinfo.ipi_ifindex as u32;
 
-            let Some(input) = msg.iovs().next() else {
-                return Err(ErrorKind::UnexpectedEof.into());
-            };
+                let Some(input) = msg.iovs().next() else {
+                    return Err(ErrorKind::UnexpectedEof.into());
+                };
 
-            // RFC 2328: Header verification.
+                // RFC 2328: Header verification.
 
-            // RFC 2328: Authentication and checksum verification.
-            let ospf_input = &input[IPV4_HEADER_LEN..];
-            if ospf_packet::validate_checksum(ospf_input).is_err() {
-                return Err(ErrorKind::InvalidData.into());
-            }
+                // RFC 2328: Authentication and checksum verification.
+                let ospf_input = &input[IPV4_HEADER_LEN..];
+                if ospf_packet::validate_checksum(ospf_input).is_err() {
+                    return Err(ErrorKind::InvalidData.into());
+                }
 
-            let Ok(packet) = ospf_packet::parse(ospf_input) else {
-                return Err(ErrorKind::UnexpectedEof.into());
-            };
+                let Ok(packet) = ospf_packet::parse(ospf_input) else {
+                    return Err(ErrorKind::UnexpectedEof.into());
+                };
 
-            // println!(
-            //     "Read: type {} src {} ifaddr {} ifindex {} dest {}",
-            //     packet.1.typ,
-            //     src.ip(),
-            //     group,
-            //     ifindex,
-            //     ifaddr
-            // );
+                // println!(
+                //     "Read: type {} src {} ifaddr {} ifindex {} dest {}",
+                //     packet.1.typ,
+                //     src.ip(),
+                //     group,
+                //     ifindex,
+                //     ifaddr
+                // );
 
-            // We will verify Area later.
+                // We will verify Area later.
 
-            tx.send(Message::Recv(packet.1, src.ip(), group, ifindex, ifaddr))
-                .unwrap();
+                tx.send(Message::Recv(packet.1, src.ip(), group, ifindex, ifaddr))
+                    .unwrap();
 
-            Ok(())
-        })
-        .await;
+                Ok(())
+            })
+            .await;
     }
 }
 

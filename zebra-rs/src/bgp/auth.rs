@@ -328,7 +328,6 @@ impl CryptoAlgorithm {
 /// `send-id`, `recv-id`.
 #[derive(Debug, Default, Clone)]
 pub struct Key {
-    pub key_id: u64,
     pub crypto_algorithm: Option<CryptoAlgorithm>,
     /// Raw key bytes. When the CLI leaf is `keystring`, this holds
     /// the ASCII bytes; when `hexadecimal-string`, the decoded hex
@@ -339,28 +338,21 @@ pub struct Key {
 }
 
 impl Key {
-    pub fn new(key_id: u64) -> Self {
-        Self {
-            key_id,
-            ..Default::default()
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 /// Named RFC 8177 key chain. Keys are ordered by key-id.
 #[derive(Debug, Default, Clone)]
 pub struct KeyChain {
-    pub name: String,
     pub description: Option<String>,
     pub keys: BTreeMap<u64, Key>,
 }
 
 impl KeyChain {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            ..Default::default()
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Pick the key to use for new connections. For this initial

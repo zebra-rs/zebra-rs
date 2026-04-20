@@ -35,20 +35,8 @@ impl BgpAttrStore {
         rc
     }
 
-    pub fn gc(&mut self) {
-        self.store.retain(|_, weak| weak.strong_count() > 0);
-    }
-
     pub fn len(&self) -> usize {
         self.store.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.store.is_empty()
-    }
-
-    pub fn refcnt(&self, attr: &BgpAttr) -> usize {
-        self.store.get(attr).map(Weak::strong_count).unwrap_or(0)
     }
 
     pub fn refcnt_all(&self) -> usize {

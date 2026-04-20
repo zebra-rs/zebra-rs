@@ -20,7 +20,6 @@ use super::yaml::yaml_parse;
 use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
 
 use libyang::{Entry, YangStore, to_entry};
-use serde_json::Value;
 use similar::TextDiff;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -439,7 +438,7 @@ impl ConfigManager {
 
                 self.store.candidate_clear();
                 for cmd in cmds.iter() {
-                    let (code, output, paths) = self.execute(mode, cmd);
+                    let (code, _output, _paths) = self.execute(mode, cmd);
                     if code != ExecCode::Show {
                         let resp = DeployResponse {
                             apply_code: ApplyCode::ParseError,

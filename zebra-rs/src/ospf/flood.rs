@@ -6,7 +6,6 @@ use std::time::Duration;
 use ospf_packet::*;
 
 use super::inst::Message;
-use super::link::OspfLink;
 use super::lsdb::{LsdbEvent, OSPF_MIN_LS_ARRIVAL, OspfLsaKey};
 use super::task::{Timer, TimerType};
 use super::{Neighbor, NfsmState, inst::OspfInterface, nfsm::ospf_nfsm_check_nbr_loading};
@@ -35,10 +34,6 @@ pub fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
     }
 }
 
-pub fn ospf_ls_request_count(nbr: &Neighbor) -> usize {
-    nbr.ls_req.len()
-}
-
 pub fn ospf_ls_request_isempty(nbr: &Neighbor) -> bool {
     nbr.ls_req.is_empty()
 }
@@ -54,7 +49,7 @@ pub fn ospf_ls_request_lookup(nbr: &Neighbor, h: &OspfLsaHeader) -> Option<usize
 
 // OSPF LSA flooding -- RFC2328 Section 13.3.
 // Following the ref/ospfd/ospf_flood.c ospf_flood_through_interface() pattern.
-pub fn ospf_flood_through_interface(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
+pub fn ospf_flood_through_interface(_oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     // For neighbors in Exchange or Loading state, check ls_req list.
     if nbr.state >= NfsmState::Exchange && nbr.state < NfsmState::Full {
         if let Some(idx) = ospf_ls_request_lookup(nbr, &lsa.h) {
@@ -99,7 +94,7 @@ pub fn ospf_is_self_originated(oi: &OspfInterface, lsa: &OspfLsa) -> bool {
 pub fn ospf_flood_self_originated_lsa(oi: &OspfInterface, lsa: &OspfLsa) {
     let key = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
     let msg = Message::Lsdb(LsdbEvent::SelfOriginatedReceived, Some(oi.area_id), key);
-    oi.tx.send(msg);
+    let _ = oi.tx.send(msg);
 }
 
 pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
@@ -202,9 +197,4 @@ pub fn ospf_ls_retransmit_delete(nbr: &mut Neighbor, lsa: &OspfLsa) {
 pub fn ospf_ls_retransmit_lookup<'a>(nbr: &'a Neighbor, lsa: &OspfLsa) -> Option<&'a OspfLsa> {
     let key: OspfLsaKey = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
     nbr.ls_rxmt.get(&key)
-}
-
-pub fn ospf_ls_retransmit_clear(nbr: &mut Neighbor) {
-    nbr.ls_rxmt.clear();
-    nbr.timer.ls_rxmt = None;
 }

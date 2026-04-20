@@ -6,12 +6,11 @@ use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::context::Timer;
-use crate::isis::inst::csnp_generate;
 use crate::isis::link::DisStatus;
 use crate::isis::network::P2P_ISS;
+use crate::isis_pdu_trace;
 use crate::rib::MacAddr;
 use crate::rib::link_ext::LinkFlagsExt;
-use crate::{isis_debug, isis_event_trace, isis_packet_trace, isis_pdu_trace};
 
 use super::inst::{Packet, PacketMessage};
 use super::link::{Afis, HelloPaddingPolicy, LinkTop, LinkType};
@@ -22,8 +21,6 @@ use super::{Level, Message, NfsmState};
 pub enum IfsmEvent {
     Start,
     Stop,
-    InterfaceUp,
-    InterfaceDown,
     HelloTimerExpire,
     CsnpTimerExpire,
     HelloOriginate,
@@ -155,7 +152,7 @@ fn hello_timer(link: &LinkTop, level: Level) -> Timer {
         async move {
             use IfsmEvent::*;
             let msg = Message::Ifsm(HelloTimerExpire, ifindex, Some(level));
-            tx.send(msg);
+            let _ = tx.send(msg);
         }
     })
 }
@@ -187,7 +184,7 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     }
 
     let ifindex = link.ifindex;
-    link.ptx.send(PacketMessage::Send(
+    let _ = link.ptx.send(PacketMessage::Send(
         Packet::Packet(packet),
         ifindex,
         level,
@@ -215,7 +212,7 @@ pub fn hello_originate(link: &mut LinkTop, level: Level) {
         };
 
         *link.state.hello.get_mut(&level) = Some(hello);
-        hello_send(link, level);
+        let _ = hello_send(link, level);
         *link.timer.hello.get_mut(&level) = Some(hello_timer(link, level));
     }
 }
@@ -284,7 +281,7 @@ pub fn csnp_timer(link: &LinkTop, level: Level) -> Timer {
         async move {
             use IfsmEvent::*;
             let msg = Message::Ifsm(CsnpTimerExpire, ifindex, Some(level));
-            tx.send(msg);
+            let _ = tx.send(msg);
         }
     })
 }
