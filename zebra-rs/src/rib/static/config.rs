@@ -198,11 +198,11 @@ fn cache_lookup<'a, F: StaticFamily>(
 }
 
 fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
-    const CONFIG_ERR: &str = "missing config";
-    const NEXTHOP_ERR: &str = "missing nexthop address";
-    const METRIC_ERR: &str = "missing metric arg";
-    const DISTANCE_ERR: &str = "missing distance arg";
-    const WEIGHT_ERR: &str = "missing weight arg";
+    const CONFIG_ERR: &str = "config parse error";
+    const NEXTHOP_ERR: &str = "nexthop address parse error";
+    const METRIC_ERR: &str = "metric arg parse error";
+    const DISTANCE_ERR: &str = "distance arg parse error";
+    const WEIGHT_ERR: &str = "weight arg parse error";
 
     ConfigBuilder::<F>::default()
         .path(&format!("/routing/static/{}/route", F::FAMILY))

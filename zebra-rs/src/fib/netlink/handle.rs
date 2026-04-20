@@ -1364,11 +1364,11 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
                 }
                 builder = builder.nexthop(Nexthop::Multi(multi));
             }
-            RouteAttribute::EncapType(e) => {
-                println!("XXX EncapType {}", e);
+            RouteAttribute::EncapType(_e) => {
+                // println!("XXX EncapType {}", e);
             }
-            RouteAttribute::Encap(e) => {
-                println!("XXX Encap {:?}", e);
+            RouteAttribute::Encap(_e) => {
+                // println!("XXX Encap {:?}", e);
             }
 
             _ => {
