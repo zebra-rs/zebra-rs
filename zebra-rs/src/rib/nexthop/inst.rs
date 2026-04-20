@@ -23,24 +23,21 @@ pub struct NexthopUni {
 
 impl NexthopUni {
     pub fn new(addr: IpAddr, metric: u32, mpls: Vec<Label>) -> Self {
-        let mut uni = Self {
+        let mpls_label = mpls
+            .iter()
+            .filter_map(|label| match label {
+                Label::Implicit(_) => None,
+                Label::Explicit(label) => Some(*label),
+            })
+            .collect();
+        Self {
             addr,
             metric,
             mpls,
+            mpls_label,
             weight: 1,
             ..Default::default()
-        };
-        for mpls in uni.mpls.iter() {
-            match mpls {
-                Label::Implicit(_) => {
-                    // Implicit null is treated as no label.
-                }
-                Label::Explicit(label) => {
-                    uni.mpls_label.push(label.clone());
-                }
-            }
         }
-        uni
     }
 
     // Backward compatibility method for IPv4
