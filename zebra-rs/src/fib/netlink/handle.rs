@@ -14,8 +14,8 @@ use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
-    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags,
-    LinkInfo, LinkLayerType, LinkMessage,
+    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo,
+    LinkLayerType, LinkMessage,
 };
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
@@ -32,7 +32,6 @@ use rtnetlink::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::context::vrf::Vrf;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
@@ -340,8 +339,8 @@ impl FibHandle {
         msg.header.flags = NexthopFlags::Onlink;
 
         // Logging purpose.
-        let mut gid: usize = 0;
-        let mut refcnt: usize = 0;
+        let gid: usize;
+        let refcnt: usize;
 
         match nexthop {
             Group::Uni(uni) => {
@@ -651,79 +650,6 @@ impl FibHandle {
         }
     }
 
-    pub async fn vrf_add(&self, vrf: &Vrf) {
-        let mut msg = LinkMessage::default();
-
-        let name = LinkAttribute::IfName(vrf.name.clone());
-        msg.attributes.push(name);
-
-        let vrf = InfoVrf::TableId(vrf.id);
-        let data = InfoData::Vrf(vec![vrf]);
-        let link_data = LinkInfo::Data(data);
-
-        let kind = InfoKind::Vrf;
-        let link_kind = LinkInfo::Kind(kind);
-
-        let link_info = LinkAttribute::LinkInfo(vec![link_kind, link_data]);
-        msg.attributes.push(link_info);
-
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-        // req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewLink error: {e}");
-            }
-        }
-    }
-
-    pub async fn vrf_del(&self, vrf: &Vrf) {
-        let mut msg = LinkMessage::default();
-
-        let name = LinkAttribute::IfName(vrf.name.clone());
-        msg.attributes.push(name);
-
-        let vrf = InfoVrf::TableId(vrf.id);
-        let data = InfoData::Vrf(vec![vrf]);
-        let link_data = LinkInfo::Data(data);
-
-        let kind = InfoKind::Vrf;
-        let link_kind = LinkInfo::Kind(kind);
-
-        let link_info = LinkAttribute::LinkInfo(vec![link_kind, link_data]);
-        msg.attributes.push(link_info);
-
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelLink(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelLink error: {}", e);
-            }
-        }
-    }
-
-    pub async fn link_bind_vrf(&self, ifindex: u32, vrfid: u32) {
-        let mut msg = LinkMessage::default();
-        msg.header.index = ifindex;
-
-        let attr = LinkAttribute::Controller(vrfid);
-        msg.attributes.push(attr);
-
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                println!("link_bind_vrf error: {}", e);
-            }
-        }
-    }
-
     pub async fn link_set_up(&self, ifindex: u32) {
         let mut msg = LinkMessage::default();
         msg.header.index = ifindex;
@@ -737,41 +663,6 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 println!("link_set_up error: {}", e);
-            }
-        }
-    }
-
-    pub async fn link_set_down(&self, ifindex: u32) {
-        let mut msg = LinkMessage::default();
-        msg.header.index = ifindex;
-        msg.header.flags = LinkFlags::empty();
-        msg.header.change_mask = LinkFlags::Up;
-
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                println!("link_set_down error: {}", e);
-            }
-        }
-    }
-
-    pub async fn link_set_mtu(&self, ifindex: u32, mtu: u32) {
-        let mut msg = LinkMessage::default();
-        msg.header.index = ifindex;
-
-        let attr = LinkAttribute::Mtu(mtu);
-        msg.attributes.push(attr);
-
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelLink error: {}", e);
             }
         }
     }
@@ -1044,7 +935,7 @@ impl FibHandle {
         mac: &MacAddr,
         tunnel_endpoint: Option<IpAddr>,
         flags: u8,
-        seq: u32,
+        _seq: u32,
         esi: Option<[u8; 10]>,
     ) {
         // Resolve VNI to VXLAN interface index using the registered mapping

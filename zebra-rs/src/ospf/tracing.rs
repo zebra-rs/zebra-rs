@@ -14,14 +14,8 @@ pub struct OspfTracing {
     pub all: bool,
     // Packet tracing configuration
     pub packet: PacketTracing,
-    // Event tracing configuration
-    pub event: EventTracing,
     // FSM tracing configuration
     pub fsm: FsmTracing,
-    // Database tracing configuration
-    pub database: DatabaseTracing,
-    // Segment Routing tracing configuration
-    pub segment_routing: SegmentRoutingTracing,
 }
 
 // Packet tracing configuration
@@ -61,25 +55,6 @@ impl PacketDirection {
     }
 }
 
-// Event tracing configuration
-#[derive(Debug, Clone, Default)]
-pub struct EventTracing {
-    pub dr_selection: EventConfig,
-    pub lsp_originate: EventConfig,
-    pub lsp_refresh: EventConfig,
-    pub lsp_purge: EventConfig,
-    pub spf_calculation: EventConfig,
-    pub adjacency: EventConfig,
-    pub flooding: EventConfig,
-    pub all: bool,
-}
-
-// Individual event type configuration
-#[derive(Debug, Clone, Default)]
-pub struct EventConfig {
-    pub enabled: bool,
-}
-
 // FSM tracing configuration
 #[derive(Debug, Clone, Default)]
 pub struct FsmTracing {
@@ -95,30 +70,7 @@ pub struct FsmConfig {
     pub detail: bool,
 }
 
-// Database tracing configuration
-#[derive(Debug, Clone, Default)]
-pub struct DatabaseTracing {
-    pub lsdb: DatabaseConfig,
-    pub spf_tree: DatabaseConfig,
-    pub rib: DatabaseConfig,
-    pub all: bool,
-}
-
-// Individual database type configuration
-#[derive(Debug, Clone, Default)]
-pub struct DatabaseConfig {
-    pub enabled: bool,
-}
-
-// Segment Routing tracing configuration
-#[derive(Debug, Clone, Default)]
-pub struct SegmentRoutingTracing {
-    pub enable: bool,
-    pub prefix_sid: bool,
-    pub adjacency_sid: bool,
-}
-
-use strum_macros::{Display, EnumString};
+use strum_macros::Display;
 
 use crate::config::{Args, ConfigOp};
 
@@ -129,39 +81,12 @@ use super::Ospf;
 pub enum PacketType {
     #[strum(serialize = "hello")]
     Hello,
-    #[strum(serialize = "dd")]
-    Dd,
-    #[strum(serialize = "ls-request")]
-    LsRequest,
-    #[strum(serialize = "ls-update")]
-    LsUpdate,
-    #[strum(serialize = "ls-ack")]
-    LsAck,
-}
-
-// Event type enumeration
-#[derive(Debug, Clone, PartialEq)]
-pub enum EventType {
-    LspOriginate,
-    LspRefresh,
-    SpfCalculation,
-    Adjacency,
-    Flooding,
 }
 
 // FSM type enumeration
 #[derive(Debug, Clone, PartialEq)]
 pub enum FsmType {
-    Ifsm,
     Nfsm,
-}
-
-// Database type enumeration
-#[derive(Debug, Clone, PartialEq)]
-pub enum DatabaseType {
-    Lsdb,
-    SpfTree,
-    Rib,
 }
 
 impl OspfTracing {
@@ -170,10 +95,6 @@ impl OspfTracing {
         if !self.all && !self.packet.all {
             let config = match packet_type {
                 PacketType::Hello => &self.packet.hello,
-                PacketType::Dd => &self.packet.dd,
-                PacketType::LsRequest => &self.packet.ls_req,
-                PacketType::LsUpdate => &self.packet.ls_update,
-                PacketType::LsAck => &self.packet.ls_ack,
             };
 
             if !config.enabled {
@@ -191,32 +112,10 @@ impl OspfTracing {
         }
     }
 
-    // Check if event tracing should be enabled for given parameters
-    pub fn should_trace_event(&self, event_type: EventType) -> bool {
-        if !self.all && !self.event.all {
-            let config = match event_type {
-                EventType::LspOriginate => &self.event.lsp_originate,
-                EventType::LspRefresh => &self.event.lsp_refresh,
-                EventType::SpfCalculation => &self.event.spf_calculation,
-                EventType::Adjacency => &self.event.adjacency,
-                EventType::Flooding => &self.event.flooding,
-            };
-
-            if !config.enabled {
-                return false;
-            }
-
-            true
-        } else {
-            true
-        }
-    }
-
     // Check if FSM tracing should be enabled for given parameters
     pub fn should_trace_fsm(&self, fsm_type: FsmType, detail: bool) -> bool {
         if !self.all && !self.fsm.all {
             let config = match fsm_type {
-                FsmType::Ifsm => &self.fsm.ifsm,
                 FsmType::Nfsm => &self.fsm.nfsm,
             };
 
@@ -224,35 +123,6 @@ impl OspfTracing {
         } else {
             true
         }
-    }
-
-    // Check if database tracing should be enabled for given parameters
-    pub fn should_trace_database(&self, db_type: DatabaseType) -> bool {
-        if !self.all && !self.database.all {
-            let config = match db_type {
-                DatabaseType::Lsdb => &self.database.lsdb,
-                DatabaseType::SpfTree => &self.database.spf_tree,
-                DatabaseType::Rib => &self.database.rib,
-            };
-
-            if !config.enabled {
-                return false;
-            }
-
-            true
-        } else {
-            true
-        }
-    }
-
-    // Check if segment routing tracing should be enabled
-    pub fn should_trace_sr_prefix_sid(&self) -> bool {
-        self.all || self.segment_routing.enable || self.segment_routing.prefix_sid
-    }
-
-    // Check if segment routing adjacency SID tracing should be enabled
-    pub fn should_trace_sr_adjacency_sid(&self) -> bool {
-        self.all || self.segment_routing.enable || self.segment_routing.adjacency_sid
     }
 }
 
@@ -391,25 +261,6 @@ macro_rules! ospf_packet_trace {
     };
 }
 
-// Conditional event tracing macro
-#[macro_export]
-macro_rules! ospf_event_trace {
-    ($tracing:expr, $event_type:ident, $level:expr, $($arg:tt)*) => {
-        if $tracing.should_trace_event(
-            $crate::ospf::tracing::EventType::$event_type,
-            $level
-        ) {
-            tracing::info!(
-                proto = "ospf",
-                category = "event",
-                event_type = stringify!($event_type),
-                level = %$level,
-                $($arg)*
-            )
-        }
-    };
-}
-
 // Conditional FSM tracing macro
 #[macro_export]
 macro_rules! ospf_fsm_trace {
@@ -423,55 +274,6 @@ macro_rules! ospf_fsm_trace {
                 category = "fsm",
                 fsm_type = stringify!($fsm_type),
                 detail = $detail,
-                $($arg)*
-            )
-        }
-    };
-}
-
-// Conditional database tracing macro
-#[macro_export]
-macro_rules! ospf_database_trace {
-    ($tracing:expr, $db_type:ident, $level:expr, $($arg:tt)*) => {
-        if $tracing.should_trace_database(
-            $crate::ospf::tracing::DatabaseType::$db_type,
-            $level
-        ) {
-            tracing::info!(
-                proto = "ospf",
-                category = "database",
-                db_type = stringify!($db_type),
-                level = %$level,
-                $($arg)*
-            )
-        }
-    };
-}
-
-// Conditional segment routing prefix SID tracing macro
-#[macro_export]
-macro_rules! ospf_sr_prefix_trace {
-    ($tracing:expr, $($arg:tt)*) => {
-        if $tracing.should_trace_sr_prefix_sid() {
-            tracing::info!(
-                proto = "ospf",
-                category = "segment_routing",
-                sr_type = "prefix_sid",
-                $($arg)*
-            )
-        }
-    };
-}
-
-// Conditional segment routing adjacency SID tracing macro
-#[macro_export]
-macro_rules! ospf_sr_adjacency_trace {
-    ($tracing:expr, $($arg:tt)*) => {
-        if $tracing.should_trace_sr_adjacency_sid() {
-            tracing::info!(
-                proto = "ospf",
-                category = "segment_routing",
-                sr_type = "adjacency_sid",
                 $($arg)*
             )
         }

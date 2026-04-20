@@ -2,7 +2,7 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use super::BgpAttrStore;
-use super::peer::{BgpTop, Event, Peer, fsm};
+use super::peer::{BgpTop, Event, fsm};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use crate::bgp::debug::BgpDebugFlags;
@@ -12,7 +12,6 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 use crate::context::Task;
-use crate::isis::link::LinkType;
 use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
 use crate::rib;
@@ -158,10 +157,10 @@ impl Bgp {
         match msg {
             Message::Event(ident, event) => {
                 match event {
-                    Event::BGPOpen(ref msg) => {
+                    Event::BGPOpen(ref _msg) => {
                         // tracing::info!("Open from: {}", peer);
                     }
-                    Event::UpdateMsg(ref msg) => {
+                    Event::UpdateMsg(ref _msg) => {
                         // tracing::info!("Update from: {}", peer);
                     }
                     Event::KeepAliveMsg => {
@@ -222,13 +221,13 @@ impl Bgp {
                 let (path, mut args) = path_from_command(&msg.paths);
                 match path.as_str() {
                     "/clear/ip/bgp/neighbors" => {
-                        peer::clear(self, &mut args);
+                        let _ = peer::clear(self, &mut args);
                     }
                     "/clear/ip/bgp/keepalive" => {
-                        peer::clear_keepalive(self, &mut args);
+                        let _ = peer::clear_keepalive(self, &mut args);
                     }
                     "/clear/ip/bgp/keepalive-recv" => {
-                        peer::clear_keepalive_recv(self, &mut args);
+                        let _ = peer::clear_keepalive_recv(self, &mut args);
                     }
                     _ => {
                         //
@@ -375,7 +374,7 @@ impl Bgp {
                 }
             }
             policy::PolicyRx::PolicyList {
-                name,
+                name: _,
                 ident,
                 policy_type,
                 policy_list,
@@ -418,22 +417,12 @@ impl Bgp {
         //     "BGP: Main event loop started with {} peers",
         //     self.peers.len()
         // );
-        let mut event_count: u64 = 0;
-        let mut last_report = std::time::Instant::now();
         loop {
             tokio::select! {
                 Some(msg) = self.rib_rx.recv() => {
                     self.process_rib_msg(msg);
                 }
                 Some(msg) = self.rx.recv() => {
-                    // Decrement queue depth for events from timers
-                    event_count += 1;
-                    // Report every 10 seconds
-                    if last_report.elapsed().as_secs() >= 10 {
-                        // tracing::info!("Event loop: processed {} events in last 10s", event_count);
-                        event_count = 0;
-                        last_report = std::time::Instant::now();
-                    }
                     self.process_msg(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {

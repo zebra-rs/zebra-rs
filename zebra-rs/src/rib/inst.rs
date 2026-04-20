@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use super::api::{RibRx, RibTx};
+use super::api::RibRx;
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
-    BridgeBuilder, BridgeConfig, Link, MacAddr, MplsConfig, Nexthop, NexthopMap, RibTxChannel,
-    RibType, StaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
+    BridgeBuilder, BridgeConfig, Link, MacAddr, MplsConfig, Nexthop, NexthopMap, RibType,
+    StaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -132,18 +132,13 @@ impl IlmEntry {
 
 #[derive(Debug, Clone)]
 pub struct MacEntry {
-    pub vni: u32,
-    pub mac: MacAddr,
     pub tunnel_endpoint: Option<IpAddr>,
     pub flags: u8,
     pub seq: u32,
-    pub esi: Option<[u8; 10]>,
-    pub ifindex: Option<u32>,
     pub installed: bool,
 }
 
 pub struct Rib {
-    pub api: RibTxChannel,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -174,7 +169,6 @@ impl Rib {
         let fib_handle = FibHandle::new(fib.tx.clone(), no_nhid)?;
         let (tx, rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
-            api: RibTxChannel::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -344,14 +338,6 @@ impl Rib {
         }
     }
 
-    fn ifname(&self, ifindex: u32) -> String {
-        if let Some(link) = self.links.get(&ifindex) {
-            link.name.clone()
-        } else {
-            String::new()
-        }
-    }
-
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
         // println!("{:?}", msg);
         match msg {
@@ -383,40 +369,6 @@ impl Rib {
                     self.ipv4_route_del(&prefix, route.entry).await;
                 }
             }
-            FibMessage::MacAdd {
-                vni,
-                mac,
-                tunnel_endpoint,
-                flags,
-                seq,
-                esi,
-            } => {
-                self.fib_handle
-                    .mac_add(vni, &mac, tunnel_endpoint, flags, seq, esi)
-                    .await;
-            }
-            FibMessage::MacDel { vni, mac } => {
-                self.fib_handle.mac_del(vni, &mac).await;
-            }
-            FibMessage::MdbAdd {
-                vni,
-                group,
-                source,
-                ifindex,
-                seq,
-            } => {
-                self.fib_handle
-                    .mdb_add(vni, group, source, ifindex, seq)
-                    .await;
-            }
-            FibMessage::MdbDel {
-                vni,
-                group,
-                source,
-                ifindex,
-            } => {
-                self.fib_handle.mdb_del(vni, group, source, ifindex).await;
-            }
         }
     }
 
@@ -433,7 +385,7 @@ impl Rib {
                     let _ = self.mpls_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/interface") {
                     // let _ = self.link_config.exec(path, args, msg.op);
-                    link_config_exec(self, path, args, msg.op).await;
+                    let _ = link_config_exec(self, path, args, msg.op).await;
                 } else if path.as_str().starts_with("/bridge") {
                     let _ = self.bridge_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/vxlan") {
@@ -464,46 +416,6 @@ impl Rib {
         }
     }
 
-    async fn process_api_msg(&mut self, msg: RibTx) {
-        use ipnet::IpNet;
-
-        match msg {
-            RibTx::RouteAdd { prefix, entry } => match prefix {
-                IpNet::V4(prefix) => {
-                    let msg = Message::Ipv4Add { prefix, rib: entry };
-                    self.process_msg(msg).await;
-                }
-                IpNet::V6(prefix) => {
-                    let msg = Message::Ipv6Add { prefix, rib: entry };
-                    self.process_msg(msg).await;
-                }
-            },
-            RibTx::RouteDel { prefix, entry } => match prefix {
-                IpNet::V4(prefix) => {
-                    let msg = Message::Ipv4Del { prefix, rib: entry };
-                    self.process_msg(msg).await;
-                }
-                IpNet::V6(prefix) => {
-                    let msg = Message::Ipv6Del { prefix, rib: entry };
-                    self.process_msg(msg).await;
-                }
-            },
-            RibTx::Subscribe(subscription) => {
-                let msg = Message::Subscribe {
-                    proto: "bgp".to_string(),
-                    tx: subscription.tx,
-                };
-                self.process_msg(msg).await;
-            }
-            RibTx::NexthopRegister() => {
-                // TODO: Implement nexthop registration
-            }
-            RibTx::NexthopUnregister() => {
-                // TODO: Implement nexthop unregistration
-            }
-        }
-    }
-
     async fn mac_add(
         &mut self,
         vni: u32,
@@ -521,13 +433,9 @@ impl Rib {
         }
 
         let entry = MacEntry {
-            vni,
-            mac,
             tunnel_endpoint,
             flags,
             seq,
-            esi,
-            ifindex: None,
             installed: false,
         };
 
@@ -566,7 +474,7 @@ impl Rib {
 
     pub async fn event_loop(&mut self) {
         // Before get into FIB interaction, we enable sysctl.
-        sysctl_enable();
+        let _ = sysctl_enable();
 
         if let Err(_err) = fib_dump(self).await {
             // warn!("FIB dump error {}", err);
@@ -585,9 +493,6 @@ impl Rib {
                 }
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
-                }
-                Some(msg) = self.api.rx.recv() => {
-                    self.process_api_msg(msg).await;
                 }
             }
         }

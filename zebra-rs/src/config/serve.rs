@@ -11,16 +11,16 @@ use tonic::transport::Server;
 use crate::config::api::DeployRequest;
 
 use super::api::{
-    ClearTxRequest, ClearTxResponse, CompletionRequest, CompletionResponse, DisplayRequest,
-    DisplayTxRequest, ExecuteRequest, ExecuteResponse, Message,
+    ClearTxRequest, CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest,
+    ExecuteRequest, ExecuteResponse, Message,
 };
 use super::vtysh::apply_server::{Apply, ApplyServer};
 use super::vtysh::clear_server::{Clear, ClearServer};
 use super::vtysh::exec_server::{Exec, ExecServer};
 use super::vtysh::show_server::{Show, ShowServer};
 use super::vtysh::{
-    ApplyCode, ApplyReply, ApplyRequest, ClearReply, ClearRequest, CommandPath, ExecCode,
-    ExecReply, ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch,
+    ApplyReply, ApplyRequest, ClearReply, ClearRequest, CommandPath, ExecCode, ExecReply,
+    ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch,
 };
 #[derive(Debug)]
 struct ExecService {

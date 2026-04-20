@@ -5,7 +5,6 @@
 const RIB_KERNEL: u8 = 0;
 const RIB_CONNECTED: u8 = 1;
 const RIB_STATIC: u8 = 2;
-const RIB_RIP: u8 = 3;
 const RIB_OSPF: u8 = 4;
 const RIB_ISIS: u8 = 5;
 const RIB_BGP: u8 = 6;

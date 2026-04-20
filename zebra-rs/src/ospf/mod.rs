@@ -5,7 +5,7 @@ pub mod inst;
 pub use inst::{Message, Ospf, ShowCallback};
 
 pub mod link;
-pub use link::{OSPF_DEFAULT_PRIORITY, OspfLink};
+pub use link::OspfLink;
 
 pub mod ident;
 pub use ident::Identity;

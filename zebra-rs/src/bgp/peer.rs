@@ -741,14 +741,14 @@ pub async fn peer_read(
                         Ok(_) => {
                             buf = remain;
                         }
-                        Err(err) => {
+                        Err(_err) => {
                             let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
                             return;
                         }
                     }
                 }
             }
-            Err(err) => {
+            Err(_err) => {
                 let _ = tx.send(Message::Event(ident, Event::ConnFail)).await;
             }
         }

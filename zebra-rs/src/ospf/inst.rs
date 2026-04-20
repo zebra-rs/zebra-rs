@@ -24,7 +24,7 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, RibType};
 use crate::spf::label_block::LabelConfig;
 use crate::{
-    config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
+    config::{Args, ConfigChannel, ConfigRequest, path_from_command},
     context::Context,
     rib::RibRxChannel,
 };
@@ -40,14 +40,13 @@ use super::socket::ospf_socket_ipv4;
 use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
 use super::{
-    AREA0, Identity, Lsdb, Neighbor, NfsmState, ReachMap, ospf_ls_ack_recv, ospf_ls_req_recv,
+    AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
     ospf_ls_upd_recv,
 };
 
 pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
 
 pub struct Ospf {
-    ctx: Context,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub ptx: UnboundedSender<Message>,
@@ -85,7 +84,6 @@ pub struct OspfInterface<'a> {
     pub lsdb_as: &'a mut Lsdb,
     pub area_id: Ipv4Addr,
     pub area_type: super::area::AreaType,
-    pub if_state: super::ifsm::IfsmState,
     pub exchange_loading_count: usize,
     pub mtu_ignore: bool,
     pub tracing: &'a OspfTracing,
@@ -101,7 +99,6 @@ impl Ospf {
         let exchange_loading_count = self.count_exchange_loading_neighbors(ifindex);
         self.links.get_mut(&ifindex).and_then(|link| {
             let link_area = link.area;
-            let if_state = link.state;
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
                 link.nbrs.get_mut(&src).map(|nbr| {
@@ -117,7 +114,6 @@ impl Ospf {
                             lsdb_as: &mut self.lsdb_as,
                             area_id: link_area,
                             area_type,
-                            if_state,
                             exchange_loading_count,
                             mtu_ignore: link.config.mtu_ignore,
                             tracing: &self.tracing,
@@ -157,7 +153,7 @@ impl Ospf {
             .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
     }
 
-    pub fn new(ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
+    pub fn new(_ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
         let chan = RibRxChannel::new();
         let msg = crate::rib::Message::Subscribe {
             proto: "ospf".to_string(),
@@ -169,7 +165,6 @@ impl Ospf {
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, prx) = mpsc::unbounded_channel();
         let mut ospf = Self {
-            ctx,
             tx,
             rx,
             ptx,
@@ -1021,17 +1016,6 @@ impl Ospf {
         super::config::apply_link_enable_transition(link, next, next_id);
     }
 
-    fn link_del(&mut self, link: Link) {
-        let Some(ospf_link) = self.links.get(&link.index) else {
-            return;
-        };
-        if ospf_link.enabled {
-            let area_id = ospf_link.area_id;
-            ospf_link.tx.send(Message::Disable(link.index, area_id));
-        }
-        self.links.remove(&link.index);
-    }
-
     fn link_up(&mut self, ifindex: u32) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
@@ -1040,7 +1024,7 @@ impl Ospf {
 
         // If OSPF is enabled on this link, bring it up.
         if link.enabled {
-            self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+            let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
         }
     }
 
@@ -1053,7 +1037,7 @@ impl Ospf {
         // If OSPF is enabled on this link, bring it down.
         if link.enabled {
             let area_id = link.area_id;
-            self.tx.send(Message::Disable(ifindex, area_id));
+            let _ = self.tx.send(Message::Disable(ifindex, area_id));
         }
     }
 
@@ -1101,7 +1085,7 @@ impl Ospf {
                 };
                 ospf_ls_ack_recv(&mut link, nbr, &packet, &src);
             }
-            OspfType::Unknown(typ) => {
+            OspfType::Unknown(_typ) => {
                 // println!("Unknown: packet type {}", typ);
             }
         }
@@ -1117,7 +1101,7 @@ impl Ospf {
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
                 self.router_lsa_originate();
-                self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+                let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
             Message::Disable(ifindex, area_id) => {
                 let Some(link) = self.links.get_mut(&ifindex) else {
@@ -1127,7 +1111,8 @@ impl Ospf {
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
                 self.router_lsa_originate();
-                self.tx
+                let _ = self
+                    .tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
             }
             Message::Recv(packet, src, from, index, dest) => {
@@ -1210,9 +1195,6 @@ impl Ospf {
             }
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
-            }
-            RibRx::LinkDel(link) => {
-                self.link_del(link);
             }
             RibRx::LinkUp(ifindex) => {
                 self.link_up(ifindex);

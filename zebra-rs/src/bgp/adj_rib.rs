@@ -3,16 +3,11 @@
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
-use std::net::{IpAddr, Ipv4Addr};
 
 use bgp_packet::*;
-use bytes::BytesMut;
 use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
 
 use super::BgpRib;
-use super::cap::CapAfiMap;
-use super::peer::{Peer, PeerType};
 
 // Direction marker types for compile-time type safety
 #[derive(Debug, Clone, Copy)]
@@ -223,18 +218,6 @@ impl AdjRib<In> {
             (_, _) => 0,
         }
     }
-
-    // Check table has prefix.
-    pub fn contains_key(&mut self, rd: Option<RouteDistinguisher>, prefix: &Ipv4Net) -> bool {
-        match rd {
-            Some(rd) => self.v4vpn.entry(rd).or_default().0.contains_key(prefix),
-            None => self.v4.0.contains_key(prefix),
-        }
-    }
-
-    pub fn contains_key_evpn(&mut self, rd: RouteDistinguisher, prefix: &EvpnPrefix) -> bool {
-        self.evpn.entry(rd).or_default().0.contains_key(prefix)
-    }
 }
 
 impl AdjRib<Out> {
@@ -264,26 +247,6 @@ impl AdjRib<Out> {
         }
     }
 
-    // EVPN add/remove ---------------------------------------------------------
-
-    pub fn add_evpn(
-        &mut self,
-        rd: RouteDistinguisher,
-        prefix: EvpnPrefix,
-        route: BgpRib,
-    ) -> Option<BgpRib> {
-        self.evpn.entry(rd).or_default().add(prefix, route)
-    }
-
-    pub fn remove_evpn(
-        &mut self,
-        rd: RouteDistinguisher,
-        prefix: &EvpnPrefix,
-        id: u32,
-    ) -> Option<BgpRib> {
-        self.evpn.entry(rd).or_default().remove(prefix, id)
-    }
-
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
@@ -299,9 +262,5 @@ impl AdjRib<Out> {
             Some(rd) => self.v4vpn.entry(rd).or_default().0.contains_key(prefix),
             None => self.v4.0.contains_key(prefix),
         }
-    }
-
-    pub fn contains_key_evpn(&mut self, rd: RouteDistinguisher, prefix: &EvpnPrefix) -> bool {
-        self.evpn.entry(rd).or_default().0.contains_key(prefix)
     }
 }

@@ -291,9 +291,9 @@ impl ConfigBuilder {
                 Ok(())
             })
             .path("/default-action")
-            .set(|policy, cache, name, seq, args| {
-                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
-                let default_action = args.string().context(ARG_ERR)?;
+            .set(|policy, cache, name, _seq, args| {
+                let _list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let _default_action = args.string().context(ARG_ERR)?;
 
                 Ok(())
             })
@@ -325,24 +325,24 @@ impl ConfigBuilder {
 pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> {
     let mut buf = String::new();
     for (name, policy) in policy.policy_config.config.iter() {
-        writeln!(buf, "policy-list: {}", name);
+        let _ = writeln!(buf, "policy-list: {}", name);
         for (seq, entry) in policy.entry.iter() {
-            writeln!(buf, " entry: {}", seq);
+            let _ = writeln!(buf, " entry: {}", seq);
             if let Some(prefix_set) = &entry.prefix_set_name {
-                writeln!(buf, "  match: prefix_set {}", prefix_set);
+                let _ = writeln!(buf, "  match: prefix_set {}", prefix_set);
             }
             if let Some(community_set) = &entry.community_set_name {
-                writeln!(buf, "  match: community_set {}", community_set);
+                let _ = writeln!(buf, "  match: community_set {}", community_set);
             }
             if let Some(local_pref) = &entry.local_pref {
-                writeln!(buf, "  set: local-pref {}", local_pref);
+                let _ = writeln!(buf, "  set: local-pref {}", local_pref);
             }
             if let Some(med) = &entry.med {
-                writeln!(buf, "  set: med {}", med);
+                let _ = writeln!(buf, "  set: med {}", med);
             }
         }
         if let Some(default_action) = &policy.default_action {
-            writeln!(buf, " default-action: {}", default_action);
+            let _ = writeln!(buf, " default-action: {}", default_action);
         }
     }
     Ok(buf)

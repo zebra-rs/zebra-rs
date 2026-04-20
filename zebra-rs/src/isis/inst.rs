@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::isis_event_trace;
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::isis::link::{Afi, DisStatus};
+use crate::isis::link::Afi;
 use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
@@ -35,7 +35,7 @@ use crate::spf;
 use super::config::IsisConfig;
 use super::flood;
 use super::ifsm::{csnp_timer, has_level};
-use super::link::{Afis, IsisLinks, LinkState, LinkTop, LinkType};
+use super::link::{Afis, IsisLinks, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::nfsm::nbr_hold_timer_expire;
 use super::srmpls::{IsisLabelMap, LabelConfig};
@@ -46,10 +46,8 @@ pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
 pub type MsgSender = UnboundedSender<Message>;
-pub type PktSender = UnboundedSender<PacketMessage>;
 
 pub struct Isis {
-    pub ctx: Context,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
@@ -69,7 +67,6 @@ pub struct Isis {
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
-    pub global_pool: Option<LabelPool>,
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
@@ -89,23 +86,12 @@ pub struct IsisTop<'a> {
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
-    pub local_pool: &'a mut Option<LabelPool>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
 }
 
-pub struct NeighborTop<'a> {
-    pub tx: &'a UnboundedSender<Message>,
-    //pub lan_id: &'a mut Levels<Option<IsisNeighborId>>,
-    pub adj: &'a mut Levels<Option<(IsisNeighborId, Option<MacAddr>)>>,
-    pub tracing: &'a IsisTracing,
-    pub local_pool: &'a mut Option<LabelPool>,
-    pub up_config: &'a IsisConfig,
-    pub lsdb: &'a mut Levels<Lsdb>,
-}
-
 impl Isis {
-    pub fn new(ctx: Context, rib_tx: UnboundedSender<rib::Message>) -> Self {
+    pub fn new(_ctx: Context, rib_tx: UnboundedSender<rib::Message>) -> Self {
         let chan = RibRxChannel::new();
         let msg = rib::Message::Subscribe {
             proto: "isis".into(),
@@ -115,7 +101,6 @@ impl Isis {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let mut isis = Self {
-            ctx,
             tx,
             rx,
             cm: ConfigChannel::new(),
@@ -135,7 +120,6 @@ impl Isis {
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf_timer: Levels::<Option<Timer>>::default(),
-            global_pool: None,
             local_pool: Some(LabelPool::new(15000, Some(16000))),
             graph: Levels::<Option<spf::Graph>>::default(),
             spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
@@ -184,7 +168,7 @@ impl Isis {
                 Ok(result) => result,
                 Err(e) => format!("Error formatting output: {}", e),
             };
-            msg.resp.send(output).await;
+            let _ = msg.resp.send(output).await;
         }
     }
 
@@ -197,7 +181,7 @@ impl Isis {
                 flood::srm_advertise(&mut link, level, ifindex);
             }
             Message::Ssn(level, ifindex) => {
-                let sys_id = self.config.net.sys_id();
+                let _sys_id = self.config.net.sys_id();
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
@@ -222,7 +206,7 @@ impl Isis {
                 let Some(mut top) = self.link_top(ifindex) else {
                     return;
                 };
-                process_packet(&mut top, packet, ifindex, mac);
+                let _ = process_packet(&mut top, packet, ifindex, mac);
             }
             Message::LspOriginate(level) => {
                 self.process_lsp_originate(level);
@@ -257,53 +241,6 @@ impl Isis {
 
                     // b) send a Complete set of Complete Sequence Numbers PDUs on that circuit.
                     *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
-                }
-            }
-        }
-    }
-
-    fn process_srm(&mut self, lsp_id: IsisLspId, level: Level, reason: String) {
-        for (_, link) in self.links.iter() {
-            if !has_level(link.state.level(), level) {
-                isis_event_trace!(
-                    self.tracing,
-                    Flooding,
-                    &level,
-                    "SRM: {} is not capable the level, continue",
-                    link.state.name
-                );
-                continue;
-            }
-
-            if *link.state.nbrs_up.get(&level) == 0 {
-                isis_event_trace!(
-                    self.tracing,
-                    Flooding,
-                    &level,
-                    "SRM: {} neighbor is 0, continue",
-                    link.state.name
-                );
-                continue;
-            }
-
-            if let Some(lsa) = self.lsdb.get(&level).get(&lsp_id) {
-                if lsa.ifindex == link.ifindex {
-                    continue;
-                }
-
-                let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
-
-                if !lsa.bytes.is_empty() {
-                    let mut buf = BytesMut::from(&lsa.bytes[..]);
-
-                    isis_packet::write_hold_time(&mut buf, hold_time);
-
-                    link.ptx.send(PacketMessage::Send(
-                        Packet::Bytes(buf),
-                        link.ifindex,
-                        level,
-                        link.state.mac,
-                    ));
                 }
             }
         }
@@ -348,7 +285,7 @@ impl Isis {
         };
 
         // Emit and flood the purged LSP
-        let buf = lsp_emit(&mut purged_lsp, level);
+        let _buf = lsp_emit(&mut purged_lsp, level);
         insert_self_originate(&mut top, level, purged_lsp, None);
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
@@ -372,12 +309,6 @@ impl Isis {
             return;
         };
         match ev {
-            IfsmEvent::InterfaceUp => {
-                //
-            }
-            IfsmEvent::InterfaceDown => {
-                //
-            }
             IfsmEvent::Start => {
                 ifsm::start(&mut top);
             }
@@ -386,7 +317,7 @@ impl Isis {
             }
             IfsmEvent::HelloTimerExpire => {
                 if let Some(level) = level {
-                    ifsm::hello_send(&mut top, level);
+                    let _ = ifsm::hello_send(&mut top, level);
                 }
             }
             IfsmEvent::CsnpTimerExpire => {
@@ -467,7 +398,6 @@ impl Isis {
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
             spf_timer: &mut self.spf_timer,
-            local_pool: &mut self.local_pool,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
         };
@@ -601,7 +531,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             "[LspOriginate] seq number reached maximum, purging LSP"
         );
         // TODO: After age out, we need to originate a new one with seq 1.
-        top.tx.send(Message::LspPurge(level, lsp_id.clone()));
+        let _ = top.tx.send(Message::LspPurge(level, lsp_id.clone()));
         return IsisLsp::default();
     }
 
@@ -792,7 +722,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
 }
 
 pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
-    let mut packet = match level {
+    let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone())),
     };
@@ -819,7 +749,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     let available_len = {
         let mut buf = BytesMut::new();
 
-        let mut csnp = IsisCsnp {
+        let csnp = IsisCsnp {
             source_id: IsisSysId::default(),
             source_id_circuit: 0,
             start: IsisLspId::start(),
@@ -855,7 +785,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     let mut start: Option<IsisLspId> = Some(IsisLspId::start());
 
     let mut entry_size = 0;
-    for (lsp_id, lsa) in link.lsdb.get(&level).iter() {
+    for (_lsp_id, lsa) in link.lsdb.get(&level).iter() {
         if start.is_none() {
             start = Some(lsa.lsp.lsp_id);
         }
@@ -864,7 +794,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
 
         entry_size += 1;
         if entry_size == entry_size_max {
-            let mut csnp = IsisCsnp {
+            let csnp = IsisCsnp {
                 pdu_len: 0,
                 source_id: link.up_config.net.sys_id(),
                 source_id_circuit: 0,
@@ -880,7 +810,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
         }
     }
     if !tlvs.entries.is_empty() {
-        let mut csnp = IsisCsnp {
+        let csnp = IsisCsnp {
             pdu_len: 0,
             source_id: link.up_config.net.sys_id(),
             source_id_circuit: 0,

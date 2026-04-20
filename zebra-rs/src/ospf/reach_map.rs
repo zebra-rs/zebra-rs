@@ -12,10 +12,6 @@ pub struct ReachMap {
 }
 
 impl ReachMap {
-    pub fn get(&self, key: &Ipv4Net) -> Option<&Vec<ExtPrefixSubTlv>> {
-        self.map.get(key)
-    }
-
     pub fn insert(
         &mut self,
         key: Ipv4Net,

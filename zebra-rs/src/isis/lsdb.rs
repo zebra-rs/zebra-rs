@@ -4,11 +4,8 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, Values};
 
-use bytes::BytesMut;
 use isis_packet::*;
-use tokio::sync::mpsc::UnboundedSender;
 
-use crate::isis::psnp_send_pdu;
 use crate::isis_database_trace;
 
 use crate::context::Timer;
@@ -17,7 +14,7 @@ use crate::isis::{
     srmpls::{LabelBlock, LabelConfig},
 };
 
-use super::inst::{MsgSender, Packet, PacketMessage};
+use super::inst::MsgSender;
 use super::link::LinkTop;
 use super::{
     Level, LspFlood,
@@ -40,10 +37,8 @@ pub enum LsdbEvent {
 pub struct Lsa {
     pub lsp: IsisLsp,
     pub originated: bool,
-    pub from: Option<u32>,
     pub hold_timer: Option<Timer>,
     pub refresh_timer: Option<Timer>,
-    pub csnp_timer: Option<Timer>,
     pub ifindex: u32,
     pub bytes: Vec<u8>,
 }
@@ -53,10 +48,8 @@ impl Lsa {
         Self {
             lsp,
             originated: false,
-            from: None,
             hold_timer: None,
             refresh_timer: None,
-            csnp_timer: None,
             ifindex: 0,
             bytes: vec![],
         }
@@ -76,10 +69,6 @@ impl Lsdb {
         self.map.values()
     }
 
-    pub fn contains_key(&self, key: &IsisLspId) -> bool {
-        self.map.contains_key(key)
-    }
-
     pub fn iter(&self) -> Iter<'_, IsisLspId, Lsa> {
         self.map.iter()
     }
@@ -91,7 +80,7 @@ fn lsdb_timer(tx: &MsgSender, level: Level, key: IsisLspId, tick: u16, ev: LsdbE
         let tx = tx.clone();
         let msg = Message::Lsdb(ev, level, key);
         async move {
-            tx.send(msg);
+            let _ = tx.send(msg);
         }
     })
 }
@@ -104,18 +93,6 @@ fn refresh_timer(tx: &MsgSender, level: Level, key: IsisLspId, refresh_time: u16
 fn hold_timer(tx: &MsgSender, level: Level, key: IsisLspId, hold_time: u16) -> Timer {
     let ev = LsdbEvent::HoldTimerExpire;
     lsdb_timer(tx, level, key, hold_time, ev)
-}
-
-fn csnp_timer(top: &mut IsisTop, level: Level, key: IsisLspId) -> Timer {
-    let tx = top.tx.clone();
-    Timer::once(3, move || {
-        let tx = tx.clone();
-        async move {
-            use LsdbEvent::*;
-            let msg = Message::Lsdb(RefreshTimerExpire, level, key);
-            tx.send(msg);
-        }
-    })
 }
 
 fn update_pseudo() {
@@ -175,11 +152,6 @@ pub fn lsp_cap_view<'a>(tlv: &'a IsisTlvRouterCap) -> LspCapView<'a> {
         }
     }
     view
-}
-
-enum MplsLabel {
-    ImplicitNull(u32),
-    Label(u32),
 }
 
 #[derive(Default)]
@@ -315,51 +287,7 @@ pub fn insert_self_originate(
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
-pub fn insert_self_originate_link(
-    top: &mut LinkTop,
-    level: Level,
-    lsp: IsisLsp,
-    bytes: Option<Vec<u8>>,
-) -> Option<Lsa> {
-    let key = lsp.lsp_id.clone();
-    let mut lsa = Lsa::new(lsp);
-    lsa.originated = true;
-
-    lsa.hold_timer = Some(hold_timer(top.tx, level, key, lsa.lsp.hold_time));
-
-    let mut refresh_time = top.up_config.refresh_time();
-
-    const ZERO_AGE_LIFETIME: u16 = 60;
-    const MIN_LSP_TRANS_INTERVAL: u16 = 5;
-    const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
-
-    // Remaining lifetime.
-    let rl = lsa.lsp.hold_time;
-    let safety_margin = ZERO_AGE_LIFETIME + MIN_LSP_TRANS_INTERVAL;
-    if rl < DEFAULT_REFRESH_TIME {
-        if rl > safety_margin {
-            refresh_time = rl - safety_margin;
-        } else {
-            refresh_time = 1;
-        }
-    }
-
-    lsa.refresh_timer = Some(refresh_timer(top.tx, level, key, refresh_time));
-    if let Some(bytes) = bytes {
-        lsa.bytes = bytes;
-    }
-    top.lsdb.get_mut(&level).map.insert(key, lsa)
-}
-
 pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
-    if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key) {
-        if let Some(_tlv) = lsa.lsp.hostname_tlv() {
-            top.hostname.get_mut(&level).remove(&key.sys_id());
-        }
-    }
-}
-
-pub fn remove_lsp_link(top: &mut LinkTop, level: Level, key: IsisLspId) {
     if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key) {
         if let Some(_tlv) = lsa.lsp.hostname_tlv() {
             top.hostname.get_mut(&level).remove(&key.sys_id());

@@ -2,7 +2,6 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -184,15 +183,6 @@ impl LocalRibTable {
             .extract_if(.., |r| r.ident == ident && r.remote_id == id)
             .collect();
         removed
-    }
-
-    pub fn remove_peer_routes(&mut self, ident: usize) -> Vec<BgpRib> {
-        let mut all_removed: Vec<BgpRib> = Vec::new();
-        for (_prefix, cands) in self.0.iter_mut() {
-            let mut removed: Vec<BgpRib> = cands.extract_if(.., |r| r.ident == ident).collect();
-            all_removed.append(&mut removed);
-        }
-        all_removed
     }
 
     // Return selected best path, not the change history.
@@ -413,15 +403,6 @@ impl LocalRibEvpnTable {
             .collect()
     }
 
-    pub fn remove_peer_routes(&mut self, ident: usize) -> Vec<BgpRib> {
-        let mut all_removed: Vec<BgpRib> = Vec::new();
-        for (_prefix, cands) in self.cands.iter_mut() {
-            let mut removed: Vec<BgpRib> = cands.extract_if(.., |r| r.ident == ident).collect();
-            all_removed.append(&mut removed);
-        }
-        all_removed
-    }
-
     pub fn select_best_path(&mut self, prefix: &EvpnPrefix) -> Vec<BgpRib> {
         let mut selected = Vec::new();
 
@@ -510,10 +491,6 @@ impl LocalRib {
         }
     }
 
-    pub fn remove_peer_routes(&mut self, ident: usize) -> Vec<BgpRib> {
-        self.v4.remove_peer_routes(ident)
-    }
-
     // Return selected best path, not the change history.
     pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
         self.v4.select_best_path(prefix)
@@ -550,15 +527,6 @@ impl LocalRib {
         ident: usize,
     ) -> Vec<BgpRib> {
         self.evpn.entry(rd).or_default().remove(prefix, id, ident)
-    }
-
-    pub fn remove_peer_routes_evpn(&mut self, ident: usize) -> Vec<BgpRib> {
-        let mut all_removed: Vec<BgpRib> = Vec::new();
-        for (_rd, table) in self.evpn.iter_mut() {
-            let mut removed = table.remove_peer_routes(ident);
-            all_removed.append(&mut removed);
-        }
-        all_removed
     }
 
     pub fn select_best_path_evpn(
@@ -773,7 +741,7 @@ fn route_advertise_to_addpath(
         if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true) {
             if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
                 // RTC match.
-                if let Some(ref rd) = rd {
+                if let Some(_rd) = rd {
                     if !peer.rtcv4.is_empty() {
                         if !rtc_match(&peer.rtcv4, &attr.ecom) {
                             continue;
@@ -889,7 +857,7 @@ fn route_advertise_to_peers(
         // Now apply the update/withdrawal
         match (nlri_opt, attr_opt) {
             (Some(nlri), Some(attr)) => {
-                if let Some(ref rd) = rd {
+                if let Some(_rd) = rd {
                     // RTC match.
                     if !peer.rtcv4.is_empty() {
                         if !rtc_match(&peer.rtcv4, &attr.ecom) {
@@ -993,13 +961,6 @@ pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap)
         return;
     };
     peer.rtcv4.insert(rtcv4.rt.clone());
-}
-
-pub fn route_ipv4_rtc_withdraw(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
-    let Some(peer) = peers.get_mut_by_idx(peer_id) else {
-        return;
-    };
-    peer.rtcv4.remove(&rtcv4.rt);
 }
 
 pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
@@ -1452,8 +1413,8 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
             start_stale_timer(peer, afi_safi, llgr.stale_time()),
         );
 
-        for (rd, table) in peer.adj_in.v4vpn.iter_mut() {
-            for (prefix, ribs) in table.0.iter_mut() {
+        for (_rd, table) in peer.adj_in.v4vpn.iter_mut() {
+            for (_prefix, ribs) in table.0.iter_mut() {
                 for rib in ribs.iter_mut() {
                     rib.stale = true;
                     let mut new_attr = (*rib.attr).clone();
@@ -1695,13 +1656,6 @@ pub fn route_update_ipv4(
     Some((nlri, attrs))
 }
 
-pub fn route_send_ipv4(peer: &mut Peer, nlri: Ipv4Nlri, bgp_attr: BgpAttr) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-    update.bgp_attr = Some(bgp_attr);
-    update.ipv4_update.push(nlri);
-    peer.send_packet(update.into());
-}
-
 impl Peer {
     pub fn send_packet(&self, bytes: BytesMut) {
         if let Some(ref packet_tx) = self.packet_tx {
@@ -1804,21 +1758,6 @@ impl Peer {
         }
         self.cache_vpnv4_rev.clear();
     }
-}
-
-pub fn route_send_vpnv4(peer: &mut Peer, nlri: Vpnv4Nlri, bgp_attr: BgpAttr) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-    if let Some(BgpNexthop::Vpnv4(nhop)) = bgp_attr.nexthop.as_ref() {
-        let nlri = Vpnv4Reach {
-            snpa: 0,
-            nhop: nhop.clone(),
-            updates: vec![nlri],
-        };
-        let mp_update = MpReachAttr::Vpnv4(nlri);
-        update.mp_update = Some(mp_update);
-    }
-    update.bgp_attr = Some(bgp_attr);
-    peer.send_packet(update.into());
 }
 
 pub fn policy_list_apply(

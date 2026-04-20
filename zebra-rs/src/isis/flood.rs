@@ -171,7 +171,7 @@ pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32) {
                 let mut buf = BytesMut::from(&lsa.bytes[..]);
                 isis_packet::write_hold_time(&mut buf, hold_time);
 
-                top.ptx.send(PacketMessage::Send(
+                let _ = top.ptx.send(PacketMessage::Send(
                     Packet::Bytes(buf),
                     ifindex,
                     level,
@@ -203,7 +203,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
     let available_len = {
         let mut buf = BytesMut::new();
 
-        let mut psnp = IsisPsnp {
+        let psnp = IsisPsnp {
             source_id: IsisSysId::default(),
             source_id_circuit: 0,
             ..Default::default()
@@ -239,7 +239,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
 
         entry_size += 1;
         if entry_size == entry_size_max {
-            let mut psnp = IsisPsnp {
+            let psnp = IsisPsnp {
                 pdu_len: 0,
                 source_id: link.up_config.net.sys_id(),
                 source_id_circuit: 0,
@@ -252,7 +252,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
         }
     }
     if !tlvs.entries.is_empty() {
-        let mut psnp = IsisPsnp {
+        let psnp = IsisPsnp {
             pdu_len: 0,
             source_id: link.up_config.net.sys_id(),
             source_id_circuit: 0,
@@ -272,7 +272,7 @@ fn srm_timer(tx: &MsgSender, level: Level, ifindex: u32) -> Timer {
         let tx = tx.clone();
         let msg = Message::Srm(level, ifindex);
         async move {
-            tx.send(msg);
+            let _ = tx.send(msg);
         }
     })
 }
@@ -283,7 +283,7 @@ fn ssn_timer(tx: &MsgSender, level: Level, ifindex: u32) -> Timer {
         let tx = tx.clone();
         let msg = Message::Ssn(level, ifindex);
         async move {
-            tx.send(msg);
+            let _ = tx.send(msg);
         }
     })
 }

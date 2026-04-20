@@ -29,9 +29,9 @@ pub fn nexthop_show(rib: &Rib, _args: Args, _json: bool) -> String {
             Group::Uni(uni) => {
                 write!(buf, "  via {}, {}", uni.addr, rib.link_name(uni.ifindex)).unwrap();
                 for label in uni.labels.iter() {
-                    write!(buf, " {}", label);
+                    let _ = write!(buf, " {}", label);
                 }
-                writeln!(buf, "");
+                let _ = writeln!(buf, "");
             }
             Group::Multi(multi) => {
                 for (gid, weight) in multi.set.iter() {

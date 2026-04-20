@@ -7,8 +7,6 @@ pub use inst::{Isis, Message, MsgSender, Packet, PacketMessage};
 pub mod link;
 pub use link::LinkTop;
 
-pub mod addr;
-
 pub mod show;
 
 pub mod network;
@@ -29,8 +27,6 @@ pub mod neigh;
 
 pub mod packet;
 pub use packet::*;
-
-pub mod graph;
 
 pub mod level;
 pub use level::*;

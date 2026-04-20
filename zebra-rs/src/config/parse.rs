@@ -13,7 +13,7 @@ use super::vtysh::{CommandPath, YangMatch};
 use super::{Completion, Config, ExecCode};
 use libyang::{Entry, MinMax, RangeExtract, RangeNode, TypeNode, YangType, range_match};
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 

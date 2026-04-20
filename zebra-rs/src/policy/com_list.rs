@@ -3,53 +3,35 @@
 
 use std::collections::BTreeMap;
 
-use bgp_packet::Community;
-
 use crate::config::{Args, ConfigOp};
 
 use super::Action;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CommunityListMap(pub BTreeMap<String, CommunityList>);
-
-impl CommunityListMap {
-    pub fn new() -> Self {
-        Self(BTreeMap::new())
-    }
-}
 
 impl CommunityListMap {
     pub fn ensure(&mut self, name: &str) {
         if self.lookup(name).is_some() {
             return;
         }
-        let clist = CommunityList::new(name);
+        let clist = CommunityList::new();
         self.0.insert(name.to_string(), clist);
     }
 
     pub fn lookup(&self, name: &str) -> Option<&CommunityList> {
         self.0.get(name)
     }
-
-    pub fn action_test(&mut self, name: &str, seq: u32, action: Action) {
-        self.ensure(name);
-        let clist = self.0.get_mut(name).unwrap();
-        clist.ensure(seq);
-        let entry = clist.get_mut(seq).unwrap();
-        entry.action = Some(action);
-    }
 }
 
 #[derive(Debug)]
 pub struct CommunityList {
-    pub name: String,
     pub entry: BTreeMap<u32, CommunityEntry>,
 }
 
 impl CommunityList {
-    pub fn new(name: &str) -> Self {
+    pub fn new() -> Self {
         Self {
-            name: name.to_string(),
             entry: BTreeMap::new(),
         }
     }
@@ -58,7 +40,7 @@ impl CommunityList {
         if self.entry.contains_key(&seq) {
             return;
         }
-        let entry = CommunityEntry::new(seq);
+        let entry = CommunityEntry::new();
         self.entry.insert(seq, entry);
     }
 
@@ -69,26 +51,13 @@ impl CommunityList {
 
 #[derive(Debug)]
 pub struct CommunityEntry {
-    pub seq: u32,
     pub action: Option<Action>,
-    pub member: CommunityMember,
 }
 
 impl CommunityEntry {
-    pub fn new(seq: u32) -> Self {
-        Self {
-            seq,
-            action: None,
-            member: CommunityMember::None,
-        }
+    pub fn new() -> Self {
+        Self { action: None }
     }
-}
-
-#[derive(Debug)]
-pub enum CommunityMember {
-    None,
-    Regexp(String),
-    Community(Community),
 }
 
 pub fn config_com_list(clist: &mut CommunityListMap, mut args: Args, _op: ConfigOp) -> Option<()> {

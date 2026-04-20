@@ -17,15 +17,15 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
+use crate::isis_event_trace;
 use crate::rib::link::LinkAddr;
 use crate::rib::{Link, MacAddr};
-use crate::{isis_event_trace, isis_warn};
 
 use super::config::IsisConfig;
 use super::ifsm::{self, has_level};
 use super::inst::{PacketMessage, ReachMap};
 use super::neigh::Neighbor;
-use super::network::{P2P_ISS, read_packet, write_packet};
+use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::IsisLabelMap;
 use super::tracing::IsisTracing;
@@ -35,10 +35,7 @@ use super::{Hostname, IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
 pub struct LinkTimer {
     pub hello: Levels<Option<Timer>>,
     pub csnp: Levels<Option<Timer>>,
-    pub dis: Levels<Option<Timer>>,
 }
-
-pub struct Graph {}
 
 #[derive(Default, Debug)]
 pub struct Afis<T> {
@@ -82,10 +79,6 @@ impl IsisLinks {
         self.map.get_mut(key)
     }
 
-    pub fn get_by_name(&self, name: &str) -> Option<&IsisLink> {
-        self.map.values().find(|link| link.state.name == name)
-    }
-
     pub fn get_mut_by_name(&mut self, name: &str) -> Option<&mut IsisLink> {
         self.map.values_mut().find(|link| link.state.name == name)
     }
@@ -106,7 +99,6 @@ impl IsisLinks {
 #[derive(Debug)]
 pub struct IsisLink {
     pub ifindex: u32,
-    pub tx: UnboundedSender<Message>,
     pub ptx: UnboundedSender<PacketMessage>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub flags: LinkFlags,
@@ -149,7 +141,6 @@ impl<'a> LinkTop<'a> {
 
     pub fn dest(&self, level: Level) -> Option<MacAddr> {
         if self.is_p2p() {
-            // MacAddr::from_vec(P2P_ISS.to_vec())
             if let Some((_, mac)) = self.state.adj.get(&level) {
                 *mac
             } else {
@@ -346,11 +337,6 @@ impl DisStatistics {
             false
         }
     }
-
-    pub fn clear_dampening(&mut self) {
-        self.dampening_until = None;
-        self.flap_count = 0;
-    }
 }
 
 // Mutable data during operation.
@@ -418,7 +404,6 @@ impl LinkState {
 
 #[derive(Default, Debug)]
 pub struct Direction<T> {
-    pub tx: T,
     pub rx: T,
 }
 
@@ -437,7 +422,6 @@ impl IsisLink {
         let (ptx, prx) = mpsc::unbounded_channel();
         let mut is_link = Self {
             ifindex: link.index,
-            tx: tx.clone(),
             ptx,
             sock,
             flags: link.flags,
@@ -460,29 +444,6 @@ impl IsisLink {
         });
 
         is_link
-    }
-
-    pub fn is_p2p(&self) -> bool {
-        // When we have user configuration.
-        if let Some(link_type) = self.config.link_type {
-            return link_type == LinkType::P2p;
-        }
-        // Otherwise check interface flags.
-        (self.flags & LinkFlags::Pointopoint) == LinkFlags::Pointopoint
-    }
-
-    // Destination L2 address.  When the link is point-to-point,
-    pub fn dest(&self, level: Level) -> Option<MacAddr> {
-        if self.is_p2p() {
-            // MacAddr::from_vec(P2P_ISS.to_vec())
-            if let Some((_, mac)) = self.state.adj.get(&level) {
-                *mac
-            } else {
-                None
-            }
-        } else {
-            None
-        }
     }
 }
 
@@ -529,7 +490,7 @@ impl Isis {
 
         if link.config.enabled() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
-            self.tx.send(msg);
+            let _ = self.tx.send(msg);
         }
     }
 
@@ -555,14 +516,8 @@ impl Isis {
 
         if link.config.enabled() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
-            self.tx.send(msg);
+            let _ = self.tx.send(msg);
         }
-    }
-
-    pub fn dis_send(&self, ifindex: u32) {
-        let Some(_link) = self.links.get(&ifindex) else {
-            return;
-        };
     }
 }
 
@@ -574,7 +529,7 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option
     link.config.priority = Some(priority);
 
     let msg = Message::Ifsm(IfsmEvent::DisSelection, link.ifindex, None);
-    isis.tx.send(msg);
+    let _ = isis.tx.send(msg);
 
     Some(())
 }
@@ -606,13 +561,13 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
         if link.config.enabled() {
             // Disable -> Enable.
             let msg = Message::Ifsm(IfsmEvent::Start, link.ifindex, None);
-            isis.tx.send(msg);
+            let _ = isis.tx.send(msg);
         }
     } else {
         if !link.config.enabled() {
             // Enable -> Disable.
             let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex, None);
-            isis.tx.send(msg);
+            let _ = isis.tx.send(msg);
         }
     }
 
@@ -730,11 +685,11 @@ pub fn config_hello_padding(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> O
         // Update Hello.
         if link.state.hello.l1.is_some() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L1));
-            isis.tx.send(msg);
+            let _ = isis.tx.send(msg);
         }
         if link.state.hello.l2.is_some() {
             let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L2));
-            isis.tx.send(msg);
+            let _ = isis.tx.send(msg);
         }
     }
 
