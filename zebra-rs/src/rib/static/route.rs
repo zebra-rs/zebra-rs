@@ -2,11 +2,12 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
 
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::{Label, NexthopUni};
 use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType};
+
+use super::config::StaticFamily;
 
 #[derive(Debug, Default, Clone)]
 pub struct StaticNexthop {
@@ -15,15 +16,50 @@ pub struct StaticNexthop {
     pub labels: Vec<u32>,
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct StaticRoute {
+pub struct StaticRoute<F: StaticFamily> {
     pub distance: Option<u8>,
     pub metric: Option<u32>,
-    pub nexthops: BTreeMap<Ipv4Addr, StaticNexthop>,
+    pub nexthops: BTreeMap<F::Addr, StaticNexthop>,
     pub delete: bool,
 }
 
-impl StaticRoute {
+impl<F: StaticFamily> Default for StaticRoute<F> {
+    fn default() -> Self {
+        Self {
+            distance: None,
+            metric: None,
+            nexthops: BTreeMap::new(),
+            delete: false,
+        }
+    }
+}
+
+impl<F: StaticFamily> Clone for StaticRoute<F> {
+    fn clone(&self) -> Self {
+        Self {
+            distance: self.distance,
+            metric: self.metric,
+            nexthops: self.nexthops.clone(),
+            delete: self.delete,
+        }
+    }
+}
+
+impl<F: StaticFamily> std::fmt::Debug for StaticRoute<F>
+where
+    F::Addr: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticRoute")
+            .field("distance", &self.distance)
+            .field("metric", &self.metric)
+            .field("nexthops", &self.nexthops)
+            .field("delete", &self.delete)
+            .finish()
+    }
+}
+
+impl<F: StaticFamily> StaticRoute<F> {
     pub fn to_entry(&self) -> Option<RibEntry> {
         if self.nexthops.is_empty() {
             return None;
@@ -37,7 +73,7 @@ impl StaticRoute {
         if self.nexthops.len() == 1 {
             let (p, n) = self.nexthops.iter().next()?;
             let nhop = NexthopUni {
-                addr: std::net::IpAddr::V4(*p),
+                addr: F::to_ip_addr(*p),
                 metric: n.metric.unwrap_or(metric),
                 weight: n.weight.unwrap_or(1),
                 mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
@@ -49,7 +85,7 @@ impl StaticRoute {
             return Some(entry);
         }
 
-        let mut map: BTreeMap<u32, Vec<(Ipv4Addr, StaticNexthop)>> = BTreeMap::new();
+        let mut map: BTreeMap<u32, Vec<(F::Addr, StaticNexthop)>> = BTreeMap::new();
         for (p, n) in self.nexthops.clone().iter() {
             let metric = n.metric.unwrap_or(metric);
             let e = map.entry(metric).or_default();
@@ -66,7 +102,7 @@ impl StaticRoute {
             };
             for (p, n) in set.iter() {
                 let nhop = NexthopUni {
-                    addr: std::net::IpAddr::V4(*p),
+                    addr: F::to_ip_addr(*p),
                     metric: n.metric.unwrap_or(metric),
                     weight: n.weight.unwrap_or(1),
                     mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
@@ -84,7 +120,7 @@ impl StaticRoute {
                 }
                 let (p, n) = set.first()?;
                 let nhop = NexthopUni {
-                    addr: std::net::IpAddr::V4(*p),
+                    addr: F::to_ip_addr(*p),
                     metric: *metric,
                     weight: n.weight.unwrap_or(1),
                     mpls: n.labels.iter().map(|&l| Label::Explicit(l)).collect(),
@@ -101,7 +137,9 @@ impl StaticRoute {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::V4;
     use super::*;
+    use std::net::Ipv4Addr;
 
     fn nh(labels: Vec<u32>, metric: Option<u32>) -> StaticNexthop {
         StaticNexthop {
@@ -127,7 +165,7 @@ mod tests {
 
     #[test]
     fn single_nexthop_with_labels() {
-        let mut r = StaticRoute::default();
+        let mut r = StaticRoute::<V4>::default();
         r.nexthops.insert(
             Ipv4Addr::new(192, 168, 100, 2),
             nh(vec![16200, 16300], None),
@@ -143,7 +181,7 @@ mod tests {
 
     #[test]
     fn ecmp_distinct_stacks_per_leg() {
-        let mut r = StaticRoute::default();
+        let mut r = StaticRoute::<V4>::default();
         r.nexthops
             .insert(Ipv4Addr::new(192, 168, 100, 2), nh(vec![100, 200], None));
         r.nexthops
@@ -167,7 +205,7 @@ mod tests {
 
     #[test]
     fn ecmp_one_leg_labeled_one_bare() {
-        let mut r = StaticRoute::default();
+        let mut r = StaticRoute::<V4>::default();
         r.nexthops
             .insert(Ipv4Addr::new(192, 168, 100, 2), nh(vec![100], None));
         r.nexthops
