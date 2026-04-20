@@ -116,7 +116,7 @@ fn lsdb_timer(
         let tx = tx.clone();
         let msg = Message::Lsdb(ev, area_id, key);
         async move {
-            tx.send(msg);
+            let _ = tx.send(msg);
         }
     })
 }
@@ -282,10 +282,6 @@ impl Lsdb {
             lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
             table.insert(key, lsa);
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        false
     }
 
     pub fn lookup_by_id(

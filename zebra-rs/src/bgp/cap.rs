@@ -3,7 +3,7 @@
 
 // Capability for sent and received.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use bgp_packet::*;
 use serde::Serialize;

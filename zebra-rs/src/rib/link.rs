@@ -3,10 +3,9 @@
 
 use anyhow::{Context, Result};
 
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use ipnet::IpNet;
 use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::fmt::{self, Write};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -75,20 +74,6 @@ pub struct LinkAddr {
     pub addr: IpNet,
     pub ifindex: u32,
     pub secondary: bool,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize)]
-pub struct LinkAddr4 {
-    pub ifaddr: Ipv4Net,
-    pub ifindex: u32,
-    pub secondary: bool,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize)]
-pub struct LinkAddr6 {
-    pub ifaddr: Ipv6Net,
-    pub ifindex: u32,
-    pub linklocal: bool,
 }
 
 impl LinkAddr {
@@ -418,7 +403,7 @@ impl Rib {
             }
         } else {
             let link = Link::from(fib_link);
-            sysctl_mpls_enable(&link.name);
+            let _ = sysctl_mpls_enable(&link.name);
             self.api_link_add(&link);
             self.links.insert(link.index, link.clone());
 
@@ -563,57 +548,11 @@ impl Rib {
     }
 }
 
-pub struct LinkConfig {
-    builder: ConfigBuilder,
-}
-
-#[derive(Default)]
-struct ConfigBuilder {
-    path: String,
-    pub map: BTreeMap<(String, ConfigOp), Handler>,
-}
-
-type Handler = fn(
-    config: &mut BTreeMap<String, String>,
-    cache: &mut BTreeMap<String, String>,
-    ifname: &String,
-    args: &mut Args,
-) -> Result<()>;
+pub struct LinkConfig {}
 
 impl LinkConfig {
     pub fn new() -> Self {
-        LinkConfig {
-            builder: ConfigBuilder::default(),
-        }
-    }
-
-    pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
-        const LINK_ERR: &str = "missing interface name";
-        const IPV4_ADDR_ERR: &str = "missing ipv4 address";
-
-        let _ifname = args.string().context(LINK_ERR)?;
-
-        // let func = self.builder.map.get()
-        if path == "/interface/ipv4/address" {
-            let v4addr = args.v4net().context(IPV4_ADDR_ERR)?;
-
-            if op.is_set() {
-                // Validate against 0.0.0.0 address
-                if v4addr.addr().is_unspecified() {
-                    println!("Cannot configure 0.0.0.0 as interface address");
-                    return Ok(());
-                }
-
-                // Validate against zero prefix length
-                if v4addr.prefix_len() == 0 {
-                    println!("Cannot configure address with zero prefix length");
-                    return Ok(());
-                }
-                // fib.addr_add_ipv4(index, v4addr, false);
-            }
-        }
-
-        Ok(())
+        LinkConfig {}
     }
 
     pub fn commit(&mut self, _tx: UnboundedSender<Message>) {

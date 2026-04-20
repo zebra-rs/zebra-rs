@@ -40,7 +40,7 @@ pub fn isis_socket(ifindex: u32) -> Result<Socket, std::io::Error> {
         Some(Protocol::from(libc::ETH_P_ALL)),
     )?;
 
-    socket.set_nonblocking(true);
+    let _ = socket.set_nonblocking(true);
 
     let sockaddr = link_addr(libc::ETH_P_ALL as u16, ifindex, None);
 

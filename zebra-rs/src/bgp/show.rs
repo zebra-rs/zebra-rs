@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::*;
@@ -459,7 +458,7 @@ fn show_bgp_vpnv4(
 
     let mut buf = String::new();
 
-    writeln!(
+    let _ = writeln!(
         buf,
         "     Network          Next Hop            Metric LocPrf Weight Path"
     );
@@ -683,7 +682,7 @@ fn show_bgp_vpnv4_route(
         if let Some(ribs) = table.0.get_lpm(&host) {
             writeln!(out, "BGP routing table entry for {}", ribs.0)?;
             writeln!(out, "Paths: ({} available)", ribs.1.len())?;
-            writeln!(out, "Route Distinguisher: {}", rd);
+            let _ = writeln!(out, "Route Distinguisher: {}", rd);
             for rib in ribs.1.iter() {
                 // Display path identifier and router ID
                 let best_marker = if rib.best_path { " best" } else { "" };
@@ -758,7 +757,7 @@ fn show_bgp_vpnv4_route(
                     writeln!(out, "{}", cluster_ids.join(" "))?;
                 }
 
-                writeln!(out, "    Reason: {}", rib.best_reason);
+                let _ = writeln!(out, "    Reason: {}", rib.best_reason);
 
                 writeln!(out)?;
             }
@@ -1700,7 +1699,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.count.get("total").map(|c| c.rcvd).unwrap_or(0),
     )?;
     if neighbor.reflector_client {
-        writeln!(out, "  Route-Reflector Client");
+        let _ = writeln!(out, "  Route-Reflector Client");
     }
 
     Ok(())
@@ -1948,7 +1947,7 @@ fn show_evpn_vni_all(
 fn show_bgp_rtcv4(
     bgp: &Bgp,
     mut args: Args,
-    json: bool,
+    _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 

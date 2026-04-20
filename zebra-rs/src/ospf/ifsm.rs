@@ -14,9 +14,7 @@ use super::{Identity, Message, NfsmEvent, NfsmState, OspfLink};
 pub enum IfsmState {
     #[default]
     Down,
-    Loopback,
     Waiting,
-    PointToPoint,
     DROther,
     Backup,
     DR,
@@ -27,9 +25,7 @@ impl Display for IfsmState {
         use IfsmState::*;
         let state = match self {
             Down => "Down",
-            Loopback => "Loopback",
             Waiting => "Waiting",
-            PointToPoint => "PointToPoint",
             DROther => "DROther",
             Backup => "Backup",
             DR => "DR",
@@ -44,8 +40,6 @@ pub enum IfsmEvent {
     WaitTimer,
     BackupSeen,
     NeighborChange,
-    LoopInd,
-    UnloopInd,
     InterfaceDown,
 }
 
@@ -61,35 +55,13 @@ impl IfsmState {
                 WaitTimer => (ospf_ifsm_ignore, Some(Down)),
                 BackupSeen => (ospf_ifsm_ignore, Some(Down)),
                 NeighborChange => (ospf_ifsm_ignore, Some(Down)),
-                LoopInd => (ospf_ifsm_ignore, Some(Loopback)),
-                UnloopInd => (ospf_ifsm_ignore, Some(Down)),
                 InterfaceDown => (ospf_ifsm_ignore, Some(Down)),
-            },
-            Loopback => match ev {
-                InterfaceUp => (ospf_ifsm_ignore, Some(Loopback)),
-                WaitTimer => (ospf_ifsm_ignore, Some(Loopback)),
-                BackupSeen => (ospf_ifsm_ignore, Some(Loopback)),
-                NeighborChange => (ospf_ifsm_ignore, Some(Loopback)),
-                LoopInd => (ospf_ifsm_ignore, Some(Loopback)),
-                UnloopInd => (ospf_ifsm_ignore, Some(Down)),
-                InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             Waiting => match ev {
                 InterfaceUp => (ospf_ifsm_ignore, Some(Waiting)),
                 WaitTimer => (ospf_ifsm_wait_timer, None),
                 BackupSeen => (ospf_ifsm_backup_seen, None),
                 NeighborChange => (ospf_ifsm_ignore, Some(Waiting)),
-                LoopInd => (ospf_ifsm_loop_ind, Some(Loopback)),
-                UnloopInd => (ospf_ifsm_ignore, Some(Waiting)),
-                InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
-            },
-            PointToPoint => match ev {
-                InterfaceUp => (ospf_ifsm_ignore, Some(PointToPoint)),
-                WaitTimer => (ospf_ifsm_ignore, Some(PointToPoint)),
-                BackupSeen => (ospf_ifsm_ignore, Some(PointToPoint)),
-                NeighborChange => (ospf_ifsm_ignore, Some(PointToPoint)),
-                LoopInd => (ospf_ifsm_loop_ind, Some(Loopback)),
-                UnloopInd => (ospf_ifsm_ignore, Some(PointToPoint)),
                 InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             DROther => match ev {
@@ -97,8 +69,6 @@ impl IfsmState {
                 WaitTimer => (ospf_ifsm_ignore, Some(DROther)),
                 BackupSeen => (ospf_ifsm_ignore, Some(DROther)),
                 NeighborChange => (ospf_ifsm_neighbor_change, None),
-                LoopInd => (ospf_ifsm_loop_ind, Some(Loopback)),
-                UnloopInd => (ospf_ifsm_ignore, Some(DROther)),
                 InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             Backup => match ev {
@@ -106,8 +76,6 @@ impl IfsmState {
                 WaitTimer => (ospf_ifsm_ignore, Some(Backup)),
                 BackupSeen => (ospf_ifsm_ignore, Some(Backup)),
                 NeighborChange => (ospf_ifsm_neighbor_change, None),
-                LoopInd => (ospf_ifsm_loop_ind, Some(Loopback)),
-                UnloopInd => (ospf_ifsm_ignore, Some(Backup)),
                 InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             DR => match ev {
@@ -115,8 +83,6 @@ impl IfsmState {
                 WaitTimer => (ospf_ifsm_ignore, Some(DR)),
                 BackupSeen => (ospf_ifsm_ignore, Some(DR)),
                 NeighborChange => (ospf_ifsm_neighbor_change, None),
-                LoopInd => (ospf_ifsm_loop_ind, Some(Loopback)),
-                UnloopInd => (ospf_ifsm_ignore, Some(DR)),
                 InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
         }
@@ -138,10 +104,6 @@ pub fn ospf_ifsm_ignore(_oi: &mut OspfLink) -> Option<IfsmState> {
     None
 }
 
-pub fn ospf_ifsm_loop_ind(_oi: &mut OspfLink) -> Option<IfsmState> {
-    None
-}
-
 pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
@@ -149,7 +111,7 @@ pub fn ospf_hello_timer(oi: &OspfLink) -> Timer {
     Timer::new(Timer::second(timer), TimerType::Infinite, move || {
         let tx = tx.clone();
         async move {
-            tx.send(Message::HelloTimer(index));
+            let _ = tx.send(Message::HelloTimer(index));
         }
     })
 }
@@ -163,7 +125,7 @@ pub fn ospf_wait_timer(oi: &OspfLink) -> Timer {
         move || {
             let tx = tx.clone();
             async move {
-                tx.send(Message::Ifsm(index, IfsmEvent::WaitTimer));
+                let _ = tx.send(Message::Ifsm(index, IfsmEvent::WaitTimer));
             }
         },
     )
@@ -379,20 +341,10 @@ fn ospf_ifsm_timer_set(oi: &mut OspfLink) {
             oi.timer.ls_ack = None;
             oi.timer.ls_upd_event = None;
         }
-        Loopback => {
-            oi.timer.hello = None;
-            oi.timer.wait = None;
-            oi.timer.ls_ack = None;
-            oi.timer.ls_upd_event = None;
-        }
         Waiting => {
             oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
             oi.timer.wait.get_or_insert(ospf_wait_timer(oi));
             oi.timer.ls_ack = None;
-        }
-        PointToPoint => {
-            oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
-            oi.timer.wait = None;
         }
         DROther | Backup | DR => {
             oi.timer.hello.get_or_insert(ospf_hello_timer(oi));

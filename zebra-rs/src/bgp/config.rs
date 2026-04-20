@@ -168,14 +168,6 @@ fn config_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     } else {
         let config = peer.policy_list.get_mut(&InOut::Input);
         config.name = None;
-
-        let msg = policy::Message::Unregister {
-            proto: "bgp".to_string(),
-            name: policy_name,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PolicyListIn,
-        };
-        let _ = bgp.policy_tx.send(msg);
     }
     Some(())
 }
@@ -199,14 +191,6 @@ fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     } else {
         let config = peer.policy_list.get_mut(&InOut::Output);
         config.name = None;
-
-        let msg = policy::Message::Unregister {
-            proto: "bgp".to_string(),
-            name: policy_name,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PolicyListOut,
-        };
-        let _ = bgp.policy_tx.send(msg);
     }
     Some(())
 }
@@ -229,14 +213,6 @@ fn config_prefix_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     } else {
         let config = peer.prefix_set.get_mut(&InOut::Input);
         config.name = None;
-
-        let msg = policy::Message::Unregister {
-            proto: "bgp".to_string(),
-            name: policy,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PrefixSetIn,
-        };
-        let _ = bgp.policy_tx.send(msg);
     }
     Some(())
 }
@@ -259,14 +235,6 @@ fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     } else {
         let config = peer.prefix_set.get_mut(&InOut::Output);
         config.name = None;
-
-        let msg = policy::Message::Unregister {
-            proto: "bgp".to_string(),
-            name: policy,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PrefixSetOut,
-        };
-        let _ = bgp.policy_tx.send(msg);
     }
     Some(())
 }
@@ -689,9 +657,7 @@ fn config_peer_tcp_ao_include_tcp_options(
 fn config_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op == ConfigOp::Set {
-        bgp.key_chains
-            .entry(name.clone())
-            .or_insert_with(|| KeyChain::new(name));
+        bgp.key_chains.entry(name).or_insert_with(KeyChain::new);
     } else {
         bgp.key_chains.remove(&name);
     }
@@ -716,7 +682,7 @@ fn config_key_chain_key(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     {
         let chain = bgp.key_chains.get_mut(&chain_name)?;
         if op == ConfigOp::Set {
-            chain.keys.entry(key_id).or_insert_with(|| Key::new(key_id));
+            chain.keys.entry(key_id).or_insert_with(Key::new);
         } else {
             chain.keys.remove(&key_id);
         }

@@ -10,9 +10,7 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{
-    CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig, policy_entry_sync,
-};
+use super::{CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
@@ -36,16 +34,6 @@ pub enum Message {
         ident: usize,
         policy_type: PolicyType,
     },
-    Unregister {
-        proto: String,
-        name: String,
-        ident: usize,
-        policy_type: PolicyType,
-    },
-}
-
-pub struct Subscription {
-    pub tx: UnboundedSender<PolicyRx>,
 }
 
 // Message from rib to protocol module.
@@ -251,14 +239,6 @@ impl Policy {
                     }
                 }
             }
-            Message::Unregister {
-                proto: _,
-                name: _,
-                ident: _,
-                policy_type: _,
-            } => {
-                //
-            }
         }
     }
 
@@ -267,11 +247,11 @@ impl Policy {
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
                 if path.as_str().starts_with("/policy-options") {
-                    self.policy_config.exec(path, args, msg.op);
+                    let _ = self.policy_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/prefix-set") {
-                    self.prefix_config.exec(path, args, msg.op);
+                    let _ = self.prefix_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/community-set") {
-                    self.community_config.exec(path, args, msg.op);
+                    let _ = self.community_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -312,7 +292,7 @@ impl Policy {
                 Ok(result) => result,
                 Err(e) => format!("{}", e),
             };
-            msg.resp.send(output).await;
+            let _ = msg.resp.send(output).await;
         }
     }
 

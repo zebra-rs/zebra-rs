@@ -4,7 +4,6 @@
 use netlink_packet_route::link::LinkFlags;
 
 pub trait LinkFlagsExt {
-    fn is_p2p(&self) -> bool;
     fn is_up(&self) -> bool;
     fn is_admin_up(&self) -> bool;
     fn is_lower_up(&self) -> bool;
@@ -26,9 +25,5 @@ impl LinkFlagsExt for LinkFlags {
 
     fn is_loopback(&self) -> bool {
         (*self & LinkFlags::Loopback) == LinkFlags::Loopback
-    }
-
-    fn is_p2p(&self) -> bool {
-        (*self & LinkFlags::Pointopoint) == LinkFlags::Pointopoint
     }
 }

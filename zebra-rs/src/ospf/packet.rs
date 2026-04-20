@@ -13,7 +13,7 @@ use crate::{
         nfsm::{ospf_db_summary_isempty, ospf_nfsm, ospf_nfsm_ls_req_timer_on},
         ospf_ls_rquest_new,
     },
-    ospf_packet_trace, ospf_pdu_trace,
+    ospf_pdu_trace,
 };
 
 use super::{
@@ -221,7 +221,7 @@ pub fn ospf_packet_ls_req_set(nbr: &mut Neighbor, ls_req: &mut OspfLsRequest) {
     }
 }
 
-pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
+pub fn ospf_ls_req_send(_link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
     let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
     let mut ls_req = OspfLsRequest::default();
 
@@ -340,7 +340,7 @@ pub fn ospf_db_desc_recv(
     // nfsm_event(nbr, NfsmEvent::HelloReceived);
 
     match nbr.state {
-        Down | Attempt => {
+        Down => {
             return;
         }
         Init | TwoWay => {
@@ -361,7 +361,7 @@ pub fn ospf_db_desc_recv(
         }
     }
     match nbr.state {
-        Down | Attempt | TwoWay | Init => {
+        Down | TwoWay | Init => {
             // Already handled.
         }
         // 10.6.  Receiving Database Description Packets
@@ -560,7 +560,6 @@ fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, age1: u16, lsa2: &OspfLsaHeader, a
 
 // RFC 2328 Section 13: result of processing a single received LSA.
 enum LsaProcessResult {
-    InstalledDirectAck,  // Step 5: installed, send direct ack
     InstalledDelayedAck, // Step 5: installed, queue delayed ack
     AckAndDiscard,       // Step 4 MaxAge / Step 7 same: ack, don't install
     DiscardNoAck,        // Step 3 / Step 7 implied ack / Step 8 MaxAge+MaxSeq: no ack
@@ -704,7 +703,7 @@ pub fn ospf_ls_upd_validate_proc(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,
     ls_upd: &OspfLsUpdate,
-    src: &Ipv4Addr,
+    _src: &Ipv4Addr,
 ) {
     let mut direct_ack_headers = Vec::new();
     let mut delayed_ack_headers = Vec::new();
@@ -712,7 +711,7 @@ pub fn ospf_ls_upd_validate_proc(
     for lsa in ls_upd.lsas.iter() {
         let result = ospf_ls_upd_proc(oi, nbr, lsa);
         match result {
-            LsaProcessResult::InstalledDirectAck | LsaProcessResult::AckAndDiscard => {
+            LsaProcessResult::AckAndDiscard => {
                 direct_ack_headers.push(lsa.h.clone());
             }
             LsaProcessResult::InstalledDelayedAck => {
@@ -740,7 +739,6 @@ pub fn ospf_ls_upd_validate_proc(
     }
 }
 
-#[ospf_packet_handler(LsUpdate, Recv)]
 pub fn ospf_ls_upd_recv(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,

@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::net::IpAddr;
-
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use ipnet::IpNet;
 use netlink_packet_route::link::LinkFlags;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::rib::link_ext::LinkFlagsExt;
 use crate::rib::{MacAddr, entry::RibEntry};
 
 use super::LinkType;
@@ -50,20 +47,6 @@ pub struct FibAddr {
     pub secondary: bool,
 }
 
-#[derive(Default, Debug)]
-pub struct FibAddr4 {
-    pub addr: Ipv4Net,
-    pub link_index: u32,
-    pub secondary: bool,
-}
-
-#[derive(Default, Debug)]
-pub struct FibAddr6 {
-    pub addr: Ipv6Net,
-    pub link_index: u32,
-    pub secondary: bool,
-}
-
 impl FibAddr {
     #[allow(dead_code)]
     pub fn new() -> FibAddr {
@@ -87,29 +70,4 @@ pub enum FibMessage {
     DelAddr(FibAddr),
     NewRoute(FibRoute),
     DelRoute(FibRoute),
-    MacAdd {
-        vni: u32,
-        mac: MacAddr,
-        tunnel_endpoint: Option<IpAddr>,
-        flags: u8,
-        seq: u32,
-        esi: Option<[u8; 10]>,
-    },
-    MacDel {
-        vni: u32,
-        mac: MacAddr,
-    },
-    MdbAdd {
-        vni: u32,
-        group: IpAddr,
-        source: Option<IpAddr>,
-        ifindex: u32,
-        seq: u32,
-    },
-    MdbDel {
-        vni: u32,
-        group: IpAddr,
-        source: Option<IpAddr>,
-        ifindex: u32,
-    },
 }

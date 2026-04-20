@@ -53,45 +53,46 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
     let mut iov = [IoSliceMut::new(&mut buf)];
 
     loop {
-        sock.async_io(Interest::READABLE, |sock| {
-            let msg = socket::recvmsg::<LinkAddr>(
-                sock.as_raw_fd(),
-                &mut iov,
-                None,
-                socket::MsgFlags::empty(),
-            )?;
+        let _ = sock
+            .async_io(Interest::READABLE, |sock| {
+                let msg = socket::recvmsg::<LinkAddr>(
+                    sock.as_raw_fd(),
+                    &mut iov,
+                    None,
+                    socket::MsgFlags::empty(),
+                )?;
 
-            let Some(addr) = msg.address else {
-                return Err(ErrorKind::UnexpectedEof.into());
-            };
-
-            let Some(input) = msg.iovs().next() else {
-                return Err(ErrorKind::UnexpectedEof.into());
-            };
-            let Ok(mut packet) = isis_packet::parse(&input[3..]) else {
-                isis_info!(
-                    "Error Packet parse on {} len {}",
-                    addr.ifindex(),
-                    input.len(),
-                );
-                hexdump(&input[3..]);
-                return Err(ErrorKind::UnexpectedEof.into());
-            };
-
-            if packet.1.pdu_type.is_lsp() {
-                if !isis_packet::is_valid_checksum(&input[3..]) {
+                let Some(addr) = msg.address else {
                     return Err(ErrorKind::UnexpectedEof.into());
+                };
+
+                let Some(input) = msg.iovs().next() else {
+                    return Err(ErrorKind::UnexpectedEof.into());
+                };
+                let Ok(mut packet) = isis_packet::parse(&input[3..]) else {
+                    isis_info!(
+                        "Error Packet parse on {} len {}",
+                        addr.ifindex(),
+                        input.len(),
+                    );
+                    hexdump(&input[3..]);
+                    return Err(ErrorKind::UnexpectedEof.into());
+                };
+
+                if packet.1.pdu_type.is_lsp() {
+                    if !isis_packet::is_valid_checksum(&input[3..]) {
+                        return Err(ErrorKind::UnexpectedEof.into());
+                    }
+                    // Store raw packet into packet's bytes.
+                    packet.1.bytes = input[3..].to_vec();
                 }
-                // Store raw packet into packet's bytes.
-                packet.1.bytes = input[3..].to_vec();
-            }
 
-            let mac = addr.addr().map(MacAddr::from);
+                let mac = addr.addr().map(MacAddr::from);
 
-            let _ = tx.send(Message::Recv(packet.1, addr.ifindex() as u32, mac));
-            Ok(())
-        })
-        .await;
+                let _ = tx.send(Message::Recv(packet.1, addr.ifindex() as u32, mac));
+                Ok(())
+            })
+            .await;
     }
 }
 

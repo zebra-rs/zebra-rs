@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [lints.rust]
-unused = "allow"
+#unused = "allow"
 
 #[profile.release]
 #debug = true
