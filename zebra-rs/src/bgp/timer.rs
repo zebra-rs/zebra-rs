@@ -27,22 +27,11 @@ impl Config {
     const DEFAULT_HOLD_TIME: u64 = 180;
     const DEFAULT_CONNECT_RETRY_TIME: u64 = 120;
 
-    const DEFAULT_MIN_ADV_INTERVAL: u64 = 3;
-    const DEFAULT_ORIG_INTERVAL: u64 = 3;
-
     pub fn idle_hold_time(&self) -> u64 {
         if let Some(idle_hold_time) = self.idle_hold_time {
             idle_hold_time as u64
         } else {
             Self::DEFAULT_IDLE_HOLD_TIME
-        }
-    }
-
-    pub fn delay_open_time(&self) -> Option<u64> {
-        if let Some(delay_open_time) = self.delay_open_time {
-            Some(delay_open_time as u64)
-        } else {
-            None
         }
     }
 
@@ -59,22 +48,6 @@ impl Config {
             connect_retry_time as u64
         } else {
             Self::DEFAULT_CONNECT_RETRY_TIME
-        }
-    }
-
-    pub fn min_adv_interval(&self) -> u64 {
-        if let Some(adv_interval) = self.min_adv_interval {
-            adv_interval as u64
-        } else {
-            Self::DEFAULT_MIN_ADV_INTERVAL
-        }
-    }
-
-    pub fn orig_interval(&self) -> u64 {
-        if let Some(orig_interval) = self.orig_interval {
-            orig_interval as u64
-        } else {
-            Self::DEFAULT_ORIG_INTERVAL
         }
     }
 }

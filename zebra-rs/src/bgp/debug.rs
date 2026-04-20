@@ -29,23 +29,6 @@ pub struct BgpDebugFlags {
 }
 
 impl BgpDebugFlags {
-    /// Check if a specific debug category is enabled
-    pub fn is_enabled(&self, category: &str) -> bool {
-        match category {
-            "event" => self.event,
-            "update" => self.update,
-            "open" => self.open,
-            "notification" => self.notification,
-            "keepalive" => self.keepalive,
-            "fsm" => self.fsm,
-            "graceful_restart" => self.graceful_restart,
-            "route" => self.route,
-            "policy" => self.policy,
-            "packet_dump" => self.packet_dump,
-            _ => false,
-        }
-    }
-
     /// Enable all debug categories
     pub fn enable_all(&mut self) {
         self.event = true;

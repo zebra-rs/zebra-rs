@@ -13,8 +13,6 @@ pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 pub enum AreaType {
     #[default]
     Normal,
-    Stub,
-    Nssa,
 }
 
 pub struct OspfAreaMap(BTreeMap<Ipv4Addr, OspfArea>);
@@ -32,14 +30,6 @@ impl OspfAreaMap {
 
     pub fn get_mut(&mut self, id: Ipv4Addr) -> Option<&mut OspfArea> {
         self.0.get_mut(&id)
-    }
-
-    pub fn insert(&mut self, area_id: Ipv4Addr, area: OspfArea) {
-        self.0.insert(area_id, area);
-    }
-
-    pub fn remove(&mut self, area_id: Ipv4Addr) -> Option<OspfArea> {
-        self.0.remove(&area_id)
     }
 
     pub fn fetch(&mut self, area_id: Ipv4Addr) -> &mut OspfArea {

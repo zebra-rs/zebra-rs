@@ -1,23 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter, Result};
-use std::net::{Ipv4Addr, Ipv6Addr};
-
 use isis_packet::*;
 use num_enum::IntoPrimitive;
 use strum_macros::{Display, EnumString};
 
 use crate::context::Timer;
 use crate::isis::inst::spf_schedule;
-use crate::isis::link::LinkType;
-use crate::rib::MacAddr;
-use crate::{isis_fsm_trace, isis_packet_trace};
 
-use super::inst::NeighborTop;
 use super::link::LinkTop;
-use super::{IfsmEvent, LabelPool, Level, Message};
+use super::{IfsmEvent, Level, Message};
 
 use super::neigh::Neighbor;
 
@@ -48,7 +40,6 @@ pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
         let tx = tx.clone();
         let sys_id = sys_id.clone();
         async move {
-            use NfsmEvent::*;
             tx.send(Message::Nfsm(
                 NfsmEvent::HoldTimerExpire,
                 level,

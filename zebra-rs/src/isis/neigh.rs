@@ -16,7 +16,7 @@ use crate::rib::MacAddr;
 
 use super::link::LinkType;
 use super::nfsm::NfsmState;
-use super::{IfsmEvent, Isis, Level, Message, NeighborAddr4, NeighborAddr6};
+use super::{Isis, Level, Message, NeighborAddr4, NeighborAddr6};
 
 // IS-IS Neighbor
 #[derive(Debug)]
@@ -238,9 +238,9 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     for (_key, value) in &nbr.addr4 {
         write!(buf, "      {}", value.addr)?;
         if let Some(label) = value.label {
-            write!(buf, " ({})", label);
+            let _ = write!(buf, " ({})", label);
         }
-        writeln!(buf, "");
+        let _ = writeln!(buf, "");
     }
     if !nbr.addr6l.is_empty() {
         writeln!(buf, "    IPv6 Link-Locals")?;

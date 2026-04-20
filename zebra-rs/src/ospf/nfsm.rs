@@ -17,7 +17,6 @@ use super::{
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
     Down,
-    Attempt,
     Init,
     TwoWay,
     ExStart,
@@ -31,7 +30,6 @@ impl Display for NfsmState {
         use NfsmState::*;
         let state = match self {
             Down => "Down",
-            Attempt => "Attempt",
             Init => "Init",
             TwoWay => "2-Way",
             ExStart => "ExStart",
@@ -46,7 +44,6 @@ impl Display for NfsmState {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum NfsmEvent {
     HelloReceived,
-    Start,
     TwoWayReceived,
     NegotiationDone,
     ExchangeDone,
@@ -55,9 +52,7 @@ pub enum NfsmEvent {
     AdjOk,
     SeqNumberMismatch,
     OneWayReceived,
-    KillNbr,
     InactivityTimer,
-    LLDown,
 }
 
 impl Display for NfsmEvent {
@@ -65,7 +60,6 @@ impl Display for NfsmEvent {
         use NfsmEvent::*;
         let event = match self {
             HelloReceived => "HelloReceived",
-            Start => "Start",
             TwoWayReceived => "TwoWayReceived",
             NegotiationDone => "NegotiationDone",
             ExchangeDone => "ExchangeDone",
@@ -74,9 +68,7 @@ impl Display for NfsmEvent {
             AdjOk => "AdjOk",
             SeqNumberMismatch => "SeqNumberMismatch",
             OneWayReceived => "OneWayReceived",
-            KillNbr => "KillNbr",
             InactivityTimer => "InactivityTimer",
-            LLDown => "LLDown",
         };
         write!(f, "{event}")
     }
@@ -92,7 +84,6 @@ impl NfsmState {
         match self {
             Down => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Init)),
-                Start => (ospf_nfsm_start, Some(Attempt)),
                 TwoWayReceived => (ospf_nfsm_ignore, Some(Down)),
                 NegotiationDone => (ospf_nfsm_ignore, Some(Down)),
                 ExchangeDone => (ospf_nfsm_ignore, Some(Down)),
@@ -101,28 +92,10 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_ignore, Some(Down)),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(Down)),
                 OneWayReceived => (ospf_nfsm_ignore, Some(Down)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
                 InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
-            },
-            Attempt => match ev {
-                HelloReceived => (ospf_nfsm_hello_received, Some(Init)),
-                Start => (ospf_nfsm_start, Some(Attempt)),
-                TwoWayReceived => (ospf_nfsm_ignore, Some(Attempt)),
-                NegotiationDone => (ospf_nfsm_ignore, Some(Attempt)),
-                ExchangeDone => (ospf_nfsm_ignore, Some(Attempt)),
-                BadLSReq => (ospf_nfsm_ignore, Some(Attempt)),
-                LoadingDone => (ospf_nfsm_ignore, Some(Attempt)),
-                AdjOk => (ospf_nfsm_ignore, Some(Attempt)),
-                SeqNumberMismatch => (ospf_nfsm_ignore, Some(Attempt)),
-                OneWayReceived => (ospf_nfsm_ignore, Some(Attempt)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
             Init => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Init)),
-                Start => (ospf_nfsm_ignore, Some(Init)),
                 TwoWayReceived => (ospf_nfsm_twoway_received, None),
                 NegotiationDone => (ospf_nfsm_ignore, Some(Init)),
                 ExchangeDone => (ospf_nfsm_ignore, Some(Init)),
@@ -131,13 +104,10 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_ignore, Some(Init)),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(Init)),
                 OneWayReceived => (ospf_nfsm_ignore, Some(Init)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
                 InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
             TwoWay => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(TwoWay)),
-                Start => (ospf_nfsm_ignore, Some(TwoWay)),
                 TwoWayReceived => (ospf_nfsm_ignore, Some(TwoWay)),
                 NegotiationDone => (ospf_nfsm_ignore, Some(TwoWay)),
                 ExchangeDone => (ospf_nfsm_ignore, Some(TwoWay)),
@@ -146,13 +116,10 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(TwoWay)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
                 InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
             ExStart => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(ExStart)),
-                Start => (ospf_nfsm_ignore, Some(ExStart)),
                 TwoWayReceived => (ospf_nfsm_ignore, Some(ExStart)),
                 NegotiationDone => (ospf_nfsm_negotiation_done, Some(Exchange)),
                 ExchangeDone => (ospf_nfsm_ignore, Some(ExStart)),
@@ -161,13 +128,10 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
                 InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
             Exchange => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Exchange)),
-                Start => (ospf_nfsm_ignore, Some(Exchange)),
                 TwoWayReceived => (ospf_nfsm_ignore, Some(Exchange)),
                 NegotiationDone => (ospf_nfsm_ignore, Some(Exchange)),
                 ExchangeDone => (ospf_nfsm_exchange_done, None),
@@ -176,13 +140,10 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
                 InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
             Loading => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Loading)),
-                Start => (ospf_nfsm_ignore, Some(Loading)),
                 TwoWayReceived => (ospf_nfsm_ignore, Some(Loading)),
                 NegotiationDone => (ospf_nfsm_ignore, Some(Loading)),
                 ExchangeDone => (ospf_nfsm_ignore, Some(Loading)),
@@ -191,13 +152,10 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
                 InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
             Full => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Full)),
-                Start => (ospf_nfsm_ignore, Some(Full)),
                 TwoWayReceived => (ospf_nfsm_ignore, Some(Full)),
                 NegotiationDone => (ospf_nfsm_ignore, Some(Full)),
                 ExchangeDone => (ospf_nfsm_ignore, Some(Full)),
@@ -206,9 +164,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                KillNbr => (ospf_nfsm_kill_nbr, Some(Down)),
                 InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
-                LLDown => (ospf_nfsm_ll_down, Some(Down)),
             },
         }
     }
@@ -241,7 +197,7 @@ pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
 pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {
     use NfsmState::*;
     match nbr.state {
-        Down | Attempt | Init | TwoWay => {
+        Down | Init | TwoWay => {
             nbr.timer.inactivity = None;
             nbr.timer.db_desc = None;
             nbr.timer.db_desc_free = None;
@@ -291,12 +247,6 @@ pub fn ospf_nfsm_ls_req_timer_on(nbr: &mut Neighbor) {
     }
 }
 
-impl Neighbor {
-    pub fn nfsm_ignore(&mut self, _oident: &Identity) -> Option<NfsmState> {
-        None
-    }
-}
-
 pub fn ospf_nfsm_ignore(
     _oi: &mut OspfInterface,
     _nbr: &mut Neighbor,
@@ -327,14 +277,6 @@ pub fn ospf_nfsm_hello_received(
     // Start or Restart Inactivity Timer.
     nbr.timer.inactivity = Some(ospf_inactivity_timer(nbr));
 
-    None
-}
-
-pub fn ospf_nfsm_start(
-    _oi: &mut OspfInterface,
-    _nbr: &mut Neighbor,
-    _oident: &Identity,
-) -> Option<NfsmState> {
     None
 }
 
@@ -476,14 +418,6 @@ pub fn ospf_nfsm_inactivity_timer(
     ospf_nfsm_kill_nbr(oi, nbr, oident)
 }
 
-pub fn ospf_nfsm_ll_down(
-    oi: &mut OspfInterface,
-    nbr: &mut Neighbor,
-    oident: &Identity,
-) -> Option<NfsmState> {
-    ospf_nfsm_kill_nbr(oi, nbr, oident)
-}
-
 fn ospf_nfsm_change_state(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,
@@ -554,9 +488,9 @@ pub fn ospf_nfsm(
     // FSM-provided next state.
     let next_state = fsm_func(link, nbr, oident).or(fsm_next_state);
 
-    // When event is KillNbr or InactivityTimer, the neighbor is being
-    // removed. Skip state change and timer set — the caller will delete it.
-    if matches!(event, NfsmEvent::KillNbr | NfsmEvent::InactivityTimer) {
+    // When event is InactivityTimer, the neighbor is being removed. Skip
+    // state change and timer set — the caller will delete it.
+    if matches!(event, NfsmEvent::InactivityTimer) {
         return;
     }
 
@@ -580,7 +514,7 @@ pub fn ospf_nfsm(
 pub fn ospf_nfsm_check_nbr_loading(nbr: &mut Neighbor) {
     if nbr.state == NfsmState::Loading {
         if ospf_ls_request_isempty(nbr) {
-            nbr.tx.send(Message::Nfsm(
+            let _ = nbr.tx.send(Message::Nfsm(
                 nbr.ifindex,
                 nbr.ident.prefix.addr(),
                 NfsmEvent::LoadingDone,

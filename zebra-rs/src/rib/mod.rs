@@ -2,7 +2,7 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 pub mod api;
-pub use api::{RibRxChannel, RibTxChannel};
+pub use api::RibRxChannel;
 
 pub mod inst;
 pub use inst::{Message, Rib, serve};
@@ -37,8 +37,6 @@ pub mod mpls;
 pub use mpls::*;
 
 pub mod resolve;
-
-pub mod intf;
 
 // pub mod nanomsg;
 

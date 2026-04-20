@@ -716,8 +716,3 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
     }
     Ok(())
 }
-
-// Compatibility function for code that still uses the old interface
-pub fn setup_tracing(output: LoggingOutput) -> anyhow::Result<()> {
-    setup_tracing_with_format(output, LogFormat::Terminal)
-}

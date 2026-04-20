@@ -541,11 +541,11 @@ fn show_isis_spf(
     let mut buf = String::new();
 
     if let Some(spf) = isis.spf_result.get(&Level::L1) {
-        writeln!(buf, "L1 SPF");
+        let _ = writeln!(buf, "L1 SPF");
         spf::disp_out(&mut buf, spf, false);
     }
     if let Some(spf) = isis.spf_result.get(&Level::L2) {
-        writeln!(buf, "L2 SPF");
+        let _ = writeln!(buf, "L2 SPF");
         spf::disp_out(&mut buf, spf, false);
     }
     Ok(buf)

@@ -927,13 +927,13 @@ fn show_ospf_database(
         return Ok(String::from("OSPF router ID is not sepcified"));
     }
 
-    writeln!(out, "");
+    let _ = writeln!(out, "");
     writeln!(out, "       OSPF Router with ID ({})", ospf.router_id)?;
-    writeln!(out, "");
+    let _ = writeln!(out, "");
 
     if let Some(area) = ospf.areas.get(AREA0) {
         writeln!(out, "Router Link States (Area {})", area.id)?;
-        writeln!(out, "");
+        let _ = writeln!(out, "");
 
         let mut header = true;
         for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
@@ -947,7 +947,7 @@ fn show_ospf_database(
             let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                 continue;
             };
-            writeln!(
+            let _ = writeln!(
                 out,
                 "{:15} {:15} {:4} 0x{:08x} 0x{:04x} {}",
                 lsa_id,
@@ -969,7 +969,7 @@ fn show_ospf_database(
                 header = false;
                 writeln!(out, "Link ID         ADV Router      Age  Seq#       CkSum")?;
             }
-            writeln!(
+            let _ = writeln!(
                 out,
                 "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
                 lsa_id,
@@ -991,7 +991,7 @@ fn show_ospf_database(
             writeln!(out)?;
             writeln!(out, "Opaque-Type/Id  ADV Router      Age  Seq#       CkSum")?;
             for ((lsa_id, adv_router), lsa) in opaque_table.iter() {
-                writeln!(
+                let _ = writeln!(
                     out,
                     "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
                     lsa_id,
@@ -1437,7 +1437,7 @@ fn show_ext_link_detail(
 fn show_ospf_route(
     ospf: &Ospf,
     _args: Args,
-    json: bool,
+    _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
