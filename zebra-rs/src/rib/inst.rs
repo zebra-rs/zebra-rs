@@ -6,7 +6,7 @@ use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
     BridgeBuilder, BridgeConfig, Link, MacAddr, MplsConfig, Nexthop, NexthopMap, RibType,
-    StaticConfig, Vxlan, VxlanBuilder, VxlanConfig,
+    StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -154,7 +154,8 @@ pub struct Rib {
     pub mac_table: BTreeMap<(u32, MacAddr), MacEntry>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
-    pub static_config: StaticConfig,
+    pub static_v4: StaticConfig<V4>,
+    pub static_v6: StaticConfig<V6>,
     pub mpls_config: MplsConfig,
     pub link_config: LinkConfig,
     pub bridge_config: BridgeBuilder,
@@ -184,7 +185,8 @@ impl Rib {
             mac_table: BTreeMap::new(),
             tx,
             rx,
-            static_config: StaticConfig::new(),
+            static_v4: StaticConfig::<V4>::new(),
+            static_v6: StaticConfig::<V6>::new(),
             mpls_config: MplsConfig::new(),
             link_config: LinkConfig::new(),
             bridge_config: BridgeBuilder::new(),
@@ -380,7 +382,9 @@ impl Rib {
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
                 if path.as_str().starts_with("/routing/static/ipv4/route") {
-                    let _ = self.static_config.exec(path, args, msg.op);
+                    let _ = self.static_v4.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/routing/static/ipv6/route") {
+                    let _ = self.static_v6.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/routing/static/mpls/label") {
                     let _ = self.mpls_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/interface") {
@@ -396,7 +400,8 @@ impl Rib {
                 self.bridge_config.commit(self.tx.clone());
                 self.vxlan_config.commit(self.tx.clone());
                 self.link_config.commit(self.tx.clone());
-                self.static_config.commit(self.tx.clone());
+                self.static_v4.commit(self.tx.clone());
+                self.static_v6.commit(self.tx.clone());
                 self.mpls_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {
