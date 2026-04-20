@@ -339,7 +339,7 @@ pub fn rib_entry_show(
                     for mpls in uni.mpls.iter() {
                         match mpls {
                             Label::Implicit(label) => {
-                                write!(buf, " {}(implicit-null)", label).unwrap();
+                                write!(buf, " {} (implicit-null)", label).unwrap();
                             }
                             Label::Explicit(label) => {
                                 write!(buf, " {}", label).unwrap();
