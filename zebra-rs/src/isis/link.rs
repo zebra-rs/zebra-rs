@@ -543,6 +543,11 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     // Currently IS-IS is enabled on this interface.
     let enabled = link.config.enabled();
 
+    // Capture the global per-AFI count before mutation so we can detect a
+    // zero ↔ non-zero transition, which is what flips the AFI's NLPID in
+    // the Protocols Supported TLV (RFC 1195) of our self-originated LSP.
+    let count_before = *isis.config.enable.get(&afi);
+
     if op.is_set() && enable {
         // Set Enable.
         if !*link.config.enable.get(&afi) {
@@ -557,6 +562,9 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
         }
     }
 
+    let count_after = *isis.config.enable.get(&afi);
+    let support_changed = (count_before == 0) != (count_after == 0);
+
     if !enabled {
         if link.config.enabled() {
             // Disable -> Enable.
@@ -568,6 +576,28 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
             // Enable -> Disable.
             let msg = Message::Ifsm(IfsmEvent::Stop, link.ifindex, None);
             let _ = isis.tx.send(msg);
+        }
+    }
+
+    if support_changed {
+        let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
+        if isis.lsdb.get(&Level::L1).get(&key).is_some() {
+            isis_event_trace!(
+                isis.tracing,
+                LspOriginate,
+                &Level::L1,
+                "LSP Originate L1 due to protocols-supported change"
+            );
+            isis.tx.send(Message::LspOriginate(Level::L1)).unwrap();
+        }
+        if isis.lsdb.get(&Level::L2).get(&key).is_some() {
+            isis_event_trace!(
+                isis.tracing,
+                LspOriginate,
+                &Level::L2,
+                "LSP Originate L2 due to protocols-supported change"
+            );
+            isis.tx.send(Message::LspOriginate(Level::L2)).unwrap();
         }
     }
 
