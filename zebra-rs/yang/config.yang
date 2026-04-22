@@ -526,6 +526,15 @@ module config {
               type uint32;
               description "Metric of the route.";
             }
+            container srv6 {
+              leaf-list segments {
+                type inet:ipv6-address;
+              }
+              leaf if-name {
+                ext:dynamic "rib:interface";
+                type string;
+              }
+            }
           }
 
           list arp {
