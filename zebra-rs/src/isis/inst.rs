@@ -13,6 +13,7 @@ use isis_packet::*;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::isis::config::SegmentRouting;
 use crate::isis_event_trace;
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -605,51 +606,75 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .insert_originate(top.config.net.sys_id(), hostname.clone());
     lsp.tlvs.push(IsisTlvHostname { hostname }.into());
 
-    // Effective router-id: configured te_router_id wins, else fall back to the
-    // RIB-derived id, else 0.0.0.0.
-    let router_id: Ipv4Addr = top
-        .config
-        .te_router_id
-        .or(top.config.rib_router_id)
-        .unwrap_or(Ipv4Addr::UNSPECIFIED);
-    let mut cap = IsisTlvRouterCap {
-        router_id,
-        flags: 0.into(),
-        subs: Vec::new(),
-    };
+    // SR Capability.
+    if let Some(sr) = &top.config.segment_routing {
+        // Effective router-id: configured te_router_id wins, else fall back to the
+        // RIB-derived id, else 0.0.0.0.
+        let router_id: Ipv4Addr = top
+            .config
+            .te_router_id
+            .or(top.config.rib_router_id)
+            .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-    // TODO: SR Capability must be obtained from configuration.
-    let mut flags = SegmentRoutingCapFlags::default();
-    flags.set_i_flag(true);
-    flags.set_v_flag(true);
-    let sid_label = SidLabelTlv::Label(16000);
-    let sr_cap = IsisSubSegmentRoutingCap {
-        flags,
-        range: 8000,
-        sid_label,
-    };
-    cap.subs.push(sr_cap.into());
+        // Router Capability.
+        let mut cap = IsisTlvRouterCap {
+            router_id,
+            flags: 0.into(),
+            subs: Vec::new(),
+        };
 
-    // Sub: SR Algorithms
-    let algo = IsisSubSegmentRoutingAlgo {
-        algo: vec![Algo::Spf],
-    };
-    cap.subs.push(algo.into());
+        match *sr {
+            SegmentRouting::MPLS => {
+                let mut flags = SegmentRoutingCapFlags::default();
+                flags.set_i_flag(true);
+                flags.set_v_flag(true);
+                let sid_label = SidLabelTlv::Label(16000);
+                let sr_cap = IsisSubSegmentRoutingCap {
+                    flags,
+                    range: 8000,
+                    sid_label,
+                };
+                cap.subs.push(sr_cap.into());
 
-    // Sub: SR Local Block
-    let sid_label = SidLabelTlv::Label(15000);
-    let lb = IsisSubSegmentRoutingLB {
-        flags: 0,
-        range: 3000,
-        sid_label,
-    };
-    cap.subs.push(lb.into());
-    lsp.tlvs.push(cap.into());
+                // Sub: SR Algorithms
+                let algo = IsisSubSegmentRoutingAlgo {
+                    algo: vec![Algo::Spf],
+                };
+                cap.subs.push(algo.into());
+
+                // Sub: SR Local Block
+                let sid_label = SidLabelTlv::Label(15000);
+                let lb = IsisSubSegmentRoutingLB {
+                    flags: 0,
+                    range: 3000,
+                    sid_label,
+                };
+                cap.subs.push(lb.into());
+
+                lsp.tlvs.push(cap.into());
+            }
+            SegmentRouting::SRv6 => {
+                // SRv6 Capability.
+                let srv6 = IsisSubSrv6::default();
+                cap.subs.push(srv6.into());
+
+                // Sub: SR Algorithms
+                let algo = IsisSubSegmentRoutingAlgo {
+                    algo: vec![Algo::Spf],
+                };
+                cap.subs.push(algo.into());
+
+                lsp.tlvs.push(cap.into());
+            }
+        }
+    }
 
     // TE Router ID. Prefer configured value, fall back to RIB-derived.
-    if let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id) {
-        let te_router_id = IsisTlvTeRouterId { router_id };
-        lsp.tlvs.push(te_router_id.into());
+    if top.config.segment_routing.is_some() {
+        if let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id) {
+            let te_router_id = IsisTlvTeRouterId { router_id };
+            lsp.tlvs.push(te_router_id.into());
+        }
     }
 
     // IS Reachability.
