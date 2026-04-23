@@ -29,6 +29,7 @@ impl Rib {
         if let Some(router_id) = router_id(&self.links) {
             if self.router_id != router_id {
                 self.router_id = router_id;
+                self.api_router_id_update(router_id);
             }
         }
     }

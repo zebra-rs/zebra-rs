@@ -85,6 +85,7 @@ pub struct IsisConfig {
     pub refresh_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub te_router_id: Option<Ipv4Addr>,
+    pub rib_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
     pub distribute: IsisDistribute,
     pub segment_routing: Option<SegmentRouting>,
