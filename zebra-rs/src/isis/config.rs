@@ -27,7 +27,7 @@ impl Isis {
         self.callback_add("/routing/isis/hostname", config_hostname);
         self.callback_add("/routing/isis/timers/hold-time", config_hold_time);
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
-        self.callback_add("/routing/segment-routing", config_segment_routing);
+        self.callback_add("/routing/isis/segment-routing", config_segment_routing);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.tracing_add("/event", config_tracing_event);
         self.tracing_add("/fsm", config_tracing_fsm);
@@ -70,7 +70,7 @@ impl Default for IsisDistribute {
     }
 }
 
-#[derive(Debug, strum_macros::EnumString)]
+#[derive(Debug, PartialEq, strum_macros::EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum SegmentRouting {
     MPLS,
