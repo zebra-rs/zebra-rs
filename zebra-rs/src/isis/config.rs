@@ -27,6 +27,7 @@ impl Isis {
         self.callback_add("/routing/isis/hostname", config_hostname);
         self.callback_add("/routing/isis/timers/hold-time", config_hold_time);
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
+        self.callback_add("/routing/segment-routing", config_segment_routing);
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.tracing_add("/event", config_tracing_event);
         self.tracing_add("/fsm", config_tracing_fsm);
@@ -69,6 +70,13 @@ impl Default for IsisDistribute {
     }
 }
 
+#[derive(Debug, strum_macros::EnumString)]
+#[strum(ascii_case_insensitive)]
+pub enum SegmentRouting {
+    MPLS,
+    SRv6,
+}
+
 #[derive(Default)]
 pub struct IsisConfig {
     pub net: Nsap,
@@ -79,6 +87,7 @@ pub struct IsisConfig {
     pub te_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
     pub distribute: IsisDistribute,
+    pub segment_routing: Option<SegmentRouting>,
 }
 
 impl IsisConfig {
@@ -154,6 +163,16 @@ fn config_hold_time(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()>
         isis.config.hold_time = Some(hold_time);
     } else {
         isis.config.hold_time = None;
+    }
+    Some(())
+}
+
+fn config_segment_routing(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let sr = args.string()?.parse::<SegmentRouting>().ok()?;
+        isis.config.segment_routing = Some(sr);
+    } else {
+        isis.config.segment_routing = None;
     }
     Some(())
 }
