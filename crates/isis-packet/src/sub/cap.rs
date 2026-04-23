@@ -292,7 +292,7 @@ impl ParseBe<Srv6Flags> for Srv6Flags {
     }
 }
 
-#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSubSrv6 {
     pub flags: Srv6Flags,
 }
@@ -308,6 +308,12 @@ impl TlvEmitter for IsisSubSrv6 {
 
     fn emit(&self, buf: &mut BytesMut) {
         buf.put_u16(self.flags.into());
+    }
+}
+
+impl From<IsisSubSrv6> for IsisSubTlv {
+    fn from(sub: IsisSubSrv6) -> Self {
+        IsisSubTlv::Srv6(sub)
     }
 }
 
