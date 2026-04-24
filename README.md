@@ -36,6 +36,25 @@ export PATH="${PATH}:${HOME}/.zebra/bin"
 
 to your `.bashrc` or `.zshrc` or any of your shell profile.
 
+## Debian Package
+
+To build a Debian package, we use [`nfpm`](https://github.com/goreleaser/nfpm),
+which is written in Go. Please install Go and `nfpm` first:
+
+``` shell
+go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+```
+
+Make sure `${GOPATH}/bin` (or `${HOME}/go/bin`) is in your `PATH`. Then from
+the `packaging/` directory:
+
+``` shell
+cd packaging
+make amd64   # or: make arm64
+```
+
+This produces a `.deb` package for the selected architecture.
+
 ## Start
 
 To try zebra, please simply launch program called `zebra`.
