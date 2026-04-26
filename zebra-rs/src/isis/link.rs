@@ -672,12 +672,17 @@ pub fn config_level_common(inst: IsLevel, link: IsLevel) -> IsLevel {
     }
 }
 
-pub fn config_circuit_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
+pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let circuit_type = args.string()?.parse::<IsLevel>().ok()?;
 
     let link = isis.links.get_mut_by_name(&name)?;
-    link.config.circuit_type = Some(circuit_type);
+
+    if op.is_set() {
+        link.config.circuit_type = Some(circuit_type);
+    } else {
+        link.config.circuit_type = None;
+    }
 
     let is_level = config_level_common(isis.config.is_type(), link.config.circuit_type());
     link.state.level = is_level;
@@ -685,13 +690,18 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Op
     Some(())
 }
 
-pub fn config_link_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
+pub fn config_link_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let link_type = args.string()?.parse::<LinkType>().ok()?;
 
     let ifindex = {
         let link = isis.links.get_mut_by_name(&name)?;
-        link.config.link_type = Some(link_type);
+
+        if op.is_set() {
+            link.config.link_type = Some(link_type);
+        } else {
+            link.config.link_type = None;
+        }
         link.ifindex
     };
 
@@ -703,24 +713,25 @@ pub fn config_link_type(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Optio
     Some(())
 }
 
-pub fn config_hello_padding(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option<()> {
+pub fn config_hello_padding(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let hello_padding = args.string()?.parse::<HelloPaddingPolicy>().ok()?;
-
     let link = isis.links.get_mut_by_name(&name)?;
 
-    if link.config.hello_padding != Some(hello_padding.clone()) {
+    if op.is_set() {
         link.config.hello_padding = Some(hello_padding);
+    } else {
+        link.config.hello_padding = None;
+    }
 
-        // Update Hello.
-        if link.state.hello.l1.is_some() {
-            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L1));
-            let _ = isis.tx.send(msg);
-        }
-        if link.state.hello.l2.is_some() {
-            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L2));
-            let _ = isis.tx.send(msg);
-        }
+    // Update Hello.
+    if link.state.hello.l1.is_some() {
+        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L1));
+        let _ = isis.tx.send(msg);
+    }
+    if link.state.hello.l2.is_some() {
+        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L2));
+        let _ = isis.tx.send(msg);
     }
 
     Some(())
