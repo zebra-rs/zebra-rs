@@ -58,4 +58,10 @@ impl Rib {
             let _ = tx.send(link);
         }
     }
+
+    pub fn api_router_id_update(&self, router_id: Ipv4Addr) {
+        for tx in self.redists.iter() {
+            let _ = tx.send(RibRx::RouterIdUpdate(router_id));
+        }
+    }
 }

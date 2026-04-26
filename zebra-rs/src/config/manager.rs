@@ -22,7 +22,7 @@ use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCo
 use libyang::{Entry, YangStore, to_entry};
 use similar::TextDiff;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
@@ -376,7 +376,9 @@ impl ConfigManager {
     ) -> (ExecCode, Vec<Completion>) {
         let mut state = State::new();
         if interactive {
-            if let Some(dynamic) = has_dynamic(input) {
+            let mut dynamics = HashSet::new();
+            collect_dynamics(&mode.entry, &mut dynamics);
+            for dynamic in dynamics {
                 let comps = self.comps_dynamic(dynamic.clone()).await;
                 state.dynamic.insert(dynamic, comps);
             }
@@ -594,13 +596,12 @@ pub async fn event_loop(mut config: ConfigManager) {
     }
 }
 
-fn has_dynamic(input: &str) -> Option<String> {
-    if input.split_whitespace().any(|s| s == "interface") {
-        Some(String::from("rib:interface"))
-    } else if input.split_whitespace().any(|s| s == "neighbors") {
-        Some(String::from("bgp:neighbor"))
-    } else {
-        None
+fn collect_dynamics(entry: &Entry, set: &mut HashSet<String>) {
+    if let Some(d) = entry.extension.get("ext:dynamic") {
+        set.insert(d.clone());
+    }
+    for child in entry.dir.borrow().iter() {
+        collect_dynamics(child, set);
     }
 }
 

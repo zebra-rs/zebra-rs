@@ -13,6 +13,7 @@ use isis_packet::*;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::isis::config::SegmentRouting;
 use crate::isis_event_trace;
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -155,9 +156,46 @@ impl Isis {
                 // isis_info!("Isis::AddrDel {}", addr.addr);
                 self.addr_del(addr);
             }
+            RibRx::RouterIdUpdate(router_id) => {
+                self.rib_router_id_update(router_id);
+            }
             _ => {
                 //
             }
+        }
+    }
+
+    fn rib_router_id_update(&mut self, router_id: Ipv4Addr) {
+        let new = (!router_id.is_unspecified()).then_some(router_id);
+        if self.config.rib_router_id == new {
+            return;
+        }
+        self.config.rib_router_id = new;
+
+        // Configured te_router_id wins; nothing to re-originate when the
+        // RIB-derived id changes underneath an explicit override.
+        if self.config.te_router_id.is_some() {
+            return;
+        }
+
+        let key = IsisLspId::new(self.config.net.sys_id(), 0, 0);
+        if self.lsdb.get(&Level::L1).get(&key).is_some() {
+            isis_event_trace!(
+                self.tracing,
+                LspOriginate,
+                &Level::L1,
+                "LSP Originate L1 due to RIB router-id change"
+            );
+            self.tx.send(Message::LspOriginate(Level::L1)).unwrap();
+        }
+        if self.lsdb.get(&Level::L2).get(&key).is_some() {
+            isis_event_trace!(
+                self.tracing,
+                LspOriginate,
+                &Level::L2,
+                "LSP Originate L2 due to RIB router-id change"
+            );
+            self.tx.send(Message::LspOriginate(Level::L2)).unwrap();
         }
     }
 
@@ -568,51 +606,75 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         .insert_originate(top.config.net.sys_id(), hostname.clone());
     lsp.tlvs.push(IsisTlvHostname { hostname }.into());
 
-    // TODO: Router capability. When TE-Router ID is configured, use the value. If
-    // not when Router ID is configured, use the value. Otherwise system
-    // default Router ID will be used.
-    let router_id: Ipv4Addr = match &top.config.te_router_id {
-        Some(router_id) => *router_id,
-        None => "0.0.0.0".parse().unwrap(),
-    };
-    let mut cap = IsisTlvRouterCap {
-        router_id,
-        flags: 0.into(),
-        subs: Vec::new(),
-    };
+    // SR Capability.
+    if let Some(sr) = &top.config.segment_routing {
+        // Effective router-id: configured te_router_id wins, else fall back to the
+        // RIB-derived id, else 0.0.0.0.
+        let router_id: Ipv4Addr = top
+            .config
+            .te_router_id
+            .or(top.config.rib_router_id)
+            .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-    // TODO: SR Capability must be obtained from configuration.
-    let mut flags = SegmentRoutingCapFlags::default();
-    flags.set_i_flag(true);
-    flags.set_v_flag(true);
-    let sid_label = SidLabelTlv::Label(16000);
-    let sr_cap = IsisSubSegmentRoutingCap {
-        flags,
-        range: 8000,
-        sid_label,
-    };
-    cap.subs.push(sr_cap.into());
+        // Router Capability.
+        let mut cap = IsisTlvRouterCap {
+            router_id,
+            flags: 0.into(),
+            subs: Vec::new(),
+        };
 
-    // Sub: SR Algorithms
-    let algo = IsisSubSegmentRoutingAlgo {
-        algo: vec![Algo::Spf],
-    };
-    cap.subs.push(algo.into());
+        match *sr {
+            SegmentRouting::MPLS => {
+                let mut flags = SegmentRoutingCapFlags::default();
+                flags.set_i_flag(true);
+                flags.set_v_flag(true);
+                let sid_label = SidLabelTlv::Label(16000);
+                let sr_cap = IsisSubSegmentRoutingCap {
+                    flags,
+                    range: 8000,
+                    sid_label,
+                };
+                cap.subs.push(sr_cap.into());
 
-    // Sub: SR Local Block
-    let sid_label = SidLabelTlv::Label(15000);
-    let lb = IsisSubSegmentRoutingLB {
-        flags: 0,
-        range: 3000,
-        sid_label,
-    };
-    cap.subs.push(lb.into());
-    lsp.tlvs.push(cap.into());
+                // Sub: SR Algorithms
+                let algo = IsisSubSegmentRoutingAlgo {
+                    algo: vec![Algo::Spf],
+                };
+                cap.subs.push(algo.into());
 
-    // TE Router ID.
-    if let Some(router_id) = top.config.te_router_id {
-        let te_router_id = IsisTlvTeRouterId { router_id };
-        lsp.tlvs.push(te_router_id.into());
+                // Sub: SR Local Block
+                let sid_label = SidLabelTlv::Label(15000);
+                let lb = IsisSubSegmentRoutingLB {
+                    flags: 0,
+                    range: 3000,
+                    sid_label,
+                };
+                cap.subs.push(lb.into());
+
+                lsp.tlvs.push(cap.into());
+            }
+            SegmentRouting::SRv6 => {
+                // SRv6 Capability.
+                let srv6 = IsisSubSrv6::default();
+                cap.subs.push(srv6.into());
+
+                // Sub: SR Algorithms
+                let algo = IsisSubSegmentRoutingAlgo {
+                    algo: vec![Algo::Spf],
+                };
+                cap.subs.push(algo.into());
+
+                lsp.tlvs.push(cap.into());
+            }
+        }
+    }
+
+    // TE Router ID. Prefer configured value, fall back to RIB-derived.
+    if top.config.segment_routing.is_some() {
+        if let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id) {
+            let te_router_id = IsisTlvTeRouterId { router_id };
+            lsp.tlvs.push(te_router_id.into());
+        }
     }
 
     // IS Reachability.
