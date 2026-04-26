@@ -139,13 +139,20 @@ pub fn nbr_hello_interpret(
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
     use IfsmEvent::*;
 
+    // Logging.
+    isis_pdu_trace!(link, &level, "[Hello:Recv] {}", link.state.name,);
+
     // Check link capability for the level.
     if !has_level(link.state.level(), level) {
+        isis_pdu_trace!(link, &level, "[Hello:Recv] Link does not have the level");
         return;
     }
 
-    // Logging.
-    isis_pdu_trace!(link, &level, "[Hello:Recv] {}", link.state.name,);
+    // Check link type.
+    if !link.is_lan() {
+        isis_pdu_trace!(link, &level, "[Hello:Recv] Link type is not LAN");
+        return;
+    }
 
     // Find neighbor by system id or create a new one.
     let nbr = link
@@ -264,13 +271,28 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
+        // Logging.
+        isis_pdu_trace!(link, &level, "[P2P Hello:Recv] on link {}", link.state.name);
+
         // Check if both sender and receiver support this level
         if !has_level(link_level, level) || !has_level(pdu_level, level) {
+            isis_pdu_trace!(
+                link,
+                &level,
+                "[P2P Hello:Recv] Link does not have enough level"
+            );
             continue;
         }
 
-        // Logging.
-        isis_pdu_trace!(link, &level, "[P2P Hello:Recv] on link {}", link.state.name);
+        // Check link type.
+        if !link.is_p2p() {
+            isis_pdu_trace!(
+                link,
+                &level,
+                "[P2P Hello:Recv] Link type is not point-to-point"
+            );
+            return;
+        }
 
         // Create or update neighbor for this level
         let nbr = link
