@@ -243,7 +243,16 @@ pub fn comps_add_all(
         YangMatch::LeafMatched => {
             //
         }
-        _ => comps_as_leaf(comps, entry),
+        _ => {
+            comps_as_leaf(comps, entry);
+            if let Some(dynamic) = entry.extension.get("ext:dynamic") {
+                if let Some(candidates) = s.dynamic.get(dynamic) {
+                    for cand in candidates.iter() {
+                        comps.push(Completion::new_name(cand));
+                    }
+                }
+            }
+        }
     }
     comps.sort_by(|a, b| a.name.cmp(&b.name));
 
