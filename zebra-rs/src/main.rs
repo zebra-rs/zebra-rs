@@ -16,6 +16,7 @@ mod context;
 mod fib;
 mod isis;
 mod ospf;
+mod srv6;
 
 use clap::Parser;
 use daemonize::Daemonize;
