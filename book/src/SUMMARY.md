@@ -15,6 +15,10 @@
 - [BGP](ch-02-00-what-is-bgp.md)
   - [Dynamic Neighbors](ch-02-01-dynamic-neighbors.md)
 
+## SRv6
+
+- [SRv6](ch-04-00-srv6.md)
+
 ## Logging and Monitoring
 
 - [Logging Configuration](ch-03-00-logging-overview.md)
