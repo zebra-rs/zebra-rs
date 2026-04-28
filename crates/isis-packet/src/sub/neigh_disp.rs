@@ -132,7 +132,15 @@ impl Display for IsisSubLanAdjSid {
 
 impl Display for IsisSubSrv6EndXSid {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "    End.X SID: {}", self.sid)
+        write!(
+            f,
+            "    SRv6 End.X SID: {}, Algo: {}, Weight: {}, Behavior {}, Flags: {}",
+            self.sid, self.algo, self.weight, self.behavior, self.flags
+        )?;
+        for sub2 in self.sub2s.iter() {
+            write!(f, "\n     {}", sub2)?;
+        }
+        Ok(())
     }
 }
 
