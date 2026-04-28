@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 
 use super::RibEntries;
@@ -43,6 +43,34 @@ pub fn rib_resolve(
     opt: &ResolveOpt,
 ) -> Resolve {
     let Ok(key) = Ipv4Net::new(p, Ipv4Addr::BITS as u8) else {
+        return Resolve::NotFound;
+    };
+
+    let Some((p, entries)) = table.get_lpm(&key) else {
+        return Resolve::NotFound;
+    };
+
+    if !opt.allow_default() && p.prefix_len() == 0 {
+        return Resolve::NotFound;
+    }
+
+    for entry in entries.iter() {
+        if entry.is_connected() {
+            return Resolve::Onlink(entry.ifindex);
+        }
+        if entry.is_static() {
+            return Resolve::Recursive(1);
+        }
+    }
+    Resolve::NotFound
+}
+
+pub fn rib_resolve_v6(
+    table: &PrefixMap<Ipv6Net, RibEntries>,
+    p: Ipv6Addr,
+    opt: &ResolveOpt,
+) -> Resolve {
+    let Ok(key) = Ipv6Net::new(p, Ipv6Addr::BITS as u8) else {
         return Resolve::NotFound;
     };
 
