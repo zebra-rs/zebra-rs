@@ -775,6 +775,19 @@ async fn ipv6_entry_selection(
             replace.nexthop_unsync(nmap, fib).await;
         }
     }
+
+    // Link-local prefixes (fe80::/10) are link-scoped: every interface
+    // legitimately holds the same fe80::/64, and best-route selection would
+    // arbitrarily flag only one. Mark every valid entry as selected+FIB.
+    if prefix.addr().is_unicast_link_local() {
+        for entry in entries.iter_mut() {
+            let on = entry.is_valid();
+            entry.set_selected(on);
+            entry.set_fib(on);
+        }
+        return;
+    }
+
     // Selected.
     let prev = rib_prev(entries);
 
