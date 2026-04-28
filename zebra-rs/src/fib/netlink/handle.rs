@@ -41,6 +41,9 @@ use crate::rib::{
     Vxlan, link,
 };
 
+// Flip to true to re-enable IPv6 FIB install diagnostic prints.
+const DEBUG_V6: bool = false;
+
 /// Check if the kernel supports nexthop ID (kernel >= 5.3).
 /// Nexthop table was introduced in Linux kernel 5.3.
 fn kernel_supports_nhid() -> bool {
@@ -327,6 +330,243 @@ impl FibHandle {
         }
     }
 
+    pub async fn route_ipv6_add_uni(&self, prefix: &Ipv6Net, entry: &RibEntry, nexthop: &Nexthop) {
+        if DEBUG_V6 {
+            println!(
+                "[IPv6 route_add_uni] prefix={} prefixlen={} rtype={:?} use_nhid={}",
+                prefix,
+                prefix.prefix_len(),
+                entry.rtype,
+                self.use_nhid,
+            );
+        }
+
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = match entry.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
+
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+
+        let attr = RouteAttribute::Destination(RouteAddress::Inet6(prefix.addr()));
+        msg.attributes.push(attr);
+
+        if self.use_nhid {
+            if let Nexthop::Uni(uni) = &nexthop {
+                if DEBUG_V6 {
+                    println!(
+                        "[IPv6 route_add_uni] using nhid: gid={} metric={}",
+                        uni.gid, uni.metric
+                    );
+                }
+                msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                if DEBUG_V6 {
+                    println!(
+                        "[IPv6 route_add_uni] using nhid (multi): gid={} metric={}",
+                        multi.gid, multi.metric
+                    );
+                }
+                msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
+        } else {
+            if let Nexthop::Uni(uni) = &nexthop {
+                if DEBUG_V6 {
+                    println!(
+                        "[IPv6 route_add_uni] embed nexthop: addr={} ifindex={} metric={}",
+                        uni.addr, uni.ifindex, uni.metric
+                    );
+                }
+                match uni.addr {
+                    IpAddr::V4(ipv4) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet(ipv4)));
+                    }
+                    IpAddr::V6(ipv6) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
+                    }
+                }
+                if uni.ifindex != 0 {
+                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                }
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                let mut mpath = vec![];
+                for uni in multi.nexthops.iter() {
+                    let mut nhop = RouteNextHop::default();
+                    let attr = match uni.addr {
+                        IpAddr::V4(ipv4) => RouteAttribute::Gateway(RouteAddress::Inet(ipv4)),
+                        IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
+                    };
+                    nhop.attributes.push(attr);
+                    if uni.ifindex != 0 {
+                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    }
+                    mpath.push(nhop);
+                }
+                msg.attributes.push(RouteAttribute::MultiPath(mpath));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
+        }
+
+        if DEBUG_V6 {
+            println!(
+                "[IPv6 route_add_uni] netlink request: af={:?} dest_prefix_len={} attrs={:?}",
+                msg.header.address_family, msg.header.destination_prefix_length, msg.attributes
+            );
+        }
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("NewRoute IPv6 error: {prefix} {e}");
+            }
+        }
+    }
+
+    pub async fn route_ipv6_add(&self, prefix: &Ipv6Net, entry: &RibEntry) {
+        if !entry.is_protocol() {
+            return;
+        }
+        match &entry.nexthop {
+            Nexthop::Uni(_) | Nexthop::Multi(_) => {
+                self.route_ipv6_add_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::List(pro) => {
+                for uni in pro.nexthops.iter() {
+                    self.route_ipv6_add_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                        .await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub async fn route_ipv6_del_uni(&self, prefix: &Ipv6Net, entry: &RibEntry, nexthop: &Nexthop) {
+        if !entry.is_protocol() {
+            return;
+        }
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.destination_prefix_length = prefix.prefix_len();
+
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = match entry.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+
+        let attr = RouteAttribute::Destination(RouteAddress::Inet6(prefix.addr()));
+        msg.attributes.push(attr);
+
+        let attr = RouteAttribute::Priority(entry.metric);
+        msg.attributes.push(attr);
+
+        if self.use_nhid {
+            if let Nexthop::Uni(uni) = &nexthop {
+                msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
+        } else {
+            if let Nexthop::Uni(uni) = &nexthop {
+                match uni.addr {
+                    IpAddr::V4(ipv4) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet(ipv4)));
+                    }
+                    IpAddr::V6(ipv6) => {
+                        msg.attributes
+                            .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
+                    }
+                }
+                if uni.ifindex != 0 {
+                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                }
+                let attr = RouteAttribute::Priority(uni.metric);
+                msg.attributes.push(attr);
+            }
+            if let Nexthop::Multi(multi) = &nexthop {
+                let mut mpath = vec![];
+                for uni in multi.nexthops.iter() {
+                    let mut nhop = RouteNextHop::default();
+                    let attr = match uni.addr {
+                        IpAddr::V4(ipv4) => RouteAttribute::Gateway(RouteAddress::Inet(ipv4)),
+                        IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
+                    };
+                    nhop.attributes.push(attr);
+                    if uni.ifindex != 0 {
+                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    }
+                    mpath.push(nhop);
+                }
+                msg.attributes.push(RouteAttribute::MultiPath(mpath));
+                let attr = RouteAttribute::Priority(multi.metric);
+                msg.attributes.push(attr);
+            }
+        }
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                println!("DelRoute IPv6 error: {e} {prefix}");
+            }
+        }
+    }
+
+    pub async fn route_ipv6_del(&self, prefix: &Ipv6Net, entry: &RibEntry) {
+        if !entry.is_protocol() {
+            return;
+        }
+
+        match &entry.nexthop {
+            Nexthop::Link(_) => {}
+            Nexthop::Uni(_) | Nexthop::Multi(_) => {
+                self.route_ipv6_del_uni(prefix, entry, &entry.nexthop).await;
+            }
+            Nexthop::List(list) => {
+                for uni in &list.nexthops {
+                    self.route_ipv6_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                        .await;
+                }
+            }
+        }
+    }
+
     pub async fn nexthop_add(&self, nexthop: &Group) {
         // Skip nexthop table management for kernels < 5.3
         if !self.use_nhid {
@@ -348,8 +588,22 @@ impl FibHandle {
                 gid = uni.gid();
                 refcnt = uni.refcnt();
 
-                // IPv4.
-                msg.header.address_family = AddressFamily::Inet;
+                if DEBUG_V6 {
+                    println!(
+                        "[nexthop_add Uni] gid={} addr={} ifindex={} valid={} installed={}",
+                        gid,
+                        uni.addr,
+                        uni.ifindex,
+                        uni.is_valid(),
+                        uni.is_installed(),
+                    );
+                }
+
+                // Address family follows the gateway address.
+                msg.header.address_family = match uni.addr {
+                    std::net::IpAddr::V4(_) => AddressFamily::Inet,
+                    std::net::IpAddr::V6(_) => AddressFamily::Inet6,
+                };
 
                 // Nexthop group ID.
                 let attr = NexthopAttribute::Id(uni.gid() as u32);
@@ -369,6 +623,13 @@ impl FibHandle {
                 // Outgoing if.
                 let attr = NexthopAttribute::Oif(uni.ifindex);
                 msg.attributes.push(attr);
+
+                if DEBUG_V6 {
+                    println!(
+                        "[nexthop_add Uni] netlink: af={:?} attrs={:?}",
+                        msg.header.address_family, msg.attributes
+                    );
+                }
 
                 // MPLS.
                 if !uni.labels.is_empty() {

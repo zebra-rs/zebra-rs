@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fib::FibHandle;
 use crate::rib::Nexthop;
-use crate::rib::resolve::{ResolveOpt, rib_resolve};
+use crate::rib::resolve::{ResolveOpt, rib_resolve, rib_resolve_v6};
 use crate::rib::util::IpNetExt;
 
 use super::entry::RibEntry;
@@ -16,6 +16,9 @@ use super::nexthop::NexthopUni;
 use super::{
     Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMulti, RibEntries, RibType,
 };
+
+// Flip to true to re-enable IPv6 RIB/FIB diagnostic prints.
+const DEBUG_V6: bool = false;
 
 impl Rib {
     pub async fn link_down(&mut self, ifindex: u32) {
@@ -208,10 +211,27 @@ impl Rib {
     }
 
     pub async fn ipv6_route_add(&mut self, prefix: &Ipv6Net, mut entry: RibEntry) {
+        if DEBUG_V6 {
+            println!(
+                "[ipv6_route_add] prefix={} rtype={:?} is_protocol={} is_connected={} valid_in={}",
+                prefix,
+                entry.rtype,
+                entry.is_protocol(),
+                entry.is_connected(),
+                entry.is_valid(),
+            );
+        }
         let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap);
+            if DEBUG_V6 {
+                println!(
+                    "[ipv6_route_add] after resolve: entry.valid={} nexthop={:?}",
+                    entry.is_valid(),
+                    entry.nexthop
+                );
+            }
             rib_add_v6(&mut self.table_v6, prefix, entry);
             self.rib_selection_v6(prefix, replace.pop()).await;
         } else {
@@ -726,17 +746,31 @@ fn rib_next(ribs: &RibEntries) -> Option<usize> {
 // IPv6 helper functions
 
 async fn ipv6_entry_selection(
-    _prefix: &Ipv6Net,
+    prefix: &Ipv6Net,
     entries: &mut RibEntries,
     replace: Option<RibEntry>,
     nmap: &mut NexthopMap,
     fib: &FibHandle,
 ) {
+    if DEBUG_V6 {
+        println!(
+            "[ipv6_entry_selection] prefix={} entries={} replace={}",
+            prefix,
+            entries.len(),
+            replace.is_some(),
+        );
+        for (i, e) in entries.iter().enumerate() {
+            println!(
+                "  entry[{}] rtype={:?} valid={} selected={} fib={} distance={} metric={}",
+                i, e.rtype, e.valid, e.selected, e.fib, e.distance, e.metric
+            );
+        }
+    }
+
     if let Some(mut replace) = replace {
         if replace.is_protocol() {
             if replace.is_fib() {
-                // TODO: Add IPv6 route deletion to FibHandle
-                // fib.route_ipv6_del(prefix, &replace).await;
+                fib.route_ipv6_del(prefix, &replace).await;
             }
             replace.nexthop_unsync(nmap, fib).await;
         }
@@ -747,6 +781,10 @@ async fn ipv6_entry_selection(
     // New select.
     let next = rib_next(entries);
 
+    if DEBUG_V6 {
+        println!("[ipv6_entry_selection] prev={:?} next={:?}", prev, next);
+    }
+
     if prev == next {
         return;
     }
@@ -754,8 +792,7 @@ async fn ipv6_entry_selection(
         let prev = entries.get_mut(prev).unwrap();
         prev.set_selected(false);
 
-        // TODO: Add IPv6 route deletion to FibHandle
-        // fib.route_ipv6_del(prefix, prev).await;
+        fib.route_ipv6_del(prefix, prev).await;
         prev.set_fib(false);
     }
     if let Some(next) = next {
@@ -764,8 +801,7 @@ async fn ipv6_entry_selection(
 
         if next.is_protocol() {
             next.nexthop_sync(nmap, fib).await;
-            // TODO: Add IPv6 route installation to FibHandle
-            // fib.route_ipv6_add(prefix, next).await;
+            fib.route_ipv6_add(prefix, next).await;
         }
         next.set_fib(true);
     }
@@ -908,7 +944,7 @@ fn ipv6_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {
 // Function is called when IPv6 rib is added.
 fn rib_resolve_nexthop_v6(
     entry: &mut RibEntry,
-    _table: &PrefixMap<Ipv6Net, RibEntries>,
+    table: &PrefixMap<Ipv6Net, RibEntries>,
     nmap: &mut NexthopMap,
 ) {
     // Only protocol entry.
@@ -916,12 +952,12 @@ fn rib_resolve_nexthop_v6(
         return;
     }
     if let Nexthop::Uni(uni) = &mut entry.nexthop {
-        let _ = resolve_nexthop_uni_v6(uni, nmap);
+        let _ = resolve_nexthop_uni_v6(uni, nmap, table);
     }
     if let Nexthop::Multi(multi) = &mut entry.nexthop {
         let mut set = BTreeSet::<(usize, u8)>::new();
         for uni in multi.nexthops.iter_mut() {
-            let valid = resolve_nexthop_uni_v6(uni, nmap);
+            let valid = resolve_nexthop_uni_v6(uni, nmap, table);
             if valid {
                 set.insert((uni.gid, uni.weight));
             }
@@ -929,33 +965,48 @@ fn rib_resolve_nexthop_v6(
         resolve_nexthop_multi(multi, nmap, set);
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
-        let mut _pro_valid = false;
         for uni in pro.nexthops.iter_mut() {
-            let valid = resolve_nexthop_uni_v6(uni, nmap);
-            if valid {
-                _pro_valid = true;
-            }
+            let _ = resolve_nexthop_uni_v6(uni, nmap, table);
         }
     }
     // If one of nexthop is valid, the entry is valid.
     entry.set_valid(entry.is_valid_nexthop(nmap));
 }
 
-fn resolve_nexthop_uni_v6(uni: &mut NexthopUni, nmap: &mut NexthopMap) -> bool {
+fn resolve_nexthop_uni_v6(
+    uni: &mut NexthopUni,
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv6Net, RibEntries>,
+) -> bool {
+    if DEBUG_V6 {
+        println!(
+            "[resolve_nexthop_uni_v6] addr={} gid_before={}",
+            uni.addr, uni.gid
+        );
+    }
     let Some(Group::Uni(group)) = nmap.fetch(&uni) else {
+        if DEBUG_V6 {
+            println!("[resolve_nexthop_uni_v6] nmap.fetch returned None");
+        }
         return false;
     };
+    if DEBUG_V6 {
+        println!(
+            "[resolve_nexthop_uni_v6] fetched group gid={} refcnt={} valid={} ifindex={}",
+            group.gid(),
+            group.refcnt(),
+            group.is_valid(),
+            group.ifindex,
+        );
+    }
     if group.refcnt() == 0 {
-        // TODO: Implement IPv6 resolution when available
-        match uni.addr {
-            std::net::IpAddr::V4(_) => {
-                // For IPv4, we can't resolve without the IPv4 table, but this shouldn't happen
-                group.set_valid(false);
-            }
-            std::net::IpAddr::V6(_) => {
-                // For IPv6, we'll mark as invalid for now until resolution is implemented
-                group.set_valid(false);
-            }
+        group.resolve_v6(table);
+        if DEBUG_V6 {
+            println!(
+                "[resolve_nexthop_uni_v6] after resolve_v6 valid={} ifindex={}",
+                group.is_valid(),
+                group.ifindex,
+            );
         }
     }
     group.refcnt_inc();
@@ -963,29 +1014,67 @@ fn resolve_nexthop_uni_v6(uni: &mut NexthopUni, nmap: &mut NexthopMap) -> bool {
     uni.gid = group.gid();
     uni.ifindex = group.ifindex;
 
-    group.is_valid()
+    let valid = group.is_valid();
+    if DEBUG_V6 {
+        println!(
+            "[resolve_nexthop_uni_v6] returning uni.gid={} uni.ifindex={} valid={}",
+            uni.gid, uni.ifindex, valid
+        );
+    }
+    valid
 }
 
 async fn ipv6_nexthop_sync(
     nmap: &mut NexthopMap,
-    _table: &PrefixMap<Ipv6Net, RibEntries>,
-    _fib: &FibHandle,
+    table: &PrefixMap<Ipv6Net, RibEntries>,
+    fib: &FibHandle,
 ) {
+    if DEBUG_V6 {
+        println!("[ipv6_nexthop_sync] start; v6 table size={}", table.len());
+    }
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            match uni.addr {
-                std::net::IpAddr::V4(_) => {
-                    // IPv4 addresses are handled by ipv4_nexthop_sync
-                    continue;
+            if DEBUG_V6 {
+                println!(
+                    "[ipv6_nexthop_sync] visiting uni gid={} addr={} ifindex={} valid={} installed={}",
+                    uni.gid(),
+                    uni.addr,
+                    uni.ifindex,
+                    uni.is_valid(),
+                    uni.is_installed(),
+                );
+            }
+            let resolve = match uni.addr {
+                std::net::IpAddr::V4(_) => continue,
+                std::net::IpAddr::V6(ipv6_addr) => {
+                    rib_resolve_v6(table, ipv6_addr, &ResolveOpt::default())
                 }
-                std::net::IpAddr::V6(_ipv6_addr) => {
-                    // TODO: Implement IPv6 resolution
-                    // For now, we'll mark IPv6 nexthops as invalid
-                    uni.set_valid(false);
+            };
+
+            let ifindex = resolve.is_valid();
+            if DEBUG_V6 {
+                println!(
+                    "[ipv6_nexthop_sync] resolved ifindex={} (0 means unresolved)",
+                    ifindex
+                );
+            }
+            if ifindex == 0 {
+                uni.set_ifindex(ifindex);
+                uni.set_valid(false);
+                if uni.is_installed() {
                     uni.set_installed(false);
-                    uni.set_ifindex(0);
+                }
+            } else {
+                uni.set_ifindex(ifindex);
+                uni.set_valid(true);
+                if !uni.is_installed() {
+                    uni.set_installed(true);
+                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
             }
         }
+    }
+    if DEBUG_V6 {
+        println!("[ipv6_nexthop_sync] done");
     }
 }
