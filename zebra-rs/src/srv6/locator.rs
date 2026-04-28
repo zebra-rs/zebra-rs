@@ -32,6 +32,8 @@ pub struct Locator {
 }
 
 impl Locator {
+    // We don't have a plan to block length, node length, function length and
+    // argument length to be configured.
     pub fn new(name: String, typ: LocatorType, prefix: Ipv6Net) -> Self {
         let (block_len, node_len, func_len, arg_len) = match &typ {
             LocatorType::Classic => (40, 24, 16, 0),
