@@ -5,13 +5,16 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use Group::*;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 
 use crate::rib::entry::RibEntries;
-use crate::rib::resolve::{Resolve, ResolveOpt, rib_resolve};
+use crate::rib::resolve::{Resolve, ResolveOpt, rib_resolve, rib_resolve_v6};
 
 use super::NexthopUni;
+
+// Flip to true to re-enable IPv6 nexthop resolution diagnostic prints.
+const DEBUG_V6: bool = false;
 
 #[derive(Debug)]
 pub enum Group {
@@ -63,9 +66,36 @@ impl GroupUni {
                     self.set_valid(true);
                 }
             }
-            IpAddr::V6(_ipv6_addr) => {
-                // TODO: Implement IPv6 resolution when IPv6 table is available
-                // For now, we'll leave IPv6 nexthops unresolved
+            IpAddr::V6(_) => {
+                // IPv6 nexthops resolve against the v6 table via resolve_v6.
+            }
+        }
+    }
+
+    pub fn resolve_v6(&mut self, table: &PrefixMap<Ipv6Net, RibEntries>) {
+        if let IpAddr::V6(ipv6_addr) = self.addr {
+            let resolve = rib_resolve_v6(table, ipv6_addr, &ResolveOpt::default());
+            match &resolve {
+                Resolve::Onlink(ifindex) => {
+                    if DEBUG_V6 {
+                        println!(
+                            "[GroupUni::resolve_v6] {} -> Onlink(ifindex={})",
+                            ipv6_addr, ifindex
+                        );
+                    }
+                    self.ifindex = *ifindex;
+                    self.set_valid(true);
+                }
+                Resolve::Recursive(_) => {
+                    if DEBUG_V6 {
+                        println!("[GroupUni::resolve_v6] {} -> Recursive", ipv6_addr);
+                    }
+                }
+                Resolve::NotFound => {
+                    if DEBUG_V6 {
+                        println!("[GroupUni::resolve_v6] {} -> NotFound", ipv6_addr);
+                    }
+                }
             }
         }
     }
