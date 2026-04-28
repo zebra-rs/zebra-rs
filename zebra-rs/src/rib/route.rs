@@ -959,7 +959,7 @@ fn rib_replace_v6(
     replace
 }
 
-async fn ipv6_route_sync(
+pub async fn ipv6_route_sync(
     table: &mut PrefixMap<Ipv6Net, RibEntries>,
     nmap: &mut NexthopMap,
     fib: &FibHandle,
@@ -1061,7 +1061,7 @@ fn resolve_nexthop_uni_v6(
     valid
 }
 
-async fn ipv6_nexthop_sync(
+pub async fn ipv6_nexthop_sync(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv6Net, RibEntries>,
     fib: &FibHandle,
