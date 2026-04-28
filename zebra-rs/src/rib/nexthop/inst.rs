@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Label {
@@ -18,6 +18,11 @@ pub struct NexthopUni {
     pub valid: bool,
     pub mpls: Vec<Label>,
     pub mpls_label: Vec<u32>,
+
+    // Segments.
+    pub segs: Vec<Ipv6Addr>,
+
+    // Action.
     pub gid: usize,
 }
 
@@ -55,6 +60,7 @@ impl Default for NexthopUni {
             weight: 1,
             mpls: vec![],
             mpls_label: vec![],
+            segs: vec![],
             gid: 0,
             valid: false,
         }
