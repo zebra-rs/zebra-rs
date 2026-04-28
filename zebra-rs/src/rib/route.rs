@@ -109,6 +109,8 @@ impl Rib {
         // Resolve RIB.
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+        ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+        ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
     }
 
     pub async fn link_up(&mut self, ifindex: u32) {
@@ -146,19 +148,28 @@ impl Rib {
         }
 
         // Add connected IPv6 routes when link comes up
-        // for addr6 in link.addr6.iter() {
-        //     if let IpNet::V6(addr) = addr6.addr {
-        //         let prefix = addr.apply_mask();
-        //         // println!("Connected IPv6: {:?} up - adding to RIB", prefix);
-        //         let mut rib = RibEntry::new(RibType::Connected);
-        //         rib.ifindex = ifindex;
-        //         rib.set_valid(true);
-        //         let msg = Message::Ipv6Add { prefix, rib };
-        //         let _ = self.tx.send(msg);
-        //     }
-        // }
+        for addr6 in link.addr6.iter() {
+            if let IpNet::V6(addr) = addr6.addr {
+                let prefix = addr.apply_mask();
+                let mut entry = RibEntry::new(RibType::Connected);
+                entry.ifindex = ifindex;
+                entry.set_valid(true);
+
+                rib_add_system_v6(&mut self.table_v6, &prefix, entry);
+                rib_selection_ipv6(
+                    &mut self.table_v6,
+                    &prefix,
+                    None,
+                    &mut self.nmap,
+                    &self.fib_handle,
+                )
+                .await;
+            }
+        }
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+        ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+        ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
@@ -295,6 +306,19 @@ pub async fn rib_selection_ipv4(
         return;
     };
     ipv4_entry_selection(prefix, entries, replace, nmap, fib, true).await;
+}
+
+pub async fn rib_selection_ipv6(
+    table: &mut PrefixMap<Ipv6Net, RibEntries>,
+    prefix: &Ipv6Net,
+    replace: Option<RibEntry>,
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+) {
+    let Some(entries) = table.get_mut(prefix) else {
+        return;
+    };
+    ipv6_entry_selection(prefix, entries, replace, nmap, fib).await;
 }
 
 pub async fn ipv4_nexthop_sync(
