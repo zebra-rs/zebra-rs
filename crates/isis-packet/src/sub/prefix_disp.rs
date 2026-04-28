@@ -104,8 +104,8 @@ impl Display for IsisSubSrv6EndSid {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(
             f,
-            r#"   SRv6 End SID: {}, Behavior: {}, Flags: {}"#,
-            self.sid, self.behavior, self.flags,
+            r#"   SRv6 End SID: Behavior: {}, SID value: {}, Flags: {}"#,
+            self.behavior, self.sid, self.flags,
         )?;
         for sub2 in &self.sub2s {
             write!(f, "\n    {}", sub2)?;
