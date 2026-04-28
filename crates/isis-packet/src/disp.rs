@@ -326,8 +326,8 @@ impl Display for IsisTlvSrv6 {
             }
             write!(
                 f,
-                "  SRv6 Locator: {} (Metric: {})",
-                locator.locator, locator.metric
+                "  SRv6 Locator: {} (Metric: {}) Algo: {}",
+                locator.locator, locator.metric, locator.algo
             )?;
             for sub in locator.subs.iter() {
                 write!(f, "\n{}", sub)?;
