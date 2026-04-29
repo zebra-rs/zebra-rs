@@ -98,6 +98,30 @@ async fn bring_link_up(_world: &mut BgpWorld, namespace: String) {
     println!("✓ Link brought up in namespace {}", namespace);
 }
 
+#[when(expr = "I make namespace {string} interface {string} {word}")]
+async fn set_namespace_interface_state(
+    _world: &mut BgpWorld,
+    namespace: String,
+    interface: String,
+    state: String,
+) {
+    let up = match state.as_str() {
+        "up" => true,
+        "down" => false,
+        other => panic!(
+            "invalid interface state '{}', expected 'up' or 'down'",
+            other
+        ),
+    };
+    netns::set_interface_state(&namespace, &interface, up)
+        .await
+        .expect("Failed to set interface state");
+    println!(
+        "✓ Interface {} in namespace {} set {}",
+        interface, namespace, state
+    );
+}
+
 #[when(expr = "I wait {int} seconds")]
 async fn wait_seconds(_world: &mut BgpWorld, seconds: u64) {
     tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
