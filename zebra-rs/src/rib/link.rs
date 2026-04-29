@@ -74,14 +74,24 @@ pub struct LinkAddr {
     pub addr: IpNet,
     pub ifindex: u32,
     pub secondary: bool,
+    pub config: bool,
+    pub fib: bool,
 }
 
 impl LinkAddr {
+    /// Build a LinkAddr from a FIB (kernel netlink) message.
+    ///
+    /// The kernel just told us about this address, so it is installed in the
+    /// kernel FIB by definition (`fib = true`). Whether the address was
+    /// configured in zebra-rs is not knowable here — callers that received
+    /// the FibAddr from the configuration path flip `config = true` after.
     pub fn from(osaddr: FibAddr) -> Self {
         Self {
             addr: osaddr.addr,
             ifindex: osaddr.link_index,
             secondary: osaddr.secondary,
+            config: false,
+            fib: true,
         }
     }
 
@@ -350,36 +360,51 @@ pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
     buf
 }
 
+/// Insert a LinkAddr or merge it into an existing entry with the same address.
+///
+/// Returns `Some(())` if the address was newly inserted, `None` if a matching
+/// entry already existed. In the merge case, the existing entry's `config`
+/// and `fib` flags are OR-ed with the incoming flags — this lets the kernel's
+/// netlink confirmation of a config-driven address flip `fib` true on the
+/// already-present LinkAddr without creating a duplicate.
 pub fn link_addr_update(link: &mut Link, addr: LinkAddr) -> Option<()> {
-    if addr.is_v4() {
-        for a in link.addr4.iter() {
-            if a.addr == addr.addr {
-                return None;
-            }
-        }
-        link.addr4.push(addr);
+    let bucket = if addr.is_v4() {
+        &mut link.addr4
     } else {
-        for a in link.addr6.iter() {
-            if a.addr == addr.addr {
-                return None;
-            }
-        }
-        link.addr6.push(addr);
+        &mut link.addr6
+    };
+    if let Some(existing) = bucket.iter_mut().find(|a| a.addr == addr.addr) {
+        existing.config |= addr.config;
+        existing.fib |= addr.fib;
+        return None;
     }
+    bucket.push(addr);
     Some(())
 }
 
+/// Handle a kernel-side address removal, branching on `config`:
+///
+/// - If the existing entry was configured (`config = true`), keep it but
+///   clear its `fib` flag — the kernel no longer has the address but config
+///   intent survives so `link_up` can re-install it later.
+/// - If the existing entry was kernel-only (`config = false`), remove it.
+///
+/// Returns `Some(())` if a matching entry was found and processed, `None`
+/// otherwise. Callers do not currently differentiate the two branches via
+/// the return value.
 pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
-    if addr.is_v4() {
-        if let Some(remove_index) = link.addr4.iter().position(|x| x.addr == addr.addr) {
-            link.addr4.remove(remove_index);
-            return Some(());
-        }
-    } else if let Some(remove_index) = link.addr6.iter().position(|x| x.addr == addr.addr) {
-        link.addr6.remove(remove_index);
-        return Some(());
+    let bucket = if addr.is_v4() {
+        &mut link.addr4
+    } else {
+        &mut link.addr6
+    };
+    let pos = bucket.iter().position(|x| x.addr == addr.addr)?;
+    if bucket[pos].config {
+        bucket[pos].fib = false;
+    } else {
+        bucket.remove(pos);
     }
-    None
+    Some(())
 }
 
 impl Rib {
@@ -389,14 +414,22 @@ impl Rib {
             // down event handling.
             if link.is_up() {
                 if !fib_link.flags.is_up() {
-                    // println!("link: {} Up => Down", link.name);
+                    tracing::info!(
+                        "kernel: link {} (ifindex {}) Up => Down",
+                        link.name,
+                        link.index
+                    );
                     link.flags = fib_link.flags;
                     let _ = self.tx.send(Message::LinkDown {
                         ifindex: link.index,
                     });
                 }
             } else if fib_link.flags.is_up() {
-                // println!("link: {} Down => Up", link.name);
+                tracing::info!(
+                    "kernel: link {} (ifindex {}) Down => Up; recovering connected routes",
+                    link.name,
+                    link.index
+                );
                 link.flags = fib_link.flags;
                 let _ = self.tx.send(Message::LinkUp {
                     ifindex: link.index,
@@ -456,9 +489,12 @@ impl Rib {
     ///
     /// # Arguments
     /// * `osaddr` - The FIB address containing the IP address, prefix length, and interface index
-    pub fn addr_add(&mut self, osaddr: FibAddr) {
-        // println!("FIB: AddrAdd {:?}", osaddr);
-
+    /// * `from_config` - true when the address originates from `link_config_exec`
+    ///   (i.e. the user configured it through the configuration manager). Sets
+    ///   `LinkAddr::config = true` so we can distinguish configured addresses
+    ///   from kernel-only addresses (e.g. SLAAC, manual `ip addr add`) and
+    ///   recover them across link bounces.
+    pub fn addr_add(&mut self, osaddr: FibAddr, from_config: bool) {
         // Validate against zero prefix length - prevents default route addresses on interfaces
         if osaddr.addr.prefix_len() == 0 {
             println!("FIB: zero prefixlen addr!");
@@ -473,7 +509,10 @@ impl Rib {
             }
         }
 
-        let addr = LinkAddr::from(osaddr);
+        let mut addr = LinkAddr::from(osaddr);
+        if from_config {
+            addr.config = true;
+        }
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             let was_addr_added = link_addr_update(link, addr.clone()).is_some();
 
@@ -511,6 +550,10 @@ impl Rib {
     pub fn addr_del(&mut self, osaddr: FibAddr) {
         let addr = LinkAddr::from(osaddr);
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
+            // TODO: When the deleted address is configured address, we remove
+            // installed flag from the address so that when interface goes up we
+            // can reinstall the address again.
+
             // Before removing the address, create connected route removal message if interface is up
             if link.is_up() {
                 match addr.addr {
@@ -634,7 +677,7 @@ pub async fn link_config_exec(
                             link_index: ifindex,
                             secondary: false,
                         };
-                        rib.addr_add(addr);
+                        rib.addr_add(addr, true);
                     }
                     Err(_) => {
                         println!("IPaddress add failure");
@@ -644,6 +687,15 @@ pub async fn link_config_exec(
         } else {
             // Handle IPv4 address deletion
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                // Clear `config` on the existing LinkAddr so the kernel's
+                // subsequent DelAddr notification removes the entry instead
+                // of keeping it as a recovery candidate.
+                if let Some(link) = rib.links.get_mut(&ifindex) {
+                    let target = IpNet::V4(v4addr);
+                    if let Some(existing) = link.addr4.iter_mut().find(|a| a.addr == target) {
+                        existing.config = false;
+                    }
+                }
                 rib.fib_handle.addr_del_ipv4(ifindex, &v4addr).await;
                 let addr = FibAddr {
                     addr: ipnet::IpNet::V4(v4addr),
@@ -705,7 +757,7 @@ pub async fn link_config_exec(
                             link_index: ifindex,
                             secondary: false,
                         };
-                        rib.addr_add(addr);
+                        rib.addr_add(addr, true);
                     }
                     Err(_) => {
                         println!("IPv6 address add failure");
@@ -717,6 +769,15 @@ pub async fn link_config_exec(
         } else {
             // Handle IPv6 address deletion
             if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
+                // Clear `config` on the existing LinkAddr so the kernel's
+                // subsequent DelAddr notification removes the entry instead
+                // of keeping it as a recovery candidate.
+                if let Some(link) = rib.links.get_mut(&ifindex) {
+                    let target = IpNet::V6(v6addr);
+                    if let Some(existing) = link.addr6.iter_mut().find(|a| a.addr == target) {
+                        existing.config = false;
+                    }
+                }
                 rib.fib_handle.addr_del_ipv6(ifindex, &v6addr).await;
                 let addr = FibAddr {
                     addr: ipnet::IpNet::V6(v6addr),
@@ -807,9 +868,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_link_addr_update() {
-        let mut link = Link {
+    fn test_link() -> Link {
+        Link {
             index: 1,
             name: "test0".to_string(),
             mtu: 1500,
@@ -819,57 +879,88 @@ mod tests {
             label: false,
             mac: None,
             addr4: Vec::new(),
-            //addrv4: Vec::new(),
             addr6: Vec::new(),
-        };
+        }
+    }
 
-        let addr = LinkAddr {
-            addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 1), 24).unwrap()),
+    fn test_addr_v4(addr: Ipv4Addr, prefix_len: u8, config: bool, fib: bool) -> LinkAddr {
+        LinkAddr {
+            addr: IpNet::V4(Ipv4Net::new(addr, prefix_len).unwrap()),
             ifindex: 1,
             secondary: false,
-        };
+            config,
+            fib,
+        }
+    }
+
+    #[test]
+    fn test_link_addr_update() {
+        let mut link = test_link();
+        let addr = test_addr_v4(Ipv4Addr::new(192, 168, 1, 1), 24, true, true);
 
         // Test adding a new address
         let result = link_addr_update(&mut link, addr.clone());
         assert!(result.is_some(), "Adding new address should succeed");
         assert_eq!(link.addr4.len(), 1, "Link should have 1 IPv4 address");
 
-        // Test adding duplicate address
+        // Test adding duplicate address — link_addr_update returns None and
+        // does not duplicate the entry.
         let result = link_addr_update(&mut link, addr);
-        assert!(
-            result.is_none(),
-            "Adding duplicate address should be rejected"
-        );
+        assert!(result.is_none(), "Duplicate add should not insert");
         assert_eq!(link.addr4.len(), 1, "Link should still have 1 IPv4 address");
     }
 
     #[test]
-    fn test_link_addr_del() {
-        let mut link = Link {
-            index: 1,
-            name: "test0".to_string(),
-            mtu: 1500,
-            metric: 1,
-            flags: LinkFlags::empty(),
-            link_type: LinkType::Ethernet,
-            label: false,
-            mac: None,
-            addr4: Vec::new(),
-            //addrv4: Vec::new(),
-            addr6: Vec::new(),
-        };
+    fn test_link_addr_update_merges_flags() {
+        let mut link = test_link();
+        // Configured first, fib not yet confirmed.
+        let cfg = test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, true, false);
+        link_addr_update(&mut link, cfg);
+        assert!(link.addr4[0].config && !link.addr4[0].fib);
 
-        let addr1 = LinkAddr {
-            addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 1), 24).unwrap()),
-            ifindex: 1,
-            secondary: false,
-        };
+        // Kernel netlink confirmation arrives — should flip fib true on the
+        // existing entry, not create a duplicate.
+        let kernel = test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, false, true);
+        let result = link_addr_update(&mut link, kernel);
+        assert!(result.is_none(), "Merge case returns None");
+        assert_eq!(link.addr4.len(), 1);
+        assert!(link.addr4[0].config && link.addr4[0].fib);
+    }
 
-        let addr2 = LinkAddr {
-            addr: IpNet::V4(Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 2), 24).unwrap()),
-            ifindex: 1,
-            secondary: false,
-        };
+    #[test]
+    fn test_link_addr_del_keeps_configured_entry() {
+        let mut link = test_link();
+        link_addr_update(
+            &mut link,
+            test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, true, true),
+        );
+        // Kernel removed the address (e.g. interface down + IPv6 flush style).
+        let kernel_del = test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, false, true);
+        let result = link_addr_del(&mut link, kernel_del);
+        assert!(result.is_some());
+        assert_eq!(link.addr4.len(), 1, "config=true entry kept");
+        assert!(link.addr4[0].config);
+        assert!(!link.addr4[0].fib, "fib flipped to false");
+    }
+
+    #[test]
+    fn test_link_addr_del_removes_kernel_only_entry() {
+        let mut link = test_link();
+        link_addr_update(
+            &mut link,
+            test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, false, true),
+        );
+        let kernel_del = test_addr_v4(Ipv4Addr::new(10, 0, 0, 1), 24, false, true);
+        let result = link_addr_del(&mut link, kernel_del);
+        assert!(result.is_some());
+        assert_eq!(link.addr4.len(), 0, "kernel-only entry removed");
+    }
+
+    #[test]
+    fn test_link_addr_del_legacy() {
+        let mut link = test_link();
+        let addr1 = test_addr_v4(Ipv4Addr::new(192, 168, 1, 1), 24, false, true);
+        let addr2 = test_addr_v4(Ipv4Addr::new(192, 168, 1, 2), 24, false, true);
 
         // Add two addresses
         link_addr_update(&mut link, addr1.clone());
