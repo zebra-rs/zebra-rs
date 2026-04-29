@@ -11,17 +11,24 @@ Feature: RIB IPv6 static route
   ```
   ┌────────────────────────────────────────┐
   │                  br0                   │
+  │                                        │
   └────────────┬───────────────┬───────────┘
                │               │
+       2001:db8:1::1/64   2001:db8:1::2/64
+            (vz1ns)            (vz2ns)
           ┌────┴────┐     ┌────┴────┐
           │   z1    │     │   z2    │
           └─────────┘     └─────────┘
+   lo: 2001:db8:0:ffff::1   lo: 2001:db8:0:ffff::2
+              /128                  /128
   ```
 
   Config files:
-  - z1-1.yaml: static IPv6 route on z1 to z2's loopback via z2's eth0 address.
+  - z1-1.yaml: z1 interface addresses (lo + vz1ns).
+  - z2-1.yaml: z2 interface addresses (lo + vz2ns).
+  - z1-2.yaml: static IPv6 route on z1 to z2's loopback via z2's eth0 address.
 
-  Scenario: IPv6 static route recovers after interface down/up
+  Scenario: Setup topology for IPv6 loopback and veth address.
     Given a clean test environment
     When I create bridge "br0"
     And I create namespace "z1" with loopback and veth interface on the bridge "br0"
@@ -32,13 +39,18 @@ Feature: RIB IPv6 static route
     And I apply config "z2-1.yaml" to namespace "z2"
     And I wait 2 seconds
     Then ping from "z1" to "2001:db8:1::2" should succeed
-    And I apply config "z1-2.yaml" to namespace "z1"
-    # Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
 
-    # When I bring link down in namespace "z1"
-    # And I wait 2 seconds
-    # Then ping from "z1" to "2001:db8:0:ffff::2" should fail
+  Scenario: Apply IPv6 static route and verify ping to the nexthop.
+    Given the test topology exists
+    When I apply config "z1-2.yaml" to namespace "z1"
+    Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
 
-    # When I bring link up in namespace "z1"
-    # And I wait 3 seconds
-    # Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
+  Scenario: IPv6 static route configuration.
+    Given the test topology exists
+    When I make namespace "z1" interface "vz1ns" down
+    Then ping from "z1" to "2001:db8:0:ffff::2" should fail
+
+  Scenario: IPv6 static route configuration.
+    Given the test topology exists
+    When I make namespace "z1" interface "vz1ns" up
+    Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
