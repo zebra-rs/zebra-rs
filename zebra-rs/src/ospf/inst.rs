@@ -1171,10 +1171,10 @@ impl Ospf {
                 self.queue_delayed_acks(ifindex, headers);
             }
             Message::SpfSchedule(area_id) => {
-                if let Some(area_id) = area_id {
-                    if let Some(area) = self.areas.get_mut(area_id) {
-                        Self::ospf_spf_schedule(&self.tx, area);
-                    }
+                if let Some(area_id) = area_id
+                    && let Some(area) = self.areas.get_mut(area_id)
+                {
+                    Self::ospf_spf_schedule(&self.tx, area);
                 }
             }
             Message::SpfCalc(area_id) => {
