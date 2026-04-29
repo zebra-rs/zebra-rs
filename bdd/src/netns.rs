@@ -110,7 +110,7 @@ pub async fn delete_bridge(bridge_name: &str) -> Result<()> {
 }
 
 /// Create a veth pair and connect namespace to bridge with IP
-pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str, ip: &str) -> Result<()> {
+pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str) -> Result<()> {
     let veth_host = format!("v{}", netns);
     let veth_ns = format!("v{}ns", netns);
 
@@ -147,9 +147,6 @@ pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str, ip: &str) -
     // Bring up namespace veth
     exec_in_netns(netns, "ip", &["link", "set", &veth_ns, "up"]).await?;
 
-    // Assign IP address
-    exec_in_netns(netns, "ip", &["addr", "add", ip, "dev", &veth_ns]).await?;
-
     Ok(())
 }
 
@@ -183,18 +180,24 @@ pub async fn spawn_in_netns(
         .with_context(|| format!("Failed to spawn {} in netns {}", cmd, netns))
 }
 
-/// Add an IPv4 or IPv6 address to the loopback interface inside a namespace.
-pub async fn add_loopback_addr(netns: &str, addr: &str) -> Result<()> {
-    exec_in_netns(netns, "ip", &["addr", "add", addr, "dev", "lo"]).await?;
-    Ok(())
-}
-
 /// Bring the namespace-side veth (the one created by connect_netns_to_bridge)
 /// administratively up or down.
 pub async fn set_link_state(netns: &str, up: bool) -> Result<()> {
     let veth_ns = format!("v{}ns", netns);
     let state = if up { "up" } else { "down" };
     exec_in_netns(netns, "ip", &["link", "set", &veth_ns, state]).await?;
+    Ok(())
+}
+
+/// Kill all zebra-rs processes on the host (across all namespaces).
+/// Errors are ignored — it's fine if no process is running.
+pub async fn killall_zebra_rs() -> Result<()> {
+    let _ = Command::new("sudo")
+        .args(["killall", "-9", "zebra-rs"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
     Ok(())
 }
 
