@@ -196,12 +196,13 @@ pub fn link_brief_show(rib: &Rib, buf: &mut String) {
     }
 
     for link in rib.links.values() {
+        let status = if link.is_up() { "Up" } else { "Down" };
         let addrs = link.addr4.iter().chain(link.addr6.iter());
 
         let mut addrs_iter = addrs.peekable();
         if addrs_iter.peek().is_none() {
             // No addresses
-            writeln!(buf, "{:<16} {:<6} {:<14}", link.name, "Up", "default").unwrap();
+            writeln!(buf, "{:<16} {:<6} {:<14}", link.name, status, "default").unwrap();
         } else {
             let mut first = true;
             for addr in addrs_iter {
@@ -209,7 +210,7 @@ pub fn link_brief_show(rib: &Rib, buf: &mut String) {
                     writeln!(
                         buf,
                         "{:<16} {:<6} {:<14} {}",
-                        link.name, "Up", "default", addr.addr
+                        link.name, status, "default", addr.addr
                     )
                     .unwrap();
                     first = false;
