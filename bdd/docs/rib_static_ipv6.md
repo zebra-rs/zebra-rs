@@ -34,6 +34,7 @@ Using an isolated test topology with two zebra-rs instances connected
 | Scenario | Result |
 |----------|--------|
 | Setup topology for IPv6 loopback and veth address. | |
-| Apply IPv6 static route and verify ping to the nexthop. | |
-| IPv6 static route configuration. | |
-| IPv6 static route configuration. | |
+| Apply IPv6 static route and verify ping to z2's loopback. | |
+| Egress interface goes down — static route is invalidated. | |
+| Egress interface comes back up — static route recovers. | |
+| Bounce egress interface again — recovery is repeatable. | |
