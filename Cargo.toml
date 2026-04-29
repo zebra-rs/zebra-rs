@@ -29,3 +29,60 @@ tokio-stream = "0.1"
 tonic = "0.13"
 tonic-build = "0.13"
 clap = { version = "4", features = ["derive"] }
+
+# Workspace-wide clippy configuration. Crates inherit this via
+# `[lints] workspace = true` in their own Cargo.toml.
+#
+# The lints below are opted out because they conflict with this project's
+# established style or are not worth the churn for an existing codebase
+# (mostly stylistic preferences, network-protocol naming conventions,
+# and explicit-over-implicit choices in packet parsers). Other clippy
+# lints remain at their default level so genuine issues still surface.
+[workspace.lints.clippy]
+# Style — explicit-over-implicit
+collapsible_if = "allow"
+collapsible_match = "allow"
+field_reassign_with_default = "allow"
+let_and_return = "allow"
+manual_map = "allow"
+needless_bool_assign = "allow"
+needless_return = "allow"
+redundant_closure = "allow"
+redundant_pattern_matching = "allow"
+unused_enumerate_index = "allow"
+unwrap_or_default = "allow"
+
+# Style — references and casts
+clone_on_copy = "allow"
+needless_borrow = "allow"
+needless_borrowed_reference = "allow"
+unnecessary_cast = "allow"
+
+# Style — APIs that get used a lot in protocol code
+for_kv_map = "allow"
+get_first = "allow"
+iter_kv_map = "allow"
+len_zero = "allow"
+manual_range_contains = "allow"
+ptr_arg = "allow"
+unnecessary_get_then_check = "allow"
+unnecessary_map_or = "allow"
+
+# Naming — networking acronyms (TCP, IP, MD5, ...) are fine as-is
+upper_case_acronyms = "allow"
+
+# Print/format — empty/trivial cases
+println_empty_string = "allow"
+writeln_empty_string = "allow"
+
+# Default constructions
+default_constructed_unit_structs = "allow"
+
+# Async — fire-and-forget tasks are intentional in a few places
+let_underscore_future = "allow"
+
+# Structural — refactoring would change public APIs; leave as-is for now.
+result_large_err = "allow"
+large_enum_variant = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"

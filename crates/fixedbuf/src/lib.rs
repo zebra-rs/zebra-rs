@@ -34,6 +34,10 @@ impl FixedBuf {
         self.inner.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     pub fn get(self) -> BytesMut {
         self.inner
     }

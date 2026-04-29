@@ -22,3 +22,6 @@ futures = "0.3"
 [[test]]
 name = "cucumber"
 harness = false
+
+[lints]
+workspace = true

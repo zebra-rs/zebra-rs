@@ -70,7 +70,7 @@ fn peer_has_negotiated(peer: &Peer, afi: Afi, safi: Safi) -> bool {
 fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} {}",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} Desc",
         "Neighbor",
         "V",
         "AS",
@@ -82,7 +82,6 @@ fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
         "Up/Down",
         "State/PfxRcd",
         "PfxSnt",
-        "Desc",
     )
 }
 
@@ -111,7 +110,7 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
 
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} {}",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} N/A",
         peer.address.to_string(),
         "4",
         peer.peer_as,
@@ -123,7 +122,6 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
         up_down,
         pfx_rcvd_str,
         pfx_sent_str,
-        "N/A", // Desc — peer description not modeled today
     )
 }
 
@@ -484,11 +482,7 @@ fn show_bgp_vpnv4(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
-                let add_path = if rib.remote_id != 0 {
-                    format!("[{}] ", rib.local_id)
-                } else {
-                    format!("[{}] ", rib.local_id)
-                };
+                let add_path = format!("[{}] ", rib.local_id);
                 let origin = show_origin(&rib.attr);
                 let com = show_com(&rib.attr);
                 writeln!(
@@ -596,11 +590,7 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
                 if !aspath.is_empty() {
                     aspath.push(' ');
                 }
-                let add_path = if rib.remote_id != 0 {
-                    format!("[{}] ", rib.local_id)
-                } else {
-                    format!("[{}] ", rib.local_id)
-                };
+                let add_path = format!("[{}] ", rib.local_id);
                 let origin = show_origin(&rib.attr);
                 let com = show_com(&rib.attr);
                 writeln!(
@@ -1756,6 +1746,7 @@ fn show_bgp_neighbor(
 /// - Two-octet AS Route Target (high=0x00, low=0x02) -> `RT:<asn>:<u32>`
 /// - Encapsulation extended community (high=0x03, low=0x0c) ->
 ///   `ET:<tunnel-type>` (tunnel-type 8 == VXLAN per RFC 8365)
+///
 /// Falls back to a hex dump for unrecognized subtypes.
 fn format_evpn_ecom_value(v: &ExtCommunityValue) -> String {
     match (v.high_type, v.low_type) {

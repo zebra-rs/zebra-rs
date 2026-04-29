@@ -244,7 +244,6 @@ impl Rib {
                 let bridge = Bridge {
                     name: name.clone(),
                     addr_gen_mode: config.addr_gen_mode,
-                    ..Default::default()
                 };
                 self.bridges.insert(name.clone(), bridge.clone());
                 self.fib_handle.bridge_add(&bridge).await;
@@ -264,7 +263,6 @@ impl Rib {
                     local_addr: config.local_addr,
                     dport: config.dport,
                     addr_gen_mode: config.addr_gen_mode,
-                    ..Default::default()
                 };
                 self.vxlan.insert(name.clone(), vxlan.clone());
                 self.fib_handle.vxlan_add(&vxlan).await;

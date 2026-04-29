@@ -204,7 +204,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         "    Interface: {}, Level: {}, State: {}",
         top.ifname(nbr.ifindex),
         level,
-        nbr.state.to_string(),
+        nbr.state,
     )?;
 
     write!(buf, "    Circuit type: {}, Speaks:", nbr.circuit_type)?;

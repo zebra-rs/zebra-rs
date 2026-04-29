@@ -743,7 +743,7 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                         let mut pro = NexthopList::default();
                         pro.nexthops.push(uni.clone());
                         pro.nexthops.push(euni);
-                        pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
+                        pro.nexthops.sort_by_key(|n| n.metric);
                         e.metric = pro.metric();
                         Nexthop::List(pro)
                     }
@@ -955,7 +955,7 @@ fn rib_add_system_v6(
                         let mut pro = NexthopList::default();
                         pro.nexthops.push(uni.clone());
                         pro.nexthops.push(euni);
-                        pro.nexthops.sort_by(|a, b| a.metric.cmp(&b.metric));
+                        pro.nexthops.sort_by_key(|n| n.metric);
                         e.metric = pro.metric();
                         Nexthop::List(pro)
                     }
