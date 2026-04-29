@@ -184,8 +184,13 @@ pub async fn spawn_in_netns(
 /// administratively up or down.
 pub async fn set_link_state(netns: &str, up: bool) -> Result<()> {
     let veth_ns = format!("v{}ns", netns);
+    set_interface_state(netns, &veth_ns, up).await
+}
+
+/// Bring an arbitrary interface inside a namespace administratively up or down.
+pub async fn set_interface_state(netns: &str, interface: &str, up: bool) -> Result<()> {
     let state = if up { "up" } else { "down" };
-    exec_in_netns(netns, "ip", &["link", "set", &veth_ns, state]).await?;
+    exec_in_netns(netns, "ip", &["link", "set", interface, state]).await?;
     Ok(())
 }
 
