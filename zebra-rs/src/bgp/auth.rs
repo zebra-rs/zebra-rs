@@ -351,10 +351,6 @@ pub struct KeyChain {
 }
 
 impl KeyChain {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Pick the key to use for new connections. For this initial
     /// implementation we take the lowest key-id. Lifetime-based
     /// selection and in-band rollover via RNextKeyID are follow-ups.

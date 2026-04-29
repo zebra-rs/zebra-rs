@@ -41,23 +41,17 @@ clap = { version = "4", features = ["derive"] }
 [workspace.lints.clippy]
 # Style — explicit-over-implicit
 collapsible_if = "allow"
-collapsible_match = "allow"
-manual_map = "allow"
 needless_bool_assign = "allow"
 needless_return = "allow"
-redundant_pattern_matching = "allow"
-unwrap_or_default = "allow"
 
 # Style — references and casts
 clone_on_copy = "allow"
 needless_borrow = "allow"
-needless_borrowed_reference = "allow"
 unnecessary_cast = "allow"
 
 # Style — APIs that get used a lot in protocol code
 for_kv_map = "allow"
 get_first = "allow"
-iter_kv_map = "allow"
 manual_range_contains = "allow"
 ptr_arg = "allow"
 unnecessary_map_or = "allow"

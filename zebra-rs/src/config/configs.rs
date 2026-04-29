@@ -23,12 +23,12 @@ fn format_json_value(value: &str) -> String {
     }
 
     // Check if it's an integer (positive or negative)
-    if let Ok(_) = value.parse::<i64>() {
+    if value.parse::<i64>().is_ok() {
         return value.to_string();
     }
 
     // Check if it's a floating point number
-    if let Ok(_) = value.parse::<f64>() {
+    if value.parse::<f64>().is_ok() {
         return value.to_string();
     }
 

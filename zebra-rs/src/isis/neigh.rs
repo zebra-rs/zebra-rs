@@ -278,8 +278,8 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
 
     let ip_prefixes = nbr
         .addr4
-        .iter()
-        .map(|(_, value)| IpPrefix {
+        .values()
+        .map(|value| IpPrefix {
             address: value.addr.to_string(),
             label: value.label,
         })
@@ -288,8 +288,8 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
     let ipv6_link_locals = nbr.addr6l.iter().map(|addr| addr.to_string()).collect();
     let ipv6_prefixes = nbr
         .addr6
-        .iter()
-        .map(|(_, value)| IpPrefix {
+        .values()
+        .map(|value| IpPrefix {
             address: value.addr.to_string(),
             label: value.label,
         })
