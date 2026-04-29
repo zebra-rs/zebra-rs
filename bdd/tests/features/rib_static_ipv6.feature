@@ -40,17 +40,29 @@ Feature: RIB IPv6 static route
     And I wait 2 seconds
     Then ping from "z1" to "2001:db8:1::2" should succeed
 
-  Scenario: Apply IPv6 static route and verify ping to the nexthop.
+  Scenario: Apply IPv6 static route and verify ping to z2's loopback.
     Given the test topology exists
     When I apply config "z1-2.yaml" to namespace "z1"
+    And I wait 2 seconds
     Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
 
-  Scenario: IPv6 static route configuration.
+  Scenario: Egress interface goes down — static route is invalidated.
     Given the test topology exists
     When I make namespace "z1" interface "vz1ns" down
+    And I wait 2 seconds
     Then ping from "z1" to "2001:db8:0:ffff::2" should fail
 
-  Scenario: IPv6 static route configuration.
+  Scenario: Egress interface comes back up — static route recovers.
     Given the test topology exists
     When I make namespace "z1" interface "vz1ns" up
+    And I wait 3 seconds
+    Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
+
+  Scenario: Bounce egress interface again — recovery is repeatable.
+    Given the test topology exists
+    When I make namespace "z1" interface "vz1ns" down
+    And I wait 2 seconds
+    Then ping from "z1" to "2001:db8:0:ffff::2" should fail
+    When I make namespace "z1" interface "vz1ns" up
+    And I wait 3 seconds
     Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
