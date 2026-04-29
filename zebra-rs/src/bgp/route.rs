@@ -977,7 +977,7 @@ pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
 /// Extract VNI from Route Distinguisher
 /// For EVPN routes, VNI is typically encoded in the lower 3 bytes of the RD value.
 /// RFC 7432 uses RD Type 0 (ASN) with format: [2 bytes ASN][3 bytes VNI][1 byte index]
-
+///
 /// Extract VNI from Route Target (RT) extended community
 ///
 /// RFC 8365 Section 5.1: "Each VXLAN EVPN instance is associated with a VXLAN VNI.

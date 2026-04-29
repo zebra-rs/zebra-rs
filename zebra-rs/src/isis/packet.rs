@@ -103,13 +103,13 @@ pub fn nbr_hello_interpret(
         keep
     });
     for (&key, _) in addr4.iter() {
-        if !nbr.addr4.contains_key(&key) {
+        if let std::collections::btree_map::Entry::Vacant(e) = nbr.addr4.entry(key) {
             // Fix borrow checker.
             let label = local_pool
                 .as_mut()
                 .and_then(|pool| pool.allocate())
                 .map(|label| label as u32);
-            nbr.addr4.insert(key, NeighborAddr4::new(key, label));
+            e.insert(NeighborAddr4::new(key, label));
         }
     }
     nbr.addr6.retain(|key, value| {
@@ -125,9 +125,9 @@ pub fn nbr_hello_interpret(
         keep
     });
     for (&key, _) in addr6.iter() {
-        if !nbr.addr6.contains_key(&key) {
-            nbr.addr6.insert(key, NeighborAddr6::new(key));
-        }
+        nbr.addr6
+            .entry(key)
+            .or_insert_with(|| NeighborAddr6::new(key));
     }
 
     nbr.addr6l = laddr6;

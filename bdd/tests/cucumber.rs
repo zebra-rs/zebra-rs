@@ -437,7 +437,7 @@ async fn verify_clean_environment(_world: &mut BgpWorld) {
 
 #[tokio::main]
 async fn main() {
-    let file = fs::File::create("allure-results/results.json".to_string()).unwrap();
+    let file = fs::File::create("allure-results/results.json").unwrap();
     BgpWorld::cucumber()
         .before(|feature, _rule, _scenario, world| {
             Box::pin(async move {

@@ -5,7 +5,7 @@
 ///
 /// This module provides convenience macros for BGP protocol logging that automatically
 /// include the proto="bgp" field for better log categorization and filtering.
-
+///
 /// Log an info-level message with proto="bgp" field
 #[macro_export]
 macro_rules! bgp_info {
