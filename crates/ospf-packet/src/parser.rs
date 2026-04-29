@@ -1199,7 +1199,7 @@ impl ExtPrefixTlv {
         let (tlv_data, flags) = be_u8(tlv_data)?;
 
         // Prefix is padded to 4-byte boundary.
-        let prefix_bytes = ((prefix_len as usize) + 7) / 8;
+        let prefix_bytes = (prefix_len as usize).div_ceil(8);
         let padded_prefix_bytes = (prefix_bytes + 3) & !3;
         let (tlv_data, prefix_data) = packet_utils::safe_split_at(tlv_data, padded_prefix_bytes)?;
 
@@ -1207,8 +1207,7 @@ impl ExtPrefixTlv {
         for (i, b) in prefix_data.iter().take(prefix_bytes).enumerate() {
             addr_bytes[i] = *b;
         }
-        let prefix =
-            Ipv4Net::new(Ipv4Addr::from(addr_bytes), prefix_len).unwrap_or(Ipv4Net::default());
+        let prefix = Ipv4Net::new(Ipv4Addr::from(addr_bytes), prefix_len).unwrap_or_default();
 
         let (_, subs) = many0_complete(ExtPrefixSubTlv::parse_sub).parse(tlv_data)?;
 
@@ -1361,7 +1360,7 @@ impl ExtPrefixTlv {
     }
 
     fn value_len(&self) -> u16 {
-        let prefix_bytes = ((self.prefix.prefix_len() as usize) + 7) / 8;
+        let prefix_bytes = (self.prefix.prefix_len() as usize).div_ceil(8);
         let padded_prefix_bytes = ((prefix_bytes + 3) & !3) as u16;
         let sub_len: u16 = self.subs.iter().map(|s| s.wire_len()).sum();
         4 + padded_prefix_bytes + sub_len
@@ -1377,7 +1376,7 @@ impl ExtPrefixTlv {
         buf.put_u8(self.flags);
 
         // Prefix bytes padded to 4-byte boundary.
-        let prefix_bytes = ((self.prefix.prefix_len() as usize) + 7) / 8;
+        let prefix_bytes = (self.prefix.prefix_len() as usize).div_ceil(8);
         let padded_prefix_bytes = (prefix_bytes + 3) & !3;
         let addr_bytes = self.prefix.addr().octets();
         buf.put(&addr_bytes[..prefix_bytes]);
