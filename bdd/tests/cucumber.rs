@@ -374,15 +374,19 @@ async fn verify_bgp_route_field(
             .find(|r| r.get("prefix").and_then(|p| p.as_str()) == Some(&expected_prefix))
     });
 
-    let route = route.expect(&format!(
-        "BGP route {} not found in namespace {}, got: {}",
-        expected_prefix, namespace, output
-    ));
+    let route = route.unwrap_or_else(|| {
+        panic!(
+            "BGP route {} not found in namespace {}, got: {}",
+            expected_prefix, namespace, output
+        )
+    });
 
-    let actual_value = route.get(&field_name).expect(&format!(
-        "Field {} not found in route {}",
-        field_name, expected_prefix
-    ));
+    let actual_value = route.get(&field_name).unwrap_or_else(|| {
+        panic!(
+            "Field {} not found in route {}",
+            field_name, expected_prefix
+        )
+    });
 
     let actual_str = match actual_value {
         Value::String(s) => s.clone(),
@@ -433,7 +437,7 @@ async fn verify_clean_environment(_world: &mut BgpWorld) {
 
 #[tokio::main]
 async fn main() {
-    let file = fs::File::create(format!("allure-results/results.json")).unwrap();
+    let file = fs::File::create("allure-results/results.json".to_string()).unwrap();
     BgpWorld::cucumber()
         .before(|feature, _rule, _scenario, world| {
             Box::pin(async move {

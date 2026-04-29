@@ -142,11 +142,11 @@ impl UpdatePacket {
 
         // Attributes emit.
         if let Some(bgp_attr) = &self.bgp_attr {
-            bgp_attr.attr_emit(&mut buf.get_mut());
+            bgp_attr.attr_emit(buf.get_mut());
         }
 
         // MP reach.
-        mp_update.attr_emit_mut(&mut buf.get_mut(), self.max_packet_size);
+        mp_update.attr_emit_mut(buf.get_mut(), self.max_packet_size);
 
         // Fill in attr length.
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
