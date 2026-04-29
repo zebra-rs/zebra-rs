@@ -111,16 +111,13 @@ impl ZmcpServer {
         };
 
         // Build response with id if present (notifications with no ID don't get responses)
-        if let Some(id) = id {
-            Some(json!({
+        id.map(|id| {
+            json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": result
-            }))
-        } else {
-            // For notifications (requests without ID), don't send a response
-            None
-        }
+            })
+        })
     }
 
     pub async fn handle_tool_call(&self, params: Value) -> Value {

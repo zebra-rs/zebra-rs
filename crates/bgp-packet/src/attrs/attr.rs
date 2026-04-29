@@ -342,7 +342,7 @@ pub fn parse_bgp_update_attribute(
                         nhop,
                         updates,
                     } => {
-                        bgp_attr.nexthop = Some(BgpNexthop::Evpn(nhop.clone()));
+                        bgp_attr.nexthop = Some(BgpNexthop::Evpn(nhop));
                         mp_update = Some(MpReachAttr::Evpn {
                             snpa,
                             nhop,

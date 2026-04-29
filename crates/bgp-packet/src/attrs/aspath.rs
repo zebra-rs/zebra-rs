@@ -437,13 +437,13 @@ impl As4Path {
     pub fn consolidate(&mut self) {
         let mut consolidated = VecDeque::new();
         for seg in self.segs.drain(..) {
-            if seg.typ == AS_SEQ {
-                if let Some(last) = consolidated.back_mut() {
-                    let last: &mut As4Segment = last;
-                    if last.typ == AS_SEQ {
-                        last.asn.extend(seg.asn);
-                        continue;
-                    }
+            if seg.typ == AS_SEQ
+                && let Some(last) = consolidated.back_mut()
+            {
+                let last: &mut As4Segment = last;
+                if last.typ == AS_SEQ {
+                    last.asn.extend(seg.asn);
+                    continue;
                 }
             }
             consolidated.push_back(seg);
