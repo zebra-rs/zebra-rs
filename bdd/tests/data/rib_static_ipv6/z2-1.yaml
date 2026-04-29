@@ -1,0 +1,7 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:0:ffff::2/128
+- if-name: vz2ns
+  ipv6:
+    address: 2001:db8:1::2/64

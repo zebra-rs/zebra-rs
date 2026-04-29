@@ -17,12 +17,17 @@ pub struct BgpWorld {
 #[given("a clean test environment")]
 async fn clean_test_environment(_world: &mut BgpWorld) {
     // Clean up any existing test resources (ignore errors)
+    // Kill any leftover zebra-rs processes before tearing down namespaces,
+    // otherwise their open netlink sockets can keep the namespace alive.
+    let _ = netns::killall_zebra_rs().await;
+
     // Delete veths first (must be done before namespaces are deleted)
     let _ = netns::delete_veth("z1").await;
     let _ = netns::delete_veth("z2").await;
     let _ = netns::delete_netns("z1").await;
     let _ = netns::delete_netns("z2").await;
     let _ = netns::delete_bridge("br0").await;
+
     println!("✓ Test environment cleaned");
 }
 
@@ -45,7 +50,7 @@ async fn create_namespace_with_ip(
         .await
         .expect("Failed to create namespace");
 
-    netns::connect_netns_to_bridge(&namespace, &bridge_name, &ip)
+    netns::connect_netns_to_bridge(&namespace, &bridge_name)
         .await
         .expect("Failed to connect namespace to bridge");
 
@@ -56,30 +61,24 @@ async fn create_namespace_with_ip(
 }
 
 #[when(
-    expr = "I create namespace {string} with loopback {string} eth0 {string} on bridge {string}"
+    expr = "I create namespace {string} with loopback and veth interface on the bridge {string}"
 )]
 async fn create_namespace_with_loopback(
     _world: &mut BgpWorld,
     namespace: String,
-    loopback: String,
-    eth0: String,
     bridge_name: String,
 ) {
     netns::create_netns(&namespace)
         .await
         .expect("Failed to create namespace");
 
-    netns::add_loopback_addr(&namespace, &loopback)
-        .await
-        .expect("Failed to add loopback address");
-
-    netns::connect_netns_to_bridge(&namespace, &bridge_name, &eth0)
+    netns::connect_netns_to_bridge(&namespace, &bridge_name)
         .await
         .expect("Failed to connect namespace to bridge");
 
     println!(
-        "✓ Namespace {} created with loopback {} eth0 {} on bridge {}",
-        namespace, loopback, eth0, bridge_name
+        "✓ Namespace {} created with loopback and veth on bridge {}",
+        namespace, bridge_name
     );
 }
 
