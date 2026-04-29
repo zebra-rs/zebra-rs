@@ -182,3 +182,43 @@ pub async fn spawn_in_netns(
         .spawn()
         .with_context(|| format!("Failed to spawn {} in netns {}", cmd, netns))
 }
+
+/// Add an IPv4 or IPv6 address to the loopback interface inside a namespace.
+pub async fn add_loopback_addr(netns: &str, addr: &str) -> Result<()> {
+    exec_in_netns(netns, "ip", &["addr", "add", addr, "dev", "lo"]).await?;
+    Ok(())
+}
+
+/// Bring the namespace-side veth (the one created by connect_netns_to_bridge)
+/// administratively up or down.
+pub async fn set_link_state(netns: &str, up: bool) -> Result<()> {
+    let veth_ns = format!("v{}ns", netns);
+    let state = if up { "up" } else { "down" };
+    exec_in_netns(netns, "ip", &["link", "set", &veth_ns, state]).await?;
+    Ok(())
+}
+
+/// Ping an IPv6 target from inside a namespace. Returns true on success,
+/// false on failure. Errors only when the ping process itself cannot be run.
+pub async fn ping6(netns: &str, target: &str, count: u32, timeout_secs: u32) -> Result<bool> {
+    let count_str = count.to_string();
+    let timeout_str = timeout_secs.to_string();
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("netns")
+        .arg("exec")
+        .arg(netns)
+        .arg("ping")
+        .arg("-6")
+        .arg("-c")
+        .arg(&count_str)
+        .arg("-W")
+        .arg(&timeout_str)
+        .arg(target)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("Failed to ping {} from netns {}", target, netns))?;
+    Ok(output.status.success())
+}

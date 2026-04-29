@@ -1,0 +1,7 @@
+routing:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:0:ffff::2/128
+        nexthop:
+        - address: 2001:db8:1::2
