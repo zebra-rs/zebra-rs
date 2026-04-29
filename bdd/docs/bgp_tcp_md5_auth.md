@@ -1,10 +1,9 @@
-# BGP Basic Session Test on iBGP
+# BGP TCP MD5 Authentication (RFC 2385)
 
 ## Overview
 
 As a network operator
-I want to test basic BGP session establishment
-Using an isolated test topology with two zebra-rs instances with iBGP connection.
+I want to protect a BGP session with a TCP MD5 shared secret and
 
 ## Test Topology
 
@@ -15,7 +14,7 @@ Using an isolated test topology with two zebra-rs instances with iBGP connection
                 │               │
            ┌────┴────┐     ┌────┴────┐
            │   z1    │     │   z2    │
-           │ AS65001 │     │ AS65001 │
+           │ AS65001 │     │ AS65002 │
            │192.168. │     │192.168. │
            │  0.1/24 │     │  0.2/24 │
            └─────────┘     └─────────┘
@@ -23,19 +22,15 @@ Using an isolated test topology with two zebra-rs instances with iBGP connection
 
 ## Config Files
 
-- z1.yaml: AS 65001, peer to 192.168.0.2
-- z2.yaml: AS 65001, peer to 192.168.0.1
+- z1-1.yaml: AS 65001, tcp-md5 password "shared-md5-secret".
+- z2-1.yaml: AS 65002, tcp-md5 password "shared-md5-secret" (match).
+- z2-2.yaml: AS 65002, tcp-md5 password "WRONG-md5-secret"
 
 ## Test Scenarios
 
 | Scenario | Result |
 |----------|--------|
-| Setup topology and establish BGP session | |
-| Apply config change and verify BGP session drops | |
-| Apply config change and verify BGP session recovered | |
-| Advertise a network 10.0.0.1/32 | |
-| Withdraw a network 10.0.0.1/32 | |
-| Advertise a network 10.0.0.1/32 and 10.0.0.2/32 | |
-| Withdraw a network 10.0.0.1/32 and 10.0.0.2/32 | |
-| Apply output policy with prefix-set | |
+| Establish a TCP MD5 authenticated BGP session | |
+| Mismatched password drops the session | |
+| Restoring the matching password re-establishes the session | |
 | Teardown topology | |
