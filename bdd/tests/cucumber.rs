@@ -55,6 +55,84 @@ async fn create_namespace_with_ip(
     );
 }
 
+#[when(
+    expr = "I create namespace {string} with loopback {string} eth0 {string} on bridge {string}"
+)]
+async fn create_namespace_with_loopback(
+    _world: &mut BgpWorld,
+    namespace: String,
+    loopback: String,
+    eth0: String,
+    bridge_name: String,
+) {
+    netns::create_netns(&namespace)
+        .await
+        .expect("Failed to create namespace");
+
+    netns::add_loopback_addr(&namespace, &loopback)
+        .await
+        .expect("Failed to add loopback address");
+
+    netns::connect_netns_to_bridge(&namespace, &bridge_name, &eth0)
+        .await
+        .expect("Failed to connect namespace to bridge");
+
+    println!(
+        "✓ Namespace {} created with loopback {} eth0 {} on bridge {}",
+        namespace, loopback, eth0, bridge_name
+    );
+}
+
+#[when(expr = "I bring link down in namespace {string}")]
+async fn bring_link_down(_world: &mut BgpWorld, namespace: String) {
+    netns::set_link_state(&namespace, false)
+        .await
+        .expect("Failed to bring link down");
+    println!("✓ Link brought down in namespace {}", namespace);
+}
+
+#[when(expr = "I bring link up in namespace {string}")]
+async fn bring_link_up(_world: &mut BgpWorld, namespace: String) {
+    netns::set_link_state(&namespace, true)
+        .await
+        .expect("Failed to bring link up");
+    println!("✓ Link brought up in namespace {}", namespace);
+}
+
+#[when(expr = "I wait {int} seconds")]
+async fn wait_seconds(_world: &mut BgpWorld, seconds: u64) {
+    tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+}
+
+#[then(expr = "ping from {string} to {string} should succeed")]
+async fn ping_should_succeed(_world: &mut BgpWorld, namespace: String, target: String) {
+    let success = netns::ping6(&namespace, &target, 3, 2)
+        .await
+        .expect("ping6 failed to run");
+    assert!(
+        success,
+        "ping from {} to {} did not succeed",
+        namespace, target
+    );
+    println!("✓ ping from {} to {} succeeded", namespace, target);
+}
+
+#[then(expr = "ping from {string} to {string} should fail")]
+async fn ping_should_fail(_world: &mut BgpWorld, namespace: String, target: String) {
+    let success = netns::ping6(&namespace, &target, 1, 1)
+        .await
+        .expect("ping6 failed to run");
+    assert!(
+        !success,
+        "ping from {} to {} unexpectedly succeeded",
+        namespace, target
+    );
+    println!(
+        "✓ ping from {} to {} failed (as expected)",
+        namespace, target
+    );
+}
+
 #[when(expr = "I start zebra-rs in namespace {string}")]
 async fn start_zebra_rs(_world: &mut BgpWorld, namespace: String) {
     let log_file = format!("{}.log", namespace);
