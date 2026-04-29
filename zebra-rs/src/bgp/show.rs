@@ -363,7 +363,7 @@ fn show_bgp(bgp: &Bgp, _args: Args, json: bool) -> std::result::Result<String, s
     buf.push_str(SHOW_BGP_HEADER);
 
     for (key, value) in bgp.local_rib.v4.0.iter() {
-        for (_i, rib) in value.iter().enumerate() {
+        for rib in value.iter() {
             let stale = if rib.stale { "S" } else { " " };
             let valid = "*";
             let best = if rib.best_path { ">" } else { " " };
@@ -461,11 +461,11 @@ fn show_bgp_vpnv4(
         "     Network          Next Hop            Metric LocPrf Weight Path"
     );
     for (key, value) in bgp.local_rib.v4vpn.iter() {
-        if value.0.len() > 0 {
+        if !value.0.is_empty() {
             writeln!(buf, "Route Distinguisher: {}", key)?;
         }
         for (k, v) in value.0.iter() {
-            for (_i, rib) in v.iter().enumerate() {
+            for rib in v.iter() {
                 let stale = if rib.stale { "S" } else { " " };
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
@@ -569,11 +569,11 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
         "     Network          Next Hop            Metric LocPrf Weight Path"
     )?;
     for (key, value) in routes.iter() {
-        if value.0.len() > 0 {
+        if !value.0.is_empty() {
             writeln!(buf, "Route Distinguisher: {}", key)?;
         }
         for (k, v) in value.0.iter() {
-            for (_i, rib) in v.iter().enumerate() {
+            for rib in v.iter() {
                 let stale = if rib.stale { "S" } else { " " };
                 let valid = "*";
                 let best = if rib.best_path { ">" } else { " " };
@@ -1323,7 +1323,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 }
                 write!(out, " received")?;
             }
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
 
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
@@ -1568,7 +1568,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 }
                 write!(out, " received")?;
             }
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
 
         if neighbor.cap_send.refresh.is_some() || neighbor.cap_recv.refresh.is_some() {
@@ -1581,7 +1581,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 }
                 write!(out, " received")?;
             }
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
 
         if neighbor.cap_send.enhanced_refresh.is_some()
@@ -1596,7 +1596,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 }
                 write!(out, " received")?;
             }
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
 
         if neighbor.cap_send.fqdn.is_some() || neighbor.cap_recv.fqdn.is_some() {
@@ -1619,7 +1619,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     v.domain()
                 )?;
             }
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
 
         if neighbor.cap_send.version.is_some() || neighbor.cap_recv.version.is_some() {
@@ -1632,10 +1632,10 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                 }
                 write!(out, " received ({})", v.version(),)?;
             }
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
 
-        writeln!(out, "")?;
+        writeln!(out)?;
     }
     writeln!(
         out,
