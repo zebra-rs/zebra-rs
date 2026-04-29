@@ -115,8 +115,21 @@ impl Rib {
 
     pub async fn link_up(&mut self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
+            tracing::info!(
+                "link_up: ifindex {} not found in link table; skipping connected route recovery",
+                ifindex
+            );
             return;
         };
+        let link_name = link.name.clone();
+
+        tracing::info!(
+            "link_up: {} (ifindex {}) recovering {} IPv4 + {} IPv6 connected addresses",
+            link_name,
+            ifindex,
+            link.addr4.len(),
+            link.addr6.len()
+        );
 
         // Notify protocol daemons.
         self.api_link_up(ifindex);
@@ -129,7 +142,11 @@ impl Rib {
                 entry.ifindex = ifindex;
                 entry.set_valid(true);
 
-                // println!("Adding Connected Prefix {prefix}");
+                tracing::info!(
+                    "link_up: {} re-adding IPv4 connected prefix {}",
+                    link_name,
+                    prefix
+                );
 
                 rib_add_system(&mut self.table, &prefix, entry);
                 rib_selection_ipv4(
@@ -140,10 +157,6 @@ impl Rib {
                     &self.fib_handle,
                 )
                 .await;
-
-                // self.ipv4_route_add(&prefix, rib);
-                // let msg = Message::Ipv4Add { prefix, rib };
-                // let _ = self.tx.send(msg);
             }
         }
 
@@ -154,6 +167,12 @@ impl Rib {
                 let mut entry = RibEntry::new(RibType::Connected);
                 entry.ifindex = ifindex;
                 entry.set_valid(true);
+
+                tracing::info!(
+                    "link_up: {} re-adding IPv6 connected prefix {}",
+                    link_name,
+                    prefix
+                );
 
                 rib_add_system_v6(&mut self.table_v6, &prefix, entry);
                 rib_selection_ipv6(
@@ -166,6 +185,64 @@ impl Rib {
                 .await;
             }
         }
+
+        // Re-install configured addresses that the kernel removed while the
+        // link was down (config=true, fib=false). The kernel will respond
+        // with NewAddr, which goes through addr_add(_, false) and merges
+        // fib=true on the existing LinkAddr without producing a duplicate.
+        // This must run before route_sync so the kernel has the address by
+        // the time protocol routes (e.g. static routes via this nexthop)
+        // are installed to the FIB.
+        let v4_recover: Vec<Ipv4Net> = link
+            .addr4
+            .iter()
+            .filter(|a| a.config && !a.fib)
+            .filter_map(|a| match a.addr {
+                IpNet::V4(net) => Some(net),
+                _ => None,
+            })
+            .collect();
+        let v6_recover: Vec<Ipv6Net> = link
+            .addr6
+            .iter()
+            .filter(|a| a.config && !a.fib)
+            .filter_map(|a| match a.addr {
+                IpNet::V6(net) => Some(net),
+                _ => None,
+            })
+            .collect();
+
+        for net in &v4_recover {
+            tracing::info!(
+                "link_up: {} re-installing IPv4 address {} to kernel (config=true, fib was false)",
+                link_name,
+                net
+            );
+            if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net, false).await {
+                tracing::warn!(
+                    "link_up: {} failed to re-install IPv4 address {}: {}",
+                    link_name,
+                    net,
+                    e
+                );
+            }
+        }
+        for net in &v6_recover {
+            tracing::info!(
+                "link_up: {} re-installing IPv6 address {} to kernel (config=true, fib was false)",
+                link_name,
+                net
+            );
+            if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net, false).await {
+                tracing::warn!(
+                    "link_up: {} failed to re-install IPv6 address {}: {}",
+                    link_name,
+                    net,
+                    e
+                );
+            }
+        }
+
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
         ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
