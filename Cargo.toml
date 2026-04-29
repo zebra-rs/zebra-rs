@@ -42,14 +42,10 @@ clap = { version = "4", features = ["derive"] }
 # Style — explicit-over-implicit
 collapsible_if = "allow"
 collapsible_match = "allow"
-field_reassign_with_default = "allow"
-let_and_return = "allow"
 manual_map = "allow"
 needless_bool_assign = "allow"
 needless_return = "allow"
-redundant_closure = "allow"
 redundant_pattern_matching = "allow"
-unused_enumerate_index = "allow"
 unwrap_or_default = "allow"
 
 # Style — references and casts
@@ -62,21 +58,12 @@ unnecessary_cast = "allow"
 for_kv_map = "allow"
 get_first = "allow"
 iter_kv_map = "allow"
-len_zero = "allow"
 manual_range_contains = "allow"
 ptr_arg = "allow"
-unnecessary_get_then_check = "allow"
 unnecessary_map_or = "allow"
 
 # Naming — networking acronyms (TCP, IP, MD5, ...) are fine as-is
 upper_case_acronyms = "allow"
-
-# Print/format — empty/trivial cases
-println_empty_string = "allow"
-writeln_empty_string = "allow"
-
-# Default constructions
-default_constructed_unit_structs = "allow"
 
 # Async — fire-and-forget tasks are intentional in a few places
 let_underscore_future = "allow"

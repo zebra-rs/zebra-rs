@@ -25,13 +25,15 @@ use super::{
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     let addr = oi.addr.first()?;
-    let mut hello = OspfHello::default();
-    hello.netmask = addr.prefix.netmask();
-    hello.hello_interval = oi.hello_interval();
+    let mut hello = OspfHello {
+        netmask: addr.prefix.netmask(),
+        hello_interval: oi.hello_interval(),
+        priority: oi.priority(),
+        router_dead_interval: oi.dead_interval(),
+        ..Default::default()
+    };
     hello.options.set_external(true);
     hello.options.set_o(true);
-    hello.priority = oi.priority();
-    hello.router_dead_interval = oi.dead_interval();
     for (_, nbr) in oi.nbrs.iter() {
         if nbr.state == NfsmState::Down {
             continue;

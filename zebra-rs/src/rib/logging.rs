@@ -261,7 +261,7 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
         (LoggingOutput::Stdout, LogFormat::Elasticsearch) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
-                .event_format(ElasticsearchFormatter::default())
+                .event_format(ElasticsearchFormatter)
                 .init();
         }
         (LoggingOutput::Stdout, LogFormat::Terminal) => {
@@ -319,7 +319,7 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                 let syslog_writer = SyslogWriter::new()?;
                 tracing_subscriber::fmt()
                     .with_env_filter(filter)
-                    .event_format(ElasticsearchFormatter::default())
+                    .event_format(ElasticsearchFormatter)
                     .with_writer(Mutex::new(syslog_writer))
                     .init();
             }
@@ -526,7 +526,7 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
             let writer = rolling::never(log_dir, log_filename);
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
-                .event_format(ElasticsearchFormatter::default())
+                .event_format(ElasticsearchFormatter)
                 .with_writer(writer)
                 .init();
         }
