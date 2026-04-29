@@ -354,7 +354,11 @@ impl ConfigManager {
         let Some(proto) = dynamics.first() else {
             return Vec::new();
         };
-        if let Some(tx) = self.cm_clients.borrow().get(&proto.to_string()) {
+        // Clone the channel out of the RefCell borrow so the Ref is dropped
+        // before we await — otherwise clippy::await_holding_refcell_ref flags
+        // a potential deadlock if the borrowed value is touched elsewhere.
+        let tx = self.cm_clients.borrow().get(&proto.to_string()).cloned();
+        if let Some(tx) = tx {
             let (comp_tx, comp_rx) = oneshot::channel();
             let req = ConfigRequest {
                 paths: Vec::new(),

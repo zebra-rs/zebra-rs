@@ -331,7 +331,7 @@ impl Ospf {
     pub fn router_info_lsa_originate(&mut self) {
         use super::srmpls::SegmentRoutingMode;
 
-        let ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | 0);
+        let ls_id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
 
         if self.segment_routing == SegmentRoutingMode::Mpls {
             let mut lsa = super::srmpls::router_info_lsa_build(self.router_id);
