@@ -1009,7 +1009,7 @@ pub fn show_detail(
                         writeln!(buf, "    {}", prefix)?;
                     }
                 }
-                writeln!(buf, "")?;
+                writeln!(buf)?;
             }
         }
         Ok(buf)
@@ -1111,8 +1111,8 @@ pub fn show_dis_statistics(
                             current_dis,
                             flap_count: dis_stats.flap_count,
                             is_dampened: dis_stats.is_dampened(),
-                            uptime: dis_stats.uptime.map(|t| format_time_ago(t)),
-                            last_change: dis_stats.last_change.map(|t| format_time_ago(t)),
+                            uptime: dis_stats.uptime.map(format_time_ago),
+                            last_change: dis_stats.last_change.map(format_time_ago),
                             history_count: dis_stats.history.len(),
                         });
                     }

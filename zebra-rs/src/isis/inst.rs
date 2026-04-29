@@ -422,7 +422,7 @@ impl Isis {
         }
     }
     pub fn top(&mut self) -> IsisTop<'_> {
-        let top = IsisTop {
+        IsisTop {
             tx: &self.tx,
             links: &mut self.links,
             config: &self.config,
@@ -438,8 +438,7 @@ impl Isis {
             spf_timer: &mut self.spf_timer,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
-        };
-        top
+        }
     }
 
     pub fn link_top<'a>(&'a mut self, ifindex: u32) -> Option<LinkTop<'a>> {
@@ -831,9 +830,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
 
         let total_base_len = packet_len + base_len + tlv_header_len;
 
-        let available_len = mtu - total_base_len;
-
-        available_len
+        mtu - total_base_len
     };
     // tracing::info!("[CSNP:Gen] available_len {}", available_len);
 
@@ -1157,11 +1154,15 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
             rib::Nexthop::default()
         }
     } else {
-        let mut multi = rib::NexthopMulti::default();
-        multi.metric = route.metric;
-        for (key, value) in route.nhops.iter() {
-            multi.nexthops.push(nhop_to_nexthop_uni(key, route, value));
-        }
+        let multi = rib::NexthopMulti {
+            metric: route.metric,
+            nexthops: route
+                .nhops
+                .iter()
+                .map(|(key, value)| nhop_to_nexthop_uni(key, route, value))
+                .collect(),
+            ..Default::default()
+        };
         rib::Nexthop::Multi(multi)
     };
 

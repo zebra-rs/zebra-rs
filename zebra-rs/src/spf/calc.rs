@@ -22,9 +22,10 @@ impl SpfOpt {
     }
 
     pub fn full_path() -> Self {
-        let mut opt = Self::default();
-        opt.full_path = true;
-        opt
+        Self {
+            full_path: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -736,19 +737,19 @@ mod tests {
                 let name = node_name(&graph, i.id);
                 print!(" {}", name);
             }
-            println!("");
+            println!();
 
             print!("P ");
             for i in pc_inter.iter() {
                 print!(" {} ", if i.p { "o" } else { "x" });
             }
-            println!("");
+            println!();
 
             print!("Q ");
             for i in pc_inter.iter() {
                 print!(" {} ", if i.q { "o" } else { "x" });
             }
-            println!("");
+            println!();
 
             // Asssert P(S, N1)
             let mut p_inter = Vec::<String>::new();

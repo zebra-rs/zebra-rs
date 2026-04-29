@@ -927,13 +927,13 @@ fn show_ospf_database(
         return Ok(String::from("OSPF router ID is not sepcified"));
     }
 
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     writeln!(out, "       OSPF Router with ID ({})", ospf.router_id)?;
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
 
     if let Some(area) = ospf.areas.get(AREA0) {
         writeln!(out, "Router Link States (Area {})", area.id)?;
-        let _ = writeln!(out, "");
+        let _ = writeln!(out);
 
         let mut header = true;
         for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
