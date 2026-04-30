@@ -223,11 +223,11 @@ pub fn comps_add_all(
                 for subent in entry.dir.borrow().iter() {
                     if &subent.name == key {
                         comps_as_leaf(comps, subent);
-                        if let Some(dynamic) = subent.extension.get("ext:dynamic") {
-                            if let Some(candidates) = s.dynamic.get(dynamic) {
-                                for cand in candidates.iter() {
-                                    comps.push(Completion::new_name(cand));
-                                }
+                        if let Some(dynamic) = subent.extension.get("ext:dynamic")
+                            && let Some(candidates) = s.dynamic.get(dynamic)
+                        {
+                            for cand in candidates.iter() {
+                                comps.push(Completion::new_name(cand));
                             }
                         }
                         if subent.name == "if-name-brief" {
@@ -245,11 +245,11 @@ pub fn comps_add_all(
         }
         _ => {
             comps_as_leaf(comps, entry);
-            if let Some(dynamic) = entry.extension.get("ext:dynamic") {
-                if let Some(candidates) = s.dynamic.get(dynamic) {
-                    for cand in candidates.iter() {
-                        comps.push(Completion::new_name(cand));
-                    }
+            if let Some(dynamic) = entry.extension.get("ext:dynamic")
+                && let Some(candidates) = s.dynamic.get(dynamic)
+            {
+                for cand in candidates.iter() {
+                    comps.push(Completion::new_name(cand));
                 }
             }
         }

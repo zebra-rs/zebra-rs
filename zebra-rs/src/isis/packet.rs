@@ -94,10 +94,10 @@ pub fn nbr_hello_interpret(
         let keep = addr4.contains_key(key);
         if !keep {
             // Release the label before removing
-            if let Some(label) = value.label {
-                if let Some(local_pool) = local_pool {
-                    local_pool.release(label as usize);
-                }
+            if let Some(label) = value.label
+                && let Some(local_pool) = local_pool
+            {
+                local_pool.release(label as usize);
             }
         }
         keep
@@ -116,10 +116,10 @@ pub fn nbr_hello_interpret(
         let keep = addr6.contains_key(key);
         if !keep {
             // Release the label before removing
-            if let Some(label) = value.label {
-                if let Some(local_pool) = local_pool {
-                    local_pool.release(label as usize);
-                }
+            if let Some(label) = value.label
+                && let Some(local_pool) = local_pool
+            {
+                local_pool.release(label as usize);
             }
         }
         keep
@@ -240,15 +240,13 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // When neighbor is elected as DIS and reports LAN ID in Hello packet,
     // register adjacency if not already set. This handles the case where
     // neighbor reaches Up state before we receive the DIS's LAN ID.
-    if nbr.is_dis() && !nbr.lan_id.is_empty() {
-        if link.state.adj.get_mut(&level).is_none() {
-            // Register adjacency and create SRM/SSN entry in LSDB.
-            *link.state.adj.get_mut(&level) = Some((nbr.lan_id, None));
-            link.lsdb.get_mut(&level).adj_set(link.ifindex);
+    if nbr.is_dis() && !nbr.lan_id.is_empty() && link.state.adj.get_mut(&level).is_none() {
+        // Register adjacency and create SRM/SSN entry in LSDB.
+        *link.state.adj.get_mut(&level) = Some((nbr.lan_id, None));
+        link.lsdb.get_mut(&level).adj_set(link.ifindex);
 
-            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-            nbr.event(Message::LspOriginate(level));
-        }
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        nbr.event(Message::LspOriginate(level));
     }
 
     // When neighbor state has been changed.
@@ -330,18 +328,16 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         }
 
         // Fall down from previous.
-        if state == NfsmState::Init {
-            if has_my_sys_id {
-                state = NfsmState::Up;
+        if state == NfsmState::Init && has_my_sys_id {
+            state = NfsmState::Up;
 
-                // Set adjacency.
-                *link.state.adj.get_mut(&level) =
-                    Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
-                link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
+            // Set adjacency.
+            *link.state.adj.get_mut(&level) =
+                Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
+            link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
 
-                nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-                let _ = link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
-            }
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+            let _ = link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
         }
 
         // When neighbor state has been changed.
@@ -522,10 +518,8 @@ pub fn psnp_recv(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     // 1 PSNP and this IS is not the level 1 designated IS for the circuit C, or
     // ii. this is a level 2 PSNP and this IS is not the level 2 designated IS
     // for the circuit C, then the IS shall discard the PDU.
-    if link.is_lan() {
-        if *link.state.dis_status.get(&level) != DisStatus::Myself {
-            return;
-        }
+    if link.is_lan() && *link.state.dis_status.get(&level) != DisStatus::Myself {
+        return;
     }
 
     // 7.3.15.2 Action on receipt of a PSNP.

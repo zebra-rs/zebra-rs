@@ -311,20 +311,18 @@ fn render_link(out: &mut String, oi: &OspfLink, ospf: &Ospf) {
     }
 
     // Line 9: Network-LSA sequence number (only when DR).
-    if oi.state == IfsmState::DR {
-        if let Some(area) = ospf.areas.get(oi.area_id) {
-            if let Some(lsa) =
-                area.lsdb
-                    .lookup_lsa(OspfLsType::Network, oi.ident.prefix.addr(), ospf.router_id)
-            {
-                writeln!(
-                    out,
-                    "  Saved Network-LSA sequence number 0x{:08x}",
-                    lsa.data.h.ls_seq_number
-                )
-                .unwrap();
-            }
-        }
+    if oi.state == IfsmState::DR
+        && let Some(area) = ospf.areas.get(oi.area_id)
+        && let Some(lsa) =
+            area.lsdb
+                .lookup_lsa(OspfLsType::Network, oi.ident.prefix.addr(), ospf.router_id)
+    {
+        writeln!(
+            out,
+            "  Saved Network-LSA sequence number 0x{:08x}",
+            lsa.data.h.ls_seq_number
+        )
+        .unwrap();
     }
 
     // Line 10: Multicast group memberships.
@@ -1589,10 +1587,10 @@ fn show_ospf_segment_routing(
                 .opaque_area
                 .values()
                 .find_map(|lsa| {
-                    if lsa.data.h.adv_router == *router_id {
-                        if let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.data.lsp {
-                            return Some(format_algo_list(ri));
-                        }
+                    if lsa.data.h.adv_router == *router_id
+                        && let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.data.lsp
+                    {
+                        return Some(format_algo_list(ri));
                     }
                     None
                 })

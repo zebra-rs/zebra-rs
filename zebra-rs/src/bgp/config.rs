@@ -92,30 +92,27 @@ fn clear_peer_listener_auth(bgp: &mut Bgp, addr: &IpAddr) {
         .get(addr)
         .and_then(|p| p.config.transport.md5_password.as_ref())
         .is_some();
-    if had_md5 {
-        if let Err(e) = super::auth::set_tcp_md5_key(fd, *addr, &[]) {
-            tracing::warn!(
-                peer = %addr,
-                error = %e,
-                "TCP MD5 del on listener failed during peer cleanup"
-            );
-        }
+    if had_md5 && let Err(e) = super::auth::set_tcp_md5_key(fd, *addr, &[]) {
+        tracing::warn!(
+            peer = %addr,
+            error = %e,
+            "TCP MD5 del on listener failed during peer cleanup"
+        );
     }
 
     // TCP-AO: needs the exact (send_id, recv_id) used at install
     // time, remembered on the peer.
     if let Some(peer) = bgp.peers.get_mut(addr)
         && let Some((send_id, recv_id)) = peer.last_ao_installed.take()
+        && let Err(e) = super::auth::del_tcp_ao_key(fd, *addr, send_id, recv_id)
     {
-        if let Err(e) = super::auth::del_tcp_ao_key(fd, *addr, send_id, recv_id) {
-            tracing::warn!(
-                peer = %addr,
-                send_id,
-                recv_id,
-                error = %e,
-                "TCP-AO del on listener failed during peer cleanup"
-            );
-        }
+        tracing::warn!(
+            peer = %addr,
+            send_id,
+            recv_id,
+            error = %e,
+            "TCP-AO del on listener failed during peer cleanup"
+        );
     }
 }
 
@@ -466,14 +463,14 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         IpAddr::V4(_) => bgp.listen_fd_v4,
         IpAddr::V6(_) => bgp.listen_fd_v6,
     };
-    if let Some(fd) = listen_fd {
-        if let Err(e) = super::auth::set_tcp_md5_key(fd, addr, &password_bytes) {
-            tracing::warn!(
-                peer = %addr,
-                error = %e,
-                "TCP MD5 setsockopt on listener failed; incoming SYNs from this peer will be dropped"
-            );
-        }
+    if let Some(fd) = listen_fd
+        && let Err(e) = super::auth::set_tcp_md5_key(fd, addr, &password_bytes)
+    {
+        tracing::warn!(
+            peer = %addr,
+            error = %e,
+            "TCP MD5 setsockopt on listener failed; incoming SYNs from this peer will be dropped"
+        );
     }
 
     Some(())

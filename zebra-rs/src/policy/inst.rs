@@ -219,16 +219,16 @@ impl Policy {
                         self.watch_prefix.entry(name).or_default().push(watch);
                     }
                     PolicyType::PolicyListIn | PolicyType::PolicyListOut => {
-                        if let Some(policy_list) = self.policy_config.config.get(&name) {
-                            if let Some(tx) = self.clients.get(&proto) {
-                                let msg = PolicyRx::PolicyList {
-                                    name: name.clone(),
-                                    ident,
-                                    policy_type,
-                                    policy_list: Some(policy_list.clone()),
-                                };
-                                let _ = tx.send(msg);
-                            }
+                        if let Some(policy_list) = self.policy_config.config.get(&name)
+                            && let Some(tx) = self.clients.get(&proto)
+                        {
+                            let msg = PolicyRx::PolicyList {
+                                name: name.clone(),
+                                ident,
+                                policy_type,
+                                policy_list: Some(policy_list.clone()),
+                            };
+                            let _ = tx.send(msg);
                         }
                         let watch = PolicyWatch {
                             proto,

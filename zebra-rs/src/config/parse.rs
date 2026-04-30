@@ -340,11 +340,11 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State
 
     // Handle choice case logic
     if let Some((choice_name, case_name)) = is_choice_case(entry) {
-        if let Some(active_case) = s.get_active_choice_case(&choice_name) {
-            if active_case != &case_name {
-                // Different case is active, clear it
-                s.clear_choice_case(&choice_name);
-            }
+        if let Some(active_case) = s.get_active_choice_case(&choice_name)
+            && active_case != &case_name
+        {
+            // Different case is active, clear it
+            s.clear_choice_case(&choice_name);
         }
         // Set this case as active
         s.set_active_choice_case(&choice_name, &case_name);
@@ -366,11 +366,11 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State
         }
     }
 
-    if let Some(dynamics) = entry.extension.get("ext:dynamic") {
-        if let Some(candidates) = s.dynamic.get(dynamics) {
-            for candidate in candidates.iter() {
-                m.match_keyword(entry, input, candidate);
-            }
+    if let Some(dynamics) = entry.extension.get("ext:dynamic")
+        && let Some(candidates) = s.dynamic.get(dynamics)
+    {
+        for candidate in candidates.iter() {
+            m.match_keyword(entry, input, candidate);
         }
     }
 
@@ -384,10 +384,10 @@ fn entry_match_dir(entry: &Rc<Entry>, str: &str, m: &mut Match, state: &State) {
         // Check if this entry is part of a choice
         if let Some((choice_name, case_name)) = is_choice_case(entry) {
             // Only include if this case is active or no case is active yet
-            if let Some(active_case) = state.get_active_choice_case(&choice_name) {
-                if active_case != &case_name {
-                    continue; // Skip inactive choice case
-                }
+            if let Some(active_case) = state.get_active_choice_case(&choice_name)
+                && active_case != &case_name
+            {
+                continue; // Skip inactive choice case
             }
         }
         m.match_entry(entry, str);
@@ -463,12 +463,11 @@ pub fn ymatch_complete(ymatch: YangMatch, list_presence: bool, is_delete: bool) 
 }
 
 fn matched_enumeration(mx: &Match) -> Option<String> {
-    if let Some(type_node) = &mx.matched_entry.type_node {
-        if type_node.kind == YangType::Enumeration {
-            if let Some(last_match) = &mx.last_match {
-                return Some(last_match.clone());
-            }
-        }
+    if let Some(type_node) = &mx.matched_entry.type_node
+        && type_node.kind == YangType::Enumeration
+        && let Some(last_match) = &mx.last_match
+    {
+        return Some(last_match.clone());
     }
     None
 }

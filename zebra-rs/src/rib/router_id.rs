@@ -26,11 +26,11 @@ fn router_id(links: &BTreeMap<u32, Link>) -> Option<Ipv4Addr> {
 
 impl Rib {
     pub fn router_id_update(&mut self) {
-        if let Some(router_id) = router_id(&self.links) {
-            if self.router_id != router_id {
-                self.router_id = router_id;
-                self.api_router_id_update(router_id);
-            }
+        if let Some(router_id) = router_id(&self.links)
+            && self.router_id != router_id
+        {
+            self.router_id = router_id;
+            self.api_router_id_update(router_id);
         }
     }
 }
