@@ -763,7 +763,7 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
 
                     btree.insert(uni.metric, uni);
 
-                    let vec: Vec<_> = btree.iter().map(|(_, &ref value)| value.clone()).collect();
+                    let vec: Vec<_> = btree.values().cloned().collect();
                     let list = NexthopList { nexthops: vec };
 
                     Nexthop::List(list)
@@ -975,7 +975,7 @@ fn rib_add_system_v6(
 
                     btree.insert(uni.metric, uni);
 
-                    let vec: Vec<_> = btree.iter().map(|(_, &ref value)| value.clone()).collect();
+                    let vec: Vec<_> = btree.values().cloned().collect();
                     let list = NexthopList { nexthops: vec };
 
                     Nexthop::List(list)

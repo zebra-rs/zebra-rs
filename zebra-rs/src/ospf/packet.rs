@@ -570,20 +570,19 @@ enum LsaProcessResult {
 fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -> LsaProcessResult {
     // Step 3: Discard AS-External LSAs in stub/NSSA areas.
     use super::area::AreaType;
-    match lsa.h.ls_type {
-        OspfLsType::AsExternal | OspfLsType::SummaryAsbr => {
-            if oi.area_type != AreaType::Normal {
-                tracing::info!(
-                    "[LS Update] Step 3: Discarding {:?} LSA in {:?} area: id={} adv={}",
-                    lsa.h.ls_type,
-                    oi.area_type,
-                    lsa.h.ls_id,
-                    lsa.h.adv_router
-                );
-                return LsaProcessResult::DiscardNoAck;
-            }
-        }
-        _ => {}
+    if matches!(
+        lsa.h.ls_type,
+        OspfLsType::AsExternal | OspfLsType::SummaryAsbr
+    ) && oi.area_type != AreaType::Normal
+    {
+        tracing::info!(
+            "[LS Update] Step 3: Discarding {:?} LSA in {:?} area: id={} adv={}",
+            lsa.h.ls_type,
+            oi.area_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router
+        );
+        return LsaProcessResult::DiscardNoAck;
     }
 
     // Step 4: Look up current database copy, compute comparison result.

@@ -1416,13 +1416,11 @@ fn build_rib_from_spf(
                 let sid = if let Some(prefix_sid) = entry.prefix_sid() {
                     match prefix_sid.sid {
                         // Prefix SID label.
-                        SidLabelValue::Index(index) => {
-                            if let Some(block) = top.label_map.get(&level).get(&sys_id) {
-                                Some(block.global.start + index)
-                            } else {
-                                None
-                            }
-                        }
+                        SidLabelValue::Index(index) => top
+                            .label_map
+                            .get(&level)
+                            .get(&sys_id)
+                            .map(|block| block.global.start + index),
                         SidLabelValue::Label(label) => Some(label),
                     }
                 } else {

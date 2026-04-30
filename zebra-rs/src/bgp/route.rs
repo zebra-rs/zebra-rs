@@ -288,8 +288,8 @@ impl LocalRibTable {
         let incb_neigh_as = incb.attr.neighboring_as();
 
         if cand_neigh_as == incb_neigh_as {
-            let cand_med = cand.attr.med.clone().unwrap_or(Med::default());
-            let incb_med = incb.attr.med.clone().unwrap_or(Med::default());
+            let cand_med = cand.attr.med.clone().unwrap_or_default();
+            let incb_med = incb.attr.med.clone().unwrap_or_default();
             if cand_med != incb_med {
                 return (cand_med < incb_med, Reason::Med);
             }
