@@ -17,12 +17,17 @@ pub struct BgpWorld {
 #[given("a clean test environment")]
 async fn clean_test_environment(_world: &mut BgpWorld) {
     // Clean up any existing test resources (ignore errors)
+    // Kill any leftover zebra-rs processes before tearing down namespaces,
+    // otherwise their open netlink sockets can keep the namespace alive.
+    let _ = netns::killall_zebra_rs().await;
+
     // Delete veths first (must be done before namespaces are deleted)
     let _ = netns::delete_veth("z1").await;
     let _ = netns::delete_veth("z2").await;
     let _ = netns::delete_netns("z1").await;
     let _ = netns::delete_netns("z2").await;
     let _ = netns::delete_bridge("br0").await;
+
     println!("✓ Test environment cleaned");
 }
 
@@ -45,13 +50,109 @@ async fn create_namespace_with_ip(
         .await
         .expect("Failed to create namespace");
 
-    netns::connect_netns_to_bridge(&namespace, &bridge_name, &ip)
+    netns::connect_netns_to_bridge(&namespace, &bridge_name)
         .await
         .expect("Failed to connect namespace to bridge");
 
     println!(
         "✓ Namespace {} created with IP {} on bridge {}",
         namespace, ip, bridge_name
+    );
+}
+
+#[when(
+    expr = "I create namespace {string} with loopback and veth interface on the bridge {string}"
+)]
+async fn create_namespace_with_loopback(
+    _world: &mut BgpWorld,
+    namespace: String,
+    bridge_name: String,
+) {
+    netns::create_netns(&namespace)
+        .await
+        .expect("Failed to create namespace");
+
+    netns::connect_netns_to_bridge(&namespace, &bridge_name)
+        .await
+        .expect("Failed to connect namespace to bridge");
+
+    println!(
+        "✓ Namespace {} created with loopback and veth on bridge {}",
+        namespace, bridge_name
+    );
+}
+
+#[when(expr = "I bring link down in namespace {string}")]
+async fn bring_link_down(_world: &mut BgpWorld, namespace: String) {
+    netns::set_link_state(&namespace, false)
+        .await
+        .expect("Failed to bring link down");
+    println!("✓ Link brought down in namespace {}", namespace);
+}
+
+#[when(expr = "I bring link up in namespace {string}")]
+async fn bring_link_up(_world: &mut BgpWorld, namespace: String) {
+    netns::set_link_state(&namespace, true)
+        .await
+        .expect("Failed to bring link up");
+    println!("✓ Link brought up in namespace {}", namespace);
+}
+
+#[when(expr = "I make namespace {string} interface {string} {word}")]
+async fn set_namespace_interface_state(
+    _world: &mut BgpWorld,
+    namespace: String,
+    interface: String,
+    state: String,
+) {
+    let up = match state.as_str() {
+        "up" => true,
+        "down" => false,
+        other => panic!(
+            "invalid interface state '{}', expected 'up' or 'down'",
+            other
+        ),
+    };
+    netns::set_interface_state(&namespace, &interface, up)
+        .await
+        .expect("Failed to set interface state");
+    println!(
+        "✓ Interface {} in namespace {} set {}",
+        interface, namespace, state
+    );
+}
+
+#[when(expr = "I wait {int} seconds")]
+async fn wait_seconds(_world: &mut BgpWorld, seconds: u64) {
+    tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+}
+
+#[then(expr = "ping from {string} to {string} should succeed")]
+async fn ping_should_succeed(_world: &mut BgpWorld, namespace: String, target: String) {
+    let success = netns::ping6(&namespace, &target, 3, 2)
+        .await
+        .expect("ping6 failed to run");
+    assert!(
+        success,
+        "ping from {} to {} did not succeed",
+        namespace, target
+    );
+    println!("✓ ping from {} to {} succeeded", namespace, target);
+}
+
+#[then(expr = "ping from {string} to {string} should fail")]
+async fn ping_should_fail(_world: &mut BgpWorld, namespace: String, target: String) {
+    let success = netns::ping6(&namespace, &target, 1, 1)
+        .await
+        .expect("ping6 failed to run");
+    assert!(
+        !success,
+        "ping from {} to {} unexpectedly succeeded",
+        namespace, target
+    );
+    println!(
+        "✓ ping from {} to {} failed (as expected)",
+        namespace, target
     );
 }
 
