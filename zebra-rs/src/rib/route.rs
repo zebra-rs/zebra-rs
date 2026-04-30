@@ -456,10 +456,10 @@ pub async fn ipv4_nexthop_sync(
         if let Some(Group::Multi(multi)) = nhop {
             let mut set = BTreeSet::<(usize, u8)>::new();
             for (m, v) in multi.set.iter() {
-                if let Some(Some(group)) = nmap.groups.get(*m) {
-                    if group.is_valid() {
-                        set.insert((*m, *v));
-                    }
+                if let Some(Some(group)) = nmap.groups.get(*m)
+                    && group.is_valid()
+                {
+                    set.insert((*m, *v));
                 }
             }
             multi_cache.insert(idx, set);
@@ -522,13 +522,13 @@ async fn ipv4_entry_selection(
     fib: &FibHandle,
     ifdown: bool,
 ) {
-    if let Some(mut replace) = replace {
-        if replace.is_protocol() {
-            if replace.is_fib() {
-                fib.route_ipv4_del(prefix, &replace).await;
-            }
-            replace.nexthop_unsync(nmap, fib).await;
+    if let Some(mut replace) = replace
+        && replace.is_protocol()
+    {
+        if replace.is_fib() {
+            fib.route_ipv4_del(prefix, &replace).await;
         }
+        replace.nexthop_unsync(nmap, fib).await;
     }
     // Selected.
     let prev = rib_prev(entries);
@@ -868,13 +868,13 @@ async fn ipv6_entry_selection(
         }
     }
 
-    if let Some(mut replace) = replace {
-        if replace.is_protocol() {
-            if replace.is_fib() {
-                fib.route_ipv6_del(prefix, &replace).await;
-            }
-            replace.nexthop_unsync(nmap, fib).await;
+    if let Some(mut replace) = replace
+        && replace.is_protocol()
+    {
+        if replace.is_fib() {
+            fib.route_ipv6_del(prefix, &replace).await;
         }
+        replace.nexthop_unsync(nmap, fib).await;
     }
 
     // Link-local prefixes (fe80::/10) are link-scoped: every interface

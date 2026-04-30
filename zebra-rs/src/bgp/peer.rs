@@ -427,10 +427,11 @@ impl Peer {
 
     pub fn is_afi_safi(&self, afi: Afi, safi: Safi) -> bool {
         let afi = CapMultiProtocol::new(&afi, &safi);
-        if let Some(cap) = self.cap_map.entries.get(&afi) {
-            if cap.send && cap.recv {
-                return true;
-            }
+        if let Some(cap) = self.cap_map.entries.get(&afi)
+            && cap.send
+            && cap.recv
+        {
+            return true;
         }
         false
     }

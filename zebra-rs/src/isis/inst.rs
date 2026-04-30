@@ -669,11 +669,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     }
 
     // TE Router ID. Prefer configured value, fall back to RIB-derived.
-    if top.config.segment_routing.is_some() {
-        if let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id) {
-            let te_router_id = IsisTlvTeRouterId { router_id };
-            lsp.tlvs.push(te_router_id.into());
-        }
+    if top.config.segment_routing.is_some()
+        && let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id)
+    {
+        let te_router_id = IsisTlvTeRouterId { router_id };
+        lsp.tlvs.push(te_router_id.into());
     }
 
     // IS Reachability.
@@ -1206,22 +1206,22 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
 }
 
 fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
-    if ilm.nhops.len() == 1 {
-        if let Some((&addr, nhop)) = ilm.nhops.iter().next() {
-            let mut uni = NexthopUni {
-                addr: std::net::IpAddr::V4(addr),
-                ifindex: nhop.ifindex,
-                ..Default::default()
-            };
-            if !nhop.adjacency {
-                uni.mpls_label.push(label);
-            }
-            return IlmEntry {
-                rtype: RibType::Isis,
-                ilm_type: ilm.ilm_type.clone(),
-                nexthop: Nexthop::Uni(uni),
-            };
+    if ilm.nhops.len() == 1
+        && let Some((&addr, nhop)) = ilm.nhops.iter().next()
+    {
+        let mut uni = NexthopUni {
+            addr: std::net::IpAddr::V4(addr),
+            ifindex: nhop.ifindex,
+            ..Default::default()
+        };
+        if !nhop.adjacency {
+            uni.mpls_label.push(label);
         }
+        return IlmEntry {
+            rtype: RibType::Isis,
+            ilm_type: ilm.ilm_type.clone(),
+            nexthop: Nexthop::Uni(uni),
+        };
     }
     let mut multi = NexthopMulti::default();
     for (&addr, nhop) in ilm.nhops.iter() {
@@ -1391,19 +1391,19 @@ fn build_rib_from_spf(
         let mut spf_nhops = BTreeMap::new();
         for p in &nhops.nexthops {
             // p.is_empty() means myself
-            if !p.is_empty() {
-                if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0]) {
-                    // Find nhop from links
-                    for (ifindex, link) in top.links.iter() {
-                        if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                            for (addr, _) in nbr.addr4.iter() {
-                                let nhop = SpfNexthop {
-                                    ifindex: *ifindex,
-                                    adjacency: p[0] == *node,
-                                    sys_id: Some(nhop_id.clone()),
-                                };
-                                spf_nhops.insert(*addr, nhop);
-                            }
+            if !p.is_empty()
+                && let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0])
+            {
+                // Find nhop from links
+                for (ifindex, link) in top.links.iter() {
+                    if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
+                        for (addr, _) in nbr.addr4.iter() {
+                            let nhop = SpfNexthop {
+                                ifindex: *ifindex,
+                                adjacency: p[0] == *node,
+                                sys_id: Some(nhop_id.clone()),
+                            };
+                            spf_nhops.insert(*addr, nhop);
                         }
                     }
                 }
