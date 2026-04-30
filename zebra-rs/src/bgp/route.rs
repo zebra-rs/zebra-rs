@@ -968,7 +968,7 @@ pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
         return;
     };
     let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
-    if peer.eor.get(&key).is_some() {
+    if peer.eor.contains_key(&key) {
         route_sync_vpnv4(peer, bgp);
     }
     peer.eor.clear();
@@ -1969,7 +1969,7 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     }
     if peer.is_afi_safi(Afi::Ip, Safi::MplsVpn) {
         let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
-        if peer.eor.get(&key).is_none() {
+        if !peer.eor.contains_key(&key) {
             route_sync_vpnv4(peer, bgp);
         }
     }

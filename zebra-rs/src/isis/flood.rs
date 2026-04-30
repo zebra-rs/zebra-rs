@@ -221,9 +221,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
 
         let total_base_len = packet_len + base_len + tlv_header_len;
 
-        let available_len = mtu - total_base_len;
-
-        available_len
+        mtu - total_base_len
     };
 
     // 16 is IsisLspEntry's length.

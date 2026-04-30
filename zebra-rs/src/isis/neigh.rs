@@ -240,7 +240,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         if let Some(label) = value.label {
             let _ = write!(buf, " ({})", label);
         }
-        let _ = writeln!(buf, "");
+        let _ = writeln!(buf);
     }
     if !nbr.addr6l.is_empty() {
         writeln!(buf, "    IPv6 Link-Locals")?;
@@ -255,7 +255,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
         writeln!(buf, "      {}", value.addr)?;
     }
 
-    writeln!(buf, "")?;
+    writeln!(buf)?;
     Ok(())
 }
 
