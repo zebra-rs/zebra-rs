@@ -107,17 +107,17 @@ fn start_hold_timer(peer: &Peer) -> Timer {
 
 pub fn start_adv_timer_ipv4(peer: &Peer) -> Timer {
     if peer.is_ibgp() {
-        start_timer!(peer, 5 as u64, Event::AdvTimerIpv4Expires)
+        start_timer!(peer, 5_u64, Event::AdvTimerIpv4Expires)
     } else {
-        start_timer!(peer, 30 as u64, Event::AdvTimerIpv4Expires)
+        start_timer!(peer, 30_u64, Event::AdvTimerIpv4Expires)
     }
 }
 
 pub fn start_adv_timer_vpnv4(peer: &Peer) -> Timer {
     if peer.is_ibgp() {
-        start_timer!(peer, 5 as u64, Event::AdvTimerVpnv4Expires)
+        start_timer!(peer, 5_u64, Event::AdvTimerVpnv4Expires)
     } else {
-        start_timer!(peer, 30 as u64, Event::AdvTimerVpnv4Expires)
+        start_timer!(peer, 30_u64, Event::AdvTimerVpnv4Expires)
     }
 }
 

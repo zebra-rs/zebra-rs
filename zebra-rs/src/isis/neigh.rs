@@ -135,8 +135,8 @@ fn show_mac(mac: Option<MacAddr>) -> String {
 pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     let mut nbrs: Vec<NeighborBrief> = vec![];
 
-    for (_, link) in top.links.iter() {
-        for (_key, nbr) in &link.state.nbrs.l1 {
+    for link in top.links.values() {
+        for nbr in link.state.nbrs.l1.values() {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id =
                 if let Some((hostname, _)) = top.hostname.get(&Level::L1).get(&nbr.sys_id) {
@@ -153,7 +153,7 @@ pub fn show(top: &Isis, _args: Args, json: bool) -> std::result::Result<String, 
                 snpa: show_mac(nbr.mac),
             });
         }
-        for (_key, nbr) in &link.state.nbrs.l2 {
+        for nbr in link.state.nbrs.l2.values() {
             let rem = nbr.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
             let system_id =
                 if let Some((hostname, _)) = top.hostname.get(&Level::L2).get(&nbr.sys_id) {
@@ -235,7 +235,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     if !nbr.addr4.is_empty() {
         writeln!(buf, "    IP Prefixes")?;
     }
-    for (_key, value) in &nbr.addr4 {
+    for value in nbr.addr4.values() {
         write!(buf, "      {}", value.addr)?;
         if let Some(label) = value.label {
             let _ = write!(buf, " ({})", label);
@@ -251,7 +251,7 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     if !nbr.addr6.is_empty() {
         writeln!(buf, "    IPv6 Prefixes")?;
     }
-    for (_, value) in &nbr.addr6 {
+    for value in nbr.addr6.values() {
         writeln!(buf, "      {}", value.addr)?;
     }
 
@@ -320,13 +320,13 @@ pub fn show_detail(
     if json {
         let mut neighbors: Vec<NeighborDetail> = Vec::new();
 
-        for (_, link) in top.links.iter() {
+        for link in top.links.values() {
             // Collect Level-1 neighbors
-            for (_, adj) in &link.state.nbrs.l1 {
+            for adj in link.state.nbrs.l1.values() {
                 neighbors.push(neighbor_to_detail(top, adj, Level::L1));
             }
             // Collect Level-2 neighbors
-            for (_, adj) in &link.state.nbrs.l2 {
+            for adj in link.state.nbrs.l2.values() {
                 neighbors.push(neighbor_to_detail(top, adj, Level::L2));
             }
         }
@@ -341,13 +341,13 @@ pub fn show_detail(
     let estimated_capacity = 512;
     let mut buf = String::with_capacity(estimated_capacity);
 
-    for (_, link) in top.links.iter() {
+    for link in top.links.values() {
         // Show Level-1 neighbors
-        for (_, adj) in &link.state.nbrs.l1 {
+        for adj in link.state.nbrs.l1.values() {
             show_entry(&mut buf, top, adj, Level::L1)?;
         }
         // Show Level-2 neighbors
-        for (_, adj) in &link.state.nbrs.l2 {
+        for adj in link.state.nbrs.l2.values() {
             show_entry(&mut buf, top, adj, Level::L2)?;
         }
     }
