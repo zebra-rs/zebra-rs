@@ -113,7 +113,7 @@ pub fn cleaf(entry: &Rc<Entry>) -> Completion {
     } else {
         format!("<{}>", entry.name)
     };
-    let help = entry.extension.get("ext:help").map_or_else(|| "", |v| v);
+    let help = entry.extension.get("ext:help").map_or("", |v| v);
     Completion {
         name: name.to_string(),
         help: help.to_string(),

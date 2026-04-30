@@ -34,3 +34,6 @@ nom-derive = { git = "https://github.com/rust-bakery/nom-derive", branch = "mast
 
 [dev-dependencies]
 hex-literal = "1.0"
+
+[lints]
+workspace = true

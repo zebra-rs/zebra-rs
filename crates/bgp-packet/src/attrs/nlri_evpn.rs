@@ -172,60 +172,6 @@ impl fmt::Display for EvpnPrefix {
     }
 }
 
-#[cfg(test)]
-mod evpn_prefix_tests {
-    use super::*;
-
-    #[test]
-    fn display_macip_no_ip() {
-        let p = EvpnPrefix::MacIp {
-            eth_tag: 0,
-            mac: [0xfe, 0xb2, 0x14, 0x6c, 0x11, 0x6c],
-            ip: None,
-        };
-        assert_eq!(p.to_string(), "[2]:[0]:[48]:[fe:b2:14:6c:11:6c]");
-    }
-
-    #[test]
-    fn display_macip_with_v4() {
-        let p = EvpnPrefix::MacIp {
-            eth_tag: 100,
-            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
-            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-        };
-        assert_eq!(
-            p.to_string(),
-            "[2]:[100]:[48]:[00:11:22:33:44:55]:[32]:[10.0.0.1]"
-        );
-    }
-
-    #[test]
-    fn display_inclusive_multicast_v4() {
-        let p = EvpnPrefix::InclusiveMulticast {
-            eth_tag: 0,
-            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
-        };
-        assert_eq!(p.to_string(), "[3]:[0]:[32]:[10.0.0.5]");
-    }
-
-    #[test]
-    fn route_type_numbers() {
-        let m = EvpnPrefix::MacIp {
-            eth_tag: 0,
-            mac: [0; 6],
-            ip: None,
-        };
-        let i = EvpnPrefix::InclusiveMulticast {
-            eth_tag: 0,
-            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        };
-        assert_eq!(m.route_type(), 2);
-        assert_eq!(i.route_type(), 3);
-        // Type 2 sorts before Type 3 (variant order).
-        assert!(m < i);
-    }
-}
-
 impl ParseNlri<EvpnRoute> for EvpnRoute {
     fn parse_nlri(input: &[u8], addpath: bool) -> IResult<&[u8], EvpnRoute> {
         let (input, id) = if addpath { be_u32(input)? } else { (input, 0) };
@@ -297,5 +243,59 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
             }
             _ => Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf))),
         }
+    }
+}
+
+#[cfg(test)]
+mod evpn_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn display_macip_no_ip() {
+        let p = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0xfe, 0xb2, 0x14, 0x6c, 0x11, 0x6c],
+            ip: None,
+        };
+        assert_eq!(p.to_string(), "[2]:[0]:[48]:[fe:b2:14:6c:11:6c]");
+    }
+
+    #[test]
+    fn display_macip_with_v4() {
+        let p = EvpnPrefix::MacIp {
+            eth_tag: 100,
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+        };
+        assert_eq!(
+            p.to_string(),
+            "[2]:[100]:[48]:[00:11:22:33:44:55]:[32]:[10.0.0.1]"
+        );
+    }
+
+    #[test]
+    fn display_inclusive_multicast_v4() {
+        let p = EvpnPrefix::InclusiveMulticast {
+            eth_tag: 0,
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        assert_eq!(p.to_string(), "[3]:[0]:[32]:[10.0.0.5]");
+    }
+
+    #[test]
+    fn route_type_numbers() {
+        let m = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0; 6],
+            ip: None,
+        };
+        let i = EvpnPrefix::InclusiveMulticast {
+            eth_tag: 0,
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        assert_eq!(m.route_type(), 2);
+        assert_eq!(i.route_type(), 3);
+        // Type 2 sorts before Type 3 (variant order).
+        assert!(m < i);
     }
 }

@@ -591,7 +591,7 @@ mod tests {
         let mut graph = BTreeMap::new();
 
         // Insert nodes
-        let nodes = vec![
+        let nodes = [
             Node::new("S", 0),
             Node::new("N1", 1),
             Node::new("N2", 2),
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn tilfa_test() {
-        let mut graph = tilfa_graph();
+        let graph = tilfa_graph();
 
         let node_name = |graph: &Graph, id: usize| graph.get(&id).map(|n| &n.name).unwrap().clone();
 
