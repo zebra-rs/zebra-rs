@@ -48,7 +48,7 @@ pub enum State {
 }
 
 impl State {
-    pub fn to_str(&self) -> &str {
+    pub fn to_str(self) -> &'static str {
         match self {
             Self::Idle => "Idle",
             Self::Connect => "Connect",

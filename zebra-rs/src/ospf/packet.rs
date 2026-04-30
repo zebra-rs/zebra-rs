@@ -24,9 +24,7 @@ use super::{
 };
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
-    let Some(addr) = oi.addr.first() else {
-        return None;
-    };
+    let addr = oi.addr.first()?;
     let mut hello = OspfHello::default();
     hello.netmask = addr.prefix.netmask();
     hello.hello_interval = oi.hello_interval();

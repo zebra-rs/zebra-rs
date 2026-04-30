@@ -46,7 +46,7 @@ pub fn ospf_packet_handler(attr: TokenStream, item: TokenStream) -> TokenStream 
     };
 
     // Replace the function body - need to wrap in Box
-    input_fn.block = Box::new(new_body);
+    *input_fn.block = new_body;
 
     TokenStream::from(quote! {
         #input_fn
