@@ -82,7 +82,7 @@ pub fn match_nsap_addr(src: &str) -> (MatchType, usize) {
     let area_id_bytes = middle_bytes - 6;
 
     // Area ID must be 1-13 octets (per ISO 10589)
-    if area_id_bytes < 1 || area_id_bytes > 13 {
+    if !(1..=13).contains(&area_id_bytes) {
         return (MatchType::None, pos);
     }
 

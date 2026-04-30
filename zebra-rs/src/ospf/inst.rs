@@ -789,7 +789,7 @@ impl Ospf {
             let link_state = link.state;
 
             // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
-            let is_source_iface = source.map_or(false, |(src_if, _)| src_if == ifindex);
+            let is_source_iface = source.is_some_and(|(src_if, _)| src_if == ifindex);
 
             // RFC 2328 Section 13.3 Step 3: If interface state is Backup and
             // LSA was received on this interface, do not flood back out.
@@ -1299,12 +1299,12 @@ pub struct LspMap {
 impl LspMap {
     fn get(&mut self, router_id: Ipv4Addr) -> usize {
         if let Some(index) = self.map.get(&router_id) {
-            return *index;
+            *index
         } else {
             let index = self.val.len();
             self.map.insert(router_id, index);
             self.val.push(router_id);
-            return index;
+            index
         }
     }
 
