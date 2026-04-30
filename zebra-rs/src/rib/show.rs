@@ -347,7 +347,7 @@ pub fn rib_entry_show(
                         }
                     }
                 }
-                writeln!(buf, "").unwrap();
+                writeln!(buf).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
@@ -449,7 +449,7 @@ pub fn rib_entry_show_v6(
                         }
                     }
                 }
-                writeln!(buf, "").unwrap();
+                writeln!(buf).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {

@@ -116,7 +116,7 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
                     socket::MsgFlags::empty(),
                     Some(&sockaddr),
                 )
-                .map_err(|e| std::io::Error::from(e))?;
+                .map_err(std::io::Error::from)?;
                 Ok(())
             })
             .await;
