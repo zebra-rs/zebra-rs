@@ -10,7 +10,7 @@ use crate::config::{Args, ConfigOp};
 use crate::policy;
 use crate::policy::com_list::*;
 
-use super::auth::{AoConfig, CryptoAlgorithm, Key, KeyChain};
+use super::auth::{AoConfig, CryptoAlgorithm, Key};
 use super::peer::BgpTop;
 use super::route_clean;
 use super::{
@@ -651,7 +651,7 @@ fn config_peer_tcp_ao_include_tcp_options(
 fn config_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     if op == ConfigOp::Set {
-        bgp.key_chains.entry(name).or_insert_with(KeyChain::new);
+        bgp.key_chains.entry(name).or_default();
     } else {
         bgp.key_chains.remove(&name);
     }
