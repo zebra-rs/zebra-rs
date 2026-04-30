@@ -26,10 +26,10 @@ impl LabelPool {
             return Some(index + self.begin);
         }
 
-        if let Some(end) = self.end {
-            if self.begin + self.allocated.len() > end {
-                return None;
-            }
+        if let Some(end) = self.end
+            && self.begin + self.allocated.len() > end
+        {
+            return None;
         }
 
         let new_label = self.allocated.len();

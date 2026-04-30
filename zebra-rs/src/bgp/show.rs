@@ -714,10 +714,10 @@ fn show_bgp_vpnv4_route(
                 writeln!(out, "    {}", attr_parts.join(", "))?;
 
                 // Display AS path if present
-                if let Some(aspath) = &rib.attr.aspath {
-                    if !aspath.segs.is_empty() {
-                        writeln!(out, "    AS path: {}", aspath)?;
-                    }
+                if let Some(aspath) = &rib.attr.aspath
+                    && !aspath.segs.is_empty()
+                {
+                    writeln!(out, "    AS path: {}", aspath)?;
                 }
 
                 // Display route reflection attributes if present (RFC 4456)
@@ -813,10 +813,10 @@ fn show_bgp_route_entry(
             writeln!(out, "    {}", attr_parts.join(", "))?;
 
             // Display AS path if present
-            if let Some(aspath) = &rib.attr.aspath {
-                if !aspath.segs.is_empty() {
-                    writeln!(out, "    AS path: {}", aspath)?;
-                }
+            if let Some(aspath) = &rib.attr.aspath
+                && !aspath.segs.is_empty()
+            {
+                writeln!(out, "    AS path: {}", aspath)?;
             }
 
             // Display route reflection attributes if present (RFC 4456)
@@ -1319,34 +1319,34 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         }
 
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
-            if cap.send || cap.recv {
-                writeln!(out, "    IPv4 Unicast: {}", cap.desc())?;
-            }
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv4 Unicast: {}", cap.desc())?;
         }
         let afi = CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
-            if cap.send || cap.recv {
-                writeln!(out, "    IPv6 Unicast: {}", cap.desc())?;
-            }
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv6 Unicast: {}", cap.desc())?;
         }
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
-            if cap.send || cap.recv {
-                writeln!(out, "    IPv4 MPLS VPN: {}", cap.desc())?;
-            }
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv4 MPLS VPN: {}", cap.desc())?;
         }
         let afi = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
-            if cap.send || cap.recv {
-                writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
-            }
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    L2VPN EVPN: {}", cap.desc())?;
         }
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::Rtc);
-        if let Some(cap) = neighbor.cap_map.entries.get(&afi) {
-            if cap.send || cap.recv {
-                writeln!(out, "    IPv4 RTC: {}", cap.desc())?;
-            }
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv4 RTC: {}", cap.desc())?;
         }
 
         if !neighbor.cap_send.addpath.is_empty() || !neighbor.cap_recv.addpath.is_empty() {

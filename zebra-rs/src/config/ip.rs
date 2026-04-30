@@ -236,10 +236,10 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
         if nums > 11 || colons > 7 {
             return (MatchType::None, i);
         }
-        if let Some(&curr) = bytes.get(i) {
-            if curr == b' ' {
-                break;
-            }
+        if let Some(&curr) = bytes.get(i)
+            && curr == b' '
+        {
+            break;
         }
         i += 1;
     }

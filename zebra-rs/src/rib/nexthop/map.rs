@@ -139,26 +139,26 @@ impl NexthopMap {
     pub async fn shutdown(&mut self, fib: &FibHandle) {
         for (_, id) in self.set.iter() {
             let entry = self.get(*id);
-            if let Some(grp) = entry {
-                if grp.is_installed() {
-                    fib.nexthop_del(grp).await;
-                }
+            if let Some(grp) = entry
+                && grp.is_installed()
+            {
+                fib.nexthop_del(grp).await;
             }
         }
         for (_, id) in self.map.iter() {
             let entry = self.get(*id);
-            if let Some(grp) = entry {
-                if grp.is_installed() {
-                    fib.nexthop_del(grp).await;
-                }
+            if let Some(grp) = entry
+                && grp.is_installed()
+            {
+                fib.nexthop_del(grp).await;
             }
         }
         for (_, id) in self.mpls.iter() {
             let entry = self.get(*id);
-            if let Some(grp) = entry {
-                if grp.is_installed() {
-                    fib.nexthop_del(grp).await;
-                }
+            if let Some(grp) = entry
+                && grp.is_installed()
+            {
+                fib.nexthop_del(grp).await;
             }
         }
     }
