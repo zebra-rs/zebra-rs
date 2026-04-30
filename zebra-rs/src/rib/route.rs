@@ -627,7 +627,7 @@ fn resolve_nexthop_uni(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
 ) -> bool {
-    let Some(Group::Uni(group)) = nmap.fetch(&uni) else {
+    let Some(Group::Uni(group)) = nmap.fetch(uni) else {
         return false;
     };
     if group.refcnt() == 0 {
@@ -1098,7 +1098,7 @@ fn resolve_nexthop_uni_v6(
             uni.addr, uni.gid
         );
     }
-    let Some(Group::Uni(group)) = nmap.fetch(&uni) else {
+    let Some(Group::Uni(group)) = nmap.fetch(uni) else {
         if DEBUG_V6 {
             println!("[resolve_nexthop_uni_v6] nmap.fetch returned None");
         }

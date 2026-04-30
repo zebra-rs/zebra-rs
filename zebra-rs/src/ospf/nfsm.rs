@@ -229,7 +229,7 @@ pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {
 
 pub fn ospf_ls_req_timer(nbr: &Neighbor) -> Timer {
     let tx = nbr.tx.clone();
-    let prefix = nbr.ident.prefix.clone();
+    let prefix = nbr.ident.prefix;
     let ifindex = nbr.ifindex;
     Timer::new(Timer::second(1), TimerType::Once, move || {
         use NfsmEvent::*;
@@ -257,7 +257,7 @@ pub fn ospf_nfsm_ignore(
 
 pub fn ospf_inactivity_timer(nbr: &Neighbor) -> Timer {
     let tx = nbr.tx.clone();
-    let prefix = nbr.ident.prefix.clone();
+    let prefix = nbr.ident.prefix;
     let ifindex = nbr.ifindex;
     Timer::new(Timer::second(40), TimerType::Once, move || {
         use NfsmEvent::*;

@@ -19,7 +19,7 @@ pub struct NexthopMap {
 
 impl Group {
     pub fn from_nexthop_uni(uni: &NexthopUni, gid: usize) -> Self {
-        Group::Uni(GroupUni::new(gid, &uni))
+        Group::Uni(GroupUni::new(gid, uni))
     }
 }
 

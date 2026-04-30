@@ -865,7 +865,7 @@ pub fn peer_send_open(peer: &mut Peer) {
 
     for (afi_safi, _) in peer.config.mp.0.iter() {
         let cap = CapMultiProtocol::new(&afi_safi.afi, &afi_safi.safi);
-        bgp_cap.mp.insert(afi_safi.clone(), cap);
+        bgp_cap.mp.insert(*afi_safi, cap);
     }
     if peer.config.four_octet {
         let cap = CapAs4::new(peer.local_as);
@@ -879,16 +879,16 @@ pub fn peer_send_open(peer: &mut Peer) {
         bgp_cap.extended = Some(CapExtended::default());
     }
     for (key, addpath) in peer.config.addpath.iter() {
-        bgp_cap.addpath.insert(key.clone(), addpath.clone());
+        bgp_cap.addpath.insert(*key, addpath.clone());
     }
     for (key, sub) in peer.config.sub.iter() {
         if let Some(_restart_time) = sub.graceful_restart {
             let restart = RestartValue::new(1, key.afi, key.safi);
-            bgp_cap.restart.insert(key.clone(), restart);
+            bgp_cap.restart.insert(*key, restart);
         }
         if let Some(llgr_time) = sub.llgr {
             let llgr = LlgrValue::new(key.afi, key.safi, llgr_time);
-            bgp_cap.llgr.insert(key.clone(), llgr);
+            bgp_cap.llgr.insert(*key, llgr);
         }
     }
 

@@ -72,7 +72,7 @@ pub struct IsisLinks {
 
 impl IsisLinks {
     pub fn get(&self, key: &u32) -> Option<&IsisLink> {
-        self.map.get(&key)
+        self.map.get(key)
     }
 
     pub fn get_mut(&mut self, key: &u32) -> Option<&mut IsisLink> {

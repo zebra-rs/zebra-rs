@@ -367,7 +367,7 @@ pub fn csnp_recv(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     // TODO: Need to check CSNP's LSP ID start and end.
     let mut lsdb: BTreeMap<IsisLspId, u32> = BTreeMap::new();
     for (_, lsa) in link.lsdb.get(&level).iter() {
-        lsdb.insert(lsa.lsp.lsp_id.clone(), lsa.lsp.seq_number);
+        lsdb.insert(lsa.lsp.lsp_id, lsa.lsp.seq_number);
     }
 
     // 7.3.15.2 b
@@ -376,7 +376,7 @@ pub fn csnp_recv(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
             for lsp in &tlv.entries {
                 match lsdb
                     .get(&lsp.lsp_id)
-                    .map(|seq_number| lsp.seq_number.cmp(&seq_number))
+                    .map(|seq_number| lsp.seq_number.cmp(seq_number))
                 {
                     Some(Ordering::Greater) => {
                         // 7.3.15.2 b.4
@@ -461,7 +461,7 @@ pub fn srm_set_for_all_lsp(link: &mut LinkTop, level: Level) {
         .lsdb
         .get(&level)
         .iter()
-        .map(|(lsp_id, _)| lsp_id.clone())
+        .map(|(lsp_id, _)| *lsp_id)
         .collect();
 
     for lsp_id in lsp_ids.iter() {

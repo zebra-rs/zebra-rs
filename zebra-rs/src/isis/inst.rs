@@ -471,7 +471,7 @@ impl Isis {
 pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<u32>) -> IsisLsp {
     let neighbor_id = if let Some(link) = top.links.get(&ifindex) {
         if let Some((adj, _)) = link.state.adj.get(&level) {
-            adj.clone()
+            *adj
         } else {
             IsisNeighborId::default()
         }
@@ -519,7 +519,7 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
     if let Some(link) = top.links.get(&ifindex) {
         for (sys_id, nbr) in link.state.nbrs.get(&level).iter() {
             if nbr.state == NfsmState::Up {
-                let neighbor_id = IsisNeighborId::from_sys_id(&sys_id, 0);
+                let neighbor_id = IsisNeighborId::from_sys_id(sys_id, 0);
                 let entry = IsisTlvExtIsReachEntry {
                     neighbor_id,
                     metric: 0,
@@ -568,7 +568,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             "[LspOriginate] seq number reached maximum, purging LSP"
         );
         // TODO: After age out, we need to originate a new one with seq 1.
-        let _ = top.tx.send(Message::LspPurge(level, lsp_id.clone()));
+        let _ = top.tx.send(Message::LspPurge(level, lsp_id));
         return IsisLsp::default();
     }
 
@@ -685,7 +685,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         // Ext IS Reach.
         let mut ext_is_reach = IsisTlvExtIsReach::default();
         let mut is_reach = IsisTlvExtIsReachEntry {
-            neighbor_id: adj.clone(),
+            neighbor_id: *adj,
             metric: link.config.metric(),
             subs: Vec::new(),
         };
@@ -704,7 +704,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                         let sub = IsisSubLanAdjSid {
                             flags: AdjSidFlags::lan_adj_flag_ipv4(),
                             weight: 0,
-                            system_id: nbr.sys_id.clone(),
+                            system_id: nbr.sys_id,
                             sid: SidLabelValue::Label(label),
                         };
                         is_reach.subs.push(neigh::IsisSubTlv::LanAdjSid(sub));
@@ -768,7 +768,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                     let entry = IsisTlvIpv6ReachEntry {
                         metric: 10,
                         flags,
-                        prefix: v6addr.clone(),
+                        prefix: *v6addr,
                         subs: Vec::new(),
                     };
                     ipv6_reach.entries.push(entry);
@@ -946,12 +946,12 @@ pub struct LspMap {
 
 impl LspMap {
     pub fn get(&mut self, sys_id: &IsisSysId) -> usize {
-        if let Some(index) = self.map.get(&sys_id) {
+        if let Some(index) = self.map.get(sys_id) {
             *index
         } else {
             let index = self.val.len();
-            self.map.insert(sys_id.clone(), index);
-            self.val.push(sys_id.clone());
+            self.map.insert(*sys_id, index);
+            self.val.push(*sys_id);
             index
         }
     }
@@ -974,7 +974,7 @@ pub fn graph(
     let mut nodes_to_process = Vec::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
         if !lsa.lsp.lsp_id.is_pseudo() {
-            let sys_id = lsa.lsp.lsp_id.sys_id().clone();
+            let sys_id = lsa.lsp.lsp_id.sys_id();
             let is_originated = lsa.originated;
             let lsp = lsa.lsp.clone();
             nodes_to_process.push((sys_id, is_originated, lsp));
@@ -1055,7 +1055,7 @@ fn process_neighbor_link(
     entry: &IsisTlvExtIsReachEntry,
     links: &mut Vec<spf::Link>,
 ) {
-    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.clone().into();
+    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
 
     if let Some(neighbor_lsa) = top.lsdb.get(&level).get(&neighbor_lsp_id) {
         // Look up the neighbor's LSP
@@ -1104,7 +1104,7 @@ fn collect_adjacency_sids(lsp: &IsisLsp, sids: &mut BTreeMap<u32, IsisSysId>) {
                     if let neigh::IsisSubTlv::LanAdjSid(adj_sid) = sub
                         && let SidLabelValue::Label(label) = adj_sid.sid
                     {
-                        sids.insert(label, adj_sid.system_id.clone());
+                        sids.insert(label, adj_sid.system_id);
                     }
                 }
             }
@@ -1347,7 +1347,7 @@ fn build_adjacency_ilm(
                     let nhop = SpfNexthop {
                         ifindex: *ifindex,
                         adjacency: true,
-                        sys_id: Some(nhop_id.clone()),
+                        sys_id: Some(*nhop_id),
                     };
                     nhops.insert(*addr, nhop);
                 }
@@ -1401,7 +1401,7 @@ fn build_rib_from_spf(
                             let nhop = SpfNexthop {
                                 ifindex: *ifindex,
                                 adjacency: p[0] == *node,
-                                sys_id: Some(nhop_id.clone()),
+                                sys_id: Some(*nhop_id),
                             };
                             spf_nhops.insert(*addr, nhop);
                         }
@@ -1411,7 +1411,7 @@ fn build_rib_from_spf(
         }
 
         // Process reachability entries for this node.
-        if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) {
+        if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(sys_id) {
             for entry in entries.iter() {
                 let sid = if let Some(prefix_sid) = entry.prefix_sid() {
                     match prefix_sid.sid {
@@ -1419,7 +1419,7 @@ fn build_rib_from_spf(
                         SidLabelValue::Index(index) => top
                             .label_map
                             .get(&level)
-                            .get(&sys_id)
+                            .get(sys_id)
                             .map(|block| block.global.start + index),
                         SidLabelValue::Label(label) => Some(label),
                     }
@@ -1428,7 +1428,7 @@ fn build_rib_from_spf(
                 };
 
                 let prefix_sid = if let Some(prefix_sid) = entry.prefix_sid()
-                    && let Some(block) = top.label_map.get(&level).get(&sys_id)
+                    && let Some(block) = top.label_map.get(&level).get(sys_id)
                 {
                     Some((prefix_sid.sid.clone(), block.clone()))
                 } else {
