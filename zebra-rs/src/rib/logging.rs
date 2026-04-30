@@ -498,7 +498,7 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                         .unwrap_or_else(|| std::path::Path::new("."));
 
                     // Try to create directory and test write permission
-                    if let Ok(_) = std::fs::create_dir_all(parent) {
+                    if std::fs::create_dir_all(parent).is_ok() {
                         // Test write permission by trying to create a temp file
                         let test_file = parent.join(".zebra_write_test");
                         if std::fs::write(&test_file, "test").is_ok() {
@@ -585,7 +585,7 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                         .unwrap_or_else(|| std::path::Path::new("."));
 
                     // Try to create directory and test write permission
-                    if let Ok(_) = std::fs::create_dir_all(parent) {
+                    if std::fs::create_dir_all(parent).is_ok() {
                         // Test write permission by trying to create a temp file
                         let test_file = parent.join(".zebra_write_test");
                         if std::fs::write(&test_file, "test").is_ok() {
@@ -677,7 +677,7 @@ pub fn setup_tracing_with_format(output: LoggingOutput, format: LogFormat) -> an
                         .unwrap_or_else(|| std::path::Path::new("."));
 
                     // Try to create directory and test write permission
-                    if let Ok(_) = std::fs::create_dir_all(parent) {
+                    if std::fs::create_dir_all(parent).is_ok() {
                         // Test write permission by trying to create a temp file
                         let test_file = parent.join(".zebra_write_test");
                         if std::fs::write(&test_file, "test").is_ok() {

@@ -187,19 +187,11 @@ fn show_local_pref(attr: &BgpAttr) -> String {
 }
 
 fn show_med2(attr: &BgpAttr) -> Option<u32> {
-    if let Some(attr) = &attr.med {
-        Some(attr.med)
-    } else {
-        None
-    }
+    attr.med.as_ref().map(|a| a.med)
 }
 
 fn show_local_pref2(attr: &BgpAttr) -> Option<u32> {
-    if let Some(attr) = &attr.local_pref {
-        Some(attr.local_pref)
-    } else {
-        None
-    }
+    attr.local_pref.as_ref().map(|a| a.local_pref)
 }
 
 fn show_aspath(attr: &BgpAttr) -> String {
