@@ -14,7 +14,7 @@ use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Show
 use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
-use crate::rib::route::{ipv4_nexthop_sync, ipv4_route_sync};
+use crate::rib::route::{ipv4_nexthop_sync, ipv4_route_sync, ipv6_nexthop_sync, ipv6_route_sync};
 use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
@@ -350,15 +350,22 @@ impl Rib {
                 self.link_delete(link);
             }
             FibMessage::NewAddr(addr) => {
-                self.addr_add(addr);
+                // Kernel netlink path: from_config=false. If a configured
+                // LinkAddr is already present for this address, the merge in
+                // link_addr_update will flip its `fib` flag to true.
+                self.addr_add(addr, false);
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+                ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+                ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
                 self.addr_del(addr);
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+                ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+                ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {

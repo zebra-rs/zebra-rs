@@ -110,7 +110,7 @@ pub async fn delete_bridge(bridge_name: &str) -> Result<()> {
 }
 
 /// Create a veth pair and connect namespace to bridge with IP
-pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str, ip: &str) -> Result<()> {
+pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str) -> Result<()> {
     let veth_host = format!("v{}", netns);
     let veth_ns = format!("v{}ns", netns);
 
@@ -147,9 +147,6 @@ pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str, ip: &str) -
     // Bring up namespace veth
     exec_in_netns(netns, "ip", &["link", "set", &veth_ns, "up"]).await?;
 
-    // Assign IP address
-    exec_in_netns(netns, "ip", &["addr", "add", ip, "dev", &veth_ns]).await?;
-
     Ok(())
 }
 
@@ -181,4 +178,55 @@ pub async fn spawn_in_netns(
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("Failed to spawn {} in netns {}", cmd, netns))
+}
+
+/// Bring the namespace-side veth (the one created by connect_netns_to_bridge)
+/// administratively up or down.
+pub async fn set_link_state(netns: &str, up: bool) -> Result<()> {
+    let veth_ns = format!("v{}ns", netns);
+    set_interface_state(netns, &veth_ns, up).await
+}
+
+/// Bring an arbitrary interface inside a namespace administratively up or down.
+pub async fn set_interface_state(netns: &str, interface: &str, up: bool) -> Result<()> {
+    let state = if up { "up" } else { "down" };
+    exec_in_netns(netns, "ip", &["link", "set", interface, state]).await?;
+    Ok(())
+}
+
+/// Kill all zebra-rs processes on the host (across all namespaces).
+/// Errors are ignored — it's fine if no process is running.
+pub async fn killall_zebra_rs() -> Result<()> {
+    let _ = Command::new("sudo")
+        .args(["killall", "-9", "zebra-rs"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    Ok(())
+}
+
+/// Ping an IPv6 target from inside a namespace. Returns true on success,
+/// false on failure. Errors only when the ping process itself cannot be run.
+pub async fn ping6(netns: &str, target: &str, count: u32, timeout_secs: u32) -> Result<bool> {
+    let count_str = count.to_string();
+    let timeout_str = timeout_secs.to_string();
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("netns")
+        .arg("exec")
+        .arg(netns)
+        .arg("ping")
+        .arg("-6")
+        .arg("-c")
+        .arg(&count_str)
+        .arg("-W")
+        .arg(&timeout_str)
+        .arg(target)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("Failed to ping {} from netns {}", target, netns))?;
+    Ok(output.status.success())
 }

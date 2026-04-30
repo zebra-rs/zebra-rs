@@ -1,25 +1,25 @@
-# BGP RR tests with gobgpd clients
+# BGP RR tests with gobgpd clients and etcd
 
 ## Overview
 
 As a network operator
-I want to test zebra-rs BGP RR functionality with gobgpd clients
-Using a test topology with one zebra-rs RR and 29 gobgpd RR clients
+I want to test zebra-rs BGP RR functionality with gobgpd clients and etcd backend
+Using a test topology with one zebra-rs RR, etcd, and 29 gobgpd RR clients
 
 ## Test Topology
 
 ```
-                            ┌─────────────┐
-                            │     rr      │
-                            │ (zebra-rs)  │
-                            │   AS64512   │
-                            │    (RR)     │
-                            │ 198.18.39.94│
-                            │  Cluster-ID │
-                            │ 198.18.39.94│
-                            └──────┬──────┘
-                                   │
-  ┌────────────────────────────────┴────────────────────────────────────────────┐
+                     ┌─────────────┐     ┌─────────────┐
+                     │     rr      │     │    etcd     │
+                     │ (zebra-rs)  │────▶│             │
+                     │   AS64512   │     │  Key-Value  │
+                     │    (RR)     │     │    Store    │
+                     │ 198.18.39.94│     │             │
+                     │  Cluster-ID │     │             │
+                     │ 198.18.39.94│     │             │
+                     └──────┬──────┘     └─────────────┘
+                            │
+  ┌─────────────────────────┴───────────────────────────────────────────────────┐
   │                                    br0                                      │
   └───┬─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬───┘
       │             │             │             │             │             │
@@ -37,6 +37,7 @@ Using a test topology with one zebra-rs RR and 29 gobgpd RR clients
 
 - rr.yaml: AS 64512, zebra-rs RR with cluster-id 198.18.39.94, peers to all gobgpd clients
 - gobgpd clients configured as RR clients with l3vpn-ipv4-unicast AFI/SAFI
+- etcd: Key-value store backend for zebra-rs configuration
 
 ## Test Scenarios
 
