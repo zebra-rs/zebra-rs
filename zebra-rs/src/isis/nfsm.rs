@@ -34,11 +34,11 @@ pub enum NfsmEvent {
 
 pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
     let tx = nbr.tx.clone();
-    let sys_id = nbr.sys_id.clone();
+    let sys_id = nbr.sys_id;
     let ifindex = nbr.ifindex;
     Timer::once(nbr.hold_time as u64, move || {
         let tx = tx.clone();
-        let sys_id = sys_id.clone();
+        let sys_id = sys_id;
         async move {
             tx.send(Message::Nfsm(
                 NfsmEvent::HoldTimerExpire,

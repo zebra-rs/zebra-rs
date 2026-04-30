@@ -125,7 +125,7 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         IsisTlvP2p3Way {
             state: nbr.state.into(),
             circuit_id: link.ifindex,
-            neighbor_id: Some(nbr.sys_id.clone()),
+            neighbor_id: Some(nbr.sys_id),
             neighbor_circuit_id: nbr.circuit_id,
         }
     } else {
@@ -254,7 +254,7 @@ pub fn dis_dropping(link: &mut LinkTop, level: Level) {
     };
 
     // Create pseudonode LSP ID from the adjacency
-    let pseudonode_lsp_id = IsisLspId::from_neighbor_id(adj.clone(), 0);
+    let pseudonode_lsp_id = IsisLspId::from_neighbor_id(*adj, 0);
 
     // Send purge message to the main IS-IS instance
     link.tx
@@ -313,7 +313,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     // Reset current status.
     let mut best_sys_id: Option<IsisSysId> = None;
     let mut best_priority = link.config.priority();
-    let mut best_mac = link.state.mac.clone();
+    let mut best_mac = link.state.mac;
 
     // We will check at least one Up state neighbor exists.
     let mut nbrs_up = 0;
@@ -331,8 +331,8 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
 
         if is_better(nbr, best_priority, &best_mac) {
             best_priority = nbr.priority;
-            best_mac = nbr.mac.clone();
-            best_sys_id = Some(sys_id.clone());
+            best_mac = nbr.mac;
+            best_sys_id = Some(*sys_id);
         }
         nbrs_up += 1;
     }
@@ -361,7 +361,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             mac_str(&nbr.mac),
         );
         let lan_id = if !nbr.lan_id.is_empty() {
-            Some(nbr.lan_id.clone())
+            Some(nbr.lan_id)
         } else {
             None
         };
@@ -412,7 +412,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 if link.state.adj.get(&level).is_none()
                     && let Some(lan_id) = lan_id
                 {
-                    *link.state.adj.get_mut(&level) = Some((lan_id.clone(), None));
+                    *link.state.adj.get_mut(&level) = Some((lan_id, None));
                     link.lsdb.get_mut(&level).adj_set(link.ifindex);
                     link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
                 }

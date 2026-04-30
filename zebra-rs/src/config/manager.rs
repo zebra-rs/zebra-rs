@@ -219,8 +219,7 @@ impl ConfigManager {
                 }
                 let paths = paths.unwrap();
                 for (_, tx) in self.cm_clients.borrow().iter() {
-                    tx.send(ConfigRequest::new(paths.clone(), op.clone()))
-                        .unwrap();
+                    tx.send(ConfigRequest::new(paths.clone(), op)).unwrap();
                 }
             }
         }
