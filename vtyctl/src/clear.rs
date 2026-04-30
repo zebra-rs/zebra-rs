@@ -12,7 +12,7 @@ pub mod vtysh {
     tonic::include_proto!("vtysh");
 }
 
-pub async fn clear(host: &String, command: &String) -> Result<()> {
+pub async fn clear(host: &str, command: &str) -> Result<()> {
     if command.is_empty() {
         eprintln!("vtyctl clear: command argument is required");
         eprintln!("Usage: vtyctl clear <command>");
@@ -31,7 +31,7 @@ pub async fn clear(host: &String, command: &String) -> Result<()> {
         r#type: ExecType::Exec as i32,
         mode: String::from("configure"),
         privilege: 15,
-        line: command.clone(),
+        line: command.to_string(),
         args: Vec::new(),
         ..Default::default()
     };
@@ -47,7 +47,7 @@ pub async fn clear(host: &String, command: &String) -> Result<()> {
     };
 
     let request = ClearRequest {
-        line: command.clone(),
+        line: command.to_string(),
         paths: reply.paths,
     };
 

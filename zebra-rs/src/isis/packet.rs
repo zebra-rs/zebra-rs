@@ -50,7 +50,7 @@ impl NeighborAddr6 {
 
 pub fn nbr_hello_interpret(
     nbr: &mut Neighbor,
-    tlvs: &Vec<IsisTlv>,
+    tlvs: &[IsisTlv],
     mac: Option<MacAddr>,
     sys_id: IsisSysId,
     local_pool: &mut Option<LabelPool>,
