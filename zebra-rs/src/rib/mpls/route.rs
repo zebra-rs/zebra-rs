@@ -52,6 +52,6 @@ impl MplsRoute {
             multi.nexthops.push(nhop);
         }
         ilm.nexthop = Nexthop::Multi(multi);
-        return Some(ilm);
+        Some(ilm)
     }
 }

@@ -87,15 +87,15 @@ impl RibEntry {
 
     pub fn is_valid_nexthop(&self, nmap: &NexthopMap) -> bool {
         match &self.nexthop {
-            Nexthop::Uni(uni) => nmap.get(uni.gid).map_or(false, |group| group.is_valid()),
+            Nexthop::Uni(uni) => nmap.get(uni.gid).is_some_and(|group| group.is_valid()),
             Nexthop::Multi(multi) => multi
                 .nexthops
                 .iter()
-                .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid())),
+                .any(|nhop| nmap.get(nhop.gid).is_some_and(|group| group.is_valid())),
             Nexthop::List(pro) => pro
                 .nexthops
                 .iter()
-                .any(|nhop| nmap.get(nhop.gid).map_or(false, |group| group.is_valid())),
+                .any(|nhop| nmap.get(nhop.gid).is_some_and(|group| group.is_valid())),
             _ => false,
         }
     }

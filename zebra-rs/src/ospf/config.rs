@@ -163,11 +163,7 @@ fn config_ospf_interface_enable(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
 
-    if op.is_set() && enable {
-        link.config.enable = true;
-    } else {
-        link.config.enable = false;
-    }
+    link.config.enable = op.is_set() && enable;
 
     let (next, next_id) = link_should_enable(link, &ospf.table);
     apply_link_enable_transition(link, next, next_id);
@@ -258,11 +254,7 @@ fn config_ospf_interface_mtu_ignore(ospf: &mut Ospf, mut args: Args, op: ConfigO
     let mtu_ignore = args.boolean()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    if op.is_set() && mtu_ignore {
-        link.config.mtu_ignore = true;
-    } else {
-        link.config.mtu_ignore = false;
-    }
+    link.config.mtu_ignore = op.is_set() && mtu_ignore;
 
     Some(())
 }
