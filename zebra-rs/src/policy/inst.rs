@@ -67,10 +67,10 @@ impl PolicyRxChannel {
 }
 
 pub trait Syncer {
-    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet);
-    fn prefix_set_remove(&self, name: &String);
-    fn policy_list_update(&self, name: &String, policy_list: &PolicyList);
-    fn policy_list_remove(&self, name: &String);
+    fn prefix_set_update(&self, name: &str, prefix_set: &PrefixSet);
+    fn prefix_set_remove(&self, name: &str);
+    fn policy_list_update(&self, name: &str, policy_list: &PolicyList);
+    fn policy_list_remove(&self, name: &str);
 }
 
 pub struct PolicySyncer<'a> {
@@ -79,13 +79,13 @@ pub struct PolicySyncer<'a> {
 }
 
 impl<'a> Syncer for PolicySyncer<'a> {
-    fn prefix_set_update(&self, name: &String, prefix_set: &PrefixSet) {
+    fn prefix_set_update(&self, name: &str, prefix_set: &PrefixSet) {
         // Notify all watchers of this prefix-set update
         if let Some(watches) = self.watch_map.get(name) {
             for watch in watches {
                 if let Some(tx) = self.clients.get(&watch.proto) {
                     let msg = PolicyRx::PrefixSet {
-                        name: name.clone(),
+                        name: name.to_string(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
                         prefix_set: Some(prefix_set.clone()),
@@ -96,12 +96,12 @@ impl<'a> Syncer for PolicySyncer<'a> {
         }
     }
 
-    fn prefix_set_remove(&self, name: &String) {
+    fn prefix_set_remove(&self, name: &str) {
         if let Some(watches) = self.watch_map.get(name) {
             for watch in watches {
                 if let Some(tx) = self.clients.get(&watch.proto) {
                     let msg = PolicyRx::PrefixSet {
-                        name: name.clone(),
+                        name: name.to_string(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
                         prefix_set: None,
@@ -112,12 +112,12 @@ impl<'a> Syncer for PolicySyncer<'a> {
         }
     }
 
-    fn policy_list_update(&self, name: &String, policy_list: &PolicyList) {
+    fn policy_list_update(&self, name: &str, policy_list: &PolicyList) {
         if let Some(watches) = self.watch_map.get(name) {
             for watch in watches {
                 if let Some(tx) = self.clients.get(&watch.proto) {
                     let msg = PolicyRx::PolicyList {
-                        name: name.clone(),
+                        name: name.to_string(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
                         policy_list: Some(policy_list.clone()),
@@ -128,12 +128,12 @@ impl<'a> Syncer for PolicySyncer<'a> {
         }
     }
 
-    fn policy_list_remove(&self, name: &String) {
+    fn policy_list_remove(&self, name: &str) {
         if let Some(watches) = self.watch_map.get(name) {
             for watch in watches {
                 if let Some(tx) = self.clients.get(&watch.proto) {
                     let msg = PolicyRx::PolicyList {
-                        name: name.clone(),
+                        name: name.to_string(),
                         ident: watch.ident,
                         policy_type: watch.policy_type,
                         policy_list: None,
