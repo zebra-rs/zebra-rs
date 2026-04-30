@@ -10,3 +10,6 @@ description = "Fixed length buffer with capacity"
 bytes = "1"
 byteorder = "1"
 thiserror = "2"
+
+[lints]
+workspace = true

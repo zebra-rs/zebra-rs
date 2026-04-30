@@ -3,8 +3,8 @@ name = "zebra-rs"
 version.workspace = true
 edition.workspace = true
 
-[lints.rust]
-#unused = "allow"
+[lints]
+workspace = true
 
 #[profile.release]
 #debug = true

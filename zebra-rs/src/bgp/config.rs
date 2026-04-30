@@ -243,15 +243,9 @@ fn config_route_reflector(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     let addr = args.addr()?;
     let flag = args.boolean()?;
 
-    let Some(peer) = bgp.peers.get_mut(&addr) else {
-        return None;
-    };
+    let peer = bgp.peers.get_mut(&addr)?;
 
-    if op.is_set() && flag {
-        peer.reflector_client = true;
-    } else {
-        peer.reflector_client = false;
-    }
+    peer.reflector_client = op.is_set() && flag;
     None
 }
 

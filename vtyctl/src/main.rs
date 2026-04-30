@@ -63,7 +63,7 @@ enum Commands {
 
 fn print_help() {
     eprintln!("`vtyctl' controls zebra-rs configuration and show commands.");
-    eprintln!("");
+    eprintln!();
     eprintln!("Basic Commands:");
     eprintln!("  apply       Apply configuration.");
     eprintln!("  clear       Clear commands.");

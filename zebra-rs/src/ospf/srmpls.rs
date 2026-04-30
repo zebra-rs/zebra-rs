@@ -52,7 +52,7 @@ pub fn router_info_lsa_build(router_id: Ipv4Addr) -> OspfLsa {
 
     // Opaque Area LSA: ls_id encodes opaque type (4=RouterInfo) in first byte,
     // opaque ID (0) in remaining 3 bytes.
-    let ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | 0);
+    let ls_id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
     let mut lsah = OspfLsaHeader::new(OspfLsType::OpaqueAreaLocal, ls_id, router_id);
     lsah.options = 0x42; // O-bit (Opaque capable) + E-bit.
 

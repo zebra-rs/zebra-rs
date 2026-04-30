@@ -161,7 +161,7 @@ impl FromStr for CommunityMatcher {
     type Err = ();
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        if input.starts_with("rt:") {
+        if let Some(value_str) = input.strip_prefix("rt:") {
             // Try to parse as exact route target (e.g., "rt:100:200" or "rt:1.2.3.4:100")
             if let Ok(ext_com) = ExtCommunity::from_str(input) {
                 // Successfully parsed as exact extended community
@@ -173,7 +173,6 @@ impl FromStr for CommunityMatcher {
             }
 
             // If exact parse failed, treat as regex pattern (e.g., "rt:^62692:.*$")
-            let value_str = &input[3..]; // Skip "rt:" prefix for regex pattern
             let Ok(compiled) = CompiledRegex::new(value_str) else {
                 return Err(());
             };
@@ -183,7 +182,7 @@ impl FromStr for CommunityMatcher {
             )));
         }
 
-        if input.starts_with("soo:") {
+        if let Some(value_str) = input.strip_prefix("soo:") {
             // Try to parse as exact site of origin (e.g., "soo:100:200")
             if let Ok(ext_com) = ExtCommunity::from_str(input) {
                 if let Some(first) = ext_com.0.first() {
@@ -194,7 +193,6 @@ impl FromStr for CommunityMatcher {
             }
 
             // If exact parse failed, treat as regex pattern
-            let value_str = &input[4..]; // Skip "soo:" prefix for regex pattern
             let Ok(compiled) = CompiledRegex::new(value_str) else {
                 return Err(());
             };

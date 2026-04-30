@@ -38,3 +38,6 @@ thiserror = "1.0"
 
 [dev-dependencies]
 hex-literal = "1.0"
+
+[lints]
+workspace = true
