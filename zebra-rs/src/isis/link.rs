@@ -94,6 +94,10 @@ impl IsisLinks {
     pub fn iter_mut(&mut self) -> IterMut<'_, u32, IsisLink> {
         self.map.iter_mut()
     }
+
+    pub fn values(&self) -> std::collections::btree_map::Values<'_, u32, IsisLink> {
+        self.map.values()
+    }
 }
 
 #[derive(Debug)]
@@ -237,7 +241,7 @@ impl LinkConfig {
         self.hello_padding.unwrap_or(HelloPaddingPolicy::Always)
     }
     pub fn holddown_count(&self) -> u32 {
-        self.holddown_count.unwrap_or(Self::DEFAULT_HOLDDOWN_COUNT) as u32
+        self.holddown_count.unwrap_or(Self::DEFAULT_HOLDDOWN_COUNT)
     }
 
     pub fn psnp_interval(&self) -> u64 {
