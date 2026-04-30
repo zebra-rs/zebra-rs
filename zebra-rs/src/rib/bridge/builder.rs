@@ -96,8 +96,8 @@ fn cache_lookup<'a>(
     if cache.delete { None } else { Some(cache) }
 }
 
-fn parse_addr_gen_mode(mode: &String) -> Option<AddrGenMode> {
-    match mode.as_str() {
+fn parse_addr_gen_mode(mode: &str) -> Option<AddrGenMode> {
+    match mode {
         "none" => Some(AddrGenMode::None),
         "eui64" => Some(AddrGenMode::Eui64),
         "stable-secret" => Some(AddrGenMode::StableSecret),

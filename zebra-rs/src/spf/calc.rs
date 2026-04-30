@@ -558,7 +558,7 @@ mod tests {
         };
         assert_eq!(n.cost, 30);
         assert_eq!(n.paths.len(), 2);
-        assert_eq!(*n.paths.get(0).unwrap(), vec![1, 3, 4]);
+        assert_eq!(*n.paths.first().unwrap(), vec![1, 3, 4]);
         assert_eq!(*n.paths.get(1).unwrap(), vec![2, 3, 4]);
 
         // SPF with full path and path max = 1.
@@ -583,7 +583,7 @@ mod tests {
         };
         assert_eq!(n.cost, 20);
         assert_eq!(n.paths.len(), 1);
-        assert_eq!(*n.paths.get(0).unwrap(), vec![1, 3]);
+        assert_eq!(*n.paths.first().unwrap(), vec![1, 3]);
     }
 
     fn tilfa_graph() -> Graph {
@@ -707,7 +707,7 @@ mod tests {
         // PCPath in this example).
         let mut pc_paths = pc_paths(&graph, s, d, x);
         assert_eq!(pc_paths.len(), 1);
-        let pc_path = pc_paths.get(0).unwrap();
+        let pc_path = pc_paths.first().unwrap();
         let mut pc_nodes = Vec::<String>::new();
         for n in pc_path.iter() {
             let name = node_name(&graph, *n);
@@ -776,7 +776,7 @@ mod tests {
             let repair_list = make_repair_list(&pc_inter, s, d);
 
             assert_eq!(repair_list.len(), 3);
-            let first_segment = repair_list.get(0).unwrap();
+            let first_segment = repair_list.first().unwrap();
             let second_segment = repair_list.get(1).unwrap();
             let third_segment = repair_list.get(2).unwrap();
 
@@ -801,10 +801,10 @@ mod tests {
 
         let repair_paths = tilfa(&graph, s, d, x);
         assert_eq!(repair_paths.len(), 1);
-        let repair_list = repair_paths.get(0).unwrap();
+        let repair_list = repair_paths.first().unwrap();
 
         assert_eq!(repair_list.len(), 3);
-        let first_segment = repair_list.get(0).unwrap();
+        let first_segment = repair_list.first().unwrap();
         let second_segment = repair_list.get(1).unwrap();
         let third_segment = repair_list.get(2).unwrap();
 
