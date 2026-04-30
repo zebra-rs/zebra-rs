@@ -12,10 +12,7 @@ pub fn match_mac_addr(src: &str) -> (MatchType, usize) {
     while pos < src.len() {
         let c = src.as_bytes()[pos];
         match c {
-            c if (c >= b'0' && c <= b'9')
-                || (c >= b'a' && c <= b'f')
-                || (c >= b'A' && c <= b'F') =>
-            {
+            c if c.is_ascii_hexdigit() => {
                 id.push(c as char);
                 if id.len() > 2 {
                     return (MatchType::None, pos);

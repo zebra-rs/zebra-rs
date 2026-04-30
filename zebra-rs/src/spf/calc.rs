@@ -207,7 +207,7 @@ pub fn spf_calc(
                 }
             } else if opt.full_path {
                 for path in &v.paths {
-                    if opt.path_max.map_or(true, |max| c.paths.len() < max) {
+                    if opt.path_max.is_none_or(|max| c.paths.len() < max) {
                         let mut newpath = path.clone();
                         newpath.push(c.id);
                         c.paths.push(newpath);
@@ -215,7 +215,7 @@ pub fn spf_calc(
                 }
             } else {
                 for nhop in &v.nexthops {
-                    if opt.path_max.map_or(true, |max| c.paths.len() < max) {
+                    if opt.path_max.is_none_or(|max| c.paths.len() < max) {
                         let mut newnhop = nhop.clone();
                         if nhop.is_empty() {
                             newnhop.push(c.id);

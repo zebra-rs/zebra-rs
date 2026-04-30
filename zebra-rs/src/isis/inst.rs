@@ -947,12 +947,12 @@ pub struct LspMap {
 impl LspMap {
     pub fn get(&mut self, sys_id: &IsisSysId) -> usize {
         if let Some(index) = self.map.get(&sys_id) {
-            return *index;
+            *index
         } else {
             let index = self.val.len();
             self.map.insert(sys_id.clone(), index);
             self.val.push(sys_id.clone());
-            return index;
+            index
         }
     }
 
@@ -1528,7 +1528,7 @@ pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, Sp
     for (_prefix, route) in rib.iter() {
         if let Some(sid) = route.sid {
             // Calculate prefix index from SID (assuming 16000 is base)
-            let pfx_index = if sid >= 16000 && sid < 24000 {
+            let pfx_index = if (16000..24000).contains(&sid) {
                 sid - 16000
             } else {
                 0
