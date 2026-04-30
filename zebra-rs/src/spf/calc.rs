@@ -286,7 +286,7 @@ pub fn q_space_nodes(graph: &Graph, d: usize, x: usize) -> HashSet<usize> {
 }
 
 pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<usize>> {
-    spf_calc(&graph, s, Some(x), &SpfOpt::full_path(), &SpfDirect::Normal)
+    spf_calc(graph, s, Some(x), &SpfOpt::full_path(), &SpfDirect::Normal)
         .remove(&d)
         .map_or_else(Vec::new, |data| data.paths)
 }
@@ -658,13 +658,13 @@ mod tests {
     fn seg_disp(graph: &Graph, seg: &SrSegment) -> String {
         match seg {
             SrSegment::NodeSid(id) => {
-                format!("NodeSid({})", graph.get(&id).map(|n| &n.name).unwrap())
+                format!("NodeSid({})", graph.get(id).map(|n| &n.name).unwrap())
             }
             SrSegment::AdjSid(from, to) => {
                 format!(
                     "AdjSid({}, {})",
-                    graph.get(&from).map(|n| &n.name).unwrap(),
-                    graph.get(&to).map(|n| &n.name).unwrap()
+                    graph.get(from).map(|n| &n.name).unwrap(),
+                    graph.get(to).map(|n| &n.name).unwrap()
                 )
             }
         }

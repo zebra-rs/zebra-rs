@@ -101,14 +101,14 @@ impl Lsdb {
 
     pub fn ssn_clear(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
         if let Some(flags) = self.adj.get_mut(&ifindex) {
-            flags.ssn.clear(&lsp_id);
+            flags.ssn.clear(lsp_id);
         }
     }
 
     pub fn ssn_clear_other(&mut self, lsp_id: &IsisLspId, ifindex: u32) {
         for (link, flags) in self.adj.iter_mut() {
             if *link != ifindex {
-                flags.ssn.clear(&lsp_id);
+                flags.ssn.clear(lsp_id);
             }
         }
     }
@@ -143,7 +143,7 @@ pub fn ssn_clear(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
 pub fn ssn_clear_other(top: &mut LinkTop, level: Level, lsp_id: &IsisLspId) {
     top.lsdb
         .get_mut(&level)
-        .ssn_clear_other(&lsp_id, top.ifindex);
+        .ssn_clear_other(lsp_id, top.ifindex);
 }
 
 pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32) {

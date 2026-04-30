@@ -183,11 +183,11 @@ fn ospf_dr_election_init(oi: &OspfLink) -> Vec<Identity> {
         .filter(|nbr| nbr.state >= NfsmState::TwoWay)
         .filter(|nbr| !nbr.ident.router_id.is_unspecified())
         .filter(|nbr| nbr.ident.priority != 0)
-        .map(|nbr| nbr.ident.clone())
+        .map(|nbr| nbr.ident)
         .collect();
 
     if oi.flags.hello_sent() && !oi.ident.router_id.is_unspecified() && oi.ident.priority != 0 {
-        v.push(oi.ident.clone());
+        v.push(oi.ident);
     }
     v
 }

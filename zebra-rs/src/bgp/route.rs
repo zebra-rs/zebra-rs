@@ -502,10 +502,7 @@ impl LocalRib {
         rd: &RouteDistinguisher,
         prefix: Ipv4Net,
     ) -> Vec<BgpRib> {
-        self.v4vpn
-            .entry(rd.clone())
-            .or_default()
-            .select_best_path(prefix)
+        self.v4vpn.entry(*rd).or_default().select_best_path(prefix)
     }
 
     // EVPN dispatch ----------------------------------------------------------
@@ -636,7 +633,7 @@ pub fn route_ipv4_update(
         // prevents routing loops in route reflection scenarios when the route
         // has already passed through this route reflector.
         if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(&bgp.router_id)
+            && cluster_list.list.contains(bgp.router_id)
         {
             eprintln!(
                 "Dropping update for {} from peer {} - local router ID {} found in CLUSTER_LIST",
@@ -756,7 +753,7 @@ fn route_advertise_to_addpath(
             if let Some(ref rd) = rd {
                 let vpnv4_nlri = Vpnv4Nlri {
                     label: Label::default(),
-                    rd: rd.clone(),
+                    rd: *rd,
                     nlri,
                 };
                 peer.send_vpnv4(vpnv4_nlri, attr, true);
@@ -793,7 +790,7 @@ fn route_withdraw_from_addpath(
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
         if let Some(ref rd) = rd {
-            peer.cache_remove_vpnv4(rd.clone(), prefix, removed.local_id);
+            peer.cache_remove_vpnv4(*rd, prefix, removed.local_id);
         } else {
             peer.cache_remove_ipv4(prefix, removed.local_id);
         }
@@ -872,7 +869,7 @@ fn route_advertise_to_peers(
                 if let Some(ref rd) = rd {
                     let vpnv4_nlri = Vpnv4Nlri {
                         label: Label::default(),
-                        rd: rd.clone(),
+                        rd: *rd,
                         nlri,
                     };
                     peer.send_vpnv4(vpnv4_nlri, attr, true);
@@ -883,7 +880,7 @@ fn route_advertise_to_peers(
             _ => {
                 // We remove the cache.
                 if let Some(ref rd) = rd {
-                    peer.cache_remove_vpnv4(rd.clone(), prefix, 0);
+                    peer.cache_remove_vpnv4(*rd, prefix, 0);
                 } else {
                     peer.cache_remove_ipv4(prefix, 0);
                 }
@@ -946,7 +943,7 @@ pub fn route_ipv4_withdraw(
         bgp.local_rib.select_best_path(nlri.prefix)
     };
     if !selected.is_empty() || !removed.is_empty() {
-        route_advertise_to_peers(rd.clone(), nlri.prefix, &selected, ident, bgp, peers);
+        route_advertise_to_peers(rd, nlri.prefix, &selected, ident, bgp, peers);
     }
     if let Some(removed) = removed.pop() {
         route_withdraw_from_addpath(rd, nlri.prefix, &removed, ident, bgp, peers);
@@ -1205,7 +1202,7 @@ pub fn route_evpn_update(
             return;
         }
         if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(&bgp.router_id)
+            && cluster_list.list.contains(bgp.router_id)
         {
             return;
         }
@@ -1300,7 +1297,7 @@ pub fn route_from_peer(
                     route_ipv4_update(
                         peer_id,
                         &update.nlri,
-                        Some(update.rd.clone()),
+                        Some(update.rd),
                         Some(update.label),
                         bgp_attr,
                         Some(nlri.nhop.clone()),
@@ -1336,7 +1333,7 @@ pub fn route_from_peer(
                     route_ipv4_withdraw(
                         peer_id,
                         &withdraw.nlri,
-                        Some(withdraw.rd.clone()),
+                        Some(withdraw.rd),
                         Some(withdraw.label),
                         bgp,
                         peers,
@@ -1390,7 +1387,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
         withdrawn
     };
     for withdraw in withdrawn.iter() {
-        route_ipv4_withdraw(peer_id, &withdraw, None, None, bgp, peers, true);
+        route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, true);
     }
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_in.v4.0.clear();
@@ -1447,7 +1444,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                             prefix: *prefix,
                         };
                         updates.push((
-                            rd.clone(),
+                            *rd,
                             nlri,
                             rib.label,
                             (*rib.attr).clone(),
@@ -1483,7 +1480,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                     for rib in ribs.iter() {
                         let withdraw = Vpnv4Nlri {
                             label: rib.label.unwrap_or(Label::default()),
-                            rd: rd.clone(),
+                            rd: *rd,
                             nlri: Ipv4Nlri {
                                 id: rib.remote_id,
                                 prefix: *prefix,
@@ -1499,7 +1496,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
             route_ipv4_withdraw(
                 peer_id,
                 &withdraw.nlri,
-                Some(withdraw.rd.clone()),
+                Some(withdraw.rd),
                 Some(withdraw.label),
                 bgp,
                 peers,
@@ -1534,7 +1531,7 @@ pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMa
                     if rib.stale {
                         let withdraw = Vpnv4Nlri {
                             label: rib.label.unwrap_or(Label::default()),
-                            rd: rd.clone(),
+                            rd: *rd,
                             nlri: Ipv4Nlri {
                                 id: rib.remote_id,
                                 prefix: *prefix,
@@ -1553,7 +1550,7 @@ pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMa
         route_ipv4_withdraw(
             peer_id,
             &withdraw.nlri,
-            Some(withdraw.rd.clone()),
+            Some(withdraw.rd),
             Some(withdraw.label),
             bgp,
             peers,
@@ -1853,7 +1850,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                     .iter()
                     .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (*prefix, rib.clone())))
                     .collect();
-                (rd.clone(), routes)
+                (*rd, routes)
             })
             .collect()
     } else {
@@ -1866,7 +1863,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                     .iter()
                     .map(|(prefix, rib)| (*prefix, rib.clone()))
                     .collect();
-                (rd.clone(), routes)
+                (*rd, routes)
             })
             .collect()
     };
@@ -1890,11 +1887,11 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             // Register to AdjOut.
             rib.attr = bgp.attr_store.intern(attr);
             let arc_attr = rib.attr.clone();
-            peer.adj_out.add(Some(rd.clone()), nlri.prefix, rib);
+            peer.adj_out.add(Some(rd), nlri.prefix, rib);
 
             let vpnv4_nlri = Vpnv4Nlri {
                 label: Label::default(),
-                rd: rd.clone(),
+                rd,
                 nlri,
             };
 

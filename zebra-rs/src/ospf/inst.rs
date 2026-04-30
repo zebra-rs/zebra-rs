@@ -101,7 +101,7 @@ impl Ospf {
             let link_area = link.area;
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
-                link.nbrs.get_mut(&src).map(|nbr| {
+                link.nbrs.get_mut(src).map(|nbr| {
                     (
                         OspfInterface {
                             tx: &self.tx,
