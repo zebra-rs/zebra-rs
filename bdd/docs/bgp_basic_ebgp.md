@@ -1,10 +1,10 @@
-# BGP Basic Session Test on iBGP
+# BGP Basic Session Test on eBGP
 
 ## Overview
 
 As a network operator
 I want to test basic BGP session establishment
-Using an isolated test topology with two zebra-rs instances with iBGP connection.
+Using an isolated test topology with two zebra-rs instances with eBGP connection.
 
 ## Test Topology
 
@@ -15,7 +15,7 @@ Using an isolated test topology with two zebra-rs instances with iBGP connection
                 │               │
            ┌────┴────┐     ┌────┴────┐
            │   z1    │     │   z2    │
-           │ AS65001 │     │ AS65001 │
+           │ AS65001 │     │ AS65002 │
            │192.168. │     │192.168. │
            │  0.1/24 │     │  0.2/24 │
            └─────────┘     └─────────┘
@@ -24,7 +24,7 @@ Using an isolated test topology with two zebra-rs instances with iBGP connection
 ## Config Files
 
 - z1.yaml: AS 65001, peer to 192.168.0.2
-- z2.yaml: AS 65001, peer to 192.168.0.1
+- z2.yaml: AS 65002, peer to 192.168.0.1
 
 ## Test Scenarios
 
