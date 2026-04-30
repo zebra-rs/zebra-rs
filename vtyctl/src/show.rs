@@ -12,7 +12,7 @@ pub mod vtysh {
     tonic::include_proto!("vtysh");
 }
 
-pub async fn show(host: &String, command: &String, json: bool) -> Result<()> {
+pub async fn show(host: &str, command: &str, json: bool) -> Result<()> {
     if command.is_empty() {
         eprintln!("zctl show: command argument is required");
         eprintln!("Usage: zctl show <command>");
@@ -31,7 +31,7 @@ pub async fn show(host: &String, command: &String, json: bool) -> Result<()> {
         r#type: ExecType::Exec as i32,
         mode: String::from("exec"),
         privilege: 15,
-        line: command.clone(),
+        line: command.to_string(),
         args: Vec::new(),
         ..Default::default()
     };
@@ -47,7 +47,7 @@ pub async fn show(host: &String, command: &String, json: bool) -> Result<()> {
     };
 
     let request = ShowRequest {
-        line: command.clone(),
+        line: command.to_string(),
         json,
         paths: reply.paths,
     };
