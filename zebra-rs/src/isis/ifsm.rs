@@ -73,12 +73,12 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
 
     let mut neighbors = Vec::new();
     for (_, nbr) in link.state.nbrs.get(&level).iter() {
-        if nbr.state == NfsmState::Init || nbr.state == NfsmState::Up {
-            if let Some(mac) = nbr.mac {
-                neighbors.push(NeighborAddr {
-                    octets: mac.octets(),
-                })
-            }
+        if (nbr.state == NfsmState::Init || nbr.state == NfsmState::Up)
+            && let Some(mac) = nbr.mac
+        {
+            neighbors.push(NeighborAddr {
+                octets: mac.octets(),
+            })
         }
     }
     hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
@@ -409,12 +409,12 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             }
             DisStatus::Other => {
                 use IfsmEvent::*;
-                if link.state.adj.get(&level).is_none() {
-                    if let Some(lan_id) = lan_id {
-                        *link.state.adj.get_mut(&level) = Some((lan_id.clone(), None));
-                        link.lsdb.get_mut(&level).adj_set(link.ifindex);
-                        link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
-                    }
+                if link.state.adj.get(&level).is_none()
+                    && let Some(lan_id) = lan_id
+                {
+                    *link.state.adj.get_mut(&level) = Some((lan_id.clone(), None));
+                    link.lsdb.get_mut(&level).adj_set(link.ifindex);
+                    link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
                 }
             }
         }
@@ -431,10 +431,8 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         link.event(Message::LspOriginate(level));
 
         // CSNP timer for when DIS is me.
-        if new_status == DisStatus::Myself {
-            if link.timer.csnp.get(&level).is_none() {
-                *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
-            }
+        if new_status == DisStatus::Myself && link.timer.csnp.get(&level).is_none() {
+            *link.timer.csnp.get_mut(&level) = Some(csnp_timer(link, level));
         }
 
         // Record changes.

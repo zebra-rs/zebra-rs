@@ -53,14 +53,14 @@ fn kernel_supports_nhid() -> bool {
         if parts.len() >= 3 && parts[0] == "Linux" && parts[1] == "version" {
             let version_str = parts[2];
             let version_parts: Vec<&str> = version_str.split('.').collect();
-            if version_parts.len() >= 2 {
-                if let (Ok(major), Ok(minor)) = (
+            if version_parts.len() >= 2
+                && let (Ok(major), Ok(minor)) = (
                     version_parts[0].parse::<u32>(),
                     version_parts[1].parse::<u32>(),
-                ) {
-                    // Nexthop table introduced in kernel 5.3
-                    return major > 5 || (major == 5 && minor >= 3);
-                }
+                )
+            {
+                // Nexthop table introduced in kernel 5.3
+                return major > 5 || (major == 5 && minor >= 3);
             }
         }
     }
@@ -1249,11 +1249,11 @@ impl FibHandle {
 
         // Phase 4D: ESI received and stored. Kernel multi-homing via NDA_NH_ID
         // will be wired in Phase 5 when ECMP nexthop groups are supported.
-        if let Some(esi_val) = esi {
-            if esi_val != [0u8; 10] {
-                // ESI[0] is the ESI type. ESI[1..9] is the type-specific value.
-                eprintln!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
-            }
+        if let Some(esi_val) = esi
+            && esi_val != [0u8; 10]
+        {
+            // ESI[0] is the ESI type. ESI[1..9] is the type-specific value.
+            eprintln!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
         }
 
         // Build netlink request

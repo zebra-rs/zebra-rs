@@ -36,24 +36,24 @@ impl PrefixSet {
                 let mut matches = true;
 
                 // Check less-than-or-equal constraint
-                if let Some(le) = entry.le {
-                    if prefix_len > le {
-                        matches = false;
-                    }
+                if let Some(le) = entry.le
+                    && prefix_len > le
+                {
+                    matches = false;
                 }
 
                 // Check equal constraint
-                if let Some(eq) = entry.eq {
-                    if prefix_len != eq {
-                        matches = false;
-                    }
+                if let Some(eq) = entry.eq
+                    && prefix_len != eq
+                {
+                    matches = false;
                 }
 
                 // Check greater-than-or-equal constraint
-                if let Some(ge) = entry.ge {
-                    if prefix_len < ge {
-                        matches = false;
-                    }
+                if let Some(ge) = entry.ge
+                    && prefix_len < ge
+                {
+                    matches = false;
                 }
 
                 if matches {

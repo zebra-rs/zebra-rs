@@ -622,27 +622,27 @@ pub fn route_ipv4_update(
         // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
         // prevents routing loops in route reflection scenarios. This happens before
         // the route store in AdjRibIn.
-        if let Some(ref originator_id) = attr.originator_id {
-            if originator_id.id == *bgp.router_id {
-                eprintln!(
-                    "Dropping update for {} from peer {} - ORIGINATOR_ID {} matches local router ID",
-                    nlri.prefix, peer.address, originator_id.id
-                );
-                return;
-            }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            eprintln!(
+                "Dropping update for {} from peer {} - ORIGINATOR_ID {} matches local router ID",
+                nlri.prefix, peer.address, originator_id.id
+            );
+            return;
         }
 
         // RFC 4456: Drop update if local router ID is in CLUSTER_LIST. This
         // prevents routing loops in route reflection scenarios when the route
         // has already passed through this route reflector.
-        if let Some(ref cluster_list) = attr.cluster_list {
-            if cluster_list.list.contains(&bgp.router_id) {
-                eprintln!(
-                    "Dropping update for {} from peer {} - local router ID {} found in CLUSTER_LIST",
-                    nlri.prefix, peer.address, bgp.router_id
-                );
-                return;
-            }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(&bgp.router_id)
+        {
+            eprintln!(
+                "Dropping update for {} from peer {} - local router ID {} found in CLUSTER_LIST",
+                nlri.prefix, peer.address, bgp.router_id
+            );
+            return;
         }
 
         // Identify peer_type
@@ -738,31 +738,30 @@ fn route_advertise_to_addpath(
     for peer_addr in peer_addrs {
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
-        if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true) {
-            if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
-                // RTC match.
-                if let Some(_rd) = rd {
-                    if !peer.rtcv4.is_empty() {
-                        if !rtc_match(&peer.rtcv4, &attr.ecom) {
-                            continue;
-                        }
-                    }
-                }
-                let attr = bgp.attr_store.intern(attr);
-                let mut rib = rib.clone();
-                rib.attr = attr.clone();
+        if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true)
+            && let Some(attr) = route_apply_policy_out(peer, &nlri, attr)
+        {
+            // RTC match.
+            if let Some(_rd) = rd
+                && !peer.rtcv4.is_empty()
+                && !rtc_match(&peer.rtcv4, &attr.ecom)
+            {
+                continue;
+            }
+            let attr = bgp.attr_store.intern(attr);
+            let mut rib = rib.clone();
+            rib.attr = attr.clone();
 
-                peer.adj_out.add(rd, nlri.prefix, rib);
-                if let Some(ref rd) = rd {
-                    let vpnv4_nlri = Vpnv4Nlri {
-                        label: Label::default(),
-                        rd: rd.clone(),
-                        nlri,
-                    };
-                    peer.send_vpnv4(vpnv4_nlri, attr, true);
-                } else {
-                    peer.send_ipv4(nlri, attr, true);
-                }
+            peer.adj_out.add(rd, nlri.prefix, rib);
+            if let Some(ref rd) = rd {
+                let vpnv4_nlri = Vpnv4Nlri {
+                    label: Label::default(),
+                    rd: rd.clone(),
+                    nlri,
+                };
+                peer.send_vpnv4(vpnv4_nlri, attr, true);
+            } else {
+                peer.send_ipv4(nlri, attr, true);
             }
         }
     }
@@ -859,10 +858,8 @@ fn route_advertise_to_peers(
             (Some(nlri), Some(attr)) => {
                 if let Some(_rd) = rd {
                     // RTC match.
-                    if !peer.rtcv4.is_empty() {
-                        if !rtc_match(&peer.rtcv4, &attr.ecom) {
-                            continue;
-                        }
+                    if !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+                        continue;
                     }
                 }
                 // Send update
@@ -1598,11 +1595,11 @@ pub fn route_update_ipv4(
     // 1. Origin.  Pass through
 
     // 2. AS_PATH
-    if peer.is_ebgp() {
-        if let Some(ref mut aspath) = attrs.aspath {
-            let local_as_path = As4Path::from(vec![peer.local_as]);
-            aspath.prepend_mut(local_as_path.clone());
-        }
+    if peer.is_ebgp()
+        && let Some(ref mut aspath) = attrs.aspath
+    {
+        let local_as_path = As4Path::from(vec![peer.local_as]);
+        aspath.prepend_mut(local_as_path.clone());
     }
 
     // 3. NEXT_HOP
@@ -1620,23 +1617,22 @@ pub fn route_update_ipv4(
     // 4. MED - Pass through.
 
     // 5. Local Preference (for IBGP only)
-    if peer.is_ibgp() {
-        if attrs.local_pref.is_none() {
-            attrs.local_pref = Some(LocalPref::default());
-        }
+    if peer.is_ibgp() && attrs.local_pref.is_none() {
+        attrs.local_pref = Some(LocalPref::default());
     }
 
     // 6. Originator ID (for IBGP route reflection)
     // RFC 4456: A route reflector SHOULD NOT create an ORIGINATOR_ID if one already
     // exists. ORIGINATOR_ID is set only once by the first route reflector and preserved
     // thereafter to identify the original route source within the AS.
-    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
-        if attrs.originator_id.is_none() {
-            // Set ORIGINATOR_ID to the router ID of the peer that originated this route
-            attrs.originator_id = Some(OriginatorId::new(rib.router_id));
-        }
-        // If ORIGINATOR_ID already exists, preserve it (don't overwrite)
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && attrs.originator_id.is_none()
+    {
+        // Set ORIGINATOR_ID to the router ID of the peer that originated this route
+        attrs.originator_id = Some(OriginatorId::new(rib.router_id));
     }
+    // If ORIGINATOR_ID already exists, preserve it (don't overwrite)
 
     // 7. Cluster List (for IBGP route reflection)
     // RFC 4456: When a route reflector reflects a route, it must prepend the local
@@ -1658,10 +1654,10 @@ pub fn route_update_ipv4(
 
 impl Peer {
     pub fn send_packet(&self, bytes: BytesMut) {
-        if let Some(ref packet_tx) = self.packet_tx {
-            if let Err(e) = packet_tx.send(bytes) {
-                eprintln!("Failed to send BGP packet to {}: {}", self.address, e);
-            }
+        if let Some(ref packet_tx) = self.packet_tx
+            && let Err(e) = packet_tx.send(bytes)
+        {
+            eprintln!("Failed to send BGP packet to {}: {}", self.address, e);
         }
     }
 
@@ -1678,12 +1674,12 @@ impl Peer {
 
     pub fn cache_remove_ipv4(&mut self, prefix: Ipv4Net, id: u32) {
         let nlri = Ipv4Nlri { id, prefix };
-        if let Some(attr) = self.cache_ipv4_rev.remove(&nlri) {
-            if let Some(set) = self.cache_ipv4.get_mut(&attr) {
-                set.remove(&nlri);
-                if set.is_empty() {
-                    self.cache_ipv4.remove(&attr);
-                }
+        if let Some(attr) = self.cache_ipv4_rev.remove(&nlri)
+            && let Some(set) = self.cache_ipv4.get_mut(&attr)
+        {
+            set.remove(&nlri);
+            if set.is_empty() {
+                self.cache_ipv4.remove(&attr);
             }
         }
     }
@@ -1723,12 +1719,12 @@ impl Peer {
             rd,
             nlri: Ipv4Nlri { id, prefix },
         };
-        if let Some(attr) = self.cache_vpnv4_rev.remove(&nlri) {
-            if let Some(set) = self.cache_vpnv4.get_mut(&attr) {
-                set.remove(&nlri);
-                if set.is_empty() {
-                    self.cache_vpnv4.remove(&attr);
-                }
+        if let Some(attr) = self.cache_vpnv4_rev.remove(&nlri)
+            && let Some(set) = self.cache_vpnv4.get_mut(&attr)
+        {
+            set.remove(&nlri);
+            if set.is_empty() {
+                self.cache_vpnv4.remove(&attr);
             }
         }
     }
@@ -1887,10 +1883,8 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             };
 
             // RTC
-            if !peer.rtcv4.is_empty() {
-                if !rtc_match(&peer.rtcv4, &attr.ecom) {
-                    continue;
-                }
+            if !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+                continue;
             }
 
             // Register to AdjOut.

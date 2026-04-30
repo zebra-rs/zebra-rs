@@ -208,15 +208,15 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     )?;
 
     write!(buf, "    Circuit type: {}, Speaks:", nbr.circuit_type)?;
-    if let Some(proto) = &nbr.proto {
-        if !proto.nlpids.is_empty() {
-            let protocols = proto
-                .nlpids
-                .iter()
-                .map(|&nlpid| IsisProto::from(nlpid))
-                .join(", ");
-            writeln!(buf, " {}", protocols)?;
-        }
+    if let Some(proto) = &nbr.proto
+        && !proto.nlpids.is_empty()
+    {
+        let protocols = proto
+            .nlpids
+            .iter()
+            .map(|&nlpid| IsisProto::from(nlpid))
+            .join(", ");
+        writeln!(buf, " {}", protocols)?;
     }
 
     writeln!(

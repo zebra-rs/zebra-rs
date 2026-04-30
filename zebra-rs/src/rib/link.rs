@@ -442,10 +442,10 @@ impl Rib {
             self.links.insert(link.index, link.clone());
 
             // Register VXLAN interface with FIB for MAC FDB operations
-            if let Some(vxlan) = self.vxlan.get(&link.name) {
-                if let Some(vni) = vxlan.vni {
-                    self.fib_handle.register_vxlan_ifindex(vni, link.index);
-                }
+            if let Some(vxlan) = self.vxlan.get(&link.name)
+                && let Some(vni) = vxlan.vni
+            {
+                self.fib_handle.register_vxlan_ifindex(vni, link.index);
             }
 
             if !link.is_up() {
@@ -456,10 +456,10 @@ impl Rib {
 
     pub fn link_delete(&mut self, oslink: FibLink) {
         // Unregister VXLAN interface from FIB if applicable
-        if let Some(vxlan) = self.vxlan.get(&oslink.name) {
-            if let Some(vni) = vxlan.vni {
-                self.fib_handle.unregister_vxlan_ifindex(vni);
-            }
+        if let Some(vxlan) = self.vxlan.get(&oslink.name)
+            && let Some(vni) = vxlan.vni
+        {
+            self.fib_handle.unregister_vxlan_ifindex(vni);
         }
         self.links.remove(&oslink.index);
     }
@@ -502,11 +502,11 @@ impl Rib {
         }
 
         // Validate against 0.0.0.0 address for IPv4 - prevents unspecified address on interfaces
-        if let ipnet::IpNet::V4(v4_net) = osaddr.addr {
-            if v4_net.addr().is_unspecified() {
-                println!("FIB: cannot add 0.0.0.0 as interface address");
-                return;
-            }
+        if let ipnet::IpNet::V4(v4_net) = osaddr.addr
+            && v4_net.addr().is_unspecified()
+        {
+            println!("FIB: cannot add 0.0.0.0 as interface address");
+            return;
         }
 
         let mut addr = LinkAddr::from(osaddr);
@@ -657,14 +657,14 @@ pub async fn link_config_exec(
                 if let Some(link) = rib.links.get(&ifindex) {
                     // Check if this IPv4 address already exists on the interface
                     for existing_addr in &link.addr4 {
-                        if let IpNet::V4(existing_v4) = existing_addr.addr {
-                            if existing_v4 == v4addr {
-                                // println!(
-                                //     "IPv4 address {} is already configured on interface {}",
-                                //     v4addr, ifname
-                                // );
-                                return Ok(());
-                            }
+                        if let IpNet::V4(existing_v4) = existing_addr.addr
+                            && existing_v4 == v4addr
+                        {
+                            // println!(
+                            //     "IPv4 address {} is already configured on interface {}",
+                            //     v4addr, ifname
+                            // );
+                            return Ok(());
                         }
                     }
                 }
@@ -722,15 +722,13 @@ pub async fn link_config_exec(
             }
 
             // Validate against loopback address on non-loopback interfaces
-            if v6addr.addr().is_loopback() {
-                if let Some(ifindex) = link_lookup(rib, ifname.to_string()) {
-                    if let Some(link) = rib.links.get(&ifindex) {
-                        if !link.is_loopback() {
-                            println!("Cannot configure loopback address on non-loopback interface");
-                            return Ok(());
-                        }
-                    }
-                }
+            if v6addr.addr().is_loopback()
+                && let Some(ifindex) = link_lookup(rib, ifname.to_string())
+                && let Some(link) = rib.links.get(&ifindex)
+                && !link.is_loopback()
+            {
+                println!("Cannot configure loopback address on non-loopback interface");
+                return Ok(());
             }
 
             // Check if IPv6 address is already configured on the link
@@ -738,14 +736,14 @@ pub async fn link_config_exec(
                 if let Some(link) = rib.links.get(&ifindex) {
                     // Check if this IPv6 address already exists on the interface
                     for existing_addr in &link.addr6 {
-                        if let IpNet::V6(existing_v6) = existing_addr.addr {
-                            if existing_v6 == v6addr {
-                                // println!(
-                                //     "IPv6 address {} is already configured on interface {}",
-                                //     v6addr, ifname
-                                // );
-                                return Ok(());
-                            }
+                        if let IpNet::V6(existing_v6) = existing_addr.addr
+                            && existing_v6 == v6addr
+                        {
+                            // println!(
+                            //     "IPv6 address {} is already configured on interface {}",
+                            //     v6addr, ifname
+                            // );
+                            return Ok(());
                         }
                     }
                 }

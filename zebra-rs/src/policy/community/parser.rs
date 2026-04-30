@@ -184,12 +184,12 @@ impl FromStr for CommunityMatcher {
 
         if let Some(value_str) = input.strip_prefix("soo:") {
             // Try to parse as exact site of origin (e.g., "soo:100:200")
-            if let Ok(ext_com) = ExtCommunity::from_str(input) {
-                if let Some(first) = ext_com.0.first() {
-                    return Ok(CommunityMatcher::Extended(ExtendedMatcher::Exact(
-                        first.clone(),
-                    )));
-                }
+            if let Ok(ext_com) = ExtCommunity::from_str(input)
+                && let Some(first) = ext_com.0.first()
+            {
+                return Ok(CommunityMatcher::Extended(ExtendedMatcher::Exact(
+                    first.clone(),
+                )));
             }
 
             // If exact parse failed, treat as regex pattern
@@ -295,10 +295,10 @@ pub fn match_community_set(matcher: &CommunityMatcher, bgp_attr: &BgpAttr) -> bo
                             let ext_com_str = ext_com_val.to_string();
                             // Remove the prefix (e.g., "rt:" or "soo:") before matching
                             // The to_string() produces "rt:100:200", but pattern is "^100:.*"
-                            if let Some(value_part) = ext_com_str.split_once(':') {
-                                if compiled.is_match(value_part.1) {
-                                    return true;
-                                }
+                            if let Some(value_part) = ext_com_str.split_once(':')
+                                && compiled.is_match(value_part.1)
+                            {
+                                return true;
                             }
                         }
                     }
