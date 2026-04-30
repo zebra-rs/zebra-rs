@@ -213,7 +213,7 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
 }
 
 pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) -> Option<Lsa> {
-    let key = lsp.lsp_id.clone();
+    let key = lsp.lsp_id;
 
     if top.up_config.net.sys_id() == key.sys_id() {
         isis_database_trace!(top.tracing, Lsdb, &level, "Self originated LSP?");
@@ -255,7 +255,7 @@ pub fn insert_self_originate(
     lsp: IsisLsp,
     bytes: Option<Vec<u8>>,
 ) -> Option<Lsa> {
-    let key = lsp.lsp_id.clone();
+    let key = lsp.lsp_id;
     let mut lsa = Lsa::new(lsp);
     lsa.originated = true;
 
