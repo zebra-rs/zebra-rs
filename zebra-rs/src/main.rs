@@ -76,9 +76,9 @@ fn yang_path(arg: &Arg) -> Option<String> {
     }
     let path = Path::new("/etc/zebra-rs/yang");
     if path.exists() {
-        return Some(path.to_string_lossy().to_string());
+        Some(path.to_string_lossy().to_string())
     } else {
-        return None;
+        None
     }
 }
 

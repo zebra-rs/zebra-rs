@@ -41,20 +41,14 @@ clap = { version = "4", features = ["derive"] }
 [workspace.lints.clippy]
 # Style — explicit-over-implicit
 collapsible_if = "allow"
-needless_bool_assign = "allow"
-needless_return = "allow"
 
 # Style — references and casts
 clone_on_copy = "allow"
 needless_borrow = "allow"
-unnecessary_cast = "allow"
 
 # Style — APIs that get used a lot in protocol code
-for_kv_map = "allow"
 get_first = "allow"
-manual_range_contains = "allow"
 ptr_arg = "allow"
-unnecessary_map_or = "allow"
 
 # Naming — networking acronyms (TCP, IP, MD5, ...) are fine as-is
 upper_case_acronyms = "allow"

@@ -194,18 +194,10 @@ fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
 
     match ev.as_str() {
         "dis" => {
-            if op.is_set() {
-                isis.tracing.event.dis.enabled = true;
-            } else {
-                isis.tracing.event.dis.enabled = false;
-            }
+            isis.tracing.event.dis.enabled = op.is_set();
         }
         "lsp-originate" => {
-            if op.is_set() {
-                isis.tracing.event.lsp_originate.enabled = true;
-            } else {
-                isis.tracing.event.lsp_originate.enabled = false;
-            }
+            isis.tracing.event.lsp_originate.enabled = op.is_set();
         }
         _ => {
             if op.is_set() {
@@ -224,18 +216,10 @@ fn config_tracing_fsm(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<(
 
     match typ.as_str() {
         "nfsm" => {
-            if op.is_set() {
-                isis.tracing.fsm.nfsm.enabled = true;
-            } else {
-                isis.tracing.fsm.nfsm.enabled = false;
-            }
+            isis.tracing.fsm.nfsm.enabled = op.is_set();
         }
         "ifsm" => {
-            if op.is_set() {
-                isis.tracing.fsm.ifsm.enabled = true;
-            } else {
-                isis.tracing.fsm.ifsm.enabled = false;
-            }
+            isis.tracing.fsm.ifsm.enabled = op.is_set();
         }
         _ => {
             //
@@ -300,11 +284,7 @@ fn config_tracing_database(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
 
     match ev.as_str() {
         "lsdb" => {
-            if op.is_set() {
-                isis.tracing.database.lsdb.enabled = true;
-            } else {
-                isis.tracing.database.lsdb.enabled = false;
-            }
+            isis.tracing.database.lsdb.enabled = op.is_set();
         }
         _ => {
             if op.is_set() {
