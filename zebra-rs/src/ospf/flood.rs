@@ -51,17 +51,18 @@ pub fn ospf_ls_request_lookup(nbr: &Neighbor, h: &OspfLsaHeader) -> Option<usize
 // Following the ref/ospfd/ospf_flood.c ospf_flood_through_interface() pattern.
 pub fn ospf_flood_through_interface(_oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     // For neighbors in Exchange or Loading state, check ls_req list.
-    if nbr.state >= NfsmState::Exchange && nbr.state < NfsmState::Full {
-        if let Some(idx) = ospf_ls_request_lookup(nbr, &lsa.h) {
-            // The received LSA is the same or newer than what we requested.
-            // Remove it from ls_req list.
-            nbr.ls_req.remove(idx);
-            tracing::info!(
-                "[Flood] Removed LSA {} from ls_req (remaining: {})",
-                lsa.h.ls_id,
-                nbr.ls_req.len()
-            );
-        }
+    if nbr.state >= NfsmState::Exchange
+        && nbr.state < NfsmState::Full
+        && let Some(idx) = ospf_ls_request_lookup(nbr, &lsa.h)
+    {
+        // The received LSA is the same or newer than what we requested.
+        // Remove it from ls_req list.
+        nbr.ls_req.remove(idx);
+        tracing::info!(
+            "[Flood] Removed LSA {} from ls_req (remaining: {})",
+            lsa.h.ls_id,
+            nbr.ls_req.len()
+        );
     }
 }
 
@@ -107,16 +108,15 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     // MinLSArrival check: if the same LSA was installed less than 1 second ago, discard.
     if let Some(install_time) =
         lsdb.lookup_install_time(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router)
+        && install_time.elapsed() < Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
     {
-        if install_time.elapsed() < Duration::from_secs(OSPF_MIN_LS_ARRIVAL) {
-            tracing::info!(
-                "[Flood] MinLSArrival: discarding LSA type={:?} id={} adv={}",
-                lsa.h.ls_type,
-                lsa.h.ls_id,
-                lsa.h.adv_router
-            );
-            return;
-        }
+        tracing::info!(
+            "[Flood] MinLSArrival: discarding LSA type={:?} id={} adv={}",
+            lsa.h.ls_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router
+        );
+        return;
     }
 
     // RFC 2328: Install into LSDB first, then flood.

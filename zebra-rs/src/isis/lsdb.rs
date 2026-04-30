@@ -164,10 +164,10 @@ pub struct LspCapView<'a> {
 }
 
 fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
-    if let Some(prev) = top.lsdb.get(&level).get(&key) {
-        if prev.lsp.tlvs == lsp.tlvs {
-            return;
-        }
+    if let Some(prev) = top.lsdb.get(&level).get(&key)
+        && prev.lsp.tlvs == lsp.tlvs
+    {
+        return;
     }
 
     let lsp = lsp_view(lsp);
@@ -190,10 +190,10 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
                     global: LabelBlock::new(start, cap.range),
                     local: None,
                 };
-                if let Some(lb) = cap_view.lb {
-                    if let SidLabelTlv::Label(start) = lb.sid_label {
-                        label_config.local = Some(LabelBlock::new(start, lb.range));
-                    }
+                if let Some(lb) = cap_view.lb
+                    && let SidLabelTlv::Label(start) = lb.sid_label
+                {
+                    label_config.local = Some(LabelBlock::new(start, lb.range));
                 }
                 top.label_map
                     .get_mut(&level)
@@ -221,16 +221,16 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     }
 
     // Check sequence number.
-    if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id) {
-        if lsp.seq_number <= lsa.lsp.seq_number {
-            isis_database_trace!(
-                top.tracing,
-                Lsdb,
-                &level,
-                "Same or smaller seq_number, no need of updating LSDB"
-            );
-            return None;
-        }
+    if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id)
+        && lsp.seq_number <= lsa.lsp.seq_number
+    {
+        isis_database_trace!(
+            top.tracing,
+            Lsdb,
+            &level,
+            "Same or smaller seq_number, no need of updating LSDB"
+        );
+        return None;
     }
 
     if key.is_pseudo() {
@@ -286,10 +286,10 @@ pub fn insert_self_originate(
 }
 
 pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
-    if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key) {
-        if let Some(_tlv) = lsa.lsp.hostname_tlv() {
-            top.hostname.get_mut(&level).remove(&key.sys_id());
-        }
+    if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key)
+        && let Some(_tlv) = lsa.lsp.hostname_tlv()
+    {
+        top.hostname.get_mut(&level).remove(&key.sys_id());
     }
 }
 

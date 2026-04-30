@@ -348,10 +348,10 @@ pub fn make_repair_list(pc_inter: &[Intersect], s: usize, d: usize) -> Vec<SrSeg
                 }
                 p_mode = false;
             }
-        } else if let Some(prev_id) = prev_id {
-            if !q_mode {
-                sr_segments.push(SrSegment::AdjSid(prev_id, inter.id));
-            }
+        } else if let Some(prev_id) = prev_id
+            && !q_mode
+        {
+            sr_segments.push(SrSegment::AdjSid(prev_id, inter.id));
         }
 
         if inter.q {
@@ -360,10 +360,8 @@ pub fn make_repair_list(pc_inter: &[Intersect], s: usize, d: usize) -> Vec<SrSeg
         prev_id = Some(inter.id);
     }
 
-    if !q_mode {
-        if let Some(prev_id) = prev_id {
-            sr_segments.push(SrSegment::AdjSid(prev_id, d));
-        }
+    if !q_mode && let Some(prev_id) = prev_id {
+        sr_segments.push(SrSegment::AdjSid(prev_id, d));
     }
 
     sr_segments

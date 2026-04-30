@@ -83,17 +83,17 @@ fn show_isis_graph(
     let mut graphs = Vec::new();
 
     // Process Level 1 graph
-    if let Some(graph) = isis.graph.get(&Level::L1) {
-        if let Some(graph_json) = format_graph(graph, "L1") {
-            graphs.push(graph_json);
-        }
+    if let Some(graph) = isis.graph.get(&Level::L1)
+        && let Some(graph_json) = format_graph(graph, "L1")
+    {
+        graphs.push(graph_json);
     }
 
     // Process Level 2 graph
-    if let Some(graph) = isis.graph.get(&Level::L2) {
-        if let Some(graph_json) = format_graph(graph, "L2") {
-            graphs.push(graph_json);
-        }
+    if let Some(graph) = isis.graph.get(&Level::L2)
+        && let Some(graph_json) = format_graph(graph, "L2")
+    {
+        graphs.push(graph_json);
     }
 
     if json {

@@ -253,12 +253,10 @@ pub fn ospf_dr_election_bdr(oi: &mut OspfLink, v: Vec<Identity>) -> Option<Ident
 
 fn ospf_dr_election_dr_change(oi: &mut OspfLink) {
     for (addr, nbr) in oi.nbrs.iter() {
-        if !nbr.ident.router_id.is_unspecified() {
-            if nbr.state >= NfsmState::TwoWay {
-                oi.tx
-                    .send(Message::Nfsm(oi.index, *addr, NfsmEvent::AdjOk))
-                    .unwrap();
-            }
+        if !nbr.ident.router_id.is_unspecified() && nbr.state >= NfsmState::TwoWay {
+            oi.tx
+                .send(Message::Nfsm(oi.index, *addr, NfsmEvent::AdjOk))
+                .unwrap();
         }
     }
 }
@@ -284,10 +282,8 @@ fn ospf_dr_election(oi: &mut OspfLink) -> Option<IfsmState> {
         let bdr = ospf_dr_election_bdr(oi, v.clone());
         let dr = ospf_dr_election_dr(oi, bdr, v);
 
-        if !oi.ident.d_router.is_unspecified() {
-            if bdr == dr {
-                oi.ident.bd_router = Ipv4Addr::UNSPECIFIED;
-            }
+        if !oi.ident.d_router.is_unspecified() && bdr == dr {
+            oi.ident.bd_router = Ipv4Addr::UNSPECIFIED;
         }
         new_state = ospf_ifsm_state(oi);
     }
@@ -377,10 +373,10 @@ pub fn ospf_ifsm(oi: &mut OspfLink, event: IfsmEvent) {
     let next_state = fsm_func(oi).or(fsm_next_state);
 
     // If a state transition occurs, update the state.
-    if let Some(new_state) = next_state {
-        if new_state != oi.state {
-            ospf_ifsm_change_state(oi, new_state);
-        }
+    if let Some(new_state) = next_state
+        && new_state != oi.state
+    {
+        ospf_ifsm_change_state(oi, new_state);
     }
     ospf_ifsm_timer_set(oi);
 }

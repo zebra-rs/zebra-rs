@@ -603,16 +603,14 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
 
     // Step 4 special case: MaxAge LSA not in database.
     // If no neighbors in the area are in Exchange or Loading, ack and discard.
-    if lsa.h.ls_age >= OSPF_MAX_AGE && current.is_none() {
-        if oi.exchange_loading_count == 0 {
-            tracing::info!(
-                "[LS Update] MaxAge not in DB, no Exchange/Loading neighbors: type={:?} id={} adv={}",
-                lsa.h.ls_type,
-                lsa.h.ls_id,
-                lsa.h.adv_router
-            );
-            return LsaProcessResult::AckAndDiscard;
-        }
+    if lsa.h.ls_age >= OSPF_MAX_AGE && current.is_none() && oi.exchange_loading_count == 0 {
+        tracing::info!(
+            "[LS Update] MaxAge not in DB, no Exchange/Loading neighbors: type={:?} id={} adv={}",
+            lsa.h.ls_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router
+        );
+        return LsaProcessResult::AckAndDiscard;
     }
 
     // Step 5: Received LSA is newer (or no current copy exists).
@@ -781,12 +779,11 @@ pub fn ospf_ls_ack_recv(
     // Remove acknowledged LSAs from retransmit list.
     for lsah in ls_ack.lsa_headers.iter() {
         let key = (lsah.ls_type, lsah.ls_id, lsah.adv_router);
-        if let Some(rxmt_lsa) = nbr.ls_rxmt.get(&key) {
-            if rxmt_lsa.h.ls_seq_number == lsah.ls_seq_number
-                && rxmt_lsa.h.ls_checksum == lsah.ls_checksum
-            {
-                nbr.ls_rxmt.remove(&key);
-            }
+        if let Some(rxmt_lsa) = nbr.ls_rxmt.get(&key)
+            && rxmt_lsa.h.ls_seq_number == lsah.ls_seq_number
+            && rxmt_lsa.h.ls_checksum == lsah.ls_checksum
+        {
+            nbr.ls_rxmt.remove(&key);
         }
     }
     if nbr.ls_rxmt.is_empty() {

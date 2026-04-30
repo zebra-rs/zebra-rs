@@ -436,10 +436,10 @@ impl Rib {
         esi: Option<[u8; 10]>,
     ) {
         // MAC Mobility: ignore stale duplicates (lower sequence number)
-        if let Some(existing) = self.mac_table.get(&(vni, mac)) {
-            if seq < existing.seq {
-                return; // Ignore stale duplicate
-            }
+        if let Some(existing) = self.mac_table.get(&(vni, mac))
+            && seq < existing.seq
+        {
+            return; // Ignore stale duplicate
         }
 
         let entry = MacEntry {
