@@ -408,7 +408,7 @@ pub fn ospf_db_desc_recv(
             ospf_db_desc_proc(oi, nbr, dd);
         }
         Exchange => {
-            if is_dd_dup(&dd, &nbr.dd.recv) {
+            if is_dd_dup(dd, &nbr.dd.recv) {
                 if nbr.dd.flags.master() {
                     // Packet dup (Master).
                 } else {
