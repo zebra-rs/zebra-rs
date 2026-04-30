@@ -39,10 +39,6 @@ clap = { version = "4", features = ["derive"] }
 # and explicit-over-implicit choices in packet parsers). Other clippy
 # lints remain at their default level so genuine issues still surface.
 [workspace.lints.clippy]
-# Style — references and casts
-clone_on_copy = "allow"
-needless_borrow = "allow"
-
 # Style — APIs that get used a lot in protocol code
 get_first = "allow"
 ptr_arg = "allow"
