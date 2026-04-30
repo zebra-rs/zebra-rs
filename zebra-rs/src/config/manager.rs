@@ -289,9 +289,9 @@ impl ConfigManager {
         std::fs::write(&self.config_path, output).expect("Unable to write file");
     }
 
-    pub fn clear(&self, paths: &Vec<CommandPath>) {
+    pub fn clear(&self, paths: &[CommandPath]) {
         for (_, tx) in self.cm_clients.borrow().iter() {
-            tx.send(ConfigRequest::new(paths.clone(), ConfigOp::Clear))
+            tx.send(ConfigRequest::new(paths.to_vec(), ConfigOp::Clear))
                 .unwrap();
         }
     }
@@ -615,7 +615,7 @@ pub enum ConfigFormat {
     Yaml,
 }
 
-pub fn config_format_type(config_str: &String) -> ConfigFormat {
+pub fn config_format_type(config_str: &str) -> ConfigFormat {
     let first_line = config_str.lines().next().unwrap_or("").trim();
     if first_line.starts_with('{') {
         ConfigFormat::Json
