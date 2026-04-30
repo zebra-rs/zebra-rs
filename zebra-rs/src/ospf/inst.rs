@@ -1583,11 +1583,15 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
             rib::Nexthop::default()
         }
     } else {
-        let mut multi = rib::NexthopMulti::default();
-        multi.metric = route.metric;
-        for (key, value) in route.nhops.iter() {
-            multi.nexthops.push(nhop_to_nexthop_uni(key, route, value));
-        }
+        let multi = rib::NexthopMulti {
+            metric: route.metric,
+            nexthops: route
+                .nhops
+                .iter()
+                .map(|(key, value)| nhop_to_nexthop_uni(key, route, value))
+                .collect(),
+            ..Default::default()
+        };
         rib::Nexthop::Multi(multi)
     };
 

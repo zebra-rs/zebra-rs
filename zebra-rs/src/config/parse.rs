@@ -474,7 +474,7 @@ fn matched_enumeration(mx: &Match) -> Option<String> {
 }
 
 pub fn is_entry_presence(entry: &Rc<Entry>) -> bool {
-    entry.extension.get("ext:presence").is_some()
+    entry.extension.contains_key("ext:presence")
 }
 
 pub fn parse(

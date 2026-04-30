@@ -246,9 +246,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     lsa.bytes = bytes;
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
 
-    let lsa = top.lsdb.get_mut(&level).map.insert(key, lsa);
-
-    lsa
+    top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
 
 pub fn insert_self_originate(

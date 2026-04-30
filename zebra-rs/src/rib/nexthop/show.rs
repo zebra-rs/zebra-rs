@@ -31,7 +31,7 @@ pub fn nexthop_show(rib: &Rib, _args: Args, _json: bool) -> String {
                 for label in uni.labels.iter() {
                     let _ = write!(buf, " {}", label);
                 }
-                let _ = writeln!(buf, "");
+                let _ = writeln!(buf);
             }
             Group::Multi(multi) => {
                 for (gid, weight) in multi.set.iter() {

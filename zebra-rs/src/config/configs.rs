@@ -381,7 +381,7 @@ impl Config {
 
     pub fn json(&self, out: &mut String) {
         let keys = self.keys.borrow();
-        if keys.len() > 0 {
+        if !keys.is_empty() {
             out.push('[');
             for (pos, key) in keys.iter().enumerate() {
                 if pos != 0 {
