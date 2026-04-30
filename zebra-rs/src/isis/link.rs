@@ -1211,10 +1211,10 @@ pub fn show_dis_history(
         let mut history = Vec::new();
         for (_, link) in isis.links.iter() {
             if link.config.enabled() {
-                if let Some(ref filter) = interface_filter {
-                    if link.state.name != *filter {
-                        continue;
-                    }
+                if let Some(ref filter) = interface_filter
+                    && link.state.name != *filter
+                {
+                    continue;
                 }
 
                 for level in [Level::L1, Level::L2] {
@@ -1252,10 +1252,10 @@ pub fn show_dis_history(
 
     for (_, link) in isis.links.iter() {
         if link.config.enabled() {
-            if let Some(ref filter) = interface_filter {
-                if link.state.name != *filter {
-                    continue;
-                }
+            if let Some(ref filter) = interface_filter
+                && link.state.name != *filter
+            {
+                continue;
             }
 
             for level in [Level::L1, Level::L2] {
