@@ -83,15 +83,25 @@ impl<F: StaticFamily> StaticRoute<F> {
 
         if !self.segs.is_empty() {
             // SRv6 H.Encap: outer destination is the first segment, kernel
-            // routes the encapsulated packet there. If the user didn't
-            // specify an encap-type, default to H.Encap (RFC 8986 §5.1).
+            // routes the encapsulated packet there. RFC 8986 §5.1 lists
+            // H.Encap as the base behavior, but operators almost always
+            // prefer H.Encap.Red because it omits the redundant first SID
+            // from the SRH (RFC 8986 §5.2). Default to Red when there are
+            // enough segments to do so; fall back to plain H.Encap for a
+            // single-segment policy since Red has no segments left after
+            // dropping the first.
             let first = self.segs[0];
+            let encap_type = self.encap_type.unwrap_or(if self.segs.len() >= 2 {
+                EncapType::HEncapRed
+            } else {
+                EncapType::HEncap
+            });
             let nhop = NexthopUni {
                 addr: IpAddr::V6(first),
                 metric,
                 weight: 1,
                 segs: self.segs.clone(),
-                encap_type: Some(self.encap_type.unwrap_or(EncapType::HEncap)),
+                encap_type: Some(encap_type),
                 ..Default::default()
             };
             entry.nexthop = Nexthop::Uni(nhop);
@@ -276,7 +286,24 @@ mod tests {
     }
 
     #[test]
-    fn srv6_segs_default_to_h_encap_when_unspecified() {
+    fn srv6_segs_default_to_h_encap_red_when_unspecified() {
+        // Operator default: with two or more segments, an unspecified
+        // encap-type resolves to H.Encap.Red (RFC 8986 §5.2 reduced
+        // encapsulation, the typical SRv6 deployment choice).
+        let r = StaticRoute::<V4> {
+            segs: vec![seg("fd00:c::"), seg("fd00:b::")],
+            ..Default::default()
+        };
+        let entry = r.to_entry().expect("entry built");
+        let uni = as_uni(&entry);
+        assert_eq!(uni.encap_type, Some(EncapType::HEncapRed));
+    }
+
+    #[test]
+    fn srv6_single_segment_default_falls_back_to_h_encap() {
+        // H.Encap.Red drops the first segment from the SRH, so a
+        // single-segment policy would leave the SRH empty. Fall back
+        // to plain H.Encap rather than producing an invalid policy.
         let r = StaticRoute::<V4> {
             segs: vec![seg("fd00:c::")],
             ..Default::default()
