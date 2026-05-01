@@ -23,7 +23,7 @@ use crate::rib::{Link, MacAddr};
 
 use super::config::IsisConfig;
 use super::ifsm::{self, has_level};
-use super::inst::{PacketMessage, ReachMap};
+use super::inst::{PacketMessage, ReachMap, ReachMapV6};
 use super::neigh::Neighbor;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
@@ -125,6 +125,7 @@ pub struct LinkTop<'a> {
     pub local_pool: &'a mut Option<LabelPool>,
     pub hostname: &'a mut Levels<Hostname>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
 }
