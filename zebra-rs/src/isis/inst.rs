@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bytes::BytesMut;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::neigh::{self, IsisSubAdjSid};
 use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
@@ -63,8 +63,10 @@ pub struct Isis {
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
     pub reach_map: Levels<Afis<ReachMap>>,
+    pub reach_map_v6: Levels<ReachMapV6>,
     pub label_map: Levels<IsisLabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
+    pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
@@ -81,8 +83,10 @@ pub struct IsisTop<'a> {
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
+    pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
@@ -116,8 +120,10 @@ impl Isis {
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
             reach_map: Levels::<Afis<ReachMap>>::default(),
+            reach_map_v6: Levels::<ReachMapV6>::default(),
             label_map: Levels::<IsisLabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
+            rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf_timer: Levels::<Option<Timer>>::default(),
@@ -430,8 +436,10 @@ impl Isis {
             lsdb: &mut self.lsdb,
             lsp_map: &mut self.lsp_map,
             reach_map: &mut self.reach_map,
+            reach_map_v6: &mut self.reach_map_v6,
             label_map: &mut self.label_map,
             rib: &mut self.rib,
+            rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
@@ -456,6 +464,7 @@ impl Isis {
             local_pool: &mut self.local_pool,
             hostname: &mut self.hostname,
             reach_map: &mut self.reach_map,
+            reach_map_v6: &mut self.reach_map_v6,
             label_map: &mut self.label_map,
             spf_timer: &mut self.spf_timer,
         })
@@ -939,6 +948,25 @@ impl ReachMap {
 }
 
 #[derive(Default)]
+pub struct ReachMapV6 {
+    map: BTreeMap<IsisSysId, Vec<IsisTlvIpv6ReachEntry>>,
+}
+
+impl ReachMapV6 {
+    pub fn get(&self, key: &IsisSysId) -> Option<&Vec<IsisTlvIpv6ReachEntry>> {
+        self.map.get(key)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: IsisSysId,
+        value: Vec<IsisTlvIpv6ReachEntry>,
+    ) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
+        self.map.insert(key, value)
+    }
+}
+
+#[derive(Default)]
 pub struct LspMap {
     map: BTreeMap<IsisSysId, usize>,
     val: Vec<IsisSysId>,
@@ -1127,7 +1155,26 @@ pub struct SpfNexthop {
     pub sys_id: Option<IsisSysId>,
 }
 
+// IPv6 single-topology mirror of SpfRoute / SpfNexthop. Nexthop key is the
+// peer's IPv6 link-local address (TLV 232 from IIH); ECMP is supported by
+// keying multiple link-locals into the same SpfRouteV6.
+#[derive(Debug, PartialEq)]
+pub struct SpfRouteV6 {
+    pub metric: u32,
+    pub nhops: BTreeMap<Ipv6Addr, SpfNexthopV6>,
+    pub sid: Option<u32>,
+    pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpfNexthopV6 {
+    pub ifindex: u32,
+    pub adjacency: bool,
+    pub sys_id: Option<IsisSysId>,
+}
+
 pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
+pub type DiffResultV6<'a> = spf::TableDiffResult<'a, Ipv6Net, SpfRouteV6>;
 pub type DiffIlmResult<'a> = spf::TableDiffResult<'a, u32, SpfIlm>;
 
 fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
@@ -1197,6 +1244,85 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+}
+
+fn nhop_to_nexthop_uni_v6(
+    key: &Ipv6Addr,
+    route: &SpfRouteV6,
+    value: &SpfNexthopV6,
+) -> rib::NexthopUni {
+    let mut mpls = vec![];
+    if let Some(sid) = route.sid {
+        mpls.push(if value.adjacency {
+            rib::Label::Implicit(sid)
+        } else {
+            rib::Label::Explicit(sid)
+        });
+    }
+    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(*key), route.metric, mpls);
+    // IPv6 link-local nexthops require ifindex for kernel scope resolution.
+    nhop.ifindex = value.ifindex;
+    nhop
+}
+
+fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
+    let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+    rib.distance = 115;
+    rib.metric = route.metric;
+
+    rib.nexthop = if route.nhops.len() == 1 {
+        if let Some((key, value)) = route.nhops.iter().next() {
+            rib::Nexthop::Uni(nhop_to_nexthop_uni_v6(key, route, value))
+        } else {
+            rib::Nexthop::default()
+        }
+    } else {
+        let multi = rib::NexthopMulti {
+            metric: route.metric,
+            nexthops: route
+                .nhops
+                .iter()
+                .map(|(key, value)| nhop_to_nexthop_uni_v6(key, route, value))
+                .collect(),
+            ..Default::default()
+        };
+        rib::Nexthop::Multi(multi)
+    };
+
+    rib
+}
+
+pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6) {
+    for (prefix, route) in diff.only_curr.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry_v6(route);
+            let msg = rib::Message::Ipv6Del {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    for (prefix, _, route) in diff.different.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry_v6(route);
+            let msg = rib::Message::Ipv6Add {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    for (prefix, route) in diff.only_next.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry_v6(route);
+            let msg = rib::Message::Ipv6Add {
                 prefix: **prefix,
                 rib,
             };
@@ -1387,9 +1513,12 @@ fn build_rib_from_spf(
             continue;
         };
 
-        // Build nexthop map
+        // Build nexthop map. SPF runs in full-path mode (see
+        // perform_spf_calculation), so each `p` is the full path
+        // [first_hop, ..., destination]; we still index `p[0]` for the
+        // first-hop semantics the v4 path has always used.
         let mut spf_nhops = BTreeMap::new();
-        for p in &nhops.nexthops {
+        for p in &nhops.paths {
             // p.is_empty() means myself
             if !p.is_empty()
                 && let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0])
@@ -1471,11 +1600,141 @@ fn build_rib_from_spf(
     rib
 }
 
+// IPv6 mirror of build_rib_from_spf. Walks the same single-topology SPF tree;
+// nexthops come from the peer's link-local IPv6 advertised in IIH (TLV 232,
+// stored on Neighbor::addr6l). Reachable prefixes come from the per-LSP
+// IsisTlvIpv6Reach indexed in reach_map_v6.
+//
+// RFC 1195 §5: in single-topology mode, every transit node along the path to
+// an IPv6 destination must advertise IPv6 NLPID (0x8E) in its
+// Protocols-Supported TLV. Paths that traverse a non-IPv6-capable node are
+// dropped here so we don't black-hole traffic at a v4-only transit.
+//
+// Prefix-SID / SR plumbing for IPv6 is intentionally deferred — sid and
+// prefix_sid are left None for now and can be added when SRv6 IS-IS support
+// lands as a follow-up.
+fn build_rib_from_spf_v6(
+    top: &mut IsisTop,
+    level: Level,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> PrefixMap<Ipv6Net, SpfRouteV6> {
+    let mut rib = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
+
+    // Precompute the set of SysIds whose LSP advertises IPv6 NLPID, used to
+    // gate every transit node on each candidate path.
+    let ipv6_capable = ipv6_capable_set(top.lsdb.get(&level));
+
+    for (node, nhops) in spf_result {
+        if *node == source {
+            continue;
+        }
+
+        let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) else {
+            continue;
+        };
+
+        // Strict NLPID gating per RFC 1195 §5: if the destination doesn't
+        // advertise IPv6, anything claimed via Ipv6Reach is unreachable.
+        if !ipv6_capable.contains(sys_id) {
+            continue;
+        }
+        // Capture SysId so later borrows of top.lsp_map don't conflict.
+        let dest_sys_id = *sys_id;
+
+        // Build nexthop map keyed by the first-hop neighbor's link-local IPv6.
+        // Iterate `paths` (full path from first-hop to destination) so we can
+        // strict-gate every transit node, not just the first hop.
+        let mut spf_nhops = BTreeMap::new();
+        'next_path: for p in &nhops.paths {
+            if p.is_empty() {
+                continue;
+            }
+            // Every node on the path (transit + destination) must advertise IPv6.
+            for &hop in p {
+                let Some(hop_sys_id) = top.lsp_map.get(&level).resolve(hop) else {
+                    continue 'next_path;
+                };
+                if !ipv6_capable.contains(hop_sys_id) {
+                    continue 'next_path;
+                }
+            }
+
+            let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0]) else {
+                continue;
+            };
+            let nhop_sys_id = *nhop_id;
+            let is_adjacency = p[0] == *node;
+            for (ifindex, link) in top.links.iter() {
+                if let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) {
+                    for addr in nbr.addr6l.iter() {
+                        let nhop = SpfNexthopV6 {
+                            ifindex: *ifindex,
+                            adjacency: is_adjacency,
+                            sys_id: Some(nhop_sys_id),
+                        };
+                        spf_nhops.insert(*addr, nhop);
+                    }
+                }
+            }
+        }
+
+        // No surviving paths after gating → don't install anything for this dest.
+        if spf_nhops.is_empty() {
+            continue;
+        }
+
+        if let Some(entries) = top.reach_map_v6.get(&level).get(&dest_sys_id) {
+            for entry in entries.iter() {
+                let route = SpfRouteV6 {
+                    metric: nhops.cost + entry.metric,
+                    nhops: spf_nhops.clone(),
+                    sid: None,
+                    prefix_sid: None,
+                };
+
+                if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
+                    if curr.metric > route.metric {
+                        *curr = route;
+                    } else if curr.metric == route.metric {
+                        for (addr, nhop) in route.nhops {
+                            curr.nhops.insert(addr, nhop);
+                        }
+                    }
+                } else {
+                    rib.insert(entry.prefix.trunc(), route);
+                }
+            }
+        }
+    }
+
+    rib
+}
+
+// Walk the LSDB and collect SysIds whose Protocols-Supported TLV (TLV 129)
+// includes the IPv6 NLPID (0x8E). Used by strict NLPID gating in
+// build_rib_from_spf_v6.
+fn ipv6_capable_set(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
+    let ipv6_proto: u8 = IsisProto::Ipv6.into();
+    let mut set = BTreeSet::new();
+    for (lsp_id, lsa) in lsdb.iter() {
+        for tlv in &lsa.lsp.tlvs {
+            if let IsisTlv::ProtoSupported(ps) = tlv
+                && ps.nlpids.contains(&ipv6_proto)
+            {
+                set.insert(lsp_id.sys_id());
+            }
+        }
+    }
+    set
+}
+
 /// Apply routing updates to RIB subsystem
 fn apply_routing_updates(
     top: &mut IsisTop,
     level: Level,
     rib: PrefixMap<Ipv4Net, SpfRoute>,
+    rib_v6: PrefixMap<Ipv6Net, SpfRouteV6>,
     ilm: BTreeMap<u32, SpfIlm>,
 ) {
     // Update MPLS ILM
@@ -1485,12 +1744,19 @@ fn apply_routing_updates(
     }
     *top.ilm.get_mut(&level) = ilm;
 
-    // Update RIB
+    // Update IPv4 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
         diff_apply(top.rib_tx.clone(), &diff);
     }
     *top.rib.get_mut(&level) = rib;
+
+    // Update IPv6 RIB
+    if top.config.distribute.rib {
+        let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
+        diff_apply_v6(top.rib_tx.clone(), &diff);
+    }
+    *top.rib_v6.get_mut(&level) = rib_v6;
 }
 
 /// Perform SPF calculation and update routing tables
@@ -1506,11 +1772,13 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);
 
     if let Some(source) = source_node {
-        // Run SPF algorithm
-        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+        // Run SPF in full-path mode so the IPv6 builder can apply RFC 1195 §5
+        // strict NLPID gating across every transit node, not just the first hop.
+        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
 
-        // Build RIB from SPF results
+        // Build IPv4 + IPv6 RIBs from the same SPF result (single-topology).
         let rib = build_rib_from_spf(top, level, source, &spf_result);
+        let rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result);
 
         // Store SPF result in the instance.
         // spf::disp(&spf_result, false);
@@ -1520,7 +1788,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         mpls_route(&rib, &mut ilm);
 
         // Apply updates to RIB subsystem
-        apply_routing_updates(top, level, rib, ilm);
+        apply_routing_updates(top, level, rib, rib_v6, ilm);
     }
 }
 
