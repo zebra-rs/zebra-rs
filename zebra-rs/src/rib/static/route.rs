@@ -2,7 +2,7 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use std::collections::BTreeMap;
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use isis_packet::srv6::EncapType;
 
@@ -72,7 +72,7 @@ where
 
 impl<F: StaticFamily> StaticRoute<F> {
     pub fn to_entry(&self) -> Option<RibEntry> {
-        if self.nexthops.is_empty() {
+        if self.nexthops.is_empty() && self.segs.is_empty() {
             return None;
         }
 
@@ -80,6 +80,24 @@ impl<F: StaticFamily> StaticRoute<F> {
         entry.distance = self.distance.unwrap_or(1);
 
         let metric = self.metric.unwrap_or(0);
+
+        if !self.segs.is_empty() {
+            // SRv6 H.Encap: outer destination is the first segment, kernel
+            // routes the encapsulated packet there. If the user didn't
+            // specify an encap-type, default to H.Encap (RFC 8986 §5.1).
+            let first = self.segs[0];
+            let nhop = NexthopUni {
+                addr: IpAddr::V6(first),
+                metric,
+                weight: 1,
+                segs: self.segs.clone(),
+                encap_type: Some(self.encap_type.unwrap_or(EncapType::HEncap)),
+                ..Default::default()
+            };
+            entry.nexthop = Nexthop::Uni(nhop);
+            entry.metric = metric;
+            return Some(entry);
+        }
 
         if self.nexthops.len() == 1 {
             let (p, n) = self.nexthops.iter().next()?;
@@ -236,5 +254,62 @@ mod tests {
         assert_eq!(labeled.mpls_label, vec![100]);
         assert!(bare.mpls_label.is_empty());
         assert!(bare.mpls.is_empty());
+    }
+
+    fn seg(s: &str) -> Ipv6Addr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn srv6_segs_build_uni_with_first_segment_as_addr() {
+        let segs = vec![seg("fd00:c::"), seg("fd00:b::"), seg("3001:2003::2")];
+        let r = StaticRoute::<V4> {
+            segs: segs.clone(),
+            encap_type: Some(EncapType::HEncapRed),
+            ..Default::default()
+        };
+        let entry = r.to_entry().expect("entry built");
+        let uni = as_uni(&entry);
+        assert_eq!(uni.addr, IpAddr::V6(seg("fd00:c::")));
+        assert_eq!(uni.segs, segs);
+        assert_eq!(uni.encap_type, Some(EncapType::HEncapRed));
+    }
+
+    #[test]
+    fn srv6_segs_default_to_h_encap_when_unspecified() {
+        let r = StaticRoute::<V4> {
+            segs: vec![seg("fd00:c::")],
+            ..Default::default()
+        };
+        let entry = r.to_entry().expect("entry built");
+        let uni = as_uni(&entry);
+        assert_eq!(uni.encap_type, Some(EncapType::HEncap));
+    }
+
+    #[test]
+    fn srv6_segs_only_no_nexthops_returns_some() {
+        // Pre-Step-1 the absence of nexthops short-circuited to None;
+        // segs alone must now be sufficient to produce a RibEntry.
+        let r = StaticRoute::<V4> {
+            segs: vec![seg("fd00:c::")],
+            ..Default::default()
+        };
+        assert!(r.to_entry().is_some());
+    }
+
+    #[test]
+    fn srv6_segs_take_priority_over_nexthops() {
+        // v1 design: when both segs and nexthops are configured, segs win.
+        let mut nexthops = BTreeMap::new();
+        nexthops.insert(Ipv4Addr::new(192, 168, 100, 2), nh(vec![], None));
+        let r = StaticRoute::<V4> {
+            nexthops,
+            segs: vec![seg("fd00:c::")],
+            ..Default::default()
+        };
+        let entry = r.to_entry().expect("entry built");
+        let uni = as_uni(&entry);
+        assert_eq!(uni.addr, IpAddr::V6(seg("fd00:c::")));
+        assert!(!uni.segs.is_empty());
     }
 }
