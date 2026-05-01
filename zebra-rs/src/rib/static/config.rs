@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context, Result};
 use ipnet::{Ipv4Net, Ipv6Net};
+use isis_packet::srv6::EncapType;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
@@ -328,6 +329,40 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
             let n = s.nexthops.get_mut(&naddr).context(CONFIG_ERR)?;
             n.labels.clear();
+            Ok(())
+        })
+        .path(&format!("/routing/static/{}/route/segments", F::FAMILY))
+        .set(|config, cache, prefix, args| {
+            const SEG_ERR: &str = "segment address parse error";
+            let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            let mut segs: Vec<Ipv6Addr> = vec![];
+            while let Some(addr) = args.string() {
+                segs.push(addr.parse::<Ipv6Addr>().context(SEG_ERR)?);
+            }
+            s.segs = segs;
+            Ok(())
+        })
+        .del(|config, cache, prefix, args| {
+            const SEG_ERR: &str = "segment address parse error";
+            let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            let mut segs: Vec<Ipv6Addr> = vec![];
+            while let Some(addr) = args.string() {
+                segs.push(addr.parse::<Ipv6Addr>().context(SEG_ERR)?);
+            }
+            s.segs.clear();
+            Ok(())
+        })
+        .path(&format!("/routing/static/{}/route/encap-type", F::FAMILY))
+        .set(|config, cache, prefix, args| {
+            const ENCAP_ERR: &str = "missing encap-type arg";
+            let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            let arg = args.string().context(ENCAP_ERR)?;
+            s.encap_type = Some(arg.parse::<EncapType>()?);
+            Ok(())
+        })
+        .del(|config, cache, prefix, _args| {
+            let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            s.encap_type = None;
             Ok(())
         })
 }
