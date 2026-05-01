@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
+use std::collections::BTreeSet;
 use std::fmt::Write;
 
-//use isis_packet::*;
+use isis_packet::{IsisProto, IsisSysId, IsisTlv, Nsap};
 use serde::Serialize;
 
 use super::{Isis, inst::ShowCallback};
 
 use crate::config::Args;
+use crate::isis::link::Afi;
 use crate::isis::{Level, hostname, link, neigh};
 // use spf_rs as spf;
 use crate::spf;
@@ -237,54 +239,412 @@ fn show_isis_route(
         Ok(serde_json::to_string_pretty(&routes_json)
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)))
     } else {
-        // Text output (existing implementation)
-        let mut buf = String::new();
+        write_show_isis_route_text(isis)
+    }
+}
 
-        // Helper closure to format and write out routes for a given level
-        let mut write_routes = |level: &Level| -> std::fmt::Result {
-            for (prefix, route) in isis.rib.get(level).iter() {
-                let mut shown = false;
-                for (addr, nhop) in route.nhops.iter() {
-                    let sid = if let Some(sid) = route.sid {
-                        if nhop.adjacency {
-                            format!(", label {} implicit null", sid)
-                        } else {
-                            format!(", label {}", sid)
-                        }
-                    } else {
-                        String::from("")
-                    };
-                    if !shown {
-                        writeln!(
-                            buf,
-                            "{:<20} [{}] via {}, {}{}",
-                            prefix.to_string(),
-                            route.metric,
-                            addr,
-                            isis.ifname(nhop.ifindex),
-                            sid
-                        )?;
-                        shown = true;
-                    } else {
-                        writeln!(
-                            buf,
-                            "                     [{}] via {}, {}{}",
-                            route.metric,
-                            addr,
-                            isis.ifname(nhop.ifindex),
-                            sid
-                        )?;
-                    }
-                }
-            }
-            Ok(())
+fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    let local_sys_id = isis.config.net.sys_id();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+
+    let mut wrote_any_level = false;
+    for level in &[Level::L1, Level::L2] {
+        let Some(spf_result) = isis.spf_result.get(level).as_ref() else {
+            continue;
+        };
+        if spf_result.is_empty() {
+            continue;
+        }
+        wrote_any_level = true;
+
+        let level_long = match level {
+            Level::L1 => "level-1",
+            Level::L2 => "level-2",
+        };
+        let level_short = match level {
+            Level::L1 => "L1",
+            Level::L2 => "L2",
         };
 
-        write_routes(&Level::L1)?;
-        write_routes(&Level::L2)?;
+        // IPv4 SPF tree
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS paths to {} routers that speak IP", level_long)?;
+        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
 
-        Ok(buf)
+        // IPv4 RIB
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS {} IPv4 routing table:", level_short)?;
+        writeln!(buf)?;
+        write_rib_v4(&mut buf, isis, level)?;
+
+        // IPv6 SPF tree (only IPv6-capable nodes)
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
+        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, true)?;
+
+        // IPv6 RIB
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS {} IPv6 routing table:", level_short)?;
+        writeln!(buf)?;
+        write_rib_v6(&mut buf, isis, level)?;
     }
+
+    if !wrote_any_level {
+        writeln!(buf, "(no SPF result yet)")?;
+    }
+    Ok(buf)
+}
+
+fn format_area_id(net: &Nsap) -> String {
+    // Render as <afi>.<area_id_bytes_hex_pairs>, the standard IS-IS area form.
+    let mut s = format!("{:02x}", net.afi);
+    for (i, b) in net.area_id.iter().enumerate() {
+        if i % 2 == 0 {
+            s.push('.');
+        }
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn hostname_for(isis: &Isis, level: &Level, sys_id: &IsisSysId) -> String {
+    isis.hostname
+        .get(level)
+        .get(sys_id)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| sys_id.to_string())
+}
+
+// Find the local interface name for a directly-adjacent SysId at the given
+// level, by walking link state. Returns "-" if no adjacency is found.
+fn ifname_for_neighbor(isis: &Isis, level: &Level, sys_id: &IsisSysId) -> String {
+    for (ifindex, link) in isis.links.iter() {
+        if link.state.nbrs.get(level).get(sys_id).is_some() {
+            return isis.ifname(*ifindex);
+        }
+    }
+    String::from("-")
+}
+
+fn ipv6_capable_set_show(isis: &Isis, level: &Level) -> BTreeSet<IsisSysId> {
+    let ipv6_proto: u8 = IsisProto::Ipv6.into();
+    let mut set = BTreeSet::new();
+    for (lsp_id, lsa) in isis.lsdb.get(level).iter() {
+        for tlv in &lsa.lsp.tlvs {
+            if let IsisTlv::ProtoSupported(ps) = tlv
+                && ps.nlpids.contains(&ipv6_proto)
+            {
+                set.insert(lsp_id.sys_id());
+            }
+        }
+    }
+    set
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_spf_tree(
+    buf: &mut String,
+    isis: &Isis,
+    level: &Level,
+    local_sys_id: &IsisSysId,
+    spf_result: &std::collections::BTreeMap<usize, spf::Path>,
+    ipv6: bool,
+) -> std::fmt::Result {
+    // Column widths chosen to fit the typical reference output.
+    const W_VERTEX: usize = 22;
+    const W_TYPE: usize = 13;
+    const W_METRIC: usize = 7;
+    const W_NEXTHOP: usize = 9;
+    const W_INTERFACE: usize = 10;
+
+    writeln!(
+        buf,
+        " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} Parent",
+        "Vertex",
+        "Type",
+        "Metric",
+        "Next-Hop",
+        "Interface",
+        wv = W_VERTEX,
+        wt = W_TYPE,
+        wm = W_METRIC,
+        wn = W_NEXTHOP,
+        wi = W_INTERFACE,
+    )?;
+    let total = 1 + W_VERTEX + 1 + W_TYPE + 1 + W_METRIC + 1 + W_NEXTHOP + 1 + W_INTERFACE + 1 + 8;
+    writeln!(buf, " {}", "-".repeat(total - 2))?;
+
+    // For IPv6 trees, gate by NLPID-capable set per RFC 1195 §5 — same logic
+    // as build_rib_from_spf_v6 so the tree mirrors what's actually installed.
+    let ipv6_capable = if ipv6 {
+        Some(ipv6_capable_set_show(isis, level))
+    } else {
+        None
+    };
+
+    let mut nodes: Vec<(usize, &spf::Path)> = spf_result.iter().map(|(k, v)| (*k, v)).collect();
+    nodes.sort_by_key(|(_, p)| (p.cost, p.id));
+
+    let local_hostname = hostname_for(isis, level, local_sys_id);
+
+    for (node_id, path) in &nodes {
+        let Some(node_sys_id) = isis.lsp_map.get(level).resolve(*node_id) else {
+            continue;
+        };
+        let node_sys_id = *node_sys_id;
+        let is_self = node_sys_id == *local_sys_id;
+        if let Some(set) = &ipv6_capable
+            && !set.contains(&node_sys_id)
+        {
+            continue;
+        }
+        let node_hostname = hostname_for(isis, level, &node_sys_id);
+
+        // First-hop hostname / interface (blank for self).
+        let (nexthop_str, iface_str, parent_str) = if is_self {
+            (String::new(), String::new(), String::new())
+        } else {
+            // Each path = [first_hop, ..., destination]; take the first as
+            // first-hop and the previous-to-last as parent. For a direct
+            // neighbor (path len 1), parent is the local node.
+            let p = path.paths.first().cloned().unwrap_or_default();
+            if p.is_empty() {
+                (String::new(), String::new(), local_hostname.clone())
+            } else {
+                let first_hop_sys_id = isis
+                    .lsp_map
+                    .get(level)
+                    .resolve(p[0])
+                    .copied()
+                    .unwrap_or(node_sys_id);
+                let parent_sys_id = if p.len() <= 1 {
+                    *local_sys_id
+                } else {
+                    isis.lsp_map
+                        .get(level)
+                        .resolve(p[p.len() - 2])
+                        .copied()
+                        .unwrap_or(*local_sys_id)
+                };
+                (
+                    hostname_for(isis, level, &first_hop_sys_id),
+                    ifname_for_neighbor(isis, level, &first_hop_sys_id),
+                    hostname_for(isis, level, &parent_sys_id),
+                )
+            }
+        };
+
+        // Vertex row for the node itself.
+        if is_self {
+            // Match reference: just the hostname, all other columns blank.
+            writeln!(buf, " {}", node_hostname)?;
+        } else {
+            writeln!(
+                buf,
+                " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}(0)",
+                node_hostname,
+                "TE-IS",
+                path.cost,
+                nexthop_str,
+                iface_str,
+                parent_str,
+                wv = W_VERTEX,
+                wt = W_TYPE,
+                wm = W_METRIC,
+                wn = W_NEXTHOP,
+                wi = W_INTERFACE,
+            )?;
+        }
+
+        // Prefix rows hanging off this node.
+        if !ipv6 {
+            if let Some(entries) = isis.reach_map.get(level).get(&Afi::Ip).get(&node_sys_id) {
+                for entry in entries.iter() {
+                    let type_str = if is_self { "IP internal" } else { "IP TE" };
+                    let total_metric = path.cost + entry.metric;
+                    let (nh, iface) = if is_self {
+                        (String::new(), String::new())
+                    } else {
+                        (nexthop_str.clone(), iface_str.clone())
+                    };
+                    writeln!(
+                        buf,
+                        " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}(0)",
+                        entry.prefix.trunc().to_string(),
+                        type_str,
+                        total_metric,
+                        nh,
+                        iface,
+                        node_hostname,
+                        wv = W_VERTEX,
+                        wt = W_TYPE,
+                        wm = W_METRIC,
+                        wn = W_NEXTHOP,
+                        wi = W_INTERFACE,
+                    )?;
+                }
+            }
+        } else if let Some(entries) = isis.reach_map_v6.get(level).get(&node_sys_id) {
+            for entry in entries.iter() {
+                let total_metric = path.cost + entry.metric;
+                let (nh, iface) = if is_self {
+                    (String::new(), String::new())
+                } else {
+                    (nexthop_str.clone(), iface_str.clone())
+                };
+                writeln!(
+                    buf,
+                    " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}(0)",
+                    entry.prefix.trunc().to_string(),
+                    "IP6 internal",
+                    total_metric,
+                    nh,
+                    iface,
+                    node_hostname,
+                    wv = W_VERTEX,
+                    wt = W_TYPE,
+                    wm = W_METRIC,
+                    wn = W_NEXTHOP,
+                    wi = W_INTERFACE,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_rib_v4(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
+    const W_PREFIX: usize = 18;
+    const W_METRIC: usize = 7;
+    const W_INTERFACE: usize = 10;
+    const W_NEXTHOP: usize = 16;
+
+    writeln!(
+        buf,
+        " {:<wp$} {:<wm$} {:<wi$} {:<wn$} Label(s)",
+        "Prefix",
+        "Metric",
+        "Interface",
+        "Nexthop",
+        wp = W_PREFIX,
+        wm = W_METRIC,
+        wi = W_INTERFACE,
+        wn = W_NEXTHOP,
+    )?;
+    let total = 1 + W_PREFIX + 1 + W_METRIC + 1 + W_INTERFACE + 1 + W_NEXTHOP + 1 + 9;
+    writeln!(buf, " {}", "-".repeat(total - 2))?;
+
+    let mut entries: Vec<_> = isis.rib.get(level).iter().collect();
+    entries.sort_by_key(|(p, _)| **p);
+
+    for (prefix, route) in entries {
+        if route.nhops.is_empty() {
+            // Locally connected / no nexthop.
+            let label = route
+                .sid
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".into());
+            writeln!(
+                buf,
+                " {:<wp$} {:<wm$} {:<wi$} {:<wn$} {}",
+                prefix.to_string(),
+                route.metric,
+                "-",
+                "-",
+                label,
+                wp = W_PREFIX,
+                wm = W_METRIC,
+                wi = W_INTERFACE,
+                wn = W_NEXTHOP,
+            )?;
+            continue;
+        }
+        for (addr, nhop) in route.nhops.iter() {
+            let label = if let Some(sid) = route.sid {
+                if nhop.adjacency {
+                    format!("{} (impl-null)", sid)
+                } else {
+                    sid.to_string()
+                }
+            } else {
+                "-".into()
+            };
+            writeln!(
+                buf,
+                " {:<wp$} {:<wm$} {:<wi$} {:<wn$} {}",
+                prefix.to_string(),
+                route.metric,
+                isis.ifname(nhop.ifindex),
+                addr,
+                label,
+                wp = W_PREFIX,
+                wm = W_METRIC,
+                wi = W_INTERFACE,
+                wn = W_NEXTHOP,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn write_rib_v6(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
+    const W_PREFIX: usize = 22;
+    const W_METRIC: usize = 7;
+    const W_INTERFACE: usize = 10;
+    const W_NEXTHOP: usize = 26;
+
+    writeln!(
+        buf,
+        " {:<wp$} {:<wm$} {:<wi$} {:<wn$} Label(s)",
+        "Prefix",
+        "Metric",
+        "Interface",
+        "Nexthop",
+        wp = W_PREFIX,
+        wm = W_METRIC,
+        wi = W_INTERFACE,
+        wn = W_NEXTHOP,
+    )?;
+    let total = 1 + W_PREFIX + 1 + W_METRIC + 1 + W_INTERFACE + 1 + W_NEXTHOP + 1 + 9;
+    writeln!(buf, " {}", "-".repeat(total - 2))?;
+
+    let mut entries: Vec<_> = isis.rib_v6.get(level).iter().collect();
+    entries.sort_by_key(|(p, _)| **p);
+
+    for (prefix, route) in entries {
+        if route.nhops.is_empty() {
+            writeln!(
+                buf,
+                " {:<wp$} {:<wm$} {:<wi$} {:<wn$} -",
+                prefix.to_string(),
+                route.metric,
+                "-",
+                "-",
+                wp = W_PREFIX,
+                wm = W_METRIC,
+                wi = W_INTERFACE,
+                wn = W_NEXTHOP,
+            )?;
+            continue;
+        }
+        for (addr, nhop) in route.nhops.iter() {
+            writeln!(
+                buf,
+                " {:<wp$} {:<wm$} {:<wi$} {:<wn$} -",
+                prefix.to_string(),
+                route.metric,
+                isis.ifname(nhop.ifindex),
+                addr,
+                wp = W_PREFIX,
+                wm = W_METRIC,
+                wi = W_INTERFACE,
+                wn = W_NEXTHOP,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 // JSON structures for ISIS database
