@@ -446,10 +446,10 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                if DEBUG_ADDR {
-                    tracing::info!("NewRoute IPv6 error: {prefix} {e}");
-                }
+            if let NetlinkPayload::Error(e) = msg.payload
+                && DEBUG_ADDR
+            {
+                tracing::info!("NewRoute IPv6 error: {prefix} {e}");
             }
         }
     }
@@ -551,10 +551,10 @@ impl FibHandle {
 
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                if DEBUG_ADDR {
-                    tracing::info!("DelRoute IPv6 error: {e} {prefix}");
-                }
+            if let NetlinkPayload::Error(e) = msg.payload
+                && DEBUG_ADDR
+            {
+                tracing::info!("DelRoute IPv6 error: {e} {prefix}");
             }
         }
     }
