@@ -17,8 +17,11 @@ use super::{
     Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMulti, RibEntries, RibType,
 };
 
-// Flip to true to re-enable IPv6 RIB/FIB diagnostic prints.
+// Flip to true to re-enable IPv6 RIB/FIB diagnostic trace.
 const DEBUG_V6: bool = false;
+
+// Flip to true to re-enable IP address diagnostic trace.
+pub const DEBUG_ADDR: bool = false;
 
 impl Rib {
     pub async fn link_down(&mut self, ifindex: u32) {
@@ -115,21 +118,25 @@ impl Rib {
 
     pub async fn link_up(&mut self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
-            tracing::info!(
-                "link_up: ifindex {} not found in link table; skipping connected route recovery",
-                ifindex
-            );
+            if DEBUG_ADDR {
+                tracing::info!(
+                    "link_up: ifindex {} not found in link table; skipping connected route recovery",
+                    ifindex
+                );
+            }
             return;
         };
         let link_name = link.name.clone();
 
-        tracing::info!(
-            "link_up: {} (ifindex {}) recovering {} IPv4 + {} IPv6 connected addresses",
-            link_name,
-            ifindex,
-            link.addr4.len(),
-            link.addr6.len()
-        );
+        if DEBUG_ADDR {
+            tracing::info!(
+                "link_up: {} (ifindex {}) recovering {} IPv4 + {} IPv6 connected addresses",
+                link_name,
+                ifindex,
+                link.addr4.len(),
+                link.addr6.len()
+            );
+        }
 
         // Notify protocol daemons.
         self.api_link_up(ifindex);
@@ -142,11 +149,13 @@ impl Rib {
                 entry.ifindex = ifindex;
                 entry.set_valid(true);
 
-                tracing::info!(
-                    "link_up: {} re-adding IPv4 connected prefix {}",
-                    link_name,
-                    prefix
-                );
+                if DEBUG_ADDR {
+                    tracing::info!(
+                        "link_up: {} re-adding IPv4 connected prefix {}",
+                        link_name,
+                        prefix
+                    );
+                }
 
                 rib_add_system(&mut self.table, &prefix, entry);
                 rib_selection_ipv4(
@@ -168,11 +177,13 @@ impl Rib {
                 entry.ifindex = ifindex;
                 entry.set_valid(true);
 
-                tracing::info!(
-                    "link_up: {} re-adding IPv6 connected prefix {}",
-                    link_name,
-                    prefix
-                );
+                if DEBUG_ADDR {
+                    tracing::info!(
+                        "link_up: {} re-adding IPv6 connected prefix {}",
+                        link_name,
+                        prefix
+                    );
+                }
 
                 rib_add_system_v6(&mut self.table_v6, &prefix, entry);
                 rib_selection_ipv6(
@@ -213,11 +224,13 @@ impl Rib {
             .collect();
 
         for net in &v4_recover {
-            tracing::info!(
-                "link_up: {} re-installing IPv4 address {} to kernel (config=true, fib was false)",
-                link_name,
-                net
-            );
+            if DEBUG_ADDR {
+                tracing::info!(
+                    "link_up: {} re-installing IPv4 address {} to kernel (config=true, fib was false)",
+                    link_name,
+                    net
+                );
+            }
             if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net, false).await {
                 tracing::warn!(
                     "link_up: {} failed to re-install IPv4 address {}: {}",
@@ -228,11 +241,13 @@ impl Rib {
             }
         }
         for net in &v6_recover {
-            tracing::info!(
-                "link_up: {} re-installing IPv6 address {} to kernel (config=true, fib was false)",
-                link_name,
-                net
-            );
+            if DEBUG_ADDR {
+                tracing::info!(
+                    "link_up: {} re-installing IPv6 address {} to kernel (config=true, fib was false)",
+                    link_name,
+                    net
+                );
+            }
             if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net, false).await {
                 tracing::warn!(
                     "link_up: {} failed to re-install IPv6 address {}: {}",
@@ -300,7 +315,7 @@ impl Rib {
 
     pub async fn ipv6_route_add(&mut self, prefix: &Ipv6Net, mut entry: RibEntry) {
         if DEBUG_V6 {
-            println!(
+            tracing::info!(
                 "[ipv6_route_add] prefix={} rtype={:?} is_protocol={} is_connected={} valid_in={}",
                 prefix,
                 entry.rtype,

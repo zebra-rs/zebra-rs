@@ -16,6 +16,7 @@ use crate::fib::sysctl::sysctl_mpls_enable;
 
 use super::api::RibRx;
 use super::entry::RibEntry;
+use super::route::DEBUG_ADDR;
 use super::util::IpNetExt;
 use super::{LinkFlagsExt, MacAddr, Message, Rib, RibType};
 
@@ -414,22 +415,27 @@ impl Rib {
             // down event handling.
             if link.is_up() {
                 if !fib_link.flags.is_up() {
-                    tracing::info!(
-                        "kernel: link {} (ifindex {}) Up => Down",
-                        link.name,
-                        link.index
-                    );
+                    if DEBUG_ADDR {
+                        tracing::info!(
+                            "kernel: link {} (ifindex {}) Up => Down",
+                            link.name,
+                            link.index
+                        );
+                    }
+
                     link.flags = fib_link.flags;
                     let _ = self.tx.send(Message::LinkDown {
                         ifindex: link.index,
                     });
                 }
             } else if fib_link.flags.is_up() {
-                tracing::info!(
-                    "kernel: link {} (ifindex {}) Down => Up; recovering connected routes",
-                    link.name,
-                    link.index
-                );
+                if DEBUG_ADDR {
+                    tracing::info!(
+                        "kernel: link {} (ifindex {}) Down => Up; recovering connected routes",
+                        link.name,
+                        link.index
+                    );
+                }
                 link.flags = fib_link.flags;
                 let _ = self.tx.send(Message::LinkUp {
                     ifindex: link.index,
