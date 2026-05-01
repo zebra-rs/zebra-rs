@@ -71,6 +71,28 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
         );
     }
 
+    // IPv6 Interface Address TLVs (RFC 5308 TLV 232 for link-local; non-standard
+    // TLV 233 for global) — only when IS-IS IPv6 is enabled on this link, so we
+    // don't advertise an IPv6 capability we won't honor.
+    if link.config.enable.v6 {
+        for prefix in &link.state.v6laddr {
+            hello.tlvs.push(
+                IsisTlvIpv6IfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
+        for prefix in &link.state.v6addr {
+            hello.tlvs.push(
+                IsisTlvIpv6GlobalIfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
+    }
+
     let mut neighbors = Vec::new();
     for (_, nbr) in link.state.nbrs.get(&level).iter() {
         if (nbr.state == NfsmState::Init || nbr.state == NfsmState::Up)
@@ -118,6 +140,27 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
             }
             .into(),
         );
+    }
+
+    // IPv6 Interface Address TLVs (RFC 5308 TLV 232 for link-local; non-standard
+    // TLV 233 for global) — only when IS-IS IPv6 is enabled on this link.
+    if link.config.enable.v6 {
+        for prefix in &link.state.v6laddr {
+            hello.tlvs.push(
+                IsisTlvIpv6IfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
+        for prefix in &link.state.v6addr {
+            hello.tlvs.push(
+                IsisTlvIpv6GlobalIfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
     }
 
     // Three way handshake.
