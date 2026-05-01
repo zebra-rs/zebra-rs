@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -1513,9 +1513,12 @@ fn build_rib_from_spf(
             continue;
         };
 
-        // Build nexthop map
+        // Build nexthop map. SPF runs in full-path mode (see
+        // perform_spf_calculation), so each `p` is the full path
+        // [first_hop, ..., destination]; we still index `p[0]` for the
+        // first-hop semantics the v4 path has always used.
         let mut spf_nhops = BTreeMap::new();
-        for p in &nhops.nexthops {
+        for p in &nhops.paths {
             // p.is_empty() means myself
             if !p.is_empty()
                 && let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0])
@@ -1602,6 +1605,11 @@ fn build_rib_from_spf(
 // stored on Neighbor::addr6l). Reachable prefixes come from the per-LSP
 // IsisTlvIpv6Reach indexed in reach_map_v6.
 //
+// RFC 1195 §5: in single-topology mode, every transit node along the path to
+// an IPv6 destination must advertise IPv6 NLPID (0x8E) in its
+// Protocols-Supported TLV. Paths that traverse a non-IPv6-capable node are
+// dropped here so we don't black-hole traffic at a v4-only transit.
+//
 // Prefix-SID / SR plumbing for IPv6 is intentionally deferred — sid and
 // prefix_sid are left None for now and can be added when SRv6 IS-IS support
 // lands as a follow-up.
@@ -1613,6 +1621,10 @@ fn build_rib_from_spf_v6(
 ) -> PrefixMap<Ipv6Net, SpfRouteV6> {
     let mut rib = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
 
+    // Precompute the set of SysIds whose LSP advertises IPv6 NLPID, used to
+    // gate every transit node on each candidate path.
+    let ipv6_capable = ipv6_capable_set(top.lsdb.get(&level));
+
     for (node, nhops) in spf_result {
         if *node == source {
             continue;
@@ -1622,28 +1634,57 @@ fn build_rib_from_spf_v6(
             continue;
         };
 
+        // Strict NLPID gating per RFC 1195 §5: if the destination doesn't
+        // advertise IPv6, anything claimed via Ipv6Reach is unreachable.
+        if !ipv6_capable.contains(sys_id) {
+            continue;
+        }
+        // Capture SysId so later borrows of top.lsp_map don't conflict.
+        let dest_sys_id = *sys_id;
+
         // Build nexthop map keyed by the first-hop neighbor's link-local IPv6.
+        // Iterate `paths` (full path from first-hop to destination) so we can
+        // strict-gate every transit node, not just the first hop.
         let mut spf_nhops = BTreeMap::new();
-        for p in &nhops.nexthops {
-            if !p.is_empty()
-                && let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0])
-            {
-                for (ifindex, link) in top.links.iter() {
-                    if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                        for addr in nbr.addr6l.iter() {
-                            let nhop = SpfNexthopV6 {
-                                ifindex: *ifindex,
-                                adjacency: p[0] == *node,
-                                sys_id: Some(*nhop_id),
-                            };
-                            spf_nhops.insert(*addr, nhop);
-                        }
+        'next_path: for p in &nhops.paths {
+            if p.is_empty() {
+                continue;
+            }
+            // Every node on the path (transit + destination) must advertise IPv6.
+            for &hop in p {
+                let Some(hop_sys_id) = top.lsp_map.get(&level).resolve(hop) else {
+                    continue 'next_path;
+                };
+                if !ipv6_capable.contains(hop_sys_id) {
+                    continue 'next_path;
+                }
+            }
+
+            let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0]) else {
+                continue;
+            };
+            let nhop_sys_id = *nhop_id;
+            let is_adjacency = p[0] == *node;
+            for (ifindex, link) in top.links.iter() {
+                if let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) {
+                    for addr in nbr.addr6l.iter() {
+                        let nhop = SpfNexthopV6 {
+                            ifindex: *ifindex,
+                            adjacency: is_adjacency,
+                            sys_id: Some(nhop_sys_id),
+                        };
+                        spf_nhops.insert(*addr, nhop);
                     }
                 }
             }
         }
 
-        if let Some(entries) = top.reach_map_v6.get(&level).get(sys_id) {
+        // No surviving paths after gating → don't install anything for this dest.
+        if spf_nhops.is_empty() {
+            continue;
+        }
+
+        if let Some(entries) = top.reach_map_v6.get(&level).get(&dest_sys_id) {
             for entry in entries.iter() {
                 let route = SpfRouteV6 {
                     metric: nhops.cost + entry.metric,
@@ -1668,6 +1709,24 @@ fn build_rib_from_spf_v6(
     }
 
     rib
+}
+
+// Walk the LSDB and collect SysIds whose Protocols-Supported TLV (TLV 129)
+// includes the IPv6 NLPID (0x8E). Used by strict NLPID gating in
+// build_rib_from_spf_v6.
+fn ipv6_capable_set(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
+    let ipv6_proto: u8 = IsisProto::Ipv6.into();
+    let mut set = BTreeSet::new();
+    for (lsp_id, lsa) in lsdb.iter() {
+        for tlv in &lsa.lsp.tlvs {
+            if let IsisTlv::ProtoSupported(ps) = tlv
+                && ps.nlpids.contains(&ipv6_proto)
+            {
+                set.insert(lsp_id.sys_id());
+            }
+        }
+    }
+    set
 }
 
 /// Apply routing updates to RIB subsystem
@@ -1713,8 +1772,9 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);
 
     if let Some(source) = source_node {
-        // Run SPF algorithm
-        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+        // Run SPF in full-path mode so the IPv6 builder can apply RFC 1195 §5
+        // strict NLPID gating across every transit node, not just the first hop.
+        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
 
         // Build IPv4 + IPv6 RIBs from the same SPF result (single-topology).
         let rib = build_rib_from_spf(top, level, source, &spf_result);
