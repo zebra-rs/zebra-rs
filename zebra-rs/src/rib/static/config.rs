@@ -104,14 +104,32 @@ impl<F: StaticFamily> StaticConfig<F> {
 
     pub fn commit(&mut self, tx: UnboundedSender<Message>) {
         while let Some((p, s)) = self.cache.pop_first() {
+            // self.config holds the last-committed snapshot, and commit() is
+            // the only path that emits add/del_msg for static routes — so
+            // "was this prefix previously installed?" is exactly
+            // "does the previous StaticRoute produce Some(to_entry())?".
+            let prev_installed = self
+                .config
+                .get(&p)
+                .and_then(StaticRoute::to_entry)
+                .is_some();
+
             if s.delete {
                 self.config.remove(&p);
-                let _ = tx.send(F::del_msg(p, RibEntry::new(RibType::Static)));
+                if prev_installed {
+                    let _ = tx.send(F::del_msg(p, RibEntry::new(RibType::Static)));
+                }
             } else {
-                let entry = s.to_entry();
+                let new_entry = s.to_entry();
                 self.config.insert(p, s);
-                if let Some(rib) = entry {
-                    let _ = tx.send(F::add_msg(p, rib));
+                match (prev_installed, new_entry) {
+                    (_, Some(rib)) => {
+                        let _ = tx.send(F::add_msg(p, rib));
+                    }
+                    (true, None) => {
+                        let _ = tx.send(F::del_msg(p, RibEntry::new(RibType::Static)));
+                    }
+                    (false, None) => {}
                 }
             }
         }
@@ -312,4 +330,162 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             n.labels.clear();
             Ok(())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::route::StaticNexthop;
+    use super::*;
+    use crate::rib::Nexthop;
+    use std::str::FromStr;
+    use tokio::sync::mpsc::{self, UnboundedReceiver};
+
+    fn prefix() -> Ipv4Net {
+        Ipv4Net::from_str("10.0.0.0/24").unwrap()
+    }
+
+    fn nexthop_addr() -> Ipv4Addr {
+        "192.0.2.1".parse().unwrap()
+    }
+
+    fn other_nexthop_addr() -> Ipv4Addr {
+        "192.0.2.2".parse().unwrap()
+    }
+
+    fn route_with_nexthop(addr: Ipv4Addr) -> StaticRoute<V4> {
+        let mut r = StaticRoute::<V4>::default();
+        r.nexthops.insert(addr, StaticNexthop::default());
+        r
+    }
+
+    fn drain(rx: &mut UnboundedReceiver<Message>) -> Vec<Message> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    }
+
+    fn assert_ipv4_add(msg: &Message, expected_prefix: Ipv4Net) -> &RibEntry {
+        match msg {
+            Message::Ipv4Add { prefix, rib } => {
+                assert_eq!(*prefix, expected_prefix);
+                rib
+            }
+            _ => panic!("expected Ipv4Add"),
+        }
+    }
+
+    fn assert_ipv4_del(msg: &Message, expected_prefix: Ipv4Net) {
+        match msg {
+            Message::Ipv4Del { prefix, .. } => assert_eq!(*prefix, expected_prefix),
+            _ => panic!("expected Ipv4Del"),
+        }
+    }
+
+    #[test]
+    fn add_with_nexthop_sends_add_msg() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sc = StaticConfig::<V4>::new();
+        sc.cache
+            .insert(prefix(), route_with_nexthop(nexthop_addr()));
+
+        sc.commit(tx);
+
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 1);
+        assert_ipv4_add(&msgs[0], prefix());
+        assert!(sc.config.contains_key(&prefix()));
+    }
+
+    #[test]
+    fn add_without_nexthop_sends_nothing() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sc = StaticConfig::<V4>::new();
+        sc.cache.insert(prefix(), StaticRoute::<V4>::default());
+
+        sc.commit(tx);
+
+        assert!(drain(&mut rx).is_empty());
+        assert!(sc.config.contains_key(&prefix()));
+    }
+
+    #[test]
+    fn remove_only_nexthop_sends_del_msg() {
+        // Reproduces the original TODO scenario: route was previously
+        // installed with a nexthop, the user removed the only nexthop
+        // without deleting the route. RIB must withdraw it.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sc = StaticConfig::<V4>::new();
+        sc.config
+            .insert(prefix(), route_with_nexthop(nexthop_addr()));
+        sc.cache.insert(prefix(), StaticRoute::<V4>::default());
+
+        sc.commit(tx);
+
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 1);
+        assert_ipv4_del(&msgs[0], prefix());
+    }
+
+    #[test]
+    fn delete_uninstalled_route_sends_nothing() {
+        // Symmetric fix: deleting a route that was never installed
+        // (no nexthops) must not emit a spurious del_msg.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sc = StaticConfig::<V4>::new();
+        sc.config.insert(prefix(), StaticRoute::<V4>::default());
+        sc.cache.insert(
+            prefix(),
+            StaticRoute::<V4> {
+                delete: true,
+                ..Default::default()
+            },
+        );
+
+        sc.commit(tx);
+
+        assert!(drain(&mut rx).is_empty());
+        assert!(!sc.config.contains_key(&prefix()));
+    }
+
+    #[test]
+    fn delete_installed_route_sends_del_msg() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sc = StaticConfig::<V4>::new();
+        sc.config
+            .insert(prefix(), route_with_nexthop(nexthop_addr()));
+        let pending = StaticRoute::<V4> {
+            delete: true,
+            ..route_with_nexthop(nexthop_addr())
+        };
+        sc.cache.insert(prefix(), pending);
+
+        sc.commit(tx);
+
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 1);
+        assert_ipv4_del(&msgs[0], prefix());
+        assert!(!sc.config.contains_key(&prefix()));
+    }
+
+    #[test]
+    fn mutate_nexthop_sends_add_msg_with_new_content() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sc = StaticConfig::<V4>::new();
+        sc.config
+            .insert(prefix(), route_with_nexthop(nexthop_addr()));
+        sc.cache
+            .insert(prefix(), route_with_nexthop(other_nexthop_addr()));
+
+        sc.commit(tx);
+
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 1);
+        let rib = assert_ipv4_add(&msgs[0], prefix());
+        match &rib.nexthop {
+            Nexthop::Uni(uni) => assert_eq!(uni.addr, IpAddr::V4(other_nexthop_addr())),
+            _ => panic!("expected Nexthop::Uni"),
+        }
+    }
 }
