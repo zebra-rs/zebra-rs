@@ -2,6 +2,9 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use std::collections::BTreeMap;
+use std::net::Ipv6Addr;
+
+use isis_packet::srv6::EncapType;
 
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::{Label, NexthopUni};
@@ -20,6 +23,8 @@ pub struct StaticRoute<F: StaticFamily> {
     pub distance: Option<u8>,
     pub metric: Option<u32>,
     pub nexthops: BTreeMap<F::Addr, StaticNexthop>,
+    pub segs: Vec<Ipv6Addr>,
+    pub encap_type: Option<EncapType>,
     pub delete: bool,
 }
 
@@ -29,6 +34,8 @@ impl<F: StaticFamily> Default for StaticRoute<F> {
             distance: None,
             metric: None,
             nexthops: BTreeMap::new(),
+            segs: Vec::new(),
+            encap_type: None,
             delete: false,
         }
     }
@@ -40,6 +47,8 @@ impl<F: StaticFamily> Clone for StaticRoute<F> {
             distance: self.distance,
             metric: self.metric,
             nexthops: self.nexthops.clone(),
+            segs: self.segs.clone(),
+            encap_type: self.encap_type,
             delete: self.delete,
         }
     }
@@ -54,6 +63,8 @@ where
             .field("distance", &self.distance)
             .field("metric", &self.metric)
             .field("nexthops", &self.nexthops)
+            .field("segs", &self.segs)
+            .field("encap_type", &self.encap_type)
             .field("delete", &self.delete)
             .finish()
     }
