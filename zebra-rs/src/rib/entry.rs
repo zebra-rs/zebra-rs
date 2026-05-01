@@ -44,10 +44,6 @@ impl RibEntry {
         self.rtype == RibType::Connected
     }
 
-    pub fn is_static(&self) -> bool {
-        self.rtype == RibType::Static
-    }
-
     pub fn set_valid(&mut self, valid: bool) {
         self.valid = valid;
     }
