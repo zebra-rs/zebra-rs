@@ -2,8 +2,10 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use std::fmt::{Display, Formatter, Result};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 // SRv6 Endpoint Behaviors — IANA "SRv6 Endpoint Behaviors" registry.
 //   - RFC 8986 base set + USD flavor variants
@@ -298,6 +300,95 @@ impl Display for Behavior {
             EndLBSCSID => write!(f, "uLBS"),
             EndXLBSCSID => write!(f, "uXLBS"),
             Resv(v) => write!(f, "Resv({})", v),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+pub enum EncapType {
+    HEncap,
+    HEncapRed,
+    HEncapL2,
+    HEncapL2Red,
+}
+
+impl EncapType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            EncapType::HEncap => "H.Encap",
+            EncapType::HEncapRed => "H.Encap.Red",
+            EncapType::HEncapL2 => "H.Encap.L2",
+            EncapType::HEncapL2Red => "H.Encap.L2.Red",
+        }
+    }
+}
+
+impl Display for EncapType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid SRv6 encap type: {0:?}")]
+pub struct ParseEncapTypeError(pub String);
+
+impl FromStr for EncapType {
+    type Err = ParseEncapTypeError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "H.Encap" => Ok(EncapType::HEncap),
+            "H.Encap.Red" => Ok(EncapType::HEncapRed),
+            "H.Encap.L2" => Ok(EncapType::HEncapL2),
+            "H.Encap.L2.Red" => Ok(EncapType::HEncapL2Red),
+            other => Err(ParseEncapTypeError(other.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [EncapType; 4] = [
+        EncapType::HEncap,
+        EncapType::HEncapRed,
+        EncapType::HEncapL2,
+        EncapType::HEncapL2Red,
+    ];
+
+    #[test]
+    fn parses_canonical_strings() {
+        assert_eq!("H.Encap".parse::<EncapType>().unwrap(), EncapType::HEncap);
+        assert_eq!(
+            "H.Encap.Red".parse::<EncapType>().unwrap(),
+            EncapType::HEncapRed
+        );
+        assert_eq!(
+            "H.Encap.L2".parse::<EncapType>().unwrap(),
+            EncapType::HEncapL2
+        );
+        assert_eq!(
+            "H.Encap.L2.Red".parse::<EncapType>().unwrap(),
+            EncapType::HEncapL2Red
+        );
+    }
+
+    #[test]
+    fn rejects_unknown() {
+        let err = "h.encap".parse::<EncapType>().unwrap_err();
+        assert_eq!(err, ParseEncapTypeError("h.encap".to_string()));
+
+        let err = "".parse::<EncapType>().unwrap_err();
+        assert_eq!(err, ParseEncapTypeError(String::new()));
+    }
+
+    #[test]
+    fn display_round_trips() {
+        for variant in ALL {
+            let parsed: EncapType = variant.to_string().parse().unwrap();
+            assert_eq!(parsed, variant);
         }
     }
 }
