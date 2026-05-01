@@ -36,6 +36,7 @@ use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
+use crate::rib::route::DEBUG_ADDR;
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
     Vxlan, link,
@@ -102,13 +103,13 @@ impl FibHandle {
 
         // Use nhid unless explicitly disabled or kernel doesn't support it
         let use_nhid = if no_nhid {
-            // println!("Nexthop ID disabled by --no-nhid flag, using embedded nexthop");
+            // tracing::info!("Nexthop ID disabled by --no-nhid flag, using embedded nexthop");
             false
         } else if kernel_supports_nhid() {
-            // println!("Kernel supports nexthop ID (>= 5.3)");
+            // tracing::info!("Kernel supports nexthop ID (>= 5.3)");
             true
         } else {
-            // println!("Kernel does not support nexthop ID (< 5.3), using embedded nexthop");
+            // tracing::info!("Kernel does not support nexthop ID (< 5.3), using embedded nexthop");
             false
         };
 
@@ -196,7 +197,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute error: {prefix} {e}");
+                tracing::info!("NewRoute error: {prefix} {e}");
             }
         }
     }
@@ -306,7 +307,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelRoute error: {e} {prefix}");
+                tracing::info!("DelRoute error: {e} {prefix}");
             }
         }
     }
@@ -332,7 +333,7 @@ impl FibHandle {
 
     pub async fn route_ipv6_add_uni(&self, prefix: &Ipv6Net, entry: &RibEntry, nexthop: &Nexthop) {
         if DEBUG_V6 {
-            println!(
+            tracing::info!(
                 "[IPv6 route_add_uni] prefix={} prefixlen={} rtype={:?} use_nhid={}",
                 prefix,
                 prefix.prefix_len(),
@@ -363,9 +364,10 @@ impl FibHandle {
         if self.use_nhid {
             if let Nexthop::Uni(uni) = &nexthop {
                 if DEBUG_V6 {
-                    println!(
+                    tracing::info!(
                         "[IPv6 route_add_uni] using nhid: gid={} metric={}",
-                        uni.gid, uni.metric
+                        uni.gid,
+                        uni.metric
                     );
                 }
                 msg.attributes.push(RouteAttribute::Nhid(uni.gid as u32));
@@ -374,9 +376,10 @@ impl FibHandle {
             }
             if let Nexthop::Multi(multi) = &nexthop {
                 if DEBUG_V6 {
-                    println!(
+                    tracing::info!(
                         "[IPv6 route_add_uni] using nhid (multi): gid={} metric={}",
-                        multi.gid, multi.metric
+                        multi.gid,
+                        multi.metric
                     );
                 }
                 msg.attributes.push(RouteAttribute::Nhid(multi.gid as u32));
@@ -386,9 +389,11 @@ impl FibHandle {
         } else {
             if let Nexthop::Uni(uni) = &nexthop {
                 if DEBUG_V6 {
-                    println!(
+                    tracing::info!(
                         "[IPv6 route_add_uni] embed nexthop: addr={} ifindex={} metric={}",
-                        uni.addr, uni.ifindex, uni.metric
+                        uni.addr,
+                        uni.ifindex,
+                        uni.metric
                     );
                 }
                 match uni.addr {
@@ -428,9 +433,11 @@ impl FibHandle {
         }
 
         if DEBUG_V6 {
-            println!(
+            tracing::info!(
                 "[IPv6 route_add_uni] netlink request: af={:?} dest_prefix_len={} attrs={:?}",
-                msg.header.address_family, msg.header.destination_prefix_length, msg.attributes
+                msg.header.address_family,
+                msg.header.destination_prefix_length,
+                msg.attributes
             );
         }
 
@@ -440,7 +447,9 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute IPv6 error: {prefix} {e}");
+                if DEBUG_ADDR {
+                    tracing::info!("NewRoute IPv6 error: {prefix} {e}");
+                }
             }
         }
     }
@@ -543,7 +552,9 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelRoute IPv6 error: {e} {prefix}");
+                if DEBUG_ADDR {
+                    tracing::info!("DelRoute IPv6 error: {e} {prefix}");
+                }
             }
         }
     }
@@ -589,7 +600,7 @@ impl FibHandle {
                 refcnt = uni.refcnt();
 
                 if DEBUG_V6 {
-                    println!(
+                    tracing::info!(
                         "[nexthop_add Uni] gid={} addr={} ifindex={} valid={} installed={}",
                         gid,
                         uni.addr,
@@ -625,9 +636,10 @@ impl FibHandle {
                 msg.attributes.push(attr);
 
                 if DEBUG_V6 {
-                    println!(
+                    tracing::info!(
                         "[nexthop_add Uni] netlink: af={:?} attrs={:?}",
-                        msg.header.address_family, msg.attributes
+                        msg.header.address_family,
+                        msg.attributes
                     );
                 }
 
@@ -681,8 +693,6 @@ impl FibHandle {
             }
         }
 
-        // println!("gid: {gid} refcnt: {refcnt}");
-
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
@@ -690,13 +700,13 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             match msg.payload {
                 NetlinkPayload::Error(e) => {
-                    println!("NewNexthop error: {e} gid: {gid} refcnt: {refcnt}");
+                    tracing::info!("NewNexthop error: {e} gid: {gid} refcnt: {refcnt}");
                 }
                 NetlinkPayload::Done(m) => {
-                    println!("NewNexthop done {m:?}");
+                    tracing::info!("NewNexthop done {m:?}");
                 }
                 _ => {
-                    println!("NewNexthop other return");
+                    tracing::info!("NewNexthop other return");
                 }
             }
         }
@@ -722,7 +732,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!(
+                tracing::info!(
                     "DelNexthop error: {e} gid: {gid} refcnt: {refcnt}",
                     gid = nexthop.gid(),
                     refcnt = nexthop.refcnt()
@@ -750,7 +760,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewLink bridge error: {e}");
+                tracing::info!("NewLink bridge error: {e}");
                 return;
             }
         }
@@ -780,7 +790,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("SetLink addr-gen-mode error: {e}");
+                tracing::info!("SetLink addr-gen-mode error: {e}");
             }
         }
     }
@@ -803,7 +813,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelLink error: {}", e);
+                tracing::info!("DelLink error: {}", e);
             }
         }
     }
@@ -853,7 +863,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewLink vxlan error: {e}");
+                tracing::info!("NewLink vxlan error: {e}");
                 return;
             }
         }
@@ -883,7 +893,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("SetLink addr-gen-mode error: {e}");
+                tracing::info!("SetLink addr-gen-mode error: {e}");
             }
         }
     }
@@ -906,7 +916,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelLink error: {}", e);
+                tracing::info!("DelLink error: {}", e);
             }
         }
     }
@@ -923,7 +933,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("link_set_up error: {}", e);
+                tracing::info!("link_set_up error: {}", e);
             }
         }
     }
@@ -978,7 +988,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelAddress error: {}", e);
+                tracing::info!("DelAddress error: {}", e);
             }
         }
     }
@@ -1033,7 +1043,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelAddress IPv6 error: {}", e);
+                tracing::info!("DelAddress IPv6 error: {}", e);
             }
         }
     }
@@ -1131,7 +1141,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("NewRoute error: {label}: {e}");
+                tracing::info!("NewRoute error: {label}: {e}");
             }
         }
     }
@@ -1167,7 +1177,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                println!("DelRoute error: {}", e);
+                tracing::info!("DelRoute error: {}", e);
             }
         }
     }
@@ -1175,16 +1185,17 @@ impl FibHandle {
     /// Register VXLAN interface with its VNI for FDB operations
     /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
     pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
-        eprintln!(
+        tracing::info!(
             "[FIB] Registered VXLAN VNI {} with ifindex {}",
-            vni, ifindex
+            vni,
+            ifindex
         );
         self.vni_ifindex_map.insert(vni, ifindex);
     }
 
     /// Unregister VXLAN interface mapping
     pub fn unregister_vxlan_ifindex(&mut self, vni: u32) {
-        eprintln!("[FIB] Unregistered VXLAN VNI {}", vni);
+        tracing::info!("[FIB] Unregistered VXLAN VNI {}", vni);
         self.vni_ifindex_map.remove(&vni);
     }
 
@@ -1253,7 +1264,7 @@ impl FibHandle {
             && esi_val != [0u8; 10]
         {
             // ESI[0] is the ESI type. ESI[1..9] is the type-specific value.
-            eprintln!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
+            tracing::info!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
         }
 
         // Build netlink request
@@ -1266,12 +1277,16 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 let has_mapping = self.vni_ifindex_map.contains_key(&vni);
-                eprintln!(
+                tracing::info!(
                     "MAC add error for {} (VNI {}, ifindex {}, vni_ifindex_map exists: {}): {}",
-                    mac, vni, vxlan_ifindex, has_mapping, e
+                    mac,
+                    vni,
+                    vxlan_ifindex,
+                    has_mapping,
+                    e
                 );
                 if !has_mapping {
-                    eprintln!(
+                    tracing::info!(
                         "  → VNI {} not registered in vni_ifindex_map (did VXLAN interface register?)",
                         vni
                     );
@@ -1309,12 +1324,16 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 let has_mapping = self.vni_ifindex_map.contains_key(&vni);
-                eprintln!(
+                tracing::info!(
                     "MAC del error for {} (VNI {}, ifindex {}, vni_ifindex_map exists: {}): {}",
-                    mac, vni, vxlan_ifindex, has_mapping, e
+                    mac,
+                    vni,
+                    vxlan_ifindex,
+                    has_mapping,
+                    e
                 );
                 if !has_mapping {
-                    eprintln!(
+                    tracing::info!(
                         "  → VNI {} not registered in vni_ifindex_map (did VXLAN interface register?)",
                         vni
                     );
@@ -1371,22 +1390,26 @@ impl FibHandle {
         let mut response = match self.handle.clone().request(req) {
             Ok(resp) => resp,
             Err(e) => {
-                eprintln!("MDB add request error for group {}: {}", group, e);
+                tracing::info!("MDB add request error for group {}: {}", group, e);
                 return;
             }
         };
 
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                eprintln!(
+                tracing::info!(
                     "MDB add error for group {} on VNI {} (ifindex {}, source: {:?}): {}",
-                    group, vni, ifindex, source, e
+                    group,
+                    vni,
+                    ifindex,
+                    source,
+                    e
                 );
-                eprintln!(
+                tracing::info!(
                     "  → Likely cause: VXLAN interface not created or MDB entry format invalid"
                 );
-                eprintln!("  → Check if VXLAN interface exists: ip link show");
-                eprintln!("  → Check if interface supports MDB: bridge mdb show");
+                tracing::info!("  → Check if VXLAN interface exists: ip link show");
+                tracing::info!("  → Check if interface supports MDB: bridge mdb show");
             }
         }
     }
@@ -1425,14 +1448,14 @@ impl FibHandle {
         let mut response = match self.handle.clone().request(req) {
             Ok(resp) => resp,
             Err(e) => {
-                eprintln!("MDB del request error for group {}: {}", group, e);
+                tracing::info!("MDB del request error for group {}: {}", group, e);
                 return;
             }
         };
 
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                eprintln!("MDB del error for group {} on VNI {}: {}", group, vni, e);
+                tracing::info!("MDB del error for group {} on VNI {}: {}", group, vni, e);
             }
         }
     }
@@ -1626,10 +1649,10 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
                 builder = builder.nexthop(Nexthop::Multi(multi));
             }
             RouteAttribute::EncapType(_e) => {
-                // println!("XXX EncapType {}", e);
+                // tracing::info!("XXX EncapType {}", e);
             }
             RouteAttribute::Encap(_e) => {
-                // println!("XXX Encap {:?}", e);
+                // tracing::info!("XXX Encap {:?}", e);
             }
 
             _ => {
