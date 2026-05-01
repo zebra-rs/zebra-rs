@@ -3,10 +3,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bytes::BytesMut;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::neigh::{self, IsisSubAdjSid};
 use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
@@ -65,6 +65,7 @@ pub struct Isis {
     pub reach_map: Levels<Afis<ReachMap>>,
     pub label_map: Levels<IsisLabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
+    pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
@@ -83,6 +84,9 @@ pub struct IsisTop<'a> {
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
+    // PR 3 (build_rib_from_spf_v6 + diff_apply_v6) wires this through.
+    #[allow(dead_code)]
+    pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
@@ -118,6 +122,7 @@ impl Isis {
             reach_map: Levels::<Afis<ReachMap>>::default(),
             label_map: Levels::<IsisLabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
+            rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf_timer: Levels::<Option<Timer>>::default(),
@@ -432,6 +437,7 @@ impl Isis {
             reach_map: &mut self.reach_map,
             label_map: &mut self.label_map,
             rib: &mut self.rib,
+            rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
@@ -1122,6 +1128,24 @@ pub struct SpfRoute {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpfNexthop {
+    pub ifindex: u32,
+    pub adjacency: bool,
+    pub sys_id: Option<IsisSysId>,
+}
+
+// IPv6 single-topology mirror of SpfRoute / SpfNexthop. Nexthop key is the
+// peer's IPv6 link-local address (TLV 232 from IIH); ECMP is supported by
+// keying multiple link-locals into the same SpfRouteV6.
+#[derive(Debug, PartialEq)]
+pub struct SpfRouteV6 {
+    pub metric: u32,
+    pub nhops: BTreeMap<Ipv6Addr, SpfNexthopV6>,
+    pub sid: Option<u32>,
+    pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpfNexthopV6 {
     pub ifindex: u32,
     pub adjacency: bool,
     pub sys_id: Option<IsisSysId>,
