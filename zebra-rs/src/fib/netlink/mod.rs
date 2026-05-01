@@ -4,7 +4,7 @@
 pub mod disp;
 pub mod dump;
 pub mod handle;
-// pub mod srv6;
+pub mod srv6;
 pub mod stats;
 pub mod sysctl;
 

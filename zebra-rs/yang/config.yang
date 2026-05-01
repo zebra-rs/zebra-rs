@@ -642,6 +642,15 @@ module config {
               type uint32;
               description "Metric of the route.";
             }
+            leaf-list segments {
+              type inet:ipv6-address;
+            }
+            leaf encap-type {
+              type enumeration {
+                enum "H.Encap";
+                enum "H.Encap.Red";
+              }
+            }
           }
         }
 
