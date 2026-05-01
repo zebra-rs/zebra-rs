@@ -104,6 +104,7 @@ pub struct LspView<'a> {
     pub cap: Option<&'a IsisTlvRouterCap>,
     pub hostname: Option<&'a IsisTlvHostname>,
     pub ip_reach: Option<&'a IsisTlvExtIpReach>,
+    pub ipv6_reach: Option<&'a IsisTlvIpv6Reach>,
 }
 
 pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
@@ -118,6 +119,9 @@ pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
             }
             IsisTlv::ExtIpReach(ip_reach) => {
                 view.ip_reach = Some(ip_reach);
+            }
+            IsisTlv::Ipv6Reach(ipv6_reach) => {
+                view.ipv6_reach = Some(ipv6_reach);
             }
             _ => {
                 //
@@ -208,6 +212,12 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
         top.reach_map
             .get_mut(&level)
             .get_mut(&Afi::Ip)
+            .insert(key.sys_id(), tlv.entries.clone());
+    }
+
+    if let Some(tlv) = lsp.ipv6_reach {
+        top.reach_map_v6
+            .get_mut(&level)
             .insert(key.sys_id(), tlv.entries.clone());
     }
 }
