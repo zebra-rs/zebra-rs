@@ -61,7 +61,11 @@ impl GroupUni {
         match self.addr {
             IpAddr::V4(ipv4_addr) => {
                 let resolve = rib_resolve(table, ipv4_addr, &ResolveOpt::default());
-                if let Resolve::Onlink(ifindex) = resolve {
+                // Both arms carry a real egress ifindex — Onlink came from a
+                // directly-connected route, Recursive from walking through an
+                // IGP/static covering route. The Group only needs the ifindex,
+                // not the path category.
+                if let Resolve::Onlink(ifindex) | Resolve::Recursive(ifindex) = resolve {
                     self.ifindex = ifindex;
                     self.set_valid(true);
                 }
@@ -76,20 +80,19 @@ impl GroupUni {
         if let IpAddr::V6(ipv6_addr) = self.addr {
             let resolve = rib_resolve_v6(table, ipv6_addr, &ResolveOpt::default());
             match &resolve {
-                Resolve::Onlink(ifindex) => {
+                // Onlink came from a directly-connected route; Recursive came
+                // from walking through an IGP/static covering route. Both
+                // produce a real egress ifindex; the Group cares about that,
+                // not the path category.
+                Resolve::Onlink(ifindex) | Resolve::Recursive(ifindex) => {
                     if DEBUG_V6 {
                         println!(
-                            "[GroupUni::resolve_v6] {} -> Onlink(ifindex={})",
+                            "[GroupUni::resolve_v6] {} -> ifindex={}",
                             ipv6_addr, ifindex
                         );
                     }
                     self.ifindex = *ifindex;
                     self.set_valid(true);
-                }
-                Resolve::Recursive(_) => {
-                    if DEBUG_V6 {
-                        println!("[GroupUni::resolve_v6] {} -> Recursive", ipv6_addr);
-                    }
                 }
                 Resolve::NotFound => {
                     if DEBUG_V6 {
