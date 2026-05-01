@@ -3,6 +3,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use isis_packet::srv6::EncapType;
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Label {
     Implicit(u32),
@@ -19,8 +21,12 @@ pub struct NexthopUni {
     pub mpls: Vec<Label>,
     pub mpls_label: Vec<u32>,
 
-    // Segments.
+    // SRv6 segments. Non-empty marks this nexthop as SRv6-encapsulated.
     pub segs: Vec<Ipv6Addr>,
+
+    // SRv6 endpoint behavior chosen for the encap (e.g. H.Encap, H.Encap.Red).
+    // None when segs is empty.
+    pub encap_type: Option<EncapType>,
 
     // Action.
     pub gid: usize,
@@ -61,6 +67,7 @@ impl Default for NexthopUni {
             mpls: vec![],
             mpls_label: vec![],
             segs: vec![],
+            encap_type: None,
             gid: 0,
             valid: false,
         }

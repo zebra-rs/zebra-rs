@@ -163,7 +163,7 @@ _cli_set_completions ()
     else
       IFS=$'\t' col=(${line})
       completions=(${completions[@]} ${col[0]})
-      if [[ ${col[0]}  =~ ^[a-z0-9/] ]];then
+      if [[ ${col[0]}  =~ ^[a-zEH0-9/] ]];then
         completions2=(${completions2[@]} ${col[0]})
         _cli_array_completions=(${_cli_array_completions[@]} ${col[0]})
       fi

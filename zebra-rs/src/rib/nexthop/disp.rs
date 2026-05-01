@@ -26,7 +26,18 @@ impl Display for Nexthop {
 
 impl Display for NexthopUni {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "uni {}", self.addr)
+        write!(f, "uni {}", self.addr)?;
+        if !self.segs.is_empty() {
+            write!(f, " encap")?;
+            if let Some(encap_type) = &self.encap_type {
+                write!(f, " {}", encap_type)?;
+            }
+            write!(f, " segs")?;
+            for seg in &self.segs {
+                write!(f, " {}", seg)?;
+            }
+        }
+        Ok(())
     }
 }
 
