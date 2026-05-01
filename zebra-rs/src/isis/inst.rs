@@ -63,6 +63,7 @@ pub struct Isis {
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
     pub reach_map: Levels<Afis<ReachMap>>,
+    pub reach_map_v6: Levels<ReachMapV6>,
     pub label_map: Levels<IsisLabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
@@ -82,10 +83,9 @@ pub struct IsisTop<'a> {
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
-    // PR 3 (build_rib_from_spf_v6 + diff_apply_v6) wires this through.
-    #[allow(dead_code)]
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
@@ -120,6 +120,7 @@ impl Isis {
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
             reach_map: Levels::<Afis<ReachMap>>::default(),
+            reach_map_v6: Levels::<ReachMapV6>::default(),
             label_map: Levels::<IsisLabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
@@ -435,6 +436,7 @@ impl Isis {
             lsdb: &mut self.lsdb,
             lsp_map: &mut self.lsp_map,
             reach_map: &mut self.reach_map,
+            reach_map_v6: &mut self.reach_map_v6,
             label_map: &mut self.label_map,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
@@ -462,6 +464,7 @@ impl Isis {
             local_pool: &mut self.local_pool,
             hostname: &mut self.hostname,
             reach_map: &mut self.reach_map,
+            reach_map_v6: &mut self.reach_map_v6,
             label_map: &mut self.label_map,
             spf_timer: &mut self.spf_timer,
         })
@@ -945,6 +948,25 @@ impl ReachMap {
 }
 
 #[derive(Default)]
+pub struct ReachMapV6 {
+    map: BTreeMap<IsisSysId, Vec<IsisTlvIpv6ReachEntry>>,
+}
+
+impl ReachMapV6 {
+    pub fn get(&self, key: &IsisSysId) -> Option<&Vec<IsisTlvIpv6ReachEntry>> {
+        self.map.get(key)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: IsisSysId,
+        value: Vec<IsisTlvIpv6ReachEntry>,
+    ) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
+        self.map.insert(key, value)
+    }
+}
+
+#[derive(Default)]
 pub struct LspMap {
     map: BTreeMap<IsisSysId, usize>,
     val: Vec<IsisSysId>,
@@ -1152,6 +1174,7 @@ pub struct SpfNexthopV6 {
 }
 
 pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
+pub type DiffResultV6<'a> = spf::TableDiffResult<'a, Ipv6Net, SpfRouteV6>;
 pub type DiffIlmResult<'a> = spf::TableDiffResult<'a, u32, SpfIlm>;
 
 fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
@@ -1221,6 +1244,85 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+}
+
+fn nhop_to_nexthop_uni_v6(
+    key: &Ipv6Addr,
+    route: &SpfRouteV6,
+    value: &SpfNexthopV6,
+) -> rib::NexthopUni {
+    let mut mpls = vec![];
+    if let Some(sid) = route.sid {
+        mpls.push(if value.adjacency {
+            rib::Label::Implicit(sid)
+        } else {
+            rib::Label::Explicit(sid)
+        });
+    }
+    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(*key), route.metric, mpls);
+    // IPv6 link-local nexthops require ifindex for kernel scope resolution.
+    nhop.ifindex = value.ifindex;
+    nhop
+}
+
+fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
+    let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+    rib.distance = 115;
+    rib.metric = route.metric;
+
+    rib.nexthop = if route.nhops.len() == 1 {
+        if let Some((key, value)) = route.nhops.iter().next() {
+            rib::Nexthop::Uni(nhop_to_nexthop_uni_v6(key, route, value))
+        } else {
+            rib::Nexthop::default()
+        }
+    } else {
+        let multi = rib::NexthopMulti {
+            metric: route.metric,
+            nexthops: route
+                .nhops
+                .iter()
+                .map(|(key, value)| nhop_to_nexthop_uni_v6(key, route, value))
+                .collect(),
+            ..Default::default()
+        };
+        rib::Nexthop::Multi(multi)
+    };
+
+    rib
+}
+
+pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6) {
+    for (prefix, route) in diff.only_curr.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry_v6(route);
+            let msg = rib::Message::Ipv6Del {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    for (prefix, _, route) in diff.different.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry_v6(route);
+            let msg = rib::Message::Ipv6Add {
+                prefix: **prefix,
+                rib,
+            };
+            rib_tx.send(msg).unwrap();
+        }
+    }
+    for (prefix, route) in diff.only_next.iter() {
+        if !route.nhops.is_empty() {
+            let rib = make_rib_entry_v6(route);
+            let msg = rib::Message::Ipv6Add {
                 prefix: **prefix,
                 rib,
             };
@@ -1495,11 +1597,85 @@ fn build_rib_from_spf(
     rib
 }
 
+// IPv6 mirror of build_rib_from_spf. Walks the same single-topology SPF tree;
+// nexthops come from the peer's link-local IPv6 advertised in IIH (TLV 232,
+// stored on Neighbor::addr6l). Reachable prefixes come from the per-LSP
+// IsisTlvIpv6Reach indexed in reach_map_v6.
+//
+// Prefix-SID / SR plumbing for IPv6 is intentionally deferred — sid and
+// prefix_sid are left None for now and can be added when SRv6 IS-IS support
+// lands as a follow-up.
+fn build_rib_from_spf_v6(
+    top: &mut IsisTop,
+    level: Level,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> PrefixMap<Ipv6Net, SpfRouteV6> {
+    let mut rib = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
+
+    for (node, nhops) in spf_result {
+        if *node == source {
+            continue;
+        }
+
+        let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) else {
+            continue;
+        };
+
+        // Build nexthop map keyed by the first-hop neighbor's link-local IPv6.
+        let mut spf_nhops = BTreeMap::new();
+        for p in &nhops.nexthops {
+            if !p.is_empty()
+                && let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0])
+            {
+                for (ifindex, link) in top.links.iter() {
+                    if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
+                        for addr in nbr.addr6l.iter() {
+                            let nhop = SpfNexthopV6 {
+                                ifindex: *ifindex,
+                                adjacency: p[0] == *node,
+                                sys_id: Some(*nhop_id),
+                            };
+                            spf_nhops.insert(*addr, nhop);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(entries) = top.reach_map_v6.get(&level).get(sys_id) {
+            for entry in entries.iter() {
+                let route = SpfRouteV6 {
+                    metric: nhops.cost + entry.metric,
+                    nhops: spf_nhops.clone(),
+                    sid: None,
+                    prefix_sid: None,
+                };
+
+                if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
+                    if curr.metric > route.metric {
+                        *curr = route;
+                    } else if curr.metric == route.metric {
+                        for (addr, nhop) in route.nhops {
+                            curr.nhops.insert(addr, nhop);
+                        }
+                    }
+                } else {
+                    rib.insert(entry.prefix.trunc(), route);
+                }
+            }
+        }
+    }
+
+    rib
+}
+
 /// Apply routing updates to RIB subsystem
 fn apply_routing_updates(
     top: &mut IsisTop,
     level: Level,
     rib: PrefixMap<Ipv4Net, SpfRoute>,
+    rib_v6: PrefixMap<Ipv6Net, SpfRouteV6>,
     ilm: BTreeMap<u32, SpfIlm>,
 ) {
     // Update MPLS ILM
@@ -1509,12 +1685,19 @@ fn apply_routing_updates(
     }
     *top.ilm.get_mut(&level) = ilm;
 
-    // Update RIB
+    // Update IPv4 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
         diff_apply(top.rib_tx.clone(), &diff);
     }
     *top.rib.get_mut(&level) = rib;
+
+    // Update IPv6 RIB
+    if top.config.distribute.rib {
+        let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
+        diff_apply_v6(top.rib_tx.clone(), &diff);
+    }
+    *top.rib_v6.get_mut(&level) = rib_v6;
 }
 
 /// Perform SPF calculation and update routing tables
@@ -1533,8 +1716,9 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         // Run SPF algorithm
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
 
-        // Build RIB from SPF results
+        // Build IPv4 + IPv6 RIBs from the same SPF result (single-topology).
         let rib = build_rib_from_spf(top, level, source, &spf_result);
+        let rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result);
 
         // Store SPF result in the instance.
         // spf::disp(&spf_result, false);
@@ -1544,7 +1728,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         mpls_route(&rib, &mut ilm);
 
         // Apply updates to RIB subsystem
-        apply_routing_updates(top, level, rib, ilm);
+        apply_routing_updates(top, level, rib, rib_v6, ilm);
     }
 }
 
