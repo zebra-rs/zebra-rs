@@ -342,6 +342,30 @@ impl FibHandle {
             );
         }
 
+        // SRv6 H.Encap dispatch: nexthops carrying a non-empty segment list
+        // bypass the regular IPv6 install path entirely. The kernel routes
+        // the encapsulated packet to the first segment via normal lookup,
+        // so an Oif derived from the resolved nexthop is enough.
+        if let Nexthop::Uni(uni) = nexthop
+            && !uni.segs.is_empty()
+        {
+            let encap_type = uni
+                .encap_type
+                .unwrap_or(isis_packet::srv6::EncapType::HEncap);
+            if let Err(e) = super::srv6::srv6_encap_add(
+                &self.handle,
+                prefix,
+                &uni.segs,
+                encap_type,
+                uni.ifindex,
+            )
+            .await
+            {
+                tracing::warn!("SRv6 encap add failed for {prefix}: {e:#}");
+            }
+            return;
+        }
+
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = prefix.prefix_len();
@@ -476,6 +500,18 @@ impl FibHandle {
         if !entry.is_protocol() {
             return;
         }
+
+        // SRv6 H.Encap dispatch: kernel matches the route by prefix only, so
+        // the SRv6 helper sends a bare DelRoute with no encap attributes.
+        if let Nexthop::Uni(uni) = nexthop
+            && !uni.segs.is_empty()
+        {
+            if let Err(e) = super::srv6::srv6_encap_del(&self.handle, prefix).await {
+                tracing::warn!("SRv6 encap del failed for {prefix}: {e:#}");
+            }
+            return;
+        }
+
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = prefix.prefix_len();
