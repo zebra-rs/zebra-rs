@@ -23,12 +23,13 @@ pub fn tokenizer(input: String) -> Vec<Token> {
             ch if ch.is_whitespace() => {
                 continue;
             }
-            'a'..='z' | '0'..='9' => {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => {
                 let s: String = iter::once(ch)
                     .chain(from_fn(|| {
                         chars.by_ref().next_if(|c| {
                             c.is_alphabetic()
                                 || c.is_ascii_digit()
+                                || c == &'_'
                                 || c == &'.'
                                 || c == &'-'
                                 || c == &'/'
@@ -64,6 +65,23 @@ pub fn tokenizer(input: String) -> Vec<Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tokenizer_accepts_uppercase_and_underscore() {
+        // Operator-chosen identifiers like locator names commonly use
+        // uppercase + underscores. Earlier the tokenizer only accepted
+        // lowercase / digit starts, so a key like `LOC_N1` was silently
+        // dropped on the way to load — the bug we're guarding against.
+        let tokens = tokenizer("locator LOC_N1;".to_string());
+        let strings: Vec<String> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                Token::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strings, vec!["locator".to_string(), "LOC_N1".to_string()]);
+    }
 
     #[test]
     fn test_tokenizer() {
