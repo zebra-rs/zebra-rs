@@ -7,7 +7,7 @@ use super::link::{LinkConfig, link_config_exec};
 use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, Link,
     Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap, RibSrRx,
-    RibType, StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
+    RibType, Sid, StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -113,6 +113,17 @@ pub enum Message {
         proto: String,
         name: String,
     },
+    /// Register an allocated SRv6 SID. Owners (IS-IS, OSPF, BGP) push
+    /// one of these whenever they carve a function out of a locator;
+    /// the RIB stores it for `show segment-routing srv6 sid`.
+    #[allow(dead_code)]
+    SidAdd {
+        sid: Sid,
+    },
+    #[allow(dead_code)]
+    SidDel {
+        addr: std::net::Ipv6Addr,
+    },
     VxlanAdd {
         name: String,
         config: VxlanConfig,
@@ -217,6 +228,10 @@ pub struct Rib {
     /// `srv6/locator` reference.
     pub blocks: BTreeMap<String, Block>,
     pub locators: BTreeMap<String, Locator>,
+    /// Allocated SRv6 SIDs across all owners. Keyed by SID address so
+    /// inserts collide naturally on duplicate allocations; the show
+    /// callback iterates this in address order.
+    pub sids: BTreeMap<std::net::Ipv6Addr, Sid>,
     /// SR-update return channels keyed by protocol name. One sender per
     /// protocol; established once via Message::SrSubscribe.
     pub sr_clients: BTreeMap<String, UnboundedSender<RibSrRx>>,
@@ -278,6 +293,7 @@ impl Rib {
                 m
             },
             locators: BTreeMap::new(),
+            sids: BTreeMap::new(),
             sr_clients: BTreeMap::new(),
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
@@ -486,6 +502,15 @@ impl Rib {
                         self.locator_watch.remove(&name);
                     }
                 }
+            }
+            Message::SidAdd { sid } => {
+                // Last-writer-wins: a re-add with the same address replaces
+                // the old entry. Owners are responsible for not double-
+                // allocating; this just keeps the registry consistent.
+                self.sids.insert(sid.addr, sid);
+            }
+            Message::SidDel { addr } => {
+                self.sids.remove(&addr);
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
