@@ -472,6 +472,12 @@ impl TlvEmitter for IsisTlvMtIpv6Reach {
     }
 }
 
+impl From<IsisTlvMtIpv6Reach> for IsisTlv {
+    fn from(tlv: IsisTlvMtIpv6Reach) -> Self {
+        IsisTlv::MtIpv6Reach(tlv)
+    }
+}
+
 #[bitfield(u8, debug = true)]
 #[derive(Serialize, Deserialize, PartialEq)]
 pub struct Ipv6ControlInfo {
