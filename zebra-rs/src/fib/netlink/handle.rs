@@ -868,6 +868,24 @@ impl FibHandle {
     /// it, otherwise falls back to embedded seg6local encap on the route
     /// itself (kernels < 5.3).
     pub async fn route_sid_install(&self, sid: &crate::rib::Sid, gid: usize, ifindex: u32) {
+        // Log uSID install attempts at warn level so a kernel rejection
+        // (which fires further down at warn) lands next to the call
+        // that triggered it. Classic End / End.X skip this trace —
+        // those paths are well-trodden.
+        if matches!(
+            sid.behavior,
+            crate::rib::SidBehavior::UN | crate::rib::SidBehavior::UA
+        ) {
+            tracing::warn!(
+                "[route_sid_install] uSID attempt addr={} behavior={:?} \
+                 structure={:?} ifindex={} nh6={:?}",
+                sid.addr,
+                sid.behavior,
+                sid.structure,
+                ifindex,
+                sid.nh6,
+            );
+        }
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         // {table, kind, prefix_length, dest_addr} all derive from the
@@ -948,11 +966,18 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
-                tracing::info!(
-                    "NewRoute SID install error: addr={} behavior={:?} ifindex={} nh6={:?} \
+                // warn level so kernel rejections show up without
+                // requiring DEBUG_SID — silent failures here are how
+                // a misshaped seg6local install slips through.
+                tracing::warn!(
+                    "NewRoute SID install error: addr={} behavior={:?} \
+                     prefix_len={} table={} kind={:?} ifindex={} nh6={:?} \
                      gid={} use_nhid={} err={}",
                     sid.addr,
                     sid.behavior,
+                    prefix_len,
+                    table,
+                    kind,
                     ifindex,
                     sid.nh6,
                     gid,
