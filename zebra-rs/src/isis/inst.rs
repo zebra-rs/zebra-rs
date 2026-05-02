@@ -923,6 +923,34 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         lsp.tlvs.push(cap.into());
     }
 
+    // SRv6 SID Structure sub-sub-TLV (RFC 9352 §9, type 1) — emitted
+    // alongside every End / End.X SID we originate so receivers know
+    // how the SID's bits are partitioned. Computed once per LSP build
+    // because every SID we emit shares the locator and the same fixed
+    // 16-bit function space.
+    //
+    // LB caps at 40, the IPv6 DOC / SR block size typical deployments
+    // use; anything past 40 in the locator goes into LN, the per-node
+    // portion (e.g. /64 → LB=40, LN=24; /48 → LB=40, LN=8). Function is
+    // 16 bits — the width function_addr() places into the SID. Argument
+    // is 0; we don't allocate argument-bearing SIDs.
+    let sid_structure_subs: Vec<IsisSub2Tlv> = top
+        .sr_locator
+        .as_ref()
+        .and_then(|loc| loc.prefix)
+        .map(|prefix| {
+            let plen = prefix.prefix_len();
+            let lb_len = plen.min(40);
+            IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
+                lb_len,
+                ln_len: plen.saturating_sub(lb_len),
+                fun_len: 16,
+                arg_len: 0,
+            })
+        })
+        .into_iter()
+        .collect();
+
     // SRv6 Locators TLV (RFC 9352 §7.1, type 27). One sub-locator per
     // active locator; today we only carry one. The contained End SID
     // sub-TLV (RFC 9352 §7.2) advertises the Node SID we registered
@@ -937,7 +965,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             flags: 0,
             behavior: Behavior::End,
             sid: end_sid,
-            sub2s: Vec::new(),
+            sub2s: sid_structure_subs.clone(),
         };
         let sub_locator = Srv6Locator {
             metric: 0,
@@ -1008,7 +1036,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                         weight: 0,
                         behavior: Behavior::EndX,
                         sid: sid_addr,
-                        sub2s: Vec::new(),
+                        sub2s: sid_structure_subs.clone(),
                     };
                     is_reach.subs.push(neigh::IsisSubTlv::Srv6EndXSid(sub));
                 } else {
@@ -1019,7 +1047,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                         weight: 0,
                         behavior: Behavior::EndX,
                         sid: sid_addr,
-                        sub2s: Vec::new(),
+                        sub2s: sid_structure_subs.clone(),
                     };
                     is_reach.subs.push(neigh::IsisSubTlv::Srv6LanEndXSid(sub));
                 }
