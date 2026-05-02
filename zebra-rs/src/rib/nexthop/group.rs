@@ -51,14 +51,11 @@ pub struct GroupUni {
     /// SRv6-encapsulated nexthop and `addr` is the outer destination (= the
     /// first segment). NexthopMap dedupes SRv6 nexthops by (addr, segs,
     /// encap_type) so multiple routes with the same SRv6 policy share one
-    /// kernel nexthop-table entry. PR 3 will read these in nexthop_add to
-    /// emit the seg6 encap; PR 5 in nexthop_show.
-    #[allow(dead_code)]
+    /// kernel nexthop-table entry.
     pub segs: Vec<Ipv6Addr>,
 
     /// SRv6 endpoint behavior chosen for this encap (e.g. H.Encap,
     /// H.Encap.Red). None when segs is empty (non-SRv6 nexthop).
-    #[allow(dead_code)]
     pub encap_type: Option<EncapType>,
 }
 
