@@ -33,6 +33,8 @@ pub use level::*;
 
 pub mod srmpls;
 
+pub mod srv6;
+
 pub mod lsdb;
 pub use lsdb::{Lsdb, LsdbEvent};
 

@@ -91,6 +91,10 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
         }
     }
 
+    // Release the End.X SID — function bits go back to the ELIB pool
+    // and the registry drops the row before the show table runs again.
+    nbr.release_endx_sid(link.elib, link.rib_tx);
+
     // Neighbor state to be down.
     nbr.state = NfsmState::Down;
 
