@@ -204,6 +204,7 @@ fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<(
         isis.config.sr_mpls_enabled = false;
         isis.config.sr_mpls_block = None;
     }
+    isis.reconcile_block_watch();
     Some(())
 }
 
@@ -214,6 +215,7 @@ fn config_sr_mpls_block(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
     } else {
         isis.config.sr_mpls_block = None;
     }
+    isis.reconcile_block_watch();
     Some(())
 }
 
@@ -224,6 +226,7 @@ fn config_sr_srv6_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<(
         isis.config.sr_srv6_enabled = false;
         isis.config.sr_srv6_locator = None;
     }
+    isis.reconcile_locator_watch();
     Some(())
 }
 
@@ -234,6 +237,7 @@ fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
     } else {
         isis.config.sr_srv6_locator = None;
     }
+    isis.reconcile_locator_watch();
     Some(())
 }
 
