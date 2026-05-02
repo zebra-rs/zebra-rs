@@ -12,7 +12,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Args;
 use crate::context::Timer;
+use crate::isis::srv6::{ElibPool, function_addr};
+use crate::rib;
 use crate::rib::MacAddr;
+use crate::rib::{Locator, Sid, SidAllocationType, SidBehavior, SidContext, SidOwner};
 
 use super::link::LinkType;
 use super::nfsm::NfsmState;
@@ -43,6 +46,13 @@ pub struct Neighbor {
     //
     pub hold_time: u16,
     pub hold_timer: Option<Timer>,
+
+    /// Allocated End.X (adjacency) SID. Pair carries the ELIB function
+    /// bits (so we can release them on neighbor down) and the full SID
+    /// address (so we know which entry to withdraw from the RIB SID
+    /// registry). `None` until the locator is resolved and the first
+    /// allocator pass picks a function.
+    pub endx_sid: Option<(u16, Ipv6Addr)>,
 }
 
 impl Neighbor {
@@ -72,6 +82,7 @@ impl Neighbor {
             circuit_id: None,
             hold_time: 0,
             link_type,
+            endx_sid: None,
         }
     }
 
@@ -81,6 +92,68 @@ impl Neighbor {
 
     pub fn event(&mut self, message: Message) {
         self.tx.send(message).unwrap();
+    }
+
+    /// Make sure this neighbor has an End.X SID allocated and
+    /// registered with the RIB. Idempotent — if a SID is already
+    /// recorded, returns immediately.
+    ///
+    /// Skipped silently when the locator isn't resolved (no prefix to
+    /// derive a SID from) or when ELIB is exhausted; the next Hello
+    /// re-tries with whatever state has changed since.
+    pub fn ensure_endx_sid(
+        &mut self,
+        ifname: &str,
+        sr_locator: &Option<Locator>,
+        watched_locator: &Option<String>,
+        elib: &mut ElibPool,
+        rib_tx: &UnboundedSender<rib::Message>,
+    ) {
+        if self.endx_sid.is_some() {
+            return;
+        }
+        let Some(locator) = sr_locator.as_ref() else {
+            return;
+        };
+        let Some(prefix) = locator.prefix else {
+            return;
+        };
+        let Some(loc_name) = watched_locator.clone() else {
+            return;
+        };
+        let Some(function) = elib.allocate() else {
+            return;
+        };
+        let Some(addr) = function_addr(prefix, function) else {
+            // Prefix too long for a 16-bit function — release the
+            // function so we don't pin it forever.
+            elib.release(function);
+            return;
+        };
+        let sid = Sid {
+            addr,
+            behavior: SidBehavior::EndX,
+            context: SidContext::Interface(ifname.to_string()),
+            owner: SidOwner::new("isis", 0),
+            locator: loc_name,
+            allocation_type: SidAllocationType::Dynamic,
+        };
+        let _ = rib_tx.send(rib::Message::SidAdd { sid });
+        self.endx_sid = Some((function, addr));
+    }
+
+    /// Release the neighbor's End.X SID, sending a SidDel and freeing
+    /// the function back to the pool. Idempotent — no-op when nothing
+    /// is allocated.
+    pub fn release_endx_sid(
+        &mut self,
+        elib: &mut ElibPool,
+        rib_tx: &UnboundedSender<rib::Message>,
+    ) {
+        if let Some((function, addr)) = self.endx_sid.take() {
+            elib.release(function);
+            let _ = rib_tx.send(rib::Message::SidDel { addr });
+        }
     }
 }
 
