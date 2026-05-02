@@ -437,6 +437,17 @@ fn ymatch_next(entry: &Rc<Entry>, ymatch: YangMatch) -> YangMatch {
             if entry.is_directory_entry() {
                 if entry.has_key() {
                     YangMatch::Key
+                } else if entry.presence {
+                    // Presence containers settle into DirMatched right
+                    // here so the CommandPath the caller builds carries
+                    // the correct ymatch — otherwise downstream set()
+                    // can't tell a presence container apart from a
+                    // plain transient Dir on the way to a leaf, and
+                    // the running config tree never marks the node as
+                    // presence. That in turn causes list() to skip the
+                    // node when emitting diffs, so the per-protocol
+                    // handler for the presence path never fires.
+                    YangMatch::DirMatched
                 } else {
                     YangMatch::Dir
                 }
@@ -609,9 +620,9 @@ pub fn parse(
     if s.ymatch == YangMatch::Leaf && mx.matched_entry.is_empty_leaf() {
         s.ymatch = YangMatch::LeafMatched;
     }
-    if s.ymatch == YangMatch::Dir && mx.matched_entry.presence {
-        s.ymatch = YangMatch::DirMatched;
-    }
+    // (presence-container Dir → DirMatched used to live here, but it
+    // was settled too late: the CommandPath was already built with the
+    // wrong ymatch. ymatch_next now handles it directly.)
 
     if path.name == "set" {
         s.set = true;
