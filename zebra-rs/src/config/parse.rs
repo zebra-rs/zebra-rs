@@ -594,8 +594,16 @@ pub fn parse(
         .map_or_else(|| 0, |v| v.parse::<i32>().unwrap_or(0));
 
     let path = if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
+        // KeyMatched / LeafMatched / LeafListMatched carry the user-
+        // typed value (the list key, the leaf value, ...). DirMatched
+        // for a presence container has no user-typed value — the
+        // "name" must be the canonical entry name so path_from_command
+        // builds e.g. `/show/ip/route` and not `/sh/ip/route` when
+        // the operator typed an abbreviation.
         let sub = if let Some(sub) = matched_enumeration(&mx) {
             sub
+        } else if s.ymatch == YangMatch::DirMatched {
+            mx.matched_entry.name.to_owned()
         } else {
             input[0..mx.pos].to_string()
         };
