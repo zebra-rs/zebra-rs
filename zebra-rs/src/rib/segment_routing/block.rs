@@ -19,7 +19,7 @@ use crate::spf::label_block::LabelBlock;
 /// both `start` and `range` were configured for the corresponding container.
 ///
 /// Fields carry `#[allow(dead_code)]` until the IS-IS-side `mpls/block`
-/// handler (next PR) reads them by name from `Rib::blocks`.
+/// handler reads them by name from `Rib::blocks`.
 #[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct Block {
@@ -28,6 +28,28 @@ pub struct Block {
     pub global: Option<LabelBlock>,
     /// SR Local Block (SRLB) — adjacency-SID label range.
     pub local: Option<LabelBlock>,
+}
+
+/// Canonical name of the default block, always present in `Rib::blocks`.
+/// Operators get this for free without explicit configuration; protocols
+/// that subscribe to "default" without a custom block fall back to it.
+pub const DEFAULT_BLOCK_NAME: &str = "default";
+
+const DEFAULT_GLOBAL_START: u32 = 16000;
+const DEFAULT_GLOBAL_RANGE: u32 = 8000;
+const DEFAULT_LOCAL_START: u32 = 15000;
+const DEFAULT_LOCAL_RANGE: u32 = 100;
+
+impl Block {
+    /// The default block — seeded into `Rib::blocks` at startup and re-seeded
+    /// after a delete of the same name. SRGB 16000..23999 + SRLB 15000..15099.
+    pub fn default_block() -> Self {
+        Self {
+            name: DEFAULT_BLOCK_NAME.to_string(),
+            global: Some(LabelBlock::new(DEFAULT_GLOBAL_START, DEFAULT_GLOBAL_RANGE)),
+            local: Some(LabelBlock::new(DEFAULT_LOCAL_START, DEFAULT_LOCAL_RANGE)),
+        }
+    }
 }
 
 /// In-flight Block configuration, mirroring the YANG list shape:
@@ -247,5 +269,33 @@ impl ConfigBuilder {
     pub fn del(mut self, func: Handler) -> Self {
         self.map.insert((self.path.clone(), ConfigOp::Delete), func);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_block_has_canonical_values() {
+        let b = Block::default_block();
+        assert_eq!(b.name, DEFAULT_BLOCK_NAME);
+
+        // LabelBlock stores (start, end = start + range), so verify the
+        // pair through that derived shape.
+        let global = b.global.expect("default block has SRGB");
+        assert_eq!(global.start, DEFAULT_GLOBAL_START);
+        assert_eq!(global.end, DEFAULT_GLOBAL_START + DEFAULT_GLOBAL_RANGE);
+
+        let local = b.local.expect("default block has SRLB");
+        assert_eq!(local.start, DEFAULT_LOCAL_START);
+        assert_eq!(local.end, DEFAULT_LOCAL_START + DEFAULT_LOCAL_RANGE);
+    }
+
+    #[test]
+    fn default_block_uses_canonical_name() {
+        // The seeded default lives at the literal name "default" — that's
+        // the name protocols watch when no explicit block is configured.
+        assert_eq!(DEFAULT_BLOCK_NAME, "default");
     }
 }
