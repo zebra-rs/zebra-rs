@@ -636,6 +636,11 @@ impl Isis {
                 owner: SidOwner::new("isis", 0),
                 locator: loc_name,
                 allocation_type: SidAllocationType::Dynamic,
+                // End is local-processing; ifindex=0 lets the RIB
+                // resolve to its loopback link before pushing to the
+                // FIB. nh6 has no meaning for End.
+                ifindex: 0,
+                nh6: None,
             };
             let _ = self.rib_tx.send(rib::Message::SidAdd { sid });
             self.sr_end_sid = Some(addr);

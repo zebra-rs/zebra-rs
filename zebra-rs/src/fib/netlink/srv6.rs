@@ -5,10 +5,13 @@ use std::net::Ipv6Addr;
 
 use anyhow::{Result, bail};
 use isis_packet::srv6::EncapType;
+use netlink_packet_route::nexthop::NexthopAttribute;
 use netlink_packet_route::route::{
     Ipv6SrHdr, RouteAttribute, RouteLwEnCapType, RouteLwTunnelEncap, RouteSeg6IpTunnel,
-    Seg6IpTunnelEncap, Seg6IpTunnelMode, VecIpv6SrHdr,
+    RouteSeg6LocalIpTunnel, Seg6IpTunnelEncap, Seg6IpTunnelMode, Seg6LocalAction, VecIpv6SrHdr,
 };
+
+use crate::rib::SidBehavior;
 
 // Build the seg6 lwtunnel encap for an SRv6 H.Encap policy. Callers wrap the
 // returned encap in either RouteAttribute::Encap (for embedded route-message
@@ -70,5 +73,67 @@ pub fn build_seg6_attrs(
     Ok((
         RouteAttribute::Encap(vec![lwencap]),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6),
+    ))
+}
+
+// Map a SidBehavior to its kernel SEG6_LOCAL_ACTION_*.
+fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
+    match behavior {
+        SidBehavior::End => Seg6LocalAction::End,
+        SidBehavior::EndX => Seg6LocalAction::EndX,
+    }
+}
+
+// Build the inner Vec<RouteLwTunnelEncap> for a seg6local install.
+//
+// End needs only the Action attribute. End.X also nests Nh6 (the IPv6
+// nexthop). The kernel's required oif rides on the outer route /
+// nexthop message rather than inside the encap, so we don't add it
+// here.
+//
+// Returns None when the operator hasn't supplied the data End.X needs
+// (no IPv6 nexthop) — caller treats that as "skip FIB install for this
+// SID; the registry row stays so the LSP advertisement is unaffected".
+fn build_seg6local_lwtunnel(
+    behavior: SidBehavior,
+    nh6: Option<Ipv6Addr>,
+) -> Option<Vec<RouteLwTunnelEncap>> {
+    let mut attrs: Vec<RouteSeg6LocalIpTunnel> =
+        vec![RouteSeg6LocalIpTunnel::Action(seg6local_action(behavior))];
+    if matches!(behavior, SidBehavior::EndX) {
+        let nh = nh6?;
+        attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
+    }
+    Some(
+        attrs
+            .into_iter()
+            .map(RouteLwTunnelEncap::Seg6Local)
+            .collect(),
+    )
+}
+
+// Build seg6local route-attribute pair (Encap + EncapType) for the
+// embedded-encap route install path.
+pub fn build_seg6local_attrs(
+    behavior: SidBehavior,
+    nh6: Option<Ipv6Addr>,
+) -> Option<(RouteAttribute, RouteAttribute)> {
+    let encaps = build_seg6local_lwtunnel(behavior, nh6)?;
+    Some((
+        RouteAttribute::Encap(encaps),
+        RouteAttribute::EncapType(RouteLwEnCapType::Seg6Local),
+    ))
+}
+
+// Build seg6local nexthop-attribute pair (Encap + EncapType) for the
+// nh_id-based install path.
+pub fn build_seg6local_nh_attrs(
+    behavior: SidBehavior,
+    nh6: Option<Ipv6Addr>,
+) -> Option<(NexthopAttribute, NexthopAttribute)> {
+    let encaps = build_seg6local_lwtunnel(behavior, nh6)?;
+    Some((
+        NexthopAttribute::Encap(encaps),
+        NexthopAttribute::EncapType(RouteLwEnCapType::Seg6Local.into()),
     ))
 }
