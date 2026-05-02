@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::{Args, ConfigOp};
 use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
-use crate::fib::sysctl::sysctl_mpls_enable;
+use crate::fib::sysctl::{sysctl_mpls_enable, sysctl_seg6_enable};
 
 use super::api::RibRx;
 use super::entry::RibEntry;
@@ -444,6 +444,7 @@ impl Rib {
         } else {
             let link = Link::from(fib_link);
             let _ = sysctl_mpls_enable(&link.name);
+            let _ = sysctl_seg6_enable(&link.name);
             self.api_link_add(&link);
             self.links.insert(link.index, link.clone());
 
