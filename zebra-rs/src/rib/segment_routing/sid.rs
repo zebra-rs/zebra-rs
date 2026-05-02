@@ -18,7 +18,7 @@ use std::net::Ipv6Addr;
 /// registry; the show callback already discriminates on every variant
 /// so no individual variant carries the attribute.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum SidBehavior {
     /// Plain End — RFC 8986 §4.1, "node SID". The SID identifies the
     /// owner node; no per-link context.
@@ -105,6 +105,13 @@ impl fmt::Display for SidOwner {
 /// A single allocated SID — one row in `show segment-routing srv6 sid`.
 /// Identified uniquely by `addr`; the registry rejects duplicate adds
 /// without going through a Del first.
+///
+/// `ifindex` and `nh6` carry the install hints the FIB needs:
+///   - End: `ifindex` is the loopback (the action is purely local
+///     processing, but the kernel rejects seg6local routes without an
+///     output device); `nh6` is `None`.
+///   - End.X: `ifindex` is the outgoing link, `nh6` is the IPv6 link-
+///     local of the neighbor.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sid {
@@ -114,6 +121,8 @@ pub struct Sid {
     pub owner: SidOwner,
     pub locator: String,
     pub allocation_type: SidAllocationType,
+    pub ifindex: u32,
+    pub nh6: Option<Ipv6Addr>,
 }
 
 #[cfg(test)]

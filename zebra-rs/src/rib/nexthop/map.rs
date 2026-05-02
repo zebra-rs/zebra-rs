@@ -17,11 +17,18 @@ use super::{Group, GroupMulti, GroupTrait, GroupUni, NexthopUni};
 // so N routes with the same SRv6 policy point at one kernel nhid.
 type Seg6Key = (IpAddr, Vec<Ipv6Addr>, Option<EncapType>);
 
+// Dedupe key for SRv6 seg6local nexthops (End / End.X). Two SID installs
+// pointing at the same {action, oif, nh6} share one nhid — uncommon today
+// (each adjacency has its own End.X) but the structure is the same as
+// every other dedupe table here.
+type Seg6LocalKey = (crate::rib::SidBehavior, u32, Option<std::net::Ipv6Addr>);
+
 pub struct NexthopMap {
     map: BTreeMap<IpAddr, usize>,
     set: BTreeMap<BTreeSet<(usize, u8)>, usize>,
     mpls: BTreeMap<(IpAddr, Vec<u32>), usize>,
     seg6: BTreeMap<Seg6Key, usize>,
+    seg6local: BTreeMap<Seg6LocalKey, usize>,
     pub groups: Vec<Option<Group>>,
 }
 
@@ -38,6 +45,7 @@ impl Default for NexthopMap {
             set: BTreeMap::new(),
             mpls: BTreeMap::new(),
             seg6: BTreeMap::new(),
+            seg6local: BTreeMap::new(),
             groups: Vec::new(),
         };
         nmap.groups.push(None);
@@ -138,12 +146,45 @@ impl NexthopMap {
         self.get_mut(gid)
     }
 
+    /// Fetch (or create) the dedup'd nexthop entry for an SRv6 seg6local
+    /// nexthop (End / End.X). Keyed on (action, oif, nh6) so two SIDs
+    /// pointing at the same install target share one Group.
+    pub fn fetch_seg6local(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+        let action = uni.seg6local_action?;
+        let nh6 = match uni.addr {
+            IpAddr::V6(a) if !a.is_unspecified() => Some(a),
+            _ => None,
+        };
+        let key: Seg6LocalKey = (action, uni.ifindex, nh6);
+        if let Some(&gid) = self.seg6local.get(&key) {
+            let entry = self.groups.get_mut(gid)?;
+            if entry.is_none() {
+                *entry = Some(Group::from_nexthop_uni(uni, gid));
+            }
+            return self.get_mut(gid);
+        }
+
+        let gid = self.new_gid();
+        let group = Group::from_nexthop_uni(uni, gid);
+
+        self.seg6local.insert(key, gid);
+        self.groups.push(Some(group));
+
+        self.get_mut(gid)
+    }
+
     pub fn fetch(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
-        // SRv6 encap takes priority — the segment list is the dedup
-        // dimension that matters, and we want SRv6 nexthops in their own
-        // table so the FIB nexthop_add path can emit seg6 attributes
-        // without re-inspecting NexthopUni.
-        if !uni.segs.is_empty() {
+        // seg6local takes priority over plain unicast — `addr` for an
+        // End SID is unspecified and would route through fetch_uni
+        // otherwise, collapsing every End SID into a single shared
+        // entry by accident.
+        if uni.seg6local_action.is_some() {
+            self.fetch_seg6local(uni)
+        } else if !uni.segs.is_empty() {
+            // SRv6 encap — the segment list is the dedup dimension,
+            // and we want SRv6 nexthops in their own table so the FIB
+            // nexthop_add path can emit seg6 attributes without
+            // re-inspecting NexthopUni.
             self.fetch_seg6(uni)
         } else if uni.mpls_label.is_empty() {
             self.fetch_uni(uni)
@@ -200,6 +241,14 @@ impl NexthopMap {
             }
         }
         for (_, id) in self.seg6.iter() {
+            let entry = self.get(*id);
+            if let Some(grp) = entry
+                && grp.is_installed()
+            {
+                fib.nexthop_del(grp).await;
+            }
+        }
+        for (_, id) in self.seg6local.iter() {
             let entry = self.get(*id);
             if let Some(grp) = entry
                 && grp.is_installed()
@@ -364,5 +413,76 @@ mod tests {
             EncapType::HEncap,
         ));
         assert_eq!(nmap.seg6.len(), 1);
+    }
+
+    fn end_uni(ifindex: u32) -> NexthopUni {
+        NexthopUni {
+            addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            ifindex,
+            seg6local_action: Some(crate::rib::SidBehavior::End),
+            ..Default::default()
+        }
+    }
+
+    fn endx_uni(ifindex: u32, nh6: &str) -> NexthopUni {
+        NexthopUni {
+            addr: IpAddr::V6(nh6.parse().unwrap()),
+            ifindex,
+            seg6local_action: Some(crate::rib::SidBehavior::EndX),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fetch_seg6local_dedupes_identical_install_target() {
+        // Two End SIDs install against the same loopback ifindex; the
+        // dedup table should hand back the same gid both times so we
+        // create only one kernel nhid.
+        let mut nmap = NexthopMap::default();
+        let gid_a = group_gid(nmap.fetch(&end_uni(1)).expect("group"));
+        let gid_b = group_gid(nmap.fetch(&end_uni(1)).expect("group"));
+        assert_eq!(gid_a, gid_b);
+    }
+
+    #[test]
+    fn fetch_seg6local_distinguishes_endx_neighbors() {
+        // Distinct adjacencies (different nh6 link-locals) must NOT
+        // share an nh_id — each End.X install is its own kernel entry.
+        let mut nmap = NexthopMap::default();
+        let gid_a = group_gid(nmap.fetch(&endx_uni(2, "fe80::1")).expect("group"));
+        let gid_b = group_gid(nmap.fetch(&endx_uni(2, "fe80::2")).expect("group"));
+        assert_ne!(gid_a, gid_b);
+    }
+
+    #[test]
+    fn fetch_seg6local_distinguishes_action_kinds() {
+        // End and End.X with otherwise-identical dedup-key fields are
+        // still different actions on the wire — keep them separate so
+        // we don't accidentally emit one kernel encap for both.
+        let mut nmap = NexthopMap::default();
+        let gid_end = group_gid(nmap.fetch(&end_uni(2)).expect("group"));
+        // End.X with empty/unspec nh6 is invalid in practice but the
+        // dedup key must still discriminate by action so a bug-y caller
+        // can't collapse the two.
+        let endx = NexthopUni {
+            addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            ifindex: 2,
+            seg6local_action: Some(crate::rib::SidBehavior::EndX),
+            ..Default::default()
+        };
+        let gid_endx = group_gid(nmap.fetch(&endx).expect("group"));
+        assert_ne!(gid_end, gid_endx);
+    }
+
+    #[test]
+    fn fetch_dispatches_seg6local_before_seg6_or_uni() {
+        // An End SID has addr=:: and segs=[] — without the seg6local
+        // priority gate it would route through fetch_uni and pollute
+        // the plain-unicast map.
+        let mut nmap = NexthopMap::default();
+        nmap.fetch(&end_uni(1));
+        assert_eq!(nmap.seg6local.len(), 1);
+        assert!(nmap.map.is_empty());
+        assert!(nmap.seg6.is_empty());
     }
 }
