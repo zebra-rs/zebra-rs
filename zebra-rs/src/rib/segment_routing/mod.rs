@@ -8,7 +8,26 @@
 //! that consume them.
 
 pub mod block;
-pub use block::{Block, BlockBuilder, BlockConfig};
+pub use block::{Block, BlockBuilder, BlockConfig, DEFAULT_BLOCK_NAME};
 
 pub mod locator;
 pub use locator::{Locator, LocatorBuilder, LocatorConfig};
+
+/// Subscription-channel return type from RIB to a protocol module.
+/// `block: None` / `locator: None` signals deletion (or "doesn't exist
+/// yet" if the protocol asked for a name that hasn't been configured).
+///
+/// The variants carry `#[allow(dead_code)]` until PR 2 of this branch
+/// wires the IS-IS-side consumer that destructures them.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum RibSrRx {
+    Block {
+        name: String,
+        block: Option<Block>,
+    },
+    Locator {
+        name: String,
+        locator: Option<Locator>,
+    },
+}
