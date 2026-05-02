@@ -27,7 +27,16 @@ impl Isis {
         self.callback_add("/routing/isis/hostname", config_hostname);
         self.callback_add("/routing/isis/timers/hold-time", config_hold_time);
         self.callback_add("/routing/isis/te-router-id", config_te_router_id);
-        self.callback_add("/routing/isis/segment-routing", config_segment_routing);
+        self.callback_add("/routing/isis/segment-routing/mpls", config_sr_mpls_enable);
+        self.callback_add(
+            "/routing/isis/segment-routing/mpls/block",
+            config_sr_mpls_block,
+        );
+        self.callback_add("/routing/isis/segment-routing/srv6", config_sr_srv6_enable);
+        self.callback_add(
+            "/routing/isis/segment-routing/srv6/locator",
+            config_sr_srv6_locator,
+        );
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.tracing_add("/event", config_tracing_event);
         self.tracing_add("/fsm", config_tracing_fsm);
@@ -70,13 +79,6 @@ impl Default for IsisDistribute {
     }
 }
 
-#[derive(Debug, PartialEq, strum_macros::EnumString)]
-#[strum(ascii_case_insensitive)]
-pub enum SegmentRouting {
-    MPLS,
-    SRv6,
-}
-
 #[derive(Default)]
 pub struct IsisConfig {
     pub net: Nsap,
@@ -88,7 +90,25 @@ pub struct IsisConfig {
     pub rib_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
     pub distribute: IsisDistribute,
-    pub segment_routing: Option<SegmentRouting>,
+
+    /// Set when /routing/isis/segment-routing/mpls is committed (the
+    /// presence-marked YANG container), even if no `block` is selected.
+    /// Drives whether IS-IS originates SR-MPLS Capability sub-TLVs.
+    pub sr_mpls_enabled: bool,
+
+    /// Optional name of a block defined under the global
+    /// /segment-routing/block list. The actual SRGB / SRLB values are
+    /// looked up by name from RIB::blocks; left as a string here so the
+    /// IS-IS config can be staged before the global block is committed.
+    pub sr_mpls_block: Option<String>,
+
+    /// Set when /routing/isis/segment-routing/srv6 is committed.
+    pub sr_srv6_enabled: bool,
+
+    /// Optional name of a locator defined under the global
+    /// /segment-routing/locator list. Same staging-friendly rationale
+    /// as sr_mpls_block.
+    pub sr_srv6_locator: Option<String>,
 }
 
 impl IsisConfig {
@@ -109,6 +129,12 @@ impl IsisConfig {
 
     pub fn hold_time(&self) -> u16 {
         self.hold_time.unwrap_or(Self::DEFAULT_HOLD_TIME)
+    }
+
+    /// True when either SR dataplane is enabled. Used to gate emission
+    /// of the TE Router ID TLV (it's only meaningful in an SR domain).
+    pub fn sr_enabled(&self) -> bool {
+        self.sr_mpls_enabled || self.sr_srv6_enabled
     }
 }
 
@@ -168,12 +194,45 @@ fn config_hold_time(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()>
     Some(())
 }
 
-fn config_segment_routing(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+// Set/cleared by the presence of the YANG container itself, not by any
+// child leaf. libyang invokes the callback at the container path with no
+// extra args when the container is committed (set) or removed (delete).
+fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     if op.is_set() {
-        let sr = args.string()?.parse::<SegmentRouting>().ok()?;
-        isis.config.segment_routing = Some(sr);
+        isis.config.sr_mpls_enabled = true;
     } else {
-        isis.config.segment_routing = None;
+        isis.config.sr_mpls_enabled = false;
+        isis.config.sr_mpls_block = None;
+    }
+    Some(())
+}
+
+fn config_sr_mpls_block(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        isis.config.sr_mpls_block = Some(name);
+    } else {
+        isis.config.sr_mpls_block = None;
+    }
+    Some(())
+}
+
+fn config_sr_srv6_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        isis.config.sr_srv6_enabled = true;
+    } else {
+        isis.config.sr_srv6_enabled = false;
+        isis.config.sr_srv6_locator = None;
+    }
+    Some(())
+}
+
+fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        isis.config.sr_srv6_locator = Some(name);
+    } else {
+        isis.config.sr_srv6_locator = None;
     }
     Some(())
 }
