@@ -32,9 +32,10 @@ pub mod neigh_disp;
 
 pub mod prefix;
 pub use prefix::{
-    IsisSub2Tlv, IsisSubPrefixSid, IsisSubSrv6EndSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry,
-    IsisTlvIpv6Reach, IsisTlvIpv6ReachEntry, IsisTlvMtIpReach, IsisTlvMtIpv6Reach,
-    IsisTlvMultiTopology, IsisTlvSrv6, MultiTopologyId, PrefixSidFlags, Srv6Locator,
+    IsisSub2SidStructure, IsisSub2Tlv, IsisSubPrefixSid, IsisSubSrv6EndSid, IsisTlvExtIpReach,
+    IsisTlvExtIpReachEntry, IsisTlvIpv6Reach, IsisTlvIpv6ReachEntry, IsisTlvMtIpReach,
+    IsisTlvMtIpv6Reach, IsisTlvMultiTopology, IsisTlvSrv6, MultiTopologyId, PrefixSidFlags,
+    Srv6Locator,
 };
 pub mod prefix_code;
 pub use prefix_code::{IsisPrefixCode, IsisSrv6SidSub2Code};
