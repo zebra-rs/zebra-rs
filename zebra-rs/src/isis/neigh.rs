@@ -130,6 +130,13 @@ impl Neighbor {
             elib.release(function);
             return;
         };
+        // End.X needs an IPv6 nexthop — by convention the neighbor's
+        // link-local from its IPv6 IIH address TLV. If we haven't
+        // heard one yet (IPv4-only deployment, or Hellos arrived
+        // before the IPv6 addr exchange), the SID still registers so
+        // the LSP advertises the capability, but `nh6: None` will
+        // tell the FIB to skip the seg6local install.
+        let nh6 = self.addr6l.first().copied();
         let sid = Sid {
             addr,
             behavior: SidBehavior::EndX,
@@ -137,6 +144,8 @@ impl Neighbor {
             owner: SidOwner::new("isis", 0),
             locator: loc_name,
             allocation_type: SidAllocationType::Dynamic,
+            ifindex: self.ifindex,
+            nh6,
         };
         let _ = rib_tx.send(rib::Message::SidAdd { sid });
         self.endx_sid = Some((function, addr));

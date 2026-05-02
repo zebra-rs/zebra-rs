@@ -5,6 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use isis_packet::srv6::EncapType;
 
+use crate::rib::SidBehavior;
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Label {
     Implicit(u32),
@@ -27,6 +29,12 @@ pub struct NexthopUni {
     // SRv6 endpoint behavior chosen for the encap (e.g. H.Encap, H.Encap.Red).
     // None when segs is empty.
     pub encap_type: Option<EncapType>,
+
+    // SRv6 seg6local action — set when this nexthop installs a local
+    // SID (End / End.X). For End.X, `addr` carries the IPv6 nexthop and
+    // `ifindex` the outgoing link; for End, `ifindex` is the loopback
+    // and `addr` is unused.
+    pub seg6local_action: Option<SidBehavior>,
 
     // Action.
     pub gid: usize,
@@ -68,6 +76,7 @@ impl Default for NexthopUni {
             mpls_label: vec![],
             segs: vec![],
             encap_type: None,
+            seg6local_action: None,
             gid: 0,
             valid: false,
         }
