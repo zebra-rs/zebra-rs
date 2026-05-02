@@ -14,13 +14,27 @@ use super::{Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, ne
 use std::fmt::Write;
 
 // "via" word prefix in show output. SRv6-encapsulated nexthops surface as
-// "via seg6 <first-segment>" to match the iproute2 / FRR convention; plain
+// "via seg6 <segments>" to match the iproute2 / FRR convention; plain
 // nexthops keep the bare "via".
 fn via_word(uni: &NexthopUni) -> &'static str {
     if uni.segs.is_empty() {
         "via"
     } else {
         "via seg6"
+    }
+}
+
+// Render the address that follows the "via" word. For SRv6 with a single
+// segment the first (and only) segment IS uni.addr, so the output is just
+// the bare address. With two or more segments we render the full list as
+// "[seg1, seg2, ...]" so the operator can see the policy without dropping
+// to `ip -6 route show`.
+fn via_addr(uni: &NexthopUni) -> String {
+    if uni.segs.len() > 1 {
+        let parts: Vec<String> = uni.segs.iter().map(|s| s.to_string()).collect();
+        format!("[{}]", parts.join(", "))
+    } else {
+        uni.addr.to_string()
     }
 }
 
@@ -348,7 +362,7 @@ pub fn rib_entry_show(
                     buf,
                     " {} {}, {}",
                     via_word(uni),
-                    uni.addr,
+                    via_addr(uni),
                     rib.link_name(ifindex)
                 )
                 .unwrap();
@@ -376,7 +390,7 @@ pub fn rib_entry_show(
                         buf,
                         " {} {}, {}",
                         via_word(uni),
-                        uni.addr,
+                        via_addr(uni),
                         rib.link_name(uni.ifindex),
                     )
                     .unwrap();
@@ -405,7 +419,7 @@ pub fn rib_entry_show(
                         buf,
                         " {} {}, {}, metric {}",
                         via_word(uni),
-                        uni.addr,
+                        via_addr(uni),
                         rib.link_name(uni.ifindex),
                         uni.metric
                     )
@@ -465,7 +479,7 @@ pub fn rib_entry_show_v6(
                     buf,
                     " {} {}, {}",
                     via_word(uni),
-                    uni.addr,
+                    via_addr(uni),
                     rib.link_name(ifindex)
                 )
                 .unwrap();
@@ -493,7 +507,7 @@ pub fn rib_entry_show_v6(
                         buf,
                         " {} {}, {}",
                         via_word(uni),
-                        uni.addr,
+                        via_addr(uni),
                         rib.link_name(uni.ifindex),
                     )
                     .unwrap();
@@ -522,7 +536,7 @@ pub fn rib_entry_show_v6(
                         buf,
                         " {} {}, {}, metric {}",
                         via_word(uni),
-                        uni.addr,
+                        via_addr(uni),
                         rib.link_name(uni.ifindex),
                         uni.metric
                     )
@@ -896,5 +910,71 @@ impl Rib {
         self.show_add("/show/nexthop", nexthop_show);
         self.show_add("/show/mpls/ilm", ilm_show);
         self.show_add("/show/l2/mac/table", mac_show);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    fn uni_with_segs(segs: Vec<Ipv6Addr>) -> NexthopUni {
+        let addr = segs.first().copied().unwrap_or(Ipv6Addr::UNSPECIFIED);
+        NexthopUni {
+            addr: IpAddr::V6(addr),
+            segs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn via_word_picks_seg6_only_when_segments_present() {
+        let plain = NexthopUni::default();
+        assert_eq!(via_word(&plain), "via");
+
+        let one = uni_with_segs(vec!["fcbb:bbbb:2:3:2::".parse().unwrap()]);
+        assert_eq!(via_word(&one), "via seg6");
+
+        let two = uni_with_segs(vec![
+            "fcbb:bbbb:2:3:2::".parse().unwrap(),
+            "fcbb:bbbb:2:3:3::".parse().unwrap(),
+        ]);
+        assert_eq!(via_word(&two), "via seg6");
+    }
+
+    #[test]
+    fn via_addr_single_segment_renders_bare_address() {
+        // With a single segment the policy is fully described by the outer
+        // destination (= uni.addr); no need for the [list] form.
+        let one = uni_with_segs(vec!["fcbb:bbbb:2:3:2::".parse().unwrap()]);
+        assert_eq!(via_addr(&one), "fcbb:bbbb:2:3:2::");
+    }
+
+    #[test]
+    fn via_addr_multi_segment_renders_bracketed_list() {
+        let two = uni_with_segs(vec![
+            "fcbb:bbbb:2:3:2::".parse().unwrap(),
+            "fcbb:bbbb:2:3:3::".parse().unwrap(),
+        ]);
+        assert_eq!(via_addr(&two), "[fcbb:bbbb:2:3:2::, fcbb:bbbb:2:3:3::]");
+
+        let three = uni_with_segs(vec![
+            "fcbb:bbbb:2:3:2::".parse().unwrap(),
+            "fcbb:bbbb:2:3:3::".parse().unwrap(),
+            "fcbb:bbbb:2:3:4::".parse().unwrap(),
+        ]);
+        assert_eq!(
+            via_addr(&three),
+            "[fcbb:bbbb:2:3:2::, fcbb:bbbb:2:3:3::, fcbb:bbbb:2:3:4::]"
+        );
+    }
+
+    #[test]
+    fn via_addr_no_segments_renders_underlying_addr() {
+        let plain = NexthopUni {
+            addr: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(via_addr(&plain), "2001:db8::1");
     }
 }
