@@ -45,6 +45,13 @@ use crate::rib::{
 // Flip to true to re-enable IPv6 FIB install diagnostic prints.
 const DEBUG_V6: bool = false;
 
+// Flip to true to log every SRv6 SID FIB install / uninstall — the
+// pre-send netlink attribute dump for the seg6local route, the
+// nexthop-skip notice, and the rib-side resolution trace. Errors from
+// the kernel are reported regardless. Mirrored by RIB via this same
+// constant (re-exported as `crate::fib::netlink::handle::DEBUG_SID`).
+pub const DEBUG_SID: bool = false;
+
 /// Check if the kernel supports nexthop ID (kernel >= 5.3).
 /// Nexthop table was introduced in Linux kernel 5.3.
 fn kernel_supports_nhid() -> bool {
@@ -630,40 +637,20 @@ impl FibHandle {
                     );
                 }
 
-                // seg6local nexthops have a different attribute shape:
-                // no Gateway, encap carries the action (and Nh6 for
-                // End.X), Oif identifies the dev. The kernel rejects
-                // this with af=Unspec, so we set Inet6 (SIDs are IPv6).
-                if let Some(action) = uni.seg6local_action {
-                    let nh6 = match uni.addr {
-                        std::net::IpAddr::V6(a) if !a.is_unspecified() => Some(a),
-                        _ => None,
-                    };
-                    let Some((encap, encap_type)) =
-                        super::srv6::build_seg6local_nh_attrs(action, nh6)
-                    else {
-                        tracing::warn!(
-                            "seg6local nexthop encap build skipped for gid {} \
-                             (End.X without IPv6 nexthop)",
+                // seg6local can't be advertised via the kernel nexthop
+                // table — only seg6 (encap) and mpls are supported as
+                // lwtunnel encaps under nh_id. The route install path
+                // embeds the encap on the route message instead, so
+                // there's nothing to push here. NexthopMap still
+                // refcounts the logical group for dedup / cleanup
+                // bookkeeping inside zebra-rs.
+                if uni.seg6local_action.is_some() {
+                    if DEBUG_SID {
+                        tracing::info!(
+                            "[nexthop_add seg6local] gid={} skipped — seg6local \
+                             install rides on the route, not the nh_id",
                             uni.gid(),
                         );
-                        return;
-                    };
-                    msg.header.address_family = AddressFamily::Inet6;
-                    msg.attributes.push(NexthopAttribute::Id(uni.gid() as u32));
-                    msg.attributes.push(NexthopAttribute::Oif(uni.ifindex));
-                    msg.attributes.push(encap_type);
-                    msg.attributes.push(encap);
-
-                    let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
-                    req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-                    let mut response = self.handle.clone().request(req).unwrap();
-                    while let Some(m) = response.next().await {
-                        if let NetlinkPayload::Error(e) = m.payload {
-                            tracing::info!(
-                                "NewNexthop seg6local error: {e} gid: {gid} refcnt: {refcnt}"
-                            );
-                        }
                     }
                     return;
                 }
@@ -827,40 +814,66 @@ impl FibHandle {
     /// it, otherwise falls back to embedded seg6local encap on the route
     /// itself (kernels < 5.3).
     pub async fn route_sid_install(&self, sid: &crate::rib::Sid, gid: usize, ifindex: u32) {
+        use crate::rib::SidBehavior;
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = 128;
-        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        // Both End and End.X land in the local routing table (255).
+        // The kind splits along behavior: End is purely host-local
+        // processing (kind=local matches `ip -6 route add <SID>/128
+        // table local encap seg6local action End dev lo`); End.X
+        // forwards to a remote nexthop after popping the SRH and is
+        // installed as a unicast route inside the local table
+        // (`ip -6 route add ... table local encap seg6local action
+        // End.X nh6 ... dev ...`).
+        // RT_TABLE_LOCAL (255) — the fork doesn't expose a named
+        // constant for it, so hard-code. See linux/rtnetlink.h.
+        msg.header.table = 255;
         msg.header.protocol = RouteProtocol::Isis;
         msg.header.scope = RouteScope::Universe;
-        // Local routes are processed by the host (the seg6local action
-        // runs on us), not forwarded; the kernel will reject Unicast
-        // here because there's no real "via" target.
-        msg.header.kind = RouteType::Local;
+        msg.header.kind = match sid.behavior {
+            SidBehavior::End => RouteType::Local,
+            SidBehavior::EndX => RouteType::Unicast,
+        };
 
         msg.attributes
             .push(RouteAttribute::Destination(RouteAddress::Inet6(sid.addr)));
 
-        if self.use_nhid {
-            msg.attributes.push(RouteAttribute::Nhid(gid as u32));
-        } else {
-            // Embedded encap fallback. Set Oif so the kernel knows where
-            // to bind the action; for End we resolved that to loopback,
-            // for End.X to the link.
-            if ifindex != 0 {
-                msg.attributes.push(RouteAttribute::Oif(ifindex));
-            }
-            let Some((encap, encap_type)) =
-                super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6)
-            else {
-                tracing::warn!(
-                    "seg6local route encap build skipped for {} (End.X without IPv6 nexthop)",
-                    sid.addr
-                );
-                return;
-            };
-            msg.attributes.push(encap);
-            msg.attributes.push(encap_type);
+        // seg6local always rides as embedded encap on the route — the
+        // kernel nh_id table doesn't accept seg6local lwtunnel encaps
+        // even when use_nhid is true for the rest of the FIB. Set Oif
+        // so the kernel knows where to bind the action; for End that's
+        // loopback, for End.X the outgoing link.
+        let _ = gid;
+        if ifindex != 0 {
+            msg.attributes.push(RouteAttribute::Oif(ifindex));
+        }
+        let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6)
+        else {
+            tracing::warn!(
+                "seg6local route encap build skipped for {} (End.X without IPv6 nexthop)",
+                sid.addr
+            );
+            return;
+        };
+        msg.attributes.push(encap);
+        msg.attributes.push(encap_type);
+
+        if DEBUG_SID {
+            tracing::info!(
+                "[route_sid_install] addr={}/{} behavior={:?} ifindex={} nh6={:?} gid={} \
+                 use_nhid={} kind={:?} protocol={:?} attrs={:?}",
+                sid.addr,
+                msg.header.destination_prefix_length,
+                sid.behavior,
+                ifindex,
+                sid.nh6,
+                gid,
+                self.use_nhid,
+                msg.header.kind,
+                msg.header.protocol,
+                msg.attributes,
+            );
         }
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
@@ -868,7 +881,17 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
-                tracing::info!("NewRoute SID install error: addr={} {}", sid.addr, e);
+                tracing::info!(
+                    "NewRoute SID install error: addr={} behavior={:?} ifindex={} nh6={:?} \
+                     gid={} use_nhid={} err={}",
+                    sid.addr,
+                    sid.behavior,
+                    ifindex,
+                    sid.nh6,
+                    gid,
+                    self.use_nhid,
+                    e
+                );
             }
         }
     }
@@ -876,24 +899,35 @@ impl FibHandle {
     /// Remove a previously-installed SID host route. Idempotent against
     /// the kernel — a missing entry surfaces as an error in the trace
     /// but doesn't propagate.
-    pub async fn route_sid_uninstall(&self, addr: std::net::Ipv6Addr) {
+    pub async fn route_sid_uninstall(&self, sid: &crate::rib::Sid) {
+        use crate::rib::SidBehavior;
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = 128;
-        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        // Same {table, kind} the install used — the kernel matches
+        // RTM_DELROUTE on (table, family, dst, prefixlen, kind).
+        msg.header.table = 255;
         msg.header.protocol = RouteProtocol::Isis;
         msg.header.scope = RouteScope::Universe;
-        msg.header.kind = RouteType::Local;
+        msg.header.kind = match sid.behavior {
+            SidBehavior::End => RouteType::Local,
+            SidBehavior::EndX => RouteType::Unicast,
+        };
 
         msg.attributes
-            .push(RouteAttribute::Destination(RouteAddress::Inet6(addr)));
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(sid.addr)));
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
-                tracing::info!("DelRoute SID uninstall error: addr={addr} {e}");
+                tracing::info!(
+                    "DelRoute SID uninstall error: addr={} behavior={:?} err={}",
+                    sid.addr,
+                    sid.behavior,
+                    e
+                );
             }
         }
     }
