@@ -5,8 +5,9 @@ use super::api::RibRx;
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
-    BridgeBuilder, BridgeConfig, Link, MacAddr, MplsConfig, Nexthop, NexthopMap, RibType,
-    StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
+    Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, Link, Locator, LocatorBuilder,
+    LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap, RibType, StaticConfig, V4, V6, Vxlan,
+    VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -62,6 +63,20 @@ pub enum Message {
         config: BridgeConfig,
     },
     BridgeDel {
+        name: String,
+    },
+    BlockAdd {
+        name: String,
+        config: BlockConfig,
+    },
+    BlockDel {
+        name: String,
+    },
+    LocatorAdd {
+        name: String,
+        config: LocatorConfig,
+    },
+    LocatorDel {
         name: String,
     },
     VxlanAdd {
@@ -161,6 +176,13 @@ pub struct Rib {
     pub link_config: LinkConfig,
     pub bridge_config: BridgeBuilder,
     pub vxlan_config: VxlanBuilder,
+    pub block_config: BlockBuilder,
+    pub locator_config: LocatorBuilder,
+    /// Applied snapshots, populated by Block/Locator Add/Del messages.
+    /// Other modules read these by name to resolve their `mpls/block` or
+    /// `srv6/locator` reference.
+    pub blocks: BTreeMap<String, Block>,
+    pub locators: BTreeMap<String, Locator>,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 
@@ -205,6 +227,10 @@ impl Rib {
             link_config: LinkConfig::new(),
             bridge_config: BridgeBuilder::new(),
             vxlan_config: VxlanBuilder::new(),
+            block_config: BlockBuilder::new(),
+            locator_config: LocatorBuilder::new(),
+            blocks: BTreeMap::new(),
+            locators: BTreeMap::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             rib_sync_timer: None,
@@ -308,6 +334,20 @@ impl Rib {
                 };
                 self.vxlan.remove(&name);
                 self.fib_handle.vxlan_del(&vxlan).await;
+            }
+            Message::BlockAdd { name, config } => {
+                let block = config.to_block(&name);
+                self.blocks.insert(name, block);
+            }
+            Message::BlockDel { name } => {
+                self.blocks.remove(&name);
+            }
+            Message::LocatorAdd { name, config } => {
+                let locator = config.to_locator(&name);
+                self.locators.insert(name, locator);
+            }
+            Message::LocatorDel { name } => {
+                self.locators.remove(&name);
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
@@ -439,6 +479,10 @@ impl Rib {
                     let _ = self.bridge_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/vxlan") {
                     let _ = self.vxlan_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/segment-routing/block") {
+                    let _ = self.block_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/segment-routing/locator") {
+                    let _ = self.locator_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -448,6 +492,8 @@ impl Rib {
                 self.static_v4.commit(self.tx.clone());
                 self.static_v6.commit(self.tx.clone());
                 self.mpls_config.commit(self.tx.clone());
+                self.block_config.commit(self.tx.clone());
+                self.locator_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();
