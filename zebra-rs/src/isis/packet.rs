@@ -195,7 +195,15 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // Interpret TLVs.
     let mac = link.state.mac;
     let sys_id = link.up_config.net.sys_id();
+    let ifname = link.state.name.clone();
     let (has_mac, _) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+    nbr.ensure_endx_sid(
+        &ifname,
+        link.sr_locator,
+        link.watched_locator,
+        link.elib,
+        link.rib_tx,
+    );
 
     // Start state transition.
     let mut state = nbr.state;
@@ -316,7 +324,15 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // Interpret TLVs.
         let mac = link.state.mac;
         let sys_id = link.up_config.net.sys_id();
+        let ifname = link.state.name.clone();
         let (_, has_my_sys_id) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+        nbr.ensure_endx_sid(
+            &ifname,
+            link.sr_locator,
+            link.watched_locator,
+            link.elib,
+            link.rib_tx,
+        );
 
         // Start state transition.
         let mut state = nbr.state;
