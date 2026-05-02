@@ -13,7 +13,8 @@ use isis_packet::*;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::isis::config::SegmentRouting;
+// (former SegmentRouting enum import — removed; replaced by sr_mpls_enabled
+// / sr_srv6_enabled flags on IsisConfig.)
 use crate::isis_event_trace;
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -615,7 +616,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     lsp.tlvs.push(IsisTlvHostname { hostname }.into());
 
     // SR Capability.
-    if let Some(sr) = &top.config.segment_routing {
+    if top.config.sr_enabled() {
         // Effective router-id: configured te_router_id wins, else fall back to the
         // RIB-derived id, else 0.0.0.0.
         let router_id: Ipv4Addr = top
@@ -631,54 +632,59 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             subs: Vec::new(),
         };
 
-        match *sr {
-            SegmentRouting::MPLS => {
-                let mut flags = SegmentRoutingCapFlags::default();
-                flags.set_i_flag(true);
-                flags.set_v_flag(true);
-                let sid_label = SidLabelTlv::Label(16000);
-                let sr_cap = IsisSubSegmentRoutingCap {
-                    flags,
-                    range: 8000,
-                    sid_label,
-                };
-                cap.subs.push(sr_cap.into());
+        // SR-MPLS Capability sub-TLVs.
+        // TODO(srv6-locator-config PR4): the SRGB / SRLB values below are
+        // hardcoded. Replace with a lookup of `top.config.sr_mpls_block`
+        // against RIB::blocks once the IS-IS daemon has access to the
+        // RIB-side block snapshot (probably via a Subscribe-style stream).
+        if top.config.sr_mpls_enabled {
+            let mut flags = SegmentRoutingCapFlags::default();
+            flags.set_i_flag(true);
+            flags.set_v_flag(true);
+            let sid_label = SidLabelTlv::Label(16000);
+            let sr_cap = IsisSubSegmentRoutingCap {
+                flags,
+                range: 8000,
+                sid_label,
+            };
+            cap.subs.push(sr_cap.into());
 
-                // Sub: SR Algorithms
+            // Sub: SR Algorithms
+            let algo = IsisSubSegmentRoutingAlgo {
+                algo: vec![Algo::Spf],
+            };
+            cap.subs.push(algo.into());
+
+            // Sub: SR Local Block
+            let sid_label = SidLabelTlv::Label(15000);
+            let lb = IsisSubSegmentRoutingLB {
+                flags: 0,
+                range: 3000,
+                sid_label,
+            };
+            cap.subs.push(lb.into());
+        }
+
+        // SRv6 Capability sub-TLV.
+        if top.config.sr_srv6_enabled {
+            let srv6 = IsisSubSrv6::default();
+            cap.subs.push(srv6.into());
+
+            // SR-MPLS already pushed Algorithms; for an SRv6-only config
+            // we still need to advertise the algorithm list once.
+            if !top.config.sr_mpls_enabled {
                 let algo = IsisSubSegmentRoutingAlgo {
                     algo: vec![Algo::Spf],
                 };
                 cap.subs.push(algo.into());
-
-                // Sub: SR Local Block
-                let sid_label = SidLabelTlv::Label(15000);
-                let lb = IsisSubSegmentRoutingLB {
-                    flags: 0,
-                    range: 3000,
-                    sid_label,
-                };
-                cap.subs.push(lb.into());
-
-                lsp.tlvs.push(cap.into());
-            }
-            SegmentRouting::SRv6 => {
-                // SRv6 Capability.
-                let srv6 = IsisSubSrv6::default();
-                cap.subs.push(srv6.into());
-
-                // Sub: SR Algorithms
-                let algo = IsisSubSegmentRoutingAlgo {
-                    algo: vec![Algo::Spf],
-                };
-                cap.subs.push(algo.into());
-
-                lsp.tlvs.push(cap.into());
             }
         }
+
+        lsp.tlvs.push(cap.into());
     }
 
     // TE Router ID. Prefer configured value, fall back to RIB-derived.
-    if top.config.segment_routing.is_some()
+    if top.config.sr_enabled()
         && let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id)
     {
         let te_router_id = IsisTlvTeRouterId { router_id };
