@@ -48,11 +48,52 @@ fn show_isis(
 }
 
 fn show_isis_summary(
-    _isis: &Isis,
+    isis: &Isis,
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok(String::from("show isis summary"))
+    let mut buf = String::new();
+
+    // SRv6 Locator section. Only present when the operator has
+    // configured a locator name under `segment-routing/srv6/locator`;
+    // an unconfigured node has nothing useful to show here.
+    if let Some(name) = isis.watched_locator.as_ref() {
+        writeln!(buf, "SRv6 Locator:")?;
+        writeln!(
+            buf,
+            "{:<20} {:<24} {:<8} Status",
+            "Name", "Prefix", "Behavior"
+        )?;
+        writeln!(buf, "{:-<20} {:-<24} {:-<8} {:-<7}", "", "", "", "")?;
+        let row = render_locator_row(name, isis.sr_locator.as_ref());
+        writeln!(buf, "{row}")?;
+    }
+
+    Ok(buf)
+}
+
+// Build the single locator row. Pulled out so a future test can pin
+// the column widths without spinning up the full Isis fixture.
+fn render_locator_row(name: &str, locator: Option<&crate::rib::Locator>) -> String {
+    use crate::rib::LocatorBehavior;
+    // The locator is "Up" only when the RIB pushed a snapshot AND that
+    // snapshot has a usable prefix. A name configured under IS-IS but
+    // not yet matched by a global `/segment-routing/locator` entry
+    // shows as Down with empty prefix / behavior.
+    let (prefix, behavior, status) = match locator {
+        Some(loc) => match loc.prefix {
+            Some(p) => {
+                let beh = match loc.behavior {
+                    Some(LocatorBehavior::Usid) => "uSID",
+                    None => "Classic",
+                };
+                (p.to_string(), beh.to_string(), "Up")
+            }
+            None => (String::new(), String::new(), "Down"),
+        },
+        None => (String::new(), String::new(), "Down"),
+    };
+    format!("{name:<20} {prefix:<24} {behavior:<8} {status}")
 }
 
 // JSON structures for ISIS graph
@@ -909,4 +950,61 @@ fn show_isis_spf(
         spf::disp_out(&mut buf, spf, false);
     }
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rib::{Locator, LocatorBehavior};
+
+    #[test]
+    fn locator_row_classic_when_resolved_with_no_behavior() {
+        let loc = Locator {
+            name: "LOC_N1".into(),
+            prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
+            behavior: None,
+        };
+        let row = render_locator_row("LOC_N1", Some(&loc));
+        assert!(row.contains("LOC_N1"));
+        assert!(row.contains("2001:db8:a:2::/64"));
+        assert!(row.contains("Classic"));
+        assert!(row.trim_end().ends_with("Up"));
+    }
+
+    #[test]
+    fn locator_row_usid_when_resolved_with_usid_behavior() {
+        let loc = Locator {
+            name: "LOC_N1".into(),
+            prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
+            behavior: Some(LocatorBehavior::Usid),
+        };
+        let row = render_locator_row("LOC_N1", Some(&loc));
+        assert!(row.contains("uSID"));
+        assert!(row.trim_end().ends_with("Up"));
+    }
+
+    #[test]
+    fn locator_row_down_when_unresolved() {
+        // The configured name still shows so operators can tell which
+        // locator they're waiting on; prefix and behavior columns are
+        // blank because the RIB hasn't pushed a snapshot.
+        let row = render_locator_row("LOC_N1", None);
+        assert!(row.starts_with("LOC_N1"));
+        assert!(row.trim_end().ends_with("Down"));
+        assert!(!row.contains("uSID"));
+        assert!(!row.contains("Classic"));
+    }
+
+    #[test]
+    fn locator_row_down_when_resolved_without_prefix() {
+        // Locator entry exists in the global config but has no prefix
+        // leaf yet. Same Down treatment as fully unresolved.
+        let loc = Locator {
+            name: "LOC_N1".into(),
+            prefix: None,
+            behavior: None,
+        };
+        let row = render_locator_row("LOC_N1", Some(&loc));
+        assert!(row.trim_end().ends_with("Down"));
+    }
 }
