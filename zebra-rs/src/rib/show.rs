@@ -1106,6 +1106,7 @@ mod tests {
             allocation_type: SidAllocationType::Dynamic,
             ifindex: 0,
             nh6: None,
+            structure: None,
         }
     }
 
