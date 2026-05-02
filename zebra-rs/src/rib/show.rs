@@ -24,17 +24,17 @@ fn via_word(uni: &NexthopUni) -> &'static str {
     }
 }
 
-// Render the address that follows the "via" word. For SRv6 with a single
-// segment the first (and only) segment IS uni.addr, so the output is just
-// the bare address. With two or more segments we render the full list as
-// "[seg1, seg2, ...]" so the operator can see the policy without dropping
-// to `ip -6 route show`.
+// Render the address that follows the "via" word. SRv6 nexthops always
+// surface their segment list inside square brackets (matching iproute2's
+// `encap seg6 ... segs N [ ... ]` shape), even for a single segment, so the
+// operator can tell at a glance which routes are policy-encapsulated.
+// Non-SRv6 nexthops render the bare address.
 fn via_addr(uni: &NexthopUni) -> String {
-    if uni.segs.len() > 1 {
+    if uni.segs.is_empty() {
+        uni.addr.to_string()
+    } else {
         let parts: Vec<String> = uni.segs.iter().map(|s| s.to_string()).collect();
         format!("[{}]", parts.join(", "))
-    } else {
-        uni.addr.to_string()
     }
 }
 
@@ -943,11 +943,12 @@ mod tests {
     }
 
     #[test]
-    fn via_addr_single_segment_renders_bare_address() {
-        // With a single segment the policy is fully described by the outer
-        // destination (= uni.addr); no need for the [list] form.
+    fn via_addr_single_segment_renders_bracketed_list() {
+        // Even a single-segment policy is rendered as "[seg]" to match the
+        // iproute2 "segs 1 [ ... ]" convention and stay consistent with the
+        // multi-segment case.
         let one = uni_with_segs(vec!["fcbb:bbbb:2:3:2::".parse().unwrap()]);
-        assert_eq!(via_addr(&one), "fcbb:bbbb:2:3:2::");
+        assert_eq!(via_addr(&one), "[fcbb:bbbb:2:3:2::]");
     }
 
     #[test]
