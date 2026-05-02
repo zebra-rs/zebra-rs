@@ -10,9 +10,9 @@
 use std::fmt;
 use std::net::Ipv6Addr;
 
-/// RFC 8986 endpoint behavior for an allocated SID. We only carry the
-/// variants we know how to advertise today; future behaviors (uSID,
-/// End.DT4, End.DT6, End.B6, ...) extend the enum.
+/// SRv6 endpoint behavior for an allocated SID. RFC 8986 base set plus
+/// the RFC 9800 NEXT-C-SID (uSID) variants we install today; other
+/// behaviors (End.DT4, End.DT6, End.B6, ...) extend the enum.
 ///
 /// `#[allow(dead_code)]` on the type until PR 2 starts populating the
 /// registry; the show callback already discriminates on every variant
@@ -26,6 +26,16 @@ pub enum SidBehavior {
     /// End.X — RFC 8986 §4.2, "L3 cross-connect" / adjacency SID.
     /// Bound to a specific outgoing interface and neighbor.
     EndX,
+    /// uN — RFC 9800 NEXT-C-SID flavor of End. Same host-local
+    /// processing semantics; the kernel additionally shifts the
+    /// destination address by `ln + fun` bits before passing the
+    /// packet on. Carries a [`SidStructure`] so the FIB knows the
+    /// shift width.
+    UN,
+    /// uA — RFC 9800 NEXT-C-SID flavor of End.X. Same per-adjacency
+    /// forwarding as End.X with the additional uSID shift; carries a
+    /// [`SidStructure`].
+    UA,
 }
 
 impl fmt::Display for SidBehavior {
@@ -33,8 +43,24 @@ impl fmt::Display for SidBehavior {
         match self {
             Self::End => write!(f, "End"),
             Self::EndX => write!(f, "End.X"),
+            Self::UN => write!(f, "uN"),
+            Self::UA => write!(f, "uA"),
         }
     }
+}
+
+/// SRv6 SID Structure (RFC 9352 §9): how the 128-bit SID is partitioned
+/// into Locator-Block / Locator-Node / Function / Argument bits.
+/// Required to install a uSID SID into the kernel because the
+/// `seg6local` NEXT-C-SID flavor needs Lblen / Nflen attributes to
+/// know what to shift; classic End / End.X don't carry one.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidStructure {
+    pub lb_bits: u8,
+    pub ln_bits: u8,
+    pub fun_bits: u8,
+    pub arg_bits: u8,
 }
 
 /// Optional context that disambiguates per-link / per-VRF SIDs. End is
@@ -123,6 +149,9 @@ pub struct Sid {
     pub allocation_type: SidAllocationType,
     pub ifindex: u32,
     pub nh6: Option<Ipv6Addr>,
+    /// Partitioning of the SID's bits. Required for `UN`/`UA`; ignored
+    /// for classic `End`/`EndX` (left `None`).
+    pub structure: Option<SidStructure>,
 }
 
 #[cfg(test)]
