@@ -2,10 +2,11 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use Group::*;
 use ipnet::{Ipv4Net, Ipv6Net};
+use isis_packet::srv6::EncapType;
 use prefix_trie::PrefixMap;
 
 use crate::rib::entry::RibEntries;
@@ -45,6 +46,20 @@ pub struct GroupUni {
     pub addr: IpAddr,
     pub ifindex: u32,
     pub labels: Vec<u32>,
+
+    /// SRv6 H.Encap segment list (RFC 8986). Non-empty indicates this is an
+    /// SRv6-encapsulated nexthop and `addr` is the outer destination (= the
+    /// first segment). NexthopMap dedupes SRv6 nexthops by (addr, segs,
+    /// encap_type) so multiple routes with the same SRv6 policy share one
+    /// kernel nexthop-table entry. PR 2 wires the dedupe; PR 3 emits the
+    /// seg6 encap on the netlink nexthop_add path.
+    #[allow(dead_code)]
+    pub segs: Vec<Ipv6Addr>,
+
+    /// SRv6 endpoint behavior chosen for this encap (e.g. H.Encap,
+    /// H.Encap.Red). None when segs is empty (non-SRv6 nexthop).
+    #[allow(dead_code)]
+    pub encap_type: Option<EncapType>,
 }
 
 impl GroupUni {
@@ -54,6 +69,8 @@ impl GroupUni {
             addr: uni.addr,
             ifindex: 0,
             labels: uni.mpls_label.clone(),
+            segs: uni.segs.clone(),
+            encap_type: uni.encap_type,
         }
     }
 
@@ -363,5 +380,39 @@ mod tests {
 
         assert_eq!(group.ifindex, 0);
         assert!(!group.is_valid());
+    }
+
+    #[test]
+    fn group_uni_carries_segs_and_encap_type_through_new() {
+        // Construct a NexthopUni with SRv6 fields populated and verify
+        // GroupUni::new copies them — required so NexthopMap can later
+        // dedupe SRv6 nexthops by (addr, segs, encap_type).
+        let segs = vec![
+            "fcbb:bbbb:2:3:2::".parse().unwrap(),
+            "fcbb:bbbb:2:3:3::".parse().unwrap(),
+        ];
+        let uni = NexthopUni {
+            addr: IpAddr::V6("fcbb:bbbb:2:3:2::".parse().unwrap()),
+            segs: segs.clone(),
+            encap_type: Some(EncapType::HEncap),
+            ..Default::default()
+        };
+        let group = GroupUni::new(7, &uni);
+        assert_eq!(group.segs, segs);
+        assert_eq!(group.encap_type, Some(EncapType::HEncap));
+    }
+
+    #[test]
+    fn group_uni_no_segs_when_nexthop_uni_is_plain() {
+        // Non-SRv6 NexthopUni produces a GroupUni with empty segs and
+        // None encap_type — the dedupe key for plain nexthops stays
+        // unaffected by the SRv6 fields.
+        let uni = NexthopUni {
+            addr: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            ..Default::default()
+        };
+        let group = GroupUni::new(3, &uni);
+        assert!(group.segs.is_empty());
+        assert_eq!(group.encap_type, None);
     }
 }
