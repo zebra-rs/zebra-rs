@@ -304,7 +304,7 @@ impl Display for Behavior {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
 pub enum EncapType {
     HEncap,
     HEncapRed,
