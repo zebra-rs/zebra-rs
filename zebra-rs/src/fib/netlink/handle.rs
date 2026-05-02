@@ -72,9 +72,14 @@ fn mask_v6(addr: std::net::Ipv6Addr, prefix_len: u8) -> std::net::Ipv6Addr {
 ///
 ///   End  : table local, kind=Local,   /128, sid.addr
 ///   End.X: table main,  kind=Unicast, /128, sid.addr
-///   uN   : table main,  kind=Unicast, /(LB+LN), masked sid.addr
+///   uN   : table local, kind=Local,   /(LB+LN), masked sid.addr
 ///          (prefix install — the NEXT-C-SID flavor strips and shifts
-///          at runtime, so any function under the locator hits this)
+///          at runtime, so any function under the locator hits this.
+///          uN reuses End's table/kind because the kernel was silently
+///          dropping installs in table=main with kind=Unicast pointing
+///          at lo; "local prefix routes" are how the kernel normally
+///          treats host-local seg6local actions, and the kind=Local
+///          path is what classic End / End.UN actions hang off.)
 ///   uA   : table main,  kind=Unicast, /128, sid.addr
 ///          (per-adjacency function is unique; longest-prefix match
 ///          picks uA over the wider uN entry)
@@ -95,12 +100,7 @@ fn sid_route_target(
             let plen = structure
                 .map(|s| s.lb_bits.saturating_add(s.ln_bits))
                 .unwrap_or(128);
-            (
-                RouteHeader::RT_TABLE_MAIN,
-                RouteType::Unicast,
-                plen,
-                mask_v6(addr, plen),
-            )
+            (255, RouteType::Local, plen, mask_v6(addr, plen))
         }
         SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
     }
@@ -868,24 +868,6 @@ impl FibHandle {
     /// it, otherwise falls back to embedded seg6local encap on the route
     /// itself (kernels < 5.3).
     pub async fn route_sid_install(&self, sid: &crate::rib::Sid, gid: usize, ifindex: u32) {
-        // Log uSID install attempts at warn level so a kernel rejection
-        // (which fires further down at warn) lands next to the call
-        // that triggered it. Classic End / End.X skip this trace —
-        // those paths are well-trodden.
-        if matches!(
-            sid.behavior,
-            crate::rib::SidBehavior::UN | crate::rib::SidBehavior::UA
-        ) {
-            tracing::warn!(
-                "[route_sid_install] uSID attempt addr={} behavior={:?} \
-                 structure={:?} ifindex={} nh6={:?}",
-                sid.addr,
-                sid.behavior,
-                sid.structure,
-                ifindex,
-                sid.nh6,
-            );
-        }
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         // {table, kind, prefix_length, dest_addr} all derive from the
