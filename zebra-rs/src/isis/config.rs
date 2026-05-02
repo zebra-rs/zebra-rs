@@ -32,6 +32,16 @@ pub enum MtId {
     Ipv6Unicast,
 }
 
+impl MtId {
+    /// 12-bit wire identifier per RFC 5120 §7.2 / §7.3.
+    pub fn wire_id(self) -> u16 {
+        match self {
+            Self::Standard => 0,
+            Self::Ipv6Unicast => 2,
+        }
+    }
+}
+
 impl Isis {
     const TRACING: &str = "/routing/isis/tracing";
 

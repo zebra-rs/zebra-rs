@@ -39,7 +39,7 @@ use crate::{
 use crate::context::Timer;
 use crate::spf;
 
-use super::config::IsisConfig;
+use super::config::{IsisConfig, MtId};
 use super::flood;
 use super::ifsm::{csnp_timer, has_level};
 use super::link::{Afis, IsisLinks, LinkTop};
@@ -1008,6 +1008,22 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         lsp.tlvs.push(IsisTlv::Srv6(srv6_tlv));
     }
 
+    // Multi-Topology TLV (229) — RFC 5120 §7.1. Lists the MT IDs
+    // this router participates in. Receivers use it to decide which
+    // MT-keyed TLVs to expect (TLV 222 / 235 / 237) and which graphs
+    // we belong to. Only emitted when MT is enabled and at least one
+    // topology is configured.
+    if top.config.mt_enabled && !top.config.mt_topologies.is_empty() {
+        let entries: Vec<MultiTopologyId> = top
+            .config
+            .mt_topologies
+            .iter()
+            .map(|id| MultiTopologyId::from(id.wire_id()))
+            .collect();
+        let mt_tlv = IsisTlvMultiTopology { entries };
+        lsp.tlvs.push(mt_tlv.into());
+    }
+
     // TE Router ID. Prefer configured value, fall back to RIB-derived.
     if top.config.sr_enabled()
         && let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id)
@@ -1086,6 +1102,72 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         lsp.tlvs.push(ext_is_reach.into());
     }
 
+    // MT IS Reach (TLV 222) for MT 2 — RFC 5120 §7.2. Mirrors the
+    // adjacencies in TLV 22 above, but only for IPv6-enabled links
+    // and only when MT 2 is configured. SRv6 End.X / LAN-End.X SIDs
+    // ride here per RFC 8667 §2 (SR sub-TLVs nest inside the
+    // MT-specific IS Reach for the MT they belong to). The IPv4
+    // SR-MPLS AdjSid stays on TLV 22 only — that's MT 0.
+    if top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast) {
+        let mt2_id = MultiTopologyId::from(MtId::Ipv6Unicast.wire_id());
+        let mut mt2_entries: Vec<IsisTlvExtIsReachEntry> = Vec::new();
+        for (_, link) in top.links.iter() {
+            if !link.config.enable.v6 {
+                continue;
+            }
+            let Some((adj, _)) = &link.state.adj.get(&level) else {
+                continue;
+            };
+            // Per-MT metric override falls back to the link's plain
+            // metric leaf. Future PR can layer per-MT defaults too.
+            let metric = link
+                .config
+                .mt_metrics
+                .get(&MtId::Ipv6Unicast)
+                .copied()
+                .unwrap_or_else(|| link.config.metric());
+            let mut entry = IsisTlvExtIsReachEntry {
+                neighbor_id: *adj,
+                metric,
+                subs: Vec::new(),
+            };
+            for (_, nbr) in link.state.nbrs.get(&level).iter() {
+                if let Some((_, sid_addr)) = nbr.endx_sid {
+                    if nbr.link_type.is_p2p() {
+                        let sub = IsisSubSrv6EndXSid {
+                            flags: 0,
+                            algo: Algo::Spf,
+                            weight: 0,
+                            behavior: endx_behavior,
+                            sid: sid_addr,
+                            sub2s: sid_structure_subs.clone(),
+                        };
+                        entry.subs.push(neigh::IsisSubTlv::Srv6EndXSid(sub));
+                    } else {
+                        let sub = IsisSubSrv6LanEndXSid {
+                            system_id: nbr.sys_id,
+                            flags: 0,
+                            algo: Algo::Spf,
+                            weight: 0,
+                            behavior: endx_behavior,
+                            sid: sid_addr,
+                            sub2s: sid_structure_subs.clone(),
+                        };
+                        entry.subs.push(neigh::IsisSubTlv::Srv6LanEndXSid(sub));
+                    }
+                }
+            }
+            mt2_entries.push(entry);
+        }
+        if !mt2_entries.is_empty() {
+            let mt_is_reach = IsisTlvMtIsReach {
+                mt: mt2_id,
+                entries: mt2_entries,
+            };
+            lsp.tlvs.push(mt_is_reach.into());
+        }
+    }
+
     // IPv4 Reachability.
     let mut ext_ip_reach = IsisTlvExtIpReach::default();
     for (_, link) in top.links.iter() {
@@ -1162,7 +1244,17 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         });
     }
     if !ipv6_reach.entries.is_empty() {
-        lsp.tlvs.push(ipv6_reach.into());
+        if top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast) {
+            // MT 2 mode: same entries, MT-keyed TLV 237 instead of
+            // TLV 236. RFC 5120 §7.3.
+            let mt_ipv6_reach = IsisTlvMtIpv6Reach {
+                mt: MultiTopologyId::from(MtId::Ipv6Unicast.wire_id()),
+                entries: ipv6_reach.entries,
+            };
+            lsp.tlvs.push(mt_ipv6_reach.into());
+        } else {
+            lsp.tlvs.push(ipv6_reach.into());
+        }
     }
     lsp
 }
