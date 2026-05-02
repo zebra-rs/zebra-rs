@@ -17,7 +17,10 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 // / sr_srv6_enabled flags on IsisConfig.)
 
 use crate::isis_event_trace;
-use crate::rib::{Block, DEFAULT_BLOCK_NAME, Locator, RibSrRx};
+use crate::rib::{
+    Block, DEFAULT_BLOCK_NAME, Locator, RibSrRx, Sid, SidAllocationType, SidBehavior, SidContext,
+    SidOwner,
+};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::link::Afi;
@@ -91,6 +94,12 @@ pub struct Isis {
     /// names. None means the watched name doesn't exist (or no watch).
     pub sr_block: Option<Block>,
     pub sr_locator: Option<Locator>,
+
+    /// End (Node) SID currently registered with the RIB SID registry.
+    /// Tracked separately from the locator so we can issue a SidDel for
+    /// the previous address before allocating a new one when the
+    /// locator's prefix changes underneath us.
+    pub sr_end_sid: Option<std::net::Ipv6Addr>,
 }
 
 pub struct IsisTop<'a> {
@@ -117,6 +126,7 @@ pub struct IsisTop<'a> {
     /// Capability / SRv6 sub-TLVs.
     pub sr_block: &'a Option<Block>,
     pub sr_locator: &'a Option<Locator>,
+    pub sr_end_sid: &'a Option<std::net::Ipv6Addr>,
 }
 
 impl Isis {
@@ -168,6 +178,7 @@ impl Isis {
             watched_locator: None,
             sr_block: None,
             sr_locator: None,
+            sr_end_sid: None,
         };
         isis.callback_build();
         isis.show_build();
@@ -489,6 +500,7 @@ impl Isis {
             spf_result: &mut self.spf_result,
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
+            sr_end_sid: &self.sr_end_sid,
         }
     }
 
@@ -559,6 +571,10 @@ impl Isis {
                 name: prev,
             });
             self.sr_locator = None;
+            // Locator gone -> Node SID has nothing to attach to. Drop
+            // the registration before we leave the helper so the show
+            // table doesn't keep advertising a SID with no locator.
+            self.update_end_sid();
         }
         if let Some(next) = desired {
             let _ = self.rib_tx.send(rib::Message::SrLocatorWatch {
@@ -566,6 +582,36 @@ impl Isis {
                 name: next.clone(),
             });
             self.watched_locator = Some(next);
+        }
+    }
+
+    /// Reconcile the End (Node) SID registration with the current
+    /// locator snapshot. The End SID is the locator's first address
+    /// (RFC 8986 §4.1 — End behavior). On any transition (locator
+    /// resolved/disappeared, prefix changed, locator name swapped) we
+    /// withdraw the previous SID before adding the new one so the
+    /// registry is never double-booked at the same address.
+    fn update_end_sid(&mut self) {
+        let desired = self.sr_locator.as_ref().and_then(|loc| loc.node_sid_addr());
+        if desired == self.sr_end_sid {
+            return;
+        }
+        if let Some(prev) = self.sr_end_sid.take() {
+            let _ = self.rib_tx.send(rib::Message::SidDel { addr: prev });
+        }
+        if let Some(addr) = desired
+            && let Some(loc_name) = self.watched_locator.clone()
+        {
+            let sid = Sid {
+                addr,
+                behavior: SidBehavior::End,
+                context: SidContext::None,
+                owner: SidOwner::new("isis", 0),
+                locator: loc_name,
+                allocation_type: SidAllocationType::Dynamic,
+            };
+            let _ = self.rib_tx.send(rib::Message::SidAdd { sid });
+            self.sr_end_sid = Some(addr);
         }
     }
 
@@ -585,6 +631,10 @@ impl Isis {
                     return;
                 }
                 self.sr_locator = locator;
+                // Allocate / withdraw the Node SID against the new
+                // snapshot before flooding so the LSP carries the
+                // correct value on the very first emission.
+                self.update_end_sid();
             }
         }
         // Re-originate both levels so the new SR snapshot is reflected in
@@ -834,6 +884,36 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         }
 
         lsp.tlvs.push(cap.into());
+    }
+
+    // SRv6 Locators TLV (RFC 9352 §7.1, type 27). One sub-locator per
+    // active locator; today we only carry one. The contained End SID
+    // sub-TLV (RFC 9352 §7.2) advertises the Node SID we registered
+    // with the RIB. Both `sr_locator` and `sr_end_sid` must be set —
+    // sr_end_sid is only populated when the locator's prefix produced
+    // a usable address.
+    if let Some(locator) = top.sr_locator.as_ref()
+        && let Some(end_sid) = *top.sr_end_sid
+        && let Some(prefix) = locator.prefix
+    {
+        let end_sub = IsisSubSrv6EndSid {
+            flags: 0,
+            behavior: Behavior::End,
+            sid: end_sid,
+            sub2s: Vec::new(),
+        };
+        let sub_locator = Srv6Locator {
+            metric: 0,
+            flags: 0,
+            algo: Algo::Spf,
+            locator: prefix,
+            subs: vec![prefix::IsisSubTlv::Srv6EndSid(end_sub)],
+        };
+        let srv6_tlv = IsisTlvSrv6 {
+            flags: Default::default(),
+            locators: vec![sub_locator],
+        };
+        lsp.tlvs.push(IsisTlv::Srv6(srv6_tlv));
     }
 
     // TE Router ID. Prefer configured value, fall back to RIB-derived.
