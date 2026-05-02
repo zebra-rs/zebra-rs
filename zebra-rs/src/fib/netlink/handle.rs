@@ -701,6 +701,29 @@ impl FibHandle {
                     let attr = NexthopAttribute::Encap(vec![encap]);
                     msg.attributes.push(attr);
                 }
+
+                // SRv6 H.Encap. Mutually exclusive with the MPLS branch
+                // above — a NexthopUni won't carry both labels and segs.
+                if !uni.segs.is_empty() {
+                    let encap_type = uni
+                        .encap_type
+                        .unwrap_or(isis_packet::srv6::EncapType::HEncap);
+                    match super::srv6::build_seg6_lwtunnel(&uni.segs, encap_type) {
+                        Ok(lwencap) => {
+                            msg.attributes
+                                .push(NexthopAttribute::EncapType(RouteLwEnCapType::Seg6.into()));
+                            msg.attributes.push(NexthopAttribute::Encap(vec![lwencap]));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "SRv6 nexthop encap build failed for gid {}: {:#}",
+                                uni.gid(),
+                                e
+                            );
+                            return;
+                        }
+                    }
+                }
             }
             Group::Multi(multi) => {
                 // Logging.
