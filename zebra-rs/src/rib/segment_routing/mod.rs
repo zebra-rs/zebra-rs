@@ -13,6 +13,13 @@ pub use block::{Block, BlockBuilder, BlockConfig, DEFAULT_BLOCK_NAME};
 pub mod locator;
 pub use locator::{Locator, LocatorBuilder, LocatorConfig};
 
+pub mod sid;
+// PR 2 wires up the IS-IS allocators that consume these types; until
+// then only the show callback reaches into `Sid` and these helper
+// types stay technically unused at the crate boundary.
+#[allow(unused_imports)]
+pub use sid::{Sid, SidAllocationType, SidBehavior, SidContext, SidOwner};
+
 /// Subscription-channel return type from RIB to a protocol module.
 /// `block: None` / `locator: None` signals deletion (or "doesn't exist
 /// yet" if the protocol asked for a name that hasn't been configured).
