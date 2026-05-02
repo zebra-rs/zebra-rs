@@ -52,6 +52,60 @@ const DEBUG_V6: bool = false;
 // constant (re-exported as `crate::fib::netlink::handle::DEBUG_SID`).
 pub const DEBUG_SID: bool = false;
 
+/// Mask the lower (128 - prefix_len) bits of an IPv6 address. The
+/// kernel ignores bits past the prefix length on install, but masking
+/// keeps the netlink trace honest and the address shape predictable
+/// for unit tests.
+fn mask_v6(addr: std::net::Ipv6Addr, prefix_len: u8) -> std::net::Ipv6Addr {
+    if prefix_len >= 128 {
+        return addr;
+    }
+    let bits = u128::from(addr);
+    let shift = 128 - u32::from(prefix_len);
+    let mask = !0u128 << shift;
+    std::net::Ipv6Addr::from(bits & mask)
+}
+
+/// Pick the (table, kind, prefix_len, dest_addr) the kernel needs for
+/// a SID install / uninstall. Behavior-driven so install and uninstall
+/// stay in lock-step:
+///
+///   End  : table local, kind=Local,   /128, sid.addr
+///   End.X: table main,  kind=Unicast, /128, sid.addr
+///   uN   : table local, kind=Local,   /(LB+LN), masked sid.addr
+///          (prefix install — the NEXT-C-SID flavor strips and shifts
+///          at runtime, so any function under the locator hits this.
+///          uN reuses End's table/kind because the kernel was silently
+///          dropping installs in table=main with kind=Unicast pointing
+///          at lo; "local prefix routes" are how the kernel normally
+///          treats host-local seg6local actions, and the kind=Local
+///          path is what classic End / End.UN actions hang off.)
+///   uA   : table main,  kind=Unicast, /128, sid.addr
+///          (per-adjacency function is unique; longest-prefix match
+///          picks uA over the wider uN entry)
+///
+/// uN with no SidStructure falls back to /128 — a degenerate state
+/// (uSID locator without a derived structure shouldn't happen), but
+/// keeps the call total.
+fn sid_route_target(
+    behavior: crate::rib::SidBehavior,
+    addr: std::net::Ipv6Addr,
+    structure: Option<crate::rib::SidStructure>,
+) -> (u8, RouteType, u8, std::net::Ipv6Addr) {
+    use crate::rib::SidBehavior;
+    match behavior {
+        SidBehavior::End => (255, RouteType::Local, 128, addr),
+        SidBehavior::EndX => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
+        SidBehavior::UN => {
+            let plen = structure
+                .map(|s| s.lb_bits.saturating_add(s.ln_bits))
+                .unwrap_or(128);
+            (255, RouteType::Local, plen, mask_v6(addr, plen))
+        }
+        SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
+    }
+}
+
 /// Check if the kernel supports nexthop ID (kernel >= 5.3).
 /// Nexthop table was introduced in Linux kernel 5.3.
 fn kernel_supports_nhid() -> bool {
@@ -814,51 +868,57 @@ impl FibHandle {
     /// it, otherwise falls back to embedded seg6local encap on the route
     /// itself (kernels < 5.3).
     pub async fn route_sid_install(&self, sid: &crate::rib::Sid, gid: usize, ifindex: u32) {
-        use crate::rib::SidBehavior;
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
-        msg.header.destination_prefix_length = 128;
-        // {table, kind} both split on behavior to match the iproute2
-        // patterns the kernel actually accepts:
-        //   End:    table local, kind=local
-        //           (`ip -6 route add <SID>/128 table local
-        //            encap seg6local action End dev lo`)
-        //   End.X:  table main,  kind=unicast
-        //           (`ip -6 route add <SID>/128
-        //            encap seg6local action End.X nh6 ... dev ...`)
-        // End is host-local termination, so it belongs in table local.
-        // End.X forwards through a remote nexthop after popping the SRH
-        // and is a normal unicast forwarding entry — table main is the
-        // right home for it.
+        // {table, kind, prefix_length, dest_addr} all derive from the
+        // behavior. The kernel matches install + uninstall on these
+        // four header values, so route_sid_uninstall mirrors the same
+        // computation.
+        //
+        //   End  : table local, kind=local, /128, sid.addr
+        //          (`ip -6 route add <SID>/128 table local
+        //           encap seg6local action End dev lo`)
+        //   End.X: table main,  kind=unicast, /128, sid.addr
+        //          (`ip -6 route add <SID>/128
+        //           encap seg6local action End.X nh6 ... dev ...`)
+        //   uN   : table main,  kind=unicast, /(LB+LN), masked addr
+        //          (`ip -6 route add <locator>/<LB+LN>
+        //           encap seg6local action End flavors next-csid
+        //           lblen <LB> nflen <LN+Fun> dev lo`)
+        //          uN is a *prefix* install so any function value
+        //          under the locator hits this entry; the kernel's
+        //          NEXT-C-SID flavor strips and shifts at runtime.
+        //   uA   : table main,  kind=unicast, /128, sid.addr
+        //          Each adjacency function is a unique address;
+        //          longest-prefix match picks uA over the wider uN
+        //          entry. /128 keeps it simple and matches iproute2.
         // RT_TABLE_LOCAL (255) — the fork doesn't expose a named
         // constant for it, so hard-code. See linux/rtnetlink.h.
-        msg.header.table = match sid.behavior {
-            SidBehavior::End => 255,
-            SidBehavior::EndX => RouteHeader::RT_TABLE_MAIN,
-        };
+        let (table, kind, prefix_len, dest_addr) =
+            sid_route_target(sid.behavior, sid.addr, sid.structure);
+        msg.header.table = table;
+        msg.header.destination_prefix_length = prefix_len;
         msg.header.protocol = RouteProtocol::Isis;
         msg.header.scope = RouteScope::Universe;
-        msg.header.kind = match sid.behavior {
-            SidBehavior::End => RouteType::Local,
-            SidBehavior::EndX => RouteType::Unicast,
-        };
+        msg.header.kind = kind;
 
         msg.attributes
-            .push(RouteAttribute::Destination(RouteAddress::Inet6(sid.addr)));
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(dest_addr)));
 
         // seg6local always rides as embedded encap on the route — the
         // kernel nh_id table doesn't accept seg6local lwtunnel encaps
         // even when use_nhid is true for the rest of the FIB. Set Oif
-        // so the kernel knows where to bind the action; for End that's
-        // loopback, for End.X the outgoing link.
+        // so the kernel knows where to bind the action; for End / uN
+        // that's loopback, for End.X / uA the outgoing link.
         let _ = gid;
         if ifindex != 0 {
             msg.attributes.push(RouteAttribute::Oif(ifindex));
         }
-        let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6)
+        let Some((encap, encap_type)) =
+            super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6, sid.structure)
         else {
             tracing::warn!(
-                "seg6local route encap build skipped for {} (End.X without IPv6 nexthop)",
+                "seg6local route encap build skipped for {} (End.X / uA without IPv6 nexthop)",
                 sid.addr
             );
             return;
@@ -888,11 +948,18 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
-                tracing::info!(
-                    "NewRoute SID install error: addr={} behavior={:?} ifindex={} nh6={:?} \
+                // warn level so kernel rejections show up without
+                // requiring DEBUG_SID — silent failures here are how
+                // a misshaped seg6local install slips through.
+                tracing::warn!(
+                    "NewRoute SID install error: addr={} behavior={:?} \
+                     prefix_len={} table={} kind={:?} ifindex={} nh6={:?} \
                      gid={} use_nhid={} err={}",
                     sid.addr,
                     sid.behavior,
+                    prefix_len,
+                    table,
+                    kind,
                     ifindex,
                     sid.nh6,
                     gid,
@@ -907,25 +974,21 @@ impl FibHandle {
     /// the kernel — a missing entry surfaces as an error in the trace
     /// but doesn't propagate.
     pub async fn route_sid_uninstall(&self, sid: &crate::rib::Sid) {
-        use crate::rib::SidBehavior;
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
-        msg.header.destination_prefix_length = 128;
-        // Same {table, kind} the install used — the kernel matches
-        // RTM_DELROUTE on (table, family, dst, prefixlen, kind).
-        msg.header.table = match sid.behavior {
-            SidBehavior::End => 255,
-            SidBehavior::EndX => RouteHeader::RT_TABLE_MAIN,
-        };
+        // Same {table, kind, prefix_len, dest_addr} the install used
+        // — the kernel matches RTM_DELROUTE on (table, family, dst,
+        // prefixlen, kind).
+        let (table, kind, prefix_len, dest_addr) =
+            sid_route_target(sid.behavior, sid.addr, sid.structure);
+        msg.header.table = table;
+        msg.header.destination_prefix_length = prefix_len;
         msg.header.protocol = RouteProtocol::Isis;
         msg.header.scope = RouteScope::Universe;
-        msg.header.kind = match sid.behavior {
-            SidBehavior::End => RouteType::Local,
-            SidBehavior::EndX => RouteType::Unicast,
-        };
+        msg.header.kind = kind;
 
         msg.attributes
-            .push(RouteAttribute::Destination(RouteAddress::Inet6(sid.addr)));
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(dest_addr)));
 
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK;

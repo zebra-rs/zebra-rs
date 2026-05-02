@@ -57,6 +57,30 @@ impl Locator {
     pub fn node_sid_addr(&self) -> Option<Ipv6Addr> {
         self.prefix.map(|p| p.network())
     }
+
+    /// Geometry of SIDs allocated under this locator (RFC 9352 §9 SID
+    /// Structure). Returns `None` when the locator has no prefix yet.
+    ///
+    /// Single source of truth so the IS-IS LSP advertisement and the
+    /// FIB install can't drift on LB/LN/Fun. uSID locators cap LB at
+    /// 32 (the typical uSID block size); classic locators cap at 40
+    /// (IPv6 DOC / SR block convention). Function is fixed at 16 bits
+    /// — the width `function_addr()` actually places into the SID.
+    /// Argument is 0; we don't allocate argument-bearing SIDs.
+    pub fn sid_structure(&self) -> Option<crate::rib::SidStructure> {
+        let prefix = self.prefix?;
+        let plen = prefix.prefix_len();
+        let lb_bits = match self.behavior {
+            Some(LocatorBehavior::Usid) => plen.min(32),
+            None => plen.min(40),
+        };
+        Some(crate::rib::SidStructure {
+            lb_bits,
+            ln_bits: plen.saturating_sub(lb_bits),
+            fun_bits: 16,
+            arg_bits: 0,
+        })
+    }
 }
 
 /// In-flight Locator configuration, mirroring the YANG list shape:
