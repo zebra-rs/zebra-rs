@@ -1104,6 +1104,8 @@ mod tests {
             owner: SidOwner::new("isis", 0),
             locator: "LOC_N1".to_string(),
             allocation_type: SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
         }
     }
 
