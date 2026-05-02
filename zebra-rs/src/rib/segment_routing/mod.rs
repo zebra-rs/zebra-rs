@@ -18,7 +18,7 @@ pub mod sid;
 // then only the show callback reaches into `Sid` and these helper
 // types stay technically unused at the crate boundary.
 #[allow(unused_imports)]
-pub use sid::{Sid, SidAllocationType, SidBehavior, SidContext, SidOwner};
+pub use sid::{Sid, SidAllocationType, SidBehavior, SidContext, SidOwner, SidStructure};
 
 /// Subscription-channel return type from RIB to a protocol module.
 /// `block: None` / `locator: None` signals deletion (or "doesn't exist

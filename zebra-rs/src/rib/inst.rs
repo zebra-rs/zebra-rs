@@ -411,24 +411,20 @@ impl Rib {
         // No usable ifindex → skip FIB install but keep the registry
         // entry so the LSP advertisement and show table are unaffected.
         if sid.ifindex == 0 {
-            if crate::fib::netlink::handle::DEBUG_SID {
-                tracing::warn!(
-                    "[sid_install] addr={} skipped — no loopback ifindex resolved yet",
-                    sid.addr
-                );
-            }
+            tracing::warn!(
+                "[sid_install] addr={} skipped — no loopback ifindex resolved yet",
+                sid.addr
+            );
             self.sids.insert(sid.addr, sid);
             return;
         }
 
         let uni = Self::sid_nexthop_uni(&sid);
         let Some(group) = self.nmap.fetch(&uni) else {
-            if crate::fib::netlink::handle::DEBUG_SID {
-                tracing::warn!(
-                    "[sid_install] addr={} NexthopMap::fetch returned None",
-                    sid.addr
-                );
-            }
+            tracing::warn!(
+                "[sid_install] addr={} NexthopMap::fetch returned None",
+                sid.addr
+            );
             self.sids.insert(sid.addr, sid);
             return;
         };
