@@ -6,6 +6,7 @@
 //! leaf.
 
 use std::collections::BTreeMap;
+use std::net::Ipv6Addr;
 
 use anyhow::{Context, Result};
 use ipnet::Ipv6Net;
@@ -39,11 +40,23 @@ impl LocatorBehavior {
 /// Fields carry `#[allow(dead_code)]` until the IS-IS-side `srv6/locator`
 /// handler (next PR) reads them by name from `Rib::locators`.
 #[allow(dead_code)]
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Locator {
     pub name: String,
     pub prefix: Option<Ipv6Net>,
     pub behavior: Option<LocatorBehavior>,
+}
+
+impl Locator {
+    /// First address of the locator prefix — the canonical Node SID for
+    /// owners that need an End SID. Returns `None` when no prefix is
+    /// configured yet (the locator exists in config but has nothing to
+    /// allocate from). Always uses the network address so a locator
+    /// configured with host bits set still produces the correct Node
+    /// SID.
+    pub fn node_sid_addr(&self) -> Option<Ipv6Addr> {
+        self.prefix.map(|p| p.network())
+    }
 }
 
 /// In-flight Locator configuration, mirroring the YANG list shape:
@@ -227,5 +240,43 @@ impl ConfigBuilder {
     pub fn del(mut self, func: Handler) -> Self {
         self.map.insert((self.path.clone(), ConfigOp::Delete), func);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_sid_uses_prefix_network_address() {
+        let loc = Locator {
+            name: "loc1".into(),
+            prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
+            behavior: None,
+        };
+        assert_eq!(loc.node_sid_addr(), Some("2001:db8:a:2::".parse().unwrap()));
+    }
+
+    #[test]
+    fn node_sid_zeros_host_bits_when_prefix_has_them_set() {
+        // An operator typo like ".../64 with ::5 host bits" should still
+        // resolve to the canonical first address; protocols rely on
+        // this to advertise a stable Node SID.
+        let loc = Locator {
+            name: "loc1".into(),
+            prefix: Some("2001:db8:a:2::5/64".parse().unwrap()),
+            behavior: None,
+        };
+        assert_eq!(loc.node_sid_addr(), Some("2001:db8:a:2::".parse().unwrap()));
+    }
+
+    #[test]
+    fn node_sid_none_when_prefix_unset() {
+        let loc = Locator {
+            name: "loc1".into(),
+            prefix: None,
+            behavior: None,
+        };
+        assert_eq!(loc.node_sid_addr(), None);
     }
 }
