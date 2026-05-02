@@ -137,15 +137,20 @@ impl Neighbor {
         // the LSP advertises the capability, but `nh6: None` will
         // tell the FIB to skip the seg6local install.
         let nh6 = self.addr6l.first().copied();
+        let (behavior, structure) = match locator.behavior {
+            Some(crate::rib::LocatorBehavior::Usid) => (SidBehavior::UA, locator.sid_structure()),
+            None => (SidBehavior::EndX, None),
+        };
         let sid = Sid {
             addr,
-            behavior: SidBehavior::EndX,
+            behavior,
             context: SidContext::Interface(ifname.to_string()),
             owner: SidOwner::new("isis", 0),
             locator: loc_name,
             allocation_type: SidAllocationType::Dynamic,
             ifindex: self.ifindex,
             nh6,
+            structure,
         };
         let _ = rib_tx.send(rib::Message::SidAdd { sid });
         self.endx_sid = Some((function, addr));

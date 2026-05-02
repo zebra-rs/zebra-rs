@@ -7,10 +7,11 @@ use anyhow::{Result, bail};
 use isis_packet::srv6::EncapType;
 use netlink_packet_route::route::{
     Ipv6SrHdr, RouteAttribute, RouteLwEnCapType, RouteLwTunnelEncap, RouteSeg6IpTunnel,
-    RouteSeg6LocalIpTunnel, Seg6IpTunnelEncap, Seg6IpTunnelMode, Seg6LocalAction, VecIpv6SrHdr,
+    RouteSeg6LocalIpTunnel, Seg6IpTunnelEncap, Seg6IpTunnelMode, Seg6LocalAction,
+    Seg6LocalFlavorOps, Seg6LocalFlavors, VecIpv6SrHdr,
 };
 
-use crate::rib::SidBehavior;
+use crate::rib::{SidBehavior, SidStructure};
 
 // Build the seg6 lwtunnel encap for an SRv6 H.Encap policy. Callers wrap the
 // returned encap in either RouteAttribute::Encap (for embedded route-message
@@ -75,33 +76,64 @@ pub fn build_seg6_attrs(
     ))
 }
 
-// Map a SidBehavior to its kernel SEG6_LOCAL_ACTION_*.
+// Map a SidBehavior to its kernel SEG6_LOCAL_ACTION_*. uSID variants
+// reuse the same kernel actions as their classic counterparts; the
+// NEXT-C-SID flavor rides as a separate Flavors attribute.
 fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
     match behavior {
-        SidBehavior::End => Seg6LocalAction::End,
-        SidBehavior::EndX => Seg6LocalAction::EndX,
+        SidBehavior::End | SidBehavior::UN => Seg6LocalAction::End,
+        SidBehavior::EndX | SidBehavior::UA => Seg6LocalAction::EndX,
     }
+}
+
+// Build the Flavors attribute for a uSID install. The kernel needs the
+// NEXT-CSID operation flag plus the lblen / nflen parameters so it
+// knows where to split the destination address when shifting the next
+// uSID into position. Returns None for classic behaviors — they don't
+// need a Flavors attribute at all.
+fn build_seg6local_flavors(
+    behavior: SidBehavior,
+    structure: Option<SidStructure>,
+) -> Option<RouteSeg6LocalIpTunnel> {
+    if !matches!(behavior, SidBehavior::UN | SidBehavior::UA) {
+        return None;
+    }
+    let s = structure?;
+    // Nflen is the combined locator-node + function width — the
+    // "uSID position" the kernel pops on each hop. Lblen is the
+    // shared block portion that stays put.
+    let nflen = s.ln_bits.saturating_add(s.fun_bits);
+    Some(RouteSeg6LocalIpTunnel::Flavors(vec![
+        Seg6LocalFlavors::Operation(Seg6LocalFlavorOps::NextCsid),
+        Seg6LocalFlavors::Lblen(s.lb_bits),
+        Seg6LocalFlavors::Nflen(nflen),
+    ]))
 }
 
 // Build the inner Vec<RouteLwTunnelEncap> for a seg6local install.
 //
-// End needs only the Action attribute. End.X also nests Nh6 (the IPv6
-// nexthop). The kernel's required oif rides on the outer route /
-// nexthop message rather than inside the encap, so we don't add it
-// here.
+// End / uN needs only the Action attribute (uN additionally carries a
+// Flavors block). End.X / uA also nests Nh6 (the IPv6 nexthop). The
+// kernel's required oif rides on the outer route / nexthop message
+// rather than inside the encap, so we don't add it here.
 //
-// Returns None when the operator hasn't supplied the data End.X needs
-// (no IPv6 nexthop) — caller treats that as "skip FIB install for this
-// SID; the registry row stays so the LSP advertisement is unaffected".
+// Returns None when the operator hasn't supplied the data End.X / uA
+// needs (no IPv6 nexthop) — caller treats that as "skip FIB install
+// for this SID; the registry row stays so the LSP advertisement is
+// unaffected".
 fn build_seg6local_lwtunnel(
     behavior: SidBehavior,
     nh6: Option<Ipv6Addr>,
+    structure: Option<SidStructure>,
 ) -> Option<Vec<RouteLwTunnelEncap>> {
     let mut attrs: Vec<RouteSeg6LocalIpTunnel> =
         vec![RouteSeg6LocalIpTunnel::Action(seg6local_action(behavior))];
-    if matches!(behavior, SidBehavior::EndX) {
+    if matches!(behavior, SidBehavior::EndX | SidBehavior::UA) {
         let nh = nh6?;
         attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
+    }
+    if let Some(flavors) = build_seg6local_flavors(behavior, structure) {
+        attrs.push(flavors);
     }
     Some(
         attrs
@@ -116,8 +148,9 @@ fn build_seg6local_lwtunnel(
 pub fn build_seg6local_attrs(
     behavior: SidBehavior,
     nh6: Option<Ipv6Addr>,
+    structure: Option<SidStructure>,
 ) -> Option<(RouteAttribute, RouteAttribute)> {
-    let encaps = build_seg6local_lwtunnel(behavior, nh6)?;
+    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure)?;
     Some((
         RouteAttribute::Encap(encaps),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6Local),

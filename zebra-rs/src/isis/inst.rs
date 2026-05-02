@@ -614,33 +614,44 @@ impl Isis {
 
     /// Reconcile the End (Node) SID registration with the current
     /// locator snapshot. The End SID is the locator's first address
-    /// (RFC 8986 §4.1 — End behavior). On any transition (locator
-    /// resolved/disappeared, prefix changed, locator name swapped) we
+    /// (RFC 8986 §4.1 — End behavior, or RFC 9800 uN when the locator
+    /// is uSID). On any transition (locator resolved/disappeared,
+    /// prefix changed, behavior flipped, locator name swapped) we
     /// withdraw the previous SID before adding the new one so the
-    /// registry is never double-booked at the same address.
+    /// registry is never double-booked at the same address — and so a
+    /// classic↔uSID flip lands the right behavior + structure in the
+    /// FIB even when the address itself didn't change.
     fn update_end_sid(&mut self) {
-        let desired = self.sr_locator.as_ref().and_then(|loc| loc.node_sid_addr());
-        if desired == self.sr_end_sid {
-            return;
-        }
+        // Always del-then-add on any reconcile call. The address might
+        // be unchanged (classic↔uSID flip preserves it) but the
+        // behavior or structure will differ, and the FIB needs the
+        // updated install. The cost of an unnecessary del+add when
+        // truly nothing changed is one channel round-trip; the cost of
+        // skipping a real change is FIB drift.
         if let Some(prev) = self.sr_end_sid.take() {
             let _ = self.rib_tx.send(rib::Message::SidDel { addr: prev });
         }
-        if let Some(addr) = desired
+        if let Some(locator) = self.sr_locator.as_ref()
+            && let Some(addr) = locator.node_sid_addr()
             && let Some(loc_name) = self.watched_locator.clone()
         {
+            let (behavior, structure) = match locator.behavior {
+                Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
+                None => (SidBehavior::End, None),
+            };
             let sid = Sid {
                 addr,
-                behavior: SidBehavior::End,
+                behavior,
                 context: SidContext::None,
                 owner: SidOwner::new("isis", 0),
                 locator: loc_name,
                 allocation_type: SidAllocationType::Dynamic,
-                // End is local-processing; ifindex=0 lets the RIB
+                // End / uN is local-processing; ifindex=0 lets the RIB
                 // resolve to its loopback link before pushing to the
-                // FIB. nh6 has no meaning for End.
+                // FIB. nh6 has no meaning for End / uN.
                 ifindex: 0,
                 nh6: None,
+                structure,
             };
             let _ = self.rib_tx.send(rib::Message::SidAdd { sid });
             self.sr_end_sid = Some(addr);
