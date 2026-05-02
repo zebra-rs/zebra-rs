@@ -11,6 +11,7 @@ use super::{
 
 use crate::config::{Args, path_from_command};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
+use crate::context::Timer;
 use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
@@ -162,7 +163,20 @@ pub struct Rib {
     pub vxlan_config: VxlanBuilder,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
+
+    /// Single-shot timer that fires Message::Resolve after a debounce when
+    /// the FIB has changed. None when no resolve is pending. Set by
+    /// schedule_rib_sync(), cleared by the Message::Resolve handler.
+    pub rib_sync_timer: Option<Timer>,
+
+    /// Debounce interval (seconds) before a queued FIB modification triggers
+    /// nexthop resolution. Configurable so an operator can tune for their
+    /// convergence vs. churn trade-off; default 1s matches the typical
+    /// "kick once shortly after the wave settles" pattern.
+    pub rib_sync_interval: u64,
 }
+
+const DEFAULT_RIB_SYNC_INTERVAL_SEC: u64 = 1;
 
 impl Rib {
     pub fn new(no_nhid: bool) -> anyhow::Result<Self> {
@@ -193,9 +207,29 @@ impl Rib {
             vxlan_config: VxlanBuilder::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
+            rib_sync_timer: None,
+            rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
         };
         rib.show_build();
         Ok(rib)
+    }
+
+    /// Arm a one-shot timer that fires Message::Resolve after rib_sync_interval
+    /// seconds, debouncing further FIB modifications until the timer fires.
+    /// Repeated calls while a timer is already pending are no-ops, which lets
+    /// a burst of FIB events (e.g. an IS-IS LSDB update producing many route
+    /// installs in quick succession) collapse into a single resolve cycle.
+    pub fn schedule_rib_sync(&mut self) {
+        if self.rib_sync_timer.is_some() {
+            return;
+        }
+        let tx = self.tx.clone();
+        self.rib_sync_timer = Some(Timer::once(self.rib_sync_interval, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::Resolve);
+            }
+        }));
     }
 
     pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, _proto: String) {
@@ -299,6 +333,12 @@ impl Rib {
                 self.link_down(ifindex).await;
             }
             Message::Resolve => {
+                // Drop the timer so the next FIB modification can arm a fresh
+                // one. Run both family resolves so static / SRv6 nexthops that
+                // were unresolved at config time get a second chance once the
+                // underlying IGP / connected route lands.
+                self.rib_sync_timer = None;
+                self.ipv4_route_resolve().await;
                 self.ipv6_route_resolve().await;
             }
             Message::Subscribe { tx, proto } => {
