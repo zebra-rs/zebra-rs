@@ -5,7 +5,6 @@ use std::net::Ipv6Addr;
 
 use anyhow::{Result, bail};
 use isis_packet::srv6::EncapType;
-use netlink_packet_route::nexthop::NexthopAttribute;
 use netlink_packet_route::route::{
     Ipv6SrHdr, RouteAttribute, RouteLwEnCapType, RouteLwTunnelEncap, RouteSeg6IpTunnel,
     RouteSeg6LocalIpTunnel, Seg6IpTunnelEncap, Seg6IpTunnelMode, Seg6LocalAction, VecIpv6SrHdr,
@@ -125,15 +124,6 @@ pub fn build_seg6local_attrs(
     ))
 }
 
-// Build seg6local nexthop-attribute pair (Encap + EncapType) for the
-// nh_id-based install path.
-pub fn build_seg6local_nh_attrs(
-    behavior: SidBehavior,
-    nh6: Option<Ipv6Addr>,
-) -> Option<(NexthopAttribute, NexthopAttribute)> {
-    let encaps = build_seg6local_lwtunnel(behavior, nh6)?;
-    Some((
-        NexthopAttribute::Encap(encaps),
-        NexthopAttribute::EncapType(RouteLwEnCapType::Seg6Local.into()),
-    ))
-}
+// (build_seg6local_nh_attrs removed: the kernel rejects seg6local
+// lwtunnel encaps in the nexthop table, so we always embed the encap
+// on the route message via build_seg6local_attrs.)
