@@ -240,6 +240,18 @@ module exec {
       ext:help "Show policy";
       presence "Show policy";
     }
+    container segment-routing {
+      ext:help "Show segment-routing";
+      presence "Segment Routing";
+      container srv6 {
+        ext:help "Show SRv6";
+        presence "SRv6";
+        leaf sid {
+          ext:help "Show allocated SRv6 SIDs";
+          type empty;
+        }
+      }
+    }
     container "prefix-set" {
       ext:help "Show prefix-set";
       presence "Show prefix-set";
