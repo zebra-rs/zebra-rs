@@ -18,8 +18,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::isis_event_trace;
 use crate::rib::{
-    Block, DEFAULT_BLOCK_NAME, Locator, RibSrRx, Sid, SidAllocationType, SidBehavior, SidContext,
-    SidOwner,
+    Block, DEFAULT_BLOCK_NAME, Locator, LocatorBehavior, RibSrRx, Sid, SidAllocationType,
+    SidBehavior, SidContext, SidOwner,
 };
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -923,33 +923,49 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         lsp.tlvs.push(cap.into());
     }
 
-    // SRv6 SID Structure sub-sub-TLV (RFC 9352 §9, type 1) — emitted
-    // alongside every End / End.X SID we originate so receivers know
-    // how the SID's bits are partitioned. Computed once per LSP build
-    // because every SID we emit shares the locator and the same fixed
-    // 16-bit function space.
+    // SRv6 endpoint behavior + SID Structure SubSub TLV (RFC 9352 §9,
+    // type 1), keyed off the locator's behavior. Computed once per LSP
+    // and reused by every End / End.X SID we emit, since they all share
+    // the locator and the same fixed 16-bit function space.
     //
-    // LB caps at 40, the IPv6 DOC / SR block size typical deployments
-    // use; anything past 40 in the locator goes into LN, the per-node
-    // portion (e.g. /64 → LB=40, LN=24; /48 → LB=40, LN=8). Function is
-    // 16 bits — the width function_addr() places into the SID. Argument
-    // is 0; we don't allocate argument-bearing SIDs.
-    let sid_structure_subs: Vec<IsisSub2Tlv> = top
+    //   classic (no behavior leaf): End / End.X codepoints, LB caps
+    //     at 40 (IPv6 DOC / SR block size most deployments use). For a
+    //     /64 → LB=40, LN=24; /48 → LB=40, LN=8.
+    //   uSID (RFC 9800 NEXT-C-SID): uN / uA codepoints, LB caps at 32
+    //     (the typical uSID block size). /32 → LB=32, LN=0; /48 →
+    //     LB=32, LN=16.
+    //
+    // Function is 16 bits — the width function_addr() places into the
+    // SID. Argument is 0; we don't allocate argument-bearing SIDs.
+    let (end_behavior, endx_behavior, sid_structure_subs) = match top
         .sr_locator
         .as_ref()
-        .and_then(|loc| loc.prefix)
-        .map(|prefix| {
+        .and_then(|loc| loc.prefix.map(|p| (loc.behavior.as_ref(), p)))
+    {
+        Some((Some(LocatorBehavior::Usid), prefix)) => {
             let plen = prefix.prefix_len();
-            let lb_len = plen.min(40);
-            IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
+            let lb_len = plen.min(32);
+            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
                 lb_len,
                 ln_len: plen.saturating_sub(lb_len),
                 fun_len: 16,
                 arg_len: 0,
-            })
-        })
-        .into_iter()
-        .collect();
+            });
+            (Behavior::EndCSID, Behavior::EndXCSID, vec![structure])
+        }
+        Some((None, prefix)) => {
+            let plen = prefix.prefix_len();
+            let lb_len = plen.min(40);
+            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
+                lb_len,
+                ln_len: plen.saturating_sub(lb_len),
+                fun_len: 16,
+                arg_len: 0,
+            });
+            (Behavior::End, Behavior::EndX, vec![structure])
+        }
+        None => (Behavior::End, Behavior::EndX, Vec::new()),
+    };
 
     // SRv6 Locators TLV (RFC 9352 §7.1, type 27). One sub-locator per
     // active locator; today we only carry one. The contained End SID
@@ -963,7 +979,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
     {
         let end_sub = IsisSubSrv6EndSid {
             flags: 0,
-            behavior: Behavior::End,
+            behavior: end_behavior,
             sid: end_sid,
             sub2s: sid_structure_subs.clone(),
         };
@@ -1034,7 +1050,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                         flags: 0,
                         algo: Algo::Spf,
                         weight: 0,
-                        behavior: Behavior::EndX,
+                        behavior: endx_behavior,
                         sid: sid_addr,
                         sub2s: sid_structure_subs.clone(),
                     };
@@ -1045,7 +1061,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                         flags: 0,
                         algo: Algo::Spf,
                         weight: 0,
-                        behavior: Behavior::EndX,
+                        behavior: endx_behavior,
                         sid: sid_addr,
                         sub2s: sid_structure_subs.clone(),
                     };
