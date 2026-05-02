@@ -630,6 +630,44 @@ impl FibHandle {
                     );
                 }
 
+                // seg6local nexthops have a different attribute shape:
+                // no Gateway, encap carries the action (and Nh6 for
+                // End.X), Oif identifies the dev. The kernel rejects
+                // this with af=Unspec, so we set Inet6 (SIDs are IPv6).
+                if let Some(action) = uni.seg6local_action {
+                    let nh6 = match uni.addr {
+                        std::net::IpAddr::V6(a) if !a.is_unspecified() => Some(a),
+                        _ => None,
+                    };
+                    let Some((encap, encap_type)) =
+                        super::srv6::build_seg6local_nh_attrs(action, nh6)
+                    else {
+                        tracing::warn!(
+                            "seg6local nexthop encap build skipped for gid {} \
+                             (End.X without IPv6 nexthop)",
+                            uni.gid(),
+                        );
+                        return;
+                    };
+                    msg.header.address_family = AddressFamily::Inet6;
+                    msg.attributes.push(NexthopAttribute::Id(uni.gid() as u32));
+                    msg.attributes.push(NexthopAttribute::Oif(uni.ifindex));
+                    msg.attributes.push(encap_type);
+                    msg.attributes.push(encap);
+
+                    let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
+                    req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+                    let mut response = self.handle.clone().request(req).unwrap();
+                    while let Some(m) = response.next().await {
+                        if let NetlinkPayload::Error(e) = m.payload {
+                            tracing::info!(
+                                "NewNexthop seg6local error: {e} gid: {gid} refcnt: {refcnt}"
+                            );
+                        }
+                    }
+                    return;
+                }
+
                 // Address family follows the gateway address.
                 msg.header.address_family = match uni.addr {
                     std::net::IpAddr::V4(_) => AddressFamily::Inet,
@@ -780,6 +818,82 @@ impl FibHandle {
                     gid = nexthop.gid(),
                     refcnt = nexthop.refcnt()
                 );
+            }
+        }
+    }
+
+    /// Install an SRv6 SID into the FIB as a local /128 host route.
+    /// Uses the nh_id allocated from NexthopMap when the kernel supports
+    /// it, otherwise falls back to embedded seg6local encap on the route
+    /// itself (kernels < 5.3).
+    pub async fn route_sid_install(&self, sid: &crate::rib::Sid, gid: usize, ifindex: u32) {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.destination_prefix_length = 128;
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = RouteProtocol::Isis;
+        msg.header.scope = RouteScope::Universe;
+        // Local routes are processed by the host (the seg6local action
+        // runs on us), not forwarded; the kernel will reject Unicast
+        // here because there's no real "via" target.
+        msg.header.kind = RouteType::Local;
+
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(sid.addr)));
+
+        if self.use_nhid {
+            msg.attributes.push(RouteAttribute::Nhid(gid as u32));
+        } else {
+            // Embedded encap fallback. Set Oif so the kernel knows where
+            // to bind the action; for End we resolved that to loopback,
+            // for End.X to the link.
+            if ifindex != 0 {
+                msg.attributes.push(RouteAttribute::Oif(ifindex));
+            }
+            let Some((encap, encap_type)) =
+                super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6)
+            else {
+                tracing::warn!(
+                    "seg6local route encap build skipped for {} (End.X without IPv6 nexthop)",
+                    sid.addr
+                );
+                return;
+            };
+            msg.attributes.push(encap);
+            msg.attributes.push(encap_type);
+        }
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                tracing::info!("NewRoute SID install error: addr={} {}", sid.addr, e);
+            }
+        }
+    }
+
+    /// Remove a previously-installed SID host route. Idempotent against
+    /// the kernel — a missing entry surfaces as an error in the trace
+    /// but doesn't propagate.
+    pub async fn route_sid_uninstall(&self, addr: std::net::Ipv6Addr) {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet6;
+        msg.header.destination_prefix_length = 128;
+        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        msg.header.protocol = RouteProtocol::Isis;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Local;
+
+        msg.attributes
+            .push(RouteAttribute::Destination(RouteAddress::Inet6(addr)));
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                tracing::info!("DelRoute SID uninstall error: addr={addr} {e}");
             }
         }
     }

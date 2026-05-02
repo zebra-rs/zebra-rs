@@ -57,17 +57,32 @@ pub struct GroupUni {
     /// SRv6 endpoint behavior chosen for this encap (e.g. H.Encap,
     /// H.Encap.Red). None when segs is empty (non-SRv6 nexthop).
     pub encap_type: Option<EncapType>,
+
+    /// SRv6 seg6local action — set when this group represents a local
+    /// SID install (End / End.X). NexthopMap keys these separately from
+    /// plain unicast / encap nexthops via `fetch_seg6local`.
+    pub seg6local_action: Option<crate::rib::SidBehavior>,
 }
 
 impl GroupUni {
     pub fn new(gid: usize, uni: &NexthopUni) -> Self {
+        // For seg6local nexthops the ifindex is pre-determined by the
+        // caller (loopback for End, the link's ifindex for End.X) and
+        // there's no IGP path to resolve through; for plain unicast we
+        // start at 0 and let `resolve`/`resolve_v6` fill it in.
+        let ifindex = if uni.seg6local_action.is_some() {
+            uni.ifindex
+        } else {
+            0
+        };
         Self {
             common: GroupCommon::new(gid),
             addr: uni.addr,
-            ifindex: 0,
+            ifindex,
             labels: uni.mpls_label.clone(),
             segs: uni.segs.clone(),
             encap_type: uni.encap_type,
+            seg6local_action: uni.seg6local_action,
         }
     }
 
