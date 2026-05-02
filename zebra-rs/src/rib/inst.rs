@@ -389,26 +389,61 @@ impl Rib {
     /// seg6local action, and record the entry in `self.sids` so the
     /// show table reflects it.
     async fn sid_install(&mut self, mut sid: Sid) {
+        let original_ifindex = sid.ifindex;
         if sid.ifindex == 0
             && let Some(ifindex) = self.resolve_lo_ifindex()
         {
             sid.ifindex = ifindex;
         }
+        if crate::fib::netlink::handle::DEBUG_SID {
+            tracing::info!(
+                "[sid_install] addr={} behavior={:?} locator={} owner={} \
+                 ifindex={} (orig={}) nh6={:?}",
+                sid.addr,
+                sid.behavior,
+                sid.locator,
+                sid.owner,
+                sid.ifindex,
+                original_ifindex,
+                sid.nh6,
+            );
+        }
         // No usable ifindex → skip FIB install but keep the registry
         // entry so the LSP advertisement and show table are unaffected.
         if sid.ifindex == 0 {
+            if crate::fib::netlink::handle::DEBUG_SID {
+                tracing::warn!(
+                    "[sid_install] addr={} skipped — no loopback ifindex resolved yet",
+                    sid.addr
+                );
+            }
             self.sids.insert(sid.addr, sid);
             return;
         }
 
         let uni = Self::sid_nexthop_uni(&sid);
         let Some(group) = self.nmap.fetch(&uni) else {
+            if crate::fib::netlink::handle::DEBUG_SID {
+                tracing::warn!(
+                    "[sid_install] addr={} NexthopMap::fetch returned None",
+                    sid.addr
+                );
+            }
             self.sids.insert(sid.addr, sid);
             return;
         };
         let gid = group.gid();
         let need_install = !group.is_installed();
         group.refcnt_inc();
+        if crate::fib::netlink::handle::DEBUG_SID {
+            tracing::info!(
+                "[sid_install] addr={} resolved gid={} need_install={} refcnt={}",
+                sid.addr,
+                gid,
+                need_install,
+                group.refcnt(),
+            );
+        }
 
         if need_install {
             self.fib_handle.nexthop_add(group).await;
@@ -435,7 +470,7 @@ impl Rib {
             return;
         }
 
-        self.fib_handle.route_sid_uninstall(addr).await;
+        self.fib_handle.route_sid_uninstall(&sid).await;
 
         let uni = Self::sid_nexthop_uni(&sid);
         let Some(group) = self.nmap.fetch(&uni) else {
