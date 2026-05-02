@@ -275,10 +275,26 @@ module config {
           }
         }
 
-        leaf segment-routing {
-          type enumeration {
-            enum mpls;
-            enum srv6;
+        container segment-routing {
+          container mpls {
+            presence "Enable Segment Routing over MPLS dataplane";
+            leaf block {
+              // Name of a block defined under the global
+              // /segment-routing/block list. Held as a string (not a
+              // leafref) so an IS-IS config can be staged before the
+              // global block is committed.
+              type string;
+            }
+          }
+          container srv6 {
+            presence "Enable Segment Routing over IPv6 dataplane";
+            leaf locator {
+              // Name of a locator defined under the global
+              // /segment-routing/locator list. Held as a string (not a
+              // leafref) so an IS-IS config can be staged before the
+              // global locator is committed.
+              type string;
+            }
           }
         }
 
@@ -654,6 +670,77 @@ module config {
           }
         }
 
+      }
+    }
+
+    container segment-routing {
+      ext:help "Segment Routing global configuration";
+      description
+        "Global Segment Routing configuration shared across protocols.
+         Blocks (SR-MPLS label ranges) and locators (SRv6 SID prefixes)
+         defined here can be referenced by name from the per-protocol
+         segment-routing sections (e.g. routing/isis/segment-routing/mpls
+         and routing/isis/segment-routing/srv6). Managed by the RIB,
+         which is the natural owner of the SID/label space and the
+         per-block / per-locator install state.";
+
+      list block {
+        key "name";
+        description
+          "SR-MPLS label block. Each block bundles an SR Global Block
+           (SRGB) and an SR Local Block (SRLB) under one name so multiple
+           protocols (IS-IS, OSPF, BGP-LU) can share the same
+           configuration by reference.";
+        leaf name {
+          type string;
+        }
+        container global {
+          description
+            "SR Global Block (SRGB) — prefix-SID label range advertised
+             to the SR domain. Matches the IS-IS SR Capability TLV
+             (RFC 8667 §3.1) <base-label, range> shape.";
+          leaf start {
+            type uint32;
+          }
+          leaf range {
+            type uint32;
+          }
+        }
+        container local {
+          description
+            "SR Local Block (SRLB) — adjacency-SID label range used
+             locally. Same <base-label, range> shape as global.";
+          leaf start {
+            type uint32;
+          }
+          leaf range {
+            type uint32;
+          }
+        }
+      }
+
+      list locator {
+        key "name";
+        description
+          "SRv6 locator. The prefix is the IPv6 range from which SIDs
+           are allocated; behavior selects the SID layout.";
+        leaf name {
+          type string;
+        }
+        leaf prefix {
+          type inet:ipv6-prefix;
+          description
+            "IPv6 prefix from which SIDs are allocated for this locator.";
+        }
+        leaf behavior {
+          type enumeration {
+            enum usid;
+          }
+          description
+            "Locator-wide endpoint behavior. 'usid' selects the
+             RFC 9800 NEXT-C-SID (micro-SID) format; absent means
+             the classic RFC 8986 full-SID layout.";
+        }
       }
     }
 
