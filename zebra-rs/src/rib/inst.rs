@@ -5,9 +5,9 @@ use super::api::RibRx;
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
-    Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, Link,
-    Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap, RibSrRx,
-    RibType, Sid, StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
+    Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
+    Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
+    NexthopUni, RibSrRx, RibType, Sid, StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -21,7 +21,7 @@ use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -356,6 +356,101 @@ impl Rib {
         }
     }
 
+    /// Build the seg6local NexthopUni a SID install resolves through
+    /// NexthopMap. The (action, ifindex, nh6) triple is the dedup key —
+    /// two End SIDs end up sharing one nh_id, two End.X SIDs to the
+    /// same neighbor likewise share, distinct adjacencies don't.
+    fn sid_nexthop_uni(sid: &Sid) -> NexthopUni {
+        let addr = match sid.nh6 {
+            Some(a) => IpAddr::V6(a),
+            None => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        };
+        NexthopUni {
+            addr,
+            ifindex: sid.ifindex,
+            seg6local_action: Some(sid.behavior),
+            valid: true,
+            ..Default::default()
+        }
+    }
+
+    /// Resolve a Sid's `ifindex == 0` to the system's loopback before
+    /// install. End SIDs arrive without an ifindex from IS-IS so the
+    /// daemon stays portable; the FIB needs a real one.
+    fn resolve_lo_ifindex(&self) -> Option<u32> {
+        self.links
+            .values()
+            .find(|link| link.is_loopback())
+            .map(|link| link.index)
+    }
+
+    /// Install an allocated SID into the FIB: allocate / share a kernel
+    /// nhid via NexthopMap, install the route as RouteType::Local with
+    /// seg6local action, and record the entry in `self.sids` so the
+    /// show table reflects it.
+    async fn sid_install(&mut self, mut sid: Sid) {
+        if sid.ifindex == 0
+            && let Some(ifindex) = self.resolve_lo_ifindex()
+        {
+            sid.ifindex = ifindex;
+        }
+        // No usable ifindex → skip FIB install but keep the registry
+        // entry so the LSP advertisement and show table are unaffected.
+        if sid.ifindex == 0 {
+            self.sids.insert(sid.addr, sid);
+            return;
+        }
+
+        let uni = Self::sid_nexthop_uni(&sid);
+        let Some(group) = self.nmap.fetch(&uni) else {
+            self.sids.insert(sid.addr, sid);
+            return;
+        };
+        let gid = group.gid();
+        let need_install = !group.is_installed();
+        group.refcnt_inc();
+
+        if need_install {
+            self.fib_handle.nexthop_add(group).await;
+            if let Some(g) = self.nmap.get_mut(gid) {
+                g.set_installed(true);
+            }
+        }
+        let ifindex = sid.ifindex;
+        self.fib_handle.route_sid_install(&sid, gid, ifindex).await;
+
+        self.sids.insert(sid.addr, sid);
+    }
+
+    /// Tear down a previously-installed SID. Walks back through the
+    /// same NexthopMap entry the install used; the kernel nhid is only
+    /// removed when the last referencing SID drops it.
+    async fn sid_uninstall(&mut self, addr: Ipv6Addr) {
+        let Some(sid) = self.sids.remove(&addr) else {
+            return;
+        };
+        if sid.ifindex == 0 {
+            // Wasn't installed (no loopback at SidAdd time); nothing to
+            // tear down on the kernel side.
+            return;
+        }
+
+        self.fib_handle.route_sid_uninstall(addr).await;
+
+        let uni = Self::sid_nexthop_uni(&sid);
+        let Some(group) = self.nmap.fetch(&uni) else {
+            return;
+        };
+        let gid = group.gid();
+        group.refcnt_dec();
+        if group.refcnt() == 0 {
+            self.fib_handle.nexthop_del(group).await;
+            if let Some(g) = self.nmap.get_mut(gid) {
+                g.set_installed(false);
+            }
+        }
+    }
+
     pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, _proto: String) {
         // Link dump.
         for (_, link) in self.links.iter() {
@@ -504,13 +599,10 @@ impl Rib {
                 }
             }
             Message::SidAdd { sid } => {
-                // Last-writer-wins: a re-add with the same address replaces
-                // the old entry. Owners are responsible for not double-
-                // allocating; this just keeps the registry consistent.
-                self.sids.insert(sid.addr, sid);
+                self.sid_install(sid).await;
             }
             Message::SidDel { addr } => {
-                self.sids.remove(&addr);
+                self.sid_uninstall(addr).await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
