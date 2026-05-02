@@ -11,7 +11,7 @@ pub mod block;
 pub use block::{Block, BlockBuilder, BlockConfig, DEFAULT_BLOCK_NAME};
 
 pub mod locator;
-pub use locator::{Locator, LocatorBuilder, LocatorConfig};
+pub use locator::{Locator, LocatorBehavior, LocatorBuilder, LocatorConfig};
 
 pub mod sid;
 // PR 2 wires up the IS-IS allocators that consume these types; until
