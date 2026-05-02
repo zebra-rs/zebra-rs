@@ -342,30 +342,6 @@ impl FibHandle {
             );
         }
 
-        // SRv6 H.Encap dispatch: nexthops carrying a non-empty segment list
-        // bypass the regular IPv6 install path entirely. The kernel routes
-        // the encapsulated packet to the first segment via normal lookup,
-        // so an Oif derived from the resolved nexthop is enough.
-        if let Nexthop::Uni(uni) = nexthop
-            && !uni.segs.is_empty()
-        {
-            let encap_type = uni
-                .encap_type
-                .unwrap_or(isis_packet::srv6::EncapType::HEncap);
-            if let Err(e) = super::srv6::srv6_encap_add(
-                &self.handle,
-                prefix,
-                &uni.segs,
-                encap_type,
-                uni.ifindex,
-            )
-            .await
-            {
-                tracing::warn!("SRv6 encap add failed for {prefix}: {e:#}");
-            }
-            return;
-        }
-
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = prefix.prefix_len();
@@ -435,6 +411,25 @@ impl FibHandle {
                 }
                 let attr = RouteAttribute::Priority(uni.metric);
                 msg.attributes.push(attr);
+
+                // Embedded seg6 encap fallback for kernels < 5.3 that don't
+                // support nexthop-table lwtunnel encap. The seg6 attributes
+                // ride directly on the route message instead of via Nhid.
+                if !uni.segs.is_empty() {
+                    let encap_type = uni
+                        .encap_type
+                        .unwrap_or(isis_packet::srv6::EncapType::HEncap);
+                    match super::srv6::build_seg6_attrs(&uni.segs, encap_type) {
+                        Ok((encap, encap_type_attr)) => {
+                            msg.attributes.push(encap);
+                            msg.attributes.push(encap_type_attr);
+                        }
+                        Err(e) => {
+                            tracing::warn!("SRv6 embedded encap build failed for {prefix}: {e:#}");
+                            return;
+                        }
+                    }
+                }
             }
             if let Nexthop::Multi(multi) = &nexthop {
                 let mut mpath = vec![];
@@ -498,17 +493,6 @@ impl FibHandle {
 
     pub async fn route_ipv6_del_uni(&self, prefix: &Ipv6Net, entry: &RibEntry, nexthop: &Nexthop) {
         if !entry.is_protocol() {
-            return;
-        }
-
-        // SRv6 H.Encap dispatch: kernel matches the route by prefix only, so
-        // the SRv6 helper sends a bare DelRoute with no encap attributes.
-        if let Nexthop::Uni(uni) = nexthop
-            && !uni.segs.is_empty()
-        {
-            if let Err(e) = super::srv6::srv6_encap_del(&self.handle, prefix).await {
-                tracing::warn!("SRv6 encap del failed for {prefix}: {e:#}");
-            }
             return;
         }
 
