@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright 2025-2026 Kunihiro Ishiguro
 
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
+use std::str::FromStr;
 
 use isis_packet::{IsLevel, Nsap};
+use strum_macros::{Display, EnumString};
 
 use crate::config::{Args, ConfigOp};
 
@@ -12,6 +15,22 @@ use super::inst::Callback;
 use super::link::Afis;
 use super::tracing::{PacketConfig, PacketDirection};
 use super::{Level, link};
+
+/// IS-IS Multi-Topology identifier (RFC 5120). The wire encoding is a
+/// 12-bit MT ID; we model only the topologies we actually compute SPF
+/// for. Multicast variants (MT 3, MT 4) parse on the wire but don't
+/// surface here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, EnumString, Display)]
+pub enum MtId {
+    /// MT 0 — IPv4 unicast (the legacy "standard" topology). When no
+    /// MT TLV is present in an LSP, RFC 5120 §3.4 says everything
+    /// implicitly belongs here.
+    #[strum(serialize = "standard")]
+    Standard,
+    /// MT 2 — IPv6 unicast.
+    #[strum(serialize = "ipv6-unicast")]
+    Ipv6Unicast,
+}
 
 impl Isis {
     const TRACING: &str = "/routing/isis/tracing";
@@ -36,6 +55,12 @@ impl Isis {
         self.callback_add(
             "/routing/isis/segment-routing/srv6/locator",
             config_sr_srv6_locator,
+        );
+        self.callback_add("/routing/isis/multi-topology", config_mt_enable);
+        self.callback_add("/routing/isis/multi-topology/topology", config_mt_topology);
+        self.callback_add(
+            "/routing/isis/interface/multi-topology/metric",
+            link::config_mt_metric,
         );
         self.callback_add("/routing/isis/interface/priority", link::config_priority);
         self.tracing_add("/event", config_tracing_event);
@@ -109,6 +134,18 @@ pub struct IsisConfig {
     /// /segment-routing/locator list. Same staging-friendly rationale
     /// as sr_mpls_block.
     pub sr_srv6_locator: Option<String>,
+
+    /// Set when /routing/isis/multi-topology is committed (the
+    /// presence-marked YANG container). Drives whether IS-IS
+    /// originates the MT TLV (229) and per-MT reach TLVs in
+    /// follow-up PRs.
+    pub mt_enabled: bool,
+
+    /// MT IDs the operator selected under
+    /// /routing/isis/multi-topology/topology. Empty when MT is on but
+    /// the operator hasn't named any topologies yet — that's a
+    /// no-op-friendly intermediate state during config staging.
+    pub mt_topologies: BTreeSet<MtId>,
 }
 
 impl IsisConfig {
@@ -238,6 +275,33 @@ fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
         isis.config.sr_srv6_locator = None;
     }
     isis.reconcile_locator_watch();
+    Some(())
+}
+
+// Set/cleared by the presence of the YANG container itself, like
+// segment-routing/srv6 above. Removing the container also drops every
+// configured topology; PR 2 will trigger LSP re-origination from here.
+fn config_mt_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        isis.config.mt_enabled = true;
+    } else {
+        isis.config.mt_enabled = false;
+        isis.config.mt_topologies.clear();
+    }
+    Some(())
+}
+
+// Per-list-entry callback: the value is the MT id keyword. Add on set,
+// remove on delete. Unknown ids fall through to None — libyang's enum
+// validation should keep them out, but we don't trust the wire.
+fn config_mt_topology(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let id_str = args.string()?;
+    let id = MtId::from_str(&id_str).ok()?;
+    if op.is_set() {
+        isis.config.mt_topologies.insert(id);
+    } else {
+        isis.config.mt_topologies.remove(&id);
+    }
     Some(())
 }
 

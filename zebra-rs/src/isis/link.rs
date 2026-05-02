@@ -21,7 +21,7 @@ use crate::isis_event_trace;
 use crate::rib::link::LinkAddr;
 use crate::rib::{Link, MacAddr};
 
-use super::config::IsisConfig;
+use super::config::{IsisConfig, MtId};
 use super::ifsm::{self, has_level};
 use super::inst::{PacketMessage, ReachMap, ReachMapV6};
 use super::neigh::Neighbor;
@@ -200,6 +200,13 @@ pub struct LinkConfig {
     pub csnp_interval: Option<u32>,
 
     pub prefix_sid: Option<SidLabelValue>,
+
+    /// Per-MT metric overrides — populated from
+    /// /routing/isis/interface/<name>/multi-topology/<id>/metric.
+    /// Empty when no per-MT metric is configured; lookup falls back
+    /// to the link's `metric` leaf above. PR 2 reads this when
+    /// emitting MT IS Reach (TLV 222) entries.
+    pub mt_metrics: BTreeMap<MtId, u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, EnumString, Display)]
@@ -624,6 +631,27 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
 
 pub fn config_ipv4_enable(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
     config_afi_enable(isis, args, op, Afi::Ip)
+}
+
+// Per-MT, per-link metric override. The path arrives with three
+// values from libyang dispatch: outer interface key (`if-name`), inner
+// list key (MT id keyword), then the leaf value (`metric`). PR 1 just
+// stores it; PR 2 reads it when emitting TLV 222 entries.
+pub fn config_mt_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    use std::str::FromStr;
+
+    let ifname = args.string()?;
+    let id_str = args.string()?;
+    let id = MtId::from_str(&id_str).ok()?;
+
+    let link = isis.links.get_mut_by_name(&ifname)?;
+    if op.is_set() {
+        let metric = args.u32()?;
+        link.config.mt_metrics.insert(id, metric);
+    } else {
+        link.config.mt_metrics.remove(&id);
+    }
+    Some(())
 }
 
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
