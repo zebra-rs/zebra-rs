@@ -26,3 +26,10 @@ pub fn sysctl_mpls_enable(ifname: &String) -> anyhow::Result<()> {
     let _ = ctl.set_value_string("1")?;
     Ok(())
 }
+
+pub fn sysctl_seg6_enable(ifname: &String) -> anyhow::Result<()> {
+    let ctlname = format!("net.ipv6.conf.{}.seg6_enabled", ifname);
+    let ctl = sysctl::Ctl::new(ctlname.as_str())?;
+    let _ = ctl.set_value_string("1")?;
+    Ok(())
+}
