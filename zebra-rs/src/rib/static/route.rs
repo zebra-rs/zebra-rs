@@ -82,20 +82,15 @@ impl<F: StaticFamily> StaticRoute<F> {
         let metric = self.metric.unwrap_or(0);
 
         if !self.segs.is_empty() {
-            // SRv6 H.Encap: outer destination is the first segment, kernel
-            // routes the encapsulated packet there. RFC 8986 §5.1 lists
-            // H.Encap as the base behavior, but operators almost always
-            // prefer H.Encap.Red because it omits the redundant first SID
-            // from the SRH (RFC 8986 §5.2). Default to Red when there are
-            // enough segments to do so; fall back to plain H.Encap for a
-            // single-segment policy since Red has no segments left after
-            // dropping the first.
+            // SRv6 H.Encap (RFC 8986 §5.1): outer destination is the first
+            // segment; the SRH carries every configured segment. We default
+            // to plain H.Encap so the FIB reflects the operator's exact
+            // segment list — `ip -6 route show` will report `segs N [...]`
+            // for N configured segments. Operators who want the SRH-reduced
+            // form (H.Encap.Red, RFC 8986 §5.2) can opt in via the explicit
+            // encap-type leaf.
             let first = self.segs[0];
-            let encap_type = self.encap_type.unwrap_or(if self.segs.len() >= 2 {
-                EncapType::HEncapRed
-            } else {
-                EncapType::HEncap
-            });
+            let encap_type = self.encap_type.unwrap_or(EncapType::HEncap);
             let nhop = NexthopUni {
                 addr: IpAddr::V6(first),
                 metric,
@@ -286,24 +281,22 @@ mod tests {
     }
 
     #[test]
-    fn srv6_segs_default_to_h_encap_red_when_unspecified() {
-        // Operator default: with two or more segments, an unspecified
-        // encap-type resolves to H.Encap.Red (RFC 8986 §5.2 reduced
-        // encapsulation, the typical SRv6 deployment choice).
+    fn srv6_segs_default_to_h_encap_when_unspecified() {
+        // Default policy: with no explicit encap-type, install full H.Encap
+        // (RFC 8986 §5.1) so every configured segment lands in the SRH and
+        // the kernel `ip -6 route show` reflects exactly what the operator
+        // configured. H.Encap.Red is opt-in via explicit encap-type.
         let r = StaticRoute::<V4> {
             segs: vec![seg("fd00:c::"), seg("fd00:b::")],
             ..Default::default()
         };
         let entry = r.to_entry().expect("entry built");
         let uni = as_uni(&entry);
-        assert_eq!(uni.encap_type, Some(EncapType::HEncapRed));
+        assert_eq!(uni.encap_type, Some(EncapType::HEncap));
     }
 
     #[test]
-    fn srv6_single_segment_default_falls_back_to_h_encap() {
-        // H.Encap.Red drops the first segment from the SRH, so a
-        // single-segment policy would leave the SRH empty. Fall back
-        // to plain H.Encap rather than producing an invalid policy.
+    fn srv6_single_segment_default_is_h_encap() {
         let r = StaticRoute::<V4> {
             segs: vec![seg("fd00:c::")],
             ..Default::default()
