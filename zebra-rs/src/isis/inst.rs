@@ -100,6 +100,11 @@ pub struct Isis {
     /// the previous address before allocating a new one when the
     /// locator's prefix changes underneath us.
     pub sr_end_sid: Option<std::net::Ipv6Addr>,
+
+    /// ELIB function pool used for End.X (adjacency) SID allocation.
+    /// Reset whenever the watched locator changes so stale function
+    /// reservations don't leak across prefix swaps.
+    pub elib: super::srv6::ElibPool,
 }
 
 pub struct IsisTop<'a> {
@@ -179,6 +184,7 @@ impl Isis {
             sr_block: None,
             sr_locator: None,
             sr_end_sid: None,
+            elib: super::srv6::ElibPool::new(),
         };
         isis.callback_build();
         isis.show_build();
@@ -522,6 +528,10 @@ impl Isis {
             reach_map_v6: &mut self.reach_map_v6,
             label_map: &mut self.label_map,
             spf_timer: &mut self.spf_timer,
+            rib_tx: &self.rib_tx,
+            sr_locator: &self.sr_locator,
+            watched_locator: &self.watched_locator,
+            elib: &mut self.elib,
         })
     }
 
@@ -575,6 +585,7 @@ impl Isis {
             // the registration before we leave the helper so the show
             // table doesn't keep advertising a SID with no locator.
             self.update_end_sid();
+            self.clear_all_endx_sids();
         }
         if let Some(next) = desired {
             let _ = self.rib_tx.send(rib::Message::SrLocatorWatch {
@@ -583,6 +594,22 @@ impl Isis {
             });
             self.watched_locator = Some(next);
         }
+    }
+
+    /// Withdraw every End.X (adjacency) SID and reset the ELIB pool.
+    /// Used whenever the underlying locator changes (prefix swap,
+    /// locator name change, locator removed): every previously-issued
+    /// End.X address is invalidated, so we drop the registry rows and
+    /// let the next Hello re-allocate from a fresh pool.
+    fn clear_all_endx_sids(&mut self) {
+        for link in self.links.values_mut() {
+            for level in [Level::L1, Level::L2] {
+                for nbr in link.state.nbrs.get_mut(&level).values_mut() {
+                    nbr.release_endx_sid(&mut self.elib, &self.rib_tx);
+                }
+            }
+        }
+        self.elib.reset();
     }
 
     /// Reconcile the End (Node) SID registration with the current
@@ -631,6 +658,11 @@ impl Isis {
                     return;
                 }
                 self.sr_locator = locator;
+                // Locator snapshot churned — every End.X address
+                // computed against the previous prefix is now stale.
+                // Drop them all and let the next Hellos re-allocate
+                // from a fresh ELIB pool.
+                self.clear_all_endx_sids();
                 // Allocate / withdraw the Node SID against the new
                 // snapshot before flooding so the LSP carries the
                 // correct value on the very first emission.
@@ -957,6 +989,34 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
                         };
                         is_reach.subs.push(neigh::IsisSubTlv::LanAdjSid(sub));
                     }
+                }
+            }
+
+            // SRv6 End.X (adjacency) sub-TLV — RFC 9352 §8.1 (P2P) /
+            // §8.2 (LAN). One per up adjacency, only when an End.X
+            // SID has been allocated against the resolved locator.
+            if let Some((_, sid_addr)) = nbr.endx_sid {
+                if nbr.link_type.is_p2p() {
+                    let sub = IsisSubSrv6EndXSid {
+                        flags: 0,
+                        algo: Algo::Spf,
+                        weight: 0,
+                        behavior: Behavior::EndX,
+                        sid: sid_addr,
+                        sub2s: Vec::new(),
+                    };
+                    is_reach.subs.push(neigh::IsisSubTlv::Srv6EndXSid(sub));
+                } else {
+                    let sub = IsisSubSrv6LanEndXSid {
+                        system_id: nbr.sys_id,
+                        flags: 0,
+                        algo: Algo::Spf,
+                        weight: 0,
+                        behavior: Behavior::EndX,
+                        sid: sid_addr,
+                        sub2s: Vec::new(),
+                    };
+                    is_reach.subs.push(neigh::IsisSubTlv::Srv6LanEndXSid(sub));
                 }
             }
         }

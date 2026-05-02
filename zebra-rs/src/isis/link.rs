@@ -98,6 +98,10 @@ impl IsisLinks {
     pub fn values(&self) -> std::collections::btree_map::Values<'_, u32, IsisLink> {
         self.map.values()
     }
+
+    pub fn values_mut(&mut self) -> std::collections::btree_map::ValuesMut<'_, u32, IsisLink> {
+        self.map.values_mut()
+    }
 }
 
 #[derive(Debug)]
@@ -128,6 +132,15 @@ pub struct LinkTop<'a> {
     pub reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
+
+    /// SR state needed for End.X (adjacency) SID allocation. Threaded
+    /// through so packet handlers can carve a function from the ELIB
+    /// pool the moment they learn about a new neighbor, without round-
+    /// tripping back through the IS-IS instance.
+    pub rib_tx: &'a tokio::sync::mpsc::UnboundedSender<crate::rib::Message>,
+    pub sr_locator: &'a Option<crate::rib::Locator>,
+    pub watched_locator: &'a Option<String>,
+    pub elib: &'a mut crate::isis::srv6::ElibPool,
 }
 
 impl<'a> LinkTop<'a> {
