@@ -195,6 +195,10 @@ module exec {
       leaf spf {
         type empty;
       }
+      leaf topology {
+        ext:help "IS-IS SPF tree (per-AFI today; per-MT once multi-topology lands)";
+        type empty;
+      }
       container adjacency {
         ext:help "IS-IS adjacency";
         presence "IS-IS adjacency";

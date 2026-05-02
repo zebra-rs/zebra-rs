@@ -36,6 +36,7 @@ impl Isis {
         self.show_add("/show/isis/hostname", hostname::show);
         self.show_add("/show/isis/graph", show_isis_graph);
         self.show_add("/show/isis/spf", show_isis_spf);
+        self.show_add("/show/isis/topology", show_isis_topology);
     }
 }
 
@@ -282,6 +283,51 @@ fn show_isis_route(
     } else {
         write_show_isis_route_text(isis)
     }
+}
+
+// `show isis topology` — per-level, per-AFI SPF tree without the RIB
+// tables that `show isis route` adds. PR 2 of the multi-topology
+// series; the renderer is the existing single-topology one. PR 5 will
+// extend it to discriminate per-MT view + add a `<topology-id>` filter.
+fn show_isis_topology(
+    isis: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    let local_sys_id = isis.config.net.sys_id();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+
+    let mut wrote_any_level = false;
+    for level in &[Level::L1, Level::L2] {
+        let Some(spf_result) = isis.spf_result.get(level).as_ref() else {
+            continue;
+        };
+        if spf_result.is_empty() {
+            continue;
+        }
+        wrote_any_level = true;
+
+        let level_long = match level {
+            Level::L1 => "level-1",
+            Level::L2 => "level-2",
+        };
+
+        // IPv4 SPF tree.
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS paths to {} routers that speak IP", level_long)?;
+        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
+
+        // IPv6 SPF tree (NLPID-gated, RFC 1195 §5).
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
+        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, true)?;
+    }
+
+    if !wrote_any_level {
+        writeln!(buf, "(no SPF result yet)")?;
+    }
+    Ok(buf)
 }
 
 fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::fmt::Error> {
