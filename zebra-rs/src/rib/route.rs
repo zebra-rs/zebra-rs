@@ -265,7 +265,6 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
-        let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap);
@@ -276,10 +275,10 @@ impl Rib {
             self.rib_selection(prefix, None).await;
         }
 
-        if is_connected {
-            let msg = Message::Resolve;
-            let _ = self.tx.send(msg);
-        }
+        // Any RIB add can shift the FIB — debounced resolve catches static /
+        // SRv6 nexthops that were unreachable before and are now covered by
+        // a freshly-installed underlay route (IS-IS, OSPF, connected, ...).
+        self.schedule_rib_sync();
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry) {
@@ -291,6 +290,8 @@ impl Rib {
             let mut replace = rib_replace_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         }
+
+        self.schedule_rib_sync();
     }
 
     pub async fn ilm_add(&mut self, label: u32, ilm: IlmEntry) {
@@ -324,7 +325,6 @@ impl Rib {
                 entry.is_valid(),
             );
         }
-        let is_connected = entry.is_connected();
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap);
@@ -342,10 +342,10 @@ impl Rib {
             self.rib_selection_v6(prefix, None).await;
         }
 
-        if is_connected {
-            let msg = Message::Resolve;
-            let _ = self.tx.send(msg);
-        }
+        // Any RIB add can shift the FIB — debounced resolve catches static /
+        // SRv6 nexthops that were unreachable before and are now covered by
+        // a freshly-installed underlay route (IS-IS, OSPF, connected, ...).
+        self.schedule_rib_sync();
     }
 
     pub async fn ipv6_route_del(&mut self, prefix: &Ipv6Net, entry: RibEntry) {
@@ -357,11 +357,20 @@ impl Rib {
             let mut replace = rib_replace_system_v6(&mut self.table_v6, prefix, entry);
             self.rib_selection_v6(prefix, replace.pop()).await;
         }
+
+        self.schedule_rib_sync();
     }
 
     pub async fn ipv6_route_resolve(&mut self) {
         ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
         ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
+    }
+
+    pub async fn ipv4_route_resolve(&mut self) {
+        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+        // `false` = not an ifdown sweep; this resolve cycle is for FIB-update
+        // re-resolution, not link-down recovery.
+        ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, false).await;
     }
 
     pub async fn rib_selection(&mut self, prefix: &Ipv4Net, replace: Option<RibEntry>) {

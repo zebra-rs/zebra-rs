@@ -7,11 +7,36 @@ use serde_json::Value;
 
 use crate::{
     config::Args,
-    rib::{Label, Nexthop},
+    rib::{Label, Nexthop, nexthop::NexthopUni},
 };
 
 use super::{Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show};
 use std::fmt::Write;
+
+// "via" word prefix in show output. SRv6-encapsulated nexthops surface as
+// "via seg6 <segments>" to match the iproute2 / FRR convention; plain
+// nexthops keep the bare "via".
+fn via_word(uni: &NexthopUni) -> &'static str {
+    if uni.segs.is_empty() {
+        "via"
+    } else {
+        "via seg6"
+    }
+}
+
+// Render the address that follows the "via" word. SRv6 nexthops always
+// surface their segment list inside square brackets (matching iproute2's
+// `encap seg6 ... segs N [ ... ]` shape), even for a single segment, so the
+// operator can tell at a glance which routes are policy-encapsulated.
+// Non-SRv6 nexthops render the bare address.
+fn via_addr(uni: &NexthopUni) -> String {
+    if uni.segs.is_empty() {
+        uni.addr.to_string()
+    } else {
+        let parts: Vec<String> = uni.segs.iter().map(|s| s.to_string()).collect();
+        format!("[{}]", parts.join(", "))
+    }
+}
 
 // JSON-serializable structures for route display
 #[derive(Serialize)]
@@ -333,7 +358,14 @@ pub fn rib_entry_show(
                 } else {
                     uni.ifindex
                 };
-                write!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
+                write!(
+                    buf,
+                    " {} {}, {}",
+                    via_word(uni),
+                    via_addr(uni),
+                    rib.link_name(ifindex)
+                )
+                .unwrap();
                 if !uni.mpls.is_empty() {
                     write!(buf, ", label").unwrap();
                     for mpls in uni.mpls.iter() {
@@ -354,7 +386,14 @@ pub fn rib_entry_show(
                     if i != 0 {
                         buf.push_str(&" ".repeat(offset));
                     }
-                    write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
+                    write!(
+                        buf,
+                        " {} {}, {}",
+                        via_word(uni),
+                        via_addr(uni),
+                        rib.link_name(uni.ifindex),
+                    )
+                    .unwrap();
                     if !uni.mpls.is_empty() {
                         write!(buf, ", label").unwrap();
                         for mpls in uni.mpls.iter() {
@@ -378,8 +417,9 @@ pub fn rib_entry_show(
                     }
                     writeln!(
                         buf,
-                        " via {}, {}, metric {}",
-                        uni.addr,
+                        " {} {}, {}, metric {}",
+                        via_word(uni),
+                        via_addr(uni),
                         rib.link_name(uni.ifindex),
                         uni.metric
                     )
@@ -435,7 +475,14 @@ pub fn rib_entry_show_v6(
                 } else {
                     uni.ifindex
                 };
-                write!(buf, " via {}, {}", uni.addr, rib.link_name(ifindex)).unwrap();
+                write!(
+                    buf,
+                    " {} {}, {}",
+                    via_word(uni),
+                    via_addr(uni),
+                    rib.link_name(ifindex)
+                )
+                .unwrap();
                 if !uni.mpls.is_empty() {
                     write!(buf, ", label").unwrap();
                     for mpls in uni.mpls.iter() {
@@ -456,7 +503,14 @@ pub fn rib_entry_show_v6(
                     if i != 0 {
                         buf.push_str(&" ".repeat(offset));
                     }
-                    write!(buf, " via {}, {}", uni.addr, rib.link_name(uni.ifindex),).unwrap();
+                    write!(
+                        buf,
+                        " {} {}, {}",
+                        via_word(uni),
+                        via_addr(uni),
+                        rib.link_name(uni.ifindex),
+                    )
+                    .unwrap();
                     if !uni.mpls.is_empty() {
                         write!(buf, ", label").unwrap();
                         for mpls in uni.mpls.iter() {
@@ -480,8 +534,9 @@ pub fn rib_entry_show_v6(
                     }
                     writeln!(
                         buf,
-                        " via {}, {}, metric {}",
-                        uni.addr,
+                        " {} {}, {}, metric {}",
+                        via_word(uni),
+                        via_addr(uni),
                         rib.link_name(uni.ifindex),
                         uni.metric
                     )
@@ -855,5 +910,72 @@ impl Rib {
         self.show_add("/show/nexthop", nexthop_show);
         self.show_add("/show/mpls/ilm", ilm_show);
         self.show_add("/show/l2/mac/table", mac_show);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    fn uni_with_segs(segs: Vec<Ipv6Addr>) -> NexthopUni {
+        let addr = segs.first().copied().unwrap_or(Ipv6Addr::UNSPECIFIED);
+        NexthopUni {
+            addr: IpAddr::V6(addr),
+            segs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn via_word_picks_seg6_only_when_segments_present() {
+        let plain = NexthopUni::default();
+        assert_eq!(via_word(&plain), "via");
+
+        let one = uni_with_segs(vec!["fcbb:bbbb:2:3:2::".parse().unwrap()]);
+        assert_eq!(via_word(&one), "via seg6");
+
+        let two = uni_with_segs(vec![
+            "fcbb:bbbb:2:3:2::".parse().unwrap(),
+            "fcbb:bbbb:2:3:3::".parse().unwrap(),
+        ]);
+        assert_eq!(via_word(&two), "via seg6");
+    }
+
+    #[test]
+    fn via_addr_single_segment_renders_bracketed_list() {
+        // Even a single-segment policy is rendered as "[seg]" to match the
+        // iproute2 "segs 1 [ ... ]" convention and stay consistent with the
+        // multi-segment case.
+        let one = uni_with_segs(vec!["fcbb:bbbb:2:3:2::".parse().unwrap()]);
+        assert_eq!(via_addr(&one), "[fcbb:bbbb:2:3:2::]");
+    }
+
+    #[test]
+    fn via_addr_multi_segment_renders_bracketed_list() {
+        let two = uni_with_segs(vec![
+            "fcbb:bbbb:2:3:2::".parse().unwrap(),
+            "fcbb:bbbb:2:3:3::".parse().unwrap(),
+        ]);
+        assert_eq!(via_addr(&two), "[fcbb:bbbb:2:3:2::, fcbb:bbbb:2:3:3::]");
+
+        let three = uni_with_segs(vec![
+            "fcbb:bbbb:2:3:2::".parse().unwrap(),
+            "fcbb:bbbb:2:3:3::".parse().unwrap(),
+            "fcbb:bbbb:2:3:4::".parse().unwrap(),
+        ]);
+        assert_eq!(
+            via_addr(&three),
+            "[fcbb:bbbb:2:3:2::, fcbb:bbbb:2:3:3::, fcbb:bbbb:2:3:4::]"
+        );
+    }
+
+    #[test]
+    fn via_addr_no_segments_renders_underlying_addr() {
+        let plain = NexthopUni {
+            addr: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(via_addr(&plain), "2001:db8::1");
     }
 }
