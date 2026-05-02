@@ -818,17 +818,24 @@ impl FibHandle {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = 128;
-        // Both End and End.X land in the local routing table (255).
-        // The kind splits along behavior: End is purely host-local
-        // processing (kind=local matches `ip -6 route add <SID>/128
-        // table local encap seg6local action End dev lo`); End.X
-        // forwards to a remote nexthop after popping the SRH and is
-        // installed as a unicast route inside the local table
-        // (`ip -6 route add ... table local encap seg6local action
-        // End.X nh6 ... dev ...`).
+        // {table, kind} both split on behavior to match the iproute2
+        // patterns the kernel actually accepts:
+        //   End:    table local, kind=local
+        //           (`ip -6 route add <SID>/128 table local
+        //            encap seg6local action End dev lo`)
+        //   End.X:  table main,  kind=unicast
+        //           (`ip -6 route add <SID>/128
+        //            encap seg6local action End.X nh6 ... dev ...`)
+        // End is host-local termination, so it belongs in table local.
+        // End.X forwards through a remote nexthop after popping the SRH
+        // and is a normal unicast forwarding entry — table main is the
+        // right home for it.
         // RT_TABLE_LOCAL (255) — the fork doesn't expose a named
         // constant for it, so hard-code. See linux/rtnetlink.h.
-        msg.header.table = 255;
+        msg.header.table = match sid.behavior {
+            SidBehavior::End => 255,
+            SidBehavior::EndX => RouteHeader::RT_TABLE_MAIN,
+        };
         msg.header.protocol = RouteProtocol::Isis;
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = match sid.behavior {
@@ -906,7 +913,10 @@ impl FibHandle {
         msg.header.destination_prefix_length = 128;
         // Same {table, kind} the install used — the kernel matches
         // RTM_DELROUTE on (table, family, dst, prefixlen, kind).
-        msg.header.table = 255;
+        msg.header.table = match sid.behavior {
+            SidBehavior::End => 255,
+            SidBehavior::EndX => RouteHeader::RT_TABLE_MAIN,
+        };
         msg.header.protocol = RouteProtocol::Isis;
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = match sid.behavior {
