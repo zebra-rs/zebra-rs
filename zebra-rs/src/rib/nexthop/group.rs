@@ -61,7 +61,11 @@ impl GroupUni {
         match self.addr {
             IpAddr::V4(ipv4_addr) => {
                 let resolve = rib_resolve(table, ipv4_addr, &ResolveOpt::default());
-                if let Resolve::Onlink(ifindex) = resolve {
+                // Both arms carry a real egress ifindex — Onlink came from a
+                // directly-connected route, Recursive from walking through an
+                // IGP/static covering route. The Group only needs the ifindex,
+                // not the path category.
+                if let Resolve::Onlink(ifindex) | Resolve::Recursive(ifindex) = resolve {
                     self.ifindex = ifindex;
                     self.set_valid(true);
                 }
@@ -76,20 +80,19 @@ impl GroupUni {
         if let IpAddr::V6(ipv6_addr) = self.addr {
             let resolve = rib_resolve_v6(table, ipv6_addr, &ResolveOpt::default());
             match &resolve {
-                Resolve::Onlink(ifindex) => {
+                // Onlink came from a directly-connected route; Recursive came
+                // from walking through an IGP/static covering route. Both
+                // produce a real egress ifindex; the Group cares about that,
+                // not the path category.
+                Resolve::Onlink(ifindex) | Resolve::Recursive(ifindex) => {
                     if DEBUG_V6 {
                         println!(
-                            "[GroupUni::resolve_v6] {} -> Onlink(ifindex={})",
+                            "[GroupUni::resolve_v6] {} -> ifindex={}",
                             ipv6_addr, ifindex
                         );
                     }
                     self.ifindex = *ifindex;
                     self.set_valid(true);
-                }
-                Resolve::Recursive(_) => {
-                    if DEBUG_V6 {
-                        println!("[GroupUni::resolve_v6] {} -> Recursive", ipv6_addr);
-                    }
                 }
                 Resolve::NotFound => {
                     if DEBUG_V6 {
@@ -208,5 +211,157 @@ impl GroupTrait for Group {
             Group::Uni(uni) => uni.refcnt(),
             Group::Multi(multi) => multi.refcnt(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rib::Nexthop;
+    use crate::rib::entry::RibEntry;
+    use crate::rib::types::RibType;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::str::FromStr;
+
+    fn group_uni_at(addr: IpAddr) -> GroupUni {
+        let uni = NexthopUni {
+            addr,
+            ..Default::default()
+        };
+        GroupUni::new(0, &uni)
+    }
+
+    fn connected_v6(ifindex: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Connected);
+        e.ifindex = ifindex;
+        e
+    }
+
+    fn isis_v6(addr: Ipv6Addr, ifindex: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Isis);
+        e.nexthop = Nexthop::Uni(NexthopUni {
+            addr: IpAddr::V6(addr),
+            ifindex,
+            ..Default::default()
+        });
+        e
+    }
+
+    fn connected_v4(ifindex: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Connected);
+        e.ifindex = ifindex;
+        e
+    }
+
+    fn isis_v4(addr: Ipv4Addr, ifindex: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Isis);
+        e.nexthop = Nexthop::Uni(NexthopUni {
+            addr: IpAddr::V4(addr),
+            ifindex,
+            ..Default::default()
+        });
+        e
+    }
+
+    #[test]
+    fn resolve_v6_through_isis_recursive_sets_ifindex() {
+        // The SRv6 first-segment scenario: GroupUni's address is covered by an
+        // IS-IS-learned aggregate. rib_resolve_v6 returns Resolve::Recursive
+        // carrying the IS-IS route's ifindex; the Group must adopt it.
+        let mut table = PrefixMap::<Ipv6Net, RibEntries>::new();
+        table.insert(
+            Ipv6Net::from_str("fcbb:bbbb:2::/48").unwrap(),
+            vec![isis_v6("fe80::21c:42ff:fee8:c23".parse().unwrap(), 42)],
+        );
+
+        let mut group = group_uni_at(IpAddr::V6("fcbb:bbbb:2:3:2::".parse().unwrap()));
+        assert_eq!(group.ifindex, 0);
+        assert!(!group.is_valid());
+
+        group.resolve_v6(&table);
+
+        assert_eq!(group.ifindex, 42);
+        assert!(group.is_valid());
+    }
+
+    #[test]
+    fn resolve_v6_onlink_sets_ifindex() {
+        let mut table = PrefixMap::<Ipv6Net, RibEntries>::new();
+        table.insert(
+            Ipv6Net::from_str("2001:db8::/64").unwrap(),
+            vec![connected_v6(7)],
+        );
+
+        let mut group = group_uni_at(IpAddr::V6("2001:db8::1".parse().unwrap()));
+        group.resolve_v6(&table);
+
+        assert_eq!(group.ifindex, 7);
+        assert!(group.is_valid());
+    }
+
+    #[test]
+    fn resolve_v6_not_found_leaves_group_invalid() {
+        let table = PrefixMap::<Ipv6Net, RibEntries>::new();
+        let mut group = group_uni_at(IpAddr::V6("2001:db8::1".parse().unwrap()));
+        group.resolve_v6(&table);
+        assert_eq!(group.ifindex, 0);
+        assert!(!group.is_valid());
+    }
+
+    #[test]
+    fn resolve_v6_with_v4_addr_is_noop() {
+        // resolve_v6 is supposed to skip groups whose addr is IPv4. Even with
+        // a bogus matching entry in the v6 table, the v4-addressed Group
+        // should not get its ifindex updated.
+        let mut table = PrefixMap::<Ipv6Net, RibEntries>::new();
+        table.insert(Ipv6Net::default(), vec![connected_v6(99)]);
+
+        let mut group = group_uni_at(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        group.resolve_v6(&table);
+
+        assert_eq!(group.ifindex, 0);
+        assert!(!group.is_valid());
+    }
+
+    #[test]
+    fn resolve_v4_through_isis_recursive_sets_ifindex() {
+        let mut table = PrefixMap::<Ipv4Net, RibEntries>::new();
+        table.insert(
+            Ipv4Net::from_str("10.0.0.0/8").unwrap(),
+            vec![isis_v4(Ipv4Addr::new(192, 0, 2, 1), 17)],
+        );
+
+        let mut group = group_uni_at(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)));
+        group.resolve(&table);
+
+        assert_eq!(group.ifindex, 17);
+        assert!(group.is_valid());
+    }
+
+    #[test]
+    fn resolve_v4_onlink_sets_ifindex() {
+        let mut table = PrefixMap::<Ipv4Net, RibEntries>::new();
+        table.insert(
+            Ipv4Net::from_str("192.168.0.0/24").unwrap(),
+            vec![connected_v4(5)],
+        );
+
+        let mut group = group_uni_at(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10)));
+        group.resolve(&table);
+
+        assert_eq!(group.ifindex, 5);
+        assert!(group.is_valid());
+    }
+
+    #[test]
+    fn resolve_v4_with_v6_addr_is_noop() {
+        let mut table = PrefixMap::<Ipv4Net, RibEntries>::new();
+        table.insert(Ipv4Net::default(), vec![connected_v4(99)]);
+
+        let mut group = group_uni_at(IpAddr::V6("2001:db8::1".parse().unwrap()));
+        group.resolve(&table);
+
+        assert_eq!(group.ifindex, 0);
+        assert!(!group.is_valid());
     }
 }
