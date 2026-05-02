@@ -12,17 +12,19 @@ use netlink_packet_route::route::{
 };
 use rtnetlink::RouteMessageBuilder;
 
-// Builds the (Encap, EncapType) RouteAttribute pair for an SRv6 H.Encap policy.
+// Build the seg6 lwtunnel encap for an SRv6 H.Encap policy. Callers wrap the
+// returned encap in either RouteAttribute::Encap (for embedded route-message
+// encap) or NexthopAttribute::Encap (for nexthop-table entries).
 //
 // HEncap carries every segment in the SRH. HEncapRed (RFC 8986 §5.2) drops
 // the first segment from the SRH because the kernel's outer IPv6 destination
 // already encodes it; the remaining segments must be non-empty. Other
-// EncapType variants are rejected here so the FIB layer surfaces a useful
-// error instead of silently flattening behavior.
-fn build_seg6_attrs(
+// EncapType variants are rejected here so callers surface a useful error
+// instead of silently flattening behavior.
+pub fn build_seg6_lwtunnel(
     segments: &[Ipv6Addr],
     encap_type: EncapType,
-) -> Result<(RouteAttribute, RouteAttribute)> {
+) -> Result<RouteLwTunnelEncap> {
     if segments.is_empty() {
         bail!("SRv6 encap requires at least one segment");
     }
@@ -53,7 +55,19 @@ fn build_seg6_attrs(
         mode: Seg6IpTunnelMode::Encap,
         ipv6_sr_hdr: VecIpv6SrHdr(vec![ipv6_sr_hdr]),
     };
-    let lwencap = RouteLwTunnelEncap::Seg6(RouteSeg6IpTunnel::Seg6IpTunnel(seg6));
+    Ok(RouteLwTunnelEncap::Seg6(RouteSeg6IpTunnel::Seg6IpTunnel(
+        seg6,
+    )))
+}
+
+// Route-message wrapper around build_seg6_lwtunnel. Used by the embedded-encap
+// fallback path (use_nhid=false) and by srv6_encap_add. PR 4 will retire this
+// once the route-level bypass is replaced by Nhid references.
+fn build_seg6_attrs(
+    segments: &[Ipv6Addr],
+    encap_type: EncapType,
+) -> Result<(RouteAttribute, RouteAttribute)> {
+    let lwencap = build_seg6_lwtunnel(segments, encap_type)?;
     Ok((
         RouteAttribute::Encap(vec![lwencap]),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6),
