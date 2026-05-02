@@ -1089,6 +1089,23 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             }
         }
     }
+    // Advertise the configured SRv6 locator as an IPv6 Reachability TLV
+    // (RFC 5308) with metric 0 so receivers learn the locator prefix
+    // purely from their IS-reach metric to us — the originator adds
+    // nothing extra. Gated on the locator having actually resolved in
+    // the RIB; a configured-but-unresolved locator means no prefix yet.
+    if top.config.sr_srv6_enabled
+        && let Some(locator) = top.sr_locator.as_ref()
+        && let Some(prefix) = locator.prefix
+    {
+        let flags = Ipv6ControlInfo::new().with_sub_tlv(false);
+        ipv6_reach.entries.push(IsisTlvIpv6ReachEntry {
+            metric: 0,
+            flags,
+            prefix,
+            subs: Vec::new(),
+        });
+    }
     if !ipv6_reach.entries.is_empty() {
         lsp.tlvs.push(ipv6_reach.into());
     }
