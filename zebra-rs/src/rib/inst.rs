@@ -5,9 +5,9 @@ use super::api::RibRx;
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
-    Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, Link, Locator, LocatorBuilder,
-    LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap, RibType, StaticConfig, V4, V6, Vxlan,
-    VxlanBuilder, VxlanConfig,
+    Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, Link,
+    Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap, RibSrRx,
+    RibType, StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -20,7 +20,7 @@ use crate::rib::route::{ipv4_nexthop_sync, ipv4_route_sync, ipv6_nexthop_sync, i
 use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -77,6 +77,40 @@ pub enum Message {
         config: LocatorConfig,
     },
     LocatorDel {
+        name: String,
+    },
+    // The Sr* variants below carry #[allow(dead_code)] because they're
+    // produced only by per-protocol subscribers (IS-IS lands in PR 2).
+    // Removed once PR 2 wires the IS-IS sender side.
+    /// One-time per-protocol registration of the SR return channel. The
+    /// channel carries `RibSrRx` updates for any block / locator the
+    /// protocol later watches.
+    #[allow(dead_code)]
+    SrSubscribe {
+        proto: String,
+        tx: UnboundedSender<RibSrRx>,
+    },
+    /// Register interest in a named block. Triggers an immediate push of
+    /// the current `Rib::blocks.get(name)` value (Some or None) and any
+    /// subsequent updates.
+    #[allow(dead_code)]
+    SrBlockWatch {
+        proto: String,
+        name: String,
+    },
+    #[allow(dead_code)]
+    SrBlockUnwatch {
+        proto: String,
+        name: String,
+    },
+    #[allow(dead_code)]
+    SrLocatorWatch {
+        proto: String,
+        name: String,
+    },
+    #[allow(dead_code)]
+    SrLocatorUnwatch {
+        proto: String,
         name: String,
     },
     VxlanAdd {
@@ -183,6 +217,13 @@ pub struct Rib {
     /// `srv6/locator` reference.
     pub blocks: BTreeMap<String, Block>,
     pub locators: BTreeMap<String, Locator>,
+    /// SR-update return channels keyed by protocol name. One sender per
+    /// protocol; established once via Message::SrSubscribe.
+    pub sr_clients: BTreeMap<String, UnboundedSender<RibSrRx>>,
+    /// Per-name block watchers — set of protocol names interested in
+    /// updates to that block.
+    pub block_watch: BTreeMap<String, BTreeSet<String>>,
+    pub locator_watch: BTreeMap<String, BTreeSet<String>>,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 
@@ -229,8 +270,17 @@ impl Rib {
             vxlan_config: VxlanBuilder::new(),
             block_config: BlockBuilder::new(),
             locator_config: LocatorBuilder::new(),
-            blocks: BTreeMap::new(),
+            blocks: {
+                // Seed the canonical default block at startup so protocols can
+                // subscribe to "default" without anyone having configured one.
+                let mut m = BTreeMap::new();
+                m.insert(DEFAULT_BLOCK_NAME.to_string(), Block::default_block());
+                m
+            },
             locators: BTreeMap::new(),
+            sr_clients: BTreeMap::new(),
+            block_watch: BTreeMap::new(),
+            locator_watch: BTreeMap::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             rib_sync_timer: None,
@@ -256,6 +306,38 @@ impl Rib {
                 let _ = tx.send(Message::Resolve);
             }
         }));
+    }
+
+    /// Push the current value of `blocks[name]` (Some / None) to every
+    /// protocol that has registered a watch on this name.
+    fn notify_block_watchers(&self, name: &str) {
+        let Some(watchers) = self.block_watch.get(name) else {
+            return;
+        };
+        let block = self.blocks.get(name).cloned();
+        for proto in watchers {
+            if let Some(tx) = self.sr_clients.get(proto) {
+                let _ = tx.send(RibSrRx::Block {
+                    name: name.to_string(),
+                    block: block.clone(),
+                });
+            }
+        }
+    }
+
+    fn notify_locator_watchers(&self, name: &str) {
+        let Some(watchers) = self.locator_watch.get(name) else {
+            return;
+        };
+        let locator = self.locators.get(name).cloned();
+        for proto in watchers {
+            if let Some(tx) = self.sr_clients.get(proto) {
+                let _ = tx.send(RibSrRx::Locator {
+                    name: name.to_string(),
+                    locator: locator.clone(),
+                });
+            }
+        }
     }
 
     pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, _proto: String) {
@@ -337,17 +419,73 @@ impl Rib {
             }
             Message::BlockAdd { name, config } => {
                 let block = config.to_block(&name);
-                self.blocks.insert(name, block);
+                self.blocks.insert(name.clone(), block);
+                self.notify_block_watchers(&name);
             }
             Message::BlockDel { name } => {
                 self.blocks.remove(&name);
+                // The default block is always present — re-seed it so a
+                // delete of `default` reverts to the canonical values
+                // rather than leaving subscribers without a block.
+                if name == DEFAULT_BLOCK_NAME {
+                    self.blocks
+                        .insert(DEFAULT_BLOCK_NAME.to_string(), Block::default_block());
+                }
+                self.notify_block_watchers(&name);
             }
             Message::LocatorAdd { name, config } => {
                 let locator = config.to_locator(&name);
-                self.locators.insert(name, locator);
+                self.locators.insert(name.clone(), locator);
+                self.notify_locator_watchers(&name);
             }
             Message::LocatorDel { name } => {
                 self.locators.remove(&name);
+                self.notify_locator_watchers(&name);
+            }
+            Message::SrSubscribe { proto, tx } => {
+                self.sr_clients.insert(proto, tx);
+            }
+            Message::SrBlockWatch { proto, name } => {
+                self.block_watch
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(proto.clone());
+                // Push the current value so the subscriber doesn't have to
+                // wait for the next change to learn what's there today.
+                if let Some(tx) = self.sr_clients.get(&proto) {
+                    let _ = tx.send(RibSrRx::Block {
+                        name: name.clone(),
+                        block: self.blocks.get(&name).cloned(),
+                    });
+                }
+            }
+            Message::SrBlockUnwatch { proto, name } => {
+                if let Some(set) = self.block_watch.get_mut(&name) {
+                    set.remove(&proto);
+                    if set.is_empty() {
+                        self.block_watch.remove(&name);
+                    }
+                }
+            }
+            Message::SrLocatorWatch { proto, name } => {
+                self.locator_watch
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(proto.clone());
+                if let Some(tx) = self.sr_clients.get(&proto) {
+                    let _ = tx.send(RibSrRx::Locator {
+                        name: name.clone(),
+                        locator: self.locators.get(&name).cloned(),
+                    });
+                }
+            }
+            Message::SrLocatorUnwatch { proto, name } => {
+                if let Some(set) = self.locator_watch.get_mut(&name) {
+                    set.remove(&proto);
+                    if set.is_empty() {
+                        self.locator_watch.remove(&name);
+                    }
+                }
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;

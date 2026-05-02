@@ -15,7 +15,9 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 // (former SegmentRouting enum import — removed; replaced by sr_mpls_enabled
 // / sr_srv6_enabled flags on IsisConfig.)
+
 use crate::isis_event_trace;
+use crate::rib::{Block, DEFAULT_BLOCK_NAME, Locator, RibSrRx};
 
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::isis::link::Afi;
@@ -74,6 +76,21 @@ pub struct Isis {
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
+
+    /// SR-update return channel from the RIB. Carries the current value of
+    /// the watched block / locator and any subsequent updates.
+    pub sr_rx: UnboundedReceiver<RibSrRx>,
+
+    /// Currently-watched block name on the RIB side. Tracked separately
+    /// from sr_mpls_block so the reconcile helper can compute Watch /
+    /// Unwatch transitions correctly.
+    pub watched_block: Option<String>,
+    pub watched_locator: Option<String>,
+
+    /// Latest applied snapshot received from the RIB for the watched
+    /// names. None means the watched name doesn't exist (or no watch).
+    pub sr_block: Option<Block>,
+    pub sr_locator: Option<Locator>,
 }
 
 pub struct IsisTop<'a> {
@@ -94,6 +111,12 @@ pub struct IsisTop<'a> {
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
+
+    /// Read-only access to the SR snapshot the IS-IS instance is caching
+    /// from RIB::SrSubscribe. lsp_generate uses these to populate the SR
+    /// Capability / SRv6 sub-TLVs.
+    pub sr_block: &'a Option<Block>,
+    pub sr_locator: &'a Option<Locator>,
 }
 
 impl Isis {
@@ -104,6 +127,15 @@ impl Isis {
             tx: chan.tx.clone(),
         };
         let _ = rib_tx.send(msg);
+
+        // SR config subscription channel. One-time registration with the
+        // RIB; subsequent SrBlockWatch / SrLocatorWatch messages drive
+        // which named entries we receive updates for.
+        let (sr_tx, sr_rx) = mpsc::unbounded_channel::<RibSrRx>();
+        let _ = rib_tx.send(rib::Message::SrSubscribe {
+            proto: "isis".into(),
+            tx: sr_tx,
+        });
 
         let (tx, rx) = mpsc::unbounded_channel();
         let mut isis = Self {
@@ -131,6 +163,11 @@ impl Isis {
             local_pool: Some(LabelPool::new(15000, Some(16000))),
             graph: Levels::<Option<spf::Graph>>::default(),
             spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
+            sr_rx,
+            watched_block: None,
+            watched_locator: None,
+            sr_block: None,
+            sr_locator: None,
         };
         isis.callback_build();
         isis.show_build();
@@ -425,6 +462,9 @@ impl Isis {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);
                 }
+                Some(msg) = self.sr_rx.recv() => {
+                    self.process_sr_rx(msg);
+                }
             }
         }
     }
@@ -447,6 +487,8 @@ impl Isis {
             spf_timer: &mut self.spf_timer,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
+            sr_block: &self.sr_block,
+            sr_locator: &self.sr_locator,
         }
     }
 
@@ -476,6 +518,108 @@ impl Isis {
             .get(&ifindex)
             .map_or_else(|| "unknown".to_string(), |link| link.state.name.clone())
     }
+
+    /// Compare desired block subscription against the currently-watched
+    /// name and emit Watch / Unwatch messages so they match. Called after
+    /// any config change that could affect `target_block_name`.
+    ///
+    /// On the unwatch transition we also drop the cached snapshot so a
+    /// subsequent re-subscription doesn't show a stale value during the
+    /// gap between Watch and the RIB's reply.
+    pub fn reconcile_block_watch(&mut self) {
+        let desired = target_block_name(&self.config);
+        if desired == self.watched_block {
+            return;
+        }
+        if let Some(prev) = self.watched_block.take() {
+            let _ = self.rib_tx.send(rib::Message::SrBlockUnwatch {
+                proto: "isis".into(),
+                name: prev,
+            });
+            self.sr_block = None;
+        }
+        if let Some(next) = desired {
+            let _ = self.rib_tx.send(rib::Message::SrBlockWatch {
+                proto: "isis".into(),
+                name: next.clone(),
+            });
+            self.watched_block = Some(next);
+        }
+    }
+
+    /// Mirror of `reconcile_block_watch` for the SRv6 locator name.
+    pub fn reconcile_locator_watch(&mut self) {
+        let desired = target_locator_name(&self.config);
+        if desired == self.watched_locator {
+            return;
+        }
+        if let Some(prev) = self.watched_locator.take() {
+            let _ = self.rib_tx.send(rib::Message::SrLocatorUnwatch {
+                proto: "isis".into(),
+                name: prev,
+            });
+            self.sr_locator = None;
+        }
+        if let Some(next) = desired {
+            let _ = self.rib_tx.send(rib::Message::SrLocatorWatch {
+                proto: "isis".into(),
+                name: next.clone(),
+            });
+            self.watched_locator = Some(next);
+        }
+    }
+
+    /// Apply a single update from the RIB SR subscription channel. We only
+    /// store updates for the names we currently watch; messages for stale
+    /// names (e.g. arriving after a switch) are dropped.
+    fn process_sr_rx(&mut self, msg: RibSrRx) {
+        match msg {
+            RibSrRx::Block { name, block } => {
+                if self.watched_block.as_deref() != Some(name.as_str()) {
+                    return;
+                }
+                self.sr_block = block;
+            }
+            RibSrRx::Locator { name, locator } => {
+                if self.watched_locator.as_deref() != Some(name.as_str()) {
+                    return;
+                }
+                self.sr_locator = locator;
+            }
+        }
+        // Re-originate both levels so the new SR snapshot is reflected in
+        // the next LSP without waiting for the refresh timer.
+        let _ = self.tx.send(Message::LspOriginate(Level::L1));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2));
+    }
+}
+
+/// Decide which block this IS-IS instance should subscribe to.
+///
+/// `segment-routing mpls` enabled with no explicit `block` falls back to
+/// the canonical "default" block seeded by the RIB; an explicit name takes
+/// precedence. When SR-MPLS is disabled we want no subscription at all.
+fn target_block_name(cfg: &IsisConfig) -> Option<String> {
+    if !cfg.sr_mpls_enabled {
+        return None;
+    }
+    Some(
+        cfg.sr_mpls_block
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BLOCK_NAME.to_string()),
+    )
+}
+
+/// Decide which locator this IS-IS instance should subscribe to.
+///
+/// SRv6 has no default locator: an enabled `segment-routing srv6` without
+/// a `locator` selection means "no SRv6 SID TLV will be originated", so
+/// no watch is registered.
+fn target_locator_name(cfg: &IsisConfig) -> Option<String> {
+    if !cfg.sr_srv6_enabled {
+        return None;
+    }
+    cfg.sr_srv6_locator.clone()
 }
 
 pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<u32>) -> IsisLsp {
@@ -632,22 +776,26 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             subs: Vec::new(),
         };
 
-        // SR-MPLS Capability sub-TLVs.
-        // TODO(srv6-locator-config PR4): the SRGB / SRLB values below are
-        // hardcoded. Replace with a lookup of `top.config.sr_mpls_block`
-        // against RIB::blocks once the IS-IS daemon has access to the
-        // RIB-side block snapshot (probably via a Subscribe-style stream).
-        if top.config.sr_mpls_enabled {
-            let mut flags = SegmentRoutingCapFlags::default();
-            flags.set_i_flag(true);
-            flags.set_v_flag(true);
-            let sid_label = SidLabelTlv::Label(16000);
-            let sr_cap = IsisSubSegmentRoutingCap {
-                flags,
-                range: 8000,
-                sid_label,
-            };
-            cap.subs.push(sr_cap.into());
+        // SR-MPLS Capability sub-TLVs. Pulled from the RIB-side block
+        // snapshot (kept fresh via SrSubscribe / SrBlockWatch). When the
+        // configured block name doesn't resolve in the RIB the snapshot
+        // is None and we skip emitting the sub-TLVs entirely — better to
+        // advertise nothing than stale or fabricated values.
+        if top.config.sr_mpls_enabled
+            && let Some(block) = top.sr_block.as_ref()
+        {
+            if let Some(global) = block.global.as_ref() {
+                let mut flags = SegmentRoutingCapFlags::default();
+                flags.set_i_flag(true);
+                flags.set_v_flag(true);
+                let sid_label = SidLabelTlv::Label(global.start);
+                let sr_cap = IsisSubSegmentRoutingCap {
+                    flags,
+                    range: global.end - global.start,
+                    sid_label,
+                };
+                cap.subs.push(sr_cap.into());
+            }
 
             // Sub: SR Algorithms
             let algo = IsisSubSegmentRoutingAlgo {
@@ -656,17 +804,22 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
             cap.subs.push(algo.into());
 
             // Sub: SR Local Block
-            let sid_label = SidLabelTlv::Label(15000);
-            let lb = IsisSubSegmentRoutingLB {
-                flags: 0,
-                range: 3000,
-                sid_label,
-            };
-            cap.subs.push(lb.into());
+            if let Some(local) = block.local.as_ref() {
+                let sid_label = SidLabelTlv::Label(local.start);
+                let lb = IsisSubSegmentRoutingLB {
+                    flags: 0,
+                    range: local.end - local.start,
+                    sid_label,
+                };
+                cap.subs.push(lb.into());
+            }
         }
 
-        // SRv6 Capability sub-TLV.
-        if top.config.sr_srv6_enabled {
+        // SRv6 Capability sub-TLV. Only advertise when the configured
+        // locator actually resolved in the RIB; an `srv6` container with
+        // no usable locator means we have nothing to derive a SID from,
+        // so we don't claim SRv6 capability.
+        if top.config.sr_srv6_enabled && top.sr_locator.is_some() {
             let srv6 = IsisSubSrv6::default();
             cap.subs.push(srv6.into());
 
@@ -1813,5 +1966,73 @@ pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, Sp
             };
             ilm.insert(sid, spf_ilm);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_block_falls_back_to_default_when_unset() {
+        // SR-MPLS enabled but no explicit block configured: should
+        // subscribe to the canonical "default" block.
+        let cfg = IsisConfig {
+            sr_mpls_enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(target_block_name(&cfg), Some("default".to_string()));
+    }
+
+    #[test]
+    fn target_block_uses_explicit_name_when_set() {
+        let cfg = IsisConfig {
+            sr_mpls_enabled: true,
+            sr_mpls_block: Some("custom".into()),
+            ..Default::default()
+        };
+        assert_eq!(target_block_name(&cfg), Some("custom".to_string()));
+    }
+
+    #[test]
+    fn target_block_returns_none_when_mpls_disabled() {
+        // The block name on its own should never produce a watch when
+        // SR-MPLS isn't enabled — otherwise we'd subscribe to stale
+        // config left behind after disabling the container.
+        let cfg = IsisConfig {
+            sr_mpls_block: Some("custom".into()),
+            ..Default::default()
+        };
+        assert_eq!(target_block_name(&cfg), None);
+    }
+
+    #[test]
+    fn target_locator_returns_none_when_unset() {
+        // SRv6 enabled with no locator: no default exists, so we must
+        // not subscribe — IS-IS will not originate the SRv6 SID TLV.
+        let cfg = IsisConfig {
+            sr_srv6_enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(target_locator_name(&cfg), None);
+    }
+
+    #[test]
+    fn target_locator_uses_explicit_name_when_set() {
+        let cfg = IsisConfig {
+            sr_srv6_enabled: true,
+            sr_srv6_locator: Some("loc1".into()),
+            ..Default::default()
+        };
+        assert_eq!(target_locator_name(&cfg), Some("loc1".to_string()));
+    }
+
+    #[test]
+    fn target_locator_returns_none_when_srv6_disabled() {
+        let cfg = IsisConfig {
+            sr_srv6_locator: Some("loc1".into()),
+            ..Default::default()
+        };
+        assert_eq!(target_locator_name(&cfg), None);
     }
 }
