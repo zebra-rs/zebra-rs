@@ -275,9 +275,21 @@ fn config_hold_time(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()>
 fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     if op.is_set() {
         isis.config.sr_mpls_enabled = true;
+        // Allocate the adjacency-SID label pool so subsequent hellos
+        // can carve labels for `IsisSubLanAdjSid` sub-TLVs. Idempotent:
+        // re-enabling without a prior disable keeps any previously
+        // handed-out labels intact.
+        if isis.local_pool.is_none() {
+            isis.local_pool = Some(super::LabelPool::new(15000, Some(16000)));
+        }
     } else {
         isis.config.sr_mpls_enabled = false;
         isis.config.sr_mpls_block = None;
+        // Drop the pool. Any labels still cached on neighbor addr4
+        // entries become orphaned but stop short of producing fresh
+        // MPLS installs — `nbr_hello_interpret` and `lsp_generate`
+        // both gate on `local_pool`/`value.label` being present.
+        isis.local_pool = None;
     }
     isis.reconcile_block_watch();
     Some(())

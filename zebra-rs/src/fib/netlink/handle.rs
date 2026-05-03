@@ -25,6 +25,7 @@ use netlink_packet_route::route::{
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
 use rtnetlink::{
+    LinkDummy,
     constants::{
         RTMGRP_IPV4_IFADDR, RTMGRP_IPV4_ROUTE, RTMGRP_IPV6_IFADDR, RTMGRP_IPV6_ROUTE, RTMGRP_LINK,
     },
@@ -70,23 +71,29 @@ fn mask_v6(addr: std::net::Ipv6Addr, prefix_len: u8) -> std::net::Ipv6Addr {
 /// a SID install / uninstall. Behavior-driven so install and uninstall
 /// stay in lock-step:
 ///
-///   End  : table local, kind=Local,   /128, sid.addr
-///   End.X: table main,  kind=Unicast, /128, sid.addr
-///   uN   : table local, kind=Local,   /(LB+LN), masked sid.addr
+///   End  : table main, kind=Unicast, /128, sid.addr
+///          (`ip -6 route add <SID>/128
+///           encap seg6local action End dev sr0`)
+///   End.X: table main, kind=Unicast, /128, sid.addr
+///   uN   : table main, kind=Unicast, /(LB+LN), masked sid.addr
 ///          (prefix install — the NEXT-C-SID flavor strips and shifts
 ///          at runtime, so any function under the locator hits this.
-///          uN reuses End's table/kind because the kernel was silently
-///          dropping installs in table=main with kind=Unicast pointing
-///          at lo; "local prefix routes" are how the kernel normally
-///          treats host-local seg6local actions, and the kind=Local
-///          path is what classic End / End.UN actions hang off.)
-///   uA   : table main,  kind=Unicast, /128, sid.addr
+///          Same dummy-device trick as End: pointing the install at sr0
+///          instead of lo lets us stay in table=main + kind=Unicast.)
+///   uA   : table main, kind=Unicast, /128, sid.addr
 ///          (per-adjacency function is unique; longest-prefix match
 ///          picks uA over the wider uN entry)
 ///
 /// uN with no SidStructure falls back to /128 — a degenerate state
 /// (uSID locator without a derived structure shouldn't happen), but
 /// keeps the call total.
+///
+/// Both End and uN previously hung off table=local + kind=Local + dev=lo
+/// to work around the kernel rejecting unicast routes that point at the
+/// loopback. Routing the seg6local action through a dummy (sr0) instead
+/// gets us back into table=main with kind=Unicast across the board, which
+/// keeps `ip -6 route show` honest and avoids the host-local route quirks
+/// (e.g. ip-rule lookup local).
 fn sid_route_target(
     behavior: crate::rib::SidBehavior,
     addr: std::net::Ipv6Addr,
@@ -94,13 +101,18 @@ fn sid_route_target(
 ) -> (u8, RouteType, u8, std::net::Ipv6Addr) {
     use crate::rib::SidBehavior;
     match behavior {
-        SidBehavior::End => (255, RouteType::Local, 128, addr),
+        SidBehavior::End => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
         SidBehavior::EndX => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
         SidBehavior::UN => {
             let plen = structure
                 .map(|s| s.lb_bits.saturating_add(s.ln_bits))
                 .unwrap_or(128);
-            (255, RouteType::Local, plen, mask_v6(addr, plen))
+            (
+                RouteHeader::RT_TABLE_MAIN,
+                RouteType::Unicast,
+                plen,
+                mask_v6(addr, plen),
+            )
         }
         SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
     }
@@ -875,20 +887,20 @@ impl FibHandle {
         // four header values, so route_sid_uninstall mirrors the same
         // computation.
         //
-        //   End  : table local, kind=local, /128, sid.addr
-        //          (`ip -6 route add <SID>/128 table local
-        //           encap seg6local action End dev lo`)
-        //   End.X: table main,  kind=unicast, /128, sid.addr
+        //   End  : table main, kind=unicast, /128, sid.addr
+        //          (`ip -6 route add <SID>/128
+        //           encap seg6local action End dev sr0`)
+        //   End.X: table main, kind=unicast, /128, sid.addr
         //          (`ip -6 route add <SID>/128
         //           encap seg6local action End.X nh6 ... dev ...`)
-        //   uN   : table main,  kind=unicast, /(LB+LN), masked addr
+        //   uN   : table main, kind=unicast, /(LB+LN), masked addr
         //          (`ip -6 route add <locator>/<LB+LN>
         //           encap seg6local action End flavors next-csid
-        //           lblen <LB> nflen <LN+Fun> dev lo`)
+        //           lblen <LB> nflen <LN+Fun> dev sr0`)
         //          uN is a *prefix* install so any function value
         //          under the locator hits this entry; the kernel's
         //          NEXT-C-SID flavor strips and shifts at runtime.
-        //   uA   : table main,  kind=unicast, /128, sid.addr
+        //   uA   : table main, kind=unicast, /128, sid.addr
         //          Each adjacency function is a unique address;
         //          longest-prefix match picks uA over the wider uN
         //          entry. /128 keeps it simple and matches iproute2.
@@ -1199,6 +1211,53 @@ impl FibHandle {
             if let NetlinkPayload::Error(e) = msg.payload {
                 tracing::info!("link_set_up error: {}", e);
             }
+        }
+    }
+
+    /// Look up a link's ifindex by name via RTM_GETLINK. Returns None on
+    /// kernel rejection (most often "device not found").
+    pub async fn link_index_by_name(&self, name: &str) -> Option<u32> {
+        use futures::TryStreamExt;
+        let mut stream = self
+            .handle
+            .clone()
+            .link()
+            .get()
+            .match_name(name.to_string())
+            .execute();
+        match stream.try_next().await {
+            Ok(Some(msg)) => Some(msg.header.index),
+            _ => None,
+        }
+    }
+
+    /// Create a dummy link with the given name. Returns the ifindex the
+    /// kernel assigned, or None if creation failed (already exists with a
+    /// conflicting type, etc.). Mirrors `ip link add <name> type dummy`.
+    pub async fn dummy_add(&self, name: &str) -> Option<u32> {
+        let result = self
+            .handle
+            .clone()
+            .link()
+            .add(LinkDummy::new(name).build())
+            .execute()
+            .await;
+        if let Err(e) = result {
+            tracing::warn!("dummy_add({}) error: {}", name, e);
+            return None;
+        }
+        self.link_index_by_name(name).await
+    }
+
+    /// Delete a link by name. Idempotent — missing names log at info but
+    /// don't propagate.
+    pub async fn dummy_del(&self, name: &str) {
+        let Some(ifindex) = self.link_index_by_name(name).await else {
+            tracing::info!("dummy_del({}) skipped — not present", name);
+            return;
+        };
+        if let Err(e) = self.handle.clone().link().del(ifindex).execute().await {
+            tracing::warn!("dummy_del({}) error: {}", name, e);
         }
     }
 

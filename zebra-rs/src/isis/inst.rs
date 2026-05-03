@@ -199,7 +199,12 @@ impl Isis {
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf_timer: Levels::<Option<Timer>>::default(),
-            local_pool: Some(LabelPool::new(15000, Some(16000))),
+            // Adjacency-SID label pool is owned by the SR-MPLS feature.
+            // Stays None until `segment-routing mpls` is configured —
+            // otherwise we'd allocate labels for every hello and emit
+            // LanAdjSid sub-TLVs that turn into MPLS ILM installs the
+            // kernel rejects (EOPNOTSUPP) on hosts without an MPLS path.
+            local_pool: None,
             graph: Levels::<Option<spf::Graph>>::default(),
             spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
             mt2_graph: Levels::<Option<spf::Graph>>::default(),
