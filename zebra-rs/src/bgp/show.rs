@@ -70,7 +70,7 @@ fn peer_has_negotiated(peer: &Peer, afi: Afi, safi: Safi) -> bool {
 fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} Desc",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} Hostname",
         "Neighbor",
         "V",
         "AS",
@@ -108,9 +108,16 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
         (pr.to_string(), ps.to_string())
     };
 
+    let hostname = peer
+        .cap_recv
+        .fqdn
+        .as_ref()
+        .map(|f| f.hostname().to_string())
+        .unwrap_or_else(|| "N/A".to_string());
+
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} N/A",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} {}",
         peer.address.to_string(),
         "4",
         peer.peer_as,
@@ -122,6 +129,7 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
         up_down,
         pfx_rcvd_str,
         pfx_sent_str,
+        hostname,
     )
 }
 
@@ -1896,7 +1904,7 @@ mod summary_tests {
         let mut buf = String::new();
         write_summary_header_row(&mut buf).unwrap();
         let expected = "\
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc\n";
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Hostname\n";
         assert_eq!(buf, expected);
     }
 
