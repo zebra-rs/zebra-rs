@@ -51,7 +51,7 @@ const DEBUG_V6: bool = false;
 // nexthop-skip notice, and the rib-side resolution trace. Errors from
 // the kernel are reported regardless. Mirrored by RIB via this same
 // constant (re-exported as `crate::fib::netlink::handle::DEBUG_SID`).
-pub const DEBUG_SID: bool = false;
+pub const DEBUG_SID: bool = true;
 
 /// Mask the lower (128 - prefix_len) bits of an IPv6 address. The
 /// kernel ignores bits past the prefix length on install, but masking
@@ -74,18 +74,12 @@ fn mask_v6(addr: std::net::Ipv6Addr, prefix_len: u8) -> std::net::Ipv6Addr {
 ///   End  : table main, kind=Unicast, /128, sid.addr
 ///          (`ip -6 route add <SID>/128
 ///           encap seg6local action End dev sr0`)
-///          End used to hang off table=local + kind=Local + dev=lo —
-///          a workaround for the kernel rejecting unicast routes that
-///          point at lo. Routing the seg6local action through a dummy
-///          (sr0) instead gets us back into table=main with kind=Unicast,
-///          which keeps `ip -6 route show` honest and avoids the
-///          host-local route quirks (e.g. ip-rule lookup local).
 ///   End.X: table main, kind=Unicast, /128, sid.addr
-///   uN   : table local, kind=Local,  /(LB+LN), masked sid.addr
+///   uN   : table main, kind=Unicast, /(LB+LN), masked sid.addr
 ///          (prefix install — the NEXT-C-SID flavor strips and shifts
 ///          at runtime, so any function under the locator hits this.
-///          uN keeps the lo + table=local + kind=Local combo for now;
-///          extending the sr0 fix to uSID is a separate change.)
+///          Same dummy-device trick as End: pointing the install at sr0
+///          instead of lo lets us stay in table=main + kind=Unicast.)
 ///   uA   : table main, kind=Unicast, /128, sid.addr
 ///          (per-adjacency function is unique; longest-prefix match
 ///          picks uA over the wider uN entry)
@@ -93,6 +87,13 @@ fn mask_v6(addr: std::net::Ipv6Addr, prefix_len: u8) -> std::net::Ipv6Addr {
 /// uN with no SidStructure falls back to /128 — a degenerate state
 /// (uSID locator without a derived structure shouldn't happen), but
 /// keeps the call total.
+///
+/// Both End and uN previously hung off table=local + kind=Local + dev=lo
+/// to work around the kernel rejecting unicast routes that point at the
+/// loopback. Routing the seg6local action through a dummy (sr0) instead
+/// gets us back into table=main with kind=Unicast across the board, which
+/// keeps `ip -6 route show` honest and avoids the host-local route quirks
+/// (e.g. ip-rule lookup local).
 fn sid_route_target(
     behavior: crate::rib::SidBehavior,
     addr: std::net::Ipv6Addr,
@@ -106,7 +107,12 @@ fn sid_route_target(
             let plen = structure
                 .map(|s| s.lb_bits.saturating_add(s.ln_bits))
                 .unwrap_or(128);
-            (255, RouteType::Local, plen, mask_v6(addr, plen))
+            (
+                RouteHeader::RT_TABLE_MAIN,
+                RouteType::Unicast,
+                plen,
+                mask_v6(addr, plen),
+            )
         }
         SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
     }
@@ -881,20 +887,20 @@ impl FibHandle {
         // four header values, so route_sid_uninstall mirrors the same
         // computation.
         //
-        //   End  : table main,  kind=unicast, /128, sid.addr
+        //   End  : table main, kind=unicast, /128, sid.addr
         //          (`ip -6 route add <SID>/128
         //           encap seg6local action End dev sr0`)
-        //   End.X: table main,  kind=unicast, /128, sid.addr
+        //   End.X: table main, kind=unicast, /128, sid.addr
         //          (`ip -6 route add <SID>/128
         //           encap seg6local action End.X nh6 ... dev ...`)
-        //   uN   : table local, kind=Local,   /(LB+LN), masked addr
-        //          (`ip -6 route add <locator>/<LB+LN> table local
+        //   uN   : table main, kind=unicast, /(LB+LN), masked addr
+        //          (`ip -6 route add <locator>/<LB+LN>
         //           encap seg6local action End flavors next-csid
-        //           lblen <LB> nflen <LN+Fun> dev lo`)
+        //           lblen <LB> nflen <LN+Fun> dev sr0`)
         //          uN is a *prefix* install so any function value
         //          under the locator hits this entry; the kernel's
         //          NEXT-C-SID flavor strips and shifts at runtime.
-        //   uA   : table main,  kind=unicast, /128, sid.addr
+        //   uA   : table main, kind=unicast, /128, sid.addr
         //          Each adjacency function is a unique address;
         //          longest-prefix match picks uA over the wider uN
         //          entry. /128 keeps it simple and matches iproute2.
