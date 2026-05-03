@@ -1069,14 +1069,30 @@ fn show_isis_spf(
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
+    // Legacy single-topology SPF — drives IPv4 RIB always, plus
+    // IPv6 RIB when MT 2 is off. Print L1 then L2.
     if let Some(spf) = isis.spf_result.get(&Level::L1) {
-        let _ = writeln!(buf, "L1 SPF");
+        let _ = writeln!(buf, "L1 SPF (single-topology / MT 0)");
         spf::disp_out(&mut buf, spf, false);
     }
     if let Some(spf) = isis.spf_result.get(&Level::L2) {
-        let _ = writeln!(buf, "L2 SPF");
+        let _ = writeln!(buf, "L2 SPF (single-topology / MT 0)");
         spf::disp_out(&mut buf, spf, false);
     }
+
+    // MT 2 SPF — only computed when local config has MT 2 in
+    // mt_topologies. We print the raw tree from mt2_spf_result here
+    // regardless of whether the legacy SPF is also present so
+    // operators can compare metrics across topologies.
+    if let Some(spf) = isis.mt2_spf_result.get(&Level::L1) {
+        let _ = writeln!(buf, "L1 SPF (MT 2 / IPv6 unicast)");
+        spf::disp_out(&mut buf, spf, false);
+    }
+    if let Some(spf) = isis.mt2_spf_result.get(&Level::L2) {
+        let _ = writeln!(buf, "L2 SPF (MT 2 / IPv6 unicast)");
+        spf::disp_out(&mut buf, spf, false);
+    }
+
     Ok(buf)
 }
 
