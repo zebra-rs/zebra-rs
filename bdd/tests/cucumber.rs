@@ -416,6 +416,35 @@ async fn test_topology_exists(world: &mut BgpWorld) {
         && netns::netns_exists("z2").await.unwrap_or(false);
 }
 
+/// Run a `vtyctl show <command>` inside a namespace and assert the
+/// stdout contains the given substring. Used by the IS-IS multi-
+/// topology feature to verify MT TLVs land in `show isis database
+/// detail`; intentionally generic so other features can reuse it
+/// for LSDB / route-table assertions.
+#[then(expr = "show command {string} in namespace {string} should contain {string}")]
+async fn show_command_contains(
+    _world: &mut BgpWorld,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+) {
+    let output = netns::exec_in_netns(&namespace, "vtyctl", &["show", &show_cmd])
+        .await
+        .expect("Failed to run show command");
+    assert!(
+        output.contains(&needle),
+        "show '{}' in namespace {} did not contain '{}'\nfull output:\n{}",
+        show_cmd,
+        namespace,
+        needle,
+        output,
+    );
+    println!(
+        "✓ show '{}' in namespace {} contains '{}'",
+        show_cmd, namespace, needle
+    );
+}
+
 #[then("the test environment should be clean")]
 async fn verify_clean_environment(_world: &mut BgpWorld) {
     let z1_exists = netns::netns_exists("z1").await.unwrap_or(false);
