@@ -62,6 +62,19 @@ impl PeerMap {
             .filter_map(move |(addr, &idx)| self.peers[idx].as_ref().map(|peer| (addr, peer)))
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&IpAddr, &mut Peer)> {
+        let map = &self.map;
+        self.peers
+            .iter_mut()
+            .enumerate()
+            .filter_map(move |(idx, slot)| {
+                let peer = slot.as_mut()?;
+                map.iter()
+                    .find(|(_, mapped_idx)| **mapped_idx == idx)
+                    .map(|(addr, _)| (addr, peer))
+            })
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &IpAddr> {
         self.map.iter().filter_map(move |(addr, &idx)| {
             if self.peers[idx].is_some() {
