@@ -57,6 +57,7 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
     mode.install_func(String::from("/clear/ip/bgp/neighbor"), clear_bgp);
+    mode.install_func(String::from("/clear/isis/spf"), clear_isis_spf);
     mode
 }
 
@@ -180,5 +181,10 @@ fn list(config: &ConfigManager) -> (ExecCode, String) {
 
 fn clear_bgp(_config: &ConfigManager) -> (ExecCode, String) {
     let output = String::from("clear ip bgp");
+    (ExecCode::Show, output)
+}
+
+fn clear_isis_spf(_config: &ConfigManager) -> (ExecCode, String) {
+    let output = String::from("clear isis spf");
     (ExecCode::Show, output)
 }

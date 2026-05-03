@@ -228,10 +228,37 @@ impl Isis {
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
-        // println!("XX path {} args {:?}", path, args);
+
+        // Clear ops don't go through the YANG callback table — they
+        // map directly to runtime side-effects (kick SPF, drop a
+        // peer, ...) the way `clear ip bgp` works in BGP. Match on
+        // the path explicitly so the rest of the pipeline keeps
+        // treating Set / Delete uniformly.
+        if msg.op == ConfigOp::Clear {
+            match path.as_str() {
+                "/clear/isis/spf" => {
+                    self.clear_spf();
+                }
+                _ => {
+                    //
+                }
+            }
+            return;
+        }
+
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         }
+    }
+
+    /// Force-recalculate the IS-IS SPF for both L1 and L2. Mirrors
+    /// FRR's `clear isis spf` — useful when an operator wants to
+    /// re-derive the route table without waiting for the next LSDB
+    /// update or the debounce timer to fire. Levels with no SPF
+    /// state yet are no-ops on the receiver side.
+    fn clear_spf(&mut self) {
+        let _ = self.tx.send(Message::SpfCalc(Level::L1));
+        let _ = self.tx.send(Message::SpfCalc(Level::L2));
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {
