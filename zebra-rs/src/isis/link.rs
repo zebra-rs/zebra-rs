@@ -522,8 +522,7 @@ impl Isis {
         // way `nbr_hold_timer_expire` does — keep that path the one
         // place that frees per-adjacency resources.
         for level in [Level::L1, Level::L2] {
-            let nbr_ids: Vec<IsisSysId> =
-                link.state.nbrs.get(&level).keys().copied().collect();
+            let nbr_ids: Vec<IsisSysId> = link.state.nbrs.get(&level).keys().copied().collect();
 
             for sys_id in nbr_ids {
                 if let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sys_id) {
