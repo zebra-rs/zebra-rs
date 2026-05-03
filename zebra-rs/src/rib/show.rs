@@ -12,6 +12,7 @@ use crate::{
 
 use super::{Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show};
 use std::fmt::Write;
+use std::net::IpAddr;
 use std::time::Duration;
 
 /// Format a route's age the way `show ip route` lines render it:
@@ -513,30 +514,53 @@ pub fn rib_entry_show_v6(
                 } else {
                     uni.ifindex().unwrap_or(0)
                 };
-                write!(
-                    buf,
-                    " {} {}, {}",
-                    via_word(uni),
-                    via_addr(uni),
-                    rib.link_name(ifindex)
-                )
-                .unwrap();
-                if !uni.mpls.is_empty() {
-                    write!(buf, ", label").unwrap();
-                    for mpls in uni.mpls.iter() {
-                        match mpls {
-                            Label::Implicit(label) => {
-                                write!(buf, " {} implicit-null", label).unwrap();
-                            }
-                            Label::Explicit(label) => {
-                                write!(buf, " {}", label).unwrap();
+
+                if let Some(action) = uni.seg6local_action {
+                    // SRv6 SID install. End / uN have no via address —
+                    // they're "directly connected" to the dummy device
+                    // that hosts the seg6local action. End.X / uA also
+                    // print as "directly connected" but trail with the
+                    // adjacency's link-local address as `nh6 ...` and
+                    // repeat the egress link, matching FRR.
+                    let iface = rib.link_name(ifindex);
+                    write!(
+                        buf,
+                        " is directly connected, {}, seg6local {}",
+                        iface, action
+                    )
+                    .unwrap();
+                    if let IpAddr::V6(nh6) = uni.addr
+                        && !nh6.is_unspecified()
+                    {
+                        write!(buf, " nh6 {}, {}", nh6, iface).unwrap();
+                    }
+                    writeln!(buf, ", {}", uptime).unwrap();
+                } else {
+                    write!(
+                        buf,
+                        " {} {}, {}",
+                        via_word(uni),
+                        via_addr(uni),
+                        rib.link_name(ifindex)
+                    )
+                    .unwrap();
+                    if !uni.mpls.is_empty() {
+                        write!(buf, ", label").unwrap();
+                        for mpls in uni.mpls.iter() {
+                            match mpls {
+                                Label::Implicit(label) => {
+                                    write!(buf, " {} implicit-null", label).unwrap();
+                                }
+                                Label::Explicit(label) => {
+                                    write!(buf, " {}", label).unwrap();
+                                }
                             }
                         }
                     }
+                    // Single nexthop — no `weight` column. ECMP prints it
+                    // per leg below.
+                    writeln!(buf, ", {}", uptime).unwrap();
                 }
-                // Single nexthop — no `weight` column. ECMP prints it
-                // per leg below.
-                writeln!(buf, ", {}", uptime).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
