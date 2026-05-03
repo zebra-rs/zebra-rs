@@ -869,9 +869,10 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 tracing::info!(
-                    "DelNexthop error: {e} gid: {gid} refcnt: {refcnt}",
+                    "DelNexthop error: {e} gid: {gid} refcnt: {refcnt} nhop: {nexthop:?}",
                     gid = nexthop.gid(),
-                    refcnt = nexthop.refcnt()
+                    refcnt = nexthop.refcnt(),
+                    nexthop = nexthop,
                 );
             }
         }
