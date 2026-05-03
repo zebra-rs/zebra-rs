@@ -510,7 +510,34 @@ impl Rib {
         let ifindex = sid.ifindex;
         self.fib_handle.route_sid_install(&sid, gid, ifindex).await;
 
+        // Surface the SID in the IPv6 RIB so `show ipv6 route` reflects
+        // it. We index by `Sid::prefix()` so install / uninstall keep
+        // RIB and FIB in lock-step (uN is a /(LB+LN) install; the rest
+        // are /128).
+        self.sid_rib_insert(&sid);
+
         self.sids.insert(sid.addr, sid);
+    }
+
+    /// Insert a `RibEntry` for this SID into `self.table_v6`. Replaces
+    /// any prior entry for the same prefix that was owned by a SID
+    /// (idempotent across re-installs); leaves SPF-installed entries
+    /// alone.
+    fn sid_rib_insert(&mut self, sid: &Sid) {
+        let prefix = sid.prefix();
+        let entry = sid_rib_entry(sid);
+        let entries = self.table_v6.entry(prefix).or_default();
+        entries.retain(|e| !is_seg6local_entry(e));
+        entries.push(entry);
+    }
+
+    /// Remove a previously-inserted SID `RibEntry`. Must match the same
+    /// prefix the install used.
+    fn sid_rib_remove(&mut self, sid: &Sid) {
+        let prefix = sid.prefix();
+        if let Some(entries) = self.table_v6.get_mut(&prefix) {
+            entries.retain(|e| !is_seg6local_entry(e));
+        }
     }
 
     /// Tear down a previously-installed SID. Walks back through the
@@ -520,6 +547,11 @@ impl Rib {
         let Some(sid) = self.sids.remove(&addr) else {
             return;
         };
+
+        // Drop the RIB entry first so a concurrent show doesn't see a
+        // dangling row after the kernel install is gone.
+        self.sid_rib_remove(&sid);
+
         if sid.ifindex == 0 {
             // Wasn't installed (no loopback at SidAdd time); nothing to
             // tear down on the kernel side.
@@ -944,6 +976,43 @@ impl Rib {
             }
         }
     }
+}
+
+/// Build a `RibEntry` for an allocated SID. The shape mirrors what
+/// the FIB install path would dump back from the kernel: rtype Isis
+/// (IS-IS is the only allocator today; broaden when OSPF / BGP
+/// follow), distance 115 / metric 0, and a single `Uni` nexthop
+/// carrying `seg6local_action` so the show callback can render
+/// `seg6local <action> [nh6 <addr>]`.
+fn sid_rib_entry(sid: &Sid) -> RibEntry {
+    let mut entry = RibEntry::new(RibType::Isis);
+    entry.distance = 115;
+    entry.metric = 0;
+    entry.set_valid(true);
+    entry.set_selected(true);
+    entry.set_fib(true);
+    entry.ifindex = sid.ifindex;
+
+    let addr = match sid.nh6 {
+        Some(a) => IpAddr::V6(a),
+        None => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    entry.nexthop = Nexthop::Uni(NexthopUni {
+        addr,
+        ifindex_origin: (sid.ifindex != 0).then_some(sid.ifindex),
+        seg6local_action: Some(sid.behavior),
+        valid: true,
+        ..Default::default()
+    });
+    entry
+}
+
+/// True when this RibEntry was inserted by `sid_rib_insert` — single
+/// `Uni` nexthop with `seg6local_action` set. Lets `sid_rib_remove`
+/// scrub only its own entries when an install gets replaced or the
+/// SID is withdrawn.
+fn is_seg6local_entry(entry: &RibEntry) -> bool {
+    matches!(&entry.nexthop, Nexthop::Uni(uni) if uni.seg6local_action.is_some())
 }
 
 pub fn serve(mut rib: Rib) {
