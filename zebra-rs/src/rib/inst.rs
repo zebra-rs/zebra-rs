@@ -821,17 +821,29 @@ impl Rib {
                 // LinkAddr is already present for this address, the merge in
                 // link_addr_update will flip its `fib` flag to true.
                 self.addr_add(addr, false);
-                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-                ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+                ipv6_nexthop_sync(
+                    &mut self.nmap,
+                    &self.table_v6,
+                    &self.links,
+                    &self.fib_handle,
+                )
+                .await;
                 ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
                 self.addr_del(addr);
-                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-                ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+                ipv6_nexthop_sync(
+                    &mut self.nmap,
+                    &self.table_v6,
+                    &self.links,
+                    &self.fib_handle,
+                )
+                .await;
                 ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
                 self.router_id_update();
             }
