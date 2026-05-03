@@ -325,6 +325,20 @@ impl Rib {
                 entry.is_valid(),
             );
         }
+
+        // Static seg6local routes (action End.DT6 / End.DT4 / End / uN
+        // configured on a prefix) arrive without an ifindex — the
+        // config callback doesn't have access to the link table. Pin
+        // the install to sr0 here so resolve_v6 short-circuits and
+        // the FIB layer emits the right Oif.
+        if let Nexthop::Uni(uni) = &mut entry.nexthop
+            && let Some(action) = uni.seg6local_action
+            && uni.ifindex_origin.is_none()
+            && let Some(ifindex) = self.resolve_sid_ifindex(action)
+        {
+            uni.ifindex_origin = Some(ifindex);
+        }
+
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap);
