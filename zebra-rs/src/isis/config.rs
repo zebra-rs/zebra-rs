@@ -11,10 +11,12 @@ use strum_macros::{Display, EnumString};
 use crate::config::{Args, ConfigOp};
 
 use super::Isis;
-use super::inst::Callback;
+use super::inst::{Callback, Message};
 use super::link::Afis;
 use super::tracing::{PacketConfig, PacketDirection};
 use super::{Level, link};
+
+use isis_packet::IsisLspId;
 
 /// IS-IS Multi-Topology identifier (RFC 5120). The wire encoding is a
 /// 12-bit MT ID; we model only the topologies we actually compute SPF
@@ -166,8 +168,18 @@ impl IsisConfig {
         self.is_type.unwrap_or(IsLevel::L1L2)
     }
 
-    pub fn hostname(&self) -> String {
-        self.hostname.clone().unwrap_or("default".into())
+    /// Resolve the hostname to advertise in TLV 137. Configured hostname
+    /// wins; otherwise we fall back to the OS hostname. If neither is
+    /// available we return None and the caller should skip emitting the
+    /// hostname TLV (RFC 5301 leaves the TLV optional).
+    pub fn hostname(&self) -> Option<String> {
+        if let Some(name) = &self.hostname {
+            return Some(name.clone());
+        }
+        hostname::get()
+            .ok()
+            .and_then(|s| s.into_string().ok())
+            .filter(|s| !s.is_empty())
     }
 
     pub fn refresh_time(&self) -> u16 {
@@ -220,12 +232,28 @@ fn config_is_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
 fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let hostname = args.string()?;
 
+    let prev = isis.config.hostname();
     if op == ConfigOp::Set {
         isis.config.hostname = Some(hostname);
     } else {
         isis.config.hostname = None;
     }
-    // TODO: Re-originate LSP for L1/L2.  That will update hostname map.
+    let curr = isis.config.hostname();
+
+    if prev == curr {
+        return Some(());
+    }
+
+    // Re-originate self LSP at any level that has one so the new
+    // hostname (or its absence) propagates without waiting for the
+    // refresh timer. Levels with no self LSP yet are still pre-NET —
+    // origination will pick the new value naturally on first emission.
+    let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
+    for level in [Level::L1, Level::L2] {
+        if isis.lsdb.get(&level).get(&key).is_some() {
+            let _ = isis.tx.send(Message::LspOriginate(level));
+        }
+    }
 
     Some(())
 }
