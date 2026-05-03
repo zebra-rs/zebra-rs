@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
 use crate::rib::entry::RibEntry;
-use crate::rib::{Message, RibType};
+use crate::rib::{Message, RibType, SidBehavior};
 
 use super::StaticRoute;
 
@@ -363,6 +363,19 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
         .del(|config, cache, prefix, _args| {
             let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             s.encap_type = None;
+            Ok(())
+        })
+        .path(&format!("/routing/static/{}/route/action", F::FAMILY))
+        .set(|config, cache, prefix, args| {
+            const ACTION_ERR: &str = "missing seg6local action arg";
+            let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            let arg = args.string().context(ACTION_ERR)?;
+            s.seg6local_action = Some(arg.parse::<SidBehavior>()?);
+            Ok(())
+        })
+        .del(|config, cache, prefix, _args| {
+            let s = cache_lookup::<F>(config, cache, prefix).context(CONFIG_ERR)?;
+            s.seg6local_action = None;
             Ok(())
         })
 }
