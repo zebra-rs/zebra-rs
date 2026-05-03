@@ -62,7 +62,7 @@ impl Rib {
                             //
                         }
                         Nexthop::Uni(uni) => {
-                            if uni.ifindex == ifindex {
+                            if uni.ifindex() == Some(ifindex) {
                                 let msg = Message::Ipv4Del {
                                     prefix: *prefix,
                                     rib: entry.clone(),
@@ -90,7 +90,7 @@ impl Rib {
                             //
                         }
                         Nexthop::Uni(uni) => {
-                            if uni.ifindex == ifindex {
+                            if uni.ifindex() == Some(ifindex) {
                                 let msg = Message::Ipv6Del {
                                     prefix: *prefix,
                                     rib: entry.clone(),
@@ -443,7 +443,7 @@ pub async fn ipv4_nexthop_sync(
             // Update the status of the next hop
             let ifindex = resolve.is_valid();
             if ifindex == 0 {
-                uni.set_ifindex(ifindex);
+                uni.ifindex_resolved = None;
                 uni.set_valid(false);
                 if uni.is_installed() {
                     // println!(
@@ -457,14 +457,14 @@ pub async fn ipv4_nexthop_sync(
                     // XXX fib.nexthop_del(&Group::Uni(uni.clone())).await;
                 }
             } else {
-                uni.set_ifindex(ifindex);
+                uni.ifindex_resolved = Some(ifindex);
                 uni.set_valid(true);
                 if !uni.is_installed() {
                     // println!(
                     //     "UniAdd: gid {} {}/{} {}",
                     //     uni.gid(),
                     //     uni.addr,
-                    //     uni.ifindex,
+                    //     uni.ifindex(),
                     //     uni.is_installed()
                     // );
                     uni.set_installed(true);
@@ -601,7 +601,12 @@ async fn ipv4_entry_selection(
 fn nexthop_uni_resolve(nhop: &mut NexthopUni, nmap: &NexthopMap) {
     if let Some(grp) = nmap.get_uni(nhop.gid) {
         nhop.valid = grp.is_valid();
-        nhop.ifindex = grp.ifindex;
+        // Group carries both halves; copy them through unchanged.
+        // Origin must never be lost — that's the whole point of the
+        // split, so the show path can name the IGP-supplied link
+        // even when the table walk would have picked something else.
+        nhop.ifindex_origin = grp.ifindex_origin;
+        nhop.ifindex_resolved = grp.ifindex_resolved;
     }
 }
 
@@ -660,7 +665,10 @@ fn resolve_nexthop_uni(
     group.refcnt_inc();
 
     uni.gid = group.gid();
-    uni.ifindex = group.ifindex;
+    // Origin came from the caller, must not be overwritten;
+    // resolution may have populated `ifindex_resolved`.
+    uni.ifindex_origin = group.ifindex_origin;
+    uni.ifindex_resolved = group.ifindex_resolved;
 
     group.is_valid()
 }
@@ -1130,33 +1138,39 @@ fn resolve_nexthop_uni_v6(
     };
     if DEBUG_V6 {
         println!(
-            "[resolve_nexthop_uni_v6] fetched group gid={} refcnt={} valid={} ifindex={}",
+            "[resolve_nexthop_uni_v6] fetched group gid={} refcnt={} valid={} ifindex={:?}",
             group.gid(),
             group.refcnt(),
             group.is_valid(),
-            group.ifindex,
+            group.ifindex(),
         );
     }
     if group.refcnt() == 0 {
         group.resolve_v6(table);
         if DEBUG_V6 {
             println!(
-                "[resolve_nexthop_uni_v6] after resolve_v6 valid={} ifindex={}",
+                "[resolve_nexthop_uni_v6] after resolve_v6 valid={} ifindex={:?}",
                 group.is_valid(),
-                group.ifindex,
+                group.ifindex(),
             );
         }
     }
     group.refcnt_inc();
 
     uni.gid = group.gid();
-    uni.ifindex = group.ifindex;
+    // Both halves flow through unchanged. The caller's origin (if
+    // any) was preserved across `fetch` and `resolve_v6`; those
+    // routines may have written `ifindex_resolved`.
+    uni.ifindex_origin = group.ifindex_origin;
+    uni.ifindex_resolved = group.ifindex_resolved;
 
     let valid = group.is_valid();
     if DEBUG_V6 {
         println!(
-            "[resolve_nexthop_uni_v6] returning uni.gid={} uni.ifindex={} valid={}",
-            uni.gid, uni.ifindex, valid
+            "[resolve_nexthop_uni_v6] returning uni.gid={} uni.ifindex={:?} valid={}",
+            uni.gid,
+            uni.ifindex(),
+            valid
         );
     }
     valid
@@ -1174,13 +1188,23 @@ pub async fn ipv6_nexthop_sync(
         if let Group::Uni(uni) = nhop {
             if DEBUG_V6 {
                 println!(
-                    "[ipv6_nexthop_sync] visiting uni gid={} addr={} ifindex={} valid={} installed={}",
+                    "[ipv6_nexthop_sync] visiting uni gid={} addr={} ifindex={:?} valid={} installed={}",
                     uni.gid(),
                     uni.addr,
-                    uni.ifindex,
+                    uni.ifindex(),
                     uni.is_valid(),
                     uni.is_installed(),
                 );
+            }
+            // Origin wins — skip the table walk entirely if the
+            // caller already supplied the egress link.
+            if uni.ifindex_origin.is_some() {
+                uni.set_valid(true);
+                if !uni.is_installed() {
+                    uni.set_installed(true);
+                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                }
+                continue;
             }
             let resolve = match uni.addr {
                 std::net::IpAddr::V4(_) => continue,
@@ -1197,13 +1221,13 @@ pub async fn ipv6_nexthop_sync(
                 );
             }
             if ifindex == 0 {
-                uni.set_ifindex(ifindex);
+                uni.ifindex_resolved = None;
                 uni.set_valid(false);
                 if uni.is_installed() {
                     uni.set_installed(false);
                 }
             } else {
-                uni.set_ifindex(ifindex);
+                uni.ifindex_resolved = Some(ifindex);
                 uni.set_valid(true);
                 if !uni.is_installed() {
                     uni.set_installed(true);

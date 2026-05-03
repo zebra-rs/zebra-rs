@@ -41,7 +41,7 @@ pub fn nexthop_show(rib: &Rib, _args: Args, _json: bool) -> String {
             Group::Uni(uni) => {
                 write!(buf, "  ").unwrap();
                 write_via(&mut buf, uni);
-                write!(buf, ", {}", rib.link_name(uni.ifindex)).unwrap();
+                write!(buf, ", {}", rib.link_name(uni.ifindex().unwrap_or(0))).unwrap();
                 for label in uni.labels.iter() {
                     let _ = write!(buf, " {}", label);
                 }
@@ -52,8 +52,13 @@ pub fn nexthop_show(rib: &Rib, _args: Args, _json: bool) -> String {
                     if let Some(Group::Uni(uni)) = rib.nmap.get(*gid) {
                         write!(buf, "  [{}] ", gid).unwrap();
                         write_via(&mut buf, uni);
-                        writeln!(buf, ", {}, weight: {}", rib.link_name(uni.ifindex), weight)
-                            .unwrap();
+                        writeln!(
+                            buf,
+                            ", {}, weight: {}",
+                            rib.link_name(uni.ifindex().unwrap_or(0)),
+                            weight
+                        )
+                        .unwrap();
                     }
                 }
             }

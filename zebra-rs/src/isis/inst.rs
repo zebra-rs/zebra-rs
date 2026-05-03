@@ -1869,7 +1869,13 @@ fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> 
             rib::Label::Explicit(sid)
         });
     }
-    rib::NexthopUni::from(*key, route.metric, mpls)
+    let mut nhop = rib::NexthopUni::from(*key, route.metric, mpls);
+    // IS-IS knows the egress link from the adjacency state machine —
+    // record it as the origin so the RIB resolver doesn't re-derive
+    // (and potentially mis-derive) the link via a recursive table
+    // walk. 0 means "no usable adjacency ifindex"; treat as None.
+    nhop.ifindex_origin = (value.ifindex != 0).then_some(value.ifindex);
+    nhop
 }
 
 fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
@@ -1949,8 +1955,10 @@ fn nhop_to_nexthop_uni_v6(
         });
     }
     let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(*key), route.metric, mpls);
-    // IPv6 link-local nexthops require ifindex for kernel scope resolution.
-    nhop.ifindex = value.ifindex;
+    // IPv6 link-local nexthops can't be disambiguated by table
+    // lookup — every interface advertises fe80::/64. The adjacency
+    // already pinned the egress link, so record it as the origin.
+    nhop.ifindex_origin = (value.ifindex != 0).then_some(value.ifindex);
     nhop
 }
 
@@ -2020,7 +2028,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     {
         let mut uni = NexthopUni {
             addr: std::net::IpAddr::V4(addr),
-            ifindex: nhop.ifindex,
+            ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
         if !nhop.adjacency {
@@ -2036,7 +2044,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     for (&addr, nhop) in ilm.nhops.iter() {
         let mut uni = NexthopUni {
             addr: std::net::IpAddr::V4(addr),
-            ifindex: nhop.ifindex,
+            ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
         if !nhop.adjacency {

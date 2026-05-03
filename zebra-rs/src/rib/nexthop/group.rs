@@ -44,7 +44,16 @@ impl GroupCommon {
 pub struct GroupUni {
     common: GroupCommon,
     pub addr: IpAddr,
-    pub ifindex: u32,
+
+    /// What the source said the egress ifindex was — copied verbatim
+    /// from `NexthopUni::ifindex_origin` in `GroupUni::new`. Resolution
+    /// must never overwrite this.
+    pub ifindex_origin: Option<u32>,
+    /// What `resolve` / `resolve_v6` looked up when origin was `None`.
+    /// `None` means resolution hasn't run yet or didn't find a covering
+    /// route.
+    pub ifindex_resolved: Option<u32>,
+
     pub labels: Vec<u32>,
 
     /// SRv6 H.Encap segment list (RFC 8986). Non-empty indicates this is an
@@ -66,25 +75,15 @@ pub struct GroupUni {
 
 impl GroupUni {
     pub fn new(gid: usize, uni: &NexthopUni) -> Self {
-        // Trust `uni.ifindex` when the caller has set it. Three
-        // populators do today:
-        //   - IGP protocols (IS-IS, OSPF) emit nexthops with the
-        //     adjacency's egress link already filled in, since they
-        //     learn the link from the adjacency state machine, not
-        //     from a recursive RIB lookup.
-        //   - seg6local installs (End / End.X) pre-resolve to
-        //     loopback / per-adjacency.
-        //   - Connected/static routes obviously know their oif.
-        // Only ifindex == 0 means "I don't know — please resolve".
-        // Previously this branch was gated on seg6local_action, which
-        // discarded IS-IS / OSPF egress info and forced a v6 table
-        // resolve that picked the wrong link for fe80::/64 (link-
-        // local routes exist on every interface, so longest-prefix
-        // returns whichever connected route lands first).
+        // Carry the source's ifindex_origin straight through — IGP
+        // adjacencies, seg6local installs, connected routes and
+        // interface-pinned static routes all set it. The resolver is
+        // only allowed to fill `ifindex_resolved` when origin is None.
         Self {
             common: GroupCommon::new(gid),
             addr: uni.addr,
-            ifindex: uni.ifindex,
+            ifindex_origin: uni.ifindex_origin,
+            ifindex_resolved: None,
             labels: uni.mpls_label.clone(),
             segs: uni.segs.clone(),
             encap_type: uni.encap_type,
@@ -92,13 +91,17 @@ impl GroupUni {
         }
     }
 
+    /// Egress ifindex to use, with origin winning over resolved.
+    pub fn ifindex(&self) -> Option<u32> {
+        self.ifindex_origin.or(self.ifindex_resolved)
+    }
+
     pub fn resolve(&mut self, table: &PrefixMap<Ipv4Net, RibEntries>) {
-        // Caller already supplied an egress link (IGP / seg6local /
-        // connected). Trust it — the recursive RIB walk would just
-        // re-derive the same answer, and for IGP nexthops it can
-        // outright pick the wrong link when the address is reachable
-        // through multiple covering routes.
-        if self.ifindex != 0 {
+        // Origin wins. The recursive RIB walk would re-derive the
+        // same answer at best, and at worst pick the wrong link
+        // when the address is reachable through multiple covering
+        // routes (classic IGP fe80::/64 scenario).
+        if self.ifindex_origin.is_some() {
             self.set_valid(true);
             return;
         }
@@ -110,7 +113,7 @@ impl GroupUni {
                 // IGP/static covering route. The Group only needs the ifindex,
                 // not the path category.
                 if let Resolve::Onlink(ifindex) | Resolve::Recursive(ifindex) = resolve {
-                    self.ifindex = ifindex;
+                    self.ifindex_resolved = Some(ifindex);
                     self.set_valid(true);
                 }
             }
@@ -121,15 +124,14 @@ impl GroupUni {
     }
 
     pub fn resolve_v6(&mut self, table: &PrefixMap<Ipv6Net, RibEntries>) {
-        // Same short-circuit as `resolve`: caller-supplied ifindex
-        // wins over recursive table resolution. Critical for IPv6
-        // because link-local nexthops can't be disambiguated by
-        // table lookup — every interface advertises fe80::/64.
-        if self.ifindex != 0 {
+        // Origin wins. Critical for IPv6 because link-local nexthops
+        // can't be disambiguated by table lookup — every interface
+        // advertises fe80::/64.
+        if let Some(ifindex) = self.ifindex_origin {
             if DEBUG_V6 {
                 println!(
-                    "[GroupUni::resolve_v6] addr={} ifindex={} pre-resolved (skipping table walk)",
-                    self.addr, self.ifindex,
+                    "[GroupUni::resolve_v6] addr={} ifindex_origin={} (skipping table walk)",
+                    self.addr, ifindex,
                 );
             }
             self.set_valid(true);
@@ -145,11 +147,11 @@ impl GroupUni {
                 Resolve::Onlink(ifindex) | Resolve::Recursive(ifindex) => {
                     if DEBUG_V6 {
                         println!(
-                            "[GroupUni::resolve_v6] {} -> ifindex={}",
+                            "[GroupUni::resolve_v6] {} -> ifindex_resolved={}",
                             ipv6_addr, ifindex
                         );
                     }
-                    self.ifindex = *ifindex;
+                    self.ifindex_resolved = Some(*ifindex);
                     self.set_valid(true);
                 }
                 Resolve::NotFound => {
@@ -159,10 +161,6 @@ impl GroupUni {
                 }
             }
         }
-    }
-
-    pub fn set_ifindex(&mut self, ifindex: u32) {
-        self.ifindex = ifindex
     }
 }
 
@@ -299,7 +297,7 @@ mod tests {
         let mut e = RibEntry::new(RibType::Isis);
         e.nexthop = Nexthop::Uni(NexthopUni {
             addr: IpAddr::V6(addr),
-            ifindex,
+            ifindex_origin: Some(ifindex),
             ..Default::default()
         });
         e
@@ -315,17 +313,18 @@ mod tests {
         let mut e = RibEntry::new(RibType::Isis);
         e.nexthop = Nexthop::Uni(NexthopUni {
             addr: IpAddr::V4(addr),
-            ifindex,
+            ifindex_origin: Some(ifindex),
             ..Default::default()
         });
         e
     }
 
     #[test]
-    fn resolve_v6_through_isis_recursive_sets_ifindex() {
+    fn resolve_v6_through_isis_recursive_lands_in_resolved_field() {
         // The SRv6 first-segment scenario: GroupUni's address is covered by an
         // IS-IS-learned aggregate. rib_resolve_v6 returns Resolve::Recursive
-        // carrying the IS-IS route's ifindex; the Group must adopt it.
+        // carrying the IS-IS route's ifindex; the Group records it as the
+        // *resolved* ifindex (origin stays None).
         let mut table = PrefixMap::<Ipv6Net, RibEntries>::new();
         table.insert(
             Ipv6Net::from_str("fcbb:bbbb:2::/48").unwrap(),
@@ -333,17 +332,19 @@ mod tests {
         );
 
         let mut group = group_uni_at(IpAddr::V6("fcbb:bbbb:2:3:2::".parse().unwrap()));
-        assert_eq!(group.ifindex, 0);
+        assert_eq!(group.ifindex(), None);
         assert!(!group.is_valid());
 
         group.resolve_v6(&table);
 
-        assert_eq!(group.ifindex, 42);
+        assert_eq!(group.ifindex_origin, None);
+        assert_eq!(group.ifindex_resolved, Some(42));
+        assert_eq!(group.ifindex(), Some(42));
         assert!(group.is_valid());
     }
 
     #[test]
-    fn resolve_v6_onlink_sets_ifindex() {
+    fn resolve_v6_onlink_lands_in_resolved_field() {
         let mut table = PrefixMap::<Ipv6Net, RibEntries>::new();
         table.insert(
             Ipv6Net::from_str("2001:db8::/64").unwrap(),
@@ -353,7 +354,8 @@ mod tests {
         let mut group = group_uni_at(IpAddr::V6("2001:db8::1".parse().unwrap()));
         group.resolve_v6(&table);
 
-        assert_eq!(group.ifindex, 7);
+        assert_eq!(group.ifindex_resolved, Some(7));
+        assert_eq!(group.ifindex(), Some(7));
         assert!(group.is_valid());
     }
 
@@ -362,32 +364,32 @@ mod tests {
         let table = PrefixMap::<Ipv6Net, RibEntries>::new();
         let mut group = group_uni_at(IpAddr::V6("2001:db8::1".parse().unwrap()));
         group.resolve_v6(&table);
-        assert_eq!(group.ifindex, 0);
+        assert_eq!(group.ifindex(), None);
         assert!(!group.is_valid());
     }
 
     #[test]
-    fn group_uni_new_preserves_caller_ifindex_for_plain_unicast() {
-        // IGP protocols (IS-IS, OSPF) populate uni.ifindex from the
-        // adjacency state machine. GroupUni::new used to throw that
-        // away for non-seg6local nexthops, forcing a table-based
-        // re-resolve that picks the wrong link for fe80::/64. Pin
-        // the new behaviour: trust the caller.
+    fn group_uni_new_carries_origin_for_plain_unicast() {
+        // IGP protocols (IS-IS, OSPF) populate uni.ifindex_origin from
+        // the adjacency state machine. GroupUni::new must carry it
+        // straight through — discarding it would force a table re-
+        // resolve that picks the wrong link for fe80::/64.
         let uni = NexthopUni {
             addr: IpAddr::V6("fe80::1".parse().unwrap()),
-            ifindex: 42,
+            ifindex_origin: Some(42),
             ..Default::default()
         };
         let group = GroupUni::new(0, &uni);
-        assert_eq!(group.ifindex, 42);
+        assert_eq!(group.ifindex_origin, Some(42));
+        assert_eq!(group.ifindex_resolved, None);
+        assert_eq!(group.ifindex(), Some(42));
     }
 
     #[test]
-    fn resolve_v6_skips_table_walk_when_ifindex_pre_resolved() {
-        // Pre-set ifindex (from an IS-IS adjacency, say) must win
-        // over recursive table resolution. Otherwise multi-link
-        // fe80::/64 routes silently route the IGP nexthop out the
-        // wrong interface.
+    fn resolve_v6_does_not_overwrite_origin() {
+        // Origin (from an IS-IS adjacency) must win over recursive
+        // table resolution. Otherwise multi-link fe80::/64 routes
+        // silently route the IGP nexthop out the wrong interface.
         let mut table = PrefixMap::<Ipv6Net, RibEntries>::new();
         // Two connected fe80::/64 routes — the table walk would pick
         // ifindex 7 (whichever lands first in PrefixMap iteration).
@@ -398,16 +400,19 @@ mod tests {
 
         let uni = NexthopUni {
             addr: IpAddr::V6("fe80::21c:42ff:fee8:c23".parse().unwrap()),
-            ifindex: 99, // adjacency knows it's on link 99
+            ifindex_origin: Some(99), // adjacency knows it's on link 99
             ..Default::default()
         };
         let mut group = GroupUni::new(0, &uni);
-        assert_eq!(group.ifindex, 99);
+        assert_eq!(group.ifindex_origin, Some(99));
+        assert_eq!(group.ifindex_resolved, None);
 
         group.resolve_v6(&table);
 
-        // Table walk did NOT overwrite our 99.
-        assert_eq!(group.ifindex, 99);
+        // Resolved stays None — origin short-circuits the table walk.
+        assert_eq!(group.ifindex_origin, Some(99));
+        assert_eq!(group.ifindex_resolved, None);
+        assert_eq!(group.ifindex(), Some(99));
         assert!(group.is_valid());
     }
 
@@ -422,12 +427,12 @@ mod tests {
         let mut group = group_uni_at(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         group.resolve_v6(&table);
 
-        assert_eq!(group.ifindex, 0);
+        assert_eq!(group.ifindex(), None);
         assert!(!group.is_valid());
     }
 
     #[test]
-    fn resolve_v4_through_isis_recursive_sets_ifindex() {
+    fn resolve_v4_through_isis_recursive_lands_in_resolved_field() {
         let mut table = PrefixMap::<Ipv4Net, RibEntries>::new();
         table.insert(
             Ipv4Net::from_str("10.0.0.0/8").unwrap(),
@@ -437,12 +442,13 @@ mod tests {
         let mut group = group_uni_at(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)));
         group.resolve(&table);
 
-        assert_eq!(group.ifindex, 17);
+        assert_eq!(group.ifindex_resolved, Some(17));
+        assert_eq!(group.ifindex(), Some(17));
         assert!(group.is_valid());
     }
 
     #[test]
-    fn resolve_v4_onlink_sets_ifindex() {
+    fn resolve_v4_onlink_lands_in_resolved_field() {
         let mut table = PrefixMap::<Ipv4Net, RibEntries>::new();
         table.insert(
             Ipv4Net::from_str("192.168.0.0/24").unwrap(),
@@ -452,7 +458,8 @@ mod tests {
         let mut group = group_uni_at(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10)));
         group.resolve(&table);
 
-        assert_eq!(group.ifindex, 5);
+        assert_eq!(group.ifindex_resolved, Some(5));
+        assert_eq!(group.ifindex(), Some(5));
         assert!(group.is_valid());
     }
 
@@ -464,8 +471,30 @@ mod tests {
         let mut group = group_uni_at(IpAddr::V6("2001:db8::1".parse().unwrap()));
         group.resolve(&table);
 
-        assert_eq!(group.ifindex, 0);
+        assert_eq!(group.ifindex(), None);
         assert!(!group.is_valid());
+    }
+
+    #[test]
+    fn nexthopuni_ifindex_prefers_origin_over_resolved() {
+        let uni = NexthopUni {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            ifindex_origin: Some(42),
+            ifindex_resolved: Some(99),
+            ..Default::default()
+        };
+        assert_eq!(uni.ifindex(), Some(42));
+    }
+
+    #[test]
+    fn nexthopuni_ifindex_falls_back_to_resolved_when_origin_is_none() {
+        let uni = NexthopUni {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            ifindex_origin: None,
+            ifindex_resolved: Some(99),
+            ..Default::default()
+        };
+        assert_eq!(uni.ifindex(), Some(99));
     }
 
     #[test]
