@@ -396,12 +396,13 @@ impl Rib {
     }
 
     /// Resolve the device the kernel binds the seg6local action to,
-    /// per behavior:
-    ///   - End: sr0 dummy (table=main + kind=Unicast install)
-    ///   - everything else: loopback (table=local + kind=Local)
+    /// per behavior. End and uN are local-processing actions; both ride
+    /// on the sr0 dummy so the install can stay in table=main +
+    /// kind=Unicast. End.X and uA already run on the actual outgoing
+    /// interface and never hit this path.
     fn resolve_sid_ifindex(&self, behavior: SidBehavior) -> Option<u32> {
         match behavior {
-            SidBehavior::End => self
+            SidBehavior::End | SidBehavior::UN => self
                 .links
                 .values()
                 .find(|link| link.name == SR0_DUMMY_NAME)
