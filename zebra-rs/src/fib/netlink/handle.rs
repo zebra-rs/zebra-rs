@@ -44,14 +44,14 @@ use crate::rib::{
 };
 
 // Flip to true to re-enable IPv6 FIB install diagnostic prints.
-const DEBUG_V6: bool = false;
+const DEBUG_V6: bool = true;
 
 // Flip to true to log every SRv6 SID FIB install / uninstall — the
 // pre-send netlink attribute dump for the seg6local route, the
 // nexthop-skip notice, and the rib-side resolution trace. Errors from
 // the kernel are reported regardless. Mirrored by RIB via this same
 // constant (re-exported as `crate::fib::netlink::handle::DEBUG_SID`).
-pub const DEBUG_SID: bool = false;
+pub const DEBUG_SID: bool = true;
 
 /// Mask the lower (128 - prefix_len) bits of an IPv6 address. The
 /// kernel ignores bits past the prefix length on install, but masking
