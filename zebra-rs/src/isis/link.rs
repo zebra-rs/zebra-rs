@@ -486,6 +486,80 @@ impl Isis {
         }
     }
 
+    /// React to a kernel-side link-up event. Mirror the IFF_UP flag
+    /// on our own link record and, if IS-IS is configured on this
+    /// interface, kick the IFSM to re-arm hellos. Adjacencies form
+    /// from scratch via the normal hello / NFSM path; LSP
+    /// re-origination + SPF land naturally on each adjacency Up
+    /// transition.
+    pub fn link_state_up(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.flags |= LinkFlags::Up;
+        link.flags |= LinkFlags::LowerUp;
+        if link.config.enabled() {
+            let _ = self.tx.send(Message::Ifsm(IfsmEvent::Start, ifindex, None));
+        }
+    }
+
+    /// React to a kernel-side link-down event. Adjacencies on this
+    /// link can't continue — packets stop flowing the moment IFF_UP
+    /// drops — so tear them down immediately rather than ride out
+    /// the 30s hold timer. Then re-originate the self LSP without
+    /// the dropped peers and schedule SPF for both levels so the
+    /// route table reflects the new topology.
+    pub fn link_state_down(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.flags &= !LinkFlags::Up;
+        link.flags &= !LinkFlags::LowerUp;
+        let was_enabled = link.config.enabled();
+
+        // Tear down per-level adjacency state. Each Up neighbor
+        // gets its label / End.X SID returned to the pool the same
+        // way `nbr_hold_timer_expire` does — keep that path the one
+        // place that frees per-adjacency resources.
+        for level in [Level::L1, Level::L2] {
+            let nbr_ids: Vec<IsisSysId> =
+                link.state.nbrs.get(&level).keys().copied().collect();
+
+            for sys_id in nbr_ids {
+                if let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(&sys_id) {
+                    // Release SR-MPLS adjacency labels.
+                    if let Some(local_pool) = self.local_pool.as_mut() {
+                        for value in nbr.addr4.values_mut() {
+                            if let Some(label) = value.label.take() {
+                                local_pool.release(label as usize);
+                            }
+                        }
+                    }
+                    nbr.release_endx_sid(&mut self.elib, &self.rib_tx);
+                    nbr.state = crate::isis::nfsm::NfsmState::Down;
+                }
+            }
+
+            // Drop adjacency LAN-ID and the per-level CSNP timer.
+            *link.state.adj.get_mut(&level) = None;
+            *link.timer.csnp.get_mut(&level) = None;
+            self.lsdb.get_mut(&level).adj_clear(ifindex);
+        }
+
+        // Stop hello generation on this interface.
+        if was_enabled {
+            let _ = self.tx.send(Message::Ifsm(IfsmEvent::Stop, ifindex, None));
+        }
+
+        // Re-originate the self LSP at both levels (pseudonode peers
+        // dropped, fewer Ext IS Reach entries) and recompute SPF so
+        // the route table no longer shows paths via the down link.
+        let _ = self.tx.send(Message::LspOriginate(Level::L1));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2));
+        let _ = self.tx.send(Message::SpfCalc(Level::L1));
+        let _ = self.tx.send(Message::SpfCalc(Level::L2));
+    }
+
     pub fn addr_add(&mut self, addr: LinkAddr) {
         // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
