@@ -267,6 +267,12 @@ impl Isis {
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
+            RibRx::LinkUp(ifindex) => {
+                self.link_state_up(ifindex);
+            }
+            RibRx::LinkDown(ifindex) => {
+                self.link_state_down(ifindex);
+            }
             RibRx::AddrAdd(addr) => {
                 // isis_info!("Isis::AddrAdd {}", addr.addr);
                 self.addr_add(addr);
