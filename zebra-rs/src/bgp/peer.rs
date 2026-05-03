@@ -281,6 +281,11 @@ pub struct Peer {
     pub remote_id: Ipv4Addr,
     pub local_as: u32,
     pub peer_as: u32,
+    /// Local BGP speaker's hostname snapshot used to populate the FQDN
+    /// capability in OPEN. Set at peer creation from `Bgp::hostname()`
+    /// and refreshed by the global hostname callback so that re-opened
+    /// sessions advertise the latest value.
+    pub local_hostname: Option<String>,
     pub active: bool,
     pub peer_type: PeerType,
     pub state: State,
@@ -329,6 +334,7 @@ impl Peer {
         router_id: Ipv4Addr,
         peer_as: u32,
         address: IpAddr,
+        local_hostname: Option<String>,
         tx: mpsc::Sender<Message>,
     ) -> Self {
         let mut peer = Self {
@@ -336,6 +342,7 @@ impl Peer {
             router_id,
             local_as,
             peer_as,
+            local_hostname,
             address,
             active: false,
             peer_type: PeerType::IBGP,
@@ -877,6 +884,11 @@ pub fn peer_send_open(peer: &mut Peer) {
     }
     if peer.config.extended_message {
         bgp_cap.extended = Some(CapExtended::default());
+    }
+    if let Some(name) = &peer.local_hostname {
+        // FQDN capability (draft-walton, code 73). Domain name is left
+        // empty for now — operators have only asked for hostname.
+        bgp_cap.fqdn = Some(CapFqdn::new(name, ""));
     }
     for (key, addpath) in peer.config.addpath.iter() {
         bgp_cap.addpath.insert(*key, addpath.clone());
