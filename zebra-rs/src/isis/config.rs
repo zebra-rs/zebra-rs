@@ -68,8 +68,7 @@ impl Isis {
             "/routing/isis/segment-routing/srv6/locator",
             config_sr_srv6_locator,
         );
-        self.callback_add("/routing/isis/multi-topology", config_mt_enable);
-        self.callback_add("/routing/isis/multi-topology/topology", config_mt_topology);
+        self.callback_add("/routing/isis/multi-topology", config_mt);
         self.callback_add(
             "/routing/isis/interface/multi-topology/metric",
             link::config_mt_metric,
@@ -147,16 +146,16 @@ pub struct IsisConfig {
     /// as sr_mpls_block.
     pub sr_srv6_locator: Option<String>,
 
-    /// Set when /routing/isis/multi-topology is committed (the
-    /// presence-marked YANG container). Drives whether IS-IS
-    /// originates the MT TLV (229) and per-MT reach TLVs in
-    /// follow-up PRs.
+    /// True when `/routing/isis/multi-topology` carries an MT id.
+    /// Drives whether IS-IS originates TLV 229 and the per-MT reach
+    /// TLVs.
     pub mt_enabled: bool,
 
-    /// MT IDs the operator selected under
-    /// /routing/isis/multi-topology/topology. Empty when MT is on but
-    /// the operator hasn't named any topologies yet — that's a
-    /// no-op-friendly intermediate state during config staging.
+    /// The MT ids the operator turned on. Today the YANG only allows
+    /// `ipv6-unicast`, so this set is either `{}` (off) or
+    /// `{Ipv6Unicast}` (on); the BTreeSet shape is kept so adding
+    /// future MTs (multicast variants, geo-redundancy, ...) doesn't
+    /// reshape the runtime checks that read it.
     pub mt_topologies: BTreeSet<MtId>,
 }
 
@@ -328,29 +327,22 @@ fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
-// Set/cleared by the presence of the YANG container itself, like
-// segment-routing/srv6 above. Removing the container also drops every
-// configured topology; PR 2 will trigger LSP re-origination from here.
-fn config_mt_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+// Single-leaf callback. The YANG narrowed `multi-topology` from a
+// container-with-list to a single enum leaf because the only MT every
+// real-world IS-IS deployment turns on is MT 2 (IPv6 unicast); the
+// classic dual-flavour matrix never landed in any operator's running
+// config. Set with `ipv6-unicast` flips MT on for that topology;
+// delete clears both the flag and the set.
+fn config_mt(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     if op.is_set() {
+        let id_str = args.string()?;
+        let id = MtId::from_str(&id_str).ok()?;
         isis.config.mt_enabled = true;
+        isis.config.mt_topologies.clear();
+        isis.config.mt_topologies.insert(id);
     } else {
         isis.config.mt_enabled = false;
         isis.config.mt_topologies.clear();
-    }
-    Some(())
-}
-
-// Per-list-entry callback: the value is the MT id keyword. Add on set,
-// remove on delete. Unknown ids fall through to None — libyang's enum
-// validation should keep them out, but we don't trust the wire.
-fn config_mt_topology(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let id_str = args.string()?;
-    let id = MtId::from_str(&id_str).ok()?;
-    if op.is_set() {
-        isis.config.mt_topologies.insert(id);
-    } else {
-        isis.config.mt_topologies.remove(&id);
     }
     Some(())
 }
