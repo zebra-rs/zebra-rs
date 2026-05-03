@@ -70,6 +70,18 @@ pub struct Isis {
     pub lsp_map: Levels<LspMap>,
     pub reach_map: Levels<Afis<ReachMap>>,
     pub reach_map_v6: Levels<ReachMapV6>,
+
+    /// MT 2 (IPv6 unicast) IPv6 reach indexed per peer. Populated from
+    /// TLV 237 entries with mt=2. Kept separate from reach_map_v6 so
+    /// strict per-topology RIB build (PR 4b) can pull MT 2's view
+    /// without mixing it with legacy TLV 236 from non-MT peers.
+    pub mt2_reach_map_v6: Levels<ReachMapV6>,
+
+    /// Per-peer set of MT IDs the peer advertised in TLV 229. Empty
+    /// (or absent key) means the peer is single-topology / legacy.
+    /// Used by the per-MT graph builder (PR 4b) to filter peers and
+    /// by show callbacks to render the MT-aware view.
+    pub mt_membership: Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: Levels<IsisLabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
@@ -79,6 +91,12 @@ pub struct Isis {
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
+
+    /// MT 2 (IPv6 unicast) graph and SPF result. Computed alongside
+    /// the legacy graph when `mt_enabled` and MT 2 is in
+    /// `mt_topologies`. Drives the v6 RIB build in that case.
+    pub mt2_graph: Levels<Option<spf::Graph>>,
+    pub mt2_spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
 
     /// SR-update return channel from the RIB. Carries the current value of
     /// the watched block / locator and any subsequent updates.
@@ -116,6 +134,8 @@ pub struct IsisTop<'a> {
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub reach_map_v6: &'a mut Levels<ReachMapV6>,
+    pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
+    pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
@@ -125,6 +145,8 @@ pub struct IsisTop<'a> {
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
+    pub mt2_graph: &'a mut Levels<Option<spf::Graph>>,
+    pub mt2_spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
 
     /// Read-only access to the SR snapshot the IS-IS instance is caching
     /// from RIB::SrSubscribe. lsp_generate uses these to populate the SR
@@ -169,6 +191,8 @@ impl Isis {
             lsp_map: Levels::<LspMap>::default(),
             reach_map: Levels::<Afis<ReachMap>>::default(),
             reach_map_v6: Levels::<ReachMapV6>::default(),
+            mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
+            mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),
             label_map: Levels::<IsisLabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
@@ -178,6 +202,8 @@ impl Isis {
             local_pool: Some(LabelPool::new(15000, Some(16000))),
             graph: Levels::<Option<spf::Graph>>::default(),
             spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
+            mt2_graph: Levels::<Option<spf::Graph>>::default(),
+            mt2_spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
             sr_rx,
             watched_block: None,
             watched_locator: None,
@@ -495,6 +521,8 @@ impl Isis {
             lsp_map: &mut self.lsp_map,
             reach_map: &mut self.reach_map,
             reach_map_v6: &mut self.reach_map_v6,
+            mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
+            mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
@@ -504,6 +532,8 @@ impl Isis {
             spf_timer: &mut self.spf_timer,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
+            mt2_graph: &mut self.mt2_graph,
+            mt2_spf_result: &mut self.mt2_spf_result,
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
@@ -526,6 +556,8 @@ impl Isis {
             hostname: &mut self.hostname,
             reach_map: &mut self.reach_map,
             reach_map_v6: &mut self.reach_map_v6,
+            mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
+            mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
             spf_timer: &mut self.spf_timer,
             rib_tx: &self.rib_tx,
@@ -1432,6 +1464,10 @@ impl ReachMapV6 {
     ) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
         self.map.insert(key, value)
     }
+
+    pub fn remove(&mut self, key: &IsisSysId) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
+        self.map.remove(key)
+    }
 }
 
 #[derive(Default)]
@@ -1606,6 +1642,137 @@ fn collect_adjacency_sids(lsp: &IsisLsp, sids: &mut BTreeMap<u32, IsisSysId>) {
             }
         }
     }
+}
+
+/// Build the MT 2 (IPv6 unicast) SPF graph. Mirrors `graph()` but
+/// walks `IsisTlv::MtIsReach` entries with mt=2 and includes only
+/// peers whose TLV 229 named MT 2. Our own originated LSP is always
+/// included — local config gates whether this function is even
+/// called.
+pub fn graph_mt2(
+    top: &mut IsisTop,
+    level: Level,
+) -> (spf::Graph, Option<usize>, BTreeMap<u32, IsisSysId>) {
+    let mut graph = spf::Graph::new();
+    let mut source_node = None;
+    let adjacency_sids = BTreeMap::new(); // SR-MPLS adj SIDs are MT 0 only
+
+    let mut nodes_to_process = Vec::new();
+    for (_, lsa) in top.lsdb.get(&level).iter() {
+        if !lsa.lsp.lsp_id.is_pseudo() {
+            let sys_id = lsa.lsp.lsp_id.sys_id();
+            let is_originated = lsa.originated;
+            // Filter peers by MT 2 capability. Our own LSP (originated
+            // == true) is always included — we wouldn't be running
+            // graph_mt2 unless local config has MT 2 on.
+            if !is_originated {
+                let mt2_capable = top
+                    .mt_membership
+                    .get(&level)
+                    .get(&sys_id)
+                    .map(|set| set.contains(&MtId::Ipv6Unicast))
+                    .unwrap_or(false);
+                if !mt2_capable {
+                    continue;
+                }
+            }
+            let lsp = lsa.lsp.clone();
+            nodes_to_process.push((sys_id, is_originated, lsp));
+        }
+    }
+
+    for (sys_id, is_originated, lsp) in nodes_to_process {
+        let node_id = top.lsp_map.get_mut(&level).get(&sys_id);
+        if is_originated {
+            source_node = Some(node_id);
+        }
+        let node = create_graph_node_mt2(top, level, node_id, &sys_id, &lsp);
+        graph.insert(node_id, node);
+    }
+
+    (graph, source_node, adjacency_sids)
+}
+
+fn create_graph_node_mt2(
+    top: &mut IsisTop,
+    level: Level,
+    node_id: usize,
+    sys_id: &IsisSysId,
+    lsp: &IsisLsp,
+) -> spf::Node {
+    let node_name = top
+        .hostname
+        .get(&level)
+        .get(sys_id)
+        .map(|(hostname, _)| hostname.clone())
+        .unwrap_or_else(|| sys_id.to_string());
+
+    let mut node = spf::Node {
+        id: node_id,
+        name: node_name,
+        sys_id: sys_id.to_string(),
+        ..Default::default()
+    };
+
+    process_outgoing_links_mt2(top, level, node_id, sys_id, lsp, &mut node.olinks);
+
+    node
+}
+
+fn process_outgoing_links_mt2(
+    top: &mut IsisTop,
+    level: Level,
+    from_id: usize,
+    from_sys_id: &IsisSysId,
+    lsp: &IsisLsp,
+    links: &mut Vec<spf::Link>,
+) {
+    for tlv in &lsp.tlvs {
+        if let IsisTlv::MtIsReach(mt_reach) = tlv
+            && mt_reach.mt.id() == 2
+        {
+            for entry in &mt_reach.entries {
+                process_neighbor_link_mt2(top, level, from_id, from_sys_id, entry, links);
+            }
+        }
+    }
+}
+
+fn process_neighbor_link_mt2(
+    top: &mut IsisTop,
+    level: Level,
+    from_id: usize,
+    _from_sys_id: &IsisSysId,
+    entry: &IsisTlvExtIsReachEntry,
+    links: &mut Vec<spf::Link>,
+) {
+    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
+
+    if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
+        return;
+    }
+    if neighbor_lsp_id.is_pseudo() {
+        // Pseudonode handling for MT 2 would walk MtIsReach entries
+        // on the pseudo-LSP. Deferred — most deployments use P2P
+        // links for MT 2 and pseudonodes mainly hit on LAN segments.
+        return;
+    }
+    let to_sys_id = neighbor_lsp_id.sys_id();
+    let mt2_capable = top
+        .mt_membership
+        .get(&level)
+        .get(&to_sys_id)
+        .map(|set| set.contains(&MtId::Ipv6Unicast))
+        .unwrap_or(false);
+    if !mt2_capable {
+        return;
+    }
+    let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+    links.push(spf::Link {
+        from: from_id,
+        to: to_id,
+        cost: entry.metric,
+    });
 }
 
 #[derive(Debug, PartialEq)]
@@ -2068,30 +2235,39 @@ fn build_rib_from_spf(
     rib
 }
 
-// IPv6 mirror of build_rib_from_spf. Walks the same single-topology SPF tree;
-// nexthops come from the peer's link-local IPv6 advertised in IIH (TLV 232,
-// stored on Neighbor::addr6l). Reachable prefixes come from the per-LSP
-// IsisTlvIpv6Reach indexed in reach_map_v6.
+// IPv6 RIB builder. Walks the chosen SPF tree and joins each reached
+// node's IPv6 reach entries to a nexthop map keyed by the first-hop
+// neighbor's link-local IPv6 (Neighbor::addr6l).
 //
-// RFC 1195 §5: in single-topology mode, every transit node along the path to
-// an IPv6 destination must advertise IPv6 NLPID (0x8E) in its
-// Protocols-Supported TLV. Paths that traverse a non-IPv6-capable node are
-// dropped here so we don't black-hole traffic at a v4-only transit.
+// `mt2_mode` controls which inputs to consume:
+//   - false (legacy / single-topology): SPF over the legacy graph,
+//     prefixes from `top.reach_map_v6` (TLV 236), with strict NLPID
+//     gating per RFC 1195 §5 — every transit node must advertise the
+//     IPv6 NLPID or its Ipv6Reach is unreachable.
+//   - true (MT 2 / RFC 5120 §3.4): SPF over the MT 2 graph
+//     (already filtered to MT-2-capable peers at graph-build time),
+//     prefixes from `top.mt2_reach_map_v6` (TLV 237). NLPID gating
+//     is redundant here — TLV 229 with MT 2 is the stricter signal —
+//     so we skip it.
 //
-// Prefix-SID / SR plumbing for IPv6 is intentionally deferred — sid and
-// prefix_sid are left None for now and can be added when SRv6 IS-IS support
-// lands as a follow-up.
+// Prefix-SID / SR plumbing for IPv6 is intentionally deferred — sid
+// and prefix_sid are left None for now and can be added when SRv6
+// IS-IS support lands as a follow-up.
 fn build_rib_from_spf_v6(
     top: &mut IsisTop,
     level: Level,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
+    mt2_mode: bool,
 ) -> PrefixMap<Ipv6Net, SpfRouteV6> {
     let mut rib = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
 
-    // Precompute the set of SysIds whose LSP advertises IPv6 NLPID, used to
-    // gate every transit node on each candidate path.
-    let ipv6_capable = ipv6_capable_set(top.lsdb.get(&level));
+    // NLPID gate set — only used in legacy mode.
+    let ipv6_capable = if mt2_mode {
+        BTreeSet::new()
+    } else {
+        ipv6_capable_set(top.lsdb.get(&level))
+    };
 
     for (node, nhops) in spf_result {
         if *node == source {
@@ -2102,9 +2278,8 @@ fn build_rib_from_spf_v6(
             continue;
         };
 
-        // Strict NLPID gating per RFC 1195 §5: if the destination doesn't
-        // advertise IPv6, anything claimed via Ipv6Reach is unreachable.
-        if !ipv6_capable.contains(sys_id) {
+        // Strict NLPID gating per RFC 1195 §5 — only in legacy mode.
+        if !mt2_mode && !ipv6_capable.contains(sys_id) {
             continue;
         }
         // Capture SysId so later borrows of top.lsp_map don't conflict.
@@ -2118,13 +2293,16 @@ fn build_rib_from_spf_v6(
             if p.is_empty() {
                 continue;
             }
-            // Every node on the path (transit + destination) must advertise IPv6.
-            for &hop in p {
-                let Some(hop_sys_id) = top.lsp_map.get(&level).resolve(hop) else {
-                    continue 'next_path;
-                };
-                if !ipv6_capable.contains(hop_sys_id) {
-                    continue 'next_path;
+            // In legacy mode, every node on the path must advertise IPv6.
+            // In MT 2 mode the graph itself is pre-filtered, so we skip.
+            if !mt2_mode {
+                for &hop in p {
+                    let Some(hop_sys_id) = top.lsp_map.get(&level).resolve(hop) else {
+                        continue 'next_path;
+                    };
+                    if !ipv6_capable.contains(hop_sys_id) {
+                        continue 'next_path;
+                    }
                 }
             }
 
@@ -2152,7 +2330,12 @@ fn build_rib_from_spf_v6(
             continue;
         }
 
-        if let Some(entries) = top.reach_map_v6.get(&level).get(&dest_sys_id) {
+        let reach = if mt2_mode {
+            top.mt2_reach_map_v6.get(&level).get(&dest_sys_id)
+        } else {
+            top.reach_map_v6.get(&level).get(&dest_sys_id)
+        };
+        if let Some(entries) = reach {
             for entry in entries.iter() {
                 let route = SpfRouteV6 {
                     metric: nhops.cost + entry.metric,
@@ -2227,35 +2410,56 @@ fn apply_routing_updates(
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
 
-/// Perform SPF calculation and update routing tables
+/// Perform SPF calculation and update routing tables.
+///
+/// Always runs the legacy single-topology SPF (used for IPv4 RIB and
+/// the IPv6 RIB in non-MT mode). When MT 2 (IPv6 unicast) is locally
+/// enabled, additionally builds an MT 2 graph from TLV 222 entries
+/// (filtered to MT-2-capable peers via `mt_membership`) and uses
+/// that SPF + `mt2_reach_map_v6` for the IPv6 RIB instead of the
+/// legacy result. RFC 5120 §3.4 strict-MT semantics — peers that
+/// didn't advertise MT 2 don't appear in the IPv6 forwarding table.
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
-    // Clear SPF timer
     *top.spf_timer.get_mut(&level) = None;
 
-    // Build graph and get source node
+    // Legacy graph + SPF — drives IPv4 RIB and IPv6 in non-MT mode.
     let (graph, source_node, adjacency_sids) = graph(top, level);
     *top.graph.get_mut(&level) = Some(graph.clone());
-
-    // Build ILM table with adjacency labels
     let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);
 
     if let Some(source) = source_node {
-        // Run SPF in full-path mode so the IPv6 builder can apply RFC 1195 §5
-        // strict NLPID gating across every transit node, not just the first hop.
+        // Full-path mode so the legacy v6 builder can apply RFC 1195
+        // §5 strict NLPID gating across every transit node.
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
-
-        // Build IPv4 + IPv6 RIBs from the same SPF result (single-topology).
         let rib = build_rib_from_spf(top, level, source, &spf_result);
-        let rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result);
 
-        // Store SPF result in the instance.
-        // spf::disp(&spf_result, false);
+        let mt2_enabled =
+            top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
+
+        let rib_v6 = if mt2_enabled {
+            // Separate MT 2 graph + SPF, fed into the v6 RIB build via
+            // mt2_reach_map_v6 (TLV 237 entries).
+            let (mt2_graph, mt2_source, _) = graph_mt2(top, level);
+            *top.mt2_graph.get_mut(&level) = Some(mt2_graph.clone());
+            if let Some(mt2_src) = mt2_source {
+                let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
+                let rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
+                *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
+                rib_v6
+            } else {
+                *top.mt2_spf_result.get_mut(&level) = None;
+                PrefixMap::new()
+            }
+        } else {
+            // No MT 2: clear any stale MT 2 caches and use the legacy
+            // graph + reach_map_v6 for IPv6.
+            *top.mt2_graph.get_mut(&level) = None;
+            *top.mt2_spf_result.get_mut(&level) = None;
+            build_rib_from_spf_v6(top, level, source, &spf_result, false)
+        };
+
         *top.spf_result.get_mut(&level) = Some(spf_result);
-
-        // Add MPLS routes to ILM
         mpls_route(&rib, &mut ilm);
-
-        // Apply updates to RIB subsystem
         apply_routing_updates(top, level, rib, rib_v6, ilm);
     }
 }
