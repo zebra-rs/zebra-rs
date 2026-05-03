@@ -99,12 +99,17 @@ fn entry_nexthop_addr(entry: &RibEntry) -> Option<IpAddr> {
 // nexthop lookup. Connected and IGP routes are always trusted; static is
 // trusted up to the depth cap; BGP is excluded because BGP next-hops should
 // resolve over the underlay (IGP / connected), not over BGP itself, and
-// allowing it would risk recursive loops.
+// allowing it would risk recursive loops. The validity check skips entries
+// that are still in the table but no longer reachable — e.g. an IS-IS
+// route whose group went invalid because its egress link is down. Without
+// this filter a recursive static would resolve through the dead route and
+// look reachable when it isn't.
 fn entry_resolvable(entry: &RibEntry) -> bool {
-    matches!(
-        entry.rtype,
-        RibType::Connected | RibType::Static | RibType::Ospf | RibType::Isis
-    )
+    entry.is_valid()
+        && matches!(
+            entry.rtype,
+            RibType::Connected | RibType::Static | RibType::Ospf | RibType::Isis
+        )
 }
 
 pub fn rib_resolve(
