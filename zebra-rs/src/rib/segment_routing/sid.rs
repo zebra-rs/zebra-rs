@@ -10,6 +10,8 @@
 use std::fmt;
 use std::net::Ipv6Addr;
 
+use ipnet::Ipv6Net;
+
 /// SRv6 endpoint behavior for an allocated SID. RFC 8986 base set plus
 /// the RFC 9800 NEXT-C-SID (uSID) variants we install today; other
 /// behaviors (End.DT4, End.DT6, End.B6, ...) extend the enum.
@@ -152,6 +154,44 @@ pub struct Sid {
     /// Partitioning of the SID's bits. Required for `UN`/`UA`; ignored
     /// for classic `End`/`EndX` (left `None`).
     pub structure: Option<SidStructure>,
+}
+
+impl Sid {
+    /// IPv6 prefix the FIB / RIB indexes this SID under. End / End.X /
+    /// uA install at /128; uN is a *prefix* install (the locator's
+    /// LB+LN portion) so the NEXT-CSID flavor matches every function
+    /// value beneath it. Returns `Ipv6Net::new(addr, 128)` as a
+    /// degenerate-fallback for uN without a SidStructure — that
+    /// shouldn't happen in practice, but a /128 keeps the FIB and RIB
+    /// in lock-step instead of one tracking the locator and the
+    /// other tracking the host address.
+    pub fn prefix(&self) -> Ipv6Net {
+        match self.behavior {
+            SidBehavior::End | SidBehavior::EndX | SidBehavior::UA => {
+                Ipv6Net::new(self.addr, 128).expect("/128 is always valid")
+            }
+            SidBehavior::UN => {
+                let plen = self
+                    .structure
+                    .map(|s| s.lb_bits.saturating_add(s.ln_bits))
+                    .unwrap_or(128);
+                let masked = mask_v6(self.addr, plen);
+                Ipv6Net::new(masked, plen)
+                    .unwrap_or_else(|_| Ipv6Net::new(self.addr, 128).expect("/128 is always valid"))
+            }
+        }
+    }
+}
+
+/// Zero the lower (128 - prefix_len) bits of `addr`.
+fn mask_v6(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
+    if prefix_len >= 128 {
+        return addr;
+    }
+    let bits = u128::from(addr);
+    let shift = 128 - u32::from(prefix_len);
+    let mask = !0u128 << shift;
+    Ipv6Addr::from(bits & mask)
 }
 
 #[cfg(test)]

@@ -443,7 +443,144 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
     if !wrote_any_level {
         writeln!(buf, "(no SPF result yet)")?;
     }
+
+    write_local_sids(&mut buf, isis)?;
+
     Ok(buf)
+}
+
+/// Append a "Local SRv6 SIDs" section. Pulls the data from existing
+/// IS-IS state — the End/uN SID off `sr_end_sid` (paired with the
+/// locator for behavior + structure) and each per-adjacency End.X/uA
+/// SID off the link's neighbor table — so we don't keep a duplicate
+/// registry on `Isis`. Empty section is suppressed entirely.
+fn write_local_sids(buf: &mut String, isis: &Isis) -> std::fmt::Result {
+    use std::net::Ipv6Addr;
+    let mut rows: Vec<LocalSidRow> = Vec::new();
+
+    // End / uN — at most one entry, derived from the configured locator.
+    if let (Some(addr), Some(locator)) = (isis.sr_end_sid, isis.sr_locator.as_ref()) {
+        let (behavior, prefix_len) = match locator.behavior {
+            Some(crate::rib::LocatorBehavior::Usid) => {
+                let plen = locator
+                    .sid_structure()
+                    .map(|s| s.lb_bits.saturating_add(s.ln_bits))
+                    .unwrap_or(128);
+                ("uN", plen)
+            }
+            None => ("End", 128),
+        };
+        let masked = mask_v6(addr, prefix_len);
+        // End / uN SIDs install on the sr0 dummy in the FIB. IS-IS
+        // doesn't track that device directly, so look it up by name in
+        // the link table — falls back to the dummy's canonical name if
+        // the netlink listener hasn't surfaced it yet.
+        let iface = isis
+            .links
+            .values()
+            .find(|l| l.state.name == crate::rib::inst::SR0_DUMMY_NAME)
+            .map(|l| l.state.name.clone())
+            .unwrap_or_else(|| crate::rib::inst::SR0_DUMMY_NAME.to_string());
+        rows.push(LocalSidRow {
+            prefix: format!("{}/{}", masked, prefix_len),
+            interface: iface,
+            nexthop: "-".to_string(),
+            action: behavior.to_string(),
+            nh6: None,
+        });
+    }
+
+    // End.X / uA — one per Up adjacency that has carved a function.
+    for level in &[Level::L1, Level::L2] {
+        for (ifindex, link) in isis.links.iter() {
+            for (_sys_id, nbr) in link.state.nbrs.get(level).iter() {
+                let Some((_, addr)) = nbr.endx_sid else {
+                    continue;
+                };
+                let behavior = match isis.sr_locator.as_ref().and_then(|l| l.behavior.as_ref()) {
+                    Some(crate::rib::LocatorBehavior::Usid) => "uA",
+                    _ => "End.X",
+                };
+                rows.push(LocalSidRow {
+                    prefix: format!("{}/128", addr),
+                    interface: isis.ifname(*ifindex),
+                    nexthop: nbr
+                        .addr6l
+                        .first()
+                        .map(|a: &Ipv6Addr| a.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    action: behavior.to_string(),
+                    nh6: nbr.addr6l.first().copied(),
+                });
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    const W_PREFIX: usize = 22;
+    const W_INTERFACE: usize = 10;
+    const W_NEXTHOP: usize = 26;
+
+    writeln!(buf)?;
+    writeln!(buf, "Local SRv6 SIDs:")?;
+    writeln!(buf)?;
+    writeln!(
+        buf,
+        " {:<wp$} {:<wi$} {:<wn$} Action",
+        "Prefix",
+        "Interface",
+        "Nexthop",
+        wp = W_PREFIX,
+        wi = W_INTERFACE,
+        wn = W_NEXTHOP,
+    )?;
+    let total = 1 + W_PREFIX + 1 + W_INTERFACE + 1 + W_NEXTHOP + 1 + 6;
+    writeln!(buf, " {}", "-".repeat(total - 2))?;
+
+    for row in rows {
+        let action = if let Some(nh6) = row.nh6 {
+            format!("seg6local {} nh6 {}", row.action, nh6)
+        } else {
+            format!("seg6local {}", row.action)
+        };
+        writeln!(
+            buf,
+            " {:<wp$} {:<wi$} {:<wn$} {}",
+            row.prefix,
+            row.interface,
+            row.nexthop,
+            action,
+            wp = W_PREFIX,
+            wi = W_INTERFACE,
+            wn = W_NEXTHOP,
+        )?;
+    }
+
+    Ok(())
+}
+
+struct LocalSidRow {
+    prefix: String,
+    interface: String,
+    nexthop: String,
+    action: String,
+    nh6: Option<std::net::Ipv6Addr>,
+}
+
+/// Zero the lower (128 - prefix_len) bits of an IPv6 address. Mirrors
+/// the helper in `rib::segment_routing::sid` so this section stays
+/// readable without pulling that helper into the public surface.
+fn mask_v6(addr: std::net::Ipv6Addr, prefix_len: u8) -> std::net::Ipv6Addr {
+    if prefix_len >= 128 {
+        return addr;
+    }
+    let bits = u128::from(addr);
+    let shift = 128 - u32::from(prefix_len);
+    let mask = !0u128 << shift;
+    std::net::Ipv6Addr::from(bits & mask)
 }
 
 /// True when local config has MT 2 (IPv6 unicast) enabled. The IPv6
