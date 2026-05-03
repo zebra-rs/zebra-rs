@@ -6,9 +6,9 @@ use std::net::Ipv6Addr;
 use anyhow::{Result, bail};
 use isis_packet::srv6::EncapType;
 use netlink_packet_route::route::{
-    Ipv6SrHdr, RouteAttribute, RouteLwEnCapType, RouteLwTunnelEncap, RouteSeg6IpTunnel,
-    RouteSeg6LocalIpTunnel, Seg6IpTunnelEncap, Seg6IpTunnelMode, Seg6LocalAction,
-    Seg6LocalFlavorOps, Seg6LocalFlavors, VecIpv6SrHdr,
+    Ipv6SrHdr, RouteAttribute, RouteHeader, RouteLwEnCapType, RouteLwTunnelEncap,
+    RouteSeg6IpTunnel, RouteSeg6LocalIpTunnel, Seg6IpTunnelEncap, Seg6IpTunnelMode,
+    Seg6LocalAction, Seg6LocalFlavorOps, Seg6LocalFlavors, VecIpv6SrHdr,
 };
 
 use crate::rib::{SidBehavior, SidStructure};
@@ -121,9 +121,13 @@ fn build_seg6local_flavors(
 // Build the inner Vec<RouteLwTunnelEncap> for a seg6local install.
 //
 // End / uN needs only the Action attribute (uN additionally carries a
-// Flavors block). End.X / uA also nests Nh6 (the IPv6 nexthop). The
-// kernel's required oif rides on the outer route / nexthop message
-// rather than inside the encap, so we don't add it here.
+// Flavors block). End.X / uA also nests Nh6 (the IPv6 nexthop).
+// End.DT4 / End.DT6 nest a VrfTable id — the kernel rejects the
+// install with EINVAL otherwise. We default to RT_TABLE_MAIN since
+// zebra-rs doesn't model VRFs yet; once it does, the operator-set
+// table id flows through here. The kernel's required oif rides on
+// the outer route / nexthop message rather than inside the encap,
+// so we don't add it here.
 //
 // Returns None when the operator hasn't supplied the data End.X / uA
 // needs (no IPv6 nexthop) — caller treats that as "skip FIB install
@@ -139,6 +143,11 @@ fn build_seg6local_lwtunnel(
     if matches!(behavior, SidBehavior::EndX | SidBehavior::UA) {
         let nh = nh6?;
         attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
+    }
+    if matches!(behavior, SidBehavior::EndDT4 | SidBehavior::EndDT6) {
+        attrs.push(RouteSeg6LocalIpTunnel::VrfTable(
+            RouteHeader::RT_TABLE_MAIN as u32,
+        ));
     }
     if let Some(flavors) = build_seg6local_flavors(behavior, structure) {
         attrs.push(flavors);
