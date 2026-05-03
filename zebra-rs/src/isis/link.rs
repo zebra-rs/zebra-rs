@@ -506,9 +506,12 @@ impl Isis {
     /// React to a kernel-side link-down event. Adjacencies on this
     /// link can't continue — packets stop flowing the moment IFF_UP
     /// drops — so tear them down immediately rather than ride out
-    /// the 30s hold timer. Then re-originate the self LSP without
-    /// the dropped peers and schedule SPF for both levels so the
-    /// route table reflects the new topology.
+    /// the 30s hold timer. Drop every neighbor entry so when the
+    /// link comes back up, IFSM starts on a blank slate and NFSM
+    /// transitions through Init / Up via fresh hellos. Then
+    /// re-originate the self LSP without the dropped peers and
+    /// schedule SPF for both levels so the route table reflects the
+    /// new topology.
     pub fn link_state_down(&mut self, ifindex: u32) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
@@ -517,10 +520,15 @@ impl Isis {
         link.flags &= !LinkFlags::LowerUp;
         let was_enabled = link.config.enabled();
 
-        // Tear down per-level adjacency state. Each Up neighbor
-        // gets its label / End.X SID returned to the pool the same
-        // way `nbr_hold_timer_expire` does — keep that path the one
-        // place that frees per-adjacency resources.
+        // Tear down per-level adjacency state. Each neighbor returns
+        // its SR-MPLS label / End.X SID to the pool the same way
+        // `nbr_hold_timer_expire` does — keep that path the one
+        // place that frees per-adjacency resources — and the
+        // neighbor entry itself is dropped so the next hello
+        // creates a fresh one. Otherwise stale `addr4` /
+        // `hold_timer` / `endx_sid` values would survive the link
+        // bounce and the NFSM would re-enter from a half-populated
+        // record.
         for level in [Level::L1, Level::L2] {
             let nbr_ids: Vec<IsisSysId> = link.state.nbrs.get(&level).keys().copied().collect();
 
@@ -535,11 +543,16 @@ impl Isis {
                         }
                     }
                     nbr.release_endx_sid(&mut self.elib, &self.rib_tx);
-                    nbr.state = crate::isis::nfsm::NfsmState::Down;
                 }
+                // Drop the entry. The hold-timer JoinHandle goes
+                // with it; tokio cancels the underlying task on
+                // drop.
+                link.state.nbrs.get_mut(&level).remove(&sys_id);
             }
 
-            // Drop adjacency LAN-ID and the per-level CSNP timer.
+            // Reset per-level Up-neighbor counter and adjacency
+            // bookkeeping.
+            *link.state.nbrs_up.get_mut(&level) = 0;
             *link.state.adj.get_mut(&level) = None;
             *link.timer.csnp.get_mut(&level) = None;
             self.lsdb.get_mut(&level).adj_clear(ifindex);
