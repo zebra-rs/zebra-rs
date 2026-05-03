@@ -69,15 +69,19 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
         return;
     };
 
+    let was_up = nbr.state == NfsmState::Up;
+    let ifindex = nbr.ifindex;
+
     // Originate Hello and LSP.
     if is_p2p {
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        nbr.event(Message::Ifsm(HelloOriginate, ifindex, Some(level)));
         nbr.event(Message::LspOriginate(level));
     } else {
-        // DIS election.
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        if nbr.state == NfsmState::Up {
-            nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+        // DIS election. Run before we drop the entry so the snapshot
+        // it operates on still has this neighbor.
+        nbr.event(Message::Ifsm(HelloOriginate, ifindex, Some(level)));
+        if was_up {
+            nbr.event(Message::Ifsm(DisSelection, ifindex, Some(level)));
         }
     }
 
@@ -95,8 +99,21 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
     // and the registry drops the row before the show table runs again.
     nbr.release_endx_sid(link.elib, link.rib_tx);
 
-    // Neighbor state to be down.
-    nbr.state = NfsmState::Down;
+    // Drop the neighbor entry. Keeping it around with NfsmState::Down
+    // (the previous behaviour) carried stale `addr4` (whose labels we
+    // just released and zeroed), the consumed `endx_sid` slot, and a
+    // newly-armed `hold_timer` from any in-flight hello that still
+    // looked up this entry. When the peer's interface bounces and
+    // hellos resume, `nbr_hello_interpret` would find the lingering
+    // record, retain the existing addr entries with `label=None`
+    // forever (no LSP adj-SID re-emission), and re-enter NFSM from
+    // a half-populated state. Drop the row so the next hello starts
+    // from scratch.
+    link.state.nbrs.get_mut(&level).remove(&sys_id);
+    if was_up {
+        let counter = link.state.nbrs_up.get_mut(&level);
+        *counter = counter.saturating_sub(1);
+    }
 
     spf_schedule(link, level);
 }
