@@ -130,6 +130,9 @@ pub struct LinkTop<'a> {
     pub hostname: &'a mut Levels<Hostname>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub reach_map_v6: &'a mut Levels<ReachMapV6>,
+    pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
+    pub mt_membership:
+        &'a mut Levels<std::collections::BTreeMap<IsisSysId, std::collections::BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
 
