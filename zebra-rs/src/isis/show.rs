@@ -316,12 +316,45 @@ fn show_isis_topology(
         // IPv4 SPF tree.
         writeln!(buf)?;
         writeln!(buf, "IS-IS paths to {} routers that speak IP", level_long)?;
-        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
+        write_spf_tree(
+            &mut buf,
+            isis,
+            level,
+            &local_sys_id,
+            spf_result,
+            false,
+            false,
+        )?;
 
-        // IPv6 SPF tree (NLPID-gated, RFC 1195 §5).
+        // IPv6 SPF tree. When MT 2 is enabled, render from the MT 2
+        // SPF result (matches what's actually installed in the v6
+        // RIB); otherwise the legacy NLPID-gated single-topology
+        // tree.
+        let mt2 = mt2_v6_active(isis);
         writeln!(buf)?;
-        writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
-        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, true)?;
+        if mt2 {
+            writeln!(
+                buf,
+                "IS-IS paths to {} routers in MT 2 (IPv6 unicast)",
+                level_long
+            )?;
+            if let Some(mt2_spf) = isis.mt2_spf_result.get(level).as_ref() {
+                write_spf_tree(&mut buf, isis, level, &local_sys_id, mt2_spf, true, true)?;
+            } else {
+                writeln!(buf, "  (MT 2 SPF not computed yet)")?;
+            }
+        } else {
+            writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
+            write_spf_tree(
+                &mut buf,
+                isis,
+                level,
+                &local_sys_id,
+                spf_result,
+                true,
+                false,
+            )?;
+        }
     }
 
     if !wrote_any_level {
@@ -357,7 +390,15 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
         // IPv4 SPF tree
         writeln!(buf)?;
         writeln!(buf, "IS-IS paths to {} routers that speak IP", level_long)?;
-        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
+        write_spf_tree(
+            &mut buf,
+            isis,
+            level,
+            &local_sys_id,
+            spf_result,
+            false,
+            false,
+        )?;
 
         // IPv4 RIB
         writeln!(buf)?;
@@ -365,10 +406,32 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
         writeln!(buf)?;
         write_rib_v4(&mut buf, isis, level)?;
 
-        // IPv6 SPF tree (only IPv6-capable nodes)
+        // IPv6 SPF tree. MT 2 enabled → MT 2 SPF; legacy otherwise.
+        let mt2 = mt2_v6_active(isis);
         writeln!(buf)?;
-        writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
-        write_spf_tree(&mut buf, isis, level, &local_sys_id, spf_result, true)?;
+        if mt2 {
+            writeln!(
+                buf,
+                "IS-IS paths to {} routers in MT 2 (IPv6 unicast)",
+                level_long
+            )?;
+            if let Some(mt2_spf) = isis.mt2_spf_result.get(level).as_ref() {
+                write_spf_tree(&mut buf, isis, level, &local_sys_id, mt2_spf, true, true)?;
+            } else {
+                writeln!(buf, "  (MT 2 SPF not computed yet)")?;
+            }
+        } else {
+            writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
+            write_spf_tree(
+                &mut buf,
+                isis,
+                level,
+                &local_sys_id,
+                spf_result,
+                true,
+                false,
+            )?;
+        }
 
         // IPv6 RIB
         writeln!(buf)?;
@@ -381,6 +444,15 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
         writeln!(buf, "(no SPF result yet)")?;
     }
     Ok(buf)
+}
+
+/// True when local config has MT 2 (IPv6 unicast) enabled. The IPv6
+/// section of the topology / route show output should pull from the
+/// MT 2 SPF + reach caches in this case so the rendered tree matches
+/// what build_rib_from_spf_v6 actually installed.
+fn mt2_v6_active(isis: &Isis) -> bool {
+    use crate::isis::config::MtId;
+    isis.config.mt_enabled && isis.config.mt_topologies.contains(&MtId::Ipv6Unicast)
 }
 
 fn format_area_id(net: &Nsap) -> String {
@@ -437,6 +509,7 @@ fn write_spf_tree(
     local_sys_id: &IsisSysId,
     spf_result: &std::collections::BTreeMap<usize, spf::Path>,
     ipv6: bool,
+    mt2_mode: bool,
 ) -> std::fmt::Result {
     // Column widths chosen to fit the typical reference output.
     const W_VERTEX: usize = 22;
@@ -462,9 +535,12 @@ fn write_spf_tree(
     let total = 1 + W_VERTEX + 1 + W_TYPE + 1 + W_METRIC + 1 + W_NEXTHOP + 1 + W_INTERFACE + 1 + 8;
     writeln!(buf, " {}", "-".repeat(total - 2))?;
 
-    // For IPv6 trees, gate by NLPID-capable set per RFC 1195 §5 — same logic
-    // as build_rib_from_spf_v6 so the tree mirrors what's actually installed.
-    let ipv6_capable = if ipv6 {
+    // For IPv6 trees in legacy single-topology mode, gate by NLPID-
+    // capable set per RFC 1195 §5 so the tree mirrors what
+    // build_rib_from_spf_v6 installs. In MT 2 mode the SPF graph is
+    // already filtered to MT-2-capable peers (TLV 229 is the
+    // stricter signal), so the NLPID gate is redundant — skip it.
+    let ipv6_capable = if ipv6 && !mt2_mode {
         Some(ipv6_capable_set_show(isis, level))
     } else {
         None
@@ -572,7 +648,13 @@ fn write_spf_tree(
                     )?;
                 }
             }
-        } else if let Some(entries) = isis.reach_map_v6.get(level).get(&node_sys_id) {
+        } else if let Some(entries) = (if mt2_mode {
+            isis.mt2_reach_map_v6.get(level)
+        } else {
+            isis.reach_map_v6.get(level)
+        })
+        .get(&node_sys_id)
+        {
             for entry in entries.iter() {
                 let total_metric = path.cost + entry.metric;
                 let (nh, iface) = if is_self {
