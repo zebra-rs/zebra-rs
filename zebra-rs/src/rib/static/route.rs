@@ -8,7 +8,7 @@ use isis_packet::srv6::EncapType;
 
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::{Label, NexthopUni};
-use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType};
+use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType, SidBehavior};
 
 use super::config::StaticFamily;
 
@@ -25,6 +25,12 @@ pub struct StaticRoute<F: StaticFamily> {
     pub nexthops: BTreeMap<F::Addr, StaticNexthop>,
     pub segs: Vec<Ipv6Addr>,
     pub encap_type: Option<EncapType>,
+    /// SRv6 terminal action (`seg6local`) bound to this prefix —
+    /// e.g. End.DT6 for an inner-IPv6 decap-and-lookup. Mutually
+    /// exclusive with `segs`/`nexthops`; when set, `to_entry`
+    /// produces a Uni nexthop that the FIB installs as a kernel
+    /// `seg6local` route on the sr0 dummy.
+    pub seg6local_action: Option<SidBehavior>,
     pub delete: bool,
 }
 
@@ -36,6 +42,7 @@ impl<F: StaticFamily> Default for StaticRoute<F> {
             nexthops: BTreeMap::new(),
             segs: Vec::new(),
             encap_type: None,
+            seg6local_action: None,
             delete: false,
         }
     }
@@ -49,6 +56,7 @@ impl<F: StaticFamily> Clone for StaticRoute<F> {
             nexthops: self.nexthops.clone(),
             segs: self.segs.clone(),
             encap_type: self.encap_type,
+            seg6local_action: self.seg6local_action,
             delete: self.delete,
         }
     }
@@ -65,6 +73,7 @@ where
             .field("nexthops", &self.nexthops)
             .field("segs", &self.segs)
             .field("encap_type", &self.encap_type)
+            .field("seg6local_action", &self.seg6local_action)
             .field("delete", &self.delete)
             .finish()
     }
@@ -72,7 +81,7 @@ where
 
 impl<F: StaticFamily> StaticRoute<F> {
     pub fn to_entry(&self) -> Option<RibEntry> {
-        if self.nexthops.is_empty() && self.segs.is_empty() {
+        if self.nexthops.is_empty() && self.segs.is_empty() && self.seg6local_action.is_none() {
             return None;
         }
 
@@ -80,6 +89,33 @@ impl<F: StaticFamily> StaticRoute<F> {
         entry.distance = self.distance.unwrap_or(1);
 
         let metric = self.metric.unwrap_or(0);
+
+        if let Some(action) = self.seg6local_action {
+            // Terminal seg6local action (End.DT6 etc.). The address
+            // doesn't matter for End/uN/EndDT4/EndDT6 — the action
+            // doesn't forward, it just decaps + looks up. End.X /
+            // uA also need a per-adjacency nh6, which the YANG
+            // doesn't model yet; the YANG enum description warns
+            // operators away from those for now.
+            //
+            // ifindex_origin is left None here; the RIB sets it to
+            // the sr0 dummy in `Rib::ipv6_route_add` once the
+            // request lands on the RIB-side processor (which has
+            // access to the link table). Doing it here would need
+            // a separate shared-state reference into the static
+            // commit pipeline, which isn't worth it for a one-line
+            // fill-in.
+            let nhop = NexthopUni {
+                addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                metric,
+                weight: 1,
+                seg6local_action: Some(action),
+                ..Default::default()
+            };
+            entry.nexthop = Nexthop::Uni(nhop);
+            entry.metric = metric;
+            return Some(entry);
+        }
 
         if !self.segs.is_empty() {
             // SRv6 H.Encap (RFC 8986 §5.1): outer destination is the first
@@ -331,5 +367,36 @@ mod tests {
         let uni = as_uni(&entry);
         assert_eq!(uni.addr, IpAddr::V6(seg("fd00:c::")));
         assert!(!uni.segs.is_empty());
+    }
+
+    #[test]
+    fn seg6local_action_alone_produces_entry() {
+        // No nexthops, no segs — just an action. Must still build a
+        // RibEntry (the FIB will install a kernel seg6local route).
+        let r = StaticRoute::<V4> {
+            seg6local_action: Some(SidBehavior::EndDT6),
+            ..Default::default()
+        };
+        let entry = r.to_entry().expect("entry built");
+        let uni = as_uni(&entry);
+        assert_eq!(uni.seg6local_action, Some(SidBehavior::EndDT6));
+        assert_eq!(uni.addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert!(uni.segs.is_empty());
+        assert_eq!(uni.ifindex_origin, None); // RIB fills sr0 in ipv6_route_add
+    }
+
+    #[test]
+    fn seg6local_action_takes_priority_over_segs() {
+        // If both action and segs are configured, action wins —
+        // they're alternative encap models on the same prefix.
+        let r = StaticRoute::<V4> {
+            seg6local_action: Some(SidBehavior::EndDT6),
+            segs: vec![seg("fd00:c::")],
+            ..Default::default()
+        };
+        let entry = r.to_entry().expect("entry built");
+        let uni = as_uni(&entry);
+        assert_eq!(uni.seg6local_action, Some(SidBehavior::EndDT6));
+        assert!(uni.segs.is_empty());
     }
 }

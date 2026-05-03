@@ -9,6 +9,7 @@
 
 use std::fmt;
 use std::net::Ipv6Addr;
+use std::str::FromStr;
 
 use ipnet::Ipv6Net;
 
@@ -38,6 +39,14 @@ pub enum SidBehavior {
     /// forwarding as End.X with the additional uSID shift; carries a
     /// [`SidStructure`].
     UA,
+    /// End.DT4 — RFC 8986 §4.6. Decapsulates and looks up the inner
+    /// IPv4 packet in a configured table. Today only operator-
+    /// configured static routes use it; the table-id arg isn't
+    /// modeled yet (always uses the route's table at install time).
+    EndDT4,
+    /// End.DT6 — RFC 8986 §4.7. Decapsulates and looks up the inner
+    /// IPv6 packet in a configured table. Same caveat as End.DT4.
+    EndDT6,
 }
 
 impl fmt::Display for SidBehavior {
@@ -47,9 +56,41 @@ impl fmt::Display for SidBehavior {
             Self::EndX => write!(f, "End.X"),
             Self::UN => write!(f, "uN"),
             Self::UA => write!(f, "uA"),
+            Self::EndDT4 => write!(f, "End.DT4"),
+            Self::EndDT6 => write!(f, "End.DT6"),
         }
     }
 }
+
+impl FromStr for SidBehavior {
+    type Err = SidBehaviorParseError;
+
+    /// Accept the canonical `Display` strings used in the YANG enum.
+    /// Case-sensitive — keep operator config matching the spec
+    /// spelling rather than papering over typos.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "End" => Ok(Self::End),
+            "End.X" => Ok(Self::EndX),
+            "uN" => Ok(Self::UN),
+            "uA" => Ok(Self::UA),
+            "End.DT4" => Ok(Self::EndDT4),
+            "End.DT6" => Ok(Self::EndDT6),
+            other => Err(SidBehaviorParseError(other.to_string())),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SidBehaviorParseError(pub String);
+
+impl fmt::Display for SidBehaviorParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown SRv6 endpoint behavior: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for SidBehaviorParseError {}
 
 /// SRv6 SID Structure (RFC 9352 §9): how the 128-bit SID is partitioned
 /// into Locator-Block / Locator-Node / Function / Argument bits.
@@ -167,9 +208,11 @@ impl Sid {
     /// other tracking the host address.
     pub fn prefix(&self) -> Ipv6Net {
         match self.behavior {
-            SidBehavior::End | SidBehavior::EndX | SidBehavior::UA => {
-                Ipv6Net::new(self.addr, 128).expect("/128 is always valid")
-            }
+            SidBehavior::End
+            | SidBehavior::EndX
+            | SidBehavior::UA
+            | SidBehavior::EndDT4
+            | SidBehavior::EndDT6 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UN => {
                 let plen = self
                     .structure
@@ -202,6 +245,32 @@ mod tests {
     fn behavior_render_matches_show_table() {
         assert_eq!(SidBehavior::End.to_string(), "End");
         assert_eq!(SidBehavior::EndX.to_string(), "End.X");
+        assert_eq!(SidBehavior::EndDT4.to_string(), "End.DT4");
+        assert_eq!(SidBehavior::EndDT6.to_string(), "End.DT6");
+    }
+
+    #[test]
+    fn behavior_round_trips_from_str() {
+        // The static route YANG enum and the Display strings must stay
+        // in sync — every value the YANG accepts must parse back.
+        for variant in [
+            SidBehavior::End,
+            SidBehavior::EndX,
+            SidBehavior::UN,
+            SidBehavior::UA,
+            SidBehavior::EndDT4,
+            SidBehavior::EndDT6,
+        ] {
+            let s = variant.to_string();
+            let parsed: SidBehavior = s.parse().expect("round-trip");
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn behavior_unknown_string_is_error() {
+        assert!("End.DT1".parse::<SidBehavior>().is_err());
+        assert!("end".parse::<SidBehavior>().is_err()); // case-sensitive
     }
 
     #[test]

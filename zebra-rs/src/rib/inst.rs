@@ -399,20 +399,30 @@ impl Rib {
     }
 
     /// Resolve the device the kernel binds the seg6local action to,
-    /// per behavior. End and uN are local-processing actions; both ride
-    /// on the sr0 dummy so the install can stay in table=main +
-    /// kind=Unicast. End.X and uA already run on the actual outgoing
-    /// interface and never hit this path.
-    fn resolve_sid_ifindex(&self, behavior: SidBehavior) -> Option<u32> {
+    /// per behavior. End / uN / End.DT4 / End.DT6 are local-processing
+    /// actions; all four ride on the sr0 dummy so the install can stay
+    /// in table=main + kind=Unicast. End.X / uA already run on the
+    /// actual outgoing interface and never hit this path.
+    pub fn resolve_sid_ifindex(&self, behavior: SidBehavior) -> Option<u32> {
         match behavior {
-            SidBehavior::End | SidBehavior::UN => self
-                .links
-                .values()
-                .find(|link| link.name == SR0_DUMMY_NAME)
-                .map(|link| link.index)
-                .or_else(|| self.resolve_lo_ifindex()),
+            SidBehavior::End | SidBehavior::UN | SidBehavior::EndDT4 | SidBehavior::EndDT6 => {
+                self.resolve_sr0_ifindex()
+            }
             _ => self.resolve_lo_ifindex(),
         }
+    }
+
+    /// Look up the sr0 dummy by name, falling back to lo when sr0 isn't
+    /// in the link table yet (early startup). Pulled out of
+    /// `resolve_sid_ifindex` so the message handlers can reach it
+    /// directly when filling in `ifindex_origin` for static
+    /// seg6local routes.
+    fn resolve_sr0_ifindex(&self) -> Option<u32> {
+        self.links
+            .values()
+            .find(|link| link.name == SR0_DUMMY_NAME)
+            .map(|link| link.index)
+            .or_else(|| self.resolve_lo_ifindex())
     }
 
     /// Make sure the sr0 dummy interface exists and is up. Called once
