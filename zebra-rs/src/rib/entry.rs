@@ -2,6 +2,7 @@
 // Copyright 2025-2026 Kunihiro Ishiguro
 
 use std::cmp::Ordering;
+use std::time::Instant;
 
 use crate::fib::FibHandle;
 
@@ -23,6 +24,15 @@ pub struct RibEntry {
 
     // Connected RIB's ifindex.
     pub ifindex: u32,
+
+    /// Wall-clock-ish stamp of when this entry was first created in
+    /// the RIB. Used by the show callback to render the "uptime"
+    /// column (`02:41:03` / `2d18h29m`). Replacing the entry resets
+    /// it; in-place mutation does not. `Instant` is monotonic, so we
+    /// don't claim it survives suspend/resume — that's an acceptable
+    /// approximation for operator-facing route ages.
+    #[serde(skip)]
+    pub time: Instant,
 }
 
 impl RibEntry {
@@ -37,6 +47,7 @@ impl RibEntry {
             metric: 0,
             nexthop: Nexthop::default(),
             ifindex: 0,
+            time: Instant::now(),
         }
     }
 
