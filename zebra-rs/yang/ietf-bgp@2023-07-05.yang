@@ -310,6 +310,15 @@ module ietf-bgp {
           reference
             "RFC 6286: AS-Wide Unique BGP ID for BGP-4. Section 2.1";
         }
+        leaf hostname {
+          type string;
+          description
+            "Hostname of the local BGP speaker. Advertised to peers
+             via the FQDN capability (draft-walton-bgp-hostname-
+             capability-02, capability code 73). When unset, the OS
+             hostname is used; when neither is available the
+             capability is not sent.";
+        }
         container distance {
           description
             "Administrative distances (or preferences) assigned to
