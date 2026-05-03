@@ -117,5 +117,14 @@ module configure {
         }
       }
     }
+    container isis {
+      // Force-recalculate the IS-IS SPF for both L1 and L2 instead
+      // of waiting for the next LSDB update or the debounce timer.
+      // Useful when manual diagnosis suspects a stuck route after
+      // an LSDB-side fix.
+      leaf spf {
+        type empty;
+      }
+    }
   }
 }
