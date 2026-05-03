@@ -99,14 +99,16 @@ fn build_seg6local_flavors(
         return None;
     }
     let s = structure?;
-    // Nflen is the combined locator-node + function width — the
-    // "uSID position" the kernel pops on each hop. Lblen is the
-    // shared block portion that stays put.
-    let nflen = s.ln_bits.saturating_add(s.fun_bits);
+    // Nflen is the *node* portion of a uSID — the bits the kernel
+    // shifts on each hop to expose the next uSID identifier. The
+    // function bits belong to the uSID that's being consumed (they
+    // pick the action), not to the next one's position, so they don't
+    // count toward the shift width. Lblen is the shared block portion
+    // that stays put.
     Some(RouteSeg6LocalIpTunnel::Flavors(vec![
         Seg6LocalFlavors::Operation(Seg6LocalFlavorOps::NextCsid),
         Seg6LocalFlavors::Lblen(s.lb_bits),
-        Seg6LocalFlavors::Nflen(nflen),
+        Seg6LocalFlavors::Nflen(s.ln_bits),
     ]))
 }
 
