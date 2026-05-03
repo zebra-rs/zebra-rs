@@ -122,12 +122,15 @@ fn build_seg6local_flavors(
 //
 // End / uN needs only the Action attribute (uN additionally carries a
 // Flavors block). End.X / uA also nests Nh6 (the IPv6 nexthop).
-// End.DT4 / End.DT6 nest a VrfTable id — the kernel rejects the
-// install with EINVAL otherwise. We default to RT_TABLE_MAIN since
-// zebra-rs doesn't model VRFs yet; once it does, the operator-set
-// table id flows through here. The kernel's required oif rides on
-// the outer route / nexthop message rather than inside the encap,
-// so we don't add it here.
+// End.DT4 / End.DT6 nest a Table id — `iproute2`'s `table N` keyword,
+// `SEG6_LOCAL_TABLE` on the wire — telling the kernel which IPv4 /
+// IPv6 fib to look up the decapsulated inner packet in. We default
+// to RT_TABLE_MAIN; once zebra-rs grows VRF support, the operator-
+// set table id flows through here. (End.DT46 is the dual-family
+// variant and uses `SEG6_LOCAL_VRFTABLE` instead — not modeled
+// yet.) The kernel's required oif rides on the outer route /
+// nexthop message rather than inside the encap, so we don't add it
+// here.
 //
 // Returns None when the operator hasn't supplied the data End.X / uA
 // needs (no IPv6 nexthop) — caller treats that as "skip FIB install
@@ -145,7 +148,7 @@ fn build_seg6local_lwtunnel(
         attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
     }
     if matches!(behavior, SidBehavior::EndDT4 | SidBehavior::EndDT6) {
-        attrs.push(RouteSeg6LocalIpTunnel::VrfTable(
+        attrs.push(RouteSeg6LocalIpTunnel::Table(
             RouteHeader::RT_TABLE_MAIN as u32,
         ));
     }
