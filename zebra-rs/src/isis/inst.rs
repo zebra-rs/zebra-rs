@@ -882,12 +882,20 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
         lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
     }
 
-    // Hostname.
-    let hostname = top.config.hostname();
-    top.hostname
-        .get_mut(&level)
-        .insert_originate(top.config.net.sys_id(), hostname.clone());
-    lsp.tlvs.push(IsisTlvHostname { hostname }.into());
+    // Hostname (RFC 5301). Configured value wins, then the OS hostname.
+    // If neither is available, skip the TLV entirely and clear any
+    // stale entry from the local hostname map so show output falls
+    // back to the system ID instead of advertising "default".
+    if let Some(hostname) = top.config.hostname() {
+        top.hostname
+            .get_mut(&level)
+            .insert_originate(top.config.net.sys_id(), hostname.clone());
+        lsp.tlvs.push(IsisTlvHostname { hostname }.into());
+    } else {
+        top.hostname
+            .get_mut(&level)
+            .remove(&top.config.net.sys_id());
+    }
 
     // SR Capability.
     if top.config.sr_enabled() {
