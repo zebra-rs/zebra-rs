@@ -56,6 +56,11 @@ pub type ShowCallback = fn(&Bgp, Args, bool) -> std::result::Result<String, std:
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
+    /// Configured hostname for the local BGP speaker. Advertised in
+    /// the FQDN capability (capability code 73). When None, falls back
+    /// to the OS hostname; if that also fails, no FQDN capability is
+    /// emitted. See `Bgp::hostname()` for the resolution order.
+    pub hostname: Option<String>,
     pub peers: PeerMap,
     /// Bounded channel for BGP events (capacity: 8192)
     pub tx: mpsc::Sender<Message>,
@@ -117,6 +122,7 @@ impl Bgp {
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
+            hostname: None,
             peers: PeerMap::new(),
             tx,
             rx,
@@ -147,6 +153,35 @@ impl Bgp {
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
+    }
+
+    /// Resolve the hostname to advertise in the FQDN capability.
+    /// Configured value wins; otherwise we fall back to the OS
+    /// hostname. None means "skip the FQDN capability entirely".
+    pub fn hostname(&self) -> Option<String> {
+        if let Some(name) = &self.hostname {
+            return Some(name.clone());
+        }
+        hostname::get()
+            .ok()
+            .and_then(|s| s.into_string().ok())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Update the configured hostname and propagate the resolved
+    /// value to every peer's `local_hostname` snapshot. Existing
+    /// sessions keep using the value they captured at OPEN; the
+    /// next OPEN this peer sends (after a reset / re-establishment)
+    /// will pick up the new one.
+    pub fn config_set_hostname(&mut self, value: Option<String>) {
+        if self.hostname == value {
+            return;
+        }
+        self.hostname = value;
+        let resolved = self.hostname();
+        for (_, peer) in self.peers.iter_mut() {
+            peer.local_hostname = resolved.clone();
+        }
     }
 
     pub fn pcallback_add(&mut self, path: &str, cb: PCallback) {

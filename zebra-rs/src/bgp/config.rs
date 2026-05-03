@@ -36,6 +36,16 @@ fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+fn config_global_hostname(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let hostname = args.string()?;
+    if op == ConfigOp::Set {
+        bgp.config_set_hostname(Some(hostname));
+    } else {
+        bgp.config_set_hostname(None);
+    }
+    Some(())
+}
+
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
@@ -45,6 +55,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             bgp.router_id,
             0u32,
             addr,
+            bgp.hostname(),
             bgp.tx.clone(),
         );
         bgp.peers.insert(addr, peer);
@@ -820,6 +831,7 @@ impl Bgp {
     pub fn callback_build(&mut self) {
         self.callback_add("/routing/bgp/global/as", config_global_asn);
         self.callback_add("/routing/bgp/global/identifier", config_global_identifier);
+        self.callback_add("/routing/bgp/global/hostname", config_global_hostname);
         self.callback_peer("", config_peer);
         self.callback_peer("/peer-as", config_peer_as);
         self.callback_peer("/local-identifier", config_local_identifier);
