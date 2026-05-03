@@ -220,6 +220,7 @@ mod tests {
     fn connected_v6(ifindex: u32) -> RibEntry {
         let mut e = RibEntry::new(RibType::Connected);
         e.ifindex = ifindex;
+        e.set_valid(true);
         e
     }
 
@@ -230,6 +231,7 @@ mod tests {
             ifindex_origin: Some(ifindex),
             ..Default::default()
         });
+        e.set_valid(true);
         e
     }
 
@@ -240,6 +242,7 @@ mod tests {
             ifindex_origin: None,
             ..Default::default()
         });
+        e.set_valid(true);
         e
     }
 
