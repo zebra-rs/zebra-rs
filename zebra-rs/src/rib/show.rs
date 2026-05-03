@@ -12,6 +12,23 @@ use crate::{
 
 use super::{Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show};
 use std::fmt::Write;
+use std::time::Duration;
+
+/// Format a route's age the way `show ip route` lines render it:
+/// `HH:MM:SS` for sub-day, `Nd Nh Nm` for ≥ 24 hours. Matches the
+/// quagga / FRR convention operators are used to.
+fn format_uptime(d: Duration) -> String {
+    let secs = d.as_secs();
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+    if days > 0 {
+        format!("{days}d{hours}h{minutes}m")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
 
 // Column widths for `show segment-routing srv6 sid`. Sized to fit the
 // example output in the design doc (longest realistic SID, "End.X",
@@ -351,13 +368,20 @@ pub fn rib_entry_show(
     }
 
     let offset = buf.len();
+    let uptime = format_uptime(e.time.elapsed());
 
     if e.is_connected() {
-        writeln!(buf, " directly connected {}", rib.link_name(e.ifindex)).unwrap();
+        writeln!(
+            buf,
+            " is directly connected, {}, {}",
+            rib.link_name(e.ifindex),
+            uptime,
+        )
+        .unwrap();
     } else {
         match &e.nexthop {
             Nexthop::Link(_ifindex) => {
-                let _ = writeln!(buf, " via {}", rib.link_name(e.ifindex));
+                let _ = writeln!(buf, " via {}, {}", rib.link_name(e.ifindex), uptime);
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
@@ -392,7 +416,9 @@ pub fn rib_entry_show(
                         }
                     }
                 }
-                writeln!(buf).unwrap();
+                // Single nexthop — `weight` is an ECMP-only column,
+                // so we omit it here. Multi prints it per leg below.
+                writeln!(buf, ", {}", uptime).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
@@ -420,7 +446,8 @@ pub fn rib_entry_show(
                             }
                         }
                     }
-                    writeln!(buf, ", weight {}", uni.weight).unwrap();
+                    // ECMP — weight per leg, then the route's age.
+                    writeln!(buf, ", weight {}, {}", uni.weight, uptime).unwrap();
                 }
             }
             Nexthop::List(pro) => {
@@ -430,11 +457,12 @@ pub fn rib_entry_show(
                     }
                     writeln!(
                         buf,
-                        " {} {}, {}, metric {}",
+                        " {} {}, {}, metric {}, {}",
                         via_word(uni),
                         via_addr(uni),
                         rib.link_name(uni.ifindex),
-                        uni.metric
+                        uni.metric,
+                        uptime,
                     )
                     .unwrap();
                 }
@@ -468,13 +496,20 @@ pub fn rib_entry_show_v6(
     }
 
     let offset = buf.len();
+    let uptime = format_uptime(e.time.elapsed());
 
     if e.is_connected() {
-        writeln!(buf, " directly connected {}", rib.link_name(e.ifindex)).unwrap();
+        writeln!(
+            buf,
+            " is directly connected, {}, {}",
+            rib.link_name(e.ifindex),
+            uptime,
+        )
+        .unwrap();
     } else {
         match &e.nexthop {
             Nexthop::Link(_ifindex) => {
-                let _ = writeln!(buf, " via {}", rib.link_name(e.ifindex));
+                let _ = writeln!(buf, " via {}, {}", rib.link_name(e.ifindex), uptime);
             }
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
@@ -509,7 +544,9 @@ pub fn rib_entry_show_v6(
                         }
                     }
                 }
-                writeln!(buf).unwrap();
+                // Single nexthop — no `weight` column. ECMP prints it
+                // per leg below.
+                writeln!(buf, ", {}", uptime).unwrap();
             }
             Nexthop::Multi(multi) => {
                 for (i, uni) in multi.nexthops.iter().enumerate() {
@@ -537,7 +574,7 @@ pub fn rib_entry_show_v6(
                             }
                         }
                     }
-                    writeln!(buf, ", weight {}", uni.weight).unwrap();
+                    writeln!(buf, ", weight {}, {}", uni.weight, uptime).unwrap();
                 }
             }
             Nexthop::List(pro) => {
@@ -547,11 +584,12 @@ pub fn rib_entry_show_v6(
                     }
                     writeln!(
                         buf,
-                        " {} {}, {}, metric {}",
+                        " {} {}, {}, metric {}, {}",
                         via_word(uni),
                         via_addr(uni),
                         rib.link_name(uni.ifindex),
-                        uni.metric
+                        uni.metric,
+                        uptime,
                     )
                     .unwrap();
                 }
@@ -1039,6 +1077,31 @@ mod tests {
             segs,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn format_uptime_sub_day_renders_hh_mm_ss() {
+        // Sub-day routes use HH:MM:SS so operators can read elapsed
+        // time the same way ip / FRR show it.
+        assert_eq!(format_uptime(Duration::from_secs(0)), "00:00:00");
+        assert_eq!(format_uptime(Duration::from_secs(59)), "00:00:59");
+        assert_eq!(format_uptime(Duration::from_secs(60)), "00:01:00");
+        assert_eq!(
+            format_uptime(Duration::from_secs(2 * 3600 + 41 * 60 + 3)),
+            "02:41:03"
+        );
+        assert_eq!(format_uptime(Duration::from_secs(86_399)), "23:59:59");
+    }
+
+    #[test]
+    fn format_uptime_multi_day_renders_dd_hh_mm() {
+        // ≥ 24 hours flips to NdNhNm; matches the FRR convention. We
+        // drop seconds at this scale because operators don't care.
+        assert_eq!(format_uptime(Duration::from_secs(86_400)), "1d0h0m");
+        assert_eq!(
+            format_uptime(Duration::from_secs(2 * 86_400 + 18 * 3600 + 29 * 60 + 7)),
+            "2d18h29m"
+        );
     }
 
     #[test]
