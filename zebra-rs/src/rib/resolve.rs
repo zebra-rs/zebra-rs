@@ -65,7 +65,7 @@ fn entry_nexthop_ifindex(entry: &RibEntry) -> Option<u32> {
         return None;
     }
     match &entry.nexthop {
-        Nexthop::Uni(uni) if uni.ifindex != 0 => Some(uni.ifindex),
+        Nexthop::Uni(uni) if uni.ifindex().is_some() => uni.ifindex(),
         Nexthop::Multi(multi) => first_ifindex(&multi.nexthops),
         Nexthop::List(list) => first_ifindex(&list.nexthops),
         _ => None,
@@ -73,23 +73,23 @@ fn entry_nexthop_ifindex(entry: &RibEntry) -> Option<u32> {
 }
 
 fn first_ifindex(nexthops: &[NexthopUni]) -> Option<u32> {
-    nexthops.iter().find(|u| u.ifindex != 0).map(|u| u.ifindex)
+    nexthops.iter().find_map(|u| u.ifindex())
 }
 
 // Pull the unicast next-hop address out of a RibEntry whose ifindex is not
 // yet populated, so we can recurse to find the underlying egress interface.
 fn entry_nexthop_addr(entry: &RibEntry) -> Option<IpAddr> {
     match &entry.nexthop {
-        Nexthop::Uni(uni) if uni.ifindex == 0 => Some(uni.addr),
+        Nexthop::Uni(uni) if uni.ifindex().is_none() => Some(uni.addr),
         Nexthop::Multi(multi) => multi
             .nexthops
             .first()
-            .filter(|u| u.ifindex == 0)
+            .filter(|u| u.ifindex().is_none())
             .map(|u| u.addr),
         Nexthop::List(list) => list
             .nexthops
             .first()
-            .filter(|u| u.ifindex == 0)
+            .filter(|u| u.ifindex().is_none())
             .map(|u| u.addr),
         _ => None,
     }
@@ -222,7 +222,7 @@ mod tests {
         let mut e = RibEntry::new(rtype);
         e.nexthop = Nexthop::Uni(NexthopUni {
             addr: IpAddr::V6(addr),
-            ifindex,
+            ifindex_origin: Some(ifindex),
             ..Default::default()
         });
         e
@@ -232,7 +232,7 @@ mod tests {
         let mut e = RibEntry::new(rtype);
         e.nexthop = Nexthop::Uni(NexthopUni {
             addr: IpAddr::V6(addr),
-            ifindex: 0,
+            ifindex_origin: None,
             ..Default::default()
         });
         e
