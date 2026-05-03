@@ -1,0 +1,24 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:0:ffff::2/128
+- if-name: vz2ns
+  ipv6:
+    address: 2001:db8:1::2/64
+routing:
+  isis:
+    net: 49.0001.0000.0000.0002.00
+    is-type: level-2-only
+    hostname: z2
+    multi-topology:
+      topology:
+      - id: ipv6-unicast
+    interface:
+    - if-name: lo
+      circuit-type: level-2-only
+      ipv6:
+        enable: true
+    - if-name: vz2ns
+      circuit-type: level-2-only
+      ipv6:
+        enable: true
