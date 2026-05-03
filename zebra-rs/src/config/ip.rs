@@ -166,8 +166,14 @@ pub fn match_ipv6_prefix(s: &str, prefix: bool) -> (MatchType, usize) {
                     if bytes.get(i + 1) != Some(&b':') {
                         return (MatchType::None, i);
                     }
+                    // Initial `::`. Skip straight to Double so the
+                    // second `:` runs through the double-colon
+                    // transition (which knows how to handle `/`,
+                    // `\0`, and a following hex segment). Going via
+                    // Colon would re-trigger the single-colon
+                    // lookahead and reject `::/0` / `::/128`.
                     colons = colons.saturating_sub(1);
-                    state = Colon;
+                    state = Double;
                 } else {
                     segment_start = Some(i);
                     state = Addr;
@@ -285,4 +291,52 @@ pub fn match_ipv6_addr(src: &str) -> (MatchType, usize) {
 
 pub fn match_ipv6_net(src: &str) -> (MatchType, usize) {
     match_ipv6_prefix(src, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_net_default_route_is_partial() {
+        // ::/0 used to be rejected because the state machine ran the
+        // second `:` of `::` through the Colon state, whose lookahead
+        // explicitly errors on `/`. Default route is a perfectly valid
+        // input and must complete cleanly.
+        let (m, _) = match_ipv6_net("::/0");
+        assert_eq!(m, MatchType::Partial);
+    }
+
+    #[test]
+    fn ipv6_net_double_colon_with_mask_is_partial() {
+        // Same shape, larger mask values.
+        for input in ["::/64", "::/128"] {
+            let (m, _) = match_ipv6_net(input);
+            assert_eq!(m, MatchType::Partial, "{input} should match");
+        }
+    }
+
+    #[test]
+    fn ipv6_net_double_colon_segment_then_mask_still_works() {
+        // Regression: the standard `2001:db8::/64` and similar shapes
+        // shouldn't have changed.
+        let (m, _) = match_ipv6_net("2001:db8::/64");
+        assert_eq!(m, MatchType::Partial);
+    }
+
+    #[test]
+    fn ipv6_addr_double_colon_only_is_partial() {
+        // Bare `::` (the all-zeros address) parses cleanly in addr
+        // mode.
+        let (m, _) = match_ipv6_addr("::");
+        assert_eq!(m, MatchType::Partial);
+    }
+
+    #[test]
+    fn ipv6_net_single_colon_then_slash_is_still_rejected() {
+        // The old Colon-state guard was meant to reject this pattern
+        // and should keep doing so.
+        let (m, _) = match_ipv6_net("2001:/64");
+        assert_eq!(m, MatchType::None);
+    }
 }
