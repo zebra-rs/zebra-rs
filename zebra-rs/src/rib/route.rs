@@ -6,9 +6,9 @@ use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fib::FibHandle;
-use crate::rib::Nexthop;
 use crate::rib::resolve::{ResolveOpt, rib_resolve, rib_resolve_v6};
 use crate::rib::util::IpNetExt;
+use crate::rib::{Link, LinkFlagsExt, Nexthop};
 
 use super::entry::RibEntry;
 use super::inst::{IlmEntry, Rib};
@@ -109,11 +109,23 @@ impl Rib {
             }
         }
 
-        // Resolve RIB.
-        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+        // Resolve RIB. The first sync pass invalidates groups whose
+        // egress link just went down; recursive groups (a static via
+        // an IS-IS route, say) need a *second* pass once those IS-IS
+        // entries have been deselected, otherwise rib_resolve_v6
+        // happily walks the still-present-but-now-invalid entries.
+        // The debounced Resolve scheduled below handles that.
+        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-        ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+        ipv6_nexthop_sync(
+            &mut self.nmap,
+            &self.table_v6,
+            &self.links,
+            &self.fib_handle,
+        )
+        .await;
         ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
+        self.schedule_rib_sync();
     }
 
     pub async fn link_up(&mut self, ifindex: u32) {
@@ -258,10 +270,21 @@ impl Rib {
             }
         }
 
-        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
-        ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+        ipv6_nexthop_sync(
+            &mut self.nmap,
+            &self.table_v6,
+            &self.links,
+            &self.fib_handle,
+        )
+        .await;
         ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
+        // Mirror link_down: schedule a deferred Resolve so recursive
+        // groups (e.g. a static whose first segment was unreachable
+        // while the link was down) re-evaluate now that the IS-IS
+        // routes are back and selectable.
+        self.schedule_rib_sync();
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
@@ -376,12 +399,18 @@ impl Rib {
     }
 
     pub async fn ipv6_route_resolve(&mut self) {
-        ipv6_nexthop_sync(&mut self.nmap, &self.table_v6, &self.fib_handle).await;
+        ipv6_nexthop_sync(
+            &mut self.nmap,
+            &self.table_v6,
+            &self.links,
+            &self.fib_handle,
+        )
+        .await;
         ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
-        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.fib_handle).await;
+        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
         // `false` = not an ifdown sweep; this resolve cycle is for FIB-update
         // re-resolution, not link-down recovery.
         ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, false).await;
@@ -439,11 +468,35 @@ pub async fn rib_selection_ipv6(
 pub async fn ipv4_nexthop_sync(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
+    links: &BTreeMap<u32, Link>,
     fib: &FibHandle,
 ) {
     // Update Group::Uni first, then check Group::Multi.
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
+            // Origin shortcut: when the source pinned an egress link
+            // (IGP adjacency, seg6local install, connected, configured
+            // static) we trust it as long as that link is still up.
+            // When it goes down the kernel auto-removes the routes
+            // that point at it; sync our view so the next route_sync
+            // pass deselects + drops the FIB entries instead of
+            // happily marking them installed.
+            if let Some(ifindex) = uni.ifindex_origin {
+                let link_up = links
+                    .get(&ifindex)
+                    .is_some_and(|l| l.flags.is_up() && l.flags.is_lower_up());
+                if link_up {
+                    uni.set_valid(true);
+                    if !uni.is_installed() {
+                        uni.set_installed(true);
+                        fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                    }
+                } else {
+                    uni.set_valid(false);
+                    uni.set_installed(false);
+                }
+                continue;
+            }
             let resolve = match uni.addr {
                 std::net::IpAddr::V4(ipv4_addr) => {
                     rib_resolve(table, ipv4_addr, &ResolveOpt::default())
@@ -460,13 +513,6 @@ pub async fn ipv4_nexthop_sync(
                 uni.ifindex_resolved = None;
                 uni.set_valid(false);
                 if uni.is_installed() {
-                    // println!(
-                    //     "UniDel: gid {} {}/{} {}",
-                    //     uni.gid(),
-                    //     uni.addr,
-                    //     uni.ifindex,
-                    //     uni.is_installed()
-                    // );
                     uni.set_installed(false);
                     // XXX fib.nexthop_del(&Group::Uni(uni.clone())).await;
                 }
@@ -474,13 +520,6 @@ pub async fn ipv4_nexthop_sync(
                 uni.ifindex_resolved = Some(ifindex);
                 uni.set_valid(true);
                 if !uni.is_installed() {
-                    // println!(
-                    //     "UniAdd: gid {} {}/{} {}",
-                    //     uni.gid(),
-                    //     uni.addr,
-                    //     uni.ifindex(),
-                    //     uni.is_installed()
-                    // );
                     uni.set_installed(true);
                     fib.nexthop_add(&Group::Uni(uni.clone())).await;
                 }
@@ -1193,6 +1232,7 @@ fn resolve_nexthop_uni_v6(
 pub async fn ipv6_nexthop_sync(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv6Net, RibEntries>,
+    links: &BTreeMap<u32, Link>,
     fib: &FibHandle,
 ) {
     if DEBUG_V6 {
@@ -1210,13 +1250,24 @@ pub async fn ipv6_nexthop_sync(
                     uni.is_installed(),
                 );
             }
-            // Origin wins — skip the table walk entirely if the
-            // caller already supplied the egress link.
-            if uni.ifindex_origin.is_some() {
-                uni.set_valid(true);
-                if !uni.is_installed() {
-                    uni.set_installed(true);
-                    fib.nexthop_add(&Group::Uni(uni.clone())).await;
+            // Origin wins — skip the table walk entirely when the
+            // caller pinned the egress link, but only if that link
+            // is still up. When it isn't, the kernel removed the
+            // route on link-down; mark the group invalid so the
+            // route_sync pass deselects and drops the FIB entry.
+            if let Some(ifindex) = uni.ifindex_origin {
+                let link_up = links
+                    .get(&ifindex)
+                    .is_some_and(|l| l.flags.is_up() && l.flags.is_lower_up());
+                if link_up {
+                    uni.set_valid(true);
+                    if !uni.is_installed() {
+                        uni.set_installed(true);
+                        fib.nexthop_add(&Group::Uni(uni.clone())).await;
+                    }
+                } else {
+                    uni.set_valid(false);
+                    uni.set_installed(false);
                 }
                 continue;
             }
