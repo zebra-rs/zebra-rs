@@ -389,13 +389,24 @@ impl From<IsisTlvIpv6Reach> for IsisTlv {
     }
 }
 
+// RFC 5120 §7.2 wire layout for an MT identifier:
+//   bit:  0 1 2 3  4 5 6 7 8 9 10 11 12 13 14 15
+//        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//        |R R R R| MT ID                  |
+//        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// As a big-endian u16, the 4 reserved bits sit in the MSB and the
+// 12-bit MT ID in the LSB. `bitfield(u16)` is LSB-first by default,
+// so the *first* declared field lands at the lowest bit positions —
+// declare `id` first to land at bits 0-11 and `resvd` second at bits
+// 12-15. The previous order produced .id()=0 for an MT 2 LSP because
+// MT ID was being read out of the reserved bits.
 #[bitfield(u16, debug = true)]
 #[derive(Serialize, Deserialize, PartialEq)]
 pub struct MultiTopologyId {
-    #[bits(4)]
-    pub resvd: u8,
     #[bits(12)]
     pub id: u16,
+    #[bits(4)]
+    pub resvd: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
