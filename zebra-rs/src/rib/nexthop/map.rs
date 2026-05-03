@@ -155,7 +155,7 @@ impl NexthopMap {
             IpAddr::V6(a) if !a.is_unspecified() => Some(a),
             _ => None,
         };
-        let key: Seg6LocalKey = (action, uni.ifindex, nh6);
+        let key: Seg6LocalKey = (action, uni.ifindex().unwrap_or(0), nh6);
         if let Some(&gid) = self.seg6local.get(&key) {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
@@ -418,7 +418,7 @@ mod tests {
     fn end_uni(ifindex: u32) -> NexthopUni {
         NexthopUni {
             addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            ifindex,
+            ifindex_origin: Some(ifindex),
             seg6local_action: Some(crate::rib::SidBehavior::End),
             ..Default::default()
         }
@@ -427,7 +427,7 @@ mod tests {
     fn endx_uni(ifindex: u32, nh6: &str) -> NexthopUni {
         NexthopUni {
             addr: IpAddr::V6(nh6.parse().unwrap()),
-            ifindex,
+            ifindex_origin: Some(ifindex),
             seg6local_action: Some(crate::rib::SidBehavior::EndX),
             ..Default::default()
         }
@@ -466,7 +466,7 @@ mod tests {
         // can't collapse the two.
         let endx = NexthopUni {
             addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            ifindex: 2,
+            ifindex_origin: Some(2),
             seg6local_action: Some(crate::rib::SidBehavior::EndX),
             ..Default::default()
         };
