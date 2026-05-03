@@ -105,6 +105,13 @@ pub struct LspView<'a> {
     pub hostname: Option<&'a IsisTlvHostname>,
     pub ip_reach: Option<&'a IsisTlvExtIpReach>,
     pub ipv6_reach: Option<&'a IsisTlvIpv6Reach>,
+    /// MT capability TLV (229) — lists the MT IDs the originator
+    /// participates in. Used to populate `mt_membership`.
+    pub multi_topology: Option<&'a IsisTlvMultiTopology>,
+    /// MT IPv6 Reach TLVs (237). One per MT id the originator
+    /// emitted; vec because in principle a peer could advertise more
+    /// than one (multicast variants etc.). PR 4 only consumes mt=2.
+    pub mt_ipv6_reach: Vec<&'a IsisTlvMtIpv6Reach>,
 }
 
 pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
@@ -122,6 +129,12 @@ pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
             }
             IsisTlv::Ipv6Reach(ipv6_reach) => {
                 view.ipv6_reach = Some(ipv6_reach);
+            }
+            IsisTlv::MultiTopology(mt) => {
+                view.multi_topology = Some(mt);
+            }
+            IsisTlv::MtIpv6Reach(mt_v6) => {
+                view.mt_ipv6_reach.push(mt_v6);
             }
             _ => {
                 //
@@ -219,6 +232,54 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
         top.reach_map_v6
             .get_mut(&level)
             .insert(key.sys_id(), tlv.entries.clone());
+    }
+
+    // MT capability — record which MT IDs the peer participates in.
+    // Empty set = absent / single-topology peer (preserves the
+    // "no key" sentinel that future graph builders use).
+    if let Some(mt_tlv) = lsp.multi_topology {
+        let mut ids = std::collections::BTreeSet::new();
+        for entry in &mt_tlv.entries {
+            if let Some(id) = mt_id_from_wire(entry.id()) {
+                ids.insert(id);
+            }
+        }
+        if !ids.is_empty() {
+            top.mt_membership.get_mut(&level).insert(key.sys_id(), ids);
+        } else {
+            top.mt_membership.get_mut(&level).remove(&key.sys_id());
+        }
+    } else {
+        top.mt_membership.get_mut(&level).remove(&key.sys_id());
+    }
+
+    // MT 2 IPv6 Reach (TLV 237 mt=2). Stored separately from
+    // reach_map_v6 so a future per-MT v6 RIB build can pull the
+    // MT 2 view in isolation without absorbing legacy TLV 236.
+    let mut mt2_v6_entries: Vec<isis_packet::IsisTlvIpv6ReachEntry> = Vec::new();
+    for tlv in &lsp.mt_ipv6_reach {
+        if tlv.mt.id() == 2 {
+            mt2_v6_entries.extend(tlv.entries.iter().cloned());
+        }
+    }
+    if !mt2_v6_entries.is_empty() {
+        top.mt2_reach_map_v6
+            .get_mut(&level)
+            .insert(key.sys_id(), mt2_v6_entries);
+    } else {
+        top.mt2_reach_map_v6.get_mut(&level).remove(&key.sys_id());
+    }
+}
+
+/// Map a 12-bit wire MT ID to the local enum. Multicast variants and
+/// unknown values fall through to None — they parse but we don't act
+/// on them.
+fn mt_id_from_wire(wire: u16) -> Option<crate::isis::config::MtId> {
+    use crate::isis::config::MtId;
+    match wire {
+        0 => Some(MtId::Standard),
+        2 => Some(MtId::Ipv6Unicast),
+        _ => None,
     }
 }
 
