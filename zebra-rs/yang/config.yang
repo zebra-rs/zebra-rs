@@ -702,6 +702,24 @@ module config {
                 enum "H.Encap.Red";
               }
             }
+            leaf action {
+              description
+                "SRv6 endpoint behavior installed as a seg6local
+                 terminal action on this prefix. Mutually exclusive
+                 with `segments` (which configures an outer H.Encap
+                 push). Only the local-action variants — End, uN,
+                 End.DT4, End.DT6 — are usable today; End.X / uA
+                 require a per-adjacency nexthop that this list
+                 doesn't model yet.";
+              type enumeration {
+                enum "End";
+                enum "End.X";
+                enum "uN";
+                enum "uA";
+                enum "End.DT4";
+                enum "End.DT6";
+              }
+            }
           }
         }
 
