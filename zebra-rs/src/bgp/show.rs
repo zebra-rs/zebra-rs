@@ -1904,7 +1904,7 @@ mod summary_tests {
         let mut buf = String::new();
         write_summary_header_row(&mut buf).unwrap();
         let expected = "\
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Desc\n";
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Hostname\n";
         assert_eq!(buf, expected);
     }
 
