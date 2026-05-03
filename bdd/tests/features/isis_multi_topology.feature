@@ -24,9 +24,9 @@ Feature: IS-IS multi-topology (RFC 5120)
               /128                  /128
   ```
 
-  Both configs add `multi-topology { topology ipv6-unicast; }` under
-  `routing/isis/` so the LSPs carry TLV 229 (capability), TLV 222
-  (MT IS Reach), and TLV 237 (MT IPv6 Reach).
+  Both configs add `multi-topology ipv6-unicast;` under `routing/isis/`
+  so the LSPs carry TLV 229 (capability), TLV 222 (MT IS Reach), and
+  TLV 237 (MT IPv6 Reach).
 
   Scenario: Setup IS-IS L2 with MT 2 over a shared bridge and confirm the link is up
     Given a clean test environment

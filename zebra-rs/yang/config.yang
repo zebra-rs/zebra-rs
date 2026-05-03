@@ -298,24 +298,12 @@ module config {
           }
         }
 
-        container multi-topology {
-          // RFC 5120 M-ISIS. Presence enables multi-topology routing;
-          // the inner `topology` list names the topologies the router
-          // participates in. PR 1 lands the config model only — wire
-          // origination, SPF, and routing-install happen in follow-up
-          // PRs.
-          presence "Enable IS-IS multi-topology routing (RFC 5120)";
-          list topology {
-            key "id";
-            // Standard MT IDs we know how to compute SPF for. Multicast
-            // variants (3, 4) parse on the wire but aren't surfaced
-            // here — operators don't enable them via this knob.
-            leaf id {
-              type enumeration {
-                enum standard;       // MT 0 — IPv4 unicast
-                enum ipv6-unicast;   // MT 2 — IPv6 unicast
-              }
-            }
+        leaf multi-topology {
+          // RFC 5120 M-ISIS Multi Topology (MT). IPv6 unicast is the
+          // only option used in the industry today, so the enum
+          // carries just that one value.
+          type enumeration {
+            enum ipv6-unicast;   // MT 2 — IPv6 unicast
           }
         }
 
