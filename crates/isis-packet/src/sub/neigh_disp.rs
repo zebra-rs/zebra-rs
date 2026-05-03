@@ -200,10 +200,25 @@ impl Display for IsisSubSrv6LanEndXSid {
 }
 
 impl Display for IsisTlvMtIsReach {
+    /// One "MT Reachability: <neighbor_id> (Metric: N) <topology>"
+    /// line per entry, mirroring TLV 222's operator-facing reference
+    /// shape. Inlined to avoid the doubled "Neighbor ID:" prefix
+    /// the entry's own Display would otherwise produce; sub-TLVs
+    /// (Adj-SID, SRv6 End.X, etc.) hang off below the main line.
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  MT IS Reachability (MT-ID {}):", self.mt.id())?;
-        for entry in self.entries.iter() {
-            write!(f, "\n{}", entry)?;
+        let topology = super::prefix_disp::mt_topology_name(self.mt.id());
+        for (pos, entry) in self.entries.iter().enumerate() {
+            if pos != 0 {
+                writeln!(f)?;
+            }
+            write!(
+                f,
+                "  MT Reachability: {} (Metric: {}) {}",
+                entry.neighbor_id, entry.metric, topology,
+            )?;
+            for sub in &entry.subs {
+                write!(f, "\n{sub}")?;
+            }
         }
         Ok(())
     }
