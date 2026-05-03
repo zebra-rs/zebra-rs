@@ -70,6 +70,18 @@ pub struct Isis {
     pub lsp_map: Levels<LspMap>,
     pub reach_map: Levels<Afis<ReachMap>>,
     pub reach_map_v6: Levels<ReachMapV6>,
+
+    /// MT 2 (IPv6 unicast) IPv6 reach indexed per peer. Populated from
+    /// TLV 237 entries with mt=2. Kept separate from reach_map_v6 so
+    /// strict per-topology RIB build (PR 4b) can pull MT 2's view
+    /// without mixing it with legacy TLV 236 from non-MT peers.
+    pub mt2_reach_map_v6: Levels<ReachMapV6>,
+
+    /// Per-peer set of MT IDs the peer advertised in TLV 229. Empty
+    /// (or absent key) means the peer is single-topology / legacy.
+    /// Used by the per-MT graph builder (PR 4b) to filter peers and
+    /// by show callbacks to render the MT-aware view.
+    pub mt_membership: Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: Levels<IsisLabelMap>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
@@ -116,6 +128,11 @@ pub struct IsisTop<'a> {
     pub lsp_map: &'a mut Levels<LspMap>,
     pub reach_map: &'a mut Levels<Afis<ReachMap>>,
     pub reach_map_v6: &'a mut Levels<ReachMapV6>,
+    // First reader lands in PR 4b (per-MT SPF + RIB build).
+    #[allow(dead_code)]
+    pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
+    #[allow(dead_code)]
+    pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
@@ -169,6 +186,8 @@ impl Isis {
             lsp_map: Levels::<LspMap>::default(),
             reach_map: Levels::<Afis<ReachMap>>::default(),
             reach_map_v6: Levels::<ReachMapV6>::default(),
+            mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
+            mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),
             label_map: Levels::<IsisLabelMap>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
@@ -495,6 +514,8 @@ impl Isis {
             lsp_map: &mut self.lsp_map,
             reach_map: &mut self.reach_map,
             reach_map_v6: &mut self.reach_map_v6,
+            mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
+            mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
@@ -526,6 +547,8 @@ impl Isis {
             hostname: &mut self.hostname,
             reach_map: &mut self.reach_map,
             reach_map_v6: &mut self.reach_map_v6,
+            mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
+            mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
             spf_timer: &mut self.spf_timer,
             rib_tx: &self.rib_tx,
@@ -1431,6 +1454,10 @@ impl ReachMapV6 {
         value: Vec<IsisTlvIpv6ReachEntry>,
     ) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
         self.map.insert(key, value)
+    }
+
+    pub fn remove(&mut self, key: &IsisSysId) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
+        self.map.remove(key)
     }
 }
 
