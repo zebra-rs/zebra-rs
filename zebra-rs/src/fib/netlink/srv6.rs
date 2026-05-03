@@ -78,11 +78,17 @@ pub fn build_seg6_attrs(
 
 // Map a SidBehavior to its kernel SEG6_LOCAL_ACTION_*. uSID variants
 // reuse the same kernel actions as their classic counterparts; the
-// NEXT-C-SID flavor rides as a separate Flavors attribute.
+// NEXT-C-SID flavor rides as a separate Flavors attribute. End.DT4 /
+// End.DT6 today install without an explicit table-id arg — the
+// kernel uses the route's own table, which is good enough for
+// statically configured terminals; richer table selection is a
+// follow-up.
 fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
     match behavior {
         SidBehavior::End | SidBehavior::UN => Seg6LocalAction::End,
         SidBehavior::EndX | SidBehavior::UA => Seg6LocalAction::EndX,
+        SidBehavior::EndDT4 => Seg6LocalAction::EndDt4,
+        SidBehavior::EndDT6 => Seg6LocalAction::EndDt6,
     }
 }
 

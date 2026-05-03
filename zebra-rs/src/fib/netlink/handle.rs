@@ -115,6 +115,13 @@ fn sid_route_target(
             )
         }
         SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
+        // End.DT4 / End.DT6 are terminal decap+lookup actions. Same
+        // FIB shape as End.X — a /128 host route in table=main with
+        // kind=Unicast, pointed at sr0 by the static route's
+        // ifindex_origin.
+        SidBehavior::EndDT4 | SidBehavior::EndDT6 => {
+            (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
+        }
     }
 }
 
@@ -434,6 +441,41 @@ impl FibHandle {
         let attr = RouteAttribute::Destination(RouteAddress::Inet6(prefix.addr()));
         msg.attributes.push(attr);
 
+        // Seg6local install (operator-configured End.DT6 / End.DT4 /
+        // End / uN on a static IPv6 prefix). The seg6local lwtunnel
+        // encap can't ride in the kernel nexthop table, so we always
+        // embed it on the route — independently of `use_nhid`. The
+        // protocol-allocated SID install path goes through
+        // `route_sid_install`, which has the same shape; this branch
+        // is the static counterpart so user-configured action routes
+        // travel the standard `Message::Ipv6Add` pipeline.
+        if let Nexthop::Uni(uni) = &nexthop
+            && let Some(action) = uni.seg6local_action
+        {
+            if let Some(ifindex) = uni.ifindex() {
+                msg.attributes.push(RouteAttribute::Oif(ifindex));
+            }
+            if let Some((encap, encap_type)) =
+                super::srv6::build_seg6local_attrs(action, None, None)
+            {
+                msg.attributes.push(encap);
+                msg.attributes.push(encap_type);
+            }
+            msg.attributes.push(RouteAttribute::Priority(uni.metric));
+
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+            let mut response = self.handle.clone().request(req).unwrap();
+            while let Some(m) = response.next().await {
+                if let NetlinkPayload::Error(e) = m.payload {
+                    tracing::warn!(
+                        "NewRoute seg6local install error: prefix={prefix} action={action:?} err={e}"
+                    );
+                }
+            }
+            return;
+        }
+
         if self.use_nhid {
             if let Nexthop::Uni(uni) = &nexthop {
                 if DEBUG_V6 {
@@ -589,6 +631,29 @@ impl FibHandle {
 
         let attr = RouteAttribute::Priority(entry.metric);
         msg.attributes.push(attr);
+
+        // Mirror the seg6local install: when the route was a
+        // seg6local route, the kernel matches del on
+        // {prefix, table, kind} alone — no encap attrs needed in
+        // the del message. Sending the Oif still helps when the
+        // user has stacked multiple actions on the same prefix
+        // (rare, but harmless to include).
+        if let Nexthop::Uni(uni) = &nexthop
+            && uni.seg6local_action.is_some()
+        {
+            if let Some(ifindex) = uni.ifindex() {
+                msg.attributes.push(RouteAttribute::Oif(ifindex));
+            }
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            let mut response = self.handle.clone().request(req).unwrap();
+            while let Some(m) = response.next().await {
+                if let NetlinkPayload::Error(e) = m.payload {
+                    tracing::warn!("DelRoute seg6local error: prefix={prefix} err={e}");
+                }
+            }
+            return;
+        }
 
         if self.use_nhid {
             if let Nexthop::Uni(uni) = &nexthop {
