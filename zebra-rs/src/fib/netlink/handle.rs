@@ -238,8 +238,8 @@ impl FibHandle {
                             .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
                     }
                 }
-                if uni.ifindex != 0 {
-                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                if let Some(ifindex) = uni.ifindex() {
+                    msg.attributes.push(RouteAttribute::Oif(ifindex));
                 }
                 let attr = RouteAttribute::Priority(uni.metric);
                 msg.attributes.push(attr);
@@ -253,8 +253,8 @@ impl FibHandle {
                         IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
                     };
                     nhop.attributes.push(attr);
-                    if uni.ifindex != 0 {
-                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    if let Some(ifindex) = uni.ifindex() {
+                        nhop.attributes.push(RouteAttribute::Oif(ifindex));
                     }
                     mpath.push(nhop);
                 }
@@ -348,8 +348,8 @@ impl FibHandle {
                             .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
                     }
                 }
-                if uni.ifindex != 0 {
-                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                if let Some(ifindex) = uni.ifindex() {
+                    msg.attributes.push(RouteAttribute::Oif(ifindex));
                 }
                 let attr = RouteAttribute::Priority(uni.metric);
                 msg.attributes.push(attr);
@@ -363,8 +363,8 @@ impl FibHandle {
                         IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
                     };
                     nhop.attributes.push(attr);
-                    if uni.ifindex != 0 {
-                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    if let Some(ifindex) = uni.ifindex() {
+                        nhop.attributes.push(RouteAttribute::Oif(ifindex));
                     }
                     mpath.push(nhop);
                 }
@@ -463,9 +463,9 @@ impl FibHandle {
             if let Nexthop::Uni(uni) = &nexthop {
                 if DEBUG_V6 {
                     tracing::info!(
-                        "[IPv6 route_add_uni] embed nexthop: addr={} ifindex={} metric={}",
+                        "[IPv6 route_add_uni] embed nexthop: addr={} ifindex={:?} metric={}",
                         uni.addr,
-                        uni.ifindex,
+                        uni.ifindex(),
                         uni.metric
                     );
                 }
@@ -479,8 +479,8 @@ impl FibHandle {
                             .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
                     }
                 }
-                if uni.ifindex != 0 {
-                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                if let Some(ifindex) = uni.ifindex() {
+                    msg.attributes.push(RouteAttribute::Oif(ifindex));
                 }
                 let attr = RouteAttribute::Priority(uni.metric);
                 msg.attributes.push(attr);
@@ -513,8 +513,8 @@ impl FibHandle {
                         IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
                     };
                     nhop.attributes.push(attr);
-                    if uni.ifindex != 0 {
-                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    if let Some(ifindex) = uni.ifindex() {
+                        nhop.attributes.push(RouteAttribute::Oif(ifindex));
                     }
                     mpath.push(nhop);
                 }
@@ -613,8 +613,8 @@ impl FibHandle {
                             .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
                     }
                 }
-                if uni.ifindex != 0 {
-                    msg.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                if let Some(ifindex) = uni.ifindex() {
+                    msg.attributes.push(RouteAttribute::Oif(ifindex));
                 }
                 let attr = RouteAttribute::Priority(uni.metric);
                 msg.attributes.push(attr);
@@ -628,8 +628,8 @@ impl FibHandle {
                         IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
                     };
                     nhop.attributes.push(attr);
-                    if uni.ifindex != 0 {
-                        nhop.attributes.push(RouteAttribute::Oif(uni.ifindex));
+                    if let Some(ifindex) = uni.ifindex() {
+                        nhop.attributes.push(RouteAttribute::Oif(ifindex));
                     }
                     mpath.push(nhop);
                 }
@@ -694,10 +694,10 @@ impl FibHandle {
 
                 if DEBUG_V6 {
                     tracing::info!(
-                        "[nexthop_add Uni] gid={} addr={} ifindex={} valid={} installed={}",
+                        "[nexthop_add Uni] gid={} addr={} ifindex={:?} valid={} installed={}",
                         gid,
                         uni.addr,
-                        uni.ifindex,
+                        uni.ifindex(),
                         uni.is_valid(),
                         uni.is_installed(),
                     );
@@ -742,8 +742,10 @@ impl FibHandle {
                 };
                 msg.attributes.push(attr);
 
-                // Outgoing if.
-                let attr = NexthopAttribute::Oif(uni.ifindex);
+                // Outgoing if. Origin wins over resolved; fall back to 0
+                // ("no Oif attribute") if neither was filled, which is a
+                // bug case the kernel will reject — we want it loud.
+                let attr = NexthopAttribute::Oif(uni.ifindex().unwrap_or(0));
                 msg.attributes.push(attr);
 
                 if DEBUG_V6 {
@@ -1396,8 +1398,8 @@ impl FibHandle {
                 };
                 msg.attributes.push(attr);
 
-                if uni.ifindex != 0 {
-                    let attr = RouteAttribute::Oif(uni.ifindex);
+                if let Some(ifindex) = uni.ifindex() {
+                    let attr = RouteAttribute::Oif(ifindex);
                     msg.attributes.push(attr);
                 }
 
@@ -1423,8 +1425,8 @@ impl FibHandle {
                     };
                     nhop.attributes.push(attr);
 
-                    if uni.ifindex != 0 {
-                        let attr = RouteAttribute::Oif(uni.ifindex);
+                    if let Some(ifindex) = uni.ifindex() {
+                        let attr = RouteAttribute::Oif(ifindex);
                         nhop.attributes.push(attr);
                     }
 
@@ -1864,7 +1866,11 @@ impl RouteBuilder {
     pub fn build(mut self) -> (IpNet, RibEntry) {
         match &mut self.entry.nexthop {
             Nexthop::Uni(uni) => {
-                uni.ifindex = self.entry.ifindex;
+                // Kernel-dump path: the entry.ifindex is what netlink
+                // reported, so it's an origin (the kernel's source of
+                // truth). 0 means "no Oif attribute on this route" —
+                // record as None rather than fabricate an origin.
+                uni.ifindex_origin = (self.entry.ifindex != 0).then_some(self.entry.ifindex);
                 uni.metric = self.entry.metric;
             }
             _ => {

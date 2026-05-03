@@ -18,7 +18,22 @@ pub struct NexthopUni {
     pub addr: IpAddr,
     pub metric: u32,
     pub weight: u8,
-    pub ifindex: u32,
+
+    /// What the source said the egress ifindex was — `Some` for IGP
+    /// adjacencies, kernel dump, connected routes, configured static
+    /// routes that name an interface, seg6local installs that
+    /// pre-resolve to loopback / per-adjacency. `None` means "the
+    /// source didn't know; please resolve via the RIB."
+    ///
+    /// Origin is the source of truth for FIB install and show output;
+    /// the resolver must never overwrite it. Future work will give
+    /// `addr` the same origin/resolved split for static routes that
+    /// recurse through a chain of nexthop addresses.
+    pub ifindex_origin: Option<u32>,
+    /// What the RIB resolver looked up when origin was `None`.
+    /// `None` means "not resolved yet" or "no covering route found."
+    pub ifindex_resolved: Option<u32>,
+
     pub valid: bool,
     pub mpls: Vec<Label>,
     pub mpls_label: Vec<u32>,
@@ -32,12 +47,22 @@ pub struct NexthopUni {
 
     // SRv6 seg6local action — set when this nexthop installs a local
     // SID (End / End.X). For End.X, `addr` carries the IPv6 nexthop and
-    // `ifindex` the outgoing link; for End, `ifindex` is the loopback
-    // and `addr` is unused.
+    // `ifindex_origin` the outgoing link; for End, the ifindex is the
+    // sr0 dummy and `addr` is unused.
     pub seg6local_action: Option<SidBehavior>,
 
     // Action.
     pub gid: usize,
+}
+
+impl NexthopUni {
+    /// Egress ifindex to use, with origin winning over resolved.
+    /// Returns `None` only when neither the source nor the resolver
+    /// produced one — callers that need a u32 (FIB / netlink) should
+    /// `.unwrap_or(0)`.
+    pub fn ifindex(&self) -> Option<u32> {
+        self.ifindex_origin.or(self.ifindex_resolved)
+    }
 }
 
 impl NexthopUni {
@@ -69,7 +94,8 @@ impl Default for NexthopUni {
     fn default() -> Self {
         Self {
             addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            ifindex: 0,
+            ifindex_origin: None,
+            ifindex_resolved: None,
             metric: 0,
             weight: 1,
             mpls: vec![],

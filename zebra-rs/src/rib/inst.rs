@@ -378,7 +378,10 @@ impl Rib {
         };
         NexthopUni {
             addr,
-            ifindex: sid.ifindex,
+            // SID installs pre-resolve the egress link (sr0 / lo for
+            // End/uN, the per-adjacency link for End.X/uA). Treat it
+            // as an origin so the resolver doesn't second-guess.
+            ifindex_origin: (sid.ifindex != 0).then_some(sid.ifindex),
             seg6local_action: Some(sid.behavior),
             valid: true,
             ..Default::default()
