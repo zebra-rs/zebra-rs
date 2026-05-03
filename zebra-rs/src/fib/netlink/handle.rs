@@ -51,7 +51,7 @@ const DEBUG_V6: bool = false;
 // nexthop-skip notice, and the rib-side resolution trace. Errors from
 // the kernel are reported regardless. Mirrored by RIB via this same
 // constant (re-exported as `crate::fib::netlink::handle::DEBUG_SID`).
-pub const DEBUG_SID: bool = true;
+pub const DEBUG_SID: bool = false;
 
 /// Mask the lower (128 - prefix_len) bits of an IPv6 address. The
 /// kernel ignores bits past the prefix length on install, but masking
