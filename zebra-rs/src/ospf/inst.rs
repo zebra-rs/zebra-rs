@@ -1566,7 +1566,13 @@ fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> 
             rib::Label::Explicit(sid)
         });
     }
-    rib::NexthopUni::from(*key, route.metric, mpls)
+    let mut nhop = rib::NexthopUni::from(*key, route.metric, mpls);
+    // OSPF, like IS-IS, learns the egress link from the adjacency
+    // state machine, so record it as the origin and let the RIB
+    // resolver leave it alone. 0 means "no usable adjacency ifindex"
+    // — record as None so callers can detect that case.
+    nhop.ifindex_origin = (value.ifindex != 0).then_some(value.ifindex);
+    nhop
 }
 
 fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {

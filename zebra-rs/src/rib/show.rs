@@ -114,14 +114,13 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
         }
         Nexthop::Uni(uni) => {
             let grp = rib.nmap.get(uni.gid);
-            let ifindex: u32 = if let Some(grp) = grp {
-                if let Group::Uni(grp) = grp {
-                    grp.ifindex
-                } else {
-                    0
-                }
+            // Prefer the group's view (post-resolution) but fall back
+            // to the NexthopUni's own accessor when no group is around
+            // — both honor origin over resolved.
+            let ifindex: u32 = if let Some(Group::Uni(grp)) = grp {
+                grp.ifindex().unwrap_or(0)
             } else {
-                uni.ifindex
+                uni.ifindex().unwrap_or(0)
             };
 
             vec![NexthopJson {
@@ -149,7 +148,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
             .iter()
             .map(|uni| NexthopJson {
                 address: Some(uni.addr.to_string()),
-                interface: rib.link_name(uni.ifindex),
+                interface: rib.link_name(uni.ifindex().unwrap_or(0)),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
                 mpls_labels: uni
@@ -172,7 +171,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
             .iter()
             .map(|uni| NexthopJson {
                 address: Some(uni.addr.to_string()),
-                interface: rib.link_name(uni.ifindex),
+                interface: rib.link_name(uni.ifindex().unwrap_or(0)),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
                 mpls_labels: uni
@@ -229,14 +228,13 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
         }
         Nexthop::Uni(uni) => {
             let grp = rib.nmap.get(uni.gid);
-            let ifindex: u32 = if let Some(grp) = grp {
-                if let Group::Uni(grp) = grp {
-                    grp.ifindex
-                } else {
-                    0
-                }
+            // Prefer the group's view (post-resolution) but fall back
+            // to the NexthopUni's own accessor when no group is around
+            // — both honor origin over resolved.
+            let ifindex: u32 = if let Some(Group::Uni(grp)) = grp {
+                grp.ifindex().unwrap_or(0)
             } else {
-                uni.ifindex
+                uni.ifindex().unwrap_or(0)
             };
 
             vec![NexthopJson {
@@ -264,7 +262,7 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
             .iter()
             .map(|uni| NexthopJson {
                 address: Some(uni.addr.to_string()),
-                interface: rib.link_name(uni.ifindex),
+                interface: rib.link_name(uni.ifindex().unwrap_or(0)),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
                 mpls_labels: uni
@@ -287,7 +285,7 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
             .iter()
             .map(|uni| NexthopJson {
                 address: Some(uni.addr.to_string()),
-                interface: rib.link_name(uni.ifindex),
+                interface: rib.link_name(uni.ifindex().unwrap_or(0)),
                 weight: Some(uni.weight),
                 metric: Some(uni.metric),
                 mpls_labels: uni
@@ -386,14 +384,10 @@ pub fn rib_entry_show(
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
 
-                let ifindex: u32 = if let Some(grp) = grp {
-                    if let Group::Uni(grp) = grp {
-                        grp.ifindex
-                    } else {
-                        0
-                    }
+                let ifindex: u32 = if let Some(Group::Uni(grp)) = grp {
+                    grp.ifindex().unwrap_or(0)
                 } else {
-                    uni.ifindex
+                    uni.ifindex().unwrap_or(0)
                 };
                 write!(
                     buf,
@@ -430,7 +424,7 @@ pub fn rib_entry_show(
                         " {} {}, {}",
                         via_word(uni),
                         via_addr(uni),
-                        rib.link_name(uni.ifindex),
+                        rib.link_name(uni.ifindex().unwrap_or(0)),
                     )
                     .unwrap();
                     if !uni.mpls.is_empty() {
@@ -460,7 +454,7 @@ pub fn rib_entry_show(
                         " {} {}, {}, metric {}, {}",
                         via_word(uni),
                         via_addr(uni),
-                        rib.link_name(uni.ifindex),
+                        rib.link_name(uni.ifindex().unwrap_or(0)),
                         uni.metric,
                         uptime,
                     )
@@ -514,14 +508,10 @@ pub fn rib_entry_show_v6(
             Nexthop::Uni(uni) => {
                 let grp = rib.nmap.get(uni.gid);
 
-                let ifindex: u32 = if let Some(grp) = grp {
-                    if let Group::Uni(grp) = grp {
-                        grp.ifindex
-                    } else {
-                        0
-                    }
+                let ifindex: u32 = if let Some(Group::Uni(grp)) = grp {
+                    grp.ifindex().unwrap_or(0)
                 } else {
-                    uni.ifindex
+                    uni.ifindex().unwrap_or(0)
                 };
                 write!(
                     buf,
@@ -558,7 +548,7 @@ pub fn rib_entry_show_v6(
                         " {} {}, {}",
                         via_word(uni),
                         via_addr(uni),
-                        rib.link_name(uni.ifindex),
+                        rib.link_name(uni.ifindex().unwrap_or(0)),
                     )
                     .unwrap();
                     if !uni.mpls.is_empty() {
@@ -587,7 +577,7 @@ pub fn rib_entry_show_v6(
                         " {} {}, {}, metric {}, {}",
                         via_word(uni),
                         via_addr(uni),
-                        rib.link_name(uni.ifindex),
+                        rib.link_name(uni.ifindex().unwrap_or(0)),
                         uni.metric,
                         uptime,
                     )
@@ -737,7 +727,7 @@ fn write_ilm_entry(
     let local_label = format!("{:<6}", label);
 
     // Determine outgoing label
-    let outgoing_label = if uni.addr.is_unspecified() && uni.ifindex == 0 {
+    let outgoing_label = if uni.addr.is_unspecified() && uni.ifindex().is_none() {
         format!("{:<11}", "Aggregate")
     } else if uni.mpls_label.is_empty() {
         format!("{:<11}", "Pop")
@@ -761,10 +751,10 @@ fn write_ilm_entry(
         }
     };
 
-    let interface = if uni.addr.is_unspecified() && uni.ifindex == 0 {
+    let interface = if uni.addr.is_unspecified() && uni.ifindex().is_none() {
         "default".to_string()
     } else {
-        rib.link_name(uni.ifindex)
+        rib.link_name(uni.ifindex().unwrap_or(0))
     };
 
     let next_hop = if uni.addr.is_unspecified() {
@@ -788,7 +778,7 @@ fn ilm_to_json(
     ilm: &super::inst::IlmEntry,
     uni: &super::NexthopUni,
 ) -> IlmJson {
-    let outgoing_label = if uni.addr.is_unspecified() && uni.ifindex == 0 {
+    let outgoing_label = if uni.addr.is_unspecified() && uni.ifindex().is_none() {
         "Aggregate".to_string()
     } else if uni.mpls_label.is_empty() {
         "Pop".to_string()
@@ -810,10 +800,10 @@ fn ilm_to_json(
         }
     };
 
-    let outgoing_interface = if uni.addr.is_unspecified() && uni.ifindex == 0 {
+    let outgoing_interface = if uni.addr.is_unspecified() && uni.ifindex().is_none() {
         "default".to_string()
     } else {
-        rib.link_name(uni.ifindex)
+        rib.link_name(uni.ifindex().unwrap_or(0))
     };
 
     let next_hop = if uni.addr.is_unspecified() {
