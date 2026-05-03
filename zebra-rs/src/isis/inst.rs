@@ -1742,21 +1742,56 @@ fn process_neighbor_link_mt2(
     top: &mut IsisTop,
     level: Level,
     from_id: usize,
-    _from_sys_id: &IsisSysId,
+    from_sys_id: &IsisSysId,
     entry: &IsisTlvExtIsReachEntry,
     links: &mut Vec<spf::Link>,
 ) {
     let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
 
-    if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
+    let Some(neighbor_lsa) = top.lsdb.get(&level).get(&neighbor_lsp_id) else {
         return;
-    }
+    };
+
     if neighbor_lsp_id.is_pseudo() {
-        // Pseudonode handling for MT 2 would walk MtIsReach entries
-        // on the pseudo-LSP. Deferred — most deployments use P2P
-        // links for MT 2 and pseudonodes mainly hit on LAN segments.
+        // LAN segment. The pseudonode LSP is originated by the DIS
+        // and lists every router attached to the LAN in TLV 22 with
+        // metric 0; pseudonode origination doesn't currently emit
+        // TLV 222, so we walk TLV 22 here and gate each LAN-attached
+        // router on its own MT 2 capability via mt_membership.
+        // Result: from_id reaches every MT-2-capable router on the
+        // LAN at cost = (entry.metric + neighbor_entry.metric).
+        let neighbor_lsp = neighbor_lsa.lsp.clone();
+        for tlv in &neighbor_lsp.tlvs {
+            let IsisTlv::ExtIsReach(ext_reach) = tlv else {
+                continue;
+            };
+            for neighbor_entry in &ext_reach.entries {
+                let to_sys_id = neighbor_entry.neighbor_id.sys_id();
+                if to_sys_id == *from_sys_id {
+                    // Skip back-edge to ourselves.
+                    continue;
+                }
+                let mt2_capable = top
+                    .mt_membership
+                    .get(&level)
+                    .get(&to_sys_id)
+                    .map(|set| set.contains(&MtId::Ipv6Unicast))
+                    .unwrap_or(false);
+                if !mt2_capable {
+                    continue;
+                }
+                let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+                links.push(spf::Link {
+                    from: from_id,
+                    to: to_id,
+                    cost: entry.metric + neighbor_entry.metric,
+                });
+            }
+        }
         return;
     }
+
+    // P2P / direct neighbor.
     let to_sys_id = neighbor_lsp_id.sys_id();
     let mt2_capable = top
         .mt_membership

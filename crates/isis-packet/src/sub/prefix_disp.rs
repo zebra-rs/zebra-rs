@@ -136,41 +136,84 @@ impl Display for IsisSub2SidStructure {
 
 impl Display for MultiTopologyId {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "{}", self.id())
+        write!(f, "{}", mt_topology_name(self.id()))
+    }
+}
+
+/// Operator-facing name for a 12-bit MT identifier per RFC 5120 §1.4
+/// and IANA "IS-IS MT IDs". Falls back to a `MT-N` placeholder for
+/// unknown / private-use values so the show output stays useful even
+/// when peers advertise topologies we don't model locally.
+pub fn mt_topology_name(id: u16) -> String {
+    match id {
+        0 => "ipv4-unicast".to_string(),
+        1 => "in-band-management".to_string(),
+        2 => "ipv6-unicast".to_string(),
+        3 => "ipv4-multicast".to_string(),
+        4 => "ipv6-multicast".to_string(),
+        n => format!("MT-{n}"),
     }
 }
 
 impl Display for IsisTlvMultiTopology {
+    /// One "MT Router Info: <name>" line per topology. RFC 5120 §3.1
+    /// — the LSP advertises every MT the router participates in;
+    /// listing them on separate lines mirrors what other IS-IS
+    /// implementations print and matches the operator-facing
+    /// reference output.
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  Multi-Topology:")?;
-        for entry in &self.entries {
-            write!(f, " {}", entry)?;
+        for (pos, entry) in self.entries.iter().enumerate() {
+            if pos != 0 {
+                writeln!(f)?;
+            }
+            write!(f, "  MT Router Info: {entry}")?;
         }
         Ok(())
     }
 }
 
 impl Display for IsisTlvMtIpReach {
+    /// One "MT IP Reachability: <prefix> (Metric: N) <topology>" line
+    /// per entry, with any sub-TLVs hanging off below. The prefix +
+    /// metric are inlined here rather than delegated to the entry's
+    /// own Display, which prepends "Extended IP Reachability:" and
+    /// would otherwise produce a doubled label.
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  MT IP Reachability (MT-ID {}):", self.mt.id())?;
+        let topology = mt_topology_name(self.mt.id());
         for (pos, entry) in self.entries.iter().enumerate() {
             if pos != 0 {
                 writeln!(f)?;
             }
-            write!(f, "\n{}", entry)?;
+            write!(
+                f,
+                "  MT IP Reachability: {} (Metric: {}) {}",
+                entry.prefix, entry.metric, topology,
+            )?;
+            for sub in &entry.subs {
+                write!(f, "\n{sub}")?;
+            }
         }
         Ok(())
     }
 }
 
 impl Display for IsisTlvMtIpv6Reach {
+    /// One "MT IPv6 Reachability: <prefix> (Metric: N) <topology>"
+    /// line per entry. Same prefix/metric inlining as IsisTlvMtIpReach.
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "  MT IPv6 Reachability (MT-ID {}):", self.mt.id())?;
+        let topology = mt_topology_name(self.mt.id());
         for (pos, entry) in self.entries.iter().enumerate() {
             if pos != 0 {
                 writeln!(f)?;
             }
-            write!(f, "\n{}", entry)?;
+            write!(
+                f,
+                "  MT IPv6 Reachability: {} (Metric: {}) {}",
+                entry.prefix, entry.metric, topology,
+            )?;
+            for sub in &entry.subs {
+                write!(f, "\n{sub}")?;
+            }
         }
         Ok(())
     }
