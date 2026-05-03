@@ -7,7 +7,8 @@ use super::link::{LinkConfig, link_config_exec};
 use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
-    NexthopUni, RibSrRx, RibType, Sid, StaticConfig, V4, V6, Vxlan, VxlanBuilder, VxlanConfig,
+    NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vxlan, VxlanBuilder,
+    VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -252,7 +253,16 @@ pub struct Rib {
     /// convergence vs. churn trade-off; default 1s matches the typical
     /// "kick once shortly after the wave settles" pattern.
     pub rib_sync_interval: u64,
+
+    /// True when the sr0 dummy was created by this process and must
+    /// therefore be cleaned up on Shutdown. False when sr0 already
+    /// existed (operator-managed) — leave it alone on exit.
+    pub sr0_owned: bool,
 }
+
+/// Name of the dummy interface that hosts End-style seg6local routes
+/// (table=main + kind=Unicast). Created at startup if missing.
+pub const SR0_DUMMY_NAME: &str = "sr0";
 
 const DEFAULT_RIB_SYNC_INTERVAL_SEC: u64 = 1;
 
@@ -301,6 +311,7 @@ impl Rib {
             router_id: Ipv4Addr::UNSPECIFIED,
             rib_sync_timer: None,
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
+            sr0_owned: false,
         };
         rib.show_build();
         Ok(rib)
@@ -384,6 +395,51 @@ impl Rib {
             .map(|link| link.index)
     }
 
+    /// Resolve the device the kernel binds the seg6local action to,
+    /// per behavior:
+    ///   - End: sr0 dummy (table=main + kind=Unicast install)
+    ///   - everything else: loopback (table=local + kind=Local)
+    fn resolve_sid_ifindex(&self, behavior: SidBehavior) -> Option<u32> {
+        match behavior {
+            SidBehavior::End => self
+                .links
+                .values()
+                .find(|link| link.name == SR0_DUMMY_NAME)
+                .map(|link| link.index)
+                .or_else(|| self.resolve_lo_ifindex()),
+            _ => self.resolve_lo_ifindex(),
+        }
+    }
+
+    /// Make sure the sr0 dummy interface exists and is up. Called once
+    /// at startup after the initial FIB dump has populated `self.links`,
+    /// so we can detect a pre-existing sr0 and avoid clobbering it.
+    /// Sets `sr0_owned = true` only when this process created the
+    /// device — used by the shutdown path to decide whether to delete it.
+    pub async fn ensure_sr0_dummy(&mut self) {
+        if self.links.values().any(|link| link.name == SR0_DUMMY_NAME) {
+            // Operator (or a prior run) left sr0 in place — assume they
+            // own its lifecycle and just verify it's up.
+            return;
+        }
+        let Some(ifindex) = self.fib_handle.dummy_add(SR0_DUMMY_NAME).await else {
+            tracing::warn!("sr0 dummy create failed — End SID installs will fall back to lo");
+            return;
+        };
+        self.fib_handle.link_set_up(ifindex).await;
+        self.sr0_owned = true;
+        tracing::info!("sr0 dummy created (ifindex={})", ifindex);
+    }
+
+    /// Inverse of `ensure_sr0_dummy` — only deletes when this process
+    /// created the device. Called from the Shutdown message handler.
+    pub async fn cleanup_sr0_dummy(&self) {
+        if !self.sr0_owned {
+            return;
+        }
+        self.fib_handle.dummy_del(SR0_DUMMY_NAME).await;
+    }
+
     /// Install an allocated SID into the FIB: allocate / share a kernel
     /// nhid via NexthopMap, install the route as RouteType::Local with
     /// seg6local action, and record the entry in `self.sids` so the
@@ -391,7 +447,7 @@ impl Rib {
     async fn sid_install(&mut self, mut sid: Sid) {
         let original_ifindex = sid.ifindex;
         if sid.ifindex == 0
-            && let Some(ifindex) = self.resolve_lo_ifindex()
+            && let Some(ifindex) = self.resolve_sid_ifindex(sid.behavior)
         {
             sid.ifindex = ifindex;
         }
@@ -412,7 +468,7 @@ impl Rib {
         // entry so the LSP advertisement and show table are unaffected.
         if sid.ifindex == 0 {
             tracing::warn!(
-                "[sid_install] addr={} skipped — no loopback ifindex resolved yet",
+                "[sid_install] addr={} skipped — no SID device ifindex resolved yet",
                 sid.addr
             );
             self.sids.insert(sid.addr, sid);
@@ -648,6 +704,7 @@ impl Rib {
                 for (_, vxlan) in self.vxlan.iter() {
                     self.fib_handle.vxlan_del(vxlan).await;
                 }
+                self.cleanup_sr0_dummy().await;
                 let _ = tx.send(());
             }
             Message::LinkUp { ifindex } => {
@@ -861,6 +918,10 @@ impl Rib {
         if let Err(_err) = fib_dump(self).await {
             // warn!("FIB dump error {}", err);
         }
+
+        // The fib_dump above populated `self.links`; we can now decide
+        // whether sr0 already exists or needs to be created.
+        self.ensure_sr0_dummy().await;
 
         loop {
             tokio::select! {
