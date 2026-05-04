@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 //! IS-IS-side SRv6 helpers — the per-instance ELIB function pool used
 //! to allocate End.X (adjacency) SIDs, and the bit math that turns a
 //! locator prefix + 16-bit function into a full SID address.

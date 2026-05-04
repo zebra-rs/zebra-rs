@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 //! SRv6 SID allocation registry. Each entry is one SID address that some
 //! protocol (IS-IS, OSPF, BGP) has carved out of a locator and is now
 //! advertising as End / End.X / End.DT4 / etc. The RIB is the central
