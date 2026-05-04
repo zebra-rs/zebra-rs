@@ -18,14 +18,41 @@ async fn clean_test_environment(_world: &mut BgpWorld) {
     // otherwise their open netlink sockets can keep the namespace alive.
     let _ = netns::killall_zebra_rs().await;
 
-    // Delete veths first (must be done before namespaces are deleted)
-    let _ = netns::delete_veth("z1").await;
-    let _ = netns::delete_veth("z2").await;
-    let _ = netns::delete_netns("z1").await;
-    let _ = netns::delete_netns("z2").await;
+    // Delete veths first (must be done before namespaces are deleted).
+    // Cleanup is best-effort across z1..z4 so the same step works for both
+    // the bridge-attached topologies (z1, z2) and the linear point-to-point
+    // chain used by the SRv6 scenario (z1..z4).
+    for ns in ["z1", "z2", "z3", "z4"] {
+        let _ = netns::delete_veth(ns).await;
+        let _ = netns::delete_netns(ns).await;
+    }
     let _ = netns::delete_bridge("br0").await;
 
     println!("✓ Test environment cleaned");
+}
+
+#[when(expr = "I create namespace {string}")]
+async fn create_namespace_plain(_world: &mut BgpWorld, namespace: String) {
+    netns::create_netns(&namespace)
+        .await
+        .expect("Failed to create namespace");
+    println!("✓ Namespace {} created (no bridge)", namespace);
+}
+
+#[when(
+    expr = "I connect namespace {string} interface {string} to namespace {string} interface {string}"
+)]
+async fn connect_two_namespaces(
+    _world: &mut BgpWorld,
+    ns_a: String,
+    iface_a: String,
+    ns_b: String,
+    iface_b: String,
+) {
+    netns::connect_netns_pair(&ns_a, &iface_a, &ns_b, &iface_b)
+        .await
+        .expect("Failed to connect namespace pair");
+    println!("✓ Linked {}:{} <-> {}:{}", ns_a, iface_a, ns_b, iface_b);
 }
 
 #[when(expr = "I create bridge {string}")]
@@ -181,13 +208,28 @@ async fn stop_zebra_rs(_world: &mut BgpWorld, namespace: String) {
 async fn apply_config(world: &mut BgpWorld, config_file: String, namespace: String) {
     let config_path = format!("tests/configs/{}/{}", world.feature_tag, config_file);
 
-    netns::exec_in_netns(&namespace, "vtyctl", &["apply", "-f", &config_path])
+    let stdout = netns::exec_in_netns(&namespace, "vtyctl", &["apply", "-f", &config_path])
         .await
         .expect("Failed to apply config");
 
+    // `vtyctl apply` exits 0 even when the server rejects the config —
+    // it prints `error: <command>` (or `applied`) to stdout and returns.
+    // Without this check, a silently-rejected config would let the
+    // scenario continue past the apply step and fail later at a ping or
+    // a show with no obvious cause. Bail loudly with the offending line
+    // so the failure is diagnosable from the cucumber log alone.
+    let trimmed = stdout.trim();
+    assert!(
+        !trimmed.starts_with("error:"),
+        "vtyctl apply rejected {} in namespace {}: {}",
+        config_file,
+        namespace,
+        trimmed
+    );
+
     println!(
-        "✓ Config {} applied to namespace {}",
-        config_file, namespace
+        "✓ Config {} applied to namespace {} ({})",
+        config_file, namespace, trimmed
     );
 }
 
