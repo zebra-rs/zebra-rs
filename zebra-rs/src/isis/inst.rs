@@ -456,16 +456,34 @@ impl Isis {
         // lsp_flood(&mut top, level, &lsp_id);
     }
 
-    fn process_dis_originate(&mut self, level: Level, ifindex: u32, base: Option<u32>) {
+    fn process_dis_originate(
+        &mut self,
+        level: Level,
+        neighbor_id: IsisNeighborId,
+        base: Option<u32>,
+    ) {
         let mut top = self.top();
 
-        let mut lsp = dis_generate(&mut top, level, ifindex, base);
+        let Some(ifindex) = resolve_dis_ifindex(top.links, level, neighbor_id) else {
+            isis_event_trace!(
+                top.tracing,
+                LspOriginate,
+                &level,
+                "[DisOriginate] no DIS link found for {} at {} - skip",
+                neighbor_id,
+                level
+            );
+            return;
+        };
+
+        let Some(mut lsp) = dis_generate(&mut top, level, ifindex, base) else {
+            return;
+        };
         let lsp_id = lsp.lsp_id;
         let buf = lsp_emit(&mut lsp, level);
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
-        //lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
@@ -791,15 +809,38 @@ fn target_locator_name(cfg: &IsisConfig) -> Option<String> {
     cfg.sr_srv6_locator.clone()
 }
 
-pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<u32>) -> IsisLsp {
-    let neighbor_id = if let Some(link) = top.links.get(&ifindex) {
-        if let Some((adj, _)) = link.state.adj.get(&level) {
-            *adj
-        } else {
-            IsisNeighborId::default()
-        }
+/// Resolve a pseudonode `neighbor_id` (sys_id + pseudo_id) back to the
+/// local `ifindex` of the link where we currently hold the matching
+/// DIS adjacency at `level`. Returns `None` when no link owns that
+/// pseudonode — in that case the caller must skip origination, since
+/// emitting an LSP without a real DIS link produces a corrupt
+/// self-LSP (historical bug: invalid lsp_id, see issue tracking
+/// `0000.0000.0000.00-00` injection).
+pub fn resolve_dis_ifindex(
+    links: &IsisLinks,
+    level: Level,
+    neighbor_id: IsisNeighborId,
+) -> Option<u32> {
+    links
+        .iter()
+        .find_map(|(idx, link)| match link.state.adj.get(&level) {
+            Some((adj, _)) if *adj == neighbor_id => Some(*idx),
+            _ => None,
+        })
+}
+
+pub fn dis_generate(
+    top: &mut IsisTop,
+    level: Level,
+    ifindex: u32,
+    base: Option<u32>,
+) -> Option<IsisLsp> {
+    let neighbor_id = if let Some(link) = top.links.get(&ifindex)
+        && let Some((adj, _)) = link.state.adj.get(&level)
+    {
+        *adj
     } else {
-        IsisNeighborId::default()
+        return None;
     };
 
     let lsp_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
@@ -856,7 +897,7 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
         lsp.tlvs.push(IsisTlv::ExtIsReach(is_reach));
     }
 
-    lsp
+    Some(lsp)
 }
 
 pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> IsisLsp {
@@ -2149,7 +2190,13 @@ pub enum Message {
     /// reactions all pass None.
     LspOriginate(Level, Option<u32>),
     LspPurge(Level, IsisLspId),
-    DisOriginate(Level, u32, Option<u32>),
+    /// Re-originate the pseudonode LSP whose owner is the given
+    /// `IsisNeighborId` (sys_id + pseudo_id). The handler resolves
+    /// this back to the local ifindex by walking `top.links`; if no
+    /// link currently holds that DIS adjacency at `level`, the
+    /// re-origination is skipped (the pseudonode no longer belongs to
+    /// us).
+    DisOriginate(Level, IsisNeighborId, Option<u32>),
     SpfCalc(Level),
     AdjacencyUp(Level, u32),
 }
@@ -2179,7 +2226,9 @@ impl Display for Message {
             Message::LspPurge(level, lsp_id) => {
                 write!(f, "[Message::LspPurge({}, {})]", level, lsp_id)
             }
-            Message::DisOriginate(level, _, _) => write!(f, "[Message::DisOriginate({})]", level),
+            Message::DisOriginate(level, neighbor_id, _) => {
+                write!(f, "[Message::DisOriginate({}, {})]", level, neighbor_id)
+            }
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
             Message::AdjacencyUp(level, ifindex) => {
                 write!(f, "[Message::AdjacencyUp({}:{})]", level, ifindex)
@@ -2650,5 +2699,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(target_locator_name(&cfg), None);
+    }
+
+    #[test]
+    fn resolve_dis_ifindex_returns_none_on_empty_links() {
+        // Regression for the `0000.0000.0000.00-00` self-LSP injection
+        // bug: when a peer reflects our pseudonode LSP back at higher
+        // seq and we no longer own that DIS adjacency, the §7.3.16.4
+        // self-bump path must skip rather than fabricate an LSP at a
+        // bogus lsp_id.
+        let links = IsisLinks::default();
+        let neighbor_id = IsisNeighborId::default();
+        assert!(resolve_dis_ifindex(&links, Level::L1, neighbor_id).is_none());
+        assert!(resolve_dis_ifindex(&links, Level::L2, neighbor_id).is_none());
     }
 }
