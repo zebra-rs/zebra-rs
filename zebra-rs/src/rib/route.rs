@@ -173,10 +173,7 @@ impl Rib {
 
         // Suppression decision and event recording.
         let now = Instant::now();
-        let state = self
-            .addr_recovery
-            .entry((ifindex, prefix))
-            .or_insert_with(AddrRecoveryState::default);
+        let state = self.addr_recovery.entry((ifindex, prefix)).or_default();
         let decision = addr_recover_decide(state, now);
 
         match decision {
@@ -460,10 +457,7 @@ impl Rib {
             .collect();
         for prefix in recover {
             let now = Instant::now();
-            let state = self
-                .addr_recovery
-                .entry((ifindex, prefix))
-                .or_insert_with(AddrRecoveryState::default);
+            let state = self.addr_recovery.entry((ifindex, prefix)).or_default();
             // Don't record a "delete event" here — link_up isn't the
             // kernel saying "deleted", it's us recovering after a
             // bounce. Just consult the existing suppression state.
