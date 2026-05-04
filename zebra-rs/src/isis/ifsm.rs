@@ -3,6 +3,7 @@ use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::context::Timer;
+use crate::fmt::DisplayOpt;
 use crate::isis::link::DisStatus;
 use crate::isis::network::P2P_ISS;
 use crate::isis_pdu_trace;
@@ -400,19 +401,35 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             return;
         };
         nbr.is_dis = true;
+
+        // Defer the DisStatus::Other transition until the elected DIS
+        // has published a LAN ID. Without it we can't register the
+        // pseudonode adjacency, so transitioning now would leave us in
+        // Other-with-adj=None — CSNPs would be dropped (packet.rs
+        // csnp_recv guards on adj.is_some()), the self LSP would miss
+        // its pseudonode reach entry, and `show isis adjacency` would
+        // report an inconsistent DIS without a binding. Election
+        // outcome is recorded (`nbr.is_dis = true`); the late-LAN-ID
+        // path in hello_recv re-fires DisSelection once lan_id arrives,
+        // and that run will complete the transition cleanly.
+        if nbr.lan_id.is_empty() {
+            if link.tracing.fsm.nfsm.enabled {
+                tracing::info!(
+                    "[NBR] DIS election: {} elected but LAN ID not yet known, deferring transition",
+                    nbr.sys_id
+                );
+            }
+            return;
+        }
+
         let reason = format!(
             "Neighbor is {} elected (priority: {}, mac: {})",
             nbr.sys_id,
             nbr.priority,
             mac_str(&nbr.mac),
         );
-        let lan_id = if !nbr.lan_id.is_empty() {
-            Some(nbr.lan_id)
-        } else {
-            None
-        };
 
-        (DisStatus::Other, Some(nbr.sys_id), lan_id, reason)
+        (DisStatus::Other, Some(nbr.sys_id), Some(nbr.lan_id), reason)
     } else {
         // DIS is myself.
         let sys_id = Some(link.up_config.net.sys_id());
@@ -462,9 +479,19 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             }
             DisStatus::Other => {
                 use IfsmEvent::*;
+                if link.tracing.fsm.nfsm.enabled {
+                    tracing::info!(
+                        "[NBR] Adjacency {:?} LAN ID {}",
+                        link.state.adj.get(&level),
+                        DisplayOpt(&lan_id)
+                    );
+                }
                 if link.state.adj.get(&level).is_none()
                     && let Some(lan_id) = lan_id
                 {
+                    if link.tracing.fsm.nfsm.enabled {
+                        tracing::info!("[NBR] Adjacency set {}", lan_id);
+                    }
                     *link.state.adj.get_mut(&level) = Some((lan_id, None));
                     link.lsdb.get_mut(&level).adj_set(link.ifindex);
                     link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
