@@ -825,7 +825,6 @@ impl Rib {
                 self.link_delete(link);
             }
             FibMessage::NewAddr(addr) => {
-                tracing::info!("NewAddr {:?}", addr);
                 // Kernel netlink path: from_config=false. If a configured
                 // LinkAddr is already present for this address, the merge in
                 // link_addr_update will flip its `fib` flag to true.
@@ -843,8 +842,6 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
-                tracing::info!("DelAddr {:?}", addr);
-
                 // If the deleted address is still in config, push it
                 // back to the kernel rather than tearing down state.
                 // Recovery may be suppressed (Step 7 hold-down) — in
