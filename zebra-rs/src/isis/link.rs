@@ -553,6 +553,9 @@ impl Isis {
             *link.state.adj.get_mut(&level) = None;
             *link.timer.csnp.get_mut(&level) = None;
             self.lsdb.get_mut(&level).adj_clear(ifindex);
+
+            // Reset DIS selection status.
+            *link.state.dis_status.get_mut(&level) = DisStatus::NotSelected;
         }
 
         // Stop hello generation on this interface.
