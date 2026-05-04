@@ -1,14 +1,15 @@
 # vty — GNU bash 5.2 with vtysh hooks
 
 This directory builds `vty`, a router-CLI shell derived from GNU
-bash 5.2 with patches that integrate it with the rest of zebra-rs.
-Bash sources are fetched at build time; only the deltas live here.
+bash 5.2.21 with patches that integrate it with the rest of
+zebra-rs. Bash sources are fetched at build time; only the deltas
+live here.
 
 ## Build
 
     make
 
-The first build downloads `bash-5.2.tar.gz` (~11 MB) into
+The first build downloads `bash-5.2.21.tar.gz` (~11 MB) into
 `~/.cache/zebra-rs/`, verifies its SHA-256, extracts it under
 `build/vty/`, lays additions on top, applies the patch, then runs
 `./configure && make`. The resulting binary is `build/vty/vty`.
