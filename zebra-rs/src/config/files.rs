@@ -110,6 +110,44 @@ segment-routing {
     }
 
     #[test]
+    fn test_static_ipv6_default_route_survives_load() {
+        // Regression: a user-reported bug where a startup-config with a
+        // default IPv6 static route was loaded with the default route
+        // missing. Root cause was in token.rs (':' wasn't accepted as
+        // the first character of a String token, so `::/0` was silently
+        // truncated to `0`). Pin the full loader pipeline so a similar
+        // tokenizer-vs-loader regression is caught here even if the
+        // tokenizer's own unit test is moved or rewritten.
+        let config = r#"
+static {
+  ipv6 {
+    route 2001:db8:ff00:5::/64 {
+      segments {
+        fcbb:bbbb:3:fe00::;
+      }
+    }
+    route ::/0 {
+      nexthop 2001:db8:ff00:10::2;
+    }
+  }
+}
+"#;
+        let cmds = load_config_file(config.to_string());
+        let dump = cmds.join("\n");
+        assert!(
+            cmds.iter()
+                .any(|c| c == "set static ipv6 route ::/0 nexthop 2001:db8:ff00:10::2"),
+            "default-route nexthop set line missing; got:\n{dump}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| c
+                    == "set static ipv6 route 2001:db8:ff00:5::/64 segments fcbb:bbbb:3:fe00::"),
+            "specific-prefix segments set line missing; got:\n{dump}"
+        );
+    }
+
+    #[test]
     fn test_leaf_list_old_format() {
         // Test that old single-line format would have been parsed differently
         let config = r#"

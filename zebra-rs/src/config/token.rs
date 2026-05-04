@@ -20,7 +20,16 @@ pub fn tokenizer(input: String) -> Vec<Token> {
             ch if ch.is_whitespace() => {
                 continue;
             }
-            'a'..='z' | 'A'..='Z' | '0'..='9' => {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | ':' => {
+                // ':' as a leader covers IPv6 prefixes that start with the
+                // double-colon shorthand: `::/0`, `::1/128`, etc. Without
+                // it the tokenizer dropped the leading `:` characters and
+                // mis-tokenized `::/0` as `0`, so the file loader emitted
+                // `set ... route 0 nexthop ...`. libyang then rejected
+                // the line as not-a-valid-IPv6-prefix and the default
+                // route silently disappeared. CLI input arrives already
+                // split by the shell, so the bug only surfaced on
+                // startup-config / saved-config loads.
                 let s: String = iter::once(ch)
                     .chain(from_fn(|| {
                         chars.by_ref().next_if(|c| {
@@ -103,5 +112,33 @@ router {
             &Token::String("neighbors".to_string())
         );
         assert_eq!(tokens.get(11).unwrap(), &Token::LeftBrace);
+    }
+
+    #[test]
+    fn test_tokenizer_ipv6_double_colon_prefix_kept_intact() {
+        // Regression: the tokenizer used to require the first character
+        // of a String token to be alphanumeric, which silently dropped
+        // the leading `:` of an IPv6 prefix written in double-colon
+        // shorthand. `::/0` ended up as the bare token "0", and the
+        // file loader then emitted `set ... route 0 nexthop ...` which
+        // libyang rejected — so a startup-config carrying a default
+        // IPv6 route lost it. Pin all four shorthand shapes so we
+        // notice if the leader rule is ever tightened again.
+        let cases = [
+            ("::/0;", vec!["::/0"]),
+            ("::1/128;", vec!["::1/128"]),
+            ("::ffff:1.2.3.4/128;", vec!["::ffff:1.2.3.4/128"]),
+            ("nexthop ::1;", vec!["nexthop", "::1"]),
+        ];
+        for (input, expected) in cases {
+            let strings: Vec<String> = tokenizer(input.to_string())
+                .into_iter()
+                .filter_map(|t| match t {
+                    Token::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(strings, expected, "input was {input:?}");
+        }
     }
 }
