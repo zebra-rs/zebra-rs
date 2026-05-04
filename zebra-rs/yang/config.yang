@@ -32,6 +32,10 @@ module config {
     prefix zba;
   }
 
+  import zebra-bgp-vrf {
+    prefix zbv;
+  }
+
   import openconfig-isis-types {
     prefix isis;
   }
