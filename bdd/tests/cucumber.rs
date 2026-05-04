@@ -179,7 +179,7 @@ async fn stop_zebra_rs(_world: &mut BgpWorld, namespace: String) {
 
 #[when(expr = "I apply config {string} to namespace {string}")]
 async fn apply_config(world: &mut BgpWorld, config_file: String, namespace: String) {
-    let config_path = format!("tests/data/{}/{}", world.feature_tag, config_file);
+    let config_path = format!("tests/configs/{}/{}", world.feature_tag, config_file);
 
     netns::exec_in_netns(&namespace, "vtyctl", &["apply", "-f", &config_path])
         .await

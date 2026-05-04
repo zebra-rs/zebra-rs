@@ -31,7 +31,7 @@ Feature: BGP RR tests with gobgpd clients and etcd
  └─────────┘  └───────────┘  └─────────┘  └───────────┘  └─────────┘  └─────────┘
   ```
 
-  29 gobgpd RR clients: ese1-ese29 (see tests/data/topology.list for IP addresses)
+  29 gobgpd RR clients: ese1-ese29 (see tests/configs/topology.list for IP addresses)
 
   Config files:
   - rr.yaml: AS 64512, zebra-rs RR with cluster-id 198.18.39.94, peers to all gobgpd clients
