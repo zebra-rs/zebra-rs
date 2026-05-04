@@ -1,0 +1,232 @@
+module config-static {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-static";
+  prefix "static";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import ietf-yang-types {
+    prefix yang;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  description
+    "Schema for the zebra-rs static-routing tree. Extracted from
+     config.yang so the same shape can be instantiated twice — once
+     at the global level (`router static {...}`, the default VRF)
+     and once inside each per-VRF entry (`router static vrf NAME
+     {...}`). The on-the-wire data tree is unchanged for the global
+     instantiation; the per-VRF tree mirrors it under each VRF key.";
+
+  grouping static-routes {
+    description
+      "Address-family static-routing constructs (mpls + ipv4 + ipv6).
+       `uses` this grouping wherever a routing-instance-scoped static
+       configuration is needed.";
+
+    container mpls {
+      list label {
+        key "value";
+        leaf value {
+          type uint32;
+        }
+        list nexthop {
+          key "address";
+          leaf "address" {
+            type inet:ipv4-address;
+            description "Nexthop of the route";
+          }
+          leaf "outgoing-label" {
+            type uint32;
+          }
+        }
+      }
+    }
+
+    container ipv4 {
+      ext:help "IPv4 configuration";
+      list route {
+        key "prefix";
+        leaf prefix {
+          type inet:ipv4-prefix;
+        }
+        list nexthop {
+          key "address";
+          leaf "address" {
+            type inet:ipv4-address;
+            description "Nexthop of the route";
+          }
+          leaf metric {
+            type uint32;
+            description "Metric of the route.";
+          }
+          leaf weight {
+            type uint8;
+            description "Weight of ECMP route.";
+          }
+          leaf-list label {
+            type uint32;
+          }
+        }
+        leaf distance {
+          type uint8;
+          description "Distance of the route.";
+        }
+        leaf metric {
+          type uint32;
+          description "Metric of the route.";
+        }
+        container srv6 {
+          leaf-list segments {
+            type inet:ipv6-address;
+          }
+          leaf if-name {
+            ext:dynamic "rib:interface";
+            type string;
+          }
+        }
+      }
+
+      list arp {
+        key "address";
+        leaf "address" {
+          type inet:ipv4-address;
+          description "ARP neighbor address";
+        }
+        leaf mac {
+          type yang:mac-address;
+          description "MAC Address";
+        }
+      }
+
+      list srv6 {
+        key "prefix";
+        leaf prefix {
+          type inet:ipv4-prefix;
+        }
+        leaf encap {
+          type enumeration {
+            enum seg6;
+            enum seg6local;
+          }
+        }
+        leaf mode {
+          type enumeration {
+            enum encap;
+            enum inline;
+          }
+        }
+        leaf-list segs {
+          type string;
+          description "SRv6 segments";
+        }
+        leaf action {
+          type enumeration {
+            enum End;
+            enum End.DT4;
+          }
+        }
+        leaf dev {
+          type string;
+          description "Outgoing interface";
+        }
+        leaf table {
+          type uint32;
+        }
+        leaf flavors {
+          type enumeration {
+            enum next-csid;
+            enum psp;
+            enum usp;
+            enum usd;
+          }
+        }
+        leaf lblen {
+          type uint8;
+        }
+        leaf nflen {
+          type uint8;
+        }
+      }
+    }
+
+    container ipv6 {
+      ext:help "IPv6 configuration";
+
+      list neighbor {
+        key "address";
+        leaf "address" {
+          type inet:ipv6-address;
+          description "ARP neighbor address";
+        }
+        leaf mac {
+          type yang:mac-address;
+          description "MAC Address";
+        }
+      }
+
+      list route {
+        key "prefix";
+        leaf prefix {
+          type inet:ipv6-prefix;
+        }
+        list nexthop {
+          key "address";
+          leaf "address" {
+            type inet:ipv6-address;
+            description "Nexthop of the route";
+          }
+          leaf metric {
+            type uint32;
+            description "Metric of the route.";
+          }
+          leaf weight {
+            type uint8;
+            description "Weight of ECMP route.";
+          }
+        }
+        leaf distance {
+          type uint8;
+          description "Distance of the route.";
+        }
+        leaf metric {
+          type uint32;
+          description "Metric of the route.";
+        }
+        leaf-list segments {
+          type inet:ipv6-address;
+        }
+        leaf encap-type {
+          type enumeration {
+            enum "H.Encap";
+            enum "H.Encap.Red";
+          }
+        }
+        leaf action {
+          description
+            "SRv6 endpoint behavior installed as a seg6local
+             terminal action on this prefix. Mutually exclusive
+             with `segments` (which configures an outer H.Encap
+             push). Only the local-action variants — End, uN,
+             End.DT4, End.DT6 — are usable today; End.X / uA
+             require a per-adjacency nexthop that this list
+             doesn't model yet.";
+          type enumeration {
+            enum "End";
+            enum "End.X";
+            enum "uN";
+            enum "uA";
+            enum "End.DT4";
+            enum "End.DT6";
+          }
+        }
+      }
+    }
+  }
+}
