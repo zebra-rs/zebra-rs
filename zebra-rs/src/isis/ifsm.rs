@@ -462,9 +462,13 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         // Update link's DIS status to the new one.
         *link.state.dis_status.get_mut(&level) = new_status;
 
-        // If my role is DIS, we originate DIS.
-        if new_status == DisStatus::Myself {
-            link.event(Message::DisOriginate(level, link.ifindex, None));
+        // If my role is DIS, we originate DIS. dis_becoming has just
+        // registered the pseudonode adjacency on this link, so the
+        // neighbor_id we pass identifies our pseudonode LSP.
+        if new_status == DisStatus::Myself
+            && let Some((neighbor_id, _)) = link.state.adj.get(&level)
+        {
+            link.event(Message::DisOriginate(level, *neighbor_id, None));
         }
 
         // LSP Originate.
