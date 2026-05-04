@@ -1,0 +1,1286 @@
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/bashline.c vty/bashline.c
+--- bash-5.2/bashline.c	2022-04-17 15:37:12.000000000 -0700
++++ vty/bashline.c	2026-05-01 04:31:42.719006431 -0700
+@@ -80,6 +80,8 @@
+ #  include "pcomplete.h"
+ #endif
+ 
++#include "vtysh.h"
++
+ /* These should agree with the defines for emacs_mode and vi_mode in
+    rldefs.h, even though that's not a public readline header file. */
+ #ifndef EMACS_EDITING_MODE
+@@ -1443,6 +1445,10 @@
+   register int s, os, ns;
+ 
+   os = 0;
++
++  if (cli_mode())
++    return os;
++
+   /* Flags == SD_NOJMP only because we want to skip over command substitutions
+      in assignment statements.  Have to test whether this affects `standalone'
+      command substitutions as individual words. */
+@@ -1491,7 +1497,10 @@
+ {
+   register int e;
+ 
+-  e = skip_to_delim (rl_line_buffer, end, COMMAND_SEPARATORS, SD_NOJMP|SD_COMPLETE);
++  if (!cli_mode())
++    e = skip_to_delim (rl_line_buffer, end, COMMAND_SEPARATORS, SD_NOJMP|SD_COMPLETE);
++  else
++    e = strlen(rl_line_buffer);
+   return e;
+ }
+ 
+@@ -1624,7 +1633,8 @@
+     }
+   else if (member (rl_line_buffer[ti], command_separator_chars))
+     {
+-      in_command_position++;
++      if (!cli_mode())
++        in_command_position++;
+ 
+       if (check_redir (ti) == 1)
+ 	in_command_position = -1;	/* sentinel that we're not the first word on the line */
+@@ -1654,6 +1664,7 @@
+      succeed.  Don't bother if readline found a single quote and we are
+      completing on the substring.  */
+   if (*text == '`' && rl_completion_quote_character != '\'' &&
++        !cli_mode() &&
+ 	(in_command_position > 0 || (unclosed_pair (rl_line_buffer, start, "`") &&
+ 				     unclosed_pair (rl_line_buffer, end, "`"))))
+     matches = rl_completion_matches (text, command_subst_completion_function);
+@@ -1663,7 +1674,7 @@
+   have_progcomps = prog_completion_enabled && (progcomp_size () > 0);
+   iw_compspec = progcomp_search (INITIALWORD);
+   if (matches == 0 &&
+-      (in_command_position == 0 || text[0] == '\0' || (in_command_position > 0 && iw_compspec)) &&
++      (cli_mode() || in_command_position == 0 || text[0] == '\0' || (in_command_position > 0 && iw_compspec)) &&
+       current_prompt_string == ps1_prompt)
+     {
+       int s, e, s1, e1, os, foundcs;
+@@ -1720,6 +1731,12 @@
+         prog_complete_matches = programmable_completions (EMPTYCMD, text, s, e, &foundcs);
+       else if (start == end && text[0] == '\0' && s1 > start && whitespace (rl_line_buffer[start]))
+         foundcs = 0;		/* whitespace before command name */
++      else if (cli_mode () && (e > s || strcmp (n, text) == 0) && was_assignment == 0 && have_progcomps)
++        {
++          prog_complete_matches = programmable_completions (n, text, s, e, &foundcs);
++          /* command completion if programmable completion fails */
++          in_command_position = s == start && STREQ (n, text);	/* XXX */
++        }
+       else if (e > s && was_assignment == 0 && e1 == end && rl_line_buffer[e] == 0 && whitespace (rl_line_buffer[e-1]) == 0)
+ 	{
+ 	  /* not assignment statement, but still want to perform command
+@@ -1802,6 +1819,11 @@
+ 
+   matches = (char **)NULL;
+ 
++  if (cli_mode()) {
++    rl_ignore_some_completions_function = bash_ignore_everything;
++    return matches;
++  }
++
+   /* New posix-style command substitution or variable name? */
+   if (*text == '$')
+     {
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/builtins/common.h vty/builtins/common.h
+--- bash-5.2/builtins/common.h	2022-06-02 11:18:35.000000000 -0700
++++ vty/builtins/common.h	2026-05-01 04:31:42.721184431 -0700
+@@ -51,6 +51,7 @@
+ #define SEVAL_FUNCDEF	0x080		/* only allow function definitions */
+ #define SEVAL_ONECMD	0x100		/* only allow a single command */
+ #define SEVAL_NOHISTEXP	0x200		/* inhibit history expansion */
++#define SEVAL_NOOPTIMIZE 0x400		/* don't try to set optimization flags */
+ 
+ /* Flags for describe_command, shared between type.def and command.def */
+ #define CDESC_ALL		0x001	/* type -a */
+@@ -257,6 +258,12 @@
+ extern int expand_once_flag;
+ #endif
+ 
++#if defined (EXTENDED_GLOB)
++extern int extglob_flag;
++#endif
++
++extern int expaliases_flag;
++
+ /* variables from source.def */
+ extern int source_searches_cwd;
+ extern int source_uses_path;
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/builtins/eval.def vty/builtins/eval.def
+--- bash-5.2/builtins/eval.def	2016-01-25 10:28:37.000000000 -0800
++++ vty/builtins/eval.def	2026-05-01 04:31:42.721184431 -0700
+@@ -53,5 +53,5 @@
+     return (EX_USAGE);
+   list = loptend;	/* skip over possible `--' */
+ 
+-  return (list ? evalstring (string_list (list), "eval", SEVAL_NOHIST) : EXECUTION_SUCCESS);
++  return (list ? evalstring (string_list (list), "eval", SEVAL_NOHIST|SEVAL_NOOPTIMIZE) : EXECUTION_SUCCESS);
+ }
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/builtins/evalfile.c vty/builtins/evalfile.c
+--- bash-5.2/builtins/evalfile.c	2019-07-20 13:16:08.000000000 -0700
++++ vty/builtins/evalfile.c	2026-05-01 04:31:42.721184431 -0700
+@@ -266,7 +266,7 @@
+ #endif
+ 
+   /* set the flags to be passed to parse_and_execute */
+-  pflags = SEVAL_RESETLINE;
++  pflags = SEVAL_RESETLINE|SEVAL_NOOPTIMIZE;
+   pflags |= (flags & FEVAL_HISTORY) ? 0 : SEVAL_NOHIST;
+ 
+   if (flags & FEVAL_BUILTIN)
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/builtins/evalstring.c vty/builtins/evalstring.c
+--- bash-5.2/builtins/evalstring.c	2022-07-18 11:46:56.000000000 -0700
++++ vty/builtins/evalstring.c	2026-05-01 04:31:42.721184431 -0700
+@@ -132,8 +132,8 @@
+   if (command->type == cm_connection &&
+       (command->value.Connection->connector == AND_AND || command->value.Connection->connector == OR_OR || command->value.Connection->connector == ';') &&
+       (command->value.Connection->second->flags & CMD_TRY_OPTIMIZING) &&
+-      ((startup_state == 2 && should_suppress_fork (command->value.Connection->second)) ||
+-       ((subshell_environment & SUBSHELL_PAREN) && should_optimize_fork (command->value.Connection->second, 0))))
++      (should_suppress_fork (command->value.Connection->second) ||
++      ((subshell_environment & SUBSHELL_PAREN) && should_optimize_fork (command->value.Connection->second, 0))))
+     {
+       command->value.Connection->second->flags |= CMD_NO_FORK;
+       command->value.Connection->second->value.Simple->flags |= CMD_NO_FORK;
+@@ -290,6 +290,7 @@
+    	(flags & SEVAL_NOFREE) -> don't free STRING when finished
+    	(flags & SEVAL_RESETLINE) -> reset line_number to 1
+    	(flags & SEVAL_NOHISTEXP) -> history_expansion_inhibited -> 1
++   	(flags & SEVAL_NOOPTIMIZE) -> don't try to turn on optimizing flags
+ */
+ 
+ int
+@@ -431,6 +432,8 @@
+ 
+       if (parse_command () == 0)
+ 	{
++	  int local_expalias, local_alflag;
++
+ 	  if ((flags & SEVAL_PARSEONLY) || (interactive_shell == 0 && read_but_dont_execute))
+ 	    {
+ 	      last_result = EXECUTION_SUCCESS;
+@@ -500,13 +503,28 @@
+ 		 if we are at the end of the command string, the last in a
+ 		 series of connection commands is
+ 		 command->value.Connection->second. */
+-	      else if (command->type == cm_connection && can_optimize_connection (command))
++	      else if (command->type == cm_connection &&
++		       (flags & SEVAL_NOOPTIMIZE) == 0 &&
++		       can_optimize_connection (command))
+ 		{
+ 		  command->value.Connection->second->flags |= CMD_TRY_OPTIMIZING;
+ 		  command->value.Connection->second->value.Simple->flags |= CMD_TRY_OPTIMIZING;
+ 		}
+ #endif /* ONESHOT */
+ 
++	      /* We play tricks in the parser and command_substitute() turning
++		 expand_aliases on and off depending on which parsing pass and
++		 whether or not we're in posix mode. This only matters for
++		 parsing, and we let the higher layers deal with that. We just
++		 want to ensure that expand_aliases is set to the appropriate
++		 global value when we go to execute this command, so we save
++		 and restore it around the execution (we don't restore it if
++		 the global value of the flag (expaliases_flag) changes). */
++	      local_expalias = expand_aliases;
++	      local_alflag = expaliases_flag;
++	      if (subshell_environment & SUBSHELL_COMSUB)
++		expand_aliases = expaliases_flag;
++
+ 	      /* See if this is a candidate for $( <file ). */
+ 	      if (startup_state == 2 &&
+ 		  (subshell_environment & SUBSHELL_COMSUB) &&
+@@ -524,6 +542,10 @@
+ 	      dispose_fd_bitmap (bitmap);
+ 	      discard_unwind_frame ("pe_dispose");
+ 
++	      /* If the global value didn't change, we restore what we had. */
++	      if ((subshell_environment & SUBSHELL_COMSUB) && local_alflag == expaliases_flag)
++		expand_aliases = local_expalias;
++
+ 	      if (flags & SEVAL_ONECMD)
+ 		{
+ 		  reset_parser ();
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/builtins/read.def vty/builtins/read.def
+--- bash-5.2/builtins/read.def	2022-06-02 11:23:19.000000000 -0700
++++ vty/builtins/read.def	2026-05-01 04:31:42.723006431 -0700
+@@ -167,6 +167,9 @@
+   /* Cancel alarm before restoring signal handler. */
+   if (read_timeout)
+     shtimer_clear (read_timeout);
++#if defined (READLINE)
++  rl_clear_timeout ();
++#endif
+   read_timeout = 0;
+ }
+ 
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/builtins/shopt.def vty/builtins/shopt.def
+--- bash-5.2/builtins/shopt.def	2022-02-14 07:30:27.000000000 -0800
++++ vty/builtins/shopt.def	2026-05-01 04:31:42.723006431 -0700
+@@ -149,6 +149,14 @@
+ static int set_assoc_expand PARAMS((char *, int));
+ #endif
+ 
++#if defined (EXTENDED_GLOB)
++int extglob_flag = EXTGLOB_DEFAULT;
++static int shopt_set_extglob PARAMS((char *, int));
++#endif
++
++int expaliases_flag = 0;
++static int shopt_set_expaliases PARAMS((char *, int));
++
+ static int shopt_set_debug_mode PARAMS((char *, int));
+ 
+ static int shopt_login_shell;
+@@ -198,12 +206,12 @@
+ #endif
+   { "dotglob", &glob_dot_filenames, (shopt_set_func_t *)NULL },
+   { "execfail", &no_exit_on_failed_exec, (shopt_set_func_t *)NULL },
+-  { "expand_aliases", &expand_aliases, (shopt_set_func_t *)NULL },
++  { "expand_aliases", &expaliases_flag, shopt_set_expaliases },
+ #if defined (DEBUGGER)
+   { "extdebug", &debugging_mode, shopt_set_debug_mode },
+ #endif
+ #if defined (EXTENDED_GLOB)
+-  { "extglob", &extended_glob, (shopt_set_func_t *)NULL },
++  { "extglob", &extglob_flag, shopt_set_extglob },
+ #endif
+   { "extquote", &extended_quote, (shopt_set_func_t *)NULL },
+   { "failglob", &fail_glob_expansion, (shopt_set_func_t *)NULL },
+@@ -350,7 +358,7 @@
+   check_window_size = CHECKWINSIZE_DEFAULT;
+   allow_null_glob_expansion = glob_dot_filenames = 0;
+   no_exit_on_failed_exec = 0;
+-  expand_aliases = 0;
++  expand_aliases = expaliases_flag = 0;
+   extended_quote = 1;
+   fail_glob_expansion = 0;
+   glob_asciirange = GLOBASCII_DEFAULT;
+@@ -374,7 +382,7 @@
+ #endif
+ 
+ #if defined (EXTENDED_GLOB)
+-  extended_glob = EXTGLOB_DEFAULT;
++  extended_glob = extglob_flag = EXTGLOB_DEFAULT;
+ #endif
+ 
+ #if defined (ARRAY_VARS)
+@@ -631,6 +639,26 @@
+   return (0);
+ }
+ 
++static int
++shopt_set_expaliases (option_name, mode)
++     char *option_name;
++     int mode;
++{
++  expand_aliases = expaliases_flag;
++  return 0;
++}
++
++#if defined (EXTENDED_GLOB)
++static int
++shopt_set_extglob (option_name, mode)
++     char *option_name;
++     int mode;
++{
++  extended_glob = extglob_flag;
++  return 0;
++}
++#endif
++
+ #if defined (READLINE)
+ static int
+ shopt_enable_hostname_completion (option_name, mode)
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/command.h vty/command.h
+--- bash-5.2/command.h	2021-04-30 12:43:15.000000000 -0700
++++ vty/command.h	2026-05-01 04:31:42.723006431 -0700
+@@ -114,6 +114,7 @@
+ #define PF_COMPLETE	0x10	/* same as W_COMPLETE, sets SX_COMPLETE */
+ #define PF_EXPANDRHS	0x20	/* same as W_EXPANDRHS */
+ #define PF_ALLINDS	0x40	/* array, act as if [@] was supplied */
++#define PF_BACKQUOTE	0x80	/* differentiate `` from $() for command_substitute */
+ 
+ /* Possible values for subshell_environment */
+ #define SUBSHELL_ASYNC	0x01	/* subshell caused by `command &' */
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/execute_cmd.c vty/execute_cmd.c
+--- bash-5.2/execute_cmd.c	2022-08-17 08:51:12.000000000 -0700
++++ vty/execute_cmd.c	2026-05-01 04:31:42.763217139 -0700
+@@ -1536,7 +1536,7 @@
+ 	 expansion with `shopt -s expand_alias' to continue to expand
+ 	 aliases. */
+       if (ois != interactive_shell)
+-	expand_aliases = 0;
++	expand_aliases = expaliases_flag = 0;
+     }
+ 
+   /* Subshells are neither login nor interactive. */
+@@ -1654,7 +1654,8 @@
+      subshell sets an exit trap, so we set CMD_NO_FORK for simple commands
+      and set CMD_TRY_OPTIMIZING for simple commands on the right side of an
+      and-or or `;' list to test for optimizing forks when they are executed. */
+-  if (user_subshell && command->type == cm_subshell)
++  if (user_subshell && command->type == cm_subshell &&
++      (command->flags & (CMD_TIME_PIPELINE|CMD_INVERT_RETURN)) == 0)
+     optimize_subshell_command (command->value.Subshell->command);
+ 
+   /* Do redirections, then dispose of them before recursive call. */
+@@ -3049,7 +3050,7 @@
+   temp = expand_arith_string (expr, Q_DOUBLE_QUOTES|Q_ARITH);
+   if (l->next)
+     free (expr);
+-  new = make_word_list (make_word (temp), (WORD_LIST *)NULL);
++  new = make_word_list (make_word (temp ? temp : ""), (WORD_LIST *)NULL);
+   free (temp);
+ 
+   if (new)
+@@ -3624,6 +3625,7 @@
+ 	  free (pattern);
+ 
+ 	  dispose_words (es);
++	  QUIT;
+ 
+ 	  if (match)
+ 	    {
+@@ -3990,13 +3992,11 @@
+       else
+ #endif /* COND_REGEXP */
+ 	{
+-	  int oe;
+-	  oe = extended_glob;
+ 	  extended_glob = 1;
+ 	  result = binary_test (cond->op->word, arg1, arg2, TEST_PATMATCH|TEST_ARITHEXP|TEST_LOCALE)
+ 				  ? EXECUTION_SUCCESS
+ 				  : EXECUTION_FAILURE;
+-	  extended_glob = oe;
++	  extended_glob = extglob_flag;
+ 	}
+       if (arg1 != nullstr)
+ 	free (arg1);
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/expr.c vty/expr.c
+--- bash-5.2/expr.c	2022-07-11 07:03:34.000000000 -0700
++++ vty/expr.c	2026-05-01 04:31:42.763217139 -0700
+@@ -1168,6 +1168,8 @@
+   /* [[[[[ */
+ #if defined (ARRAY_VARS)
+   aflag = tflag;	/* use a different variable for now */
++  if (shell_compatibility_level > 51)
++    aflag |= AV_ATSTARKEYS;
+   v = (e == ']') ? array_variable_part (tok, tflag, (char **)0, (int *)0) : find_variable (tok);
+ #else
+   v = find_variable (tok);
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/general.c vty/general.c
+--- bash-5.2/general.c	2021-11-04 11:12:38.000000000 -0700
++++ vty/general.c	2026-05-01 04:31:42.763217139 -0700
+@@ -91,7 +91,7 @@
+ {
+   &interactive_comments,
+   &source_uses_path,
+-  &expand_aliases,
++  &expaliases_flag,
+   &inherit_errexit,
+   &print_shift_error,
+   0
+@@ -106,7 +106,8 @@
+   /* Things that should be turned on when posix mode is enabled. */
+   if (on != 0)
+     {
+-      interactive_comments = source_uses_path = expand_aliases = 1;
++      interactive_comments = source_uses_path = 1;
++      expand_aliases = expaliases_flag = 1;
+       inherit_errexit = 1;
+       source_searches_cwd = 0;
+       print_shift_error = 1;
+@@ -116,13 +117,14 @@
+   else if (saved_posix_vars)		/* on == 0, restore saved settings */
+     {
+       set_posix_options (saved_posix_vars);
++      expand_aliases = expaliases_flag;
+       free (saved_posix_vars);
+       saved_posix_vars = 0;
+     }
+   else	/* on == 0, restore a default set of settings */
+     {
+       source_searches_cwd = 1;
+-      expand_aliases = interactive_shell;
++      expand_aliases = expaliases_flag = interactive_shell;	/* XXX */
+       print_shift_error = 0;
+     }
+ }
+@@ -681,21 +683,20 @@
+      int sample_len;
+ {
+   register int i;
++  int nline;
+   unsigned char c;
+ 
+   if (sample_len >= 4 && sample[0] == 0x7f && sample[1] == 'E' && sample[2] == 'L' && sample[3] == 'F')
+     return 1;
+ 
+   /* Generally we check the first line for NULs. If the first line looks like
+-     a `#!' interpreter specifier, we just look for NULs anywhere in the
+-     buffer. */
+-  if (sample[0] == '#' && sample[1] == '!')
+-    return (memchr (sample, '\0', sample_len) != NULL);
++     a `#!' interpreter specifier, we look for NULs in the first two lines. */
++  nline = (sample[0] == '#' && sample[1] == '!') ? 2 : 1;
+ 
+   for (i = 0; i < sample_len; i++)
+     {
+       c = sample[i];
+-      if (c == '\n')
++      if (c == '\n' && --nline == 0)
+ 	return (0);
+       if (c == '\0')
+ 	return (1);
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/jobs.c vty/jobs.c
+--- bash-5.2/jobs.c	2022-07-18 07:19:56.000000000 -0700
++++ vty/jobs.c	2026-05-01 04:31:42.764285264 -0700
+@@ -3077,9 +3077,13 @@
+       /* Don't modify terminal pgrp if we are running in background or a
+ 	 subshell.  Make sure subst.c:command_substitute uses the same
+ 	 conditions to determine whether or not it should undo this and
+-	 give the terminal to pipeline_pgrp. */
+-      
++	 give the terminal to pipeline_pgrp. We don't give the terminal
++	 back to shell_pgrp if an async job in the background exits because
++	 we never gave it to that job in the first place. An async job in
++	 the foreground is one we started in the background and foregrounded
++	 with `fg', and gave it the terminal. */
+       if ((flags & JWAIT_NOTERM) == 0 && running_in_background == 0 &&
++	  (job == NO_JOB || IS_ASYNC (job) == 0 || IS_FOREGROUND (job)) &&
+ 	  (subshell_environment & (SUBSHELL_ASYNC|SUBSHELL_PIPE)) == 0)
+ 	give_terminal_to (shell_pgrp, 0);
+     }
+@@ -3623,6 +3627,7 @@
+     {
+       get_tty_state ();
+       save_stty = shell_tty_info;
++      jobs[job]->flags &= ~J_ASYNC;	/* no longer async */
+       /* Give the terminal to this job. */
+       if (IS_JOBCONTROL (job))
+ 	give_terminal_to (jobs[job]->pgrp, 0);
+@@ -4220,7 +4225,7 @@
+   jobs_list_frozen = 1;
+   for (i = 0; i < nchild; i++)
+     {
+-      parse_and_execute (savestring (trap_command), "trap", SEVAL_NOHIST|SEVAL_RESETLINE);
++      parse_and_execute (savestring (trap_command), "trap", SEVAL_NOHIST|SEVAL_RESETLINE|SEVAL_NOOPTIMIZE);
+     }
+ 
+   run_unwind_frame ("SIGCHLD trap");
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/lib/readline/nls.c vty/lib/readline/nls.c
+--- bash-5.2/lib/readline/nls.c	2022-08-15 06:38:51.000000000 -0700
++++ vty/lib/readline/nls.c	2026-05-01 04:31:42.769125889 -0700
+@@ -141,6 +141,10 @@
+   if (lspec == 0)
+     lspec = "";
+   ret = setlocale (LC_CTYPE, lspec);	/* ok, since it does not change locale */
++  if (ret == 0 || *ret == 0)
++    ret = setlocale (LC_CTYPE, (char *)NULL);
++  if (ret == 0 || *ret == 0)
++    ret = RL_DEFAULT_LOCALE;
+ #else
+   ret = (lspec == 0 || *lspec == 0) ? RL_DEFAULT_LOCALE : lspec;
+ #endif
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/Makefile.in vty/Makefile.in
+--- bash-5.2/Makefile.in	2022-07-26 13:24:54.000000000 -0700
++++ vty/Makefile.in	2026-05-01 04:31:42.717006431 -0700
+@@ -109,10 +109,10 @@
+ OBJEXT = @OBJEXT@
+ 
+ # The name of this program and some version information.
+-VERSPROG = bashversion$(EXEEXT)
+-VERSOBJ = bashversion.$(OBJEXT)
++VERSPROG = vtyversion$(EXEEXT)
++VERSOBJ = vtyversion.$(OBJEXT)
+ 
+-Program = bash$(EXEEXT)
++Program = vty$(EXEEXT)
+ Version = @BASHVERS@
+ PatchLevel = `$(BUILD_DIR)/$(VERSPROG) -p`
+ RELSTATUS = @RELSTATUS@
+@@ -450,7 +450,8 @@
+ 	   input.c bashhist.c array.c arrayfunc.c assoc.c sig.c pathexp.c \
+ 	   unwind_prot.c siglist.c bashline.c bracecomp.c error.c \
+ 	   list.c stringlib.c locale.c findcmd.c redir.c \
+-	   pcomplete.c pcomplib.c syntax.c xmalloc.c
++	   pcomplete.c pcomplib.c syntax.c xmalloc.c \
++	   vtysh.c
+ 
+ HSOURCES = shell.h flags.h trap.h hashcmd.h hashlib.h jobs.h builtins.h \
+ 	   general.h variables.h config.h $(ALLOC_HEADERS) alias.h \
+@@ -459,6 +460,7 @@
+ 	   subst.h externs.h siglist.h bashhist.h bashline.h bashtypes.h \
+ 	   array.h arrayfunc.h sig.h mailcheck.h bashintl.h bashjmp.h \
+ 	   execute_cmd.h parser.h pathexp.h pathnames.h pcomplete.h assoc.h \
++	   vtysh.h \
+ 	   $(BASHINCFILES)
+ 
+ SOURCES	 = $(CSOURCES) $(HSOURCES) $(BUILTIN_DEFS)
+@@ -494,7 +496,8 @@
+ 	   trap.o input.o unwind_prot.o pathexp.o sig.o test.o version.o \
+ 	   alias.o $(ARRAY_O) arrayfunc.o assoc.o braces.o bracecomp.o bashhist.o \
+ 	   bashline.o $(SIGLIST_O) list.o stringlib.o locale.o findcmd.o redir.o \
+-	   pcomplete.o pcomplib.o syntax.o xmalloc.o $(SIGNAMES_O)
++	   pcomplete.o pcomplib.o syntax.o xmalloc.o $(SIGNAMES_O) \
++	   vtysh.o
+ 
+ # Where the source code of the shell builtins resides.
+ BUILTIN_SRCDIR=$(srcdir)/builtins
+@@ -547,8 +550,8 @@
+ BUILTINS_DEP = $(BUILTINS_LIBRARY)
+ 
+ # Documentation for the shell.
+-DOCSRC = $(srcdir)/doc
+-DOCDIR = $(dot)/doc
++# DOCSRC = $(srcdir)/doc
++# DOCDIR = $(dot)/doc
+ 
+ # Translations and other i18n support files
+ PO_SRC = $(srcdir)/po/
+@@ -568,7 +571,7 @@
+ 		  buildversion.o mksignames.o signames.o buildsignames.o
+ CREATED_CONFIGURE = config.h config.cache config.status config.log \
+ 		    stamp-h po/POTFILES config.status.lineno
+-CREATED_MAKEFILES = Makefile builtins/Makefile doc/Makefile \
++CREATED_MAKEFILES = Makefile builtins/Makefile \
+ 		    lib/readline/Makefile lib/glob/Makefile \
+ 		    lib/sh/Makefile lib/tilde/Makefile lib/malloc/Makefile \
+ 		    lib/termcap/Makefile examples/loadables/Makefile \
+@@ -587,7 +590,7 @@
+ # Keep GNU Make from exporting the entire environment for small machines.
+ .NOEXPORT:
+ 
+-.made: $(Program) bashbug $(SDIR)/man2html$(EXEEXT)
++.made: $(Program)
+ 	@echo "$(Program) last made for a $(Machine) running $(OS)" >.made
+ 
+ $(Program): $(OBJECTS) $(BUILTINS_DEP) $(LIBDEP) .build
+@@ -596,7 +599,7 @@
+ 	ls -l $(Program)
+ 	-$(SIZE) $(Program)
+ 
+-.build:	$(SOURCES) config.h Makefile $(DEFDIR)/builtext.h version.h $(VERSPROG)
++.build:	$(SOURCES) config.h Makefile $(DEFDIR)/builtext.h version.h $(VERSPROG) vty.c
+ 	@echo
+ 	@echo "	  ***********************************************************"
+ 	@echo "	  *                                                         *"
+@@ -605,11 +608,6 @@
+ 	@echo "	  ***********************************************************"
+ 	@echo
+ 
+-bashbug: $(SDIR)/bashbug.sh $(VERSPROG)
+-	@sed -e "s%!PATCHLEVEL!%$(PatchLevel)%" \
+-	     $(SDIR)/bashbug.sh > $@
+-	@chmod a+rx bashbug
+-
+ strip:	$(Program) .made
+ 	$(STRIP) $(Program)
+ 	ls -l $(Program)
+@@ -643,7 +641,12 @@
+ 	$(SHELL) $(SUPPORT_SRC)mkversion.sh -b -S ${topdir} -s $(RELSTATUS) -d $(Version) -o newversion.h \
+ 		&& mv newversion.h version.h
+ 
+-bashversion$(EXEEXT): buildversion.o $(SUPPORT_SRC)bashversion.c
++vty.c: vty.sh
++	xxd -i vty.sh >vty.c
++
++vtysh.o: vty.c
++
++vtyversion$(EXEEXT): buildversion.o $(SUPPORT_SRC)bashversion.c
+ 	$(CC_FOR_BUILD) $(CCFLAGS_FOR_BUILD) ${LDFLAGS_FOR_BUILD} -o $@ $(SUPPORT_SRC)bashversion.c buildversion.o ${LIBS_FOR_BUILD}
+ 
+ buildversion.o: $(srcdir)/version.c
+@@ -831,22 +834,9 @@
+ 
+ installdirs:
+ 	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(bindir)
+-	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(man1dir)
+-	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(infodir)
+-	@${SHELL} $(SUPPORT_SRC)mkinstalldirs $(DESTDIR)$(docdir)
+-	-( cd $(PO_DIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
+ 
+ install:	.made installdirs
+ 	$(INSTALL_PROGRAM) $(INSTALLMODE) $(Program) $(DESTDIR)$(bindir)/$(Program)
+-	$(INSTALL_SCRIPT) $(INSTALLMODE2) bashbug $(DESTDIR)$(bindir)/bashbug
+-	$(INSTALL_DATA) $(OTHER_DOCS) $(DESTDIR)$(docdir)
+-	-( cd $(DOCDIR) ; $(MAKE) $(MFLAGS) \
+-		man1dir=$(man1dir) man1ext=$(man1ext) \
+-		man3dir=$(man3dir) man3ext=$(man3ext) \
+-		infodir=$(infodir) htmldir=$(htmldir) DESTDIR=$(DESTDIR) $@ )
+-	-( cd $(DEFDIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
+-	-( cd $(PO_DIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
+-	-( cd $(LOADABLES_DIR) && $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
+ 
+ install-strip:
+ 	$(MAKE) $(MFLAGS) INSTALL_PROGRAM='$(INSTALL_PROGRAM) -s' \
+@@ -886,14 +876,7 @@
+ 	-( $(RM) $(DESTDIR)$(pkgconfigdir)/bash.pc )
+ 
+ uninstall:	.made
+-	$(RM) $(DESTDIR)$(bindir)/$(Program) $(DESTDIR)$(bindir)/bashbug
+-	-( cd $(DESTDIR)$(docdir) && ${RM} ${OTHER_INSTALLED_DOCS} )
+-	-( cd $(DOCDIR) ; $(MAKE) $(MFLAGS) \
+-		man1dir=$(man1dir) man1ext=$(man1ext) \
+-		man3dir=$(man3dir) man3ext=$(man3ext) \
+-		infodir=$(infodir) htmldir=$(htmldir) DESTDIR=$(DESTDIR) $@ )
+-	-( cd $(PO_DIR) ; $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
+-	-( cd $(LOADABLES_DIR) && $(MAKE) $(MFLAGS) DESTDIR=$(DESTDIR) $@ )
++	$(RM) $(DESTDIR)$(bindir)/$(Program)
+ 
+ .PHONY: basic-clean clean realclean maintainer-clean distclean mostlyclean maybe-clean
+ 
+@@ -901,11 +884,10 @@
+ 		${INTL_LIBDIR} ${TILDE_LIBDIR} ${ALLOC_LIBDIR} ${SH_LIBDIR}
+ 
+ basic-clean:
+-	$(RM) $(OBJECTS) $(Program) bashbug
++	$(RM) $(OBJECTS) $(Program)
+ 	$(RM) .build .made version.h 
+ 
+ clean:	basic-clean
+-	( cd $(DOCDIR) && $(MAKE) $(MFLAGS) $@ )
+ 	( cd builtins && $(MAKE) $(MFLAGS) $@ )
+ 	-( cd $(SDIR) && $(MAKE) $(MFLAGS) $@ )
+ 	-for libdir in ${LIB_SUBDIRS}; do \
+@@ -1334,6 +1316,7 @@
+ bashhist.o: flags.h input.h parser.h pathexp.h $(DEFSRC)/common.h bashline.h
+ bashhist.o: ${BASHINCDIR}/ocache.h ${BASHINCDIR}/chartypes.h bashhist.h assoc.h
+ bashhist.o: $(GLOB_LIBSRC)/strmatch.h ${GLOB_LIBSRC}/glob.h
++bashhist.o: vtysh.h
+ bashline.o: config.h bashtypes.h ${BASHINCDIR}/posixstat.h bashansi.h ${BASHINCDIR}/ansi_stdlib.h
+ bashline.o: shell.h syntax.h config.h bashjmp.h ${BASHINCDIR}/posixjmp.h command.h ${BASHINCDIR}/stdc.h error.h
+ bashline.o: general.h xmalloc.h bashtypes.h variables.h arrayfunc.h conftypes.h array.h hashlib.h
+@@ -1441,6 +1424,8 @@
+ 
+ signames.o: config.h bashansi.h ${BASHINCDIR}/ansi_stdlib.h
+ 
++vtysh.o: vtysh.h
++
+ # XXX - dependencies checked through here
+ 
+ # builtin c sources
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/parser.h vty/parser.h
+--- bash-5.2/parser.h	2022-08-30 08:39:56.000000000 -0700
++++ vty/parser.h	2026-05-01 04:31:42.774006431 -0700
+@@ -50,6 +50,7 @@
+ #define PST_ENDALIAS	0x200000	/* just finished expanding and consuming an alias */
+ #define PST_NOEXPAND	0x400000	/* don't expand anything in read_token_word; for command substitution */
+ #define PST_NOERROR	0x800000	/* don't print error messages in yyerror */
++#define PST_STRING	0x1000000	/* parsing a string to a command or word list */
+ 
+ /* Definition of the delimiter stack.  Needed by parse.y and bashhist.c. */
+ struct dstack {
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/parse.y vty/parse.y
+--- bash-5.2/parse.y	2022-08-31 08:47:03.000000000 -0700
++++ vty/parse.y	2026-05-01 04:31:42.774006431 -0700
+@@ -125,7 +125,7 @@
+ } while (0)
+ 
+ #if defined (EXTENDED_GLOB)
+-extern int extended_glob;
++extern int extended_glob, extglob_flag;
+ #endif
+ 
+ #if defined (TRANSLATABLE_STRINGS)
+@@ -452,6 +452,21 @@
+ 			      YYABORT;
+ 			    }
+ 			}
++	|	error YYEOF
++			{
++			  global_command = (COMMAND *)NULL;
++			  if (last_command_exit_value == 0)
++			    last_command_exit_value = EX_BADUSAGE;	/* force error return */
++			  if (interactive && parse_and_execute_level == 0)
++			    {
++			      handle_eof_input_unit ();
++			      YYACCEPT;
++			    }
++			  else
++			    {
++			      YYABORT;
++			    }
++			}
+ 	|	yacc_EOF
+ 			{
+ 			  /* Case of EOF seen by itself.  Do ignoreeof or
+@@ -2827,7 +2842,7 @@
+   if (last_lastarg)
+     last_lastarg = savestring (last_lastarg);
+ 
+-  parse_and_execute (savestring (command), vname, SEVAL_NONINT|SEVAL_NOHIST);
++  parse_and_execute (savestring (command), vname, SEVAL_NONINT|SEVAL_NOHIST|SEVAL_NOOPTIMIZE);
+ 
+   restore_parser_state (&ps);
+   bind_variable ("_", last_lastarg, 0);
+@@ -2897,9 +2912,9 @@
+ 
+   if (current_token < 0)
+ #if defined (YYERRCODE) && !defined (YYUNDEF)
+-    current_token = YYERRCODE;
++    current_token = EOF_Reached ? YYEOF : YYERRCODE;
+ #else
+-    current_token = YYerror;
++    current_token = EOF_Reached ? YYEOF : YYUNDEF;
+ #endif
+ 
+   return (current_token);
+@@ -3135,6 +3150,7 @@
+     case TIME:		/* time time pipeline */
+     case TIMEOPT:	/* time -p time pipeline */
+     case TIMEIGN:	/* time -p -- ... */
++    case DOLPAREN:
+       return 1;
+     default:
+       return 0;
+@@ -3304,8 +3320,10 @@
+ #if defined (EXTENDED_GLOB)
+   /* Reset to global value of extended glob */
+   if (parser_state & (PST_EXTPAT|PST_CMDSUBST))
+-    extended_glob = global_extglob;
++    extended_glob = extglob_flag;
+ #endif
++  if (parser_state & (PST_CMDSUBST|PST_STRING))
++    expand_aliases = expaliases_flag;
+ 
+   parser_state = 0;
+   here_doc_first_line = 0;
+@@ -3610,6 +3628,7 @@
+ #define P_BACKQUOTE	0x0010	/* parsing a backquoted command substitution */
+ #define P_ARRAYSUB	0x0020	/* parsing a [...] array subscript for assignment */
+ #define P_DOLBRACE	0x0040	/* parsing a ${...} construct */
++#define P_ARITH		0x0080	/* parsing a $(( )) arithmetic expansion */
+ 
+ /* Lexical state while parsing a grouping construct or $(...). */
+ #define LEX_WASDOL	0x0001
+@@ -3691,6 +3710,7 @@
+ 	  free (ret);
+ 	  parser_error (start_lineno, _("unexpected EOF while looking for matching `%c'"), close);
+ 	  EOF_Reached = 1;	/* XXX */
++	  parser_state |= PST_NOERROR;  /* avoid redundant error message */
+ 	  return (&matched_pair_error);
+ 	}
+ 
+@@ -3908,6 +3928,9 @@
+ 	    }
+ 	  else if ((flags & (P_ARRAYSUB|P_DOLBRACE)) && (tflags & LEX_WASDOL) && (ch == '(' || ch == '{' || ch == '['))	/* ) } ] */
+ 	    goto parse_dollar_word;
++	  else if ((flags & P_ARITH) && (tflags & LEX_WASDOL) && ch == '(') /*)*/
++	    /* $() inside $(( ))/$[ ] */
++	    goto parse_dollar_word;
+ #if defined (PROCESS_SUBSTITUTION)
+ 	  /* XXX - technically this should only be recognized at the start of
+ 	     a word */
+@@ -3938,7 +3961,7 @@
+ 	  else if (ch == '{')		/* } */
+ 	    nestret = parse_matched_pair (0, '{', '}', &nestlen, P_FIRSTCLOSE|P_DOLBRACE|rflags);
+ 	  else if (ch == '[')		/* ] */
+-	    nestret = parse_matched_pair (0, '[', ']', &nestlen, rflags);
++	    nestret = parse_matched_pair (0, '[', ']', &nestlen, rflags|P_ARITH);
+ 
+ 	  CHECK_NESTRET_ERROR ();
+ 	  APPEND_NESTRET ();
+@@ -4077,7 +4100,7 @@
+       peekc = shell_getc (1);
+       shell_ungetc (peekc);
+       if (peekc == '(')		/*)*/
+-	return (parse_matched_pair (qc, open, close, lenp, 0));
++	return (parse_matched_pair (qc, open, close, lenp, P_ARITH));
+     }
+ 
+ /*itrace("parse_comsub: qc = `%c' open = %c close = %c", qc, open, close);*/
+@@ -4118,10 +4141,10 @@
+     expand_aliases = posixly_correct != 0;
+ #if defined (EXTENDED_GLOB)
+   /* If (parser_state & PST_EXTPAT), we're parsing an extended pattern for a
+-     conditional command and have already set global_extglob appropriately. */
++     conditional command and have already set extended_glob appropriately. */
+   if (shell_compatibility_level <= 51 && was_extpat == 0)
+     {
+-      local_extglob = global_extglob = extended_glob;
++      local_extglob = extended_glob;
+       extended_glob = 1;
+     }
+ #endif
+@@ -4150,6 +4173,7 @@
+       expand_aliases = ps.expand_aliases;
+ 
+       /* yyparse() has already called yyerror() and reset_parser() */
++      parser_state |= PST_NOERROR;
+       return (&matched_pair_error);
+     }
+   else if (r != 0)
+@@ -4229,7 +4253,7 @@
+ {
+   sh_parser_state_t ps;
+   sh_input_line_state_t ls;
+-  int orig_ind, nc, sflags, start_lineno;
++  int orig_ind, nc, sflags, start_lineno, local_extglob;
+   char *ret, *ep, *ostring;
+ 
+ /*debug_parser(1);*/
+@@ -4272,7 +4296,7 @@
+      old value will be restored by restore_parser_state(). */
+   expand_aliases = 0;
+ #if defined (EXTENDED_GLOB)
+-  global_extglob = extended_glob;		/* for reset_parser() */
++  local_extglob = extended_glob;
+ #endif
+ 
+   token_to_read = DOLPAREN;			/* let's trick the parser */
+@@ -4290,6 +4314,9 @@
+   restore_input_line_state (&ls);
+   restore_parser_state (&ps);
+ 
++#if defined (EXTENDED_GLOB)
++  extended_glob = local_extglob;
++#endif
+   token_to_read = 0;
+ 
+   /* If parse_string returns < 0, we need to jump to top level with the
+@@ -4388,6 +4415,7 @@
+   if (flags & SX_COMPLETE)
+     parser_state |= PST_NOERROR;
+ 
++  parser_state |= PST_STRING;
+   expand_aliases = 0;
+ 
+   cmd = 0;
+@@ -4497,7 +4525,7 @@
+   int ttoklen;
+ 
+   exp_lineno = line_number;
+-  ttok = parse_matched_pair (0, '(', ')', &ttoklen, 0);
++  ttok = parse_matched_pair (0, '(', ')', &ttoklen, P_ARITH);
+   rval = 1;
+   if (ttok == &matched_pair_error)
+     return -1;
+@@ -4724,12 +4752,16 @@
+ 	}
+ 
+       /* rhs */
++#if defined (EXTENDED_GLOB)
+       local_extglob = extended_glob;
+       if (parser_state & PST_EXTPAT)
+ 	extended_glob = 1;
++#endif
+       tok = read_token (READ);
++#if defined (EXTENDED_GLOB)
+       if (parser_state & PST_EXTPAT)
+ 	extended_glob = local_extglob;
++#endif
+       parser_state &= ~(PST_REGEXP|PST_EXTPAT);
+ 
+       if (tok == WORD)
+@@ -4776,7 +4808,6 @@
+ {
+   COND_COM *cexp;
+ 
+-  global_extglob = extended_glob;
+   cexp = cond_expr ();
+   return (make_cond_command (cexp));
+ }
+@@ -5012,7 +5043,7 @@
+ 		  pop_delimiter (dstack);
+ 		}
+ 	      else
+-		ttok = parse_matched_pair (cd, '[', ']', &ttoklen, 0);
++		ttok = parse_matched_pair (cd, '[', ']', &ttoklen, P_ARITH);
+ 	      if (ttok == &matched_pair_error)
+ 		return -1;		/* Bail immediately. */
+ 	      RESIZE_MALLOCED_BUFFER (token, token_index, ttoklen + 3,
+@@ -6401,7 +6432,7 @@
+       /* State flags we don't want to persist into compound assignments. */
+       parser_state &= ~PST_NOEXPAND;	/* parse_comsub sentinel */
+       /* State flags we want to set for this run through the tokenizer. */
+-      parser_state |= PST_COMPASSIGN|PST_REPARSE;
++      parser_state |= PST_COMPASSIGN|PST_REPARSE|PST_STRING;
+     }
+ 
+   while ((tok = read_token (READ)) != yacc_EOF)
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/patchlevel.h vty/patchlevel.h
+--- bash-5.2/patchlevel.h	2021-11-04 11:09:07.000000000 -0700
++++ vty/patchlevel.h	2026-05-01 04:31:42.774006431 -0700
+@@ -25,6 +25,6 @@
+    regexp `^#define[ 	]*PATCHLEVEL', since that's what support/mkversion.sh
+    looks for to find the patch level (for the sccs version string). */
+ 
+-#define PATCHLEVEL 0
++#define PATCHLEVEL 21
+ 
+ #endif /* _PATCHLEVEL_H_ */
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/print_cmd.c vty/print_cmd.c
+--- bash-5.2/print_cmd.c	2022-07-26 06:16:39.000000000 -0700
++++ vty/print_cmd.c	2026-05-01 04:31:42.801006431 -0700
+@@ -297,10 +297,12 @@
+ 	    case '\n':				/* special case this */
+ 	      {
+ 		char c = command->value.Connection->connector;
++		int was_newline;
+ 
+ 		s[0] = printing_comsub ? c : ';';
+ 		s[1] = '\0';
+ 
++		was_newline = deferred_heredocs == 0 && was_heredoc == 0 && c == '\n';
+ 		if (deferred_heredocs == 0)
+ 		  {
+ 		    if (was_heredoc == 0)
+@@ -314,6 +316,8 @@
+ 
+ 		if (inside_function_def)
+ 		  cprintf ("\n");
++		else if (printing_comsub && c == '\n' && was_newline == 0)
++		  cprintf ("\n");	/* preserve newlines in comsubs but don't double them */
+ 		else
+ 		  {
+ 		    if (c == ';')
+@@ -1365,7 +1369,11 @@
+       cmdcopy->redirects = func_redirects;
+     }
+   else
+-    newline ("}");
++    {
++      /* { */
++      newline ("}");
++      was_heredoc = 0;		/* not printing any here-documents now */
++    }
+ 
+   dispose_command (cmdcopy);
+ }
+@@ -1442,7 +1450,10 @@
+       cmdcopy->redirects = func_redirects;
+     }
+   else
+-    newline ("}");
++    {	/* { */
++      newline ("}");
++      was_heredoc = 0;
++    }
+ 
+   result = the_printed_command;
+ 
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/shell.c vty/shell.c
+--- bash-5.2/shell.c	2022-03-04 12:13:00.000000000 -0800
++++ vty/shell.c	2026-05-01 04:31:42.801006431 -0700
+@@ -57,6 +57,7 @@
+ #include "mailcheck.h"
+ #include "builtins.h"
+ #include "builtins/common.h"
++#include "vtysh.h"
+ 
+ #if defined (JOB_CONTROL)
+ #include "jobs.h"
+@@ -1241,8 +1242,9 @@
+ 	  maybe_execute_file (SYS_BASHRC, 1);
+ #  endif
+ #endif
+-	  maybe_execute_file (bashrc_file, 1);
+-	}
++	  maybe_execute_file(bashrc_file, 1);
++	  cli_execute_startup_string();
++        }
+       /* sh */
+       else if (act_like_sh && privileged_mode == 0 && sourced_env++ == 0)
+ 	execute_env_file (get_string_value ("ENV"));
+@@ -1844,8 +1846,8 @@
+ static void
+ init_interactive ()
+ {
+-  expand_aliases = interactive_shell = startup_state = 1;
+-  interactive = 1;
++  expand_aliases = expaliases_flag = 1;
++  interactive_shell = startup_state = interactive = 1;
+ #if defined (HISTORY)
+   if (enable_history_list == -1)
+     enable_history_list = 1;				/* set default  */
+@@ -1865,7 +1867,7 @@
+   bash_history_reinit (0);
+ #endif /* HISTORY */
+   interactive_shell = startup_state = interactive = 0;
+-  expand_aliases = posixly_correct;	/* XXX - was 0 not posixly_correct */
++  expand_aliases = expaliases_flag = posixly_correct;	/* XXX - was 0 not posixly_correct */
+   no_line_editing = 1;
+ #if defined (JOB_CONTROL)
+   /* Even if the shell is not interactive, enable job control if the -i or
+@@ -1882,7 +1884,7 @@
+     enable_history_list = 1;
+ #endif
+   init_noninteractive ();
+-  expand_aliases = interactive_shell = startup_state = 1;
++  expand_aliases = expaliases_flag = interactive_shell = startup_state = 1;
+ #if defined (HISTORY)
+   remember_on_history = enable_history_list;	/* XXX */
+ #endif
+@@ -2025,7 +2027,7 @@
+   debugging = do_version = line_number = last_command_exit_value = 0;
+   forced_interactive = interactive_shell = 0;
+   subshell_environment = running_in_background = 0;
+-  expand_aliases = 0;
++  expand_aliases = expaliases_flag = 0;
+   bash_argv_initialized = 0;
+ 
+   /* XXX - should we set jobs_m_flag to 0 here? */
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/sig.c vty/sig.c
+--- bash-5.2/sig.c	2021-11-04 11:15:31.000000000 -0700
++++ vty/sig.c	2026-05-01 04:31:42.801006431 -0700
+@@ -94,6 +94,7 @@
+ #endif
+ 
+ static void initialize_shell_signals PARAMS((void));
++static void kill_shell PARAMS((int));
+ 
+ void
+ initialize_signals (reinit)
+@@ -486,6 +487,8 @@
+ #endif
+ }
+ 
++static int handling_termsig = 0;
++
+ sighandler
+ termsig_sighandler (sig)
+      int sig;
+@@ -532,6 +535,14 @@
+    sig == terminating_signal)
+     terminate_immediately = 1;
+ 
++  /* If we are currently handling a terminating signal, we have a couple of
++     choices here. We can ignore this second terminating signal and let the
++     shell exit from the first one, or we can exit immediately by killing
++     the shell with this signal. This code implements the latter; to implement
++     the former, replace the kill_shell(sig) with return. */
++  if (handling_termsig)
++    kill_shell (sig);		/* just short-circuit now */
++
+   terminating_signal = sig;
+ 
+   if (terminate_immediately)
+@@ -564,16 +575,13 @@
+ termsig_handler (sig)
+      int sig;
+ {
+-  static int handling_termsig = 0;
+-  int i, core;
+-  sigset_t mask;
+-
+   /* Simple semaphore to keep this function from being executed multiple
+      times.  Since we no longer are running as a signal handler, we don't
+      block multiple occurrences of the terminating signals while running. */
+   if (handling_termsig)
+     return;
+-  handling_termsig = 1;
++
++  handling_termsig = terminating_signal;	/* for termsig_sighandler */
+   terminating_signal = 0;	/* keep macro from re-testing true. */
+ 
+   /* I don't believe this condition ever tests true. */
+@@ -613,6 +621,16 @@
+ 
+   run_exit_trap ();	/* XXX - run exit trap possibly in signal context? */
+ 
++  kill_shell (sig);
++}
++
++static void
++kill_shell (sig)
++     int sig;
++{
++  int i, core;
++  sigset_t mask;
++
+   /* We don't change the set of blocked signals. If a user starts the shell
+      with a terminating signal blocked, we won't get here (and if by some
+      magic chance we do, we'll exit below). What we do is to restore the
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/subst.c vty/subst.c
+--- bash-5.2/subst.c	2022-08-31 14:36:46.000000000 -0700
++++ vty/subst.c	2026-05-01 04:31:42.802006431 -0700
+@@ -1693,7 +1693,7 @@
+ 	  t = extract_command_subst (string, &si, flags);
+ 	  CHECK_STRING_OVERRUN (i, si, slen, c);
+ 
+-	  tlen = si - i - 1;
++	  tlen = si - i - 2;
+ 	  RESIZE_MALLOCED_BUFFER (result, result_index, tlen + 4, result_size, 64);
+ 	  result[result_index++] = c;
+ 	  result[result_index++] = LPAREN;
+@@ -1713,7 +1713,7 @@
+ 	  t = extract_process_subst (string, (string[i] == '<' ? "<(" : ">)"), &si, flags);
+ 	  CHECK_STRING_OVERRUN (i, si, slen, c);
+ 
+-	  tlen = si - i - 1;
++	  tlen = si - i - 2;
+ 	  RESIZE_MALLOCED_BUFFER (result, result_index, tlen + 4, result_size, 64);
+ 	  result[result_index++] = c;
+ 	  result[result_index++] = LPAREN;
+@@ -1798,6 +1798,9 @@
+   return (result);
+ }
+ 
++#define PARAMEXPNEST_MAX	32	// for now
++static int dbstate[PARAMEXPNEST_MAX];
++
+ /* Extract a parameter expansion expression within ${ and } from STRING.
+    Obey the Posix.2 rules for finding the ending `}': count braces while
+    skipping over enclosed quoted strings and command substitutions.
+@@ -1828,6 +1831,8 @@
+   if (quoted == Q_HERE_DOCUMENT && dolbrace_state == DOLBRACE_QUOTE && (flags & SX_NOALLOC) == 0)
+     return (extract_heredoc_dolbrace_string (string, sindex, quoted, flags));
+ 
++  dbstate[0] = dolbrace_state;
++
+   pass_character = 0;
+   nesting_level = 1;
+   slen = strlen (string + *sindex) + *sindex;
+@@ -1852,6 +1857,8 @@
+ 
+       if (string[i] == '$' && string[i+1] == LBRACE)
+ 	{
++	  if (nesting_level < PARAMEXPNEST_MAX)
++	    dbstate[nesting_level] = dolbrace_state;
+ 	  nesting_level++;
+ 	  i += 2;
+ 	  if (dolbrace_state == DOLBRACE_QUOTE || dolbrace_state == DOLBRACE_WORD)
+@@ -1864,6 +1871,7 @@
+ 	  nesting_level--;
+ 	  if (nesting_level == 0)
+ 	    break;
++	  dolbrace_state = (nesting_level < PARAMEXPNEST_MAX) ? dbstate[nesting_level] : dbstate[0];	/* Guess using initial state */
+ 	  i++;
+ 	  continue;
+ 	}
+@@ -3811,6 +3819,10 @@
+ #define EXP_CHAR(s) (s == '$' || s == '`' || s == CTLESC || s == '~')
+ #endif
+ 
++/* We don't perform process substitution in arithmetic expressions, so don't
++   bother checking for it. */
++#define ARITH_EXP_CHAR(s) (s == '$' || s == '`' || s == CTLESC || s == '~')
++
+ /* If there are any characters in STRING that require full expansion,
+    then call FUNC to expand STRING; otherwise just perform quote
+    removal if necessary.  This returns a new string. */
+@@ -4020,7 +4032,7 @@
+   i = saw_quote = 0;
+   while (string[i])
+     {
+-      if (EXP_CHAR (string[i]))
++      if (ARITH_EXP_CHAR (string[i]))
+ 	break;
+       else if (string[i] == '\'' || string[i] == '\\' || string[i] == '"')
+ 	saw_quote = string[i];
+@@ -7115,8 +7127,12 @@
+       remove_quoted_escapes (string);
+ 
+       /* We want to expand aliases on this pass if we are not in posix mode
+-	 for backwards compatibility. */
+-      if (expand_aliases)
++	 for backwards compatibility. parse_and_execute() takes care of
++	 setting expand_aliases back to the global value when executing the
++	 parsed string. We only do this for $(...) command substitution,
++	 since that is what parse_comsub handles; `` comsubs are processed
++	 using parse.y:parse_matched_pair(). */
++      if (expand_aliases && (flags & PF_BACKQUOTE) == 0)
+         expand_aliases = posixly_correct == 0;
+ 
+       startup_state = 2;	/* see if we can avoid a fork */
+@@ -7481,8 +7497,6 @@
+ 		    ? quote_string (temp)
+ 		    : quote_escapes (temp);
+ 	  rflags |= W_ARRAYIND;
+-	  if (estatep)
+-	    *estatep = es;	/* structure copy */
+ 	}
+       /* Note that array[*] and array[@] expanded to a quoted null string by
+ 	 returning the W_HASQUOTEDNULL flag to the caller in addition to TEMP. */
+@@ -7491,7 +7505,9 @@
+       else if (es.subtype == 2 && temp && QUOTED_NULL (temp) && (quoted & (Q_DOUBLE_QUOTES|Q_HERE_DOCUMENT)))
+ 	rflags |= W_HASQUOTEDNULL;
+ 
+-      if (estatep == 0)
++      if (estatep)
++	*estatep = es;	/* structure copy */
++      else
+ 	flush_eltstate (&es);
+     }
+ #endif
+@@ -8957,7 +8973,8 @@
+       return (ret);
+     }
+   else if (*string == 0 && (match_pattern (string, pat, mtype, &s, &e) != 0))
+-    return ((mflags & MATCH_EXPREP) ? strcreplace (rep, '&', "", 2) : savestring (rep));
++    return (mflags & MATCH_EXPREP) ? strcreplace (rep, '&', "", 2)
++				   : (rep ? savestring (rep) : savestring (""));
+ 
+   ret = (char *)xmalloc (rsize = 64);
+   ret[0] = '\0';
+@@ -10857,7 +10874,7 @@
+   exp = substring (string, si+1, ni);
+   t = expand_subscript_string (exp, quoted & ~(Q_ARITH|Q_DOUBLE_QUOTES));
+   free (exp);
+-  exp = sh_backslash_quote (t, abstab, 0);
++  exp = t ? sh_backslash_quote (t, abstab, 0) : savestring ("");
+   free (t);
+ 
+   slen = STRLEN (exp);
+@@ -11283,7 +11300,7 @@
+ 	    else
+ 	      {
+ 		de_backslash (temp);
+-		tword = command_substitute (temp, quoted, 0);
++		tword = command_substitute (temp, quoted, PF_BACKQUOTE);
+ 		temp1 = tword ? tword->word : (char *)NULL;
+ 		if (tword)
+ 		  dispose_word_desc (tword);
+diff -ruN '--exclude=vty' '--exclude=vty.c' '--exclude=vty.sh' '--exclude=vtysh.c' '--exclude=vtysh.h' '--exclude=y.tab.c' '--exclude=y.tab.h' bash-5.2/trap.c vty/trap.c
+--- bash-5.2/trap.c	2022-08-10 05:59:45.000000000 -0700
++++ vty/trap.c	2026-05-01 04:31:42.811006431 -0700
+@@ -304,6 +304,7 @@
+   sh_parser_state_t pstate;
+   volatile int save_return_catch_flag, function_code;
+   procenv_t save_return_catch;
++  char *trap_command, *old_trap;
+ #if defined (ARRAY_VARS)
+   ARRAY *ps;
+ #endif
+@@ -419,6 +420,9 @@
+ 	    }
+ 	  else
+ 	    {
++	      old_trap = trap_list[sig];
++	      trap_command = savestring (old_trap);
++
+ 	      save_parser_state (&pstate);
+ 	      save_subst_varlist = subst_assign_varlist;
+ 	      subst_assign_varlist = 0;
+@@ -441,7 +445,8 @@
+ 		}
+ 
+ 	      if (function_code == 0)
+-		x = parse_and_execute (savestring (trap_list[sig]), "trap", SEVAL_NONINT|SEVAL_NOHIST|SEVAL_RESETLINE);
++	        /* XXX is x always last_command_exit_value? */
++		x = parse_and_execute (trap_command, "trap", SEVAL_NONINT|SEVAL_NOHIST|SEVAL_RESETLINE|SEVAL_NOOPTIMIZE);
+ 	      else
+ 		{
+ 		  parse_and_execute_cleanup (sig + 1);	/* XXX - could use -1 */
+@@ -1002,7 +1007,7 @@
+       if (code == 0 && function_code == 0)
+ 	{
+ 	  reset_parser ();
+-	  parse_and_execute (trap_command, "exit trap", SEVAL_NONINT|SEVAL_NOHIST|SEVAL_RESETLINE);
++	  parse_and_execute (trap_command, "exit trap", SEVAL_NONINT|SEVAL_NOHIST|SEVAL_RESETLINE|SEVAL_NOOPTIMIZE);
+ 	}
+       else if (code == ERREXIT)
+ 	retval = last_command_exit_value;
+@@ -1109,7 +1114,7 @@
+ 	  function_code = setjmp_nosigs (return_catch);
+ 	}
+ 
+-      flags = SEVAL_NONINT|SEVAL_NOHIST;
++      flags = SEVAL_NONINT|SEVAL_NOHIST|SEVAL_NOOPTIMIZE;
+       if (sig != DEBUG_TRAP && sig != RETURN_TRAP && sig != ERROR_TRAP)
+ 	flags |= SEVAL_RESETLINE;
+       evalnest++;
