@@ -14,7 +14,9 @@ use crate::context::Timer;
 use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage};
-use crate::rib::route::{ipv4_nexthop_sync, ipv4_route_sync, ipv6_nexthop_sync, ipv6_route_sync};
+use crate::rib::route::{
+    AddrRecoveryState, ipv4_nexthop_sync, ipv4_route_sync, ipv6_nexthop_sync, ipv6_route_sync,
+};
 use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
@@ -255,6 +257,14 @@ pub struct Rib {
     /// therefore be cleaned up on Shutdown. False when sr0 already
     /// existed (operator-managed) — leave it alone on exit.
     pub sr0_owned: bool,
+
+    /// Per-address state for kernel-driven address recovery. Keyed by
+    /// (ifindex, prefix). Entries are created lazily on the first
+    /// DelAddr we receive for a configured address; the burst counter
+    /// inside trips a 10-minute cool-down per
+    /// `crate::rib::route::RECOVERY_*` if an external actor keeps
+    /// fighting us.
+    pub addr_recovery: BTreeMap<(u32, IpNet), AddrRecoveryState>,
 }
 
 /// Name of the dummy interface that hosts End-style seg6local routes
@@ -309,6 +319,7 @@ impl Rib {
             rib_sync_timer: None,
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
+            addr_recovery: BTreeMap::new(),
         };
         rib.show_build();
         Ok(rib)
@@ -814,6 +825,7 @@ impl Rib {
                 self.link_delete(link);
             }
             FibMessage::NewAddr(addr) => {
+                tracing::info!("NewAddr {:?}", addr);
                 // Kernel netlink path: from_config=false. If a configured
                 // LinkAddr is already present for this address, the merge in
                 // link_addr_update will flip its `fib` flag to true.
@@ -831,6 +843,19 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
+                tracing::info!("DelAddr {:?}", addr);
+
+                // If the deleted address is still in config, push it
+                // back to the kernel rather than tearing down state.
+                // Recovery may be suppressed (Step 7 hold-down) — in
+                // both cases skip the normal teardown so the
+                // connected route doesn't churn. The next NewAddr we
+                // receive (either from our own re-install, or from a
+                // future operator add) will run the sync chain.
+                if self.addr_recover_if_configured(&addr).await {
+                    return;
+                }
+
                 self.addr_del(addr);
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
                 ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
