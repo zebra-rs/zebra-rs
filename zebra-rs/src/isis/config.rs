@@ -250,7 +250,7 @@ fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
     let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
     for level in [Level::L1, Level::L2] {
         if isis.lsdb.get(&level).get(&key).is_some() {
-            let _ = isis.tx.send(Message::LspOriginate(level));
+            let _ = isis.tx.send(Message::LspOriginate(level, None));
         }
     }
 

@@ -75,7 +75,7 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
     // Originate Hello and LSP.
     if is_p2p {
         nbr.event(Message::Ifsm(HelloOriginate, ifindex, Some(level)));
-        nbr.event(Message::LspOriginate(level));
+        nbr.event(Message::LspOriginate(level, None));
     } else {
         // DIS election. Run before we drop the entry so the snapshot
         // it operates on still has this neighbor.
