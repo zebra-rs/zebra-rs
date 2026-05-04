@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 //! SR-MPLS label block (SRGB + SRLB) configuration. Per-protocol modules
 //! (IS-IS, OSPF, BGP-LU) reference a block by name from their
 //! `segment-routing/mpls/block` leaf.

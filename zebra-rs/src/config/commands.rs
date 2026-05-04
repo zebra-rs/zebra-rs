@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 use super::ExecCode;
 use super::manager::ConfigManager;
 use super::util::trim_first_line;
