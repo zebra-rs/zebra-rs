@@ -75,7 +75,7 @@ mod tests {
     fn release_returns_id_to_pool_smallest_first() {
         let mut a = VrfIdAllocator::new();
         let id1 = a.allocate().unwrap();
-        let id2 = a.allocate().unwrap();
+        let _id2 = a.allocate().unwrap();
         let _id3 = a.allocate().unwrap();
         a.release(id1);
         // The smallest free ID is now 1 again.
