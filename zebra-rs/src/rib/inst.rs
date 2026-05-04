@@ -458,7 +458,7 @@ impl Rib {
         };
         self.fib_handle.link_set_up(ifindex).await;
         self.sr0_owned = true;
-        tracing::info!("sr0 dummy created (ifindex={})", ifindex);
+        // tracing::info!("sr0 dummy created (ifindex={})", ifindex);
     }
 
     /// Inverse of `ensure_sr0_dummy` — only deletes when this process
