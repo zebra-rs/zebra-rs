@@ -343,9 +343,6 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 })
     }
 
-    // Logging.
-    // tracing::info!("DIS selection start");
-
     // Store current DIS state for tracking
     let old_status = *link.state.dis_status.get(&level);
     // let old_sys_id = *link.state.dis_sys_id.get(&level);
@@ -377,6 +374,15 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         nbrs_up += 1;
     }
 
+    // Logging.
+    if link.tracing.fsm.nfsm.enabled {
+        tracing::info!(
+            "[NBR] DIS selection on {} up neighbor count {}",
+            link.ifindex,
+            nbrs_up
+        );
+    }
+
     // Update link's neighbors Up count.
     *link.state.nbrs_up.get_mut(&level) = nbrs_up;
 
@@ -395,7 +401,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         };
         nbr.is_dis = true;
         let reason = format!(
-            "Neighbor {} elected (priority: {}, mac: {})",
+            "Neighbor is {} elected (priority: {}, mac: {})",
             nbr.sys_id,
             nbr.priority,
             mac_str(&nbr.mac),
@@ -411,14 +417,21 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         // DIS is myself.
         let sys_id = Some(link.up_config.net.sys_id());
         let reason = format!(
-            "Self elected (priority: {}, neighbors: {})",
+            "Self is elected (priority: {}, neighbors: {})",
             link.config.priority(),
             nbrs_up
         );
         (DisStatus::Myself, sys_id, None, reason)
     };
 
-    // tracing::info!("DIS selection {:?} {}", new_status, reason);
+    if link.tracing.fsm.nfsm.enabled {
+        tracing::info!(
+            "[NBR] DIS selection {:?} -> {:?} {}",
+            old_status,
+            new_status,
+            reason
+        );
+    }
 
     // Perform DIS change when status or sys_id has been changed.
     if old_status != new_status {

@@ -6,6 +6,7 @@ use anyhow::Error;
 use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
+use crate::fmt::DisplayOpt;
 use crate::isis::inst::csnp_generate;
 use crate::isis::link::DisStatus;
 use crate::isis::neigh::Neighbor;
@@ -165,6 +166,26 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
             mac,
         ));
 
+    // Logging.
+    if link.tracing.fsm.nfsm.enabled {
+        if nbr.created {
+            tracing::info!(
+                "[NBR] {} Created on {} state {}",
+                pdu.source_id,
+                DisplayOpt(&mac),
+                nbr.state
+            );
+        } else {
+            // tracing::info!(
+            //     "[NBR] {} Fonud on {} state {}",
+            //     pdu.source_id,
+            //     DisplayOpt(&mac),
+            //     nbr.state
+            // );
+        }
+    }
+    nbr.created = false;
+
     // 8.4.2 Broadcast subnetwork IIH PDUs
     //
     // Level n LAN IIH PDUs contain the transmitting Intermediate system’s ID,
@@ -212,6 +233,9 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // system and the source of the PDU (R) is two-way. However R shall be
         // included in future Level n LAN IIH PDUs transmitted by this system.
         state = NfsmState::Init;
+        if link.tracing.fsm.nfsm.enabled {
+            tracing::info!("[NBR] {} Down -> Init", nbr.sys_id);
+        }
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
 
@@ -222,6 +246,9 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // e) generate an adjacencyStateChange (Up)” event.
         if has_mac {
             state = NfsmState::Up;
+            if link.tracing.fsm.nfsm.enabled {
+                tracing::info!("[NBR] {} Init -> Up", nbr.sys_id);
+            }
             // XXX Adjacency(Up)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
@@ -236,6 +263,9 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // b) generate an adjacencyStateChange (Down) event.
         if !has_mac {
             state = NfsmState::Init;
+            if link.tracing.fsm.nfsm.enabled {
+                tracing::info!("[NBR] {} {} -> Init", nbr.sys_id, nbr.state);
+            }
             // XXX Adjacency(Down)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
