@@ -1,4 +1,5 @@
 mod config;
+mod fmt;
 mod spf;
 mod version;
 use config::{Cli, ConfigManager};
