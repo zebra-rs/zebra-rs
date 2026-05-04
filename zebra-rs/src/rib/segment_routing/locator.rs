@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 //! SRv6 locator configuration. Per-protocol modules (IS-IS, OSPF, BGP-LU)
 //! reference a locator by name from their `segment-routing/srv6/locator`
 //! leaf.
