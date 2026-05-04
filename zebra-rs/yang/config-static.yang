@@ -214,9 +214,16 @@ module config-static {
              terminal action on this prefix. Mutually exclusive
              with `segments` (which configures an outer H.Encap
              push). Only the local-action variants — End, uN,
-             End.DT4, End.DT6 — are usable today; End.X / uA
-             require a per-adjacency nexthop that this list
-             doesn't model yet.";
+             End.DT4, End.DT6, End.DT46 — are usable today;
+             End.X / uA require a per-adjacency nexthop that this
+             list doesn't model yet.
+
+             End.DT4 / End.DT6 / End.DT46 decapsulate the outer
+             IPv6 header and look the inner packet up in the VRF
+             named by the sibling `vrf` leaf — End.DT4 for the
+             VRF's IPv4 unicast table, End.DT6 for IPv6 unicast,
+             End.DT46 for both (selected by the inner header's
+             address family).";
           type enumeration {
             enum "End";
             enum "End.X";
@@ -224,7 +231,21 @@ module config-static {
             enum "uA";
             enum "End.DT4";
             enum "End.DT6";
+            enum "End.DT46";
           }
+        }
+        leaf vrf {
+          type string;
+          description
+            "Name of the VRF whose routing table is consulted
+             after decapsulation. Required when `action` is
+             End.DT4, End.DT6, or End.DT46; ignored otherwise.
+
+             Held as a plain string (not a leafref to the
+             top-level /vrf list) for the same staging-friendly
+             reason as IS-IS uses for `block` and `locator`
+             references — a static SID block can be parsed
+             before the VRF is declared at the top level.";
         }
       }
     }
