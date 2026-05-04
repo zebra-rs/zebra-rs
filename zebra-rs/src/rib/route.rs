@@ -448,37 +448,43 @@ impl Rib {
         // Suppression policy is shared with the kernel-driven DelAddr
         // recovery path: if a misbehaving external actor has already
         // triggered the cool-down for an address, link_up respects it.
-        let recover: Vec<IpNet> = link
-            .addr4
-            .iter()
-            .chain(link.addr6.iter())
-            .filter(|a| a.config && !a.fib)
-            .map(|a| a.addr)
-            .collect();
-        for prefix in recover {
-            let now = Instant::now();
-            let state = self.addr_recovery.entry((ifindex, prefix)).or_default();
-            // Don't record a "delete event" here — link_up isn't the
-            // kernel saying "deleted", it's us recovering after a
-            // bounce. Just consult the existing suppression state.
-            let suppressed = matches!(
-                state.suppressed_until,
-                Some(until) if until > now
-            );
-            if suppressed {
-                let remaining = state
-                    .suppressed_until
-                    .and_then(|until| until.checked_duration_since(now))
-                    .unwrap_or_default();
-                tracing::info!(
-                    "link_up: {} skipping re-install of {} ({}s cool-down remaining)",
-                    link_name,
-                    prefix,
-                    remaining.as_secs(),
+        //
+        // Gated by addr_recovery_enabled (`--enable-addr-recovery`); when
+        // off, the kernel-erased addresses simply stay erased until the
+        // operator re-applies config.
+        if self.addr_recovery_enabled {
+            let recover: Vec<IpNet> = link
+                .addr4
+                .iter()
+                .chain(link.addr6.iter())
+                .filter(|a| a.config && !a.fib)
+                .map(|a| a.addr)
+                .collect();
+            for prefix in recover {
+                let now = Instant::now();
+                let state = self.addr_recovery.entry((ifindex, prefix)).or_default();
+                // Don't record a "delete event" here — link_up isn't the
+                // kernel saying "deleted", it's us recovering after a
+                // bounce. Just consult the existing suppression state.
+                let suppressed = matches!(
+                    state.suppressed_until,
+                    Some(until) if until > now
                 );
-                continue;
+                if suppressed {
+                    let remaining = state
+                        .suppressed_until
+                        .and_then(|until| until.checked_duration_since(now))
+                        .unwrap_or_default();
+                    tracing::info!(
+                        "link_up: {} skipping re-install of {} ({}s cool-down remaining)",
+                        link_name,
+                        prefix,
+                        remaining.as_secs(),
+                    );
+                    continue;
+                }
+                self.addr_reinstall(ifindex, &link_name, &prefix).await;
             }
-            self.addr_reinstall(ifindex, &link_name, &prefix).await;
         }
 
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
