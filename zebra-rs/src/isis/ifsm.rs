@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::context::Timer;
+use crate::fmt::DisplayOpt;
 use crate::isis::link::DisStatus;
 use crate::isis::network::P2P_ISS;
 use crate::isis_pdu_trace;
@@ -199,19 +200,39 @@ fn hello_timer(link: &LinkTop, level: Level) -> Timer {
 
 #[isis_pdu_handler(Hello, Send)]
 pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
-    let hello = link.state.hello.get(&level).as_ref().context("")?;
+    // Regenerate the Hello at every send so the IS Neighbor TLV and
+    // lan_id field always reflect current link state. Caching the
+    // PDU between sends would let an Init→Up transition (or a DIS
+    // election outcome) that didn't fire HelloOriginate at exactly
+    // the right moment leave a stale cached PDU on the wire — which
+    // on broadcast LANs deadlocks the 3-way handshake (peer never
+    // sees us in their IS Neighbor TLV → peer's nbr stays Init →
+    // peer's DIS election never fires → peer's lan_id stays empty
+    // → our deferred DisStatus never recovers).
+    if !has_level(link.state.level(), level) {
+        return Ok(());
+    }
 
-    let (packet, mac) = match hello {
-        IsisPdu::L1Hello(hello) => (
-            IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello.clone())),
+    let hello = if link.config.link_type() == LinkType::P2p {
+        IsisPdu::P2pHello(hello_p2p_generate(link, level))
+    } else {
+        match level {
+            Level::L1 => IsisPdu::L1Hello(hello_generate(link, level)),
+            Level::L2 => IsisPdu::L2Hello(hello_generate(link, level)),
+        }
+    };
+
+    let (packet, mac) = match &hello {
+        IsisPdu::L1Hello(h) => (
+            IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(h.clone())),
             None,
         ),
-        IsisPdu::L2Hello(hello) => (
-            IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(hello.clone())),
+        IsisPdu::L2Hello(h) => (
+            IsisPacket::from(IsisType::L2Hello, IsisPdu::L2Hello(h.clone())),
             None,
         ),
-        IsisPdu::P2pHello(hello) => (
-            IsisPacket::from(IsisType::P2pHello, IsisPdu::P2pHello(hello.clone())),
+        IsisPdu::P2pHello(h) => (
+            IsisPacket::from(IsisType::P2pHello, IsisPdu::P2pHello(h.clone())),
             MacAddr::from_vec(P2P_ISS.to_vec()),
         ),
         _ => return Ok(()),
@@ -222,6 +243,12 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     } else {
         isis_pdu_trace!(link, &level, "[P2P Hello:Send] {}", link.state.name);
     }
+
+    // Stash the just-sent PDU for show output and the
+    // "level-active" flag at link.rs (hello_padding reload checks
+    // `link.state.hello.l1.is_some()`); the cache is no longer the
+    // source of truth at send time.
+    *link.state.hello.get_mut(&level) = Some(hello);
 
     let ifindex = link.ifindex;
     let _ = link.ptx.send(PacketMessage::Send(
@@ -242,16 +269,8 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
 
 pub fn hello_originate(link: &mut LinkTop, level: Level) {
     if has_level(link.state.level(), level) {
-        let hello = if link.config.link_type() == LinkType::P2p {
-            IsisPdu::P2pHello(hello_p2p_generate(link, level))
-        } else {
-            match level {
-                Level::L1 => IsisPdu::L1Hello(hello_generate(link, level)),
-                Level::L2 => IsisPdu::L2Hello(hello_generate(link, level)),
-            }
-        };
-
-        *link.state.hello.get_mut(&level) = Some(hello);
+        // hello_send regenerates the PDU itself; we only send one
+        // immediately and (re-)arm the periodic timer here.
         let _ = hello_send(link, level);
         *link.timer.hello.get_mut(&level) = Some(hello_timer(link, level));
     }
@@ -400,19 +419,35 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             return;
         };
         nbr.is_dis = true;
+
+        // Defer the DisStatus::Other transition until the elected DIS
+        // has published a LAN ID. Without it we can't register the
+        // pseudonode adjacency, so transitioning now would leave us in
+        // Other-with-adj=None — CSNPs would be dropped (packet.rs
+        // csnp_recv guards on adj.is_some()), the self LSP would miss
+        // its pseudonode reach entry, and `show isis adjacency` would
+        // report an inconsistent DIS without a binding. Election
+        // outcome is recorded (`nbr.is_dis = true`); the late-LAN-ID
+        // path in hello_recv re-fires DisSelection once lan_id arrives,
+        // and that run will complete the transition cleanly.
+        if nbr.lan_id.is_empty() {
+            if link.tracing.fsm.nfsm.enabled {
+                tracing::info!(
+                    "[NBR] DIS election: {} elected but LAN ID not yet known, deferring transition",
+                    nbr.sys_id
+                );
+            }
+            return;
+        }
+
         let reason = format!(
             "Neighbor is {} elected (priority: {}, mac: {})",
             nbr.sys_id,
             nbr.priority,
             mac_str(&nbr.mac),
         );
-        let lan_id = if !nbr.lan_id.is_empty() {
-            Some(nbr.lan_id)
-        } else {
-            None
-        };
 
-        (DisStatus::Other, Some(nbr.sys_id), lan_id, reason)
+        (DisStatus::Other, Some(nbr.sys_id), Some(nbr.lan_id), reason)
     } else {
         // DIS is myself.
         let sys_id = Some(link.up_config.net.sys_id());
@@ -462,9 +497,19 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             }
             DisStatus::Other => {
                 use IfsmEvent::*;
+                if link.tracing.fsm.nfsm.enabled {
+                    tracing::info!(
+                        "[NBR] Adjacency {:?} LAN ID {}",
+                        link.state.adj.get(&level),
+                        DisplayOpt(&lan_id)
+                    );
+                }
                 if link.state.adj.get(&level).is_none()
                     && let Some(lan_id) = lan_id
                 {
+                    if link.tracing.fsm.nfsm.enabled {
+                        tracing::info!("[NBR] Adjacency set {}", lan_id);
+                    }
                     *link.state.adj.get_mut(&level) = Some((lan_id, None));
                     link.lsdb.get_mut(&level).adj_set(link.ifindex);
                     link.event(Message::Ifsm(HelloOriginate, link.ifindex, Some(level)));
