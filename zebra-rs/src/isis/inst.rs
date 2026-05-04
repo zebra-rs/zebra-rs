@@ -311,7 +311,9 @@ impl Isis {
                 &Level::L1,
                 "LSP Originate L1 due to RIB router-id change"
             );
-            self.tx.send(Message::LspOriginate(Level::L1)).unwrap();
+            self.tx
+                .send(Message::LspOriginate(Level::L1, None))
+                .unwrap();
         }
         if self.lsdb.get(&Level::L2).get(&key).is_some() {
             isis_event_trace!(
@@ -320,7 +322,9 @@ impl Isis {
                 &Level::L2,
                 "LSP Originate L2 due to RIB router-id change"
             );
-            self.tx.send(Message::LspOriginate(Level::L2)).unwrap();
+            self.tx
+                .send(Message::LspOriginate(Level::L2, None))
+                .unwrap();
         }
     }
 
@@ -371,8 +375,8 @@ impl Isis {
                 };
                 let _ = process_packet(&mut top, packet, ifindex, mac);
             }
-            Message::LspOriginate(level) => {
-                self.process_lsp_originate(level);
+            Message::LspOriginate(level, floor) => {
+                self.process_lsp_originate(level, floor);
             }
             Message::LspPurge(level, lsp_id) => {
                 self.process_lsp_purge(level, lsp_id);
@@ -387,7 +391,7 @@ impl Isis {
                 self.process_lsdb(ev, level, key);
             }
             Message::AdjacencyUp(level, ifindex) => {
-                self.process_lsp_originate(level);
+                self.process_lsp_originate(level, None);
 
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
@@ -409,9 +413,9 @@ impl Isis {
         }
     }
 
-    fn process_lsp_originate(&mut self, level: Level) {
+    fn process_lsp_originate(&mut self, level: Level, seq_floor: Option<u32>) {
         let mut top = self.top();
-        let mut lsp = lsp_generate(&mut top, level);
+        let mut lsp = lsp_generate(&mut top, level, seq_floor);
         // tracing::info!("[LSP:Gen] {}", lsp.lsp_id);
         let buf = lsp_emit(&mut lsp, level);
         let lsp_id = lsp.lsp_id;
@@ -757,8 +761,8 @@ impl Isis {
         }
         // Re-originate both levels so the new SR snapshot is reflected in
         // the next LSP without waiting for the refresh timer.
-        let _ = self.tx.send(Message::LspOriginate(Level::L1));
-        let _ = self.tx.send(Message::LspOriginate(Level::L2));
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
 }
 
@@ -858,17 +862,21 @@ pub fn dis_generate(top: &mut IsisTop, level: Level, ifindex: u32, base: Option<
     lsp
 }
 
-pub fn lsp_generate(top: &mut IsisTop, level: Level) -> IsisLsp {
+pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> IsisLsp {
     // LSP ID with no pseudo id and no fragmentation.
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
-    // Fetch current sequence number if LSP exists.
-    let seq_number = top
-        .lsdb
-        .get(&level)
-        .get(&lsp_id)
-        .map(|x| x.lsp.seq_number + 1)
-        .unwrap_or(0x0001);
+    // ISO 10589 §7.3.16.4: when a peer floods our own LSP back at us
+    // with `recv_seq > existing_seq`, we have to bump the next
+    // emission past `recv_seq` so the network converges on our
+    // authoritative copy. `seq_floor` carries that signal.
+    let existing = top.lsdb.get(&level).get(&lsp_id).map(|x| x.lsp.seq_number);
+    let seq_number = match (existing, seq_floor) {
+        (Some(e), Some(f)) => e.max(f) + 1,
+        (Some(e), None) => e + 1,
+        (None, Some(f)) => f + 1,
+        (None, None) => 0x0001,
+    };
 
     // Logging.
     isis_event_trace!(
@@ -2135,7 +2143,14 @@ pub enum Message {
     Ifsm(IfsmEvent, u32, Option<Level>),
     Recv(IsisPacket, u32, Option<MacAddr>),
     Lsdb(LsdbEvent, Level, IsisLspId),
-    LspOriginate(Level),
+    /// Re-originate the self LSP at `level`. The optional seq-number
+    /// floor carries §7.3.16.4 semantics: when a peer floods our own
+    /// LSP back at us with a seq higher than what we hold, we must
+    /// bump our next emission to `floor + 1` so the network converges
+    /// on our authoritative copy. `None` means "use the natural
+    /// existing+1" — config edits, RIB router-id changes, link-state
+    /// reactions all pass None.
+    LspOriginate(Level, Option<u32>),
     LspPurge(Level, IsisLspId),
     DisOriginate(Level, u32, Option<u32>),
     SpfCalc(Level),
@@ -2161,7 +2176,9 @@ impl Display for Message {
             Message::Lsdb(lsdb_event, _level, _isis_lsp_id) => {
                 write!(f, "[Message::Lsdb({:?})]", lsdb_event)
             }
-            Message::LspOriginate(level) => write!(f, "[Message::LspOriginate({})]", level),
+            Message::LspOriginate(level, floor) => {
+                write!(f, "[Message::LspOriginate({}, floor={:?})]", level, floor)
+            }
             Message::LspPurge(level, lsp_id) => {
                 write!(f, "[Message::LspPurge({}, {})]", level, lsp_id)
             }

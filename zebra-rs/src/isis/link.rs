@@ -566,8 +566,8 @@ impl Isis {
         // Re-originate the self LSP at both levels (pseudonode peers
         // dropped, fewer Ext IS Reach entries) and recompute SPF so
         // the route table no longer shows paths via the down link.
-        let _ = self.tx.send(Message::LspOriginate(Level::L1));
-        let _ = self.tx.send(Message::LspOriginate(Level::L2));
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
         let _ = self.tx.send(Message::SpfCalc(Level::L1));
         let _ = self.tx.send(Message::SpfCalc(Level::L2));
     }
@@ -702,7 +702,9 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
                 &Level::L1,
                 "LSP Originate L1 due to protocols-supported change"
             );
-            isis.tx.send(Message::LspOriginate(Level::L1)).unwrap();
+            isis.tx
+                .send(Message::LspOriginate(Level::L1, None))
+                .unwrap();
         }
         if isis.lsdb.get(&Level::L2).get(&key).is_some() {
             isis_event_trace!(
@@ -711,7 +713,9 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
                 &Level::L2,
                 "LSP Originate L2 due to protocols-supported change"
             );
-            isis.tx.send(Message::LspOriginate(Level::L2)).unwrap();
+            isis.tx
+                .send(Message::LspOriginate(Level::L2, None))
+                .unwrap();
         }
     }
 
@@ -762,7 +766,9 @@ pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()
             &Level::L1,
             "LSP Originate L1 due to metric change"
         );
-        isis.tx.send(Message::LspOriginate(Level::L1)).unwrap();
+        isis.tx
+            .send(Message::LspOriginate(Level::L1, None))
+            .unwrap();
     }
 
     // Originate L2 LSP.
@@ -773,7 +779,9 @@ pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()
             &Level::L2,
             "LSP Originate L2 due to metric change"
         );
-        isis.tx.send(Message::LspOriginate(Level::L2)).unwrap();
+        isis.tx
+            .send(Message::LspOriginate(Level::L2, None))
+            .unwrap();
     }
 
     Some(())

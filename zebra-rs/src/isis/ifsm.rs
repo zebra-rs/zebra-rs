@@ -471,7 +471,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         }
 
         // LSP Originate.
-        link.event(Message::LspOriginate(level));
+        link.event(Message::LspOriginate(level, None));
 
         // CSNP timer for when DIS is me.
         if new_status == DisStatus::Myself && link.timer.csnp.get(&level).is_none() {
