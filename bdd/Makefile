@@ -24,6 +24,10 @@ isis_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_ipv6"
 
+isis_srv6:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_srv6"
+
 generate:
 	rm -rf allure-report
 	allure generate
@@ -43,4 +47,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 generate open docs FORCE
+.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 generate open docs FORCE

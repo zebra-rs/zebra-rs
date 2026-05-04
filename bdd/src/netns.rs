@@ -147,6 +147,63 @@ pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str) -> Result<(
     Ok(())
 }
 
+/// Create a point-to-point veth pair between two existing namespaces and
+/// rename each end to a caller-chosen interface name. Brings both ends
+/// administratively up but does not assign addresses — that is left to the
+/// router's own config so the test fixtures stay self-describing.
+///
+/// The pair is created in the host namespace with throwaway names (an
+/// `ip link add NAME ...` in the host ns requires globally unique names),
+/// then `ip link set <link> netns <ns> name <newname>` moves and renames
+/// each end in one atomic step.
+pub async fn connect_netns_pair(
+    netns_a: &str,
+    iface_a: &str,
+    netns_b: &str,
+    iface_b: &str,
+) -> Result<()> {
+    let tmp_a = format!("vp{}{}a", netns_a, netns_b);
+    let tmp_b = format!("vp{}{}b", netns_a, netns_b);
+
+    run_cmd(
+        &[
+            "ip", "link", "add", &tmp_a, "type", "veth", "peer", "name", &tmp_b,
+        ],
+        &format!(
+            "Failed to create veth pair between {} and {}",
+            netns_a, netns_b
+        ),
+    )
+    .await?;
+
+    run_cmd(
+        &[
+            "ip", "link", "set", &tmp_a, "netns", netns_a, "name", iface_a,
+        ],
+        &format!(
+            "Failed to move/rename veth {} into {} as {}",
+            tmp_a, netns_a, iface_a
+        ),
+    )
+    .await?;
+
+    run_cmd(
+        &[
+            "ip", "link", "set", &tmp_b, "netns", netns_b, "name", iface_b,
+        ],
+        &format!(
+            "Failed to move/rename veth {} into {} as {}",
+            tmp_b, netns_b, iface_b
+        ),
+    )
+    .await?;
+
+    exec_in_netns(netns_a, "ip", &["link", "set", iface_a, "up"]).await?;
+    exec_in_netns(netns_b, "ip", &["link", "set", iface_b, "up"]).await?;
+
+    Ok(())
+}
+
 /// Delete the veth interface for a namespace (host side)
 pub async fn delete_veth(netns: &str) -> Result<()> {
     let veth_host = format!("v{}", netns);

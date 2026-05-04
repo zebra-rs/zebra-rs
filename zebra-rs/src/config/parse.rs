@@ -93,31 +93,52 @@ fn match_word(str: &str) -> (MatchType, usize) {
 }
 
 fn match_regexp(s: &str, regstr: &str) -> (MatchType, usize) {
-    let pos = 0usize;
-    let cache = REGEX_CACHE.lock().unwrap();
-    if let Some(regex) = cache.get(regstr) {
-        let matched = regex.is_match(s);
-        drop(cache);
-        return if matched {
-            (MatchType::Exact, pos)
-        } else {
-            (MatchType::None, pos)
-        };
+    // The CLI parser hands us the entire unparsed remainder of the line.
+    // A leaf value is one whitespace-delimited word, so identify the word
+    // boundary first and validate the pattern against just that word.
+    // Without this — and without returning the word length as `pos` — the
+    // caller at parse.rs:`remain = input.split_off(mx.pos)` would always
+    // see pos=0, re-feed the same input on the next recursion, and the
+    // recursion in `LeafMatched` state has no matcher so mx.count stays
+    // 0 → ExecCode::Nomatch. Net effect: every string-typed leaf with a
+    // YANG `pattern` (e.g. `isis:net` when not resolved to NsapAddr)
+    // failed to load via the CLI block format.
+    let word_end = s
+        .char_indices()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    let word = &s[..word_end];
+
+    {
+        let cache = REGEX_CACHE.lock().unwrap();
+        if let Some(regex) = cache.get(regstr) {
+            return regex_match_word(regex, word, word_end);
+        }
     }
-    drop(cache);
 
     let Ok(regex) = Regex::new(regstr) else {
-        return (MatchType::None, pos);
+        return (MatchType::None, 0);
     };
-    let matched = regex.is_match(s);
+    let result = regex_match_word(&regex, word, word_end);
     REGEX_CACHE
         .lock()
         .unwrap()
         .insert(regstr.to_string(), regex);
-    if matched {
-        (MatchType::Exact, pos)
+    result
+}
+
+/// Helper for `match_regexp`: full-word match against the compiled regex.
+/// Anchoring is implicit — only an Exact start-to-end match counts, so a
+/// permissive pattern like `[0-9]+` won't accidentally accept `12abc`.
+fn regex_match_word(regex: &Regex, word: &str, word_end: usize) -> (MatchType, usize) {
+    if let Some(m) = regex.find(word)
+        && m.start() == 0
+        && m.end() == word.len()
+    {
+        (MatchType::Exact, word_end)
     } else {
-        (MatchType::None, pos)
+        (MatchType::None, 0)
     }
 }
 
@@ -700,5 +721,53 @@ pub fn parse(
             s.delete = true;
         }
         parse(&remain, next, config.clone(), s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `match_regexp` used to return `pos = 0` even on a
+    /// successful match, so the parser's `remain = input.split_off(pos)`
+    /// kept the entire input around and the next recursion (now in
+    /// `LeafMatched` state with no matcher) reported `Nomatch`. Net
+    /// effect: every string-typed leaf with a YANG `pattern` failed to
+    /// load via the CLI block format. Pinned at the helper level — pos
+    /// must equal the consumed word length, not 0.
+    #[test]
+    fn match_regexp_returns_consumed_word_length() {
+        // openconfig-isis-types `net` pattern: 1-octet AFI, 3-9 4-hex
+        // groups, 1-octet NSEL — also exercised by the BDD SRv6 fixture
+        // that surfaced the bug.
+        let pat = r"[a-fA-F0-9]{2}(\.[a-fA-F0-9]{4}){3,9}\.[a-fA-F0-9]{2}";
+
+        let (m, pos) = match_regexp("49.0000.0000.0000.0001.00", pat);
+        assert_eq!(m, MatchType::Exact);
+        assert_eq!(pos, 25);
+
+        // Trailing word still reported correctly: pos covers the leaf
+        // word only, so the parser advances exactly past it.
+        let (m, pos) = match_regexp("49.0000.0000.0000.0001.00 trailing", pat);
+        assert_eq!(m, MatchType::Exact);
+        assert_eq!(pos, 25);
+    }
+
+    #[test]
+    fn match_regexp_rejects_partial_word_match() {
+        // Permissive pattern — `is_match` would say yes for the leading
+        // digits, but as a leaf value `12abc` is invalid. Anchoring the
+        // match to the full word keeps the parser strict.
+        let pat = r"[0-9]+";
+        let (m, pos) = match_regexp("12abc", pat);
+        assert_eq!(m, MatchType::None);
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn match_regexp_rejects_non_matching_word() {
+        let pat = r"[a-fA-F0-9]{2}(\.[a-fA-F0-9]{4}){3,9}\.[a-fA-F0-9]{2}";
+        let (m, _) = match_regexp("not-an-nsap", pat);
+        assert_eq!(m, MatchType::None);
     }
 }
