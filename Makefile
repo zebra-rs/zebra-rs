@@ -5,7 +5,7 @@ zebra:
 
 all:
 	cargo build --release
-	cd vtysh;./configure;make
+	$(MAKE) -C vty
 
 console:
 	RUSTFLAGS="--cfg tokio_unstable" cargo run --bin zebra --release
@@ -16,8 +16,8 @@ install:
 	cp target/release/zebra ${HOME}/.zebra/bin
 	cp target/release/vtyhelper ${HOME}/.zebra/bin
 	cp target/release/vtyctl ${HOME}/.zebra/bin
-ifneq ("$(wildcard vtysh/vtysh)","")
-	cp vtysh/vtysh ${HOME}/.zebra/bin
+ifneq ("$(wildcard vty/build/vty/vty)","")
+	cp vty/build/vty/vty ${HOME}/.zebra/bin
 endif
 	cp zebra/yang/* ${HOME}/.zebra/yang
 	touch ${HOME}/.zebra/zebra.conf
