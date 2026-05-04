@@ -390,7 +390,6 @@ pub fn csnp_recv(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     for entry in pdu.tlvs.iter() {
         if let IsisTlv::LspEntries(tlv) = entry {
             for lsp in &tlv.entries {
-                tracing::info!("CSNP LSP ID: {} SEQ {}", lsp.lsp_id, lsp.seq_number);
                 match lsdb
                     .get(&lsp.lsp_id)
                     .map(|seq_number| lsp.seq_number.cmp(seq_number))
