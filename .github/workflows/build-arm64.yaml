@@ -19,15 +19,12 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt upgrade -y
-          sudo apt install -y protobuf-compiler libnanomsg-dev
-          cd vty
-          ./configure
-          make
+          sudo apt install -y protobuf-compiler libnanomsg-dev bison
+          make -C vty
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt update
           sudo apt install nfpm
-          cd ../packaging
-          make arm64
+          make -C packaging arm64
 
       - name: Upload basefs artifact
         uses: actions/upload-artifact@v4
