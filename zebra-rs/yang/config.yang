@@ -36,6 +36,75 @@ module config {
     prefix isis;
   }
 
+  typedef vrf-route-target {
+    type string {
+      pattern
+          '(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|'
+        + '6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}|0)'
+        + ':'
+        + '(429496729[0-5]|42949672[0-8][0-9]|'
+        + '4294967[01][0-9]{2}|429496[0-6][0-9]{3}|'
+        + '42949[0-5][0-9]{4}|4294[0-8][0-9]{5}|'
+        + '429[0-3][0-9]{6}|42[0-8][0-9]{7}|'
+        + '4[01][0-9]{8}|[1-3][0-9]{9}|'
+        + '[1-9][0-9]{0,8}|0)'
+        + '|'
+        + '((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}'
+        + '(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+        + ':'
+        + '(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|'
+        + '6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}|0)'
+        + '|'
+        + '(429496729[0-5]|42949672[0-8][0-9]|'
+        + '4294967[01][0-9]{2}|429496[0-6][0-9]{3}|'
+        + '42949[0-5][0-9]{4}|4294[0-8][0-9]{5}|'
+        + '429[0-3][0-9]{6}|42[0-8][0-9]{7}|'
+        + '4[01][0-9]{8}|[1-3][0-9]{9}|'
+        + '[1-9][0-9]{0,8}|0)'
+        + ':'
+        + '(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|'
+        + '6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}|0)';
+    }
+    description
+      "BGP/MPLS VPN Route Target in operator-friendly notation
+       (no leading type-number prefix). Three encodings are accepted:
+
+         Type 0:  2-byte-ASN:4-byte-number    e.g. 65000:100
+         Type 1:  IPv4-address:2-byte-number  e.g. 192.0.2.1:100
+         Type 2:  4-byte-ASN:2-byte-number    e.g. 4200000000:100
+
+       Disambiguation between Type 0 and Type 2 is by the magnitude
+       of the first field: <= 65535 means Type 0, otherwise Type 2.
+       Type 1 is recognised by the dotted-quad in the first field.
+
+       This differs from RFC 8294 / ietf-routing-types route-target,
+       which prefixes each value with the type number (0:65000:100).";
+    reference
+      "RFC 4360: BGP Extended Communities Attribute
+       RFC 4364: BGP/MPLS IP Virtual Private Networks (VPNs)
+       RFC 5668: 4-Octet AS Specific BGP Extended Community";
+  }
+
+  grouping vrf-route-target-policy {
+    description
+      "Per-address-family RT import/export sets attached to a VRF.";
+    container route-target {
+      leaf-list import {
+        type vrf-route-target;
+        description
+          "Route Targets accepted into this VRF. A VPN route is
+           imported if any of its attached RTs matches an entry here.";
+      }
+      leaf-list export {
+        type vrf-route-target;
+        description
+          "Route Targets attached to routes exported from this VRF.
+           Every locally-originated VPN route is tagged with all
+           entries listed here.";
+      }
+    }
+  }
+
   grouping config {
     uses "zba:key-chains-group";
 
@@ -871,13 +940,29 @@ module config {
       }
     }
     list vrf {
+      ext:sort "30";
       key "name";
+      description
+        "BGP/MPLS L3VPN Virtual Routing and Forwarding instance.
+         The optional ipv4 / ipv6 containers carry the per-address-
+         family Route Target import/export policy.";
       leaf name {
         type string;
+        description
+          "Operator-assigned VRF identifier (e.g. CUST-A). Keys this
+           list and is the handle used everywhere else in config.
+           The numeric VRF / kernel routing-table ID is assigned
+           internally by zebra-rs and is not user-configurable.";
       }
-      leaf id {
-        mandatory true;
-        type uint32;
+      container ipv4 {
+        description
+          "IPv4 unicast (VPNv4 / RFC 4364) route policy for this VRF.";
+        uses vrf-route-target-policy;
+      }
+      container ipv6 {
+        description
+          "IPv6 unicast (VPNv6 / RFC 4659) route policy for this VRF.";
+        uses vrf-route-target-policy;
       }
     }
     container policy-options {
