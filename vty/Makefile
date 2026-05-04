@@ -12,12 +12,11 @@ CACHE_DIR     ?= $(HOME)/.cache/zebra-rs
 TARBALL       := $(CACHE_DIR)/$(BASH_TARBALL)
 
 BUILD_DIR     := build
-SRC_DIR       := $(BUILD_DIR)/vty
-TARGET        := $(SRC_DIR)/vty
+TARGET        := $(BUILD_DIR)/vty
 BINARY        := vty
 PATCH         := patches/0001-vty-hooks.patch
 ADDITIONS     := $(wildcard additions/*)
-STAMP_PREPARE := $(SRC_DIR)/.zebra-prepared
+STAMP_PREPARE := $(BUILD_DIR)/.zebra-prepared
 
 .PHONY: all prepare clean distclean
 
@@ -29,16 +28,15 @@ $(BINARY): $(TARGET)
 	cp $< $@
 
 $(TARGET): $(STAMP_PREPARE)
-	cd $(SRC_DIR) && ./configure
-	$(MAKE) -C $(SRC_DIR)
+	cd $(BUILD_DIR) && ./configure
+	$(MAKE) -C $(BUILD_DIR)
 
 $(STAMP_PREPARE): $(TARBALL) $(PATCH) $(ADDITIONS)
-	rm -rf $(SRC_DIR)
+	rm -rf $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)
-	tar -xzf $(TARBALL) -C $(BUILD_DIR)
-	mv $(BUILD_DIR)/bash-$(BASH_VERSION) $(SRC_DIR)
-	cp $(ADDITIONS) $(SRC_DIR)/
-	cd $(SRC_DIR) && patch -p1 --no-backup-if-mismatch < $(abspath $(PATCH))
+	tar -xzf $(TARBALL) -C $(BUILD_DIR) --strip-components=1
+	cp $(ADDITIONS) $(BUILD_DIR)/
+	cd $(BUILD_DIR) && patch -p1 --no-backup-if-mismatch < $(abspath $(PATCH))
 	touch $@
 
 $(TARBALL):
