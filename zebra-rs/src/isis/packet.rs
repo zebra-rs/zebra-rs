@@ -649,12 +649,15 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
                 // the peer naturally gets it back via the normal
                 // flooding path — no `srm_clear` here, that would
                 // suppress the very flood we want.
+                // For a pseudonode LSP, the DisOriginate handler needs the
+                // pseudonode neighbor_id (sys_id + pseudo_id) so it can
+                // resolve back to the local ifindex that owns this DIS
+                // adjacency. Earlier we passed `pseudo_id as u32` as
+                // ifindex, which collided with `top.links` keys and led
+                // dis_generate to emit a self-LSP at lsp_id
+                // 0000.0000.0000.00-00.
                 let msg = if lsp.lsp_id.is_pseudo() {
-                    Message::DisOriginate(
-                        level,
-                        lsp.lsp_id.pseudo_id() as u32,
-                        Some(lsp.seq_number),
-                    )
+                    Message::DisOriginate(level, lsp.lsp_id.neighbor_id(), Some(lsp.seq_number))
                 } else {
                     Message::LspOriginate(level, Some(lsp.seq_number))
                 };
