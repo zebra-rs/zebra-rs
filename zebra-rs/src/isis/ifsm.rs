@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 use anyhow::{Context, Result};
 use isis_macros::isis_pdu_handler;
 use isis_packet::*;

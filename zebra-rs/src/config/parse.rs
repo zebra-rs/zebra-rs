@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 use super::comps::{
     centry, cleaf, cname, comps_add_all, comps_add_config, comps_add_cr, comps_append, crange,
 };
