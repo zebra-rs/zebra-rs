@@ -9,7 +9,7 @@ key-chains:
       key-string:
         keystring: "shared-ao-secret"
 
-routing:
+router:
   bgp:
     global:
       as: 65002

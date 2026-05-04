@@ -28,8 +28,8 @@ impl Default for OspfNetworkConfig {
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 
 impl Ospf {
-    const OSPF: &str = "/routing/ospf";
-    const TRACING: &str = "/routing/ospf/tracing";
+    const OSPF: &str = "/router/ospf";
+    const TRACING: &str = "/router/ospf/tracing";
 
     pub fn ospf_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(format!("{}{}", Self::OSPF, path), cb);

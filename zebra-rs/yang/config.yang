@@ -191,8 +191,8 @@ module config {
       }
     }
 
-    container routing {
-      ext:help "Routing configuration";
+    container router {
+      ext:help "Router configuration";
       uses "ietf-bgp:bgp";
       // uses "policy:defined-sets";
       container ospf {
@@ -789,8 +789,8 @@ module config {
         "Global Segment Routing configuration shared across protocols.
          Blocks (SR-MPLS label ranges) and locators (SRv6 SID prefixes)
          defined here can be referenced by name from the per-protocol
-         segment-routing sections (e.g. routing/isis/segment-routing/mpls
-         and routing/isis/segment-routing/srv6). Managed by the RIB,
+         segment-routing sections (e.g. router/isis/segment-routing/mpls
+         and router/isis/segment-routing/srv6). Managed by the RIB,
          which is the natural owner of the SID/label space and the
          per-block / per-locator install state.";
 
