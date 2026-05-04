@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 // String utilities.
 
 pub fn is_whitespace(s: &str, pos: usize) -> bool {
