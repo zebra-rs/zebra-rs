@@ -272,16 +272,22 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         }
     }
 
-    // When neighbor is elected as DIS and reports LAN ID in Hello packet,
-    // register adjacency if not already set. This handles the case where
-    // neighbor reaches Up state before we receive the DIS's LAN ID.
-    if nbr.is_dis() && !nbr.lan_id.is_empty() && link.state.adj.get_mut(&level).is_none() {
-        // Register adjacency and create SRM/SSN entry in LSDB.
-        *link.state.adj.get_mut(&level) = Some((nbr.lan_id, None));
-        link.lsdb.get_mut(&level).adj_set(link.ifindex);
-
-        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        nbr.event(Message::LspOriginate(level, None));
+    // Late-LAN-ID arrival: dis_selection deferred the
+    // DisStatus::Other transition because the elected DIS hadn't
+    // published a LAN ID yet. Now that this Hello carries one and we
+    // still have no pseudonode adjacency on this link, re-fire DIS
+    // selection — this time `nbr.lan_id` is non-empty, so the
+    // election will transition to Other and register the adjacency
+    // through the normal path (no inline state mutation here).
+    if nbr.is_dis() && !nbr.lan_id.is_empty() && link.state.adj.get(&level).is_none() {
+        if link.tracing.fsm.nfsm.enabled {
+            tracing::info!(
+                "[NBR] Late LAN ID {} from elected DIS {} - re-running DIS selection",
+                nbr.lan_id,
+                nbr.sys_id
+            );
+        }
+        nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
     }
 
     // When neighbor state has been changed.
@@ -375,6 +381,9 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             state = NfsmState::Up;
 
             // Set adjacency.
+            if link.tracing.fsm.nfsm.enabled {
+                tracing::info!("[NBR] Adjacency set {}", nbr.sys_id);
+            }
             *link.state.adj.get_mut(&level) =
                 Some((IsisNeighborId::from_sys_id(&nbr.sys_id, 0), nbr.mac));
             link.lsdb.get_mut(&level).adj_set(nbr.ifindex);
