@@ -60,7 +60,7 @@ policy-options:
     - number: 10
       match:
         community-set: 198.18.39.160/28
-routing:
+router:
   bgp:
     global:
       as: 64512

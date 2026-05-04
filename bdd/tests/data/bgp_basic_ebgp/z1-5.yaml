@@ -9,7 +9,7 @@ policy-options:
     - number: 10
       match:
         prefix-set: out-test
-routing:
+router:
   bgp:
     global:
       as: 65001

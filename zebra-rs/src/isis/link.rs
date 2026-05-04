@@ -202,7 +202,7 @@ pub struct LinkConfig {
     pub prefix_sid: Option<SidLabelValue>,
 
     /// Per-MT metric overrides — populated from
-    /// /routing/isis/interface/<name>/multi-topology/<id>/metric.
+    /// /router/isis/interface/<name>/multi-topology/<id>/metric.
     /// Empty when no per-MT metric is configured; lookup falls back
     /// to the link's `metric` leaf above. PR 2 reads this when
     /// emitting MT IS Reach (TLV 222) entries.
