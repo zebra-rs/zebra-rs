@@ -254,7 +254,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         link.lsdb.get_mut(&level).adj_set(link.ifindex);
 
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
-        nbr.event(Message::LspOriginate(level));
+        nbr.event(Message::LspOriginate(level, None));
     }
 
     // When neighbor state has been changed.
@@ -390,6 +390,7 @@ pub fn csnp_recv(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
     for entry in pdu.tlvs.iter() {
         if let IsisTlv::LspEntries(tlv) = entry {
             for lsp in &tlv.entries {
+                tracing::info!("CSNP LSP ID: {} SEQ {}", lsp.lsp_id, lsp.seq_number);
                 match lsdb
                     .get(&lsp.lsp_id)
                     .map(|seq_number| lsp.seq_number.cmp(seq_number))
@@ -626,6 +627,12 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
         return;
     }
 
+    // Detect self-originated LSPs (regular self LSP at pseudo_id 0,
+    // or any pseudonode LSP we originated as DIS — both share our
+    // sys_id). ISO 10589 §7.3.16.4 says we must hold the network on
+    // our authoritative copy, not adopt the peer's view of "ours".
+    let is_self = link.up_config.net.sys_id() == lsp.lsp_id.sys_id();
+
     // 7.3.15.1 Action on receipt of a link state PDU
     match link
         .lsdb
@@ -634,33 +641,54 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
         .map(|lsa| lsp.seq_number.cmp(&lsa.lsp.seq_number))
     {
         None | Some(Ordering::Greater) => {
-            // 7.3.15.1 e.1
+            if is_self {
+                // §7.3.16.4: a peer is holding our LSP at a higher
+                // seq than what's in our LSDB (typically because we
+                // restarted and lost the high-water mark, or the LSP
+                // aged out and was re-introduced). Bump the next
+                // emission to `recv_seq + 1` so the network
+                // converges on our authoritative copy. The
+                // `Message::LspOriginate` / `Message::DisOriginate`
+                // handler will run `srm_set_all` on the new LSP, so
+                // the peer naturally gets it back via the normal
+                // flooding path — no `srm_clear` here, that would
+                // suppress the very flood we want.
+                let msg = if lsp.lsp_id.is_pseudo() {
+                    Message::DisOriginate(
+                        level,
+                        lsp.lsp_id.pseudo_id() as u32,
+                        Some(lsp.seq_number),
+                    )
+                } else {
+                    Message::LspOriginate(level, Some(lsp.seq_number))
+                };
+                let _ = link.tx.send(msg);
+            } else {
+                // 7.3.15.1 e.1
+                // 1. Store the new LSP in the database, overwriting the
+                //    existing database LSP for that source (if any) with the
+                //    received LSP.
+                lsdb::insert_lsp(link, level, lsp.clone(), bytes);
 
-            // 1. Store the new LSP in the database, overwriting the
-            //    existing database LSP for that source (if any) with the
-            //    received LSP.
+                // 2. Set SRMflag for that LSP for all circuits other than C.
+                flood::srm_set_other(link, level, &lsp.lsp_id);
 
-            // TODO: We may consider update self originated LSP when it really
-            // overwrite existing one.
-            lsdb::insert_lsp(link, level, lsp.clone(), bytes);
+                // 3. Clear SRMflag for C.
+                flood::srm_clear(link, level, &lsp.lsp_id);
 
-            // 2. Set SRMflag for that LSP for all circuits other than C.
-            flood::srm_set_other(link, level, &lsp.lsp_id);
+                // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
+                if link.is_p2p() {
+                    flood::ssn_set(link, level, &IsisLspEntry::from_lsp(&lsp));
+                }
 
-            // 3. Clear SRMflag for C.
-            flood::srm_clear(link, level, &lsp.lsp_id);
-
-            // 4. If C is a non-broadcast circuit, set SSNflag for that LSP for C.
-            if link.is_p2p() {
-                flood::ssn_set(link, level, &IsisLspEntry::from_lsp(&lsp));
+                // 5. Clear SSNflag for that LSP for the circuits associated
+                //    with a linkage other than C.
+                flood::ssn_clear_other(link, level, &lsp.lsp_id);
             }
-
-            // 5. Clear SSNflag for that LSP for the circuits associated
-            //    with a linkage other than C.
-            flood::ssn_clear_other(link, level, &lsp.lsp_id);
         }
         Some(Ordering::Equal) => {
-            // 7.3.15.1 e.2
+            // 7.3.15.1 e.2 — same for self / non-self: peer mirrors
+            // what we hold, so just ack via SSN on P2P.
 
             // 1. Clear SRMflag for C.
             flood::srm_clear(link, level, &lsp.lsp_id);
@@ -672,7 +700,8 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
             }
         }
         Some(Ordering::Less) => {
-            // 7.3.15.1 e.3
+            // 7.3.15.1 e.3 — same for self / non-self: peer holds a
+            // stale copy, set SRM toward C so our copy floods back.
 
             // 1. Set SRMflag for C.
             flood::srm_set(link, level, &lsp.lsp_id);
