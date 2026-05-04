@@ -19,7 +19,7 @@ use super::{
 const DEBUG_V6: bool = false;
 
 // Flip to true to re-enable IP address diagnostic trace.
-pub const DEBUG_ADDR: bool = true;
+pub const DEBUG_ADDR: bool = false;
 
 /// Hold-down policy for kernel-driven address recovery.
 ///
