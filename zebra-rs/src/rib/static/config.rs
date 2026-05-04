@@ -221,7 +221,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
     const WEIGHT_ERR: &str = "weight arg parse error";
 
     ConfigBuilder::<F>::default()
-        .path(&format!("/routing/static/{}/route", F::FAMILY))
+        .path(&format!("/router/static/{}/route", F::FAMILY))
         .set(|config, cache, prefix, _args| {
             let _ = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             Ok(())
@@ -236,7 +236,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             }
             Ok(())
         })
-        .path(&format!("/routing/static/{}/route/metric", F::FAMILY))
+        .path(&format!("/router/static/{}/route/metric", F::FAMILY))
         .set(|config, cache, prefix, args| {
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             s.metric = Some(args.u32().context(METRIC_ERR)?);
@@ -247,7 +247,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             s.metric = None;
             Ok(())
         })
-        .path(&format!("/routing/static/{}/route/distance", F::FAMILY))
+        .path(&format!("/router/static/{}/route/distance", F::FAMILY))
         .set(|config, cache, prefix, args| {
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             s.distance = Some(args.u8().context(DISTANCE_ERR)?);
@@ -258,7 +258,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             s.distance = None;
             Ok(())
         })
-        .path(&format!("/routing/static/{}/route/nexthop", F::FAMILY))
+        .path(&format!("/router/static/{}/route/nexthop", F::FAMILY))
         .set(|config, cache, prefix, args| {
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
@@ -272,7 +272,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             Ok(())
         })
         .path(&format!(
-            "/routing/static/{}/route/nexthop/metric",
+            "/router/static/{}/route/nexthop/metric",
             F::FAMILY
         ))
         .set(|config, cache, prefix, args| {
@@ -290,7 +290,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             Ok(())
         })
         .path(&format!(
-            "/routing/static/{}/route/nexthop/weight",
+            "/router/static/{}/route/nexthop/weight",
             F::FAMILY
         ))
         .set(|config, cache, prefix, args| {
@@ -307,10 +307,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             n.weight = None;
             Ok(())
         })
-        .path(&format!(
-            "/routing/static/{}/route/nexthop/label",
-            F::FAMILY
-        ))
+        .path(&format!("/router/static/{}/route/nexthop/label", F::FAMILY))
         .set(|config, cache, prefix, args| {
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
             let naddr = F::parse_addr(args).context(NEXTHOP_ERR)?;
@@ -328,7 +325,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             n.labels.clear();
             Ok(())
         })
-        .path(&format!("/routing/static/{}/route/segments", F::FAMILY))
+        .path(&format!("/router/static/{}/route/segments", F::FAMILY))
         .set(|config, cache, prefix, args| {
             const SEG_ERR: &str = "segment address parse error";
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
@@ -349,7 +346,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             s.segs.clear();
             Ok(())
         })
-        .path(&format!("/routing/static/{}/route/encap-type", F::FAMILY))
+        .path(&format!("/router/static/{}/route/encap-type", F::FAMILY))
         .set(|config, cache, prefix, args| {
             const ENCAP_ERR: &str = "missing encap-type arg";
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;
@@ -362,7 +359,7 @@ fn config_builder<F: StaticFamily>() -> ConfigBuilder<F> {
             s.encap_type = None;
             Ok(())
         })
-        .path(&format!("/routing/static/{}/route/action", F::FAMILY))
+        .path(&format!("/router/static/{}/route/action", F::FAMILY))
         .set(|config, cache, prefix, args| {
             const ACTION_ERR: &str = "missing seg6local action arg";
             let s = cache_get::<F>(config, cache, prefix).context(CONFIG_ERR)?;

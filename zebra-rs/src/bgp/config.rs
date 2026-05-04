@@ -810,25 +810,25 @@ fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
 
 impl Bgp {
     fn callback_peer(&mut self, path: &str, cb: Callback) {
-        let prefix = String::from("/routing/bgp/neighbor");
+        let prefix = String::from("/router/bgp/neighbor");
         self.callbacks.insert(prefix + path, cb);
     }
 
     #[allow(dead_code)]
     fn callback_afi_safi(&mut self, path: &str, cb: Callback) {
-        let prefix = String::from("/routing/bgp/neighbor");
+        let prefix = String::from("/router/bgp/neighbor");
         self.callbacks.insert(prefix + path, cb);
     }
 
     fn timer(&mut self, path: &str, cb: Callback) {
-        let prefix = String::from("/routing/bgp/neighbor/timers");
+        let prefix = String::from("/router/bgp/neighbor/timers");
         self.callbacks.insert(prefix + path, cb);
     }
 
     pub fn callback_build(&mut self) {
-        self.callback_add("/routing/bgp/global/as", config_global_asn);
-        self.callback_add("/routing/bgp/global/identifier", config_global_identifier);
-        self.callback_add("/routing/bgp/global/hostname", config_global_hostname);
+        self.callback_add("/router/bgp/global/as", config_global_asn);
+        self.callback_add("/router/bgp/global/identifier", config_global_identifier);
+        self.callback_add("/router/bgp/global/hostname", config_global_hostname);
         self.callback_peer("", config_peer);
         self.callback_peer("/peer-as", config_peer_as);
         self.callback_peer("/local-identifier", config_local_identifier);
@@ -892,10 +892,10 @@ impl Bgp {
         self.pcallback_add("/community-list/seq/action", config_com_list_action);
 
         // Debug configuration
-        self.callback_add("/routing/bgp/debug", config_debug_category);
+        self.callback_add("/router/bgp/debug", config_debug_category);
 
         // Network configuration
-        self.callback_add("/routing/bgp/afi-safi/network", config_network);
+        self.callback_add("/router/bgp/afi-safi/network", config_network);
 
         // Applying policy.
         self.callback_peer("/apply-policy/in", config_policy_in);

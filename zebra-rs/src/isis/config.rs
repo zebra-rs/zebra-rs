@@ -42,7 +42,7 @@ impl MtId {
 }
 
 impl Isis {
-    const TRACING: &str = "/routing/isis/tracing";
+    const TRACING: &str = "/router/isis/tracing";
 
     pub fn tracing_add(&mut self, path: &str, cb: Callback) {
         self.callbacks
@@ -50,55 +50,55 @@ impl Isis {
     }
 
     pub fn callback_build(&mut self) {
-        self.callback_add("/routing/isis/net", config_net);
-        self.callback_add("/routing/isis/is-type", config_is_type);
-        self.callback_add("/routing/isis/hostname", config_hostname);
-        self.callback_add("/routing/isis/timers/hold-time", config_hold_time);
-        self.callback_add("/routing/isis/te-router-id", config_te_router_id);
-        self.callback_add("/routing/isis/segment-routing/mpls", config_sr_mpls_enable);
+        self.callback_add("/router/isis/net", config_net);
+        self.callback_add("/router/isis/is-type", config_is_type);
+        self.callback_add("/router/isis/hostname", config_hostname);
+        self.callback_add("/router/isis/timers/hold-time", config_hold_time);
+        self.callback_add("/router/isis/te-router-id", config_te_router_id);
+        self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
         self.callback_add(
-            "/routing/isis/segment-routing/mpls/block",
+            "/router/isis/segment-routing/mpls/block",
             config_sr_mpls_block,
         );
-        self.callback_add("/routing/isis/segment-routing/srv6", config_sr_srv6_enable);
+        self.callback_add("/router/isis/segment-routing/srv6", config_sr_srv6_enable);
         self.callback_add(
-            "/routing/isis/segment-routing/srv6/locator",
+            "/router/isis/segment-routing/srv6/locator",
             config_sr_srv6_locator,
         );
-        self.callback_add("/routing/isis/multi-topology", config_mt);
+        self.callback_add("/router/isis/multi-topology", config_mt);
         self.callback_add(
-            "/routing/isis/interface/multi-topology/metric",
+            "/router/isis/interface/multi-topology/metric",
             link::config_mt_metric,
         );
-        self.callback_add("/routing/isis/interface/priority", link::config_priority);
+        self.callback_add("/router/isis/interface/priority", link::config_priority);
         self.tracing_add("/event", config_tracing_event);
         self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
         self.tracing_add("/packet/direction", config_tracing_packet);
         self.tracing_add("/database", config_tracing_database);
         self.callback_add(
-            "/routing/isis/interface/circuit-type",
+            "/router/isis/interface/circuit-type",
             link::config_circuit_type,
         );
-        self.callback_add("/routing/isis/interface/link-type", link::config_link_type);
+        self.callback_add("/router/isis/interface/link-type", link::config_link_type);
         self.callback_add(
-            "/routing/isis/interface/hello/padding",
+            "/router/isis/interface/hello/padding",
             link::config_hello_padding,
         );
         self.callback_add(
-            "/routing/isis/interface/ipv4/enable",
+            "/router/isis/interface/ipv4/enable",
             link::config_ipv4_enable,
         );
         self.callback_add(
-            "/routing/isis/interface/ipv4/prefix-sid/index",
+            "/router/isis/interface/ipv4/prefix-sid/index",
             link::config_ipv4_prefix_sid_index,
         );
-        self.callback_add("/routing/isis/interface/metric", link::config_metric);
+        self.callback_add("/router/isis/interface/metric", link::config_metric);
         self.callback_add(
-            "/routing/isis/interface/ipv6/enable",
+            "/router/isis/interface/ipv6/enable",
             link::config_ipv6_enable,
         );
-        self.callback_add("/routing/isis/distribute/rib", config_distribute_rib);
+        self.callback_add("/router/isis/distribute/rib", config_distribute_rib);
     }
 }
 
@@ -124,7 +124,7 @@ pub struct IsisConfig {
     pub enable: Afis<usize>,
     pub distribute: IsisDistribute,
 
-    /// Set when /routing/isis/segment-routing/mpls is committed (the
+    /// Set when /router/isis/segment-routing/mpls is committed (the
     /// presence-marked YANG container), even if no `block` is selected.
     /// Drives whether IS-IS originates SR-MPLS Capability sub-TLVs.
     pub sr_mpls_enabled: bool,
@@ -135,7 +135,7 @@ pub struct IsisConfig {
     /// IS-IS config can be staged before the global block is committed.
     pub sr_mpls_block: Option<String>,
 
-    /// Set when /routing/isis/segment-routing/srv6 is committed.
+    /// Set when /router/isis/segment-routing/srv6 is committed.
     pub sr_srv6_enabled: bool,
 
     /// Optional name of a locator defined under the global
@@ -143,7 +143,7 @@ pub struct IsisConfig {
     /// as sr_mpls_block.
     pub sr_srv6_locator: Option<String>,
 
-    /// True when `/routing/isis/multi-topology` carries an MT id.
+    /// True when `/router/isis/multi-topology` carries an MT id.
     /// Drives whether IS-IS originates TLV 229 and the per-MT reach
     /// TLVs.
     pub mt_enabled: bool,

@@ -72,13 +72,13 @@ prefix-test {
     #[test]
     fn test_user_segment_routing_round_trip() {
         // Reproduces a user-reported save/load round-trip bug: after
-        // saving a config containing both /routing/isis/segment-routing
+        // saving a config containing both /router/isis/segment-routing
         // and /segment-routing, the loader is supposed to reproduce
         // both `set` lines. This test pins the parser output so we can
         // tell whether the bug is in tokenization (no `set` line emitted)
         // or downstream in parse / dispatch (line emitted but dropped).
         let config = r#"
-routing {
+router {
   isis {
     segment-routing {
       srv6 {
@@ -97,7 +97,7 @@ segment-routing {
         let dump = cmds.join("\n");
         assert!(
             cmds.iter()
-                .any(|c| c == "set routing isis segment-routing srv6 locator LOC"),
+                .any(|c| c == "set router isis segment-routing srv6 locator LOC"),
             "missing isis srv6 locator set line; got:\n{}",
             dump
         );

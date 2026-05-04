@@ -1,4 +1,4 @@
-routing:
+router:
   bgp:
     global:
       as: 65001

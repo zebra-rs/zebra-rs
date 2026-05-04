@@ -134,7 +134,7 @@ fn config_builder() -> ConfigBuilder {
     const OUT_LABEL_ERR: &str = "missing outgoing label arg";
 
     ConfigBuilder::default()
-        .path("/routing/static/mpls/label")
+        .path("/router/static/mpls/label")
         .set(|config, cache, label, _| {
             let _ = cache_get(config, cache, &label).context(CONFIG_ERR)?;
             Ok(())
@@ -149,7 +149,7 @@ fn config_builder() -> ConfigBuilder {
             }
             Ok(())
         })
-        .path("/routing/static/mpls/label/nexthop")
+        .path("/router/static/mpls/label/nexthop")
         .set(|config, cache, label, args| {
             let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
@@ -162,7 +162,7 @@ fn config_builder() -> ConfigBuilder {
             s.nexthops.remove(&naddr).context(CONFIG_ERR)?;
             Ok(())
         })
-        .path("/routing/static/mpls/label/nexthop/outgoing-label")
+        .path("/router/static/mpls/label/nexthop/outgoing-label")
         .set(|config, cache, label, args| {
             let s = cache_get(config, cache, &label).context(CONFIG_ERR)?;
             let naddr = args.v4addr().context(NEXTHOP_ERR)?;
