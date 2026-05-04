@@ -24,7 +24,7 @@ Feature: IS-IS multi-topology (RFC 5120)
               /128                  /128
   ```
 
-  Both configs add `multi-topology ipv6-unicast;` under `routing/isis/`
+  Both configs add `multi-topology ipv6-unicast;` under `router/isis/`
   so the LSPs carry TLV 229 (capability), TLV 222 (MT IS Reach), and
   TLV 237 (MT IPv6 Reach).
 
