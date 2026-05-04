@@ -1,6 +1,7 @@
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use crate::fib::FibHandle;
 use crate::rib::resolve::{ResolveOpt, rib_resolve, rib_resolve_v6};
@@ -18,9 +19,239 @@ use super::{
 const DEBUG_V6: bool = false;
 
 // Flip to true to re-enable IP address diagnostic trace.
-pub const DEBUG_ADDR: bool = false;
+pub const DEBUG_ADDR: bool = true;
+
+/// Hold-down policy for kernel-driven address recovery.
+///
+/// If a configured address is deleted by an external actor (NetworkManager,
+/// dhcpcd, an operator script, …) zebra-rs re-installs it from
+/// `FibMessage::DelAddr`. To avoid an infinite delete/re-install loop with
+/// a misbehaving peer, we track recent deletions per (ifindex, prefix) and
+/// suppress recovery for `RECOVERY_COOLDOWN` once we see
+/// `RECOVERY_BURST_THRESHOLD` events within `RECOVERY_WINDOW`.
+pub const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
+pub const RECOVERY_BURST_THRESHOLD: usize = 3;
+pub const RECOVERY_COOLDOWN: Duration = Duration::from_secs(600);
+
+#[derive(Debug, Default)]
+pub struct AddrRecoveryState {
+    /// Timestamps of recent kernel DelAddr events for this address.
+    /// Only entries within `RECOVERY_WINDOW` of the current call are kept.
+    pub history: VecDeque<Instant>,
+    /// When set, recovery is suspended until this instant. Cleared on the
+    /// next decision after expiry.
+    pub suppressed_until: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecoveryDecision {
+    /// Proceed with re-installing this address to the kernel.
+    Recover,
+    /// Skip recovery. The reason carries why so the caller can log it.
+    Suppress(SuppressReason),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SuppressReason {
+    /// Cool-down was already active when this call arrived.
+    AlreadySuppressed,
+    /// This call pushed the history past `RECOVERY_BURST_THRESHOLD`;
+    /// cool-down has just started.
+    JustTripped,
+}
+
+/// Pure decision: would we recover this address right now? Mutates
+/// `state` to record the event and may set `suppressed_until`. Pulled
+/// out of the `Rib` so unit tests don't need a `FibHandle`.
+pub fn addr_recover_decide(state: &mut AddrRecoveryState, now: Instant) -> RecoveryDecision {
+    // Already in cool-down.
+    if let Some(until) = state.suppressed_until {
+        if until > now {
+            return RecoveryDecision::Suppress(SuppressReason::AlreadySuppressed);
+        }
+        // Cool-down expired — reset and treat this call like a fresh
+        // first event after silence.
+        state.suppressed_until = None;
+        state.history.clear();
+    }
+
+    // Drop events outside the rolling window.
+    let cutoff = now.checked_sub(RECOVERY_WINDOW).unwrap_or(now);
+    while let Some(front) = state.history.front() {
+        if *front < cutoff {
+            state.history.pop_front();
+        } else {
+            break;
+        }
+    }
+
+    state.history.push_back(now);
+
+    if state.history.len() >= RECOVERY_BURST_THRESHOLD {
+        state.suppressed_until = Some(now + RECOVERY_COOLDOWN);
+        return RecoveryDecision::Suppress(SuppressReason::JustTripped);
+    }
+
+    RecoveryDecision::Recover
+}
 
 impl Rib {
+    /// Push a configured address back to the kernel. Used by both
+    /// `link_up` (when the kernel dropped a configured address while
+    /// the link was down) and the kernel-driven DelAddr recovery
+    /// path. Caller is responsible for the recovery decision; this
+    /// helper just performs the netlink call and logs the outcome.
+    async fn addr_reinstall(&self, ifindex: u32, link_name: &str, addr: &IpNet) {
+        match addr {
+            IpNet::V4(net) => {
+                if DEBUG_ADDR {
+                    tracing::info!(
+                        "addr_reinstall: {} re-installing IPv4 {} to kernel",
+                        link_name,
+                        net
+                    );
+                }
+                if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net, false).await {
+                    tracing::warn!(
+                        "addr_reinstall: {} failed to re-install IPv4 {}: {}",
+                        link_name,
+                        net,
+                        e
+                    );
+                }
+            }
+            IpNet::V6(net) => {
+                if DEBUG_ADDR {
+                    tracing::info!(
+                        "addr_reinstall: {} re-installing IPv6 {} to kernel",
+                        link_name,
+                        net
+                    );
+                }
+                if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net, false).await {
+                    tracing::warn!(
+                        "addr_reinstall: {} failed to re-install IPv6 {}: {}",
+                        link_name,
+                        net,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Decide whether the kernel-deleted address `osaddr` corresponds
+    /// to a configured `LinkAddr`, and if so push it back to the
+    /// kernel — unless the per-address recovery state is in cool-down
+    /// (Step 7 hold-down).
+    ///
+    /// Returns `true` when the caller should *skip* the normal
+    /// `addr_del` teardown path: either we re-installed the address
+    /// (kernel will echo NewAddr to flip `fib` back to true) or the
+    /// suppression policy decided to leave it absent. Returns `false`
+    /// when the address was kernel-only — caller falls through to the
+    /// existing `addr_del` flow.
+    pub async fn addr_recover_if_configured(&mut self, osaddr: &crate::fib::FibAddr) -> bool {
+        let ifindex = osaddr.link_index;
+        let prefix = osaddr.addr;
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return false;
+        };
+        let bucket = if matches!(prefix, IpNet::V4(_)) {
+            &link.addr4
+        } else {
+            &link.addr6
+        };
+        let Some(existing) = bucket.iter().find(|x| x.addr == prefix) else {
+            return false;
+        };
+        if !existing.config {
+            return false;
+        }
+        let link_name = link.name.clone();
+
+        // Suppression decision and event recording.
+        let now = Instant::now();
+        let state = self.addr_recovery.entry((ifindex, prefix)).or_default();
+        let decision = addr_recover_decide(state, now);
+
+        match decision {
+            RecoveryDecision::Suppress(reason) => {
+                let cooldown_remaining = state
+                    .suppressed_until
+                    .and_then(|until| until.checked_duration_since(now))
+                    .unwrap_or_default();
+                match reason {
+                    SuppressReason::JustTripped => {
+                        tracing::warn!(
+                            "addr_recover: {} {} deleted {} times in {}s; \
+                             suppressing recovery for {}s — investigate \
+                             external actor (NetworkManager? dhcpcd? operator script?)",
+                            link_name,
+                            prefix,
+                            RECOVERY_BURST_THRESHOLD,
+                            RECOVERY_WINDOW.as_secs(),
+                            RECOVERY_COOLDOWN.as_secs(),
+                        );
+                    }
+                    SuppressReason::AlreadySuppressed => {
+                        tracing::info!(
+                            "addr_recover: {} {} kernel-delete ignored, \
+                             still in cool-down ({}s remaining)",
+                            link_name,
+                            prefix,
+                            cooldown_remaining.as_secs(),
+                        );
+                    }
+                }
+                // We still flip the LinkAddr's fib flag to false so the
+                // RIB matches reality (kernel doesn't have it). The
+                // `config = true` row stays — link_up will retry on
+                // the next bounce after the cool-down expires.
+                if let Some(link) = self.links.get_mut(&ifindex) {
+                    let bucket = if matches!(prefix, IpNet::V4(_)) {
+                        &mut link.addr4
+                    } else {
+                        &mut link.addr6
+                    };
+                    if let Some(e) = bucket.iter_mut().find(|x| x.addr == prefix) {
+                        e.fib = false;
+                    }
+                }
+                true
+            }
+            RecoveryDecision::Recover => {
+                if DEBUG_ADDR {
+                    tracing::info!(
+                        "addr_recover: {} {} kernel-deleted, still in config — \
+                         re-installing (history len now {})",
+                        link_name,
+                        prefix,
+                        state.history.len(),
+                    );
+                }
+                // Drop the &mut self borrow held by `state` before
+                // calling the FibHandle.
+                let _ = state;
+                self.addr_reinstall(ifindex, &link_name, &prefix).await;
+                // Mark fib=false until the kernel echoes back the
+                // NewAddr we just triggered.
+                if let Some(link) = self.links.get_mut(&ifindex) {
+                    let bucket = if matches!(prefix, IpNet::V4(_)) {
+                        &mut link.addr4
+                    } else {
+                        &mut link.addr6
+                    };
+                    if let Some(e) = bucket.iter_mut().find(|x| x.addr == prefix) {
+                        e.fib = false;
+                    }
+                }
+                true
+            }
+        }
+    }
+
     pub async fn link_down(&mut self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
             return;
@@ -213,58 +444,41 @@ impl Rib {
         // This must run before route_sync so the kernel has the address by
         // the time protocol routes (e.g. static routes via this nexthop)
         // are installed to the FIB.
-        let v4_recover: Vec<Ipv4Net> = link
+        //
+        // Suppression policy is shared with the kernel-driven DelAddr
+        // recovery path: if a misbehaving external actor has already
+        // triggered the cool-down for an address, link_up respects it.
+        let recover: Vec<IpNet> = link
             .addr4
             .iter()
+            .chain(link.addr6.iter())
             .filter(|a| a.config && !a.fib)
-            .filter_map(|a| match a.addr {
-                IpNet::V4(net) => Some(net),
-                _ => None,
-            })
+            .map(|a| a.addr)
             .collect();
-        let v6_recover: Vec<Ipv6Net> = link
-            .addr6
-            .iter()
-            .filter(|a| a.config && !a.fib)
-            .filter_map(|a| match a.addr {
-                IpNet::V6(net) => Some(net),
-                _ => None,
-            })
-            .collect();
-
-        for net in &v4_recover {
-            if DEBUG_ADDR {
+        for prefix in recover {
+            let now = Instant::now();
+            let state = self.addr_recovery.entry((ifindex, prefix)).or_default();
+            // Don't record a "delete event" here — link_up isn't the
+            // kernel saying "deleted", it's us recovering after a
+            // bounce. Just consult the existing suppression state.
+            let suppressed = matches!(
+                state.suppressed_until,
+                Some(until) if until > now
+            );
+            if suppressed {
+                let remaining = state
+                    .suppressed_until
+                    .and_then(|until| until.checked_duration_since(now))
+                    .unwrap_or_default();
                 tracing::info!(
-                    "link_up: {} re-installing IPv4 address {} to kernel (config=true, fib was false)",
+                    "link_up: {} skipping re-install of {} ({}s cool-down remaining)",
                     link_name,
-                    net
+                    prefix,
+                    remaining.as_secs(),
                 );
+                continue;
             }
-            if let Err(e) = self.fib_handle.addr_add_ipv4(ifindex, net, false).await {
-                tracing::warn!(
-                    "link_up: {} failed to re-install IPv4 address {}: {}",
-                    link_name,
-                    net,
-                    e
-                );
-            }
-        }
-        for net in &v6_recover {
-            if DEBUG_ADDR {
-                tracing::info!(
-                    "link_up: {} re-installing IPv6 address {} to kernel (config=true, fib was false)",
-                    link_name,
-                    net
-                );
-            }
-            if let Err(e) = self.fib_handle.addr_add_ipv6(ifindex, net, false).await {
-                tracing::warn!(
-                    "link_up: {} failed to re-install IPv6 address {}: {}",
-                    link_name,
-                    net,
-                    e
-                );
-            }
+            self.addr_reinstall(ifindex, &link_name, &prefix).await;
         }
 
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
@@ -1300,5 +1514,108 @@ pub async fn ipv6_nexthop_sync(
     }
     if DEBUG_V6 {
         println!("[ipv6_nexthop_sync] done");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AddrRecoveryState, RECOVERY_BURST_THRESHOLD, RECOVERY_COOLDOWN, RECOVERY_WINDOW,
+        RecoveryDecision, SuppressReason, addr_recover_decide,
+    };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_delete_recovers() {
+        let mut state = AddrRecoveryState::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            addr_recover_decide(&mut state, t0),
+            RecoveryDecision::Recover
+        );
+        assert_eq!(state.history.len(), 1);
+        assert!(state.suppressed_until.is_none());
+    }
+
+    #[test]
+    fn third_delete_within_window_suppresses() {
+        let mut state = AddrRecoveryState::default();
+        let t0 = Instant::now();
+
+        assert_eq!(
+            addr_recover_decide(&mut state, t0),
+            RecoveryDecision::Recover
+        );
+        assert_eq!(
+            addr_recover_decide(&mut state, t0 + Duration::from_secs(20)),
+            RecoveryDecision::Recover
+        );
+        // Third delete inside the 60s window — trips the cool-down.
+        assert_eq!(
+            addr_recover_decide(&mut state, t0 + Duration::from_secs(40)),
+            RecoveryDecision::Suppress(SuppressReason::JustTripped)
+        );
+        assert!(state.suppressed_until.is_some());
+        assert_eq!(state.history.len(), RECOVERY_BURST_THRESHOLD);
+    }
+
+    #[test]
+    fn during_cooldown_keeps_suppressing() {
+        let mut state = AddrRecoveryState::default();
+        let t0 = Instant::now();
+
+        // Trip the cool-down.
+        addr_recover_decide(&mut state, t0);
+        addr_recover_decide(&mut state, t0 + Duration::from_secs(10));
+        addr_recover_decide(&mut state, t0 + Duration::from_secs(20));
+
+        // Mid cool-down — still suppressed.
+        assert_eq!(
+            addr_recover_decide(&mut state, t0 + Duration::from_secs(60)),
+            RecoveryDecision::Suppress(SuppressReason::AlreadySuppressed)
+        );
+        assert_eq!(
+            addr_recover_decide(&mut state, t0 + Duration::from_secs(300)),
+            RecoveryDecision::Suppress(SuppressReason::AlreadySuppressed)
+        );
+    }
+
+    #[test]
+    fn cooldown_expires_and_recovery_resumes() {
+        let mut state = AddrRecoveryState::default();
+        let t0 = Instant::now();
+
+        addr_recover_decide(&mut state, t0);
+        addr_recover_decide(&mut state, t0 + Duration::from_secs(10));
+        addr_recover_decide(&mut state, t0 + Duration::from_secs(20));
+        assert!(state.suppressed_until.is_some());
+
+        // After cool-down (10 min plus a margin) — fresh start.
+        let after_cooldown =
+            t0 + Duration::from_secs(20) + RECOVERY_COOLDOWN + Duration::from_secs(1);
+        assert_eq!(
+            addr_recover_decide(&mut state, after_cooldown),
+            RecoveryDecision::Recover
+        );
+        assert!(state.suppressed_until.is_none());
+        assert_eq!(state.history.len(), 1);
+    }
+
+    #[test]
+    fn old_events_outside_window_dont_count() {
+        let mut state = AddrRecoveryState::default();
+        let t0 = Instant::now();
+
+        // Two deletes both more than RECOVERY_WINDOW before the third
+        // call's "now"; pruning should evict them so the third call
+        // is treated as a fresh first event.
+        addr_recover_decide(&mut state, t0);
+        addr_recover_decide(&mut state, t0 + Duration::from_secs(10));
+        let after = t0 + RECOVERY_WINDOW + Duration::from_secs(11);
+        assert_eq!(
+            addr_recover_decide(&mut state, after),
+            RecoveryDecision::Recover
+        );
+        assert_eq!(state.history.len(), 1);
     }
 }
