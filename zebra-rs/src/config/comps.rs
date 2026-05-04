@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright 2025-2026 Kunihiro Ishiguro
-
 use super::Config;
 use super::parse::State;
 use super::parse::{entry_is_key, ymatch_complete, ytype_from_typedef};
