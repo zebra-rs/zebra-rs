@@ -50,6 +50,12 @@ struct Arg {
         help = "Disable nexthop ID and use embedded nexthop in routes (for kernels < 5.3)"
     )]
     no_nhid: bool,
+
+    #[arg(
+        long,
+        help = "Re-install configured addresses removed by the kernel (cool-down on burst); off by default"
+    )]
+    enable_addr_recovery: bool,
 }
 
 // 1. Option Yang path
@@ -130,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let yang_path = yang_path.unwrap();
 
-    let mut rib = Rib::new(arg.no_nhid)?;
+    let mut rib = Rib::new(arg.no_nhid, arg.enable_addr_recovery)?;
 
     let policy = Policy::new();
 
