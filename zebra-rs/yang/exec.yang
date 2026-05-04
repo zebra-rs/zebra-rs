@@ -38,6 +38,10 @@ module exec {
       ext:help "Show nexthop group";
       type empty;
     }
+    leaf vrf {
+      ext:help "Show VRF table";
+      type empty;
+    }
     leaf community-set {
       ext:help "Show community-set";
       type empty;
