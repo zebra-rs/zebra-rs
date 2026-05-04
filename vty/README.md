@@ -11,8 +11,10 @@ live here.
 
 The first build downloads `bash-5.2.21.tar.gz` (~11 MB) into
 `~/.cache/zebra-rs/`, verifies its SHA-256, extracts it under
-`build/vty/`, lays additions on top, applies the patch, then runs
-`./configure && make`. The resulting binary is `build/vty/vty`.
+`build/` (via `tar --strip-components=1`, so no redundant
+`build/bash-5.2.21/` layer), lays additions on top, applies the
+patch, then runs `./configure && make`. The resulting binary is
+`build/vty`, with a copy at `vty` for packaging.
 
 Override the cache location with `CACHE_DIR=/some/path`.
 
@@ -26,4 +28,4 @@ Override the cache location with `CACHE_DIR=/some/path`.
 
 After `make`, bash's own regression suite is available:
 
-    cd build/vty/tests && ./run-all
+    cd build/tests && ./run-all
