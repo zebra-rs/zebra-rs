@@ -188,11 +188,11 @@ impl ConfigManager {
             if paths.is_none() {
                 continue;
             }
-            if !ospf && op == ConfigOp::Set && line.starts_with("routing ospf") {
+            if !ospf && op == ConfigOp::Set && line.starts_with("router ospf") {
                 ospf = true;
                 spawn_ospf(self);
             }
-            if !isis && op == ConfigOp::Set && line.starts_with("routing isis") {
+            if !isis && op == ConfigOp::Set && line.starts_with("router isis") {
                 isis = true;
                 spawn_isis(self);
             }

@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn test_tokenizer() {
         let config: &str = r#"
-routing {
+router {
     bgp {
         global {
             as 100;

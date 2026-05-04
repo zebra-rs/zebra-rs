@@ -76,22 +76,22 @@ $ ~ vtysh
 zebra>configure
 zebra#show
 zebra#set?
--> routing		Routing configuration
+-> router		Router configuration
 -> system		System configuration
 
-zebra#set routing bgp
+zebra#set router bgp
 -> global
 -> neighbors
 -> peer-groups
 -> rib
 
-zebra#set routing bgp global as 100
-zebra#set routing bgp global identifier 10.0.0.100
-zebra#set routing bgp neighbors neighbor 10.0.0.1 pe?
+zebra#set router bgp global as 100
+zebra#set router bgp global identifier 10.0.0.100
+zebra#set router bgp neighbors neighbor 10.0.0.1 pe?
 peer-as     peer-group  peer-type
-zebra#set routing bgp neighbors neighbor 10.0.0.1 peer-as 200
+zebra#set router bgp neighbors neighbor 10.0.0.1 peer-as 200
 zebra#show
-+routing {
++router {
 +    bgp {
 +        global {
 +            as 100;
@@ -105,11 +105,11 @@ zebra#show
 +    }
 +}
 zebra#commit
-CM: ["routing", "bgp", "global", "as", "100"]
-CM: ["routing", "bgp", "global", "identifier", "10.0.0.100"]
-CM: ["routing", "bgp", "neighbors", "neighbor", "10.0.0.1", "peer-as", "200"]
+CM: ["router", "bgp", "global", "as", "100"]
+CM: ["router", "bgp", "global", "identifier", "10.0.0.100"]
+CM: ["router", "bgp", "neighbors", "neighbor", "10.0.0.1", "peer-as", "200"]
 zebra#show
-routing {
+router {
     bgp {
         global {
             as 100;

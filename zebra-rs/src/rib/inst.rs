@@ -895,11 +895,11 @@ impl Rib {
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                if path.as_str().starts_with("/routing/static/ipv4/route") {
+                if path.as_str().starts_with("/router/static/ipv4/route") {
                     let _ = self.static_v4.exec(path, args, msg.op);
-                } else if path.as_str().starts_with("/routing/static/ipv6/route") {
+                } else if path.as_str().starts_with("/router/static/ipv6/route") {
                     let _ = self.static_v6.exec(path, args, msg.op);
-                } else if path.as_str().starts_with("/routing/static/mpls/label") {
+                } else if path.as_str().starts_with("/router/static/mpls/label") {
                     let _ = self.mpls_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/interface") {
                     // let _ = self.link_config.exec(path, args, msg.op);
