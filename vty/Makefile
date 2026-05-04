@@ -3,10 +3,10 @@
 # bash sources are fetched at build time and cached locally.
 # This directory contains only the deltas.
 
-BASH_VERSION  := 5.2
+BASH_VERSION  := 5.2.21
 BASH_TARBALL  := bash-$(BASH_VERSION).tar.gz
 BASH_URL      := https://ftp.gnu.org/gnu/bash/$(BASH_TARBALL)
-BASH_SHA256   := a139c166df7ff4471c5e0733051642ee5556c1cc8a4a78f145583c5c81ab32fb
+BASH_SHA256   := c8e31bdc59b69aaffc5b36509905ba3e5cbb12747091d27b4b977f078560d5b8
 
 CACHE_DIR     ?= $(HOME)/.cache/zebra-rs
 TARBALL       := $(CACHE_DIR)/$(BASH_TARBALL)
