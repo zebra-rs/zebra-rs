@@ -1181,16 +1181,10 @@ fn show_isis_adjacency(
     for (_, link) in top.links.iter() {
         writeln!(buf, "Interface: {}", top.ifname(link.ifindex))?;
         if let Some((adj, _)) = &link.state.adj.get(&Level::L1) {
-            writeln!(buf, "  Adj: {}", adj)?;
-        } else {
-            writeln!(buf, "  Adj: N/A")?;
+            writeln!(buf, "  L1 Adj: {}", adj)?;
         }
-
-        writeln!(buf, "Interface: {}", top.ifname(link.ifindex)).unwrap();
         if let Some((adj, _)) = &link.state.adj.get(&Level::L2) {
-            writeln!(buf, "  Adj: {}", adj).unwrap();
-        } else {
-            writeln!(buf, "  Adj: N/A").unwrap();
+            writeln!(buf, "  L2 Adj: {}", adj).unwrap();
         }
     }
     Ok(buf)
