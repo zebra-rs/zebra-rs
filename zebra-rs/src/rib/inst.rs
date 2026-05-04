@@ -4,8 +4,8 @@ use super::link::{LinkConfig, link_config_exec};
 use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
-    NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vxlan, VxlanBuilder,
-    VxlanConfig,
+    NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vrf, VrfBuilder,
+    VrfIdAllocator, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -131,6 +131,12 @@ pub enum Message {
     VxlanDel {
         name: String,
     },
+    VrfAdd {
+        name: String,
+    },
+    VrfDel {
+        name: String,
+    },
     MacAdd {
         vni: u32,
         mac: MacAddr,
@@ -209,6 +215,12 @@ pub struct Rib {
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
     pub vxlan: BTreeMap<String, Vxlan>,
+    /// Applied VRFs, keyed by name. Populated when `Message::VrfAdd`
+    /// is handled (allocator hands out a fresh table id, netlink
+    /// creates the kernel `vrf` master, entry is recorded here).
+    /// `Message::VrfDel` removes the entry and releases the id.
+    pub vrfs: BTreeMap<String, Vrf>,
+    pub vrf_id_alloc: VrfIdAllocator,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
@@ -221,6 +233,7 @@ pub struct Rib {
     pub link_config: LinkConfig,
     pub bridge_config: BridgeBuilder,
     pub vxlan_config: VxlanBuilder,
+    pub vrf_config: VrfBuilder,
     pub block_config: BlockBuilder,
     pub locator_config: LocatorBuilder,
     /// Applied snapshots, populated by Block/Locator Add/Del messages.
@@ -295,6 +308,8 @@ impl Rib {
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
             vxlan: BTreeMap::new(),
+            vrfs: BTreeMap::new(),
+            vrf_id_alloc: VrfIdAllocator::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
@@ -307,6 +322,7 @@ impl Rib {
             link_config: LinkConfig::new(),
             bridge_config: BridgeBuilder::new(),
             vxlan_config: VxlanBuilder::new(),
+            vrf_config: VrfBuilder::new(),
             block_config: BlockBuilder::new(),
             locator_config: LocatorBuilder::new(),
             blocks: {
@@ -677,6 +693,47 @@ impl Rib {
                 self.vxlan.remove(&name);
                 self.fib_handle.vxlan_del(&vxlan).await;
             }
+            Message::VrfAdd { name } => {
+                if self.vrfs.contains_key(&name) {
+                    // Re-creating an already-applied VRF (e.g. operator
+                    // sets the same name twice in one commit batch) is a
+                    // no-op: the kernel interface already exists with
+                    // the previously-allocated table id, and re-issuing
+                    // `ip link add` would just error.
+                    return;
+                }
+                let Some(table_id) = self.vrf_id_alloc.allocate() else {
+                    tracing::warn!("vrf_add({}) failed — id space exhausted", name);
+                    return;
+                };
+                if self.fib_handle.vrf_add(&name, table_id).await.is_none() {
+                    // Netlink rejected the create — release the id so
+                    // the next attempt isn't penalised by a leak.
+                    self.vrf_id_alloc.release(table_id);
+                    return;
+                }
+                self.vrfs.insert(
+                    name.clone(),
+                    Vrf {
+                        name: name.clone(),
+                        table_id,
+                    },
+                );
+                tracing::info!("vrf_add: {} table_id={}", name, table_id);
+            }
+            Message::VrfDel { name } => {
+                let Some(vrf) = self.vrfs.remove(&name) else {
+                    // Either never created, or a previous VrfAdd failed
+                    // partway through. Nothing to undo locally; defer to
+                    // netlink to clean up if the kernel happens to have
+                    // an interface by that name.
+                    self.fib_handle.vrf_del(&name).await;
+                    return;
+                };
+                self.fib_handle.vrf_del(&name).await;
+                self.vrf_id_alloc.release(vrf.table_id);
+                tracing::info!("vrf_del: {} (table_id={})", name, vrf.table_id);
+            }
             Message::BlockAdd { name, config } => {
                 let block = config.to_block(&name);
                 self.blocks.insert(name.clone(), block);
@@ -908,6 +965,8 @@ impl Rib {
                     let _ = self.bridge_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/vxlan") {
                     let _ = self.vxlan_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/vrf") {
+                    let _ = self.vrf_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/segment-routing/block") {
                     let _ = self.block_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/segment-routing/locator") {
@@ -917,6 +976,7 @@ impl Rib {
             ConfigOp::CommitEnd => {
                 self.bridge_config.commit(self.tx.clone());
                 self.vxlan_config.commit(self.tx.clone());
+                self.vrf_config.commit(self.tx.clone());
                 self.link_config.commit(self.tx.clone());
                 self.static_v4.commit(self.tx.clone());
                 self.static_v6.commit(self.tx.clone());
