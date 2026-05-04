@@ -50,6 +50,9 @@ pub struct Neighbor {
     /// registry). `None` until the locator is resolved and the first
     /// allocator pass picks a function.
     pub endx_sid: Option<(u16, Ipv6Addr)>,
+
+    // For logging purpose.
+    pub created: bool,
 }
 
 impl Neighbor {
@@ -67,7 +70,6 @@ impl Neighbor {
             lan_id: IsisNeighborId::default(),
             circuit_type: IsLevel::default(),
             ifindex,
-            // prev: NfsmState::Down,
             state: NfsmState::Down,
             addr4: BTreeMap::new(),
             addr6: BTreeMap::new(),
@@ -80,6 +82,7 @@ impl Neighbor {
             hold_time: 0,
             link_type,
             endx_sid: None,
+            created: true,
         }
     }
 
