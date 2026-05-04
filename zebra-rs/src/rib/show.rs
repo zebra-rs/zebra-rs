@@ -973,7 +973,18 @@ impl Rib {
         self.show_add("/show/mpls/ilm", ilm_show);
         self.show_add("/show/l2/mac/table", mac_show);
         self.show_add("/show/segment-routing/srv6/sid", sid_show);
+        self.show_add("/show/vrf", vrf_show);
     }
+}
+
+pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
+    let mut buf = String::new();
+    writeln!(buf, " {:<32}{:>10}", "Name", "Table-ID").unwrap();
+    writeln!(buf, " {:-<32}  {:-<10}", "", "").unwrap();
+    for vrf in rib.vrfs.values() {
+        writeln!(buf, " {:<32}{:>10}", vrf.name, vrf.table_id).unwrap();
+    }
+    buf
 }
 
 /// Render `show segment-routing srv6 sid`. Always emits the header row

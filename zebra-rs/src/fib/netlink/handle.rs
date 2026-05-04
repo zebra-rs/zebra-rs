@@ -22,7 +22,7 @@ use netlink_packet_route::route::{
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use netlink_sys::{AsyncSocket, SocketAddr};
 use rtnetlink::{
-    LinkDummy,
+    LinkDummy, LinkVrf,
     constants::{
         RTMGRP_IPV4_IFADDR, RTMGRP_IPV4_ROUTE, RTMGRP_IPV6_IFADDR, RTMGRP_IPV6_ROUTE, RTMGRP_LINK,
     },
@@ -1323,6 +1323,41 @@ impl FibHandle {
         };
         if let Err(e) = self.handle.clone().link().del(ifindex).execute().await {
             tracing::warn!("dummy_del({}) error: {}", name, e);
+        }
+    }
+
+    /// Create a Linux VRF master interface bound to `table_id`. Returns
+    /// the ifindex the kernel assigned, or None if creation failed
+    /// (table-id collision with another VRF master, name collision with
+    /// an existing interface, etc.). Mirrors
+    /// `ip link add <name> type vrf table <table_id>` followed by
+    /// `ip link set <name> up`.
+    pub async fn vrf_add(&self, name: &str, table_id: u32) -> Option<u32> {
+        let result = self
+            .handle
+            .clone()
+            .link()
+            .add(LinkVrf::new(name, table_id).up().build())
+            .execute()
+            .await;
+        if let Err(e) = result {
+            tracing::warn!("vrf_add({}, table={}) error: {}", name, table_id, e);
+            return None;
+        }
+        self.link_index_by_name(name).await
+    }
+
+    /// Delete a VRF master interface by name. Idempotent — missing names
+    /// log at info but don't propagate. Slave interfaces enslaved to this
+    /// VRF are detached by the kernel automatically; per-VRF routes in
+    /// the associated table are flushed.
+    pub async fn vrf_del(&self, name: &str) {
+        let Some(ifindex) = self.link_index_by_name(name).await else {
+            tracing::info!("vrf_del({}) skipped — not present", name);
+            return;
+        };
+        if let Err(e) = self.handle.clone().link().del(ifindex).execute().await {
+            tracing::warn!("vrf_del({}) error: {}", name, e);
         }
     }
 
