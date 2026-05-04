@@ -14,15 +14,19 @@ TARBALL       := $(CACHE_DIR)/$(BASH_TARBALL)
 BUILD_DIR     := build
 SRC_DIR       := $(BUILD_DIR)/vty
 TARGET        := $(SRC_DIR)/vty
+BINARY        := vty
 PATCH         := patches/0001-vty-hooks.patch
 ADDITIONS     := $(wildcard additions/*)
 STAMP_PREPARE := $(SRC_DIR)/.zebra-prepared
 
 .PHONY: all prepare clean distclean
 
-all: $(TARGET)
+all: $(BINARY)
 
 prepare: $(STAMP_PREPARE)
+
+$(BINARY): $(TARGET)
+	cp $< $@
 
 $(TARGET): $(STAMP_PREPARE)
 	cd $(SRC_DIR) && ./configure
@@ -44,7 +48,7 @@ $(TARBALL):
 	mv $@.tmp $@
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(BINARY)
 
 distclean: clean
 	rm -f $(TARBALL)
