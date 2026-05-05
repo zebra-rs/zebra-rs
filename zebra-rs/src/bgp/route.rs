@@ -9,7 +9,7 @@ use prefix_trie::PrefixMap;
 
 use crate::bgp::timer::start_stale_timer;
 use crate::policy::PolicyList;
-use crate::rib::{self, MacAddr};
+use crate::rib::{self, MacAddr, api::FdbEntry};
 
 use super::cap::CapAfiMap;
 use super::peer::{BgpTop, Event, Peer, PeerType};
@@ -2026,4 +2026,102 @@ impl Bgp {
             );
         }
     }
+
+    /// Originate an EVPN Type-2 (MAC/IP Advertisement) route from a
+    /// kernel-learned bridge FDB entry.
+    ///
+    /// Inserts into `Bgp::local_rib.evpn` only — wire transmission
+    /// (route_advertise_evpn_to_peers + send_evpn) lands in a follow-up.
+    /// Verification target this PR: `show bgp l2vpn evpn` lists the
+    /// route after a local FDB learn.
+    ///
+    /// Gates:
+    ///   - `advertise_all_vni` must be true (FRR-style global enable).
+    ///   - `NTF_EXT_LEARNED` must be clear in the FDB flags. Set bits
+    ///     mark FDB rows that arrived via netlink from another speaker
+    ///     (typically zebra-rs's own `mac_add` path installing a
+    ///     remote VTEP MAC); re-advertising them would loop.
+    ///
+    /// Hardcodes (per RFC 8365 single-homed VLAN-Based service):
+    ///   - ESI = 0 (no multi-homing)
+    ///   - Ethernet Tag = 0 (one bridge per VNI)
+    ///   - IP component absent (MAC-only Type-2; MAC+IP needs ARP/NDP
+    ///     correlation, follow-up).
+    ///   - RD = `<router-id>:<VNI>` (Type-1, IPv4 + 2-byte). VNIs
+    ///     above 65535 are skipped — Type-0 ASN-format RD support
+    ///     for big VNIs is a follow-up.
+    pub fn evpn_originate_macip(&mut self, entry: &FdbEntry) {
+        if !self.advertise_all_vni {
+            return;
+        }
+        if entry.flags & NTF_EXT_LEARNED != 0 {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, entry.vni) else {
+            tracing::warn!(
+                "evpn_originate_macip: VNI {} > 65535, RD encoding not yet supported; \
+                 dropping local origination for {}",
+                entry.vni,
+                entry.mac
+            );
+            return;
+        };
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: entry.mac.octets(),
+            ip: None,
+        };
+        let attr = BgpAttr::new();
+        let rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0, // remote_id — fixed at 0 for locally-originated; the
+            // withdraw path matches against the same value.
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let _ = self.local_rib.update_evpn(rd, prefix, rib);
+    }
+
+    /// Inverse of `evpn_originate_macip`. No-op when
+    /// `advertise_all_vni` is false (we never originated anything to
+    /// withdraw) or when the entry's VNI exceeds the Type-1 RD
+    /// encoding range.
+    pub fn evpn_withdraw_macip(&mut self, entry: &FdbEntry) {
+        if !self.advertise_all_vni {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, entry.vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: entry.mac.octets(),
+            ip: None,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+    }
+}
+
+/// `NTF_EXT_LEARNED` from `<linux/neighbour.h>` — bit 0x10. Set on
+/// FDB entries learned from external sources (e.g. another EVPN
+/// speaker that installed via netlink). Must be filtered out of
+/// origination to avoid advertise loops.
+const NTF_EXT_LEARNED: u8 = 0x10;
+
+/// Build a Type-1 RD (4-byte IPv4 + 2-byte assigned number) from
+/// the local router-id and VNI per RFC 8365 §5.1.2. Returns None
+/// when the VNI exceeds 16 bits — Type-1 only has 2 bytes for the
+/// assigned-number field; supporting VNIs above 65535 needs the
+/// Type-0 (ASN) format and is a follow-up.
+fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistinguisher> {
+    let vni_short: u16 = vni.try_into().ok()?;
+    let mut rd = RouteDistinguisher::new(RouteDistinguisherType::IP);
+    rd.val[0..4].copy_from_slice(&router_id.octets());
+    rd.val[4..6].copy_from_slice(&vni_short.to_be_bytes());
+    Some(rd)
 }
