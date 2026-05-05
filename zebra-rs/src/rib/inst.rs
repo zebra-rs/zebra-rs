@@ -249,6 +249,14 @@ pub struct Rib {
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
     pub mac_table: BTreeMap<(u32, MacAddr), MacEntry>,
+    /// Remote VTEPs we've installed as VXLAN BUM ingress-replication
+    /// targets (zero-MAC FDB rows on the VXLAN device, keyed by
+    /// `(vni, peer-VTEP-IP)`). Populated by `mdb_add`, removed by
+    /// `mdb_del`. Walked at `Message::Shutdown` so we can DELNEIGH
+    /// every entry we installed before exiting — externally-created
+    /// VXLAN devices outlive the daemon and would otherwise keep
+    /// our zero-MAC rows around forever.
+    pub vtep_table: std::collections::BTreeSet<(u32, IpAddr)>,
     /// Local snapshot of the kernel's neighbor table (ARP + NDP + bridge
     /// FDB). Populated from `FibMessage::NewNeighbor` / `DelNeighbor`,
     /// initially seeded by `fib_dump` at startup. Read by `show l2
@@ -344,6 +352,7 @@ impl Rib {
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
             mac_table: BTreeMap::new(),
+            vtep_table: std::collections::BTreeSet::new(),
             neighbors: BTreeMap::new(),
             tx,
             rx,
@@ -928,6 +937,27 @@ impl Rib {
                 for (&label, ilm) in ilms.iter() {
                     self.ilm_del(label, ilm.clone()).await;
                 }
+                // Clean up EVPN-installed FDB rows on externally-managed
+                // VXLAN devices BEFORE we tear down zebra-rs-managed
+                // bridges/VXLANs. For zebra-rs-managed devices the
+                // device deletion would auto-purge the FDB, but
+                // operators commonly create the VXLAN themselves
+                // (`ip link add vni550 type vxlan ...`) — those
+                // outlive the daemon and would keep stale extern_learn
+                // rows. Walk both the unicast MAC table and the
+                // ingress-replication VTEP set; the FIB calls are
+                // no-ops if the VXLAN itself was removed by the
+                // bridge/vxlan loops below.
+                let macs: Vec<(u32, MacAddr)> = self.mac_table.keys().copied().collect();
+                for (vni, mac) in macs {
+                    self.fib_handle.mac_del(vni, &mac).await;
+                }
+                self.mac_table.clear();
+                let vteps: Vec<(u32, IpAddr)> = self.vtep_table.iter().copied().collect();
+                for (vni, group) in vteps {
+                    self.fib_handle.mdb_del(vni, group, None, 0).await;
+                }
+                self.vtep_table.clear();
                 for (_, bridge) in self.bridges.iter() {
                     self.fib_handle.bridge_del(bridge).await;
                 }
@@ -1175,14 +1205,16 @@ impl Rib {
         ifindex: u32,
         seq: u32,
     ) {
-        // Phase 4B: Forward MDB add request to FIB
+        // Track the VTEP we're about to install so the shutdown path
+        // can DELNEIGH it before exit.
+        self.vtep_table.insert((vni, group));
         self.fib_handle
             .mdb_add(vni, group, source, ifindex, seq)
             .await;
     }
 
     async fn mdb_del(&mut self, vni: u32, group: IpAddr, source: Option<IpAddr>, ifindex: u32) {
-        // Phase 4B: Forward MDB delete request to FIB
+        self.vtep_table.remove(&(vni, group));
         self.fib_handle.mdb_del(vni, group, source, ifindex).await;
     }
 
