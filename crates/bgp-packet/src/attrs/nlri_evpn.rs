@@ -52,13 +52,13 @@ pub struct Evpn {
     pub ether_tag: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EvpnRoute {
     Mac(EvpnMac),
     Multicast(EvpnMulticast),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EvpnMac {
     pub id: u32,
     pub rd: RouteDistinguisher,
@@ -68,7 +68,7 @@ pub struct EvpnMac {
     pub vni: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EvpnMulticast {
     pub id: u32,
     pub rd: RouteDistinguisher,

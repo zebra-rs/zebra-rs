@@ -79,6 +79,7 @@ pub enum Event {
     StaleTimerExipires(AfiSafi),
     AdvTimerIpv4Expires,
     AdvTimerVpnv4Expires,
+    AdvTimerEvpnExpires,
 }
 
 pub enum FsmEffect {
@@ -313,8 +314,15 @@ pub struct Peer {
     pub cache_ipv4_rev: HashMap<Ipv4Nlri, Arc<BgpAttr>>,
     pub cache_vpnv4: HashMap<Arc<BgpAttr>, HashSet<Vpnv4Nlri>>,
     pub cache_vpnv4_rev: HashMap<Vpnv4Nlri, Arc<BgpAttr>>,
+    /// EVPN advertise cache. Mirrors `cache_vpnv4` shape — NLRIs
+    /// grouped by attribute so a single MP_REACH UPDATE on flush can
+    /// carry every route that shares one attr set. Withdraw path uses
+    /// the reverse map; not yet implemented in this PR.
+    pub cache_evpn: HashMap<Arc<BgpAttr>, HashSet<EvpnRoute>>,
+    pub cache_evpn_rev: HashMap<EvpnRoute, Arc<BgpAttr>>,
     pub cache_ipv4_timer: Option<Timer>,
     pub cache_vpnv4_timer: Option<Timer>,
+    pub cache_evpn_timer: Option<Timer>,
     // Runtime bookkeeping for TCP-AO listener state: the (send_id,
     // recv_id) pair most recently installed via TCP_AO_ADD_KEY for
     // this peer. Needed because TCP_AO_DEL_KEY requires the exact
@@ -374,8 +382,11 @@ impl Peer {
             cache_ipv4_rev: HashMap::default(),
             cache_vpnv4: HashMap::default(),
             cache_vpnv4_rev: HashMap::default(),
+            cache_evpn: HashMap::default(),
+            cache_evpn_rev: HashMap::default(),
             cache_ipv4_timer: None,
             cache_vpnv4_timer: None,
+            cache_evpn_timer: None,
             last_ao_installed: None,
         };
         peer.config
@@ -474,6 +485,7 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
         }
         Event::AdvTimerIpv4Expires => (fsm_adv_timer_ipv4_expires(peer), FsmEffect::None),
         Event::AdvTimerVpnv4Expires => (fsm_adv_timer_vpnv4_expires(peer), FsmEffect::None),
+        Event::AdvTimerEvpnExpires => (fsm_adv_timer_evpn_expires(peer), FsmEffect::None),
     }
 }
 
@@ -533,6 +545,12 @@ pub fn fsm_adv_timer_ipv4_expires(peer: &mut Peer) -> State {
 pub fn fsm_adv_timer_vpnv4_expires(peer: &mut Peer) -> State {
     peer.cache_vpnv4_timer = None;
     peer.flush_vpnv4();
+    State::Established
+}
+
+pub fn fsm_adv_timer_evpn_expires(peer: &mut Peer) -> State {
+    peer.cache_evpn_timer = None;
+    peer.flush_evpn();
     State::Established
 }
 
