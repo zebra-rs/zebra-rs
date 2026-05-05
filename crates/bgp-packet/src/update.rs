@@ -119,6 +119,60 @@ impl UpdatePacket {
         Some(buf)
     }
 
+    /// Emit the BGP UPDATE that carries an `MP_REACH_NLRI` for EVPN
+    /// (AFI=25 / SAFI=70). Mirrors `pop_vpnv4`'s framing — empty IPv4
+    /// withdraw, attributes, MP_REACH — but uses the un-paginated
+    /// `evpn_attr_emit` helper from `mp_reach`. All NLRIs in the
+    /// `MpReachAttr::Evpn::updates` vector are emitted in a single
+    /// packet; pagination across multiple UPDATEs (e.g. when a
+    /// large RD's MAC table doesn't fit) is a follow-up.
+    ///
+    /// Returns `None` when the packet has no EVPN payload to emit
+    /// (caller can stop iterating). Distinct from `pop_vpnv4` in
+    /// that it's idempotently single-shot — callers that want to
+    /// emit multiple UPDATEs should batch into separate
+    /// `UpdatePacket` instances.
+    pub fn pop_evpn(&mut self) -> Option<BytesMut> {
+        let (snpa, nhop, updates) = match &self.mp_update {
+            Some(MpReachAttr::Evpn {
+                snpa,
+                nhop,
+                updates,
+            }) if !updates.is_empty() => (*snpa, *nhop, updates.clone()),
+            _ => return None,
+        };
+
+        let mut buf = FixedBuf::new(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        let _ = buf.put(&header[..]);
+
+        // No IPv4 withdraw on EVPN UPDATEs — same as the VPNv4 path.
+        let _ = buf.put_u16(0u16);
+
+        let attr_len_pos = buf.len();
+        let _ = buf.put_u16(0u16); // placeholder
+
+        if let Some(bgp_attr) = &self.bgp_attr {
+            bgp_attr.attr_emit(buf.get_mut());
+        }
+
+        super::attrs::mp_reach::evpn_attr_emit(snpa, &nhop, &updates, buf.get_mut());
+
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        let _ = buf.put_u16_at(attr_len_pos, attr_len);
+
+        let length: u16 = buf.len() as u16;
+        let _ = buf.put_u16_at(16, length);
+
+        // Drain so a second call returns None — matches VPNv4's
+        // "consume once" semantics from the flush_vpnv4 callers.
+        if let Some(MpReachAttr::Evpn { updates, .. }) = self.mp_update.as_mut() {
+            updates.clear();
+        }
+
+        Some(buf.get())
+    }
+
     pub fn pop_vpnv4(&mut self) -> Option<BytesMut> {
         match &self.mp_update {
             Some(MpReachAttr::Vpnv4(vpnv4)) if !vpnv4.updates.is_empty() => {}
