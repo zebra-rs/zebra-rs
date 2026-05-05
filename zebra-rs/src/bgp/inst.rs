@@ -79,6 +79,13 @@ pub struct Bgp {
     /// so origination becomes deterministic regardless of which
     /// channel wins the boot race.
     pub local_fdb: BTreeMap<(u32, MacAddr), FdbEntry>,
+    /// Local VXLAN VTEP shadow keyed by VNI, value = local VTEP IP
+    /// (the VXLAN device's `IFLA_VXLAN_LOCAL` / `LOCAL6`). Populated
+    /// from `RibRx::VxlanAdd`, removed on `RibRx::VxlanDel`. Drives
+    /// Type-3 (Inclusive Multicast) origination — one IMET per VNI
+    /// — and replays on `advertise_all_vni` / `router_id` transitions
+    /// just like `local_fdb`.
+    pub local_vxlans: BTreeMap<u32, std::net::IpAddr>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -147,6 +154,7 @@ impl Bgp {
             router_id: Ipv4Addr::UNSPECIFIED,
             advertise_all_vni: false,
             local_fdb: BTreeMap::new(),
+            local_vxlans: BTreeMap::new(),
             hostname: None,
             peers: PeerMap::new(),
             tx,
@@ -243,10 +251,23 @@ impl Bgp {
         // to withdraw).
         let old_router_id = self.router_id;
         let advertising = self.advertise_all_vni;
-        if advertising && !old_router_id.is_unspecified() && !self.local_fdb.is_empty() {
-            let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
-            for entry in entries {
-                self.evpn_withdraw_macip(&entry);
+        if advertising && !old_router_id.is_unspecified() {
+            if !self.local_fdb.is_empty() {
+                let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
+                for entry in entries {
+                    self.evpn_withdraw_macip(&entry);
+                }
+            }
+            // Same RD-rebind story for Type-3 (IMET): each VXLAN's
+            // outbound IMET is keyed by the local router-id-derived
+            // RD; a router-id change requires withdrawing under the
+            // old RD and re-originating under the new.
+            if !self.local_vxlans.is_empty() {
+                let vxlans: Vec<(u32, std::net::IpAddr)> =
+                    self.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect();
+                for (vni, vtep_local) in vxlans {
+                    self.evpn_withdraw_imet(vni, vtep_local);
+                }
             }
         }
 
@@ -260,10 +281,19 @@ impl Bgp {
         // Same gate as the false→true advertise-all-vni replay; the
         // `evpn_originate_macip` body re-checks both conditions, so
         // an unspecified `router_id` here is a safe no-op.
-        if advertising && !router_id.is_unspecified() && !self.local_fdb.is_empty() {
-            let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
-            for entry in entries {
-                self.evpn_originate_macip(&entry);
+        if advertising && !router_id.is_unspecified() {
+            if !self.local_fdb.is_empty() {
+                let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
+                for entry in entries {
+                    self.evpn_originate_macip(&entry);
+                }
+            }
+            if !self.local_vxlans.is_empty() {
+                let vxlans: Vec<(u32, std::net::IpAddr)> =
+                    self.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect();
+                for (vni, vtep_local) in vxlans {
+                    self.evpn_originate_imet(vni, vtep_local);
+                }
             }
         }
     }
@@ -485,6 +515,15 @@ impl Bgp {
             RibRx::FdbDel(entry) => {
                 self.local_fdb.remove(&(entry.vni, entry.mac));
                 self.evpn_withdraw_macip(&entry);
+            }
+            RibRx::VxlanAdd { vni, vtep_local } => {
+                self.local_vxlans.insert(vni, vtep_local);
+                self.evpn_originate_imet(vni, vtep_local);
+            }
+            RibRx::VxlanDel { vni } => {
+                if let Some(vtep_local) = self.local_vxlans.remove(&vni) {
+                    self.evpn_withdraw_imet(vni, vtep_local);
+                }
             }
             _ => {
                 //

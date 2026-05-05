@@ -2646,6 +2646,106 @@ impl Bgp {
         // figure it out when they see the MP_UNREACH.
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
+
+    /// Originate a Type-3 (Inclusive Multicast Ethernet Tag) route
+    /// for one local VTEP×VNI pair (RFC 7432 §4.3, §11.3 + RFC 8365
+    /// §5.1.3). One IMET per VNI tells remote PEs "send your BUM
+    /// traffic for this VNI to me, encapsulated with VXLAN at this
+    /// IP". Receivers install a zero-MAC FDB row whose `dst` = the
+    /// nexthop, used for ingress-replication of broadcast / unknown
+    /// unicast / multicast.
+    ///
+    /// Required attributes:
+    ///   - RT (Two-Octet AS Specific) carrying VNI in low 3 bytes
+    ///     of Local Admin (same as Type-2).
+    ///   - Encapsulation extended community = VXLAN (8) per RFC 9012.
+    ///   - PMSI Tunnel attribute (RFC 6514 §5) — Tunnel Type 6
+    ///     (Ingress Replication), Label = VNI, Tunnel Identifier =
+    ///     local VTEP IP. Without it, peers won't know which tunnel
+    ///     mechanism to use and will reject the route.
+    ///   - Nexthop = local VTEP IP. Same as Type-2 origination.
+    ///
+    /// Same gates as `evpn_originate_macip`: `advertise_all_vni` on
+    /// AND a valid router-id. RD = `<router-id>:<VNI>`.
+    pub fn evpn_originate_imet(&mut self, vni: u32, vtep_local: IpAddr) {
+        if !self.advertise_all_vni {
+            return;
+        }
+        if self.router_id.is_unspecified() {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            tracing::warn!(
+                "evpn_originate_imet: VNI {} > 65535, RD encoding not yet supported",
+                vni
+            );
+            return;
+        };
+        let prefix = EvpnPrefix::InclusiveMulticast {
+            eth_tag: 0,
+            orig: vtep_local,
+        };
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity(vec![
+            evpn_route_target(self.asn, vni),
+            evpn_encap_vxlan(),
+        ]));
+        attr.pmsi_tunnel = Some(PmsiTunnel {
+            // Flags = 0 (no leaf info required, per RFC 6514 §5).
+            flags: 0,
+            // Tunnel Type 6 = Ingress Replication.
+            tunnel_type: 6,
+            vni,
+            endpoint: vtep_local,
+        });
+        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let (_replaced, selected, next_id) =
+            self.local_rib.update_evpn(rd, prefix.clone(), rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_tx: &self.rib_tx,
+            attr_store: &mut self.attr_store,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    /// Inverse of `evpn_originate_imet`. Mirrors `evpn_withdraw_macip`:
+    /// remove from candidate set, evict the per-prefix `selected`
+    /// entry via `select_best_path_evpn`, fan out MP_UNREACH to peers.
+    pub fn evpn_withdraw_imet(&mut self, vni: u32, vtep_local: IpAddr) {
+        if !self.advertise_all_vni {
+            return;
+        }
+        let Some(rd) = rd_from_router_id_vni(self.router_id, vni) else {
+            return;
+        };
+        let prefix = EvpnPrefix::InclusiveMulticast {
+            eth_tag: 0,
+            orig: vtep_local,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
 }
 
 /// `NTF_EXT_LEARNED` from `<linux/neighbour.h>` — bit 0x10. Set on
