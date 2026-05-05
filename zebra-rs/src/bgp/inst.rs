@@ -229,9 +229,42 @@ impl Bgp {
         if self.router_id == router_id {
             return;
         }
+        // EVPN RD = `<router-id>:<VNI>` (RFC 8365 §5.1.2). When
+        // router-id changes, every locally-originated route is now
+        // sitting under a stale RD that no peer (and no future
+        // re-originate) will withdraw. Drain the local FDB cache and
+        // withdraw under the OLD router-id BEFORE flipping the field,
+        // then re-originate under the NEW value below. Skips the
+        // withdraw when the old router-id is unspecified (initial
+        // 0.0.0.0 → operator value transition — nothing was ever
+        // originated under the all-zero RD because
+        // `evpn_originate_macip` gates on a valid router-id) or when
+        // `advertise_all_vni` is off (we never originated, so nothing
+        // to withdraw).
+        let old_router_id = self.router_id;
+        let advertising = self.advertise_all_vni;
+        if advertising && !old_router_id.is_unspecified() && !self.local_fdb.is_empty() {
+            let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
+            for entry in entries {
+                self.evpn_withdraw_macip(&entry);
+            }
+        }
+
         self.router_id = router_id;
         for (_, peer) in self.peers.iter_mut() {
             peer.router_id = router_id;
+        }
+
+        // Re-originate under the new router-id so the cache contents
+        // come back into the local-RIB / wire under the right RD.
+        // Same gate as the false→true advertise-all-vni replay; the
+        // `evpn_originate_macip` body re-checks both conditions, so
+        // an unspecified `router_id` here is a safe no-op.
+        if advertising && !router_id.is_unspecified() && !self.local_fdb.is_empty() {
+            let entries: Vec<FdbEntry> = self.local_fdb.values().cloned().collect();
+            for entry in entries {
+                self.evpn_originate_macip(&entry);
+            }
         }
     }
 
