@@ -942,6 +942,17 @@ impl Rib {
                     self.ipv4_route_del(&prefix, route.entry).await;
                 }
             }
+            // Inbound L2/L3-neighbor visibility for the upcoming EVPN
+            // work. No consumer yet; logged at debug for now so the
+            // wire is exercised end-to-end (subscribe + parse + dispatch)
+            // without committing to any protocol behavior. Type-2 MAC/IP
+            // advertisement will read these in a follow-up.
+            FibMessage::NewNeighbor(nbr) => {
+                tracing::debug!("FibMessage::NewNeighbor {:?}", nbr);
+            }
+            FibMessage::DelNeighbor(nbr) => {
+                tracing::debug!("FibMessage::DelNeighbor {:?}", nbr);
+            }
         }
     }
 

@@ -14,6 +14,7 @@ use netlink_packet_route::link::{
     AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo,
     LinkLayerType, LinkMessage,
 };
+use netlink_packet_route::neighbour::{NeighbourAddress, NeighbourAttribute, NeighbourMessage};
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
 use netlink_packet_route::route::{
     MplsLabel, RouteAddress, RouteAttribute, RouteHeader, RouteLwEnCapType, RouteLwTunnelEncap,
@@ -25,13 +26,14 @@ use rtnetlink::{
     LinkDummy, LinkVrf,
     constants::{
         RTMGRP_IPV4_IFADDR, RTMGRP_IPV4_ROUTE, RTMGRP_IPV6_IFADDR, RTMGRP_IPV6_ROUTE, RTMGRP_LINK,
+        RTMGRP_NEIGH,
     },
     new_connection,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fib::sysctl::sysctl_enable;
-use crate::fib::{FibAddr, FibLink, FibMessage, FibRoute};
+use crate::fib::{FibAddr, FibLink, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
 use crate::rib::route::DEBUG_ADDR;
@@ -164,7 +166,11 @@ impl FibHandle {
             | RTMGRP_IPV4_ROUTE
             | RTMGRP_IPV6_ROUTE
             | RTMGRP_IPV4_IFADDR
-            | RTMGRP_IPV6_IFADDR;
+            | RTMGRP_IPV6_IFADDR
+            // Covers RTM_NEWNEIGH / RTM_DELNEIGH for AF_INET (ARP),
+            // AF_INET6 (NDP), and AF_BRIDGE (FDB) — all three flow
+            // through the same group.
+            | RTMGRP_NEIGH;
 
         let addr = SocketAddr::new(0, mgroup_flags);
         connection.socket_mut().socket_mut().bind(&addr)?;
@@ -2098,6 +2104,52 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
     Some(msg)
 }
 
+/// Translate a kernel `RTM_NEWNEIGH` / `RTM_DELNEIGH` payload into the
+/// internal [`FibNeighbor`] form. Supports the three address families
+/// the consumer cares about today:
+///
+/// - `AF_INET` — ARP entries (NDA_DST = IPv4 protocol address,
+///   NDA_LLADDR = MAC).
+/// - `AF_INET6` — NDP entries (NDA_DST = IPv6 protocol address,
+///   NDA_LLADDR = MAC).
+/// - `AF_BRIDGE` — FDB entries (NDA_LLADDR = MAC, NDA_DST optional =
+///   remote VTEP IP for VXLAN, NDA_VNI optional, NDA_VLAN optional).
+///
+/// Other families fall through with the header populated and the
+/// attribute fields left at their defaults — easier to debug than
+/// silently dropping them.
+pub fn neighbor_from_msg(msg: NeighbourMessage) -> FibNeighbor {
+    let mut nbr = FibNeighbor {
+        family: msg.header.family,
+        ifindex: msg.header.ifindex,
+        state: msg.header.state,
+        flags: msg.header.flags,
+        kind: msg.header.kind,
+        ..Default::default()
+    };
+
+    for attr in msg.attributes.into_iter() {
+        match attr {
+            NeighbourAttribute::Destination(addr) => match addr {
+                NeighbourAddress::Inet(v4) => nbr.dst = Some(IpAddr::V4(v4)),
+                NeighbourAddress::Inet6(v6) => nbr.dst = Some(IpAddr::V6(v6)),
+                NeighbourAddress::Other(_) => {}
+                // Non-exhaustive enum; future-proof against new variants.
+                _ => {}
+            },
+            NeighbourAttribute::LinkLocalAddress(bytes) => {
+                nbr.lladdr = MacAddr::from_vec(bytes);
+            }
+            NeighbourAttribute::Vlan(vlan) => nbr.vlan = Some(vlan),
+            NeighbourAttribute::Vni(vni) => nbr.vni = Some(vni),
+            NeighbourAttribute::Controller(idx) => nbr.master = Some(idx),
+            _ => {}
+        }
+    }
+
+    nbr
+}
+
 fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
     if let NetlinkPayload::InnerMessage(msg) = msg.payload {
         match msg {
@@ -2134,6 +2186,16 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                     let msg = FibMessage::DelRoute(route);
                     tx.send(msg).unwrap();
                 }
+            }
+            RouteNetlinkMessage::NewNeighbour(msg) => {
+                let neighbor = neighbor_from_msg(msg);
+                let msg = FibMessage::NewNeighbor(neighbor);
+                tx.send(msg).unwrap();
+            }
+            RouteNetlinkMessage::DelNeighbour(msg) => {
+                let neighbor = neighbor_from_msg(msg);
+                let msg = FibMessage::DelNeighbor(neighbor);
+                tx.send(msg).unwrap();
             }
             // TODO: Phase 4B - Add MDB message handling when netlink-packet-route supports it
             // RouteNetlinkMessage::NewMdb(_) => {
