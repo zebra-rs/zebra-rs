@@ -1781,13 +1781,27 @@ impl FibHandle {
         vni: u32,
         group: IpAddr,
         source: Option<IpAddr>,
-        ifindex: u32,
+        _ifindex: u32,
         seq: u32,
     ) {
         use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
 
-        // Resolve VNI to VXLAN interface index
-        let vxlan_ifindex = ifindex;
+        // BGP-EVPN type-3 receive can't know the local VXLAN's ifindex
+        // (it's a netlink concept) so the caller passes 0 as a sentinel
+        // and we resolve it here against the map populated by
+        // `register_vxlan_ifindex` when the VXLAN device is observed.
+        // If the map has no entry, this VNI isn't configured on the
+        // local node — skipping is the honest answer (kernel would
+        // return EINVAL for ifindex 0 anyway, producing log spam for
+        // routes whose presence wasn't actionable here).
+        let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
+            tracing::debug!(
+                "mdb_add: no local VXLAN for VNI {} — skipping (group {})",
+                vni,
+                group
+            );
+            return;
+        };
 
         let mut msg = MdbMessage::default();
         msg.header.family = AddressFamily::Bridge;
@@ -1830,24 +1844,28 @@ impl FibHandle {
                     "MDB add error for group {} on VNI {} (ifindex {}, source: {:?}): {}",
                     group,
                     vni,
-                    ifindex,
+                    vxlan_ifindex,
                     source,
                     e
                 );
-                tracing::info!(
-                    "  → Likely cause: VXLAN interface not created or MDB entry format invalid"
-                );
-                tracing::info!("  → Check if VXLAN interface exists: ip link show");
-                tracing::info!("  → Check if interface supports MDB: bridge mdb show");
             }
         }
     }
 
     /// Delete EVPN Type 3 (Inclusive Multicast) entry from kernel MDB
-    pub async fn mdb_del(&self, vni: u32, group: IpAddr, source: Option<IpAddr>, ifindex: u32) {
+    pub async fn mdb_del(&self, vni: u32, group: IpAddr, source: Option<IpAddr>, _ifindex: u32) {
         use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
 
-        let vxlan_ifindex = ifindex;
+        // Mirror `mdb_add` — caller's `ifindex` is a sentinel; resolve
+        // via the registered map and skip when no local VXLAN exists.
+        let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
+            tracing::debug!(
+                "mdb_del: no local VXLAN for VNI {} — skipping (group {})",
+                vni,
+                group
+            );
+            return;
+        };
 
         let mut msg = MdbMessage::default();
         msg.header.family = AddressFamily::Bridge;
