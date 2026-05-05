@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use bytes::{BufMut, BytesMut};
 use nom::IResult;
 use nom::bytes::complete::take;
 use nom::error::{ErrorKind, make_error};
@@ -243,6 +244,80 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
     }
 }
 
+impl EvpnRoute {
+    /// Emit one EVPN NLRI (Route Type byte + Length byte + payload)
+    /// onto `buf`. Mirror of `parse_nlri`. Add-Path is signalled by a
+    /// non-zero `id`: when set, the four-byte path identifier is
+    /// prepended before the route-type byte (RFC 7911), matching the
+    /// asymmetry the existing `Vpnv4Reach::emit` uses.
+    ///
+    /// The length byte is the count of octets that follow it,
+    /// computed by buffering the payload first and reading its size —
+    /// keeps the encoder honest against future field additions
+    /// (e.g. Type-2 IP component going from absent → IPv4 → IPv6).
+    pub fn nlri_emit(&self, buf: &mut BytesMut) {
+        match self {
+            EvpnRoute::Mac(m) => {
+                if m.id != 0 {
+                    buf.put_u32(m.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets): 2-byte type + 6-byte value.
+                payload.put_u16(m.rd.typ as u16);
+                payload.put(&m.rd.val[..]);
+                // ESI (10 octets).
+                payload.put(&m.esi[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(m.ether_tag);
+                // MAC Address Length in bits (1 octet) — always 48
+                // for an EVPN MAC route. RFC 7432 §7.2.
+                payload.put_u8(48);
+                // MAC Address (6 octets).
+                payload.put(&m.mac[..]);
+                // IP Address Length (1 octet). MAC-only Type-2 routes
+                // emit length 0 with no following IP — operator-side
+                // MAC+IP support is a follow-up that will set 32 (IPv4)
+                // or 128 (IPv6) and emit the address.
+                payload.put_u8(0);
+                // MPLS Label1 / VNI (3 octets, big-endian, low 24
+                // bits of the u32). RFC 8365 §5.1.3.
+                let vni_bytes = m.vni.to_be_bytes();
+                payload.put(&vni_bytes[1..4]);
+                buf.put_u8(2); // Route Type 2 — MAC/IP Advertisement.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
+            EvpnRoute::Multicast(m) => {
+                if m.id != 0 {
+                    buf.put_u32(m.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(m.rd.typ as u16);
+                payload.put(&m.rd.val[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(m.ether_tag);
+                match m.addr {
+                    IpAddr::V4(v4) => {
+                        // IP Address Length in bits (1 octet) — 32
+                        // for IPv4. Mirror of the parse side which
+                        // accepts 32 → 4-octet read.
+                        payload.put_u8(32);
+                        payload.put(&v4.octets()[..]);
+                    }
+                    IpAddr::V6(v6) => {
+                        payload.put_u8(128);
+                        payload.put(&v6.octets()[..]);
+                    }
+                }
+                buf.put_u8(3); // Route Type 3 — Inclusive Multicast.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod evpn_prefix_tests {
     use super::*;
@@ -294,5 +369,141 @@ mod evpn_prefix_tests {
         assert_eq!(i.route_type(), 3);
         // Type 2 sorts before Type 3 (variant order).
         assert!(m < i);
+    }
+}
+
+#[cfg(test)]
+mod evpn_emit_tests {
+    use super::*;
+    use crate::RouteDistinguisherType;
+
+    /// Type-1 RD `192.0.2.1:100`. Type byte 0x0001 then 4-byte IPv4
+    /// followed by 2-byte assigned number.
+    fn rd_type1_ip(ip: Ipv4Addr, num: u16) -> RouteDistinguisher {
+        let mut rd = RouteDistinguisher::new(RouteDistinguisherType::IP);
+        rd.val[0..4].copy_from_slice(&ip.octets());
+        rd.val[4..6].copy_from_slice(&num.to_be_bytes());
+        rd
+    }
+
+    /// Type-2 NLRI: route-type byte (2), length byte, then 33 octets
+    /// of MAC-only payload — 8 (RD) + 10 (ESI) + 4 (eth-tag) + 1 + 6
+    /// (MAC) + 1 (IP-len=0) + 3 (VNI) = 33.
+    #[test]
+    fn macip_nlri_emit_macros_only() {
+        let mac = EvpnMac {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vni: 100,
+        };
+        let route = EvpnRoute::Mac(mac);
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+
+        assert_eq!(buf[0], 2, "route type");
+        assert_eq!(buf[1], 33, "length");
+        assert_eq!(&buf[2..4], &[0x00, 0x01], "RD type 1");
+        assert_eq!(&buf[4..8], &[192, 0, 2, 1], "RD IP");
+        assert_eq!(&buf[8..10], &[0x00, 0x64], "RD assigned-number = 100");
+        assert_eq!(&buf[10..20], &[0u8; 10], "ESI all zeros");
+        assert_eq!(&buf[20..24], &[0, 0, 0, 0], "eth-tag = 0");
+        assert_eq!(buf[24], 48, "MAC length in bits");
+        assert_eq!(&buf[25..31], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        assert_eq!(buf[31], 0, "IP length 0 — MAC-only Type-2");
+        assert_eq!(&buf[32..35], &[0x00, 0x00, 0x64], "VNI 100 in 24 bits");
+        assert_eq!(buf.len(), 35, "1 + 1 + 33");
+    }
+
+    /// Add-Path: when `id != 0` the four-byte path id leads.
+    #[test]
+    fn macip_nlri_emit_addpath() {
+        let mac = EvpnMac {
+            id: 7,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 50),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0; 6],
+            vni: 50,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Mac(mac).nlri_emit(&mut buf);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 7], "path id 7 prepended");
+        assert_eq!(buf[4], 2, "route type follows id");
+    }
+
+    /// Type-3 NLRI: 8 (RD) + 4 (eth-tag) + 1 (IP-len=32) + 4 (IP) = 17.
+    #[test]
+    fn inclusive_multicast_nlri_emit_v4() {
+        let m = EvpnMulticast {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 5), 100),
+            ether_tag: 0,
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Multicast(m).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 3);
+        assert_eq!(buf[1], 17);
+        assert_eq!(&buf[2..10], &[0x00, 0x01, 10, 0, 0, 5, 0x00, 0x64]);
+        assert_eq!(&buf[10..14], &[0, 0, 0, 0], "eth-tag = 0");
+        assert_eq!(buf[14], 32, "IPv4 origin = 32 bits");
+        assert_eq!(&buf[15..19], &[10, 0, 0, 5]);
+        assert_eq!(buf.len(), 19);
+    }
+
+    /// Round-trip: emit a Type-2 route, then parse the bytes back as
+    /// an MP_REACH-style NLRI stream. The parser must recover the
+    /// same RD, eth-tag, MAC, and VNI we emitted.
+    #[test]
+    fn macip_emit_then_parse_roundtrip() {
+        let original = EvpnMac {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 200),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc],
+            vni: 200,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Mac(original.clone()).nlri_emit(&mut buf);
+
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&buf, false).expect("parse_nlri must accept what we emit");
+        match parsed {
+            EvpnRoute::Mac(p) => {
+                assert_eq!(p.rd, original.rd);
+                assert_eq!(p.ether_tag, original.ether_tag);
+                assert_eq!(p.mac, original.mac);
+                assert_eq!(p.vni, original.vni);
+                assert_eq!(p.esi, original.esi);
+            }
+            _ => panic!("expected Mac variant"),
+        }
+    }
+
+    #[test]
+    fn inclusive_multicast_emit_then_parse_roundtrip() {
+        let original = EvpnMulticast {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 5), 100),
+            ether_tag: 0,
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Multicast(original.clone()).nlri_emit(&mut buf);
+
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&buf, false).expect("parse_nlri must accept what we emit");
+        match parsed {
+            EvpnRoute::Multicast(p) => {
+                assert_eq!(p.rd, original.rd);
+                assert_eq!(p.ether_tag, original.ether_tag);
+                assert_eq!(p.addr, original.addr);
+            }
+            _ => panic!("expected Multicast variant"),
+        }
     }
 }
