@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -20,6 +20,14 @@ pub struct FdbEntry {
     pub ifindex: u32,
     pub bridge_ifindex: u32,
     pub flags: u8,
+    /// Local VTEP source IP — the `local` address configured on the
+    /// VXLAN slave of `bridge_ifindex` (`IFLA_VXLAN_LOCAL` /
+    /// `IFLA_VXLAN_LOCAL6`). The EVPN advertise path uses this as
+    /// the BGP MP_REACH nexthop per RFC 8365 §5.1.3 — that's the IP
+    /// remote peers will encapsulate VXLAN packets to. None when the
+    /// VXLAN was created without an explicit `local` (kernel uses
+    /// 0.0.0.0 / :: in that case); callers fall back to router-id.
+    pub vxlan_local: Option<IpAddr>,
 }
 
 #[allow(dead_code)]

@@ -488,6 +488,18 @@ impl Rib {
             .and_then(|link| link.vni)
     }
 
+    /// Sibling of `vni_for_bridge` returning the same VXLAN slave's
+    /// local source IP (`IFLA_VXLAN_LOCAL` / `IFLA_VXLAN_LOCAL6`),
+    /// when set. The EVPN advertise path uses this for the BGP
+    /// MP_REACH nexthop on Type-2 / Type-3 routes — receivers
+    /// encapsulate VXLAN packets to this address.
+    pub fn vxlan_local_for_bridge(&self, bridge_ifindex: u32) -> Option<IpAddr> {
+        self.links
+            .values()
+            .find(|link| link.master == Some(bridge_ifindex) && link.vni.is_some())
+            .and_then(|link| link.vxlan_local)
+    }
+
     /// Re-emit `RibRx::FdbAdd` for every existing AF_BRIDGE entry on
     /// `bridge_ifindex`. Called from `link_add` when a VXLAN device
     /// gains a bridge master so MACs that were learned BEFORE the
@@ -505,6 +517,7 @@ impl Rib {
         let Some(vni) = self.vni_for_bridge(bridge_ifindex) else {
             return;
         };
+        let vxlan_local = self.vxlan_local_for_bridge(bridge_ifindex);
         for (key, nbr) in self.neighbors.iter() {
             let NeighborKey::Bridge {
                 ifindex,
@@ -533,6 +546,7 @@ impl Rib {
                 ifindex: *ifindex,
                 bridge_ifindex,
                 flags: nbr.flags.bits(),
+                vxlan_local,
             };
             self.api_fdb_add(&entry);
         }
@@ -1335,12 +1349,14 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
         .master
         .or_else(|| rib.links.get(&nbr.ifindex).and_then(|link| link.master))?;
     let vni = rib.vni_for_bridge(bridge_ifindex)?;
+    let vxlan_local = rib.vxlan_local_for_bridge(bridge_ifindex);
     Some(FdbEntry {
         vni,
         mac,
         ifindex: nbr.ifindex,
         bridge_ifindex,
         flags: nbr.flags.bits(),
+        vxlan_local,
     })
 }
 

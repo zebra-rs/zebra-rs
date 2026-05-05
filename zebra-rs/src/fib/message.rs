@@ -38,6 +38,13 @@ pub struct FibLink {
     /// VXLAN links. Used by the EVPN advertise path to map a bridge
     /// (via its VXLAN slave) to the L2VPN VNI it carries.
     pub vni: Option<u32>,
+    /// Local VTEP source IP from `IFLA_VXLAN_LOCAL` (4 bytes IPv4) or
+    /// `IFLA_VXLAN_LOCAL6` (16 bytes IPv6) on VXLAN links — i.e. the
+    /// `local` address shown by `ip -d link show <vxlan>`. Used by
+    /// the EVPN advertise path as the BGP nexthop in MP_REACH_NLRI
+    /// per RFC 8365 §5.1.3 (egress PE = local VTEP). None on
+    /// non-VXLAN links and on VXLANs configured without a local IP.
+    pub vxlan_local: Option<std::net::IpAddr>,
 }
 
 impl FibLink {
