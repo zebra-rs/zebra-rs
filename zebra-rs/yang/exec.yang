@@ -115,7 +115,11 @@ module exec {
           key name;
           leaf name {
             ext:dynamic "bgp:neighbor";
-            type "inet:ipv4-address";
+            // Accept either family — peers are keyed by `IpAddr`.
+            type union {
+              type inet:ipv4-address;
+              type inet:ipv6-address;
+            }
           }
           leaf rtcv4 {
             type empty;
