@@ -1740,6 +1740,100 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_out.v4vpn.clear();
 
+    // EVPN. Same shape as the VPNv4 block above:
+    //   * If both ends advertised LLGR for L2VPN/EVPN, retain the
+    //     adj-in entries marked stale (with the LLGR_STALE community
+    //     attached) and re-import them into the local-RIB so best
+    //     path selection still considers them; the stale timer
+    //     evicts them later.
+    //   * Otherwise, withdraw every route the peer had given us.
+    //     `route_evpn_withdraw` removes from adj-in + local-RIB and
+    //     fans out MP_UNREACH to other peers (covering any kernel
+    //     install/withdraw via `route_evpn_export_selected`).
+    let afi_safi_evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+    let llgr_evpn = peer.cap_send.llgr.contains_key(&afi_safi_evpn)
+        && peer.cap_recv.llgr.contains_key(&afi_safi_evpn);
+    if llgr_evpn {
+        let stale_time = peer
+            .cap_recv
+            .llgr
+            .get(&afi_safi_evpn)
+            .expect("checked above")
+            .stale_time();
+        peer.timer.stale_timer.insert(
+            afi_safi_evpn,
+            start_stale_timer(peer, afi_safi_evpn, stale_time),
+        );
+        for (_rd, table) in peer.adj_in.evpn.iter_mut() {
+            for (_prefix, ribs) in table.0.iter_mut() {
+                for rib in ribs.iter_mut() {
+                    rib.stale = true;
+                    let mut new_attr = (*rib.attr).clone();
+                    match &mut new_attr.com {
+                        Some(com) => {
+                            com.push(CommunityValue::LLGR_STALE.value());
+                        }
+                        None => {
+                            let mut com = Community::new();
+                            com.push(CommunityValue::LLGR_STALE.value());
+                            new_attr.com = Some(com);
+                        }
+                    }
+                    rib.attr = bgp.attr_store.intern(new_attr);
+                }
+            }
+        }
+
+        // Re-import the now-stale entries into local-RIB so best-path
+        // re-evaluation includes the stale attr+community.
+        let stale_updates: Vec<(EvpnRoute, BgpAttr, IpAddr)> = {
+            let mut updates = Vec::new();
+            for (rd, table) in peer.adj_in.evpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        if let Some(route) = build_evpn_route(rd, prefix, rib) {
+                            let nhop = match rib.attr.nexthop.as_ref() {
+                                Some(BgpNexthop::Evpn(addr)) => *addr,
+                                _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                            };
+                            updates.push((route, (*rib.attr).clone(), nhop));
+                        }
+                    }
+                }
+            }
+            updates
+        };
+        for (route, attr, nhop) in stale_updates {
+            route_evpn_update(peer_id, &route, nhop, &attr, bgp, peers, true);
+        }
+    } else {
+        let withdrawn: Vec<EvpnRoute> = {
+            let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+            let mut out = Vec::new();
+            for (rd, table) in peer.adj_in.evpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        if let Some(route) = build_evpn_route(rd, prefix, rib) {
+                            out.push(route);
+                        }
+                    }
+                }
+            }
+            out
+        };
+        for route in withdrawn.iter() {
+            route_evpn_withdraw(peer_id, route, bgp, peers);
+        }
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        peer.adj_in.evpn.clear();
+    }
+
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    peer.adj_out.evpn.clear();
+    peer.cache_evpn.clear();
+    peer.cache_evpn_rev.clear();
+    peer.cache_evpn_timer = None;
+
     peer.cap_map = CapAfiMap::new();
     peer.cap_recv = BgpCap::default();
     peer.opt.clear();
@@ -1747,6 +1841,38 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     // IPv4 RTC.
     peer.rtcv4.clear();
     peer.eor.clear();
+}
+
+/// Reconstruct the wire `EvpnRoute` from a Loc-RIB / Adj-RIB entry,
+/// re-deriving the per-NLRI fields (path-id, ESI, VNI) from the
+/// stored `BgpRib`. Used by the peer-down cleanup path to feed
+/// `route_evpn_withdraw`.
+fn build_evpn_route(
+    rd: &RouteDistinguisher,
+    prefix: &EvpnPrefix,
+    rib: &BgpRib,
+) -> Option<EvpnRoute> {
+    match prefix {
+        EvpnPrefix::MacIp { eth_tag, mac, .. } => {
+            let vni = extract_vni_from_attr(&rib.attr).unwrap_or(0);
+            Some(EvpnRoute::Mac(EvpnMac {
+                id: rib.remote_id,
+                rd: *rd,
+                esi: rib.esi.unwrap_or([0; 10]),
+                ether_tag: *eth_tag,
+                mac: *mac,
+                vni,
+            }))
+        }
+        EvpnPrefix::InclusiveMulticast { eth_tag, orig } => {
+            Some(EvpnRoute::Multicast(EvpnMulticast {
+                id: rib.remote_id,
+                rd: *rd,
+                ether_tag: *eth_tag,
+                addr: *orig,
+            }))
+        }
+    }
 }
 
 pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
@@ -2419,14 +2545,31 @@ impl Bgp {
         //     <local-AS>:<VNI>, two-octet ASN form for now).
         //   - Encapsulation extended community = VXLAN (8) so the
         //     receiver knows which data plane to use.
-        // Nexthop is the local router-id; per-peer NEXT_HOP rewrite
-        // for eBGP happens inside `route_update_evpn`.
+        // Nexthop = local VTEP source IP (RFC 8365 §5.1.3 — the
+        // egress PE for VXLAN is the VTEP). RIB resolved this from
+        // the VXLAN slave's `IFLA_VXLAN_LOCAL` / `LOCAL6` and stuck
+        // it on the FdbEntry. Falling back to router-id keeps an
+        // older configuration where the VXLAN was created without
+        // an explicit `local` from emitting a 0.0.0.0 nexthop, but
+        // operators with an actual VTEP IP set will get the right
+        // family in the wire encoding (v4 → 4-byte nexthop, v6 →
+        // 16-byte nexthop). Per-peer NEXT_HOP rewrite for eBGP
+        // still happens inside `route_update_evpn`.
         let mut attr = BgpAttr::new();
         attr.ecom = Some(ExtCommunity(vec![
             evpn_route_target(self.asn, entry.vni),
             evpn_encap_vxlan(),
         ]));
-        attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(self.router_id)));
+        let nexthop = entry.vxlan_local.unwrap_or(IpAddr::V4(self.router_id));
+        if entry.vxlan_local.is_none() {
+            tracing::warn!(
+                "evpn_originate_macip: VXLAN for VNI {} has no local IP; \
+                 falling back to router-id {} as nexthop",
+                entry.vni,
+                self.router_id,
+            );
+        }
+        attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
