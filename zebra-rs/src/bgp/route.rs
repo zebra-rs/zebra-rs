@@ -7,7 +7,7 @@ use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
-use crate::bgp::timer::start_stale_timer;
+use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
 use crate::policy::PolicyList;
 use crate::rib::{self, MacAddr, api::FdbEntry};
 
@@ -891,6 +891,119 @@ fn route_advertise_to_peers(
     }
 }
 
+/// Per-peer EVPN advertise builder. Mirrors `route_update_ipv4`:
+/// applies split-horizon, the iBGP-iBGP / route-reflector filter,
+/// and fixes up AS_PATH / NEXT_HOP / LOCAL_PREF for the outgoing
+/// direction. Returns `(EvpnRoute, BgpAttr)` if the peer should
+/// receive an advertisement, `None` otherwise.
+///
+/// VNI is sourced from the RT extended community on the inbound
+/// attribute (per RFC 8365 §5.1.2.4). For locally-originated routes
+/// `evpn_originate_macip` attaches the RT first, so the lookup
+/// always succeeds; for re-advertised routes the upstream RT is
+/// preserved.
+pub fn route_update_evpn(
+    peer: &mut Peer,
+    rd: &RouteDistinguisher,
+    prefix: &EvpnPrefix,
+    rib: &BgpRib,
+    bgp: &mut BgpTop,
+    add_path: bool,
+) -> Option<(EvpnRoute, BgpAttr)> {
+    if rib.ident == peer.ident {
+        return None;
+    }
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && !peer.is_reflector_client()
+    {
+        return None;
+    }
+
+    let id = if add_path { rib.local_id } else { 0 };
+
+    let route = match prefix {
+        EvpnPrefix::MacIp { eth_tag, mac, .. } => {
+            let vni = extract_vni_from_attr(&rib.attr).unwrap_or(0);
+            EvpnRoute::Mac(EvpnMac {
+                id,
+                rd: *rd,
+                esi: rib.esi.unwrap_or([0; 10]),
+                ether_tag: *eth_tag,
+                mac: *mac,
+                vni,
+            })
+        }
+        EvpnPrefix::InclusiveMulticast { eth_tag, orig } => EvpnRoute::Multicast(EvpnMulticast {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            addr: *orig,
+        }),
+    };
+
+    let mut attrs = (*rib.attr).clone();
+
+    if peer.is_ebgp()
+        && let Some(ref mut aspath) = attrs.aspath
+    {
+        let local_as_path = As4Path::from(vec![peer.local_as]);
+        aspath.prepend_mut(local_as_path);
+    }
+
+    if peer.is_ebgp() || rib.is_originated() {
+        let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
+            local_addr.ip()
+        } else {
+            IpAddr::V4(*bgp.router_id)
+        };
+        attrs.nexthop = Some(BgpNexthop::Evpn(nexthop));
+    }
+
+    if peer.is_ibgp() && attrs.local_pref.is_none() {
+        attrs.local_pref = Some(LocalPref::default());
+    }
+
+    Some((route, attrs))
+}
+
+/// Fan out an EVPN best-path selection to every peer with the
+/// `(L2vpn, Evpn)` AFI/SAFI established. Skips peers filtered by
+/// split-horizon / iBGP rules inside `route_update_evpn`. Withdraw
+/// path (MpUnreach for EVPN) is a follow-up — this PR only
+/// advertises new best paths.
+pub fn route_advertise_evpn_to_peers(
+    rd: RouteDistinguisher,
+    prefix: EvpnPrefix,
+    selected: &[BgpRib],
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let Some(new_best) = selected.last() else {
+        return;
+    };
+
+    let peer_addrs: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(Afi::L2vpn, Safi::Evpn))
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    for peer_addr in peer_addrs {
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+        let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
+
+        let Some((route, attr)) = route_update_evpn(peer, &rd, &prefix, new_best, bgp, add_path)
+        else {
+            continue;
+        };
+
+        let attr = bgp.attr_store.intern(attr);
+        peer.send_evpn(route, attr, true);
+    }
+}
+
 // Send BGP withdrawal for a prefix
 fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: Ipv4Net, id: u32) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
@@ -1723,6 +1836,56 @@ impl Peer {
         }
     }
 
+    /// Cache an EVPN route for advertisement, grouped by attribute.
+    /// Mirrors `send_vpnv4`: same timer-debounce shape, same
+    /// per-attribute batching so a single MP_REACH UPDATE can carry
+    /// every route that shares an attribute set.
+    pub fn send_evpn(&mut self, route: EvpnRoute, attr: Arc<BgpAttr>, timer: bool) {
+        self.cache_evpn
+            .entry(attr.clone())
+            .or_default()
+            .insert(route.clone());
+        self.cache_evpn_rev.insert(route, attr);
+        if timer && self.cache_evpn_timer.is_none() {
+            self.cache_evpn_timer = Some(start_adv_timer_evpn(self));
+        }
+    }
+
+    /// Drain `cache_evpn` and emit one BGP UPDATE per attribute
+    /// group via `pop_evpn`. Pagination across multiple UPDATEs is a
+    /// follow-up; the encoder currently emits all NLRIs from a
+    /// single attr group in one packet.
+    pub fn flush_evpn(&mut self) {
+        let packet_tx = self.packet_tx.clone();
+        let max_size = self.max_packet_size();
+        for (attr, routes) in self.cache_evpn.drain() {
+            let mut update = UpdatePacket::with_max_packet_size(max_size);
+
+            // Nexthop comes from the cached attribute. EVPN allows
+            // either an IPv4 or IPv6 nexthop; if neither was set on
+            // the attr (shouldn't happen for locally-originated
+            // routes), default to 0.0.0.0 — the receiver will
+            // notice and drop, which is the right behavior.
+            let nhop = match attr.nexthop.as_ref() {
+                Some(BgpNexthop::Evpn(addr)) => *addr,
+                _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            };
+            update.mp_update = Some(MpReachAttr::Evpn {
+                snpa: 0,
+                nhop,
+                updates: routes.into_iter().collect(),
+            });
+            update.bgp_attr = Some((*attr).clone());
+
+            if let Some(bytes) = update.pop_evpn()
+                && let Some(ref tx) = packet_tx
+            {
+                let _ = tx.send(bytes);
+            }
+        }
+        self.cache_evpn_rev.clear();
+    }
+
     // Flush BGP update.
     pub fn flush_vpnv4(&mut self) {
         let packet_tx = self.packet_tx.clone();
@@ -2071,8 +2234,24 @@ impl Bgp {
             mac: entry.mac.octets(),
             ip: None,
         };
-        let attr = BgpAttr::new();
-        let rib = BgpRib::new(
+
+        // Build the BGP attributes for this origination. RFC 8365
+        // §5.1.2.4 requires both:
+        //   - RT (Route Target) carrying the VNI so receivers can
+        //     install into the right L2VPN (auto-derived
+        //     <local-AS>:<VNI>, two-octet ASN form for now).
+        //   - Encapsulation extended community = VXLAN (8) so the
+        //     receiver knows which data plane to use.
+        // Nexthop is the local router-id; per-peer NEXT_HOP rewrite
+        // for eBGP happens inside `route_update_evpn`.
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity(vec![
+            evpn_route_target(self.asn, entry.vni),
+            evpn_encap_vxlan(),
+        ]));
+        attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(self.router_id)));
+
+        let mut rib = BgpRib::new(
             ORIGINATED_PEER,
             Ipv4Addr::UNSPECIFIED,
             BgpRibType::Originated,
@@ -2084,7 +2263,21 @@ impl Bgp {
             None,
             false,
         );
-        let _ = self.local_rib.update_evpn(rd, prefix, rib);
+        let (_replaced, selected, next_id) =
+            self.local_rib.update_evpn(rd, prefix.clone(), rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_tx: &self.rib_tx,
+            attr_store: &mut self.attr_store,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
     }
 
     /// Inverse of `evpn_originate_macip`. No-op when
@@ -2124,4 +2317,40 @@ fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistingui
     rd.val[0..4].copy_from_slice(&router_id.octets());
     rd.val[4..6].copy_from_slice(&vni_short.to_be_bytes());
     Some(rd)
+}
+
+/// Build the auto-derived Route Target extended community for an EVPN
+/// route per RFC 8365 §5.1.2.4: type 0x00 / sub 0x02 (Two-Octet AS
+/// Specific Route Target) carrying `<local-AS>:<VNI>`. The 2-byte
+/// ASN sits in the first two octets; the VNI fills the remaining
+/// four (24-bit VNI naturally encoded big-endian into the low 3 of
+/// 4 bytes; 32-bit values would clobber the high byte but VNIs are
+/// 24-bit per RFC 7348).
+fn evpn_route_target(asn: u32, vni: u32) -> ExtCommunityValue {
+    let mut rt = ExtCommunityValue {
+        high_type: 0x00,
+        low_type: 0x02,
+        val: [0; 6],
+    };
+    let asn16 = asn as u16;
+    rt.val[0..2].copy_from_slice(&asn16.to_be_bytes());
+    rt.val[2..6].copy_from_slice(&vni.to_be_bytes());
+    rt
+}
+
+/// Build the Tunnel Encapsulation extended community for VXLAN per
+/// RFC 9012 §6.1: type 0x03 (Transitive Opaque) / sub 0x0c
+/// (Encapsulation), value = encapsulation type 8 (VXLAN) in the low
+/// two octets. Without this community a Type-2 receiver that
+/// understands EVPN but supports multiple data planes can't tell
+/// which encap to install, so RFC 8365 §5.1.2.4 makes it mandatory.
+fn evpn_encap_vxlan() -> ExtCommunityValue {
+    let mut encap = ExtCommunityValue {
+        high_type: 0x03,
+        low_type: 0x0c,
+        val: [0; 6],
+    };
+    // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
+    encap.val[5] = 8;
+    encap
 }

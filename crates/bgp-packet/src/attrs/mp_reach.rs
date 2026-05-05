@@ -263,7 +263,7 @@ impl fmt::Debug for MpReachAttr {
 /// before writing the header — extended (2-byte) length is used when
 /// the value exceeds 255 octets, matching the convention used by
 /// `Vpnv4Reach::attr_emit_mut`.
-fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], buf: &mut BytesMut) {
+pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], buf: &mut BytesMut) {
     let mut value = BytesMut::new();
     value.put_u16(u16::from(Afi::L2vpn));
     value.put_u8(u8::from(Safi::Evpn));
