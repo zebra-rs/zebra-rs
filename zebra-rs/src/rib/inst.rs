@@ -540,6 +540,12 @@ impl Rib {
             if mac.is_multicast() {
                 continue;
             }
+            // And drop MACs learned on VXLAN ports (remote hosts).
+            if let Some(slave) = self.links.get(ifindex)
+                && slave.vni.is_some()
+            {
+                continue;
+            }
             let entry = FdbEntry {
                 vni,
                 mac: *mac,
@@ -1343,6 +1349,19 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     // local-reception filters, not remote hosts, and have no
     // meaning as EVPN Type-2 MAC advertisements.
     if mac.is_multicast() {
+        return None;
+    }
+    // Skip MACs the bridge learned on a VXLAN port — those are
+    // remote hosts whose frames came in over a tunnel; advertising
+    // them as locally-originated would loop the route back to
+    // peers. NTF_EXT_LEARNED catches operator-installed entries
+    // but NOT data-plane learns (kernel sets neither flag on a
+    // dynamically learned bridge FDB row), so the slave-port type
+    // is the authoritative signal: any link with a `vni` is a
+    // VXLAN device.
+    if let Some(slave) = rib.links.get(&nbr.ifindex)
+        && slave.vni.is_some()
+    {
         return None;
     }
     let bridge_ifindex = nbr
