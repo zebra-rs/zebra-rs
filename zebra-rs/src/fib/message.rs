@@ -1,9 +1,9 @@
 use std::net::IpAddr;
 
 use ipnet::IpNet;
+use netlink_packet_route::AddressFamily;
 use netlink_packet_route::link::LinkFlags;
 use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
-use netlink_packet_route::{AddressFamily, route::RouteType};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::rib::{MacAddr, entry::RibEntry};
@@ -81,19 +81,18 @@ pub struct FibRoute {
 /// VRF ifindex when the kernel sent `NDA_MASTER` (renamed
 /// `NDA_CONTROLLER` in current uapi).
 ///
-/// Fields are populated for the upcoming EVPN Type-2 advertise path
-/// (which will key on family + lladdr + dst + vni). Reading them in
-/// the meantime is intentionally limited to the FibMessage Debug
-/// formatter — `#[allow(dead_code)]` keeps that staging visible to
-/// the reader without tripping `-D warnings`.
-#[allow(dead_code)]
+/// Fields are read by `Rib::neighbor_key` (for keying the `Rib::neighbors`
+/// map) and by `l2_neighbor_show` (for the `show l2 neighbor` command).
+/// EVPN Type-2 advertise will iterate the same map in a follow-up.
 #[derive(Default, Debug, Clone)]
 pub struct FibNeighbor {
     pub family: AddressFamily,
     pub ifindex: u32,
     pub state: NeighbourState,
+    /// `NTF_*` flags. `NTF_EXT_LEARNED` matters for EVPN — a MAC the
+    /// kernel learned from a remote VTEP (often via this very daemon's
+    /// own `mac_add` push) shouldn't be re-advertised back into BGP.
     pub flags: NeighbourFlags,
-    pub kind: RouteType,
     pub lladdr: Option<MacAddr>,
     pub dst: Option<IpAddr>,
     pub vlan: Option<u16>,

@@ -2124,7 +2124,6 @@ pub fn neighbor_from_msg(msg: NeighbourMessage) -> FibNeighbor {
         ifindex: msg.header.ifindex,
         state: msg.header.state,
         flags: msg.header.flags,
-        kind: msg.header.kind,
         ..Default::default()
     };
 

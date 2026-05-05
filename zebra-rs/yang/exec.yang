@@ -42,6 +42,14 @@ module exec {
       ext:help "Show VRF table";
       type empty;
     }
+    container l2 {
+      ext:help "Show L2 / data-link information";
+      presence "Show L2";
+      leaf neighbor {
+        ext:help "Show bridge FDB entries";
+        type empty;
+      }
+    }
     leaf community-set {
       ext:help "Show community-set";
       type empty;
