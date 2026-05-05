@@ -416,6 +416,21 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub async fn link_add(&mut self, fib_link: FibLink) {
+        // Capture pre-state so we can detect a VXLAN-bridge association
+        // gaining valid `(master, vni)` and trigger an FDB rescan. The
+        // common case is operator-driven sequence:
+        //   1. ip link add br50 type bridge      (no master/vni)
+        //   2. ip link add vxlan100 type vxlan id 100   (vni set, no master)
+        //   3. ip link set vxlan100 master br50  (master gained — THIS PATH)
+        // Without rescan, FDB entries already learned on `br50` between
+        // steps 1 and 3 would never reach the EVPN advertise path until
+        // they re-learn; with rescan we re-emit `RibRx::FdbAdd` for them.
+        let ifindex = fib_link.index;
+        let prev_evpn_bridge: Option<u32> = self
+            .links
+            .get(&ifindex)
+            .and_then(|l| if l.vni.is_some() { l.master } else { None });
+
         if let Some(link) = self.links.get_mut(&fib_link.index) {
             // When link already exists, we are going to check interface up &
             // down event handling.
@@ -447,6 +462,13 @@ impl Rib {
                     ifindex: link.index,
                 });
             }
+            // Master / VNI can change on an existing link too — most
+            // commonly when a VXLAN device is enslaved or re-enslaved
+            // via `ip link set ... master <br>` after creation. Track
+            // them so `vni_for_bridge` reflects the current state and
+            // FDB resolution gets the right bridge.
+            link.master = fib_link.master;
+            link.vni = fib_link.vni;
         } else {
             let link = Link::from(fib_link);
             let _ = sysctl_mpls_enable(&link.name);
@@ -464,6 +486,21 @@ impl Rib {
             if !link.is_up() {
                 self.make_link_up(link.index).await;
             }
+        }
+
+        // Did this link just gain (or change) its EVPN bridge
+        // association? If so, walk the neighbor table and re-emit
+        // `RibRx::FdbAdd` for every AF_BRIDGE entry on that bridge.
+        // BGP's `evpn_originate_macip` is idempotent (update_evpn
+        // replaces same ident+remote_id) so duplicate fires are safe.
+        let now_evpn_bridge: Option<u32> = self
+            .links
+            .get(&ifindex)
+            .and_then(|l| if l.vni.is_some() { l.master } else { None });
+        if let Some(bridge) = now_evpn_bridge
+            && prev_evpn_bridge != Some(bridge)
+        {
+            self.rescan_fdb_for_bridge(bridge);
         }
     }
 
