@@ -1913,12 +1913,28 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
             }
             LinkAttribute::Address(addr) => {
                 link.mac = MacAddr::from_vec(addr);
-                // if addr.len() == 6 {
-                //     let slice = addr.as_slice();
-                //     let mut mac = [0u8; 6];
-                //     mac.copy_from_slice(slice);
-                //     link.mac = Some(mac);
-                // }
+            }
+            LinkAttribute::Controller(idx) => {
+                // `IFLA_MASTER` (kernel constant; rtnetlink renamed
+                // the variant to `Controller`). Slave-of-bridge /
+                // slave-of-VRF membership.
+                link.master = Some(idx);
+            }
+            LinkAttribute::LinkInfo(infos) => {
+                // VXLAN link kind carries the VNI in
+                // `LinkInfo::Data(InfoData::Vxlan(InfoVxlan::Id(_)))`.
+                // Walk both the Kind and Data sub-attrs and pick the
+                // VNI when present — non-VXLAN links contribute
+                // nothing here.
+                for info in infos {
+                    if let LinkInfo::Data(InfoData::Vxlan(vxlan_attrs)) = info {
+                        for v in vxlan_attrs {
+                            if let InfoVxlan::Id(vni) = v {
+                                link.vni = Some(vni);
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }

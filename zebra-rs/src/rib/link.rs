@@ -40,6 +40,13 @@ pub struct Link {
     pub mac: Option<MacAddr>,
     pub addr4: Vec<LinkAddr>,
     pub addr6: Vec<LinkAddr>,
+    /// `IFLA_MASTER` ifindex when this link is a slave of a bridge or
+    /// VRF master. None for top-level links.
+    pub master: Option<u32>,
+    /// VNI from the kernel's `IFLA_VXLAN_ID` attribute on VXLAN links.
+    /// Used by the EVPN advertise path: a bridge's VXLAN slave maps the
+    /// bridge to the L2VPN VNI it carries.
+    pub vni: Option<u32>,
 }
 
 impl Link {
@@ -55,6 +62,8 @@ impl Link {
             mac: link.mac,
             addr4: Vec::new(),
             addr6: Vec::new(),
+            master: link.master,
+            vni: link.vni,
         }
     }
 
@@ -882,6 +891,8 @@ mod tests {
             mac: None,
             addr4: Vec::new(),
             addr6: Vec::new(),
+            master: None,
+            vni: None,
         }
     }
 
