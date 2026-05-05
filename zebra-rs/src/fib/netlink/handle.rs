@@ -1628,8 +1628,29 @@ impl FibHandle {
         self.vni_ifindex_map.remove(&vni);
     }
 
-    /// Add EVPN MAC entry to bridge FDB
-    /// Uses RTM_NEWNEIGH to install MAC address in kernel bridge
+    /// Add EVPN remote MAC to the bridge / VXLAN FDB.
+    ///
+    /// Linux EVPN-VXLAN forwarding requires **two** FDB entries per
+    /// remote MAC, both attached to the VXLAN slave interface but
+    /// landing in different kernel tables (selected by the netlink
+    /// `NTF_*` flag):
+    ///
+    ///   1. Bridge master FDB — `NTF_MASTER | NTF_EXT_LEARNED`.
+    ///      "MAC X is reachable via this slave port." Without this
+    ///      entry, frames arriving at the bridge from a local port
+    ///      destined for the remote MAC are flooded to every bridge
+    ///      port instead of unicast to the VXLAN slave.
+    ///
+    ///   2. VXLAN self FDB — `NTF_SELF | NTF_EXT_LEARNED`.
+    ///      "When a frame is being forwarded out this VXLAN device,
+    ///      encapsulate to remote VTEP `dst`." Carries `NDA_DST`,
+    ///      `NDA_VNI`, `NDA_SRC_VNI`, `NDA_PORT`.
+    ///
+    /// Installing only entry 1 leaves no encap target; installing
+    /// only entry 2 causes flooding because the bridge can't learn
+    /// from BGP. Both are required and FRR programs both. The third
+    /// VLAN-tagged variant FRR sometimes adds is only needed when the
+    /// bridge is `vlan_filtering 1`; not implemented here yet.
     pub async fn mac_add(
         &self,
         vni: u32,
@@ -1639,16 +1660,6 @@ impl FibHandle {
         _seq: u32,
         esi: Option<[u8; 10]>,
     ) {
-        // Resolve VNI to VXLAN interface index via the map populated
-        // by `register_vxlan_ifindex` when the VXLAN device is observed
-        // on netlink. If the map has no entry, this VNI isn't
-        // configured on the local node — skip rather than fall back
-        // to using the VNI itself as ifindex. The previous
-        // `unwrap_or(vni)` shipped install requests to whatever
-        // unrelated interface happened to have that ifindex (e.g.
-        // VNI 550 → ifindex 550 → enp0s5), creating bogus FDB rows
-        // on the wrong device. See sibling `mdb_add` for the same
-        // pattern.
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
             tracing::info!(
                 "mac_add: no local VXLAN for VNI {} — skipping (mac {})",
@@ -1668,42 +1679,92 @@ impl FibHandle {
                 .unwrap_or_else(|| "-".into()),
         );
 
-        // Build bridge FDB entry using rtnetlink neighbours API
-        use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
+        // Entry 1 — bridge master FDB. No VXLAN-specific attrs.
+        // NUD_REACHABLE matches what Linux records for kernel-learned
+        // entries and what FRR sets on its master-side install.
+        const NTF_MASTER: u8 = 0x04;
+        const NTF_SELF: u8 = 0x02;
+        const NTF_EXT_LEARNED: u8 = 0x10;
+        const NTF_STICKY: u8 = 0x40;
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_PERMANENT: u16 = 0x80;
 
-        // Create neighbour message for bridge FDB
+        self.fdb_neigh_send(
+            vxlan_ifindex,
+            mac,
+            NTF_MASTER | NTF_EXT_LEARNED,
+            NUD_REACHABLE,
+            None,
+            None,
+            true,
+            "mac_add(master)",
+        )
+        .await;
+
+        // Entry 2 — VXLAN self FDB. Carries the encap target and VNI.
+        let mut self_flags: u8 = NTF_SELF | NTF_EXT_LEARNED;
+        if (flags & 0x01) != 0 {
+            // BGP signaled MAC mobility "sticky" (RFC 7432 §10.6).
+            self_flags |= NTF_STICKY;
+        }
+        self.fdb_neigh_send(
+            vxlan_ifindex,
+            mac,
+            self_flags,
+            NUD_PERMANENT,
+            Some(vni),
+            tunnel_endpoint,
+            true,
+            "mac_add(self)",
+        )
+        .await;
+
+        // Phase 4D: ESI received and stored. Kernel multi-homing via NDA_NH_ID
+        // will be wired in Phase 5 when ECMP nexthop groups are supported.
+        if let Some(esi_val) = esi
+            && esi_val != [0u8; 10]
+        {
+            tracing::info!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
+        }
+    }
+
+    /// Build and send a single AF_BRIDGE FDB neighbour message.
+    /// `is_add` selects RTM_NEWNEIGH (with `NLM_F_CREATE | NLM_F_REPLACE`
+    /// upsert flags) vs RTM_DELNEIGH. `vni` adds NDA_VNI/NDA_SRC_VNI/
+    /// NDA_PORT (only meaningful for VXLAN self entries). `dst` adds
+    /// NDA_DST (the remote VTEP IP, also self-only).
+    #[allow(clippy::too_many_arguments)]
+    async fn fdb_neigh_send(
+        &self,
+        ifindex: u32,
+        mac: &MacAddr,
+        ntf_flags: u8,
+        nud_state: u16,
+        vni: Option<u32>,
+        dst: Option<IpAddr>,
+        is_add: bool,
+        log_label: &str,
+    ) {
+        use netlink_packet_route::RouteNetlinkMessage;
+        use netlink_packet_route::neighbour::{
+            NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
+        };
+
         let mut msg = NeighbourMessage::default();
         msg.header.family = AddressFamily::Bridge;
-        msg.header.ifindex = vxlan_ifindex;
-        // NUD_PERMANENT = 0x80
-        msg.header.state = netlink_packet_route::neighbour::NeighbourState::Other(0x80);
+        msg.header.ifindex = ifindex;
+        msg.header.state = NeighbourState::Other(nud_state);
+        msg.header.flags = NeighbourFlags::from_bits_retain(ntf_flags);
 
-        // Set flags: NTF_SELF (0x02) | NTF_EXT_LEARNED (0x10), and optionally NTF_STICKY (0x40)
-        let mut flag_value: u8 = 0x02 | 0x10;
-        if (flags & 0x01) != 0 {
-            flag_value |= 0x40;
-        }
-        use netlink_packet_route::neighbour::NeighbourFlags;
-        msg.header.flags = NeighbourFlags::from_bits_retain(flag_value);
-
-        // Add MAC address (NDA_LLADDR)
         msg.attributes
             .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
 
-        // Add VNI (NDA_VNI)
-        msg.attributes.push(NeighbourAttribute::Vni(vni));
-
-        // Add SRC_VNI (NDA_SRC_VNI)
-        msg.attributes.push(NeighbourAttribute::SourceVni(vni));
-
-        // Add Port (NDA_PORT)
-        msg.attributes.push(NeighbourAttribute::Port(4789));
-
-        // Add tunnel endpoint (NDA_DST for VXLAN remote VTEP)
-        // This attribute is interpreted differently in AF_BRIDGE context:
-        // In AF_BRIDGE with VXLAN, NDA_DST specifies the remote tunnel endpoint IP
-        if let Some(endpoint) = tunnel_endpoint {
-            use netlink_packet_route::neighbour::NeighbourAddress;
+        if let Some(vni) = vni {
+            msg.attributes.push(NeighbourAttribute::Vni(vni));
+            msg.attributes.push(NeighbourAttribute::SourceVni(vni));
+            msg.attributes.push(NeighbourAttribute::Port(4789));
+        }
+        if let Some(endpoint) = dst {
             let addr = match endpoint {
                 IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
                 IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
@@ -1712,43 +1773,27 @@ impl FibHandle {
                 .push(NeighbourAttribute::TunnelEndpoint(addr));
         }
 
-        // Phase 4D: ESI received and stored. Kernel multi-homing via NDA_NH_ID
-        // will be wired in Phase 5 when ECMP nexthop groups are supported.
-        if let Some(esi_val) = esi
-            && esi_val != [0u8; 10]
-        {
-            // ESI[0] is the ESI type. ESI[1..9] is the type-specific value.
-            tracing::info!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
-        }
+        let req = if is_add {
+            let mut r = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
+            r.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+            r
+        } else {
+            let mut r = NetlinkMessage::from(RouteNetlinkMessage::DelNeighbour(msg));
+            r.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            r
+        };
 
-        // Build netlink request. `NLM_F_CREATE | NLM_F_REPLACE` is
-        // upsert semantics — needed because `NLM_F_REPLACE` alone
-        // requires the entry to already exist; on first install
-        // (the common case for a remote MAC just learned via BGP)
-        // the kernel returns ENOENT and the row never lands.
-        use netlink_packet_route::RouteNetlinkMessage;
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-
-        // Send request
         let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                let has_mapping = self.vni_ifindex_map.contains_key(&vni);
+        while let Some(rsp) = response.next().await {
+            if let NetlinkPayload::Error(e) = rsp.payload {
                 tracing::info!(
-                    "MAC add error for {} (VNI {}, ifindex {}, vni_ifindex_map exists: {}): {}",
+                    "{}: netlink error mac {} ifindex {} flags 0x{:02x}: {}",
+                    log_label,
                     mac,
-                    vni,
-                    vxlan_ifindex,
-                    has_mapping,
+                    ifindex,
+                    ntf_flags,
                     e
                 );
-                if !has_mapping {
-                    tracing::info!(
-                        "  → VNI {} not registered in vni_ifindex_map (did VXLAN interface register?)",
-                        vni
-                    );
-                }
             }
         }
     }
@@ -1769,55 +1814,37 @@ impl FibHandle {
             return;
         };
 
-        tracing::info!("mac_del: VNI {} mac {} ifindex {}", vni, mac, vxlan_ifindex,);
+        tracing::info!("mac_del: VNI {} mac {} ifindex {}", vni, mac, vxlan_ifindex);
 
-        // Build delete request via netlink
-        use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
+        // Mirror `mac_add` — remove BOTH the bridge master entry and
+        // the VXLAN self entry. NUD state is irrelevant on delete
+        // (kernel matches by family/ifindex/MAC + the NTF flag that
+        // selects which FDB table to look in); pass 0.
+        const NTF_MASTER: u8 = 0x04;
+        const NTF_SELF: u8 = 0x02;
 
-        let mut msg = NeighbourMessage::default();
-        msg.header.family = AddressFamily::Bridge;
-        msg.header.ifindex = vxlan_ifindex;
-        // `mac_add` installs with NTF_SELF (0x02) so the row lives in
-        // the VXLAN device's own FDB, not the bridge's master FDB.
-        // The delete must carry the same flag or the kernel scans the
-        // wrong table and returns ENOENT. iproute2's `bridge fdb del`
-        // defaults to NTF_SELF for the same reason.
-        use netlink_packet_route::neighbour::NeighbourFlags;
-        msg.header.flags = NeighbourFlags::from_bits_retain(0x02);
-
-        // Add MAC address for identification
-        msg.attributes
-            .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
-
-        // Add VNI for identification
-        msg.attributes.push(NeighbourAttribute::Vni(vni));
-
-        // Build netlink request
-        use netlink_packet_route::RouteNetlinkMessage;
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelNeighbour(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-
-        // Send request
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                let has_mapping = self.vni_ifindex_map.contains_key(&vni);
-                tracing::info!(
-                    "MAC del error for {} (VNI {}, ifindex {}, vni_ifindex_map exists: {}): {}",
-                    mac,
-                    vni,
-                    vxlan_ifindex,
-                    has_mapping,
-                    e
-                );
-                if !has_mapping {
-                    tracing::info!(
-                        "  → VNI {} not registered in vni_ifindex_map (did VXLAN interface register?)",
-                        vni
-                    );
-                }
-            }
-        }
+        self.fdb_neigh_send(
+            vxlan_ifindex,
+            mac,
+            NTF_MASTER,
+            0,
+            None,
+            None,
+            false,
+            "mac_del(master)",
+        )
+        .await;
+        self.fdb_neigh_send(
+            vxlan_ifindex,
+            mac,
+            NTF_SELF,
+            0,
+            Some(vni),
+            None,
+            false,
+            "mac_del(self)",
+        )
+        .await;
     }
 
     /// Add EVPN Type 3 (Inclusive Multicast) entry to kernel MDB
