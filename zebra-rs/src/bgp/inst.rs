@@ -429,6 +429,15 @@ impl Bgp {
                 // `set router bgp global identifier <ip>`.
                 self.set_router_id(router_id);
             }
+            RibRx::FdbAdd(entry) => {
+                // Local bridge FDB learn. EVPN advertise-all-vni
+                // originates a Type-2 (MAC/IP) route into the local-
+                // RIB; wire transmission lands in a follow-up.
+                self.evpn_originate_macip(&entry);
+            }
+            RibRx::FdbDel(entry) => {
+                self.evpn_withdraw_macip(&entry);
+            }
             _ => {
                 //
             }

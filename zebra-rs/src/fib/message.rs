@@ -31,6 +31,13 @@ pub struct FibLink {
     pub link_type: LinkType,
     pub mtu: u32,
     pub mac: Option<MacAddr>,
+    /// `IFLA_MASTER` ifindex for slave interfaces — the bridge or VRF
+    /// this link is enslaved to. None for top-level links.
+    pub master: Option<u32>,
+    /// VNI from `LinkInfo::Data(InfoData::Vxlan(InfoVxlan::Id(_)))` on
+    /// VXLAN links. Used by the EVPN advertise path to map a bridge
+    /// (via its VXLAN slave) to the L2VPN VNI it carries.
+    pub vni: Option<u32>,
 }
 
 impl FibLink {
