@@ -1,5 +1,9 @@
+use std::net::IpAddr;
+
 use ipnet::IpNet;
 use netlink_packet_route::link::LinkFlags;
+use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
+use netlink_packet_route::{AddressFamily, route::RouteType};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::rib::{MacAddr, entry::RibEntry};
@@ -59,6 +63,44 @@ pub struct FibRoute {
     pub entry: RibEntry,
 }
 
+/// One row from the kernel's neighbor table — covers IPv4 ARP, IPv6
+/// NDP, and bridge FDB. The `family` field tells the consumer which
+/// of those it is:
+///
+/// - `AddressFamily::Inet` — ARP entry; `dst` is the IPv4 protocol
+///   address, `lladdr` is the MAC.
+/// - `AddressFamily::Inet6` — NDP entry; `dst` is the IPv6 protocol
+///   address, `lladdr` is the MAC.
+/// - `AddressFamily::Bridge` — FDB entry; `lladdr` is the MAC, `dst`
+///   is the remote VTEP IP for VXLAN-bridged entries (empty for
+///   ordinary bridge ports).
+///
+/// `vni` is set on AF_BRIDGE entries that came in with `NDA_VNI`
+/// (per-FDB-entry override of the device-wide VNI). `vlan` is the
+/// 802.1Q tag on traditional bridge entries. `master` is the bridge /
+/// VRF ifindex when the kernel sent `NDA_MASTER` (renamed
+/// `NDA_CONTROLLER` in current uapi).
+///
+/// Fields are populated for the upcoming EVPN Type-2 advertise path
+/// (which will key on family + lladdr + dst + vni). Reading them in
+/// the meantime is intentionally limited to the FibMessage Debug
+/// formatter — `#[allow(dead_code)]` keeps that staging visible to
+/// the reader without tripping `-D warnings`.
+#[allow(dead_code)]
+#[derive(Default, Debug, Clone)]
+pub struct FibNeighbor {
+    pub family: AddressFamily,
+    pub ifindex: u32,
+    pub state: NeighbourState,
+    pub flags: NeighbourFlags,
+    pub kind: RouteType,
+    pub lladdr: Option<MacAddr>,
+    pub dst: Option<IpAddr>,
+    pub vlan: Option<u16>,
+    pub vni: Option<u32>,
+    pub master: Option<u32>,
+}
+
 #[derive(Debug)]
 pub enum FibMessage {
     NewLink(FibLink),
@@ -67,4 +109,6 @@ pub enum FibMessage {
     DelAddr(FibAddr),
     NewRoute(FibRoute),
     DelRoute(FibRoute),
+    NewNeighbor(FibNeighbor),
+    DelNeighbor(FibNeighbor),
 }
