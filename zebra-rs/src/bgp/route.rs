@@ -967,11 +967,88 @@ pub fn route_update_evpn(
     Some((route, attrs))
 }
 
+/// Send a single EVPN withdraw to one peer. Mirrors
+/// `route_withdraw_ipv4` — no caching, straight to the wire as a
+/// one-NLRI MP_UNREACH UPDATE. The receiver removes the route from
+/// its adj-RIB-in and re-runs best-path; an empty selection at the
+/// peer triggers `route_evpn_export_selected` which sends
+/// `Message::MacDel` / `MdbDel` and the kernel FDB row goes away.
+fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_withdraw = Some(MpUnreachAttr::Evpn(vec![route]));
+    peer.send_packet(update.into());
+}
+
+/// Fan out a withdraw to every peer with `(L2vpn, Evpn)` Established.
+/// Also drains any pending advertise from each peer's `cache_evpn` —
+/// without this, a quick add/remove cycle would leave a stale
+/// announce in the cache that fires after the withdraw wins on the
+/// wire.
+pub fn route_withdraw_evpn_to_peers(
+    rd: RouteDistinguisher,
+    prefix: EvpnPrefix,
+    peers: &mut PeerMap,
+) {
+    let peer_addrs: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(Afi::L2vpn, Safi::Evpn))
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    for peer_addr in peer_addrs {
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+        let route = evpn_route_from_prefix(&rd, &prefix, 0);
+        // Drop a queued advertise for the same route from the peer's
+        // cache so flush_evpn doesn't ship a now-stale add after we
+        // ship the withdraw.
+        if let Some(attr) = peer.cache_evpn_rev.remove(&route)
+            && let Some(set) = peer.cache_evpn.get_mut(&attr)
+        {
+            set.remove(&route);
+            if set.is_empty() {
+                peer.cache_evpn.remove(&attr);
+            }
+        }
+        route_withdraw_evpn(peer, route);
+    }
+}
+
+/// Build an `EvpnRoute` (Mac/Multicast) from an `(rd, prefix)` pair
+/// — needed both at advertise time (in `route_update_evpn` via the
+/// inbound BgpRib's attr) and at withdraw time, where there's no
+/// inbound attr to consult and the VNI is recovered from the RD's
+/// trailing 2 bytes (Type-1 form). ESI defaults to zero, eth-tag
+/// passes through.
+fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32) -> EvpnRoute {
+    match prefix {
+        EvpnPrefix::MacIp { eth_tag, mac, .. } => {
+            // RD type 1 (IPv4 + 2-byte assigned-number) is the form
+            // we emit at origination — the assigned-number bytes
+            // [4..6] carry the low 16 bits of the VNI.
+            let vni = u16::from_be_bytes([rd.val[4], rd.val[5]]) as u32;
+            EvpnRoute::Mac(EvpnMac {
+                id,
+                rd: *rd,
+                esi: [0; 10],
+                ether_tag: *eth_tag,
+                mac: *mac,
+                vni,
+            })
+        }
+        EvpnPrefix::InclusiveMulticast { eth_tag, orig } => EvpnRoute::Multicast(EvpnMulticast {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            addr: *orig,
+        }),
+    }
+}
+
 /// Fan out an EVPN best-path selection to every peer with the
 /// `(L2vpn, Evpn)` AFI/SAFI established. Skips peers filtered by
-/// split-horizon / iBGP rules inside `route_update_evpn`. Withdraw
-/// path (MpUnreach for EVPN) is a follow-up — this PR only
-/// advertises new best paths.
+/// split-horizon / iBGP rules inside `route_update_evpn`. Pairs with
+/// `route_withdraw_evpn_to_peers` for the inverse direction.
 pub fn route_advertise_evpn_to_peers(
     rd: RouteDistinguisher,
     prefix: EvpnPrefix,
@@ -2297,6 +2374,11 @@ impl Bgp {
             ip: None,
         };
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        // Tell every EVPN peer the route is gone. No best-path
+        // re-evaluation here — for a locally-originated route there
+        // is no other path that would replace it; the peers can
+        // figure it out when they see the MP_UNREACH.
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 }
 

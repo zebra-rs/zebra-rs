@@ -1,12 +1,12 @@
 use std::fmt;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use crate::{
-    Afi, EvpnRoute, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Safi,
-    Vpnv4Nlri, many0_complete,
+    Afi, AttrFlags, AttrType, EvpnRoute, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4,
+    Rtcv4Unreach, Safi, Vpnv4Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach};
@@ -50,11 +50,57 @@ impl MpUnreachAttr {
                 let attr = Rtcv4Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
+            MpUnreachAttr::Evpn(withdraw) => {
+                evpn_unreach_attr_emit(withdraw, buf);
+            }
+            MpUnreachAttr::EvpnEor => {
+                evpn_unreach_attr_emit(&[], buf);
+            }
             _ => {
                 //
             }
         }
     }
+}
+
+/// Serialize an `MpUnreachAttr::Evpn(updates)` (or `EvpnEor` when
+/// `updates` is empty) as a complete `MP_UNREACH_NLRI` path attribute
+/// (header + value).
+///
+/// Wire format (RFC 4760 §4):
+/// ```text
+///   AFI  (2 octets) = 25 (L2VPN)
+///   SAFI (1 octet)  = 70 (EVPN)
+///   Withdrawn Routes (one or more EvpnRoute encodings; empty for EoR)
+/// ```
+///
+/// MP_UNREACH carries neither nexthop nor SNPA — only the AFI/SAFI
+/// header and the NLRI list. The NLRI body bytes are produced by
+/// `EvpnRoute::nlri_emit` (PR #399), the same encoder used by the
+/// MP_REACH advertise path.
+fn evpn_unreach_attr_emit(withdraw: &[EvpnRoute], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::L2vpn));
+    value.put_u8(u8::from(Safi::Evpn));
+    for r in withdraw {
+        r.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
 }
 
 impl MpUnreachAttr {
