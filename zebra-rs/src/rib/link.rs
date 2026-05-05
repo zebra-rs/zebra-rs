@@ -416,6 +416,13 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub async fn link_add(&mut self, fib_link: FibLink) {
+        tracing::info!(
+            "link_add: ifindex {} name {} vni {:?} master {:?}",
+            fib_link.index,
+            fib_link.name,
+            fib_link.vni,
+            fib_link.master,
+        );
         // Capture pre-state so we can detect a VXLAN-bridge association
         // gaining valid `(master, vni)` and trigger an FDB rescan. The
         // common case is operator-driven sequence:
