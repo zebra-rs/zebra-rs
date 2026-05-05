@@ -874,6 +874,12 @@ impl Bgp {
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/transport/local-address", config_transport_local_address);
+        // FRR-style flat alias from zebra-bgp-transport.yang. Same
+        // backing field (`peer.config.transport.update_source`) and
+        // same `peer_connect` bind site as the IETF `local-address`
+        // path above; either CLI form is accepted, both lower onto
+        // the same runtime state.
+        self.callback_peer("/update-source", config_transport_local_address);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);

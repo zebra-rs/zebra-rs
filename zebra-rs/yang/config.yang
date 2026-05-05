@@ -40,6 +40,10 @@ module config {
     prefix zbe;
   }
 
+  import zebra-bgp-transport {
+    prefix zbt;
+  }
+
   import openconfig-isis-types {
     prefix isis;
   }
