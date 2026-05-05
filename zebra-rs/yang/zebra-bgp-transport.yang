@@ -1,0 +1,101 @@
+module zebra-bgp-transport {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-transport";
+  prefix "zbt";
+
+  import ietf-inet-types {
+    prefix inet;
+    reference "RFC 6991: Common YANG Data Types.";
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style flat per-neighbor transport extensions on the BGP
+     candidate-config tree.
+
+     Adds `update-source` directly under each BGP neighbor so the
+     CLI shape matches FRR / IOS:
+
+       router bgp {
+         neighbor 10.0.0.5 {
+           peer-as 65501;
+           update-source 10.0.0.1;
+         }
+       }
+
+     Functionally equivalent to the IETF YANG path
+     `neighbor/transport/local-address` (ietf-bgp-common@2023-07-05);
+     both lower onto the same runtime field
+     (`peer.config.transport.update_source`) and the same TCP-bind
+     site in `peer_connect`. Operators using the FRR vocabulary get
+     the flat form without giving up the IETF tree.";
+
+  revision 2026-05-05 {
+    description "Initial revision.";
+    reference "FRR `neighbor X update-source`; Cisco IOS equivalent.";
+  }
+
+  grouping bgp-neighbor-transport-extension {
+    description
+      "FRR-style transport leaves on a BGP neighbor.";
+
+    leaf update-source {
+      ext:help "Source address to bind for outbound BGP TCP connect";
+      type union {
+        type inet:ipv4-address;
+        type inet:ipv6-address;
+      }
+      description
+        "Local IP address (IPv4 or IPv6) to bind before the outbound
+         BGP TCP connect to this neighbor. The address family must
+         match the peer's address family. When absent, the kernel
+         picks the source via the routing table.
+
+         Equivalent to `neighbor X update-source` in FRR / Cisco
+         IOS, and to `neighbor/transport/local-address` in
+         ietf-bgp-common.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach update-source to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-transport-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X update-source` is path-valid.";
+    uses bgp-neighbor-transport-extension;
+  }
+}
