@@ -181,6 +181,32 @@ impl Bgp {
         }
     }
 
+    /// Update the BGP router-id and propagate it to every peer's
+    /// `router_id` snapshot. `Peer::new` captures `bgp.router_id` at
+    /// peer-create time; without this propagation, peers configured
+    /// before the router-id was known would emit OPEN messages with
+    /// `0.0.0.0` in the BGP Identifier field forever.
+    ///
+    /// Inputs:
+    ///   - operator config (`set router bgp global identifier <ip>`)
+    ///     via `config_global_identifier`.
+    ///   - RIB-derived auto-pick (`RibRx::RouterIdUpdate`) when no
+    ///     explicit identifier is configured. Same precedence Cisco /
+    ///     Junos use — last write wins for now; an explicit / auto
+    ///     priority pin is a follow-up.
+    ///
+    /// Existing established sessions keep using the value they sent
+    /// at OPEN; the next OPEN (after a reset) picks up the new one.
+    pub fn set_router_id(&mut self, router_id: Ipv4Addr) {
+        if self.router_id == router_id {
+            return;
+        }
+        self.router_id = router_id;
+        for (_, peer) in self.peers.iter_mut() {
+            peer.router_id = router_id;
+        }
+    }
+
     pub fn pcallback_add(&mut self, path: &str, cb: PCallback) {
         self.pcallbacks.insert(path.to_string(), cb);
     }
@@ -379,6 +405,15 @@ impl Bgp {
             RibRx::AddrDel(_addr) => {
                 // isis_info!("Isis::AddrDel {}", addr.addr);
                 // self.addr_del(addr);
+            }
+            RibRx::RouterIdUpdate(router_id) => {
+                // RIB auto-derived a router-id from interface IPv4
+                // addresses (highest loopback, falling back to
+                // non-loopback). Without this arm BGP missed the
+                // notification and emitted OPEN with 0.0.0.0 in the
+                // BGP Identifier whenever the operator hadn't typed
+                // `set router bgp global identifier <ip>`.
+                self.set_router_id(router_id);
             }
             _ => {
                 //
