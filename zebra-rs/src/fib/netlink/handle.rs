@@ -1650,13 +1650,23 @@ impl FibHandle {
         // on the wrong device. See sibling `mdb_add` for the same
         // pattern.
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::debug!(
+            tracing::info!(
                 "mac_add: no local VXLAN for VNI {} — skipping (mac {})",
                 vni,
                 mac
             );
             return;
         };
+
+        tracing::info!(
+            "mac_add: VNI {} mac {} ifindex {} dst {}",
+            vni,
+            mac,
+            vxlan_ifindex,
+            tunnel_endpoint
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "-".into()),
+        );
 
         // Build bridge FDB entry using rtnetlink neighbours API
         use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
@@ -1711,10 +1721,14 @@ impl FibHandle {
             tracing::info!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
         }
 
-        // Build netlink request
+        // Build netlink request. `NLM_F_CREATE | NLM_F_REPLACE` is
+        // upsert semantics — needed because `NLM_F_REPLACE` alone
+        // requires the entry to already exist; on first install
+        // (the common case for a remote MAC just learned via BGP)
+        // the kernel returns ENOENT and the row never lands.
         use netlink_packet_route::RouteNetlinkMessage;
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_REPLACE;
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
         // Send request
         let mut response = self.handle.clone().request(req).unwrap();
@@ -1747,7 +1761,7 @@ impl FibHandle {
         // `unwrap_or(vni)` would have issued a stray RTM_DELNEIGH
         // against a random interface.
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::debug!(
+            tracing::info!(
                 "mac_del: no local VXLAN for VNI {} — skipping (mac {})",
                 vni,
                 mac
@@ -1755,12 +1769,21 @@ impl FibHandle {
             return;
         };
 
+        tracing::info!("mac_del: VNI {} mac {} ifindex {}", vni, mac, vxlan_ifindex,);
+
         // Build delete request via netlink
         use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
 
         let mut msg = NeighbourMessage::default();
         msg.header.family = AddressFamily::Bridge;
         msg.header.ifindex = vxlan_ifindex;
+        // `mac_add` installs with NTF_SELF (0x02) so the row lives in
+        // the VXLAN device's own FDB, not the bridge's master FDB.
+        // The delete must carry the same flag or the kernel scans the
+        // wrong table and returns ENOENT. iproute2's `bridge fdb del`
+        // defaults to NTF_SELF for the same reason.
+        use netlink_packet_route::neighbour::NeighbourFlags;
+        msg.header.flags = NeighbourFlags::from_bits_retain(0x02);
 
         // Add MAC address for identification
         msg.attributes
@@ -1821,13 +1844,21 @@ impl FibHandle {
         // return EINVAL for ifindex 0 anyway, producing log spam for
         // routes whose presence wasn't actionable here).
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::debug!(
+            tracing::info!(
                 "mdb_add: no local VXLAN for VNI {} — skipping (group {})",
                 vni,
                 group
             );
             return;
         };
+
+        tracing::info!(
+            "mdb_add: VNI {} group {} source {} ifindex {}",
+            vni,
+            group,
+            source.map(|s| s.to_string()).unwrap_or_else(|| "-".into()),
+            vxlan_ifindex,
+        );
 
         let mut msg = MdbMessage::default();
         msg.header.family = AddressFamily::Bridge;
@@ -1885,13 +1916,21 @@ impl FibHandle {
         // Mirror `mdb_add` — caller's `ifindex` is a sentinel; resolve
         // via the registered map and skip when no local VXLAN exists.
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::debug!(
+            tracing::info!(
                 "mdb_del: no local VXLAN for VNI {} — skipping (group {})",
                 vni,
                 group
             );
             return;
         };
+
+        tracing::info!(
+            "mdb_del: VNI {} group {} source {} ifindex {}",
+            vni,
+            group,
+            source.map(|s| s.to_string()).unwrap_or_else(|| "-".into()),
+            vxlan_ifindex,
+        );
 
         let mut msg = MdbMessage::default();
         msg.header.family = AddressFamily::Bridge;
