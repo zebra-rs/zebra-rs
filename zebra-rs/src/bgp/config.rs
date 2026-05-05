@@ -28,7 +28,12 @@ fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
 fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         let router_id = args.v4addr()?;
-        bgp.router_id = router_id;
+        // Go through `set_router_id` so the new value is also
+        // propagated to every existing peer's `router_id` snapshot
+        // — peers created before the operator typed this line would
+        // otherwise keep their stale (often 0.0.0.0) value and emit
+        // OPEN with the wrong BGP Identifier.
+        bgp.set_router_id(router_id);
     }
     Some(())
 }
