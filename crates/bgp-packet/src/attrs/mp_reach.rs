@@ -6,9 +6,11 @@ use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u32, be_u128};
 use nom_derive::*;
 
+use bytes::BufMut;
+
 use crate::{
-    Afi, EvpnRoute, Ipv4Nlri, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4, Safi, Vpnv4Nexthop,
-    Vpnv4Nlri, many0_complete,
+    Afi, AttrFlags, AttrType, EvpnRoute, Ipv4Nlri, Ipv6Nlri, ParseBe, ParseNlri, ParseOption,
+    Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach};
@@ -49,6 +51,13 @@ impl MpReachAttr {
             }
             MpReachAttr::Rtcv4(nlri) => {
                 nlri.attr_emit(buf);
+            }
+            MpReachAttr::Evpn {
+                snpa,
+                nhop,
+                updates,
+            } => {
+                evpn_attr_emit(*snpa, nhop, updates, buf);
             }
             _ => {
                 //
@@ -235,4 +244,58 @@ impl fmt::Debug for MpReachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }
+}
+
+/// Serialize an `MpReachAttr::Evpn { snpa, nhop, updates }` as a
+/// complete `MP_REACH_NLRI` path attribute (header + value).
+///
+/// Wire format (RFC 4760 §3 + RFC 7432 §7):
+/// ```text
+///   AFI  (2 octets) = 25 (L2VPN)
+///   SAFI (1 octet)  = 70 (EVPN)
+///   Nexthop Length (1 octet) = 4 or 16
+///   Nexthop Address
+///   Reserved / SNPA (1 octet) = 0
+///   NLRIs (one or more EvpnRoute encodings)
+/// ```
+///
+/// The value is buffered first so the attribute length can be set
+/// before writing the header — extended (2-byte) length is used when
+/// the value exceeds 255 octets, matching the convention used by
+/// `Vpnv4Reach::attr_emit_mut`.
+fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::L2vpn));
+    value.put_u8(u8::from(Safi::Evpn));
+    match nhop {
+        IpAddr::V4(v4) => {
+            value.put_u8(4);
+            value.put(&v4.octets()[..]);
+        }
+        IpAddr::V6(v6) => {
+            value.put_u8(16);
+            value.put(&v6.octets()[..]);
+        }
+    }
+    // Reserved / SNPA byte, always zero per RFC 4760 §3.
+    value.put_u8(0);
+    for r in updates {
+        r.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
 }
