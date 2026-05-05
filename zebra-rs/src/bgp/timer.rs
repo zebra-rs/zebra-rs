@@ -118,6 +118,17 @@ pub fn start_adv_timer_vpnv4(peer: &Peer) -> Timer {
     }
 }
 
+/// EVPN advertise debounce — same iBGP/eBGP cadence as the IPv4 /
+/// VPNv4 timers. Buffers a burst of FDB learns into one MP_REACH
+/// UPDATE per attribute group.
+pub fn start_adv_timer_evpn(peer: &Peer) -> Timer {
+    if peer.is_ibgp() {
+        start_timer!(peer, 5_u64, Event::AdvTimerEvpnExpires)
+    } else {
+        start_timer!(peer, 30_u64, Event::AdvTimerEvpnExpires)
+    }
+}
+
 fn start_keepalive_timer(peer: &Peer) -> Timer {
     start_repeater!(
         peer,
