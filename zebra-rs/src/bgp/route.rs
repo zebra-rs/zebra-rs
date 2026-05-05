@@ -2628,6 +2628,18 @@ impl Bgp {
             ip: None,
         };
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        // `remove_evpn` only edits `cands`; the per-prefix `selected`
+        // map (the one `show ip bgp l2vpn evpn` iterates) is updated
+        // by `select_best_path_evpn`, which evicts the entry when no
+        // candidate remains. Without this call the withdrawn route
+        // stays visible in `show` and orphan RDs accumulate after
+        // every router-id change. Don't route the result through
+        // `route_evpn_export_selected` — that path triggers kernel
+        // FDB del via `MacDel`, which is appropriate for received
+        // EVPN routes but wrong for locally-originated ones (the
+        // kernel row is the operator's local MAC, not something we
+        // installed via mac_add).
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         // Tell every EVPN peer the route is gone. No best-path
         // re-evaluation here — for a locally-originated route there
         // is no other path that would replace it; the peers can
