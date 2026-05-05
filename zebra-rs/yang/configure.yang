@@ -104,16 +104,28 @@ module configure {
           key name;
           leaf name {
             ext:dynamic "bgp:neighbor";
-            type "inet:ipv4-address";
+            // Accept either family — the BGP runtime keys peers
+            // by `IpAddr` regardless of family, and the path stays
+            // under `ip` purely as a CLI-vocabulary convention.
+            type union {
+              type inet:ipv4-address;
+              type inet:ipv6-address;
+            }
           }
         }
         // Test for manual clear of keepalive timer.
         leaf keepalive {
-          type "inet:ipv4-address";
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+          }
         }
         // Test for manual clear of keepalive timer.
         leaf keepalive-recv {
-          type "inet:ipv4-address";
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+          }
         }
       }
     }
