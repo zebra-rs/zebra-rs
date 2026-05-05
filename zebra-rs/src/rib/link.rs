@@ -47,6 +47,10 @@ pub struct Link {
     /// Used by the EVPN advertise path: a bridge's VXLAN slave maps the
     /// bridge to the L2VPN VNI it carries.
     pub vni: Option<u32>,
+    /// Local VTEP source IP from `IFLA_VXLAN_LOCAL` / `IFLA_VXLAN_LOCAL6`
+    /// on VXLAN links. Used as the BGP MP_REACH nexthop for EVPN
+    /// advertisements per RFC 8365 §5.1.3.
+    pub vxlan_local: Option<std::net::IpAddr>,
 }
 
 impl Link {
@@ -64,6 +68,7 @@ impl Link {
             addr6: Vec::new(),
             master: link.master,
             vni: link.vni,
+            vxlan_local: link.vxlan_local,
         }
     }
 
@@ -965,6 +970,7 @@ mod tests {
             addr6: Vec::new(),
             master: None,
             vni: None,
+            vxlan_local: None,
         }
     }
 
