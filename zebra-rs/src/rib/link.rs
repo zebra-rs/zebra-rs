@@ -430,6 +430,14 @@ impl Rib {
             .links
             .get(&ifindex)
             .and_then(|l| if l.vni.is_some() { l.master } else { None });
+        // Pre-update VNI snapshot so the existing-link path can fire
+        // `register_vxlan_ifindex` / `unregister_vxlan_ifindex` on
+        // transitions. Without this, a VXLAN whose RTM_NEWLINK arrives
+        // a second time (e.g. partial first emission, then a full one
+        // carrying `IFLA_VXLAN_ID`) only gets its VNI cached on `Link`
+        // but never registered with FIB — so subsequent `mac_add`
+        // calls find no entry in `vni_ifindex_map` and silently skip.
+        let prev_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
 
         if let Some(link) = self.links.get_mut(&fib_link.index) {
             // When link already exists, we are going to check interface up &
@@ -476,23 +484,36 @@ impl Rib {
             self.api_link_add(&link);
             self.links.insert(link.index, link.clone());
 
-            // Register VXLAN interface with FIB for MAC/MDB FDB
-            // operations. The VNI comes from the kernel's
-            // `IFLA_INFO_DATA / VXLAN / IFLA_VXLAN_ID` attribute,
-            // captured into `link.vni` by `link_from_msg`. The
-            // previous gate required a matching entry in
-            // `self.vxlan` (zebra-rs's own `/vxlan` config tree),
-            // so VXLANs created externally with `ip link add` —
-            // the typical lab setup — were never registered, and
-            // `mac_add`'s VNI→ifindex lookup later fell back to
-            // sending kernel installs against a random interface
-            // that happened to have ifindex == VNI.
-            if let Some(vni) = link.vni {
-                self.fib_handle.register_vxlan_ifindex(vni, link.index);
-            }
+            // Note: VXLAN VNI registration happens in the unified
+            // post-block reconciliation below (covers both new-link
+            // and existing-link paths uniformly).
 
             if !link.is_up() {
                 self.make_link_up(link.index).await;
+            }
+        }
+
+        // Reconcile FIB's VNI→ifindex map across (prev_vni → now_vni)
+        // transitions for both branches uniformly:
+        //   None    → Some(n): register (new VXLAN, or pre-existing
+        //                      link gained its VXLAN ID)
+        //   Some(m) → Some(n), m ≠ n: unregister m, register n
+        //   Some(n) → None: unregister n (rare — kernel doesn't
+        //                   normally strip the VNI from a live VXLAN)
+        //   unchanged: no-op
+        // Doing this post-block (rather than only in the new-link
+        // branch) is what fixes the case where RTM_NEWLINK is
+        // re-emitted with `IFLA_VXLAN_ID` after the link was first
+        // observed without it — without reconciliation, the VNI
+        // would land on `Link::vni` but never reach `vni_ifindex_map`,
+        // and `mac_add` would silently skip every install.
+        let now_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
+        if prev_vni != now_vni {
+            if let Some(prev) = prev_vni {
+                self.fib_handle.unregister_vxlan_ifindex(prev);
+            }
+            if let Some(new) = now_vni {
+                self.fib_handle.register_vxlan_ifindex(new, ifindex);
             }
         }
 
