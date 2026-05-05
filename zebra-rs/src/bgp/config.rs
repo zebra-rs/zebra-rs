@@ -338,10 +338,20 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
         for entry in entries {
             bgp.evpn_originate_macip(&entry);
         }
+        let vxlans: Vec<(u32, std::net::IpAddr)> =
+            bgp.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect();
+        for (vni, vtep_local) in vxlans {
+            bgp.evpn_originate_imet(vni, vtep_local);
+        }
     } else if was_enabled && !enabled {
         let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
         for entry in entries {
             bgp.evpn_withdraw_macip(&entry);
+        }
+        let vxlans: Vec<(u32, std::net::IpAddr)> =
+            bgp.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect();
+        for (vni, vtep_local) in vxlans {
+            bgp.evpn_withdraw_imet(vni, vtep_local);
         }
     }
     Some(())
