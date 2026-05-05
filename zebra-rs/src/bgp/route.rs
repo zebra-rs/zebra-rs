@@ -2182,6 +2182,60 @@ fn send_eor_rtcv4_unicast(peer: &mut Peer) {
     peer.send_packet(update.into());
 }
 
+// Send End-of-RIB marker for L2VPN/EVPN. RFC 4724 §2 represents EoR
+// as an empty UPDATE; the multiprotocol form (RFC 7606 §3) carries
+// it as an MP_UNREACH with empty NLRI for the AFI/SAFI in question.
+fn send_eor_evpn(peer: &mut Peer) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_withdraw = Some(MpUnreachAttr::EvpnEor);
+    peer.send_packet(update.into());
+}
+
+/// Replay every selected EVPN route from the local-RIB to a peer
+/// that just transitioned to Established. Mirrors `route_sync_ipv4`:
+/// per-RD walk over `LocalRib::evpn[rd].selected`, push through
+/// `route_update_evpn` (which handles split-horizon and iBGP gating),
+/// batch into the per-peer EVPN cache, then flush a single batched
+/// MP_REACH and finish with the EVPN EoR.
+///
+/// Called from `route_sync` only when the peer negotiated the
+/// `(L2vpn, Evpn)` capability — without that gate the receiver would
+/// reject the UPDATE.
+pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
+    let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
+
+    // Snapshot first to dodge the borrow checker — `route_update_evpn`
+    // takes `&mut Peer` and `&mut BgpTop`, both of which alias the
+    // RIB we're walking.
+    let snapshot: Vec<(RouteDistinguisher, EvpnPrefix, BgpRib)> = bgp
+        .local_rib
+        .evpn
+        .iter()
+        .flat_map(|(rd, table)| {
+            table
+                .selected
+                .iter()
+                .map(move |(prefix, rib)| (*rd, prefix.clone(), rib.clone()))
+        })
+        .collect();
+
+    for (rd, prefix, rib) in snapshot {
+        let Some((route, attr)) = route_update_evpn(peer, &rd, &prefix, &rib, bgp, add_path) else {
+            continue;
+        };
+        let attr = bgp.attr_store.intern(attr);
+        // `false`: don't arm the per-peer advertise timer — we flush
+        // synchronously at end-of-sync so the new peer sees one
+        // batched MP_REACH (or several, one per attribute group)
+        // followed immediately by EoR, rather than waiting for the
+        // debounce.
+        peer.send_evpn(route, attr, false);
+    }
+
+    peer.flush_evpn();
+    send_eor_evpn(peer);
+}
+
 // Called when peer has been established.
 pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     // Advertize.
@@ -2200,6 +2254,9 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
         if !peer.eor.contains_key(&key) {
             route_sync_vpnv4(peer, bgp);
         }
+    }
+    if peer.is_afi_safi(Afi::L2vpn, Safi::Evpn) {
+        route_sync_evpn(peer, bgp);
     }
 }
 
