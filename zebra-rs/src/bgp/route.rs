@@ -1243,22 +1243,34 @@ fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
 }
 
 /// Export selected EVPN MAC entry to RIB for kernel installation
-/// Called after best path selection to send MACs to the RIB layer
+/// Called after best path selection to send MACs to the RIB layer.
+///
+/// `withdrawn` carries the path that was just removed from the
+/// candidate set (when called from the withdraw flow). It exists
+/// because the VNI lives in the path's RT extended community per
+/// RFC 8365 §5.1.2.4 — and once `selected` is empty (no remaining
+/// path on this prefix), there's no candidate to read the RT from.
+/// Reading it from the withdrawn path's attr is the only correct
+/// source. On the announce flow `withdrawn` is `None`; the empty-
+/// selected case is unreachable there.
 fn route_evpn_export_selected(
     rd: &RouteDistinguisher,
     prefix: &EvpnPrefix,
     selected: &[BgpRib],
+    withdrawn: Option<&BgpRib>,
     bgp: &mut BgpTop,
 ) {
-    // If no selected path exists, send delete
+    // If no selected path exists, send delete using the withdrawn
+    // path's attr as the RT/VNI source.
     if selected.is_empty() {
+        let Some(wd) = withdrawn else {
+            // Withdraw of a non-existent path — nothing was removed,
+            // nothing to delete in kernel state. Silent no-op.
+            return;
+        };
         match prefix {
             EvpnPrefix::MacIp { mac, .. } => {
-                // RFC 8365: VNI must come from Route Target extended community
-                if let Some(vni) = selected
-                    .first()
-                    .and_then(|p| extract_vni_from_attr(&p.attr))
-                {
+                if let Some(vni) = extract_vni_from_attr(&wd.attr) {
                     let msg = rib::Message::MacDel {
                         vni,
                         mac: MacAddr::from(*mac),
@@ -1266,19 +1278,14 @@ fn route_evpn_export_selected(
                     let _ = bgp.rib_tx.send(msg);
                 } else {
                     eprintln!(
-                        "[ERROR] EVPN Type 2 route missing Route Target (RFC 8365). \
-                         VNI required from RT extended community. RD: {:?}",
+                        "[ERROR] EVPN Type 2 withdraw: removed path has no Route Target. \
+                         RD: {:?}",
                         rd
                     );
                 }
             }
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
-                // Phase 4B: Type 3 multicast route withdrawal
-                // RFC 8365: VNI must come from Route Target extended community
-                if let Some(vni) = selected
-                    .first()
-                    .and_then(|p| extract_vni_from_attr(&p.attr))
-                {
+                if let Some(vni) = extract_vni_from_attr(&wd.attr) {
                     let msg = rib::Message::MdbDel {
                         vni,
                         group: *orig,
@@ -1288,8 +1295,8 @@ fn route_evpn_export_selected(
                     let _ = bgp.rib_tx.send(msg);
                 } else {
                     eprintln!(
-                        "[ERROR] EVPN Type 3 route missing Route Target (RFC 8365). \
-                         VNI required from RT extended community. RD: {:?}",
+                        "[ERROR] EVPN Type 3 withdraw: removed path has no Route Target. \
+                         RD: {:?}",
                         rd
                     );
                 }
@@ -1427,9 +1434,11 @@ pub fn route_evpn_update(
 
     let _ = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
 
-    // After updating Loc-RIB, re-run best path selection and export to RIB
+    // After updating Loc-RIB, re-run best path selection and export to RIB.
+    // No `withdrawn` source on the announce path — selected is non-empty by
+    // construction (we just inserted the path).
     let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
-    route_evpn_export_selected(&rd, &prefix, &selected, bgp);
+    route_evpn_export_selected(&rd, &prefix, &selected, None, bgp);
 }
 
 /// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
@@ -1446,11 +1455,16 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
         peer.adj_in.remove_evpn(rd, &prefix, id);
     }
 
-    let _ = bgp.local_rib.remove_evpn(rd, &prefix, id, ident);
+    // Capture the removed path so the export below can read its
+    // RT-derived VNI when the prefix has no remaining selected path.
+    // `remove_evpn` returns every candidate that matched
+    // `(ident, remote_id)`; in normal operation that's a single path,
+    // and `.first()` is fine. If the prefix wasn't in the RIB the
+    // vec is empty and the export becomes a no-op.
+    let removed = bgp.local_rib.remove_evpn(rd, &prefix, id, ident);
     let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
 
-    // After best path selection, export to RIB (sends MacDel if no paths remain)
-    route_evpn_export_selected(&rd, &prefix, &selected, bgp);
+    route_evpn_export_selected(&rd, &prefix, &selected, removed.first(), bgp);
 }
 
 pub fn route_from_peer(
