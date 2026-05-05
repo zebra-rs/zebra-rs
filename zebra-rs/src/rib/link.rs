@@ -523,9 +523,13 @@ impl Rib {
         if prev_vni != now_vni {
             if let Some(prev) = prev_vni {
                 self.fib_handle.unregister_vxlan_ifindex(prev);
+                self.api_vxlan_del(prev);
             }
             if let Some(new) = now_vni {
                 self.fib_handle.register_vxlan_ifindex(new, ifindex);
+                if let Some(local) = self.links.get(&ifindex).and_then(|l| l.vxlan_local) {
+                    self.api_vxlan_add(new, local);
+                }
             }
         }
 
