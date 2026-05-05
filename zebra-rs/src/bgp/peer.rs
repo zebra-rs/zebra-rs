@@ -865,6 +865,18 @@ pub fn peer_send_open(peer: &mut Peer) {
     } else {
         peer.router_id
     };
+    // Sending 0.0.0.0 as the BGP Identifier is a protocol error per
+    // RFC 4271 §4.2; the peer will respond with NOTIFICATION
+    // (Bad BGP Identifier). Surface it loudly here so the operator
+    // sees it before chasing FSM symptoms.
+    if router_id.is_unspecified() {
+        tracing::warn!(
+            "peer {}: sending OPEN with router-id 0.0.0.0 — \
+             configure `router bgp global identifier <ipv4>` or wait \
+             for an interface address to seed the auto-derivation",
+            peer.address
+        );
+    }
     let mut bgp_cap = BgpCap::default();
 
     for (afi_safi, _) in peer.config.mp.0.iter() {
