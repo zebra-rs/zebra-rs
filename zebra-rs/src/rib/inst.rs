@@ -13,7 +13,7 @@ use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Show
 use crate::context::Timer;
 use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
-use crate::fib::{FibChannel, FibHandle, FibMessage};
+use crate::fib::{FibChannel, FibHandle, FibMessage, FibNeighbor};
 use crate::rib::route::{
     AddrRecoveryState, ipv4_nexthop_sync, ipv4_route_sync, ipv6_nexthop_sync, ipv6_route_sync,
 };
@@ -205,6 +205,30 @@ pub struct MacEntry {
     pub installed: bool,
 }
 
+/// Composite key for `Rib::neighbors`. The kernel's neighbor table mixes
+/// three address families behind one RTM_NEWNEIGH; the key distinguishes
+/// them while staying naturally Ord/Hash so all three can live in one
+/// BTreeMap.
+///
+/// - `Inet` covers `AF_INET` (ARP) and `AF_INET6` (NDP) — uniqueness is
+///   `(ifindex, ip)`. The `IpAddr` discriminant carries the family.
+/// - `Bridge` covers `AF_BRIDGE` (FDB) — uniqueness is
+///   `(ifindex, mac, vlan)`. VXLAN's per-VNI uniqueness comes via the
+///   `dst` and `vni` attributes inside the stored `FibNeighbor`; on a
+///   classic bridge the `vlan` portion of the key handles 802.1Q.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NeighborKey {
+    Inet {
+        ifindex: u32,
+        addr: IpAddr,
+    },
+    Bridge {
+        ifindex: u32,
+        mac: MacAddr,
+        vlan: Option<u16>,
+    },
+}
+
 pub struct Rib {
     pub cm: ConfigChannel,
     pub show: ShowChannel,
@@ -225,6 +249,12 @@ pub struct Rib {
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
     pub mac_table: BTreeMap<(u32, MacAddr), MacEntry>,
+    /// Local snapshot of the kernel's neighbor table (ARP + NDP + bridge
+    /// FDB). Populated from `FibMessage::NewNeighbor` / `DelNeighbor`,
+    /// initially seeded by `fib_dump` at startup. Read by `show l2
+    /// neighbor` today; the EVPN Type-2 advertise path will iterate
+    /// the `NeighborKey::Bridge` entries in a follow-up.
+    pub neighbors: BTreeMap<NeighborKey, FibNeighbor>,
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub static_v4: StaticConfig<V4>,
@@ -314,6 +344,7 @@ impl Rib {
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
             mac_table: BTreeMap::new(),
+            neighbors: BTreeMap::new(),
             tx,
             rx,
             static_v4: StaticConfig::<V4>::new(),
@@ -942,16 +973,15 @@ impl Rib {
                     self.ipv4_route_del(&prefix, route.entry).await;
                 }
             }
-            // Inbound L2/L3-neighbor visibility for the upcoming EVPN
-            // work. No consumer yet; logged at debug for now so the
-            // wire is exercised end-to-end (subscribe + parse + dispatch)
-            // without committing to any protocol behavior. Type-2 MAC/IP
-            // advertisement will read these in a follow-up.
             FibMessage::NewNeighbor(nbr) => {
-                tracing::debug!("FibMessage::NewNeighbor {:?}", nbr);
+                if let Some(key) = neighbor_key(&nbr) {
+                    self.neighbors.insert(key, nbr);
+                }
             }
             FibMessage::DelNeighbor(nbr) => {
-                tracing::debug!("FibMessage::DelNeighbor {:?}", nbr);
+                if let Some(key) = neighbor_key(&nbr) {
+                    self.neighbors.remove(&key);
+                }
             }
         }
     }
@@ -1134,6 +1164,33 @@ fn sid_rib_entry(sid: &Sid) -> RibEntry {
 /// SID is withdrawn.
 fn is_seg6local_entry(entry: &RibEntry) -> bool {
     matches!(&entry.nexthop, Nexthop::Uni(uni) if uni.seg6local_action.is_some())
+}
+
+/// Build a `NeighborKey` from a `FibNeighbor` so the entry can be inserted
+/// into / removed from `Rib::neighbors`. Returns `None` when the entry
+/// lacks the discriminator the family requires (no `dst` for ARP/NDP, no
+/// `lladdr` for FDB) — those are dropped silently rather than stored
+/// under an ambiguous key.
+fn neighbor_key(nbr: &FibNeighbor) -> Option<NeighborKey> {
+    use netlink_packet_route::AddressFamily;
+    match nbr.family {
+        AddressFamily::Inet | AddressFamily::Inet6 => {
+            let addr = nbr.dst?;
+            Some(NeighborKey::Inet {
+                ifindex: nbr.ifindex,
+                addr,
+            })
+        }
+        AddressFamily::Bridge => {
+            let mac = nbr.lladdr?;
+            Some(NeighborKey::Bridge {
+                ifindex: nbr.ifindex,
+                mac,
+                vlan: nbr.vlan,
+            })
+        }
+        _ => None,
+    }
 }
 
 pub fn serve(mut rib: Rib) {
