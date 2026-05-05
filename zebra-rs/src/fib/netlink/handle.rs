@@ -4,8 +4,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use futures::stream::StreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{
-    NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST, NetlinkMessage,
-    NetlinkPayload,
+    NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST,
+    NetlinkMessage, NetlinkPayload,
 };
 use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
@@ -154,6 +154,27 @@ pub struct FibHandle {
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
+}
+
+/// Op selector for `fdb_neigh_send`. The kernel netlink flag set
+/// differs per scenario:
+///
+/// - `Upsert` — `NLM_F_CREATE | NLM_F_REPLACE`. Right for unicast
+///   MAC entries where (ifindex, MAC) is unique; replacing the prior
+///   entry on a re-advertise (e.g. MAC mobility) is correct.
+///
+/// - `Append` — `NLM_F_CREATE | NLM_F_APPEND`. Right for VXLAN
+///   ingress-replication entries (zero-MAC with per-peer `dst`).
+///   Multiple peers each contribute a `dst` on the same MAC; APPEND
+///   adds without erasing the existing remote list, REPLACE would
+///   clobber it.
+///
+/// - `Delete` — plain `NLM_F_REQUEST | NLM_F_ACK` with RTM_DELNEIGH.
+#[derive(Clone, Copy)]
+enum FdbOp {
+    Upsert,
+    Append,
+    Delete,
 }
 
 impl FibHandle {
@@ -1696,7 +1717,7 @@ impl FibHandle {
             NUD_REACHABLE,
             None,
             None,
-            true,
+            FdbOp::Upsert,
             "mac_add(master)",
         )
         .await;
@@ -1714,7 +1735,7 @@ impl FibHandle {
             NUD_PERMANENT,
             Some(vni),
             tunnel_endpoint,
-            true,
+            FdbOp::Upsert,
             "mac_add(self)",
         )
         .await;
@@ -1742,7 +1763,7 @@ impl FibHandle {
         nud_state: u16,
         vni: Option<u32>,
         dst: Option<IpAddr>,
-        is_add: bool,
+        op: FdbOp,
         log_label: &str,
     ) {
         use netlink_packet_route::RouteNetlinkMessage;
@@ -1773,14 +1794,27 @@ impl FibHandle {
                 .push(NeighbourAttribute::TunnelEndpoint(addr));
         }
 
-        let req = if is_add {
-            let mut r = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
-            r.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-            r
-        } else {
-            let mut r = NetlinkMessage::from(RouteNetlinkMessage::DelNeighbour(msg));
-            r.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-            r
+        let req = match op {
+            FdbOp::Upsert => {
+                let mut r = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
+                r.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+                r
+            }
+            FdbOp::Append => {
+                // Used for VXLAN BUM ingress-replication entries
+                // (zero-MAC + per-peer dst). Multiple peers each
+                // contribute their own dst on the same MAC; APPEND
+                // adds without clobbering the existing remote list,
+                // unlike REPLACE which would erase prior peers' dsts.
+                let mut r = NetlinkMessage::from(RouteNetlinkMessage::NewNeighbour(msg));
+                r.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND;
+                r
+            }
+            FdbOp::Delete => {
+                let mut r = NetlinkMessage::from(RouteNetlinkMessage::DelNeighbour(msg));
+                r.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+                r
+            }
         };
 
         let mut response = self.handle.clone().request(req).unwrap();
@@ -1830,7 +1864,7 @@ impl FibHandle {
             0,
             None,
             None,
-            false,
+            FdbOp::Delete,
             "mac_del(master)",
         )
         .await;
@@ -1841,35 +1875,41 @@ impl FibHandle {
             0,
             Some(vni),
             None,
-            false,
+            FdbOp::Delete,
             "mac_del(self)",
         )
         .await;
     }
 
-    /// Add EVPN Type 3 (Inclusive Multicast) entry to kernel MDB
+    /// Install a remote VTEP for VXLAN BUM ingress replication
+    /// (EVPN Type-3 Inclusive Multicast).
     ///
-    /// This creates a multicast database entry for a multicast group that should
-    /// be replicated to remote VTEPs. The group and source are encoded in the MDB
-    /// entry for kernel multicast forwarding.
+    /// **Implementation note**: despite the historical name (`mdb_add`),
+    /// this does NOT use kernel MDB. RTM_NEWMDB is for IGMP/MLD
+    /// snooping on the bridge — completely separate machinery. The
+    /// correct kernel mechanism for VXLAN BUM head-end replication
+    /// is an FDB entry on the VXLAN device with a zero MAC and the
+    /// remote VTEP IP as `dst`:
+    ///
+    ///     bridge fdb add 00:00:00:00:00:00 dev <vxlan> dst <peer-VTEP> self
+    ///
+    /// When the VXLAN device forwards BUM (broadcast / unknown
+    /// unicast / multicast) it replicates to every `dst` listed
+    /// across its zero-MAC FDB rows. Each peer's Type-3 contributes
+    /// one row; we use `NLM_F_APPEND` so multiple peers' `dst`s
+    /// coexist instead of clobbering one another.
+    ///
+    /// The `source` and `seq` parameters from the original MDB
+    /// signature are accepted for ABI compatibility but unused here.
+    /// Renaming the function and message are a follow-up.
     pub async fn mdb_add(
         &self,
         vni: u32,
         group: IpAddr,
-        source: Option<IpAddr>,
+        _source: Option<IpAddr>,
         _ifindex: u32,
-        seq: u32,
+        _seq: u32,
     ) {
-        use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
-
-        // BGP-EVPN type-3 receive can't know the local VXLAN's ifindex
-        // (it's a netlink concept) so the caller passes 0 as a sentinel
-        // and we resolve it here against the map populated by
-        // `register_vxlan_ifindex` when the VXLAN device is observed.
-        // If the map has no entry, this VNI isn't configured on the
-        // local node — skipping is the honest answer (kernel would
-        // return EINVAL for ifindex 0 anyway, producing log spam for
-        // routes whose presence wasn't actionable here).
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
             tracing::info!(
                 "mdb_add: no local VXLAN for VNI {} — skipping (group {})",
@@ -1880,68 +1920,36 @@ impl FibHandle {
         };
 
         tracing::info!(
-            "mdb_add: VNI {} group {} source {} ifindex {}",
+            "mdb_add: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
             vni,
             group,
-            source.map(|s| s.to_string()).unwrap_or_else(|| "-".into()),
             vxlan_ifindex,
         );
 
-        let mut msg = MdbMessage::default();
-        msg.header.family = AddressFamily::Bridge;
-        msg.header.index = vxlan_ifindex;
+        const NTF_SELF: u8 = 0x02;
+        const NTF_EXT_LEARNED: u8 = 0x10;
+        const NUD_PERMANENT: u16 = 0x80;
 
-        // Encode multicast group and source into MDB entry
-        // Format: group_addr (4/16 bytes) + optional source_addr (4/16 bytes)
-        let mut mdb_entry_data = Vec::new();
-        match group {
-            IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
-            IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
-        }
-        if let Some(src) = source {
-            match src {
-                IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
-                IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
-            }
-        }
-
-        msg.attributes.push(MdbAttribute::MdbEntry(mdb_entry_data));
-
-        // Build netlink request with RTM_NEWMDB
-        use netlink_packet_route::RouteNetlinkMessage;
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewMdb(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
-        req.header.sequence_number = seq;
-
-        // Send request
-        let mut response = match self.handle.clone().request(req) {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::info!("MDB add request error for group {}: {}", group, e);
-                return;
-            }
-        };
-
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                tracing::info!(
-                    "MDB add error for group {} on VNI {} (ifindex {}, source: {:?}): {}",
-                    group,
-                    vni,
-                    vxlan_ifindex,
-                    source,
-                    e
-                );
-            }
-        }
+        // Zero-MAC entry on the VXLAN device. Note we pass `vni: None`
+        // — for ingress-replication entries the kernel uses the
+        // VXLAN device's own VNI (set at link creation), and adding
+        // NDA_VNI/NDA_SRC_VNI here is incorrect.
+        self.fdb_neigh_send(
+            vxlan_ifindex,
+            &MacAddr::from([0u8; 6]),
+            NTF_SELF | NTF_EXT_LEARNED,
+            NUD_PERMANENT,
+            None,
+            Some(group),
+            FdbOp::Append,
+            "mdb_add(zero-mac)",
+        )
+        .await;
     }
 
-    /// Delete EVPN Type 3 (Inclusive Multicast) entry from kernel MDB
-    pub async fn mdb_del(&self, vni: u32, group: IpAddr, source: Option<IpAddr>, _ifindex: u32) {
-        use netlink_packet_route::mdb::{MdbAttribute, MdbMessage};
-
-        // Mirror `mdb_add` — caller's `ifindex` is a sentinel; resolve
-        // via the registered map and skip when no local VXLAN exists.
+    /// Remove a remote VTEP from VXLAN BUM ingress replication.
+    /// Counterpart of `mdb_add`; same rationale on naming.
+    pub async fn mdb_del(&self, vni: u32, group: IpAddr, _source: Option<IpAddr>, _ifindex: u32) {
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
             tracing::info!(
                 "mdb_del: no local VXLAN for VNI {} — skipping (group {})",
@@ -1952,51 +1960,25 @@ impl FibHandle {
         };
 
         tracing::info!(
-            "mdb_del: VNI {} group {} source {} ifindex {}",
+            "mdb_del: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
             vni,
             group,
-            source.map(|s| s.to_string()).unwrap_or_else(|| "-".into()),
             vxlan_ifindex,
         );
 
-        let mut msg = MdbMessage::default();
-        msg.header.family = AddressFamily::Bridge;
-        msg.header.index = vxlan_ifindex;
+        const NTF_SELF: u8 = 0x02;
 
-        // Encode multicast group and source for deletion
-        let mut mdb_entry_data = Vec::new();
-        match group {
-            IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
-            IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
-        }
-        if let Some(src) = source {
-            match src {
-                IpAddr::V4(v4) => mdb_entry_data.extend_from_slice(&v4.octets()),
-                IpAddr::V6(v6) => mdb_entry_data.extend_from_slice(&v6.octets()),
-            }
-        }
-
-        msg.attributes.push(MdbAttribute::MdbEntry(mdb_entry_data));
-
-        // Build netlink request with RTM_DELMDB
-        use netlink_packet_route::RouteNetlinkMessage;
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelMdb(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-
-        // Send request
-        let mut response = match self.handle.clone().request(req) {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::info!("MDB del request error for group {}: {}", group, e);
-                return;
-            }
-        };
-
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload {
-                tracing::info!("MDB del error for group {} on VNI {}: {}", group, vni, e);
-            }
-        }
+        self.fdb_neigh_send(
+            vxlan_ifindex,
+            &MacAddr::from([0u8; 6]),
+            NTF_SELF,
+            0,
+            None,
+            Some(group),
+            FdbOp::Delete,
+            "mdb_del(zero-mac)",
+        )
+        .await;
     }
 }
 
