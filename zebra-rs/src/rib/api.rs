@@ -59,6 +59,20 @@ pub enum RibRx {
     FdbAdd(FdbEntry),
     /// Inverse of `FdbAdd` — emitted on `FibMessage::DelNeighbor`.
     FdbDel(FdbEntry),
+    /// Local VXLAN device with `IFLA_VXLAN_LOCAL` set. Emitted by
+    /// RIB when a VXLAN slave is registered (`register_vxlan_ifindex`
+    /// path in `link_add`) and replayed at subscribe time. The EVPN
+    /// advertise path uses it to originate one Type-3 (Inclusive
+    /// Multicast) route per local VTEP×VNI pair.
+    VxlanAdd {
+        vni: u32,
+        vtep_local: IpAddr,
+    },
+    /// Inverse of `VxlanAdd` — emitted when the VXLAN device is
+    /// removed or its VNI changes.
+    VxlanDel {
+        vni: u32,
+    },
     EoR,
 }
 
@@ -104,6 +118,18 @@ impl Rib {
     pub fn api_fdb_del(&self, entry: &FdbEntry) {
         for tx in self.redists.iter() {
             let _ = tx.send(RibRx::FdbDel(entry.clone()));
+        }
+    }
+
+    pub fn api_vxlan_add(&self, vni: u32, vtep_local: IpAddr) {
+        for tx in self.redists.iter() {
+            let _ = tx.send(RibRx::VxlanAdd { vni, vtep_local });
+        }
+    }
+
+    pub fn api_vxlan_del(&self, vni: u32) {
+        for tx in self.redists.iter() {
+            let _ = tx.send(RibRx::VxlanDel { vni });
         }
     }
 }
