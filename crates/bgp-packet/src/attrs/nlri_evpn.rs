@@ -484,6 +484,34 @@ mod evpn_emit_tests {
         }
     }
 
+    /// Roundtrip via the MP_UNREACH path: the NLRI body produced by
+    /// `nlri_emit` must round-trip through `EvpnRoute::parse_nlri`
+    /// exactly the same way it does for MP_REACH (the wire format
+    /// for the NLRI proper is identical between announce/withdraw).
+    #[test]
+    fn macip_emit_then_parse_roundtrip_for_withdraw_path() {
+        let original = EvpnMac {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vni: 100,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Mac(original.clone()).nlri_emit(&mut buf);
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&buf, false).expect("withdraw NLRI must round-trip");
+        match parsed {
+            EvpnRoute::Mac(p) => {
+                assert_eq!(p.rd, original.rd);
+                assert_eq!(p.mac, original.mac);
+                assert_eq!(p.vni, original.vni);
+            }
+            _ => panic!("expected Mac variant"),
+        }
+    }
+
     #[test]
     fn inclusive_multicast_emit_then_parse_roundtrip() {
         let original = EvpnMulticast {
