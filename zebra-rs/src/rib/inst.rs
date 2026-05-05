@@ -1,4 +1,4 @@
-use super::api::RibRx;
+use super::api::{FdbEntry, RibRx};
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
@@ -459,6 +459,24 @@ impl Rib {
             .values()
             .find(|link| link.is_loopback())
             .map(|link| link.index)
+    }
+
+    /// Resolve the L2VPN VNI for a bridge.
+    ///
+    /// Walks the link table looking for a link whose `master` is the
+    /// requested bridge ifindex AND whose `vni` is set — i.e. a VXLAN
+    /// device enslaved to this bridge. Returns the VNI of the first
+    /// such slave (typical EVPN deployment is exactly one VXLAN per
+    /// bridge per VNI).
+    ///
+    /// Used by the EVPN advertise path: a kernel FDB entry tells us
+    /// `(master = bridge_ifindex, mac, ...)`; this helper turns the
+    /// bridge into the VNI used to derive the Type-2 route's RD/RT.
+    pub fn vni_for_bridge(&self, bridge_ifindex: u32) -> Option<u32> {
+        self.links
+            .values()
+            .find(|link| link.master == Some(bridge_ifindex) && link.vni.is_some())
+            .and_then(|link| link.vni)
     }
 
     /// Resolve the device the kernel binds the seg6local action to,
@@ -974,13 +992,21 @@ impl Rib {
                 }
             }
             FibMessage::NewNeighbor(nbr) => {
+                let fdb_entry = fdb_entry_from_neighbor(self, &nbr);
                 if let Some(key) = neighbor_key(&nbr) {
                     self.neighbors.insert(key, nbr);
                 }
+                if let Some(entry) = fdb_entry {
+                    self.api_fdb_add(&entry);
+                }
             }
             FibMessage::DelNeighbor(nbr) => {
+                let fdb_entry = fdb_entry_from_neighbor(self, &nbr);
                 if let Some(key) = neighbor_key(&nbr) {
                     self.neighbors.remove(&key);
+                }
+                if let Some(entry) = fdb_entry {
+                    self.api_fdb_del(&entry);
                 }
             }
         }
@@ -1171,6 +1197,36 @@ fn is_seg6local_entry(entry: &RibEntry) -> bool {
 /// lacks the discriminator the family requires (no `dst` for ARP/NDP, no
 /// `lladdr` for FDB) — those are dropped silently rather than stored
 /// under an ambiguous key.
+/// Build an `FdbEntry` for the api-side fan-out from a `FibNeighbor`.
+///
+/// Returns `None` when the neighbor isn't a publishable FDB row:
+///   - non-`AF_BRIDGE` family (covered by `RibRx::FdbAdd` only)
+///   - no MAC address attached
+///   - no master ifindex (entry isn't bridged anywhere)
+///   - the master bridge has no VXLAN slave with a known VNI — until
+///     the bridge is wired to VXLAN, an EVPN advertise consumer
+///     wouldn't have anywhere to put the route, so dropping early
+///     keeps the message stream tidy.
+///
+/// All four `Option::?` paths return early so the only published
+/// entries are exactly those an EVPN Type-2 advertise can use.
+fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
+    use netlink_packet_route::AddressFamily;
+    if nbr.family != AddressFamily::Bridge {
+        return None;
+    }
+    let mac = nbr.lladdr?;
+    let bridge_ifindex = nbr.master?;
+    let vni = rib.vni_for_bridge(bridge_ifindex)?;
+    Some(FdbEntry {
+        vni,
+        mac,
+        ifindex: nbr.ifindex,
+        bridge_ifindex,
+        flags: nbr.flags.bits(),
+    })
+}
+
 fn neighbor_key(nbr: &FibNeighbor) -> Option<NeighborKey> {
     use netlink_packet_route::AddressFamily;
     match nbr.family {
