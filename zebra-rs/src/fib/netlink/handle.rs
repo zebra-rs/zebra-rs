@@ -2013,16 +2013,27 @@ pub fn link_from_msg(msg: LinkMessage) -> FibLink {
                 link.master = Some(idx);
             }
             LinkAttribute::LinkInfo(infos) => {
-                // VXLAN link kind carries the VNI in
-                // `LinkInfo::Data(InfoData::Vxlan(InfoVxlan::Id(_)))`.
-                // Walk both the Kind and Data sub-attrs and pick the
-                // VNI when present — non-VXLAN links contribute
-                // nothing here.
+                // VXLAN link data carries both the VNI (`IFLA_VXLAN_ID`)
+                // and the local VTEP source IP (`IFLA_VXLAN_LOCAL` or
+                // `IFLA_VXLAN_LOCAL6`). Walk every Vxlan sub-attr and
+                // capture them. Non-VXLAN links contribute nothing.
                 for info in infos {
                     if let LinkInfo::Data(InfoData::Vxlan(vxlan_attrs)) = info {
                         for v in vxlan_attrs {
-                            if let InfoVxlan::Id(vni) = v {
-                                link.vni = Some(vni);
+                            match v {
+                                InfoVxlan::Id(vni) => link.vni = Some(vni),
+                                InfoVxlan::Local(bytes) if bytes.len() == 4 => {
+                                    link.vxlan_local = Some(IpAddr::V4(std::net::Ipv4Addr::new(
+                                        bytes[0], bytes[1], bytes[2], bytes[3],
+                                    )));
+                                }
+                                InfoVxlan::Local6(bytes) if bytes.len() == 16 => {
+                                    let mut octets = [0u8; 16];
+                                    octets.copy_from_slice(&bytes);
+                                    link.vxlan_local =
+                                        Some(IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+                                }
+                                _ => {}
                             }
                         }
                     }
