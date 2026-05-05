@@ -53,6 +53,19 @@ pub type ShowCallback = fn(&Bgp, Args, bool) -> std::result::Result<String, std:
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
+    /// FRR-style `advertise-all-vni` knob under `router bgp afi-safi
+    /// l2vpn-evpn`. When true, every locally-configured VXLAN VNI
+    /// participates in EVPN advertisement: Type-2 (MAC/IP) routes
+    /// from the kernel's bridge FDB and Type-3 (Inclusive Multicast)
+    /// routes per local VTEP. Bridge -> VNI mapping is inferred from
+    /// the kernel (each bridge's VXLAN slave supplies the VNI). RD =
+    /// router-id:VNI; RT-import / RT-export = local-AS:VNI per
+    /// RFC 8365 §5.1.2.
+    ///
+    /// Schema-only in the PR that introduced this — no consumer yet.
+    /// The Rib::neighbors -> EvpnPrefix::MacIp pipeline that reads
+    /// this lands separately.
+    pub advertise_all_vni: bool,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -119,6 +132,7 @@ impl Bgp {
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
+            advertise_all_vni: false,
             hostname: None,
             peers: PeerMap::new(),
             tx,
