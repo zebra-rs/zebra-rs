@@ -6,6 +6,7 @@ use crate::bgp::InOut;
 use crate::config::{Args, ConfigOp};
 use crate::policy;
 use crate::policy::com_list::*;
+use crate::rib::api::FdbEntry;
 
 use super::auth::{AoConfig, CryptoAlgorithm, Key};
 use super::peer::BgpTop;
@@ -321,11 +322,27 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
         return None;
     }
-    if op.is_set() {
-        let enabled = args.boolean()?;
-        bgp.advertise_all_vni = enabled;
-    } else {
-        bgp.advertise_all_vni = false;
+    let was_enabled = bgp.advertise_all_vni;
+    let enabled = if op.is_set() { args.boolean()? } else { false };
+    bgp.advertise_all_vni = enabled;
+
+    // Replay the local FDB cache across the gate transition. The
+    // false→true case fixes the cold-boot race: fib_dump's FdbAdd
+    // events arrive on `rib_rx` before `config.load_config` lands the
+    // advertise-all-vni Set on `cm.rx`, so on the live ingest path
+    // every entry was dropped at the gate inside `evpn_originate_macip`.
+    // The true→false case mirrors what an operator-driven runtime
+    // toggle should do — clear the originated routes from peers.
+    if !was_enabled && enabled {
+        let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
+        for entry in entries {
+            bgp.evpn_originate_macip(&entry);
+        }
+    } else if was_enabled && !enabled {
+        let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
+        for entry in entries {
+            bgp.evpn_withdraw_macip(&entry);
+        }
     }
     Some(())
 }
