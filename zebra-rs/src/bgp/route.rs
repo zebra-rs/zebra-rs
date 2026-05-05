@@ -1175,16 +1175,23 @@ pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
 fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
     if let Some(ecom) = &attr.ecom {
         for ec in &ecom.0 {
-            // RFC 4360: Route Target Type is high_type 0x00, low_type 0x02
+            // RFC 4360 Two-Octet AS Specific Route Target: high 0x00,
+            // low 0x02. Wire layout of the 6-byte value:
+            //   val[0..2] = Global Administrator (2-byte ASN)
+            //   val[2..6] = Local Administrator (4 bytes)
+            // RFC 8365 §5.1.2.4 places the VNI in the *lower 3 bytes*
+            // of the 4-byte Local Administrator — i.e. val[3..6]. The
+            // earlier code read val[2..5] which is offset by one byte
+            // and grabbed the high (always-zero for ≤24-bit VNIs)
+            // byte, producing values 256× too small. For RT 65501:550
+            // the buggy read returned 2; for any 24-bit VNI < 0x100
+            // it returned 0 and skipped the route entirely.
             if ec.high_type == 0x00 && ec.low_type == 0x02 {
-                // RT value: [2 bytes ASN][4 bytes target]
-                // VNI is lower 3 bytes of the 4-byte target value
-                // Extract from bytes [2:5] (skip 2-byte ASN)
                 let vni =
-                    ((ec.val[2] as u32) << 16) | ((ec.val[3] as u32) << 8) | (ec.val[4] as u32);
+                    ((ec.val[3] as u32) << 16) | ((ec.val[4] as u32) << 8) | (ec.val[5] as u32);
 
                 if vni > 0 && vni < 0x1000000 {
-                    eprintln!("[BGP] Extracted VNI {} from Route Target (RFC 8365)", vni);
+                    tracing::info!("extract_vni_from_attr: RT yields VNI {}", vni);
                     return Some(vni);
                 }
             }
@@ -1234,12 +1241,21 @@ fn extract_mac_mobility_seq(attr: &BgpAttr) -> u32 {
     0
 }
 
-/// Extract tunnel endpoint from BgpRib nexthop
+/// Extract the remote VTEP IP for a received EVPN route. The VTEP
+/// is the BGP nexthop, but EVPN routes carry it in
+/// `BgpAttr::nexthop` as `BgpNexthop::Evpn(IpAddr)` — populated from
+/// the MP_REACH_NLRI nexthop field on receive (`bgp/route.rs:960`).
+///
+/// `BgpRib::nexthop` is the VPNv4-specific `Vpnv4Nexthop` slot and
+/// is always None for EVPN; the previous code read that field and
+/// produced `tunnel_endpoint = None` for every received Type-2,
+/// which made `mac_add` build an FDB row with no NDA_DST and the
+/// kernel rejected the install with EINVAL.
 fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
-    rib.nexthop.as_ref().map(|nh| {
-        // Vpnv4Nexthop has nhop field (not nexthop) containing the VTEP IP
-        IpAddr::V4(nh.nhop)
-    })
+    match rib.attr.nexthop.as_ref()? {
+        BgpNexthop::Evpn(addr) => Some(*addr),
+        _ => None,
+    }
 }
 
 /// Export selected EVPN MAC entry to RIB for kernel installation
