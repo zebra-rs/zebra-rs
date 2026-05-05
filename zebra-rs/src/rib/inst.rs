@@ -523,6 +523,10 @@ impl Rib {
             if !belongs_here {
                 continue;
             }
+            // Match `fdb_entry_from_neighbor`: drop multicast/broadcast.
+            if mac.is_multicast() {
+                continue;
+            }
             let entry = FdbEntry {
                 vni,
                 mac: *mac,
@@ -1318,6 +1322,15 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
         return None;
     }
     let mac = nbr.lladdr?;
+    // Skip multicast / broadcast MACs. The kernel's bridge FDB
+    // contains rows for every multicast group the local device
+    // joined (`33:33:..` for IPv6, `01:00:5e:..` for IPv4, plus
+    // reserved-link addresses like `01:80:c2:..`); these are
+    // local-reception filters, not remote hosts, and have no
+    // meaning as EVPN Type-2 MAC advertisements.
+    if mac.is_multicast() {
+        return None;
+    }
     let bridge_ifindex = nbr
         .master
         .or_else(|| rib.links.get(&nbr.ifindex).and_then(|link| link.master))?;
