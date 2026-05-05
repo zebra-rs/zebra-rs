@@ -1286,11 +1286,14 @@ fn route_evpn_export_selected(
         };
         match prefix {
             EvpnPrefix::MacIp { mac, .. } => {
+                // Match the announce-side filter: never installed
+                // multicast MAC entries → nothing to delete.
+                let mac_addr = MacAddr::from(*mac);
+                if mac_addr.is_multicast() {
+                    return;
+                }
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
-                    let msg = rib::Message::MacDel {
-                        vni,
-                        mac: MacAddr::from(*mac),
-                    };
+                    let msg = rib::Message::MacDel { vni, mac: mac_addr };
                     let _ = bgp.rib_tx.send(msg);
                 } else {
                     eprintln!(
@@ -1326,11 +1329,21 @@ fn route_evpn_export_selected(
 
     match prefix {
         EvpnPrefix::MacIp { mac, .. } => {
+            // Defensive: the local FDB->BGP origination path skips
+            // multicast MACs in `fdb_entry_from_neighbor`, but a peer
+            // running different software may still have advertised
+            // one. Don't try to install — there is no remote host
+            // behind a multicast MAC and the kernel FDB rows for
+            // these are local-reception filters owned by the OS.
+            let mac_addr = MacAddr::from(*mac);
+            if mac_addr.is_multicast() {
+                return;
+            }
             // RFC 8365: VNI must come from Route Target extended community
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
                 let msg = rib::Message::MacAdd {
                     vni,
-                    mac: MacAddr::from(*mac),
+                    mac: mac_addr,
                     tunnel_endpoint: extract_tunnel_endpoint(best),
                     flags: extract_flags_from_attr(&best.attr),
                     seq: extract_mac_mobility_seq(&best.attr),
