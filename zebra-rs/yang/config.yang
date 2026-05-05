@@ -36,6 +36,10 @@ module config {
     prefix zbv;
   }
 
+  import zebra-bgp-evpn {
+    prefix zbe;
+  }
+
   import openconfig-isis-types {
     prefix isis;
   }
