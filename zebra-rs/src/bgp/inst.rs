@@ -11,10 +11,10 @@ use crate::config::{
 use crate::context::Task;
 use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
-use crate::rib;
-use crate::rib::api::{RibRx, RibRxChannel};
+use crate::rib::api::{FdbEntry, RibRx, RibRxChannel};
+use crate::rib::{self, MacAddr};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
@@ -66,6 +66,19 @@ pub struct Bgp {
     /// The Rib::neighbors -> EvpnPrefix::MacIp pipeline that reads
     /// this lands separately.
     pub advertise_all_vni: bool,
+    /// Local bridge FDB shadow keyed by `(vni, mac)`. Populated from
+    /// every `RibRx::FdbAdd`, removed on `RibRx::FdbDel`. We need
+    /// durable state (not just one-shot event handling) because the
+    /// FDB events from `Rib::subscribe` / `fib_dump` race with the
+    /// config commit that flips `advertise_all_vni` to true: at cold
+    /// start, fib_dump's netlink walk almost always finishes before
+    /// `config.load_config` does, so the FdbAdd messages arrive while
+    /// the gate is still false and `evpn_originate_macip` drops them.
+    /// With the shadow, the config callback can replay every cached
+    /// entry on the false→true transition (and withdraw on true→false),
+    /// so origination becomes deterministic regardless of which
+    /// channel wins the boot race.
+    pub local_fdb: BTreeMap<(u32, MacAddr), FdbEntry>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -133,6 +146,7 @@ impl Bgp {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             advertise_all_vni: false,
+            local_fdb: BTreeMap::new(),
             hostname: None,
             peers: PeerMap::new(),
             tx,
@@ -430,12 +444,13 @@ impl Bgp {
                 self.set_router_id(router_id);
             }
             RibRx::FdbAdd(entry) => {
-                // Local bridge FDB learn. EVPN advertise-all-vni
-                // originates a Type-2 (MAC/IP) route into the local-
-                // RIB; wire transmission lands in a follow-up.
+                // Cache durably so we can replay on `advertise_all_vni`
+                // false→true transitions — see `local_fdb` doc.
+                self.local_fdb.insert((entry.vni, entry.mac), entry.clone());
                 self.evpn_originate_macip(&entry);
             }
             RibRx::FdbDel(entry) => {
+                self.local_fdb.remove(&(entry.vni, entry.mac));
                 self.evpn_withdraw_macip(&entry);
             }
             _ => {
