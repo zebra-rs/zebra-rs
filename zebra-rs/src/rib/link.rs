@@ -476,10 +476,18 @@ impl Rib {
             self.api_link_add(&link);
             self.links.insert(link.index, link.clone());
 
-            // Register VXLAN interface with FIB for MAC FDB operations
-            if let Some(vxlan) = self.vxlan.get(&link.name)
-                && let Some(vni) = vxlan.vni
-            {
+            // Register VXLAN interface with FIB for MAC/MDB FDB
+            // operations. The VNI comes from the kernel's
+            // `IFLA_INFO_DATA / VXLAN / IFLA_VXLAN_ID` attribute,
+            // captured into `link.vni` by `link_from_msg`. The
+            // previous gate required a matching entry in
+            // `self.vxlan` (zebra-rs's own `/vxlan` config tree),
+            // so VXLANs created externally with `ip link add` —
+            // the typical lab setup — were never registered, and
+            // `mac_add`'s VNI→ifindex lookup later fell back to
+            // sending kernel installs against a random interface
+            // that happened to have ifindex == VNI.
+            if let Some(vni) = link.vni {
                 self.fib_handle.register_vxlan_ifindex(vni, link.index);
             }
 
@@ -505,10 +513,9 @@ impl Rib {
     }
 
     pub fn link_delete(&mut self, oslink: FibLink) {
-        // Unregister VXLAN interface from FIB if applicable
-        if let Some(vxlan) = self.vxlan.get(&oslink.name)
-            && let Some(vni) = vxlan.vni
-        {
+        // Unregister via the kernel-derived VNI on the netlink
+        // message (mirrors the registration trigger in `link_add`).
+        if let Some(vni) = oslink.vni {
             self.fib_handle.unregister_vxlan_ifindex(vni);
         }
         self.links.remove(&oslink.index);

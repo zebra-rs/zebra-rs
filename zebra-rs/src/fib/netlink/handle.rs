@@ -1639,9 +1639,24 @@ impl FibHandle {
         _seq: u32,
         esi: Option<[u8; 10]>,
     ) {
-        // Resolve VNI to VXLAN interface index using the registered mapping
-        // If not found, use VNI as fallback (for testing/simple configs)
-        let vxlan_ifindex = self.vni_ifindex_map.get(&vni).copied().unwrap_or(vni);
+        // Resolve VNI to VXLAN interface index via the map populated
+        // by `register_vxlan_ifindex` when the VXLAN device is observed
+        // on netlink. If the map has no entry, this VNI isn't
+        // configured on the local node — skip rather than fall back
+        // to using the VNI itself as ifindex. The previous
+        // `unwrap_or(vni)` shipped install requests to whatever
+        // unrelated interface happened to have that ifindex (e.g.
+        // VNI 550 → ifindex 550 → enp0s5), creating bogus FDB rows
+        // on the wrong device. See sibling `mdb_add` for the same
+        // pattern.
+        let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
+            tracing::debug!(
+                "mac_add: no local VXLAN for VNI {} — skipping (mac {})",
+                vni,
+                mac
+            );
+            return;
+        };
 
         // Build bridge FDB entry using rtnetlink neighbours API
         use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
@@ -1726,8 +1741,19 @@ impl FibHandle {
 
     /// Delete EVPN MAC entry from bridge FDB
     pub async fn mac_del(&self, vni: u32, mac: &MacAddr) {
-        // Resolve VNI to VXLAN interface index using the registered mapping
-        let vxlan_ifindex = self.vni_ifindex_map.get(&vni).copied().unwrap_or(vni);
+        // Mirror `mac_add` — skip when no local VXLAN registered for
+        // this VNI. With `mac_add` skipping installs in the same case,
+        // there's nothing in the kernel to delete; the old
+        // `unwrap_or(vni)` would have issued a stray RTM_DELNEIGH
+        // against a random interface.
+        let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
+            tracing::debug!(
+                "mac_del: no local VXLAN for VNI {} — skipping (mac {})",
+                vni,
+                mac
+            );
+            return;
+        };
 
         // Build delete request via netlink
         use netlink_packet_route::neighbour::{NeighbourAttribute, NeighbourMessage};
