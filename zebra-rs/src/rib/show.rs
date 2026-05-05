@@ -972,6 +972,7 @@ impl Rib {
         self.show_add("/show/nexthop", nexthop_show);
         self.show_add("/show/mpls/ilm", ilm_show);
         self.show_add("/show/l2/mac/table", mac_show);
+        self.show_add("/show/l2/neighbor", l2_neighbor_show);
         self.show_add("/show/segment-routing/srv6/sid", sid_show);
         self.show_add("/show/vrf", vrf_show);
     }
@@ -983,6 +984,65 @@ pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
     writeln!(buf, " {:-<32}  {:-<10}", "", "").unwrap();
     for vrf in rib.vrfs.values() {
         writeln!(buf, " {:<32}{:>10}", vrf.name, vrf.table_id).unwrap();
+    }
+    buf
+}
+
+/// Render the bridge FDB slice of `rib.neighbors` (the AF_BRIDGE entries).
+/// Modelled on `bridge fdb show` — one row per (ifindex, mac, vlan)
+/// triple, with the resolved interface name and any per-FDB-entry
+/// attributes (VLAN, VNI, remote VTEP IP) the kernel supplied. ARP/NDP
+/// (AF_INET / AF_INET6) lives in the same map but isn't shown here —
+/// `show ip arp` / `show ipv6 neighbor` will surface those separately.
+pub fn l2_neighbor_show(rib: &Rib, _args: Args, _json: bool) -> String {
+    use super::inst::NeighborKey;
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        " {mac:<18} {ifname:<16} {vlan:>5}  {vni:>10}  {dst:<40} {state:<14} {flags:<10}",
+        mac = "MAC",
+        ifname = "Interface",
+        vlan = "VLAN",
+        vni = "VNI",
+        dst = "Dst",
+        state = "State",
+        flags = "Flags",
+    )
+    .unwrap();
+    writeln!(
+        buf,
+        " {:-<18} {:-<16} {:->5}  {:->10}  {:-<40} {:-<14} {:-<10}",
+        "", "", "", "", "", "", "",
+    )
+    .unwrap();
+    for (key, nbr) in rib.neighbors.iter() {
+        let NeighborKey::Bridge { ifindex, mac, vlan } = key else {
+            continue;
+        };
+        let ifname = rib
+            .links
+            .get(ifindex)
+            .map(|l| l.name.clone())
+            .unwrap_or_else(|| format!("if#{ifindex}"));
+        let vlan_s = vlan.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+        let vni_s = nbr.vni.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+        let dst_s = nbr.dst.map(|d| d.to_string()).unwrap_or_else(|| "-".into());
+        // Format `flags` via `.bits()` rather than Debug so the field
+        // counts as a real read for dead-code analysis (CI runs with
+        // `-D warnings`); the hex form is also more compact than the
+        // bitflags Debug rendering and keeps the column width stable.
+        writeln!(
+            buf,
+            " {:<18} {:<16} {:>5}  {:>10}  {:<40} {:<14?} 0x{:02x}",
+            mac.to_string(),
+            ifname,
+            vlan_s,
+            vni_s,
+            dst_s,
+            nbr.state,
+            nbr.flags.bits(),
+        )
+        .unwrap();
     }
     buf
 }
