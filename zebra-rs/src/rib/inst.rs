@@ -758,6 +758,19 @@ impl Rib {
                 tx.send(msg).unwrap();
             }
         }
+        // VXLAN dump. Replay every observed VXLAN device with a
+        // local IP — same cold-start race motivation as the FDB
+        // replay below: without this, BGP misses VXLANs that
+        // `link_add` saw during `fib_dump` and Type-3 (IMET) routes
+        // would never originate.
+        for link in self.links.values() {
+            if let (Some(vni), Some(local)) = (link.vni, link.vxlan_local) {
+                let _ = tx.send(RibRx::VxlanAdd {
+                    vni,
+                    vtep_local: local,
+                });
+            }
+        }
         // FDB dump. Replay every existing AF_BRIDGE neighbor that
         // resolves to a known VNI. Without this, FDB entries learned
         // during `fib_dump` — i.e. *before* BGP subscribed — would
