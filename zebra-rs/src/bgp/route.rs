@@ -2523,6 +2523,17 @@ impl Bgp {
         if entry.flags & NTF_EXT_LEARNED != 0 {
             return;
         }
+        // Defer until router-id is set. The `local_fdb` cache holds
+        // the entry; `set_router_id` replays the cache when the
+        // router-id transitions from unspecified to a real value
+        // (auto-derived from interface addrs or set by operator
+        // config). Without this gate, a cold-boot race would emit
+        // routes under RD `0.0.0.0:VNI`, peers would accept them,
+        // and the subsequent router-id update would leave the
+        // 0.0.0.0 RD orphaned (no path withdraws it).
+        if self.router_id.is_unspecified() {
+            return;
+        }
         let Some(rd) = rd_from_router_id_vni(self.router_id, entry.vni) else {
             tracing::warn!(
                 "evpn_originate_macip: VNI {} > 65535, RD encoding not yet supported; \
