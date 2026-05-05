@@ -479,6 +479,52 @@ impl Rib {
             .and_then(|link| link.vni)
     }
 
+    /// Re-emit `RibRx::FdbAdd` for every existing AF_BRIDGE entry on
+    /// `bridge_ifindex`. Called from `link_add` when a VXLAN device
+    /// gains a bridge master so MACs that were learned BEFORE the
+    /// VXLAN was wired in get re-evaluated and pushed to BGP.
+    ///
+    /// Without this, the operator's typical sequence — bridge ->
+    /// VXLAN -> enslave VXLAN -> enslave physical port -> traffic
+    /// flows -> MAC learned -> *operator wonders why BGP shows
+    /// nothing* — leaves data-plane-learned MACs invisible until
+    /// the kernel happens to re-learn them. Each successful re-emit
+    /// flows through `evpn_originate_macip` whose `update_evpn` is
+    /// idempotent (matches on `(ident, remote_id)`), so a benign
+    /// re-fire on already-known entries doesn't multiply the route.
+    pub fn rescan_fdb_for_bridge(&self, bridge_ifindex: u32) {
+        let Some(vni) = self.vni_for_bridge(bridge_ifindex) else {
+            return;
+        };
+        for (key, nbr) in self.neighbors.iter() {
+            let NeighborKey::Bridge {
+                ifindex,
+                mac,
+                vlan: _,
+            } = key
+            else {
+                continue;
+            };
+            // Match only entries whose slave port belongs to this
+            // bridge (either via the cached IFLA_MASTER on the slave
+            // link, or via NDA_MASTER on the FDB entry itself).
+            let slave_master = self.links.get(ifindex).and_then(|l| l.master);
+            let belongs_here =
+                slave_master == Some(bridge_ifindex) || nbr.master == Some(bridge_ifindex);
+            if !belongs_here {
+                continue;
+            }
+            let entry = FdbEntry {
+                vni,
+                mac: *mac,
+                ifindex: *ifindex,
+                bridge_ifindex,
+                flags: nbr.flags.bits(),
+            };
+            self.api_fdb_add(&entry);
+        }
+    }
+
     /// Resolve the device the kernel binds the seg6local action to,
     /// per behavior. End / uN / End.DT4 / End.DT6 are local-processing
     /// actions; all four ride on the sr0 dummy so the install can stay
@@ -677,6 +723,22 @@ impl Rib {
             for addr in link.addr6.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
                 tx.send(msg).unwrap();
+            }
+        }
+        // FDB dump. Replay every existing AF_BRIDGE neighbor that
+        // resolves to a known VNI. Without this, FDB entries learned
+        // during `fib_dump` — i.e. *before* BGP subscribed — would
+        // never reach the EVPN advertise path: `api_fdb_add` would
+        // have sent them into `self.redists` while `self.redists` was
+        // still empty. The typical cold-start order is fib_dump
+        // (populates `self.neighbors`) → BGP subscribe (this fn), so
+        // every entry needs an explicit replay here.
+        for (key, nbr) in self.neighbors.iter() {
+            if !matches!(key, NeighborKey::Bridge { .. }) {
+                continue;
+            }
+            if let Some(entry) = fdb_entry_from_neighbor(self, nbr) {
+                let _ = tx.send(RibRx::FdbAdd(entry));
             }
         }
         self.redists.push(tx.clone());
@@ -1202,21 +1264,31 @@ fn is_seg6local_entry(entry: &RibEntry) -> bool {
 /// Returns `None` when the neighbor isn't a publishable FDB row:
 ///   - non-`AF_BRIDGE` family (covered by `RibRx::FdbAdd` only)
 ///   - no MAC address attached
-///   - no master ifindex (entry isn't bridged anywhere)
+///   - the slave port has no resolvable bridge master
 ///   - the master bridge has no VXLAN slave with a known VNI — until
 ///     the bridge is wired to VXLAN, an EVPN advertise consumer
 ///     wouldn't have anywhere to put the route, so dropping early
 ///     keeps the message stream tidy.
 ///
-/// All four `Option::?` paths return early so the only published
-/// entries are exactly those an EVPN Type-2 advertise can use.
+/// **Bridge resolution is two-tier**: try `NDA_MASTER` from the FDB
+/// message first (set by userland tools — e.g. `bridge fdb add ...
+/// master <br>` — and by some sticky/permanent path), then fall back
+/// to the slave port's `IFLA_MASTER` (which we cached when the link
+/// came up). Without the fallback, data-plane-learned MACs that the
+/// kernel broadcasts WITHOUT `NDA_MASTER` are silently dropped here
+/// — matched user-visible bug: `bridge fdb show` lists the MAC but
+/// `show ip bgp l2vpn evpn` doesn't, because the operator-added MACs
+/// (which carry NDA_MASTER) succeed and the data-plane-learned ones
+/// don't.
 fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     use netlink_packet_route::AddressFamily;
     if nbr.family != AddressFamily::Bridge {
         return None;
     }
     let mac = nbr.lladdr?;
-    let bridge_ifindex = nbr.master?;
+    let bridge_ifindex = nbr
+        .master
+        .or_else(|| rib.links.get(&nbr.ifindex).and_then(|link| link.master))?;
     let vni = rib.vni_for_bridge(bridge_ifindex)?;
     Some(FdbEntry {
         vni,
