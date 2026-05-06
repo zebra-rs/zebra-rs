@@ -7,7 +7,9 @@ use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
 
-use super::{CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig};
+use super::{
+    AsPathSetConfig, CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig,
+};
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
 
@@ -151,6 +153,7 @@ pub struct Policy {
     pub policy_config: PolicyConfig,
     pub prefix_config: PrefixSetConfig,
     pub community_config: CommunitySetConfig,
+    pub as_path_config: AsPathSetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
     pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
     pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
@@ -175,6 +178,7 @@ impl Policy {
             policy_config: PolicyConfig::new(),
             prefix_config: PrefixSetConfig::new(),
             community_config: CommunitySetConfig::new(),
+            as_path_config: AsPathSetConfig::new(),
             clients: BTreeMap::new(),
             watch_prefix: BTreeMap::new(),
             watch_policy: BTreeMap::new(),
@@ -249,6 +253,8 @@ impl Policy {
                     let _ = self.prefix_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/community-set") {
                     let _ = self.community_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/as-path-set") {
+                    let _ = self.as_path_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -264,6 +270,8 @@ impl Policy {
                 );
                 // Sync community-set.
                 self.community_config.commit();
+                // Sync as-path-set.
+                self.as_path_config.commit();
 
                 // Sync policy-list.
                 let syncer = PolicySyncer {
@@ -275,6 +283,7 @@ impl Policy {
                     &mut self.policy_config.cache,
                     &self.prefix_config,
                     &self.community_config,
+                    &self.as_path_config,
                     syncer,
                 );
             }

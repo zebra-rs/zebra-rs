@@ -1,6 +1,7 @@
 use crate::policy::Policy;
 use crate::policy::inst::ShowCallback;
 
+use super::aspath;
 use super::community;
 use super::policy_list;
 use super::prefix;
@@ -19,5 +20,7 @@ impl Policy {
             "/show/community-set/name",
             community::show::community_set_name,
         );
+        self.show_add("/show/as-path-set", aspath::show::as_path_set);
+        self.show_add("/show/as-path-set/name", aspath::show::as_path_set_name);
     }
 }

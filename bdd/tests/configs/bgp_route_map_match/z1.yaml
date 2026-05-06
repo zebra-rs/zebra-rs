@@ -1,0 +1,33 @@
+prefix-set:
+- name: ALL-V4
+  prefixes:
+  - prefix: 0.0.0.0/0
+    le: 32
+policy-options:
+  policy:
+  - name: SET-MED-100
+    entry:
+    - number: 10
+      match:
+        prefix-set: ALL-V4
+      set:
+        med: 100
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4-unicast
+        enabled: true
+      apply-policy:
+        out: SET-MED-100
+      enabled: true
+      peer-as: 65002
+    afi-safi:
+    - name: ipv4-unicast
+      network:
+      - prefix: 10.0.0.1/32
+      - prefix: 10.0.0.2/32

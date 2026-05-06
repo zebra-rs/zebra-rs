@@ -54,6 +54,16 @@ module exec {
       ext:help "Show community-set";
       type empty;
     }
+    container "as-path-set" {
+      ext:help "Show as-path-set";
+      presence "Show as-path-set";
+      list name {
+        key name;
+        leaf name {
+          type string;
+        }
+      }
+    }
     list interface {
       ext:help "Show interface commands";
       ext:presence "Show presence";
