@@ -931,8 +931,7 @@ impl Rib {
                 if vrf.is_none() {
                     self.pending_vrf_bind.remove(&ifname);
                 } else {
-                    self.pending_vrf_bind
-                        .insert(ifname.clone(), vrf.clone());
+                    self.pending_vrf_bind.insert(ifname.clone(), vrf.clone());
                 }
 
                 let Some(link) = self.links.values().find(|l| l.name == ifname) else {
