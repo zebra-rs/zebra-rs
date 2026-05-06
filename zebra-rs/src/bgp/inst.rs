@@ -378,6 +378,12 @@ impl Bgp {
                     "/clear/ip/bgp/keepalive-recv" => {
                         let _ = peer::clear_keepalive_recv(self, &mut args);
                     }
+                    "/clear/ip/bgp/soft-out" => {
+                        let _ = peer::clear_soft_out(self, &mut args);
+                    }
+                    "/clear/ip/bgp/soft-in" => {
+                        let _ = peer::clear_soft_in(self, &mut args);
+                    }
                     _ => {
                         //
                     }

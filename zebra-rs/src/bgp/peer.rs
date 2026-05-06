@@ -76,6 +76,10 @@ pub enum Event {
     NotifMsg(NotificationPacket), // 25
     KeepAliveMsg,                 // 26
     UpdateMsg(UpdatePacket),      // 27
+    // RFC 2918 Route Refresh receive. Carries the AFI/SAFI from the
+    // wire (raw u16/u8) so unknown-AF refreshes still dispatch
+    // through the FSM rather than tearing the session down.
+    RouteRefreshMsg(u16, u8),
     StaleTimerExipires(AfiSafi),
     AdvTimerIpv4Expires,
     AdvTimerVpnv4Expires,
@@ -86,6 +90,14 @@ pub enum FsmEffect {
     None,
     RouteUpdate(UpdatePacket),
     StaleExpire(AfiSafi),
+    // Peer asked us to re-send the Adj-RIB-Out for an AFI/SAFI
+    // (RFC 2918). The current implementation re-runs the full
+    // soft-out replay across every negotiated AFI/SAFI rather than
+    // narrowing to the requested one — over-eager but correct, and
+    // simpler than threading AFI/SAFI through the route layer. The
+    // (afi, safi) pair is kept in the variant so a future revision
+    // can do the targeted version without an FSM change.
+    RouteRefreshRecv { afi: u16, safi: u8 },
 }
 
 #[derive(Debug, Default)]
@@ -151,6 +163,12 @@ pub struct PeerConfig {
     pub llgr: AfiSafis<LlgrValue>,
     pub addpath: AfiSafis<AddPathValue>,
     pub route_refresh: bool,
+    // When true, the peer's pre-policy Adj-RIB-In is replayed locally
+    // on `clear ... soft in` instead of (or in addition to) sending a
+    // Route Refresh. Lets policy changes take effect without a session
+    // bounce when the peer doesn't support RFC 2918, at the cost of
+    // keeping received UPDATEs in memory.
+    pub soft_reconfig_in: bool,
     pub timer: timer::Config,
     pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
 }
@@ -166,6 +184,7 @@ impl Default for PeerConfig {
             llgr: AfiSafis::new(),
             addpath: AfiSafis::new(),
             route_refresh: Default::default(),
+            soft_reconfig_in: Default::default(),
             timer: Default::default(),
             sub: Default::default(),
         }
@@ -479,6 +498,11 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
             timer::refresh_hold_timer(peer);
             (State::Established, FsmEffect::RouteUpdate(packet))
         }
+        Event::RouteRefreshMsg(afi, safi) => {
+            peer.counter[BgpType::RouteRefresh as usize].rcvd += 1;
+            timer::refresh_hold_timer(peer);
+            (peer.state, FsmEffect::RouteRefreshRecv { afi, safi })
+        }
         Event::StaleTimerExipires(afi_safi) => {
             peer.timer.stale_timer.remove(&afi_safi);
             (peer.state, FsmEffect::StaleExpire(afi_safi))
@@ -497,6 +521,9 @@ fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMa
         }
         FsmEffect::StaleExpire(_afi_safi) => {
             stale_route_withdraw(id, bgp, peers);
+        }
+        FsmEffect::RouteRefreshRecv { afi: _, safi: _ } => {
+            super::route::route_soft_out_peer(id, bgp, peers);
         }
     }
 }
@@ -725,6 +752,11 @@ pub async fn peer_packet_parse(
                 }
                 BgpPacket::Update(p) => {
                     let _ = tx.send(Message::Event(ident, Event::UpdateMsg(*p))).await;
+                }
+                BgpPacket::RouteRefresh(p) => {
+                    let _ = tx
+                        .send(Message::Event(ident, Event::RouteRefreshMsg(p.afi, p.safi)))
+                        .await;
                 }
             }
             Ok(())
@@ -971,6 +1003,21 @@ pub fn peer_send_keepalive(peer: &mut Peer) {
     let _ = packet_tx.send(bytes);
 }
 
+// Send a BGP Route Refresh (RFC 2918, type 5) for one AFI/SAFI. The
+// caller is responsible for verifying the peer is established and
+// advertised the Route Refresh capability — sending REFRESH to a peer
+// that didn't advertise the cap is technically permitted but the peer
+// is allowed to ignore it.
+pub fn peer_send_route_refresh(peer: &mut Peer, afi: u16, safi: u8) {
+    let Some(packet_tx) = peer.packet_tx.as_ref() else {
+        return;
+    };
+    let pkt = RouteRefreshPacket::new(afi, safi);
+    let bytes: BytesMut = pkt.into();
+    peer.counter[BgpType::RouteRefresh as usize].sent += 1;
+    let _ = packet_tx.send(bytes);
+}
+
 /// Reject a connection by sending a NOTIFICATION and closing the socket.
 /// Spawns an async task with a timeout to prevent FD exhaustion.
 fn reject_connection(stream: TcpStream, code: NotifyCode, sub_code: u8) {
@@ -1067,6 +1114,102 @@ pub fn clear(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt
         Ok(()) => Ok(format!("%% peer {} is cleared", addr)),
         Err(e) => Ok(format!("%% failed to clear peer {}: {}", addr, e)),
     }
+}
+
+// Soft-clear outbound: re-apply outbound policy and refresh
+// Adj-RIB-Out for this peer without bouncing the session. Returns
+// immediately if the peer isn't established (nothing to refresh).
+pub fn clear_soft_out(
+    bgp: &mut Bgp,
+    args: &mut Args,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(addr) = args.addr() else {
+        return Ok("peer not found".to_string());
+    };
+
+    let Some(peer) = bgp.peers.get(&addr) else {
+        return Ok("peer not found".to_string());
+    };
+
+    if !peer.state.is_established() {
+        return Ok(format!("%% peer {} is not established", addr));
+    }
+    let peer_idx = peer.ident;
+
+    let mut bgp_ref = BgpTop {
+        router_id: &bgp.router_id,
+        local_rib: &mut bgp.local_rib,
+        tx: &bgp.tx,
+        rib_tx: &bgp.rib_tx,
+        attr_store: &mut bgp.attr_store,
+    };
+    super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+
+    Ok(format!("%% peer {} soft-out done", addr))
+}
+
+// Soft-clear inbound: replay the stored Adj-RIB-In through the current
+// inbound policy and reconcile Loc-RIB. Requires
+// `neighbor X soft-reconfiguration inbound`. When the flag is off,
+// fall back is "send Route Refresh" — Phase 5 wires that path; for
+// now we surface a clear error.
+pub fn clear_soft_in(
+    bgp: &mut Bgp,
+    args: &mut Args,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(addr) = args.addr() else {
+        return Ok("peer not found".to_string());
+    };
+
+    let Some(peer) = bgp.peers.get(&addr) else {
+        return Ok("peer not found".to_string());
+    };
+
+    if !peer.state.is_established() {
+        return Ok(format!("%% peer {} is not established", addr));
+    }
+
+    // Stored mode: replay Adj-RIB-In locally. Doesn't touch the wire,
+    // so works even when the peer doesn't speak Route Refresh.
+    if peer.config.soft_reconfig_in {
+        let peer_idx = peer.ident;
+        let mut bgp_ref = BgpTop {
+            router_id: &bgp.router_id,
+            local_rib: &mut bgp.local_rib,
+            tx: &bgp.tx,
+            rib_tx: &bgp.rib_tx,
+            attr_store: &mut bgp.attr_store,
+        };
+        super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+        return Ok(format!("%% peer {} soft-in done (stored replay)", addr));
+    }
+
+    // Fallback: ask the peer to re-send via RFC 2918 Route Refresh,
+    // if they advertised the capability. One REFRESH per negotiated
+    // (afi, safi) — peer.cap_recv.mp tracks what the peer can
+    // actually carry.
+    if peer.cap_recv.refresh.is_none() {
+        return Ok(format!(
+            "%% peer {addr}: no stored Adj-RIB-In and peer did not advertise Route Refresh capability; \
+             enable `neighbor {addr} soft-reconfiguration inbound` or hard-clear the session"
+        ));
+    }
+    let pairs: Vec<(u16, u8)> = peer
+        .cap_recv
+        .mp
+        .keys()
+        .map(|af| (u16::from(af.afi), u8::from(af.safi)))
+        .collect();
+
+    let peer = bgp.peers.get_mut(&addr).expect("peer exists");
+    for (afi, safi) in &pairs {
+        peer_send_route_refresh(peer, *afi, *safi);
+    }
+    Ok(format!(
+        "%% peer {} soft-in done (sent {} Route Refresh)",
+        addr,
+        pairs.len()
+    ))
 }
 
 pub fn clear_keepalive(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt::Error> {

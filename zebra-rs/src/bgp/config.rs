@@ -260,6 +260,16 @@ fn config_route_reflector(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     None
 }
 
+fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let flag = args.boolean()?;
+
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    peer.config.soft_reconfig_in = op.is_set() && flag;
+    Some(())
+}
+
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let key: AfiSafi = args.afi_safi()?;
@@ -970,5 +980,10 @@ impl Bgp {
 
         // Route Reflector.
         self.callback_peer("/route-reflector/client", config_route_reflector);
+
+        // Soft-reconfiguration inbound (zebra-bgp-soft-reconfiguration.yang).
+        // Stored-mode soft-in: retain pre-policy Adj-RIB-In so `clear soft in`
+        // can replay locally without sending a Route Refresh.
+        self.callback_peer("/soft-reconfiguration/inbound", config_soft_reconfig_in);
     }
 }

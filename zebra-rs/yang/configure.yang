@@ -127,6 +127,30 @@ module configure {
             type inet:ipv6-address;
           }
         }
+        // Soft-clear outbound: re-apply outbound policy to Loc-RIB
+        // and re-advertise to the named neighbor without bouncing the
+        // session. No persistent state is required (Loc-RIB already
+        // holds the routes); previously-advertised prefixes that
+        // newly fail outbound policy are withdrawn.
+        leaf soft-out {
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+          }
+        }
+        // Soft-clear inbound: replay the peer's stored Adj-RIB-In
+        // through the current inbound policy. Requires
+        // `neighbor X soft-reconfiguration inbound` to be enabled —
+        // otherwise the per-peer pre-policy state is not preserved
+        // across policy changes. Phase 5 will fall back to sending a
+        // BGP Route Refresh (RFC 2918) when stored mode is off and
+        // the peer negotiated the capability.
+        leaf soft-in {
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+          }
+        }
       }
     }
     container isis {

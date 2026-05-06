@@ -1104,6 +1104,242 @@ fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: 
     peer.send_packet(update.into());
 }
 
+// Soft-reconfiguration outbound: walk Loc-RIB for the AFI/SAFIs the
+// peer has negotiated, run each prefix through the per-peer advertise
+// builder + outbound policy, and either re-send the UPDATE or withdraw
+// (when a previously-advertised prefix newly fails policy or filtering).
+// Caller is responsible for ensuring the peer is established.
+//
+// Phase 2 covers IPv4 unicast and IPv4 MPLS-VPN. EVPN soft-out is left
+// for a follow-up — it would mirror this with `route_update_evpn` /
+// `route_apply_policy_evpn_out` over `bgp.local_rib.evpn[rd]`.
+pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let (do_v4, vpn_rds) = {
+        let Some(peer) = peers.get_by_idx(peer_idx) else {
+            return;
+        };
+        if !peer.state.is_established() {
+            return;
+        }
+        let do_v4 = peer.is_afi_safi(Afi::Ip, Safi::Unicast);
+        let do_vpn = peer.is_afi_safi(Afi::Ip, Safi::MplsVpn);
+        let rds: Vec<RouteDistinguisher> = if do_vpn {
+            bgp.local_rib.v4vpn.keys().copied().collect()
+        } else {
+            Vec::new()
+        };
+        (do_v4, rds)
+    };
+
+    if do_v4 {
+        route_soft_out_peer_table(peer_idx, None, bgp, peers);
+    }
+    for rd in vpn_rds {
+        route_soft_out_peer_table(peer_idx, Some(rd), bgp, peers);
+    }
+}
+
+fn route_soft_out_peer_table(
+    peer_idx: usize,
+    rd: Option<RouteDistinguisher>,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let (afi, safi) = if rd.is_some() {
+        (Afi::Ip, Safi::MplsVpn)
+    } else {
+        (Afi::Ip, Safi::Unicast)
+    };
+
+    // Snapshot Loc-RIB selected so the iteration outlives later
+    // mutable borrows of `bgp` (attr_store.intern, send paths).
+    let selected: Vec<(Ipv4Net, BgpRib)> = match rd {
+        Some(rd) => bgp
+            .local_rib
+            .v4vpn
+            .get(&rd)
+            .map(|t| t.1.iter().map(|(p, r)| (*p, r.clone())).collect())
+            .unwrap_or_default(),
+        None => bgp
+            .local_rib
+            .v4
+            .1
+            .iter()
+            .map(|(p, r)| (*p, r.clone()))
+            .collect(),
+    };
+
+    // Snapshot what's currently in this peer's Adj-RIB-Out so we can
+    // detect which previously-advertised prefixes need a withdraw.
+    let was_advertised: BTreeSet<Ipv4Net> = {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        match rd {
+            Some(rd) => peer
+                .adj_out
+                .v4vpn
+                .get(&rd)
+                .map(|t| t.0.keys().copied().collect())
+                .unwrap_or_default(),
+            None => peer.adj_out.v4.0.keys().copied().collect(),
+        }
+    };
+
+    let mut newly_advertised: BTreeSet<Ipv4Net> = BTreeSet::new();
+
+    for (prefix, rib) in &selected {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        let add_path = peer.opt.is_add_path_send(afi, safi);
+
+        let Some((nlri, attr)) = route_update_ipv4(peer, prefix, rib, bgp, add_path) else {
+            continue;
+        };
+        let Some(attr) = route_apply_policy_out(peer, &nlri, attr) else {
+            continue;
+        };
+        if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+            continue;
+        }
+
+        let attr = bgp.attr_store.intern(attr);
+        let mut adj = rib.clone();
+        adj.attr = attr.clone();
+        peer.adj_out.add(rd, nlri.prefix, adj);
+
+        if let Some(rd_val) = rd {
+            let vpnv4_nlri = Vpnv4Nlri {
+                label: Label::default(),
+                rd: rd_val,
+                nlri,
+            };
+            peer.send_vpnv4(vpnv4_nlri, attr, true);
+        } else {
+            peer.send_ipv4(nlri, attr, true);
+        }
+
+        newly_advertised.insert(*prefix);
+    }
+
+    let to_withdraw: Vec<Ipv4Net> = was_advertised
+        .difference(&newly_advertised)
+        .copied()
+        .collect();
+    for prefix in to_withdraw {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        match rd {
+            Some(rd) => peer.cache_remove_vpnv4(rd, prefix, 0),
+            None => peer.cache_remove_ipv4(prefix, 0),
+        };
+        peer.adj_out.remove(rd, prefix, 0);
+        route_withdraw_ipv4(peer, rd, prefix, 0);
+    }
+}
+
+// Soft-reconfiguration inbound (stored mode): replay the peer's
+// pre-policy Adj-RIB-In through the current inbound policy and
+// reconcile Loc-RIB. The caller must have already verified
+// `peer.config.soft_reconfig_in` and that the peer is established.
+//
+// For each stored entry: re-apply inbound policy. If accepted, refresh
+// the Loc-RIB candidate with the (possibly new) post-policy attrs and
+// fan out best-path changes via the normal advertise paths. If denied,
+// withdraw from Loc-RIB only — the Adj-RIB-In entry stays so the next
+// replay (e.g., after another policy edit) still has it.
+//
+// Phase 3 covers IPv4 unicast and IPv4 MPLS-VPN. EVPN soft-in is left
+// for a follow-up, mirroring the EVPN soft-out gap.
+pub fn route_soft_in_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let (do_v4, vpn_rds) = {
+        let Some(peer) = peers.get_by_idx(peer_idx) else {
+            return;
+        };
+        if !peer.state.is_established() {
+            return;
+        }
+        let do_v4 = peer.is_afi_safi(Afi::Ip, Safi::Unicast);
+        let do_vpn = peer.is_afi_safi(Afi::Ip, Safi::MplsVpn);
+        let rds: Vec<RouteDistinguisher> = if do_vpn {
+            peer.adj_in.v4vpn.keys().copied().collect()
+        } else {
+            Vec::new()
+        };
+        (do_v4, rds)
+    };
+
+    if do_v4 {
+        route_soft_in_peer_table(peer_idx, None, bgp, peers);
+    }
+    for rd in vpn_rds {
+        route_soft_in_peer_table(peer_idx, Some(rd), bgp, peers);
+    }
+}
+
+fn route_soft_in_peer_table(
+    peer_idx: usize,
+    rd: Option<RouteDistinguisher>,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    // Snapshot stored Adj-RIB-In entries so subsequent mutable borrows
+    // of `peers` / `bgp` (policy apply, Loc-RIB update, advertise
+    // fan-out) don't conflict with the iteration.
+    let entries: Vec<(Ipv4Net, Vec<BgpRib>)> = {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        match rd {
+            Some(rd) => peer
+                .adj_in
+                .v4vpn
+                .get(&rd)
+                .map(|t| t.0.iter().map(|(p, ribs)| (*p, ribs.clone())).collect())
+                .unwrap_or_default(),
+            None => peer
+                .adj_in
+                .v4
+                .0
+                .iter()
+                .map(|(p, ribs)| (*p, ribs.clone()))
+                .collect(),
+        }
+    };
+
+    for (prefix, ribs) in entries {
+        for stored in ribs {
+            let nlri = Ipv4Nlri {
+                id: stored.remote_id,
+                prefix,
+            };
+
+            // Re-run inbound policy against the stored pre-policy
+            // attributes. The Adj-RIB-In keeps the original attr; only
+            // the Loc-RIB candidate gets the post-policy version.
+            let pre_attr: BgpAttr = (*stored.attr).clone();
+            let post_attr_opt = {
+                let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+                route_apply_policy_in(peer, &nlri, pre_attr)
+            };
+
+            match post_attr_opt {
+                None => {
+                    // Policy denies this route under the new rules.
+                    // rib_in=false leaves the Adj-RIB-In entry in
+                    // place so subsequent replays still see it.
+                    route_ipv4_withdraw(peer_idx, &nlri, rd, None, bgp, peers, false);
+                }
+                Some(post_attr) => {
+                    let mut new_rib = stored.clone();
+                    new_rib.attr = bgp.attr_store.intern(post_attr);
+                    let (_, selected, next_id) = bgp.local_rib.update(rd, prefix, new_rib.clone());
+
+                    if !selected.is_empty() {
+                        route_advertise_to_peers(rd, prefix, &selected, peer_idx, bgp, peers);
+                    }
+                    new_rib.local_id = next_id;
+                    route_advertise_to_addpath(rd, prefix, &new_rib, peer_idx, bgp, peers);
+                }
+            }
+        }
+    }
+}
+
 pub fn route_ipv4_withdraw(
     ident: usize,
     nlri: &Ipv4Nlri,
