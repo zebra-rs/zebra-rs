@@ -3,8 +3,8 @@ use tokio_stream::StreamExt;
 use tonic::Request;
 use tracing::{debug, error};
 
-use crate::vtysh::show_client::ShowClient;
-use crate::vtysh::{CommandPath, ShowRequest, YangMatch};
+use crate::vty::show_client::ShowClient;
+use crate::vty::{CommandPath, ShowRequest, YangMatch};
 
 /// Client for communicating with zebra-rs daemon via gRPC
 #[derive(Clone)]

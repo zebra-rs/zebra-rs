@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use super::Args;
 use super::configs::ymatch_enum;
-use super::vtysh::{CommandPath, YangMatch};
+use super::vty::{CommandPath, YangMatch};
 
 pub fn paths_str(paths: &[CommandPath]) -> String {
     let mut s = String::from("");

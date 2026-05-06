@@ -11,11 +11,11 @@ use super::api::{
     ClearTxRequest, CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest,
     ExecuteRequest, ExecuteResponse, Message,
 };
-use super::vtysh::apply_server::{Apply, ApplyServer};
-use super::vtysh::clear_server::{Clear, ClearServer};
-use super::vtysh::exec_server::{Exec, ExecServer};
-use super::vtysh::show_server::{Show, ShowServer};
-use super::vtysh::{
+use super::vty::apply_server::{Apply, ApplyServer};
+use super::vty::clear_server::{Clear, ClearServer};
+use super::vty::exec_server::{Exec, ExecServer};
+use super::vty::show_server::{Show, ShowServer};
+use super::vty::{
     ApplyReply, ApplyRequest, ClearReply, ClearRequest, CommandPath, ExecCode, ExecReply,
     ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch,
 };

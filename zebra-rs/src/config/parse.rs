@@ -6,7 +6,7 @@ use super::ip::*;
 use super::mac::match_mac_addr;
 use super::nsap::match_nsap_addr;
 use super::util::*;
-use super::vtysh::{CommandPath, YangMatch};
+use super::vty::{CommandPath, YangMatch};
 use super::{Completion, Config, ExecCode};
 use libyang::{Entry, MinMax, RangeExtract, RangeNode, TypeNode, YangType, range_match};
 use regex::Regex;

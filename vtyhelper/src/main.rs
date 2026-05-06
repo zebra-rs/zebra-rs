@@ -3,12 +3,12 @@ use clap::Parser;
 use std::env;
 use tokio::io::{self, AsyncWriteExt};
 use tokio_stream::StreamExt;
-use vtysh::exec_client::ExecClient;
-use vtysh::show_client::ShowClient;
-use vtysh::{CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, ShowRequest};
+use vty::exec_client::ExecClient;
+use vty::show_client::ShowClient;
+use vty::{CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, ShowRequest};
 
-pub mod vtysh {
-    tonic::include_proto!("vtysh");
+pub mod vty {
+    tonic::include_proto!("vty");
 }
 
 #[derive(Parser)]

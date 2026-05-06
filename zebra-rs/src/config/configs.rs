@@ -3,7 +3,7 @@ use bgp_packet::{Afi, AfiSafi, Safi};
 use super::Completion;
 use super::parse::match_keyword;
 use super::parse::{Match, MatchType};
-use super::vtysh::{CommandPath, YangMatch};
+use super::vty::{CommandPath, YangMatch};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::collections::{HashSet, VecDeque};
@@ -732,7 +732,7 @@ pub fn config_match(config: &Rc<Config>, input: &str, mx: &mut Match) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::vtysh::CommandPath;
+    use crate::config::vty::CommandPath;
 
     #[test]
     fn test_leaf_list_round_trip() {

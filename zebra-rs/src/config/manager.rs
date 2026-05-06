@@ -12,7 +12,7 @@ use super::parse::State;
 use super::parse::parse;
 use super::paths::{path_try_trim, paths_str};
 use super::util::trim_first_line;
-use super::vtysh::CommandPath;
+use super::vty::CommandPath;
 use super::yaml::yaml_parse;
 use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
 
