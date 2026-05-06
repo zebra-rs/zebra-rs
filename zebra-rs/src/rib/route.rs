@@ -21,6 +21,13 @@ const DEBUG_V6: bool = false;
 // Flip to true to re-enable IP address diagnostic trace.
 pub const DEBUG_ADDR: bool = false;
 
+// Flip to true to log EVPN-related diagnostic traces (VXLAN VNI
+// register/unregister, mac_add / mac_del / mdb_add / mdb_del,
+// link_add EVPN bridge association, BGP RT→VNI extraction). Errors
+// from the kernel are reported regardless. Imported by the FIB and
+// BGP modules so all EVPN diagnostics share one switch.
+pub const DEBUG_EVPN: bool = false;
+
 /// Hold-down policy for kernel-driven address recovery.
 ///
 /// If a configured address is deleted by an external actor (NetworkManager,

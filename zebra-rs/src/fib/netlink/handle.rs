@@ -36,7 +36,7 @@ use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
-use crate::rib::route::DEBUG_ADDR;
+use crate::rib::route::{DEBUG_ADDR, DEBUG_EVPN};
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
     Vxlan, link,
@@ -51,12 +51,6 @@ const DEBUG_V6: bool = false;
 // the kernel are reported regardless. Mirrored by RIB via this same
 // constant (re-exported as `crate::fib::netlink::handle::DEBUG_SID`).
 pub const DEBUG_SID: bool = false;
-
-// Flip to true to log every EVPN-related FDB / MDB / VXLAN VNI
-// registration the FIB performs (mac_add, mac_del, mdb_add, mdb_del,
-// register/unregister VXLAN ifindex). Errors from the kernel are
-// reported regardless.
-const DEBUG_EVPN: bool = false;
 
 /// Mask the lower (128 - prefix_len) bits of an IPv6 address. The
 /// kernel ignores bits past the prefix length on install, but masking

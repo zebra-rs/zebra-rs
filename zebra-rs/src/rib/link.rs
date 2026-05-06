@@ -13,7 +13,7 @@ use crate::fib::sysctl::{sysctl_mpls_enable, sysctl_seg6_enable};
 
 use super::api::RibRx;
 use super::entry::RibEntry;
-use super::route::DEBUG_ADDR;
+use super::route::{DEBUG_ADDR, DEBUG_EVPN};
 use super::util::IpNetExt;
 use super::{LinkFlagsExt, MacAddr, Message, Rib, RibType};
 
@@ -429,13 +429,15 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub async fn link_add(&mut self, fib_link: FibLink) {
-        tracing::info!(
-            "link_add: ifindex {} name {} vni {:?} master {:?}",
-            fib_link.index,
-            fib_link.name,
-            fib_link.vni,
-            fib_link.master,
-        );
+        if DEBUG_EVPN {
+            tracing::info!(
+                "link_add: ifindex {} name {} vni {:?} master {:?}",
+                fib_link.index,
+                fib_link.name,
+                fib_link.vni,
+                fib_link.master,
+            );
+        }
         // Capture pre-state so we can detect a VXLAN-bridge association
         // gaining valid `(master, vni)` and trigger an FDB rescan. The
         // common case is operator-driven sequence:

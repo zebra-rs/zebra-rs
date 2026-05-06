@@ -9,6 +9,7 @@ use prefix_trie::PrefixMap;
 
 use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
 use crate::policy::{CommunityMatcher, PolicyList, StandardMatcher};
+use crate::rib::route::DEBUG_EVPN;
 use crate::rib::{self, MacAddr, api::FdbEntry};
 
 use super::cap::CapAfiMap;
@@ -18,10 +19,6 @@ use super::timer::{start_adv_timer_ipv4, start_adv_timer_vpnv4};
 use super::{Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
-
-// Flip to true to log EVPN-related diagnostic traces (e.g., VNI
-// extraction from RT extended communities).
-const DEBUG_EVPN: bool = false;
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BgpRibType {
