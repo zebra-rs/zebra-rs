@@ -2191,11 +2191,7 @@ pub fn policy_list_apply(
                     bgp_attr.med = Some(Med { med: *med });
                 }
                 if let Some(set_community) = &entry.set_community {
-                    apply_set_community(
-                        &mut bgp_attr,
-                        set_community,
-                        entry.set_community_additive,
-                    );
+                    apply_set_community(&mut bgp_attr, set_community, entry.set_community_additive);
                 }
                 if let Some(prepend) = &entry.set_as_path_prepend {
                     apply_set_as_path_prepend(&mut bgp_attr, prepend);
@@ -2876,7 +2872,9 @@ mod tests {
 
     use std::net::Ipv4Addr;
 
-    use bgp_packet::{As4Path, BgpAttr, BgpNexthop, Community, CommunityValue, Ipv4Nlri, LocalPref};
+    use bgp_packet::{
+        As4Path, BgpAttr, BgpNexthop, Community, CommunityValue, Ipv4Nlri, LocalPref,
+    };
     use ipnet::Ipv4Net;
 
     use super::policy_list_apply;
