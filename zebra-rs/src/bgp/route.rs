@@ -2200,6 +2200,9 @@ pub fn policy_list_apply(
                 if let Some(prepend) = &entry.set_as_path_prepend {
                     apply_set_as_path_prepend(&mut bgp_attr, prepend);
                 }
+                if let Some(addr) = &entry.set_next_hop {
+                    bgp_attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+                }
                 return Some(bgp_attr);
             }
             (_, _) => {
@@ -2871,7 +2874,9 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
 mod tests {
     use std::str::FromStr;
 
-    use bgp_packet::{As4Path, BgpAttr, Community, CommunityValue, Ipv4Nlri, LocalPref};
+    use std::net::Ipv4Addr;
+
+    use bgp_packet::{As4Path, BgpAttr, BgpNexthop, Community, CommunityValue, Ipv4Nlri, LocalPref};
     use ipnet::Ipv4Net;
 
     use super::policy_list_apply;
@@ -3048,5 +3053,34 @@ mod tests {
         let path = out.aspath.expect("aspath set");
         assert_eq!(path.as_path_display(), "65001 65002 65003 100");
         assert_eq!(path.length(), 4);
+    }
+
+    #[test]
+    fn policy_list_apply_sets_next_hop() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_next_hop = Some(Ipv4Addr::new(10, 1, 1, 1));
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        match out.nexthop.expect("nexthop set") {
+            BgpNexthop::Ipv4(a) => assert_eq!(a, Ipv4Addr::new(10, 1, 1, 1)),
+            other => panic!("expected Ipv4 nexthop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn policy_list_apply_next_hop_overrides_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_next_hop = Some(Ipv4Addr::new(10, 1, 1, 1));
+
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1))),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        match out.nexthop.unwrap() {
+            BgpNexthop::Ipv4(a) => assert_eq!(a, Ipv4Addr::new(10, 1, 1, 1)),
+            other => panic!("expected Ipv4 nexthop, got {:?}", other),
+        }
     }
 }
