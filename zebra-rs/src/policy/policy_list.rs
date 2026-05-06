@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::net::Ipv4Addr;
 
 use anyhow::{Context, Error, Result};
 use strum_macros::{Display, EnumString};
@@ -45,6 +46,11 @@ pub struct PolicyEntry {
     // Set.
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
+    pub set_community_name: Option<String>,
+    pub set_community: Option<CommunitySet>,
+    pub set_community_additive: bool,
+    pub set_as_path_prepend: Option<Vec<u32>>,
+    pub set_next_hop: Option<Ipv4Addr>,
     // Action.
     pub action: Option<PolicyAction>,
 }
@@ -67,6 +73,13 @@ pub fn policy_entry_sync(
                 policy.community_set = Some(community_set.clone());
             } else {
                 policy.community_set = None;
+            }
+        }
+        if let Some(name) = &policy.set_community_name {
+            if let Some(community_set) = community_set.config.get(name) {
+                policy.set_community = Some(community_set.clone());
+            } else {
+                policy.set_community = None;
             }
         }
     }
@@ -271,6 +284,79 @@ impl ConfigBuilder {
                 entry.med = None;
                 Ok(())
             })
+            .path("/entry/set/community-set")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let community_set = args.string().context(ARG_ERR)?;
+                entry.set_community_name = Some(community_set);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_community_name = None;
+                entry.set_community = None;
+                Ok(())
+            })
+            .path("/entry/set/community-additive")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let additive = args.boolean().context(ARG_ERR)?;
+                entry.set_community_additive = additive;
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_community_additive = false;
+                Ok(())
+            })
+            .path("/entry/set/as-path-prepend")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let raw = args.string().context(ARG_ERR)?;
+                let asns: Vec<u32> = raw
+                    .split_whitespace()
+                    .map(|s| s.parse::<u32>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("as-path-prepend: invalid AS number")?;
+                if asns.is_empty() {
+                    anyhow::bail!("as-path-prepend: empty AS list");
+                }
+                entry.set_as_path_prepend = Some(asns);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_as_path_prepend = None;
+                Ok(())
+            })
+            .path("/entry/set/next-hop")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let addr = args.v4addr().context(ARG_ERR)?;
+                entry.set_next_hop = Some(addr);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_next_hop = None;
+                Ok(())
+            })
             .path("/entry/action")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -336,6 +422,25 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             }
             if let Some(med) = &entry.med {
                 let _ = writeln!(buf, "  set: med {}", med);
+            }
+            if let Some(set_community) = &entry.set_community_name {
+                let suffix = if entry.set_community_additive {
+                    " additive"
+                } else {
+                    ""
+                };
+                let _ = writeln!(buf, "  set: community {}{}", set_community, suffix);
+            }
+            if let Some(prepend) = &entry.set_as_path_prepend {
+                let s = prepend
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let _ = writeln!(buf, "  set: as-path-prepend {}", s);
+            }
+            if let Some(nh) = &entry.set_next_hop {
+                let _ = writeln!(buf, "  set: next-hop {}", nh);
             }
         }
         if let Some(default_action) = &policy.default_action {
