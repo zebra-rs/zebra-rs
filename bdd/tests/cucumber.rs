@@ -1,9 +1,9 @@
 use std::fs;
+use std::path::Path;
 
 use bdd::netns;
 use cucumber::{World, WriterExt, given, then, when, writer};
 use serde_json::Value;
-use tokio::process::Command;
 
 #[derive(Debug, Default, World)]
 pub struct BgpWorld {
@@ -11,76 +11,155 @@ pub struct BgpWorld {
     feature_tag: String,
 }
 
-#[given("a clean test environment")]
-async fn clean_test_environment(_world: &mut BgpWorld) {
-    // Clean up any existing test resources (ignore errors)
-    // Kill any leftover zebra-rs processes before tearing down namespaces,
-    // otherwise their open netlink sockets can keep the namespace alive.
-    let _ = netns::killall_zebra_rs().await;
-
-    // Delete veths first (must be done before namespaces are deleted).
-    // Cleanup is best-effort across z1..z4 so the same step works for both
-    // the bridge-attached topologies (z1, z2) and the linear point-to-point
-    // chain used by the SRv6 scenario (z1..z4).
-    for ns in ["z1", "z2", "z3", "z4"] {
-        let _ = netns::delete_veth(ns).await;
-        let _ = netns::delete_netns(ns).await;
+impl BgpWorld {
+    fn short_id(&self) -> String {
+        let mut hash: u32 = 0x811c_9dc5;
+        for byte in self.feature_tag.as_bytes() {
+            hash ^= *byte as u32;
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        format!("{:04x}", hash & 0xffff)
     }
-    let _ = netns::delete_bridge("br0").await;
 
-    println!("✓ Test environment cleaned");
+    fn ns(&self, logical: &str) -> String {
+        format!("{}_{}", self.feature_tag, logical)
+    }
+
+    fn bridge(&self, _logical: &str) -> String {
+        format!("br_{}", self.short_id())
+    }
+
+    fn host_veth(&self, logical: &str) -> String {
+        format!("v{}_{}", self.short_id(), logical)
+    }
+
+    fn ns_veth(&self, logical: &str) -> String {
+        format!("v{}ns", logical)
+    }
+
+    fn pid_file(&self, logical: &str) -> String {
+        format!("/tmp/{}.pid", self.ns(logical))
+    }
+}
+
+#[given("a clean test environment")]
+async fn clean_test_environment(world: &mut BgpWorld) {
+    // Per-feature deterministic prefix lets parallel runs of *different*
+    // features coexist without colliding on host-global namespace, bridge,
+    // or veth names. We sweep only resources owned by this feature.
+    assert!(
+        !world.feature_tag.is_empty(),
+        "feature must declare a tag (e.g. @bgp_basic_ibgp) for parallel-safe scoping"
+    );
+
+    let ns_prefix = format!("{}_", world.feature_tag);
+    let pid_prefix = ns_prefix.clone();
+    let bridge_name = world.bridge("");
+
+    // 1. Detect concurrent run of the same feature: if any pid file in
+    // /tmp matching this feature points to a live process, abort. The
+    // operator should wait for the other run to finish (or use a
+    // different feature for parallelism).
+    if let Ok(pidfiles) = netns::list_pidfiles(Path::new("/tmp"), &pid_prefix).await {
+        for path in &pidfiles {
+            if netns::pidfile_alive(path).await {
+                panic!(
+                    "another run of feature {} is in progress (live pid file {:?}); refusing to clobber its resources",
+                    world.feature_tag, path
+                );
+            }
+        }
+        // Stale pid files from a crashed prior run: best-effort kill +
+        // remove. kill_pidfile tolerates missing process / file.
+        for path in pidfiles {
+            let _ = netns::kill_pidfile(&path).await;
+        }
+    }
+
+    // 2. Sweep stale namespaces from a crashed prior run of THIS
+    // feature. Deleting a netns auto-destroys its in-namespace
+    // interfaces (including the ns end of any veth pair, which by
+    // veth semantics also destroys the host end).
+    if let Ok(stale) = netns::list_netns_with_prefix(&ns_prefix).await {
+        for ns in stale {
+            let _ = netns::delete_netns(&ns).await;
+        }
+    }
+
+    // 3. Sweep stale bridges. We use a single bridge name per feature
+    // (br_{short_id}); list-by-prefix picks it up if it survived.
+    if let Ok(stale) = netns::list_bridges_with_prefix(&bridge_name).await {
+        for br in stale {
+            let _ = netns::delete_bridge(&br).await;
+        }
+    }
+
+    println!(
+        "✓ Test environment cleaned for feature {}",
+        world.feature_tag
+    );
 }
 
 #[when(expr = "I create namespace {string}")]
-async fn create_namespace_plain(_world: &mut BgpWorld, namespace: String) {
-    netns::create_netns(&namespace)
+async fn create_namespace_plain(world: &mut BgpWorld, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::create_netns(&scoped)
         .await
         .expect("Failed to create namespace");
-    println!("✓ Namespace {} created (no bridge)", namespace);
+    println!("✓ Namespace {} created (no bridge)", scoped);
 }
 
 #[when(
     expr = "I connect namespace {string} interface {string} to namespace {string} interface {string}"
 )]
 async fn connect_two_namespaces(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     ns_a: String,
     iface_a: String,
     ns_b: String,
     iface_b: String,
 ) {
-    netns::connect_netns_pair(&ns_a, &iface_a, &ns_b, &iface_b)
+    let a = world.ns(&ns_a);
+    let b = world.ns(&ns_b);
+    let short = world.short_id();
+    netns::connect_netns_pair(&short, &a, &iface_a, &b, &iface_b)
         .await
         .expect("Failed to connect namespace pair");
-    println!("✓ Linked {}:{} <-> {}:{}", ns_a, iface_a, ns_b, iface_b);
+    println!("✓ Linked {}:{} <-> {}:{}", a, iface_a, b, iface_b);
 }
 
 #[when(expr = "I create bridge {string}")]
-async fn create_bridge(_world: &mut BgpWorld, bridge_name: String) {
-    netns::create_bridge(&bridge_name)
+async fn create_bridge(world: &mut BgpWorld, bridge_name: String) {
+    let scoped = world.bridge(&bridge_name);
+    netns::create_bridge(&scoped)
         .await
         .expect("Failed to create bridge");
-    println!("✓ Bridge {} created and up", bridge_name);
+    println!("✓ Bridge {} created and up", scoped);
 }
 
 #[when(expr = "I create namespace {string} with IP {string} on bridge {string}")]
 async fn create_namespace_with_ip(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     namespace: String,
     ip: String,
     bridge_name: String,
 ) {
-    netns::create_netns(&namespace)
+    let scoped_ns = world.ns(&namespace);
+    let scoped_br = world.bridge(&bridge_name);
+    let host_veth = world.host_veth(&namespace);
+    let ns_veth = world.ns_veth(&namespace);
+
+    netns::create_netns(&scoped_ns)
         .await
         .expect("Failed to create namespace");
 
-    netns::connect_netns_to_bridge(&namespace, &bridge_name)
+    netns::connect_netns_to_bridge(&scoped_ns, &scoped_br, &host_veth, &ns_veth)
         .await
         .expect("Failed to connect namespace to bridge");
 
     println!(
         "✓ Namespace {} created with IP {} on bridge {}",
-        namespace, ip, bridge_name
+        scoped_ns, ip, scoped_br
     );
 }
 
@@ -88,43 +167,52 @@ async fn create_namespace_with_ip(
     expr = "I create namespace {string} with loopback and veth interface on the bridge {string}"
 )]
 async fn create_namespace_with_loopback(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     namespace: String,
     bridge_name: String,
 ) {
-    netns::create_netns(&namespace)
+    let scoped_ns = world.ns(&namespace);
+    let scoped_br = world.bridge(&bridge_name);
+    let host_veth = world.host_veth(&namespace);
+    let ns_veth = world.ns_veth(&namespace);
+
+    netns::create_netns(&scoped_ns)
         .await
         .expect("Failed to create namespace");
 
-    netns::connect_netns_to_bridge(&namespace, &bridge_name)
+    netns::connect_netns_to_bridge(&scoped_ns, &scoped_br, &host_veth, &ns_veth)
         .await
         .expect("Failed to connect namespace to bridge");
 
     println!(
         "✓ Namespace {} created with loopback and veth on bridge {}",
-        namespace, bridge_name
+        scoped_ns, scoped_br
     );
 }
 
 #[when(expr = "I bring link down in namespace {string}")]
-async fn bring_link_down(_world: &mut BgpWorld, namespace: String) {
-    netns::set_link_state(&namespace, false)
+async fn bring_link_down(world: &mut BgpWorld, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let veth = world.ns_veth(&namespace);
+    netns::set_link_state(&scoped, &veth, false)
         .await
         .expect("Failed to bring link down");
-    println!("✓ Link brought down in namespace {}", namespace);
+    println!("✓ Link brought down in namespace {}", scoped);
 }
 
 #[when(expr = "I bring link up in namespace {string}")]
-async fn bring_link_up(_world: &mut BgpWorld, namespace: String) {
-    netns::set_link_state(&namespace, true)
+async fn bring_link_up(world: &mut BgpWorld, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let veth = world.ns_veth(&namespace);
+    netns::set_link_state(&scoped, &veth, true)
         .await
         .expect("Failed to bring link up");
-    println!("✓ Link brought up in namespace {}", namespace);
+    println!("✓ Link brought up in namespace {}", scoped);
 }
 
 #[when(expr = "I make namespace {string} interface {string} {word}")]
 async fn set_namespace_interface_state(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     namespace: String,
     interface: String,
     state: String,
@@ -137,12 +225,13 @@ async fn set_namespace_interface_state(
             other
         ),
     };
-    netns::set_interface_state(&namespace, &interface, up)
+    let scoped = world.ns(&namespace);
+    netns::set_interface_state(&scoped, &interface, up)
         .await
         .expect("Failed to set interface state");
     println!(
         "✓ Interface {} in namespace {} set {}",
-        interface, namespace, state
+        interface, scoped, state
     );
 }
 
@@ -152,42 +241,47 @@ async fn wait_seconds(_world: &mut BgpWorld, seconds: u64) {
 }
 
 #[then(expr = "ping from {string} to {string} should succeed")]
-async fn ping_should_succeed(_world: &mut BgpWorld, namespace: String, target: String) {
-    let success = netns::ping6(&namespace, &target, 3, 2)
+async fn ping_should_succeed(world: &mut BgpWorld, namespace: String, target: String) {
+    let scoped = world.ns(&namespace);
+    let success = netns::ping6(&scoped, &target, 3, 2)
         .await
         .expect("ping6 failed to run");
     assert!(
         success,
         "ping from {} to {} did not succeed",
-        namespace, target
+        scoped, target
     );
-    println!("✓ ping from {} to {} succeeded", namespace, target);
+    println!("✓ ping from {} to {} succeeded", scoped, target);
 }
 
 #[then(expr = "ping from {string} to {string} should fail")]
-async fn ping_should_fail(_world: &mut BgpWorld, namespace: String, target: String) {
-    let success = netns::ping6(&namespace, &target, 1, 1)
+async fn ping_should_fail(world: &mut BgpWorld, namespace: String, target: String) {
+    let scoped = world.ns(&namespace);
+    let success = netns::ping6(&scoped, &target, 1, 1)
         .await
         .expect("ping6 failed to run");
     assert!(
         !success,
         "ping from {} to {} unexpectedly succeeded",
-        namespace, target
+        scoped, target
     );
-    println!(
-        "✓ ping from {} to {} failed (as expected)",
-        namespace, target
-    );
+    println!("✓ ping from {} to {} failed (as expected)", scoped, target);
 }
 
 #[when(expr = "I start zebra-rs in namespace {string}")]
-async fn start_zebra_rs(_world: &mut BgpWorld, namespace: String) {
-    let log_file = format!("{}.log", namespace);
+async fn start_zebra_rs(world: &mut BgpWorld, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("{}.log", scoped);
+    let pid_file = world.pid_file(&namespace);
 
     let _child = netns::spawn_in_netns(
-        &namespace,
+        &scoped,
         "zebra-rs",
-        &["--log-output=file", &format!("--log-file={}", log_file)],
+        &[
+            "--log-output=file",
+            &format!("--log-file={}", log_file),
+            &format!("--pid-file={}", pid_file),
+        ],
     )
     .await
     .expect("Failed to start zebra-rs");
@@ -195,20 +289,29 @@ async fn start_zebra_rs(_world: &mut BgpWorld, namespace: String) {
     // Wait a moment for zebra-rs to start
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    println!("✓ zebra-rs started in namespace {}", namespace);
+    println!(
+        "✓ zebra-rs started in namespace {} (pid file {})",
+        scoped, pid_file
+    );
 }
 
 #[when(expr = "I stop zebra-rs in namespace {string}")]
-async fn stop_zebra_rs(_world: &mut BgpWorld, namespace: String) {
-    let _ = netns::exec_in_netns(&namespace, "pkill", &["-9", "zebra-rs"]).await;
-    println!("✓ zebra-rs stopped in namespace {}", namespace);
+async fn stop_zebra_rs(world: &mut BgpWorld, namespace: String) {
+    let pid_file = world.pid_file(&namespace);
+    let _ = netns::kill_pidfile(Path::new(&pid_file)).await;
+    println!(
+        "✓ zebra-rs stopped in namespace {} (via {})",
+        world.ns(&namespace),
+        pid_file
+    );
 }
 
 #[when(expr = "I apply config {string} to namespace {string}")]
 async fn apply_config(world: &mut BgpWorld, config_file: String, namespace: String) {
     let config_path = format!("tests/configs/{}/{}", world.feature_tag, config_file);
+    let scoped = world.ns(&namespace);
 
-    let stdout = netns::exec_in_netns(&namespace, "vtyctl", &["apply", "-f", &config_path])
+    let stdout = netns::exec_in_netns(&scoped, "vtyctl", &["apply", "-f", &config_path])
         .await
         .expect("Failed to apply config");
 
@@ -223,13 +326,13 @@ async fn apply_config(world: &mut BgpWorld, config_file: String, namespace: Stri
         !trimmed.starts_with("error:"),
         "vtyctl apply rejected {} in namespace {}: {}",
         config_file,
-        namespace,
+        scoped,
         trimmed
     );
 
     println!(
         "✓ Config {} applied to namespace {} ({})",
-        config_file, namespace, trimmed
+        config_file, scoped, trimmed
     );
 }
 
@@ -240,49 +343,50 @@ async fn wait_for_bgp(_world: &mut BgpWorld, seconds: u64) {
 }
 
 #[when(expr = "I clear namespace {string} neighbor {string}")]
-async fn clear_bgp_neighbor(_world: &mut BgpWorld, namespace: String, neighbor: String) {
+async fn clear_bgp_neighbor(world: &mut BgpWorld, namespace: String, neighbor: String) {
+    let scoped = world.ns(&namespace);
     let cmd = format!("clear ip bgp neighbors {}", neighbor);
-    netns::exec_in_netns(&namespace, "vtyctl", &["clear", &cmd])
+    netns::exec_in_netns(&scoped, "vtyctl", &["clear", &cmd])
         .await
         .expect("Failed to clear BGP neighbor");
 
     println!(
         "✓ Cleared BGP neighbor {} in namespace {}",
-        neighbor, namespace
+        neighbor, scoped
     );
 }
 
 #[when(expr = "I delete namespace {string}")]
-async fn delete_namespace(_world: &mut BgpWorld, namespace: String) {
-    // Delete veth on host side first
-    // let _ = netns::delete_veth(&namespace).await;
-
-    netns::delete_netns(&namespace)
+async fn delete_namespace(world: &mut BgpWorld, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::delete_netns(&scoped)
         .await
         .expect("Failed to delete namespace");
 
-    println!("✓ Namespace {} deleted", namespace);
+    println!("✓ Namespace {} deleted", scoped);
 }
 
 #[when(expr = "I delete bridge {string}")]
-async fn delete_bridge(_world: &mut BgpWorld, bridge_name: String) {
-    netns::delete_bridge(&bridge_name)
+async fn delete_bridge(world: &mut BgpWorld, bridge_name: String) {
+    let scoped = world.bridge(&bridge_name);
+    netns::delete_bridge(&scoped)
         .await
         .expect("Failed to delete bridge");
 
-    println!("✓ Bridge {} deleted", bridge_name);
+    println!("✓ Bridge {} deleted", scoped);
 }
 
 #[then(expr = "BGP session in {string} to {string} should be {string}")]
 async fn verify_bgp_session(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     namespace: String,
     neighbor: String,
     expected_state: String,
 ) {
+    let scoped = world.ns(&namespace);
     let cmd = format!("show ip bgp neighbors {}", neighbor);
     let binding = ["show", "-j", &cmd];
-    let output = netns::exec_in_netns(&namespace, "vtyctl", &binding)
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &binding)
         .await
         .expect("Failed to get BGP neighbor state");
 
@@ -294,7 +398,7 @@ async fn verify_bgp_session(
             .to_lowercase()
             .contains(&expected_state.to_lowercase()),
         "BGP session {} -> {} is not {}, got: {}",
-        namespace,
+        scoped,
         neighbor,
         expected_state,
         output
@@ -302,20 +406,21 @@ async fn verify_bgp_session(
 
     println!(
         "✓ BGP session {} -> {} is {}",
-        namespace, neighbor, expected_state
+        scoped, neighbor, expected_state
     );
 }
 
 #[then(expr = "BGP session in {string} to {string} should not be {string}")]
 async fn verify_bgp_session_not(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     namespace: String,
     neighbor: String,
     unexpected_state: String,
 ) {
+    let scoped = world.ns(&namespace);
     let cmd = format!("show ip bgp neighbors {}", neighbor);
     let binding = ["show", "-j", &cmd];
-    let output = netns::exec_in_netns(&namespace, "vtyctl", &binding)
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &binding)
         .await
         .expect("Failed to get BGP neighbor state");
 
@@ -325,7 +430,7 @@ async fn verify_bgp_session_not(
     assert!(
         state.to_lowercase() != unexpected_state.to_lowercase(),
         "BGP session {} -> {} should not be {}, got: {}",
-        namespace,
+        scoped,
         neighbor,
         unexpected_state,
         state
@@ -333,13 +438,14 @@ async fn verify_bgp_session_not(
 
     println!(
         "✓ BGP session {} -> {} is not {}",
-        namespace, neighbor, unexpected_state
+        scoped, neighbor, unexpected_state
     );
 }
 
 #[then(expr = "BGP route in {string} has {string}")]
-async fn verify_bgp_route(_world: &mut BgpWorld, namespace: String, expected_prefix: String) {
-    let output = netns::exec_in_netns(&namespace, "vtyctl", &["show", "-j", "show ip bgp"])
+async fn verify_bgp_route(world: &mut BgpWorld, namespace: String, expected_prefix: String) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip bgp"])
         .await
         .expect("Failed to get BGP routes");
 
@@ -356,18 +462,19 @@ async fn verify_bgp_route(_world: &mut BgpWorld, namespace: String, expected_pre
     assert!(
         has_prefix,
         "BGP route {} not found in namespace {}, got: {}",
-        expected_prefix, namespace, output
+        expected_prefix, scoped, output
     );
 
     println!(
         "✓ BGP route {} found in namespace {}",
-        expected_prefix, namespace
+        expected_prefix, scoped
     );
 }
 
 #[then(expr = "BGP route in {string} does not have {string}")]
-async fn verify_bgp_route_not(_world: &mut BgpWorld, namespace: String, unexpected_prefix: String) {
-    let output = netns::exec_in_netns(&namespace, "vtyctl", &["show", "-j", "show ip bgp"])
+async fn verify_bgp_route_not(world: &mut BgpWorld, namespace: String, unexpected_prefix: String) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip bgp"])
         .await
         .expect("Failed to get BGP routes");
 
@@ -385,24 +492,25 @@ async fn verify_bgp_route_not(_world: &mut BgpWorld, namespace: String, unexpect
     assert!(
         !has_prefix,
         "BGP route {} should not be in namespace {}, got: {}",
-        unexpected_prefix, namespace, output
+        unexpected_prefix, scoped, output
     );
 
     println!(
         "✓ BGP route {} not found in namespace {}",
-        unexpected_prefix, namespace
+        unexpected_prefix, scoped
     );
 }
 
 #[then(expr = "BGP route in {string} has {string} with {string} value {string}")]
 async fn verify_bgp_route_field(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     namespace: String,
     expected_prefix: String,
     field_name: String,
     expected_value: String,
 ) {
-    let output = netns::exec_in_netns(&namespace, "vtyctl", &["show", "-j", "show ip bgp"])
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip bgp"])
         .await
         .expect("Failed to get BGP routes");
 
@@ -416,7 +524,7 @@ async fn verify_bgp_route_field(
     let route = route.unwrap_or_else(|| {
         panic!(
             "BGP route {} not found in namespace {}, got: {}",
-            expected_prefix, namespace, output
+            expected_prefix, scoped, output
         )
     });
 
@@ -445,14 +553,16 @@ async fn verify_bgp_route_field(
 
     println!(
         "✓ BGP route {} in namespace {} has {} = {}",
-        expected_prefix, namespace, field_name, expected_value
+        expected_prefix, scoped, field_name, expected_value
     );
 }
 
 #[given("the test topology exists")]
 async fn test_topology_exists(world: &mut BgpWorld) {
-    world.topology_running = netns::netns_exists("z1").await.unwrap_or(false)
-        && netns::netns_exists("z2").await.unwrap_or(false);
+    let z1 = world.ns("z1");
+    let z2 = world.ns("z2");
+    world.topology_running = netns::netns_exists(&z1).await.unwrap_or(false)
+        && netns::netns_exists(&z2).await.unwrap_or(false);
 }
 
 /// Run a `vtyctl show <command>` inside a namespace and assert the
@@ -462,50 +572,70 @@ async fn test_topology_exists(world: &mut BgpWorld) {
 /// for LSDB / route-table assertions.
 #[then(expr = "show command {string} in namespace {string} should contain {string}")]
 async fn show_command_contains(
-    _world: &mut BgpWorld,
+    world: &mut BgpWorld,
     show_cmd: String,
     namespace: String,
     needle: String,
 ) {
-    let output = netns::exec_in_netns(&namespace, "vtyctl", &["show", &show_cmd])
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
         .await
         .expect("Failed to run show command");
     assert!(
         output.contains(&needle),
         "show '{}' in namespace {} did not contain '{}'\nfull output:\n{}",
         show_cmd,
-        namespace,
+        scoped,
         needle,
         output,
     );
     println!(
         "✓ show '{}' in namespace {} contains '{}'",
-        show_cmd, namespace, needle
+        show_cmd, scoped, needle
     );
 }
 
 #[then("the test environment should be clean")]
-async fn verify_clean_environment(_world: &mut BgpWorld) {
-    let z1_exists = netns::netns_exists("z1").await.unwrap_or(false);
-    let z2_exists = netns::netns_exists("z2").await.unwrap_or(false);
-
-    assert!(!z1_exists, "Namespace z1 still exists");
-    assert!(!z2_exists, "Namespace z2 still exists");
-
-    let output = Command::new("sudo")
-        .args(["ip", "link", "show", "br0"])
-        .output()
+async fn verify_clean_environment(world: &mut BgpWorld) {
+    let ns_prefix = format!("{}_", world.feature_tag);
+    let leftover_ns = netns::list_netns_with_prefix(&ns_prefix)
         .await
-        .expect("Failed to check bridge");
+        .unwrap_or_default();
+    assert!(
+        leftover_ns.is_empty(),
+        "Namespaces still exist: {:?}",
+        leftover_ns
+    );
 
-    assert!(!output.status.success(), "Bridge br0 still exists");
+    let bridge = world.bridge("");
+    let leftover_br = netns::list_bridges_with_prefix(&bridge)
+        .await
+        .unwrap_or_default();
+    assert!(
+        leftover_br.is_empty(),
+        "Bridges still exist: {:?}",
+        leftover_br
+    );
+
+    let leftover_pid = netns::list_pidfiles(Path::new("/tmp"), &ns_prefix)
+        .await
+        .unwrap_or_default();
+    assert!(
+        leftover_pid.is_empty(),
+        "PID files still exist: {:?}",
+        leftover_pid
+    );
 
     println!("✓ Test environment is clean");
 }
 
 #[tokio::main]
 async fn main() {
-    let file = fs::File::create("allure-results/results.json").unwrap();
+    // Scope Allure output by PID so concurrent `cargo test` invocations
+    // don't clobber each other's results.json.
+    let _ = fs::create_dir_all("allure-results");
+    let results_path = format!("allure-results/results-{}.json", std::process::id());
+    let file = fs::File::create(&results_path).unwrap();
     BgpWorld::cucumber()
         .before(|feature, _rule, _scenario, world| {
             Box::pin(async move {
