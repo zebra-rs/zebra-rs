@@ -9,6 +9,7 @@ use crate::config::{
 
 use super::{
     AsPathSetConfig, CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig,
+    policy_entry_sync,
 };
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
@@ -28,6 +29,17 @@ pub enum Message {
         tx: UnboundedSender<PolicyRx>,
     },
     Register {
+        proto: String,
+        name: String,
+        ident: usize,
+        policy_type: PolicyType,
+    },
+    /// Counterpart of `Register`. Sent by a protocol when a peer
+    /// detaches a policy (operator runs `delete apply-policy in X`,
+    /// or rebinds to a different name). Without this the watcher
+    /// list grows unbounded as peers churn or rename their policy
+    /// references.
+    Unregister {
         proto: String,
         name: String,
         ident: usize,
@@ -240,6 +252,25 @@ impl Policy {
                     }
                 }
             }
+            Message::Unregister {
+                proto,
+                name,
+                ident,
+                policy_type,
+            } => {
+                let map = match policy_type {
+                    PolicyType::PrefixSetIn | PolicyType::PrefixSetOut => &mut self.watch_prefix,
+                    PolicyType::PolicyListIn | PolicyType::PolicyListOut => &mut self.watch_policy,
+                };
+                if let Some(watches) = map.get_mut(&name) {
+                    watches.retain(|w| {
+                        !(w.proto == proto && w.ident == ident && w.policy_type == policy_type)
+                    });
+                    if watches.is_empty() {
+                        map.remove(&name);
+                    }
+                }
+            }
         }
     }
 
@@ -258,6 +289,22 @@ impl Policy {
                 }
             }
             ConfigOp::CommitEnd => {
+                // Capture which names are about to be touched directly,
+                // before any of the per-set commits drain their caches.
+                // Used after the direct syncs to find policies that
+                // reference these sets indirectly (via `match prefix-set
+                // X` etc.) and re-fire their watchers — without this
+                // step, BGP peers attached to such policies wouldn't
+                // see updates that flow through indirection.
+                let changed_prefix_sets: std::collections::BTreeSet<String> =
+                    self.prefix_config.cache.keys().cloned().collect();
+                let changed_community_sets: std::collections::BTreeSet<String> =
+                    self.community_config.cache.keys().cloned().collect();
+                let changed_as_path_sets: std::collections::BTreeSet<String> =
+                    self.as_path_config.cache.keys().cloned().collect();
+                let changed_policies: std::collections::BTreeSet<String> =
+                    self.policy_config.cache.keys().cloned().collect();
+
                 // Sync prefix-set.
                 let syncer = PolicySyncer {
                     watch_map: &self.watch_prefix,
@@ -286,6 +333,24 @@ impl Policy {
                     &self.as_path_config,
                     syncer,
                 );
+
+                // Cascade: a policy that wasn't itself edited may still
+                // be stale if any of the prefix/community/as-path sets
+                // it references were updated. Re-resolve those policies
+                // against the freshly-committed sets and notify their
+                // watchers so attached peers re-evaluate Adj-RIB-In.
+                cascade_indirect_policy_updates(
+                    &mut self.policy_config.config,
+                    &self.prefix_config,
+                    &self.community_config,
+                    &self.as_path_config,
+                    &self.watch_policy,
+                    &self.clients,
+                    &changed_prefix_sets,
+                    &changed_community_sets,
+                    &changed_as_path_sets,
+                    &changed_policies,
+                );
             }
             _ => {}
         }
@@ -313,6 +378,76 @@ impl Policy {
                 }
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
+                }
+            }
+        }
+    }
+}
+
+/// Re-resolve and re-fire policies that *indirectly* reference any
+/// of the changed sets, skipping policies that were already directly
+/// committed in this same batch. This is what makes
+///
+///     set policy-options prefix-set hoge prefixes 2.2.2.2/32
+///
+/// reach a peer attached via `apply-policy in <policy that
+/// matches prefix-set hoge>` — the prefix-set edit alone wouldn't
+/// fire `policy_list_update` for that policy without this cascade.
+#[allow(clippy::too_many_arguments)]
+fn cascade_indirect_policy_updates(
+    policy_config: &mut BTreeMap<String, PolicyList>,
+    prefix_config: &PrefixSetConfig,
+    community_config: &CommunitySetConfig,
+    as_path_config: &AsPathSetConfig,
+    watch_policy: &BTreeMap<String, Vec<PolicyWatch>>,
+    clients: &BTreeMap<String, UnboundedSender<PolicyRx>>,
+    changed_prefix_sets: &std::collections::BTreeSet<String>,
+    changed_community_sets: &std::collections::BTreeSet<String>,
+    changed_as_path_sets: &std::collections::BTreeSet<String>,
+    changed_policies: &std::collections::BTreeSet<String>,
+) {
+    if changed_prefix_sets.is_empty()
+        && changed_community_sets.is_empty()
+        && changed_as_path_sets.is_empty()
+    {
+        return;
+    }
+    for (name, policy_list) in policy_config.iter_mut() {
+        // Already fired by PolicyConfig::commit; the cache version
+        // already saw the updated sets via `policy_entry_sync`.
+        if changed_policies.contains(name) {
+            continue;
+        }
+        let needs_resync = policy_list.entry.values().any(|e| {
+            e.prefix_set_name
+                .as_ref()
+                .is_some_and(|n| changed_prefix_sets.contains(n))
+                || e.next_hop_set_name
+                    .as_ref()
+                    .is_some_and(|n| changed_prefix_sets.contains(n))
+                || e.community_set_name
+                    .as_ref()
+                    .is_some_and(|n| changed_community_sets.contains(n))
+                || e.set_community_name
+                    .as_ref()
+                    .is_some_and(|n| changed_community_sets.contains(n))
+                || e.as_path_set_name
+                    .as_ref()
+                    .is_some_and(|n| changed_as_path_sets.contains(n))
+        });
+        if !needs_resync {
+            continue;
+        }
+        policy_entry_sync(policy_list, prefix_config, community_config, as_path_config);
+        if let Some(watches) = watch_policy.get(name) {
+            for watch in watches {
+                if let Some(tx) = clients.get(&watch.proto) {
+                    let _ = tx.send(PolicyRx::PolicyList {
+                        name: name.clone(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        policy_list: Some(policy_list.clone()),
+                    });
                 }
             }
         }

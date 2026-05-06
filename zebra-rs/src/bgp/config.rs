@@ -161,92 +161,141 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+/// Drive `Register` / `Unregister` messages to Policy as a peer's
+/// attachment changes. `prior` is the name the peer was bound to
+/// before this call (or None on first attach), `new` is what it's
+/// being bound to now (or None on detach).
+///
+/// - prior == new: idempotent reapply, no-op.
+/// - prior present, new differs: Unregister(prior) + Register(new).
+/// - new only: Register(new) (first attach).
+/// - prior only: Unregister(prior) (detach).
+///
+/// Always-Unregister-before-Register avoids the watcher leak that
+/// previously occurred when the operator switched a peer from
+/// `apply-policy in hoge` to `apply-policy in fuga` — the "hoge"
+/// watcher would otherwise stay registered forever.
+fn policy_attach_msgs(
+    policy_tx: &tokio::sync::mpsc::UnboundedSender<policy::Message>,
+    ident: usize,
+    policy_type: policy::PolicyType,
+    prior: Option<String>,
+    new: Option<String>,
+) {
+    if prior == new {
+        return;
+    }
+    if let Some(prior_name) = prior {
+        let _ = policy_tx.send(policy::Message::Unregister {
+            proto: "bgp".to_string(),
+            name: prior_name,
+            ident,
+            policy_type,
+        });
+    }
+    if let Some(new_name) = new {
+        let _ = policy_tx.send(policy::Message::Register {
+            proto: "bgp".to_string(),
+            name: new_name,
+            ident,
+            policy_type,
+        });
+    }
+}
+
 fn config_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    let policy_name = args.string()?;
-    if op.is_set() {
-        let config = peer.policy_list.get_mut(&InOut::Input);
-        config.name = Some(policy_name.clone());
-
-        let msg = policy::Message::Register {
-            proto: "bgp".to_string(),
-            name: policy_name,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PolicyListIn,
-        };
-        let _ = bgp.policy_tx.send(msg);
+    let new_name = if op.is_set() {
+        Some(args.string()?)
     } else {
-        let config = peer.policy_list.get_mut(&InOut::Input);
-        config.name = None;
-    }
+        None
+    };
+    let peer = bgp.peers.get_mut(&addr)?;
+    let peer_ident = peer.ident;
+    let config = peer.policy_list.get_mut(&InOut::Input);
+    let prior = match &new_name {
+        Some(n) => config.name.replace(n.clone()),
+        None => config.name.take(),
+    };
+    policy_attach_msgs(
+        &bgp.policy_tx,
+        peer_ident,
+        policy::PolicyType::PolicyListIn,
+        prior,
+        new_name,
+    );
     Some(())
 }
 
 fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    let policy_name = args.string()?;
-    if op.is_set() {
-        let config = peer.policy_list.get_mut(&InOut::Output);
-        config.name = Some(policy_name.clone());
-
-        let msg = policy::Message::Register {
-            proto: "bgp".to_string(),
-            name: policy_name,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PolicyListOut,
-        };
-        // tracing::info!("{:?}", msg);
-        let _ = bgp.policy_tx.send(msg);
+    let new_name = if op.is_set() {
+        Some(args.string()?)
     } else {
-        let config = peer.policy_list.get_mut(&InOut::Output);
-        config.name = None;
-    }
+        None
+    };
+    let peer = bgp.peers.get_mut(&addr)?;
+    let peer_ident = peer.ident;
+    let config = peer.policy_list.get_mut(&InOut::Output);
+    let prior = match &new_name {
+        Some(n) => config.name.replace(n.clone()),
+        None => config.name.take(),
+    };
+    policy_attach_msgs(
+        &bgp.policy_tx,
+        peer_ident,
+        policy::PolicyType::PolicyListOut,
+        prior,
+        new_name,
+    );
     Some(())
 }
 
 fn config_prefix_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    let policy = args.string()?;
-    if op.is_set() {
-        let config = peer.prefix_set.get_mut(&InOut::Input);
-        config.name = Some(policy.clone());
-
-        let msg = policy::Message::Register {
-            proto: "bgp".to_string(),
-            name: policy,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PrefixSetIn,
-        };
-        let _ = bgp.policy_tx.send(msg);
+    let new_name = if op.is_set() {
+        Some(args.string()?)
     } else {
-        let config = peer.prefix_set.get_mut(&InOut::Input);
-        config.name = None;
-    }
+        None
+    };
+    let peer = bgp.peers.get_mut(&addr)?;
+    let peer_ident = peer.ident;
+    let config = peer.prefix_set.get_mut(&InOut::Input);
+    let prior = match &new_name {
+        Some(n) => config.name.replace(n.clone()),
+        None => config.name.take(),
+    };
+    policy_attach_msgs(
+        &bgp.policy_tx,
+        peer_ident,
+        policy::PolicyType::PrefixSetIn,
+        prior,
+        new_name,
+    );
     Some(())
 }
 
 fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    let policy = args.string()?;
-    if op.is_set() {
-        let config = peer.prefix_set.get_mut(&InOut::Output);
-        config.name = Some(policy.clone());
-
-        let msg = policy::Message::Register {
-            proto: "bgp".to_string(),
-            name: policy,
-            ident: peer.ident,
-            policy_type: policy::PolicyType::PrefixSetOut,
-        };
-        let _ = bgp.policy_tx.send(msg);
+    let new_name = if op.is_set() {
+        Some(args.string()?)
     } else {
-        let config = peer.prefix_set.get_mut(&InOut::Output);
-        config.name = None;
-    }
+        None
+    };
+    let peer = bgp.peers.get_mut(&addr)?;
+    let peer_ident = peer.ident;
+    let config = peer.prefix_set.get_mut(&InOut::Output);
+    let prior = match &new_name {
+        Some(n) => config.name.replace(n.clone()),
+        None => config.name.take(),
+    };
+    policy_attach_msgs(
+        &bgp.policy_tx,
+        peer_ident,
+        policy::PolicyType::PrefixSetOut,
+        prior,
+        new_name,
+    );
     Some(())
 }
 

@@ -538,6 +538,12 @@ impl Bgp {
     }
 
     pub async fn process_policy_msg(&mut self, msg: policy::PolicyRx) {
+        // Two responsibilities per message: refresh the per-peer policy
+        // snapshot, then trigger a soft-reconfiguration so already-
+        // received Adj-RIB-In or already-advertised Loc-RIB entries
+        // get re-evaluated against the new policy. Without the second
+        // step a prefix-set / policy-list edit only affects routes
+        // that arrive *after* the edit.
         match msg {
             policy::PolicyRx::PrefixSet {
                 name: _,
@@ -548,12 +554,17 @@ impl Bgp {
                 let Some(peer) = self.peers.get_mut_by_idx(ident) else {
                     return;
                 };
-                if policy_type == policy::PolicyType::PrefixSetIn {
-                    let config = peer.prefix_set.get_mut(&InOut::Input);
-                    config.prefix_set = prefix_set;
-                } else if policy_type == policy::PolicyType::PrefixSetOut {
-                    let config = peer.prefix_set.get_mut(&InOut::Output);
-                    config.prefix_set = prefix_set;
+                let direction = match policy_type {
+                    policy::PolicyType::PrefixSetIn => InOut::Input,
+                    policy::PolicyType::PrefixSetOut => InOut::Output,
+                    _ => return,
+                };
+                let config = peer.prefix_set.get_mut(&direction);
+                config.prefix_set = prefix_set;
+
+                match direction {
+                    InOut::Input => super::peer::apply_soft_in_peer(self, ident),
+                    InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }
             policy::PolicyRx::PolicyList {
@@ -565,18 +576,17 @@ impl Bgp {
                 let Some(peer) = self.peers.get_mut_by_idx(ident) else {
                     return;
                 };
-                match policy_type {
-                    policy::PolicyType::PolicyListIn => {
-                        let config = peer.policy_list.get_mut(&InOut::Input);
-                        config.policy_list = policy_list;
-                    }
-                    policy::PolicyType::PolicyListOut => {
-                        let config = peer.policy_list.get_mut(&InOut::Output);
-                        config.policy_list = policy_list;
-                    }
-                    _ => {
-                        //
-                    }
+                let direction = match policy_type {
+                    policy::PolicyType::PolicyListIn => InOut::Input,
+                    policy::PolicyType::PolicyListOut => InOut::Output,
+                    _ => return,
+                };
+                let config = peer.policy_list.get_mut(&direction);
+                config.policy_list = policy_list;
+
+                match direction {
+                    InOut::Input => super::peer::apply_soft_in_peer(self, ident),
+                    InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }
         }
