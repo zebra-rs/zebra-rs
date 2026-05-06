@@ -1116,6 +1116,71 @@ pub fn clear(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt
     }
 }
 
+/// Replay Adj-RIB-In through the current inbound policy for `peer_idx`,
+/// without bouncing the session. If the peer has `soft-reconfiguration
+/// inbound` configured we replay locally from the stored Adj-RIB-In.
+/// Otherwise we fall back to RFC 2918 Route Refresh provided the peer
+/// advertised the capability. With neither, the call is a silent no-op
+/// — the peer will only converge on its next update.
+///
+/// Used by both the CLI (`clear_soft_in`) and the policy-update path
+/// in `process_policy_msg`. The CLI variant additionally formats a
+/// human-readable status string; this helper performs the side
+/// effects only.
+pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
+    let Some(peer) = bgp.peers.get_by_idx(peer_idx) else {
+        return;
+    };
+    if !peer.state.is_established() {
+        return;
+    }
+    let soft_in = peer.config.soft_reconfig_in;
+    let supports_refresh = peer.cap_recv.refresh.is_some();
+    let mp_pairs: Vec<(u16, u8)> = peer
+        .cap_recv
+        .mp
+        .keys()
+        .map(|af| (u16::from(af.afi), u8::from(af.safi)))
+        .collect();
+
+    if soft_in {
+        let mut bgp_ref = BgpTop {
+            router_id: &bgp.router_id,
+            local_rib: &mut bgp.local_rib,
+            tx: &bgp.tx,
+            rib_tx: &bgp.rib_tx,
+            attr_store: &mut bgp.attr_store,
+        };
+        super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+    } else if supports_refresh {
+        let peer = bgp.peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        for (afi, safi) in &mp_pairs {
+            peer_send_route_refresh(peer, *afi, *safi);
+        }
+    }
+}
+
+/// Replay Loc-RIB through the current outbound policy for `peer_idx`,
+/// without bouncing the session. Always works when the peer is
+/// Established — no peer cooperation needed because we drive the
+/// re-advertisement from our local RIB.
+pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
+    let Some(peer) = bgp.peers.get_by_idx(peer_idx) else {
+        return;
+    };
+    if !peer.state.is_established() {
+        return;
+    }
+    let mut bgp_ref = BgpTop {
+        router_id: &bgp.router_id,
+        local_rib: &mut bgp.local_rib,
+        tx: &bgp.tx,
+        rib_tx: &bgp.rib_tx,
+        attr_store: &mut bgp.attr_store,
+    };
+    super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+}
+
 // Soft-clear outbound: re-apply outbound policy and refresh
 // Adj-RIB-Out for this peer without bouncing the session. Returns
 // immediately if the peer isn't established (nothing to refresh).
