@@ -1,7 +1,7 @@
 use bytes::{BufMut, BytesMut};
 use nom_derive::*;
 
-use crate::{NotificationPacket, OpenPacket, UpdatePacket};
+use crate::{NotificationPacket, OpenPacket, RouteRefreshPacket, UpdatePacket};
 
 pub const BGP_PACKET_LEN: usize = 4096;
 pub const BGP_EXTENDED_PACKET_LEN: usize = 65535;
@@ -53,4 +53,5 @@ pub enum BgpPacket {
     Keepalive(BgpHeader),
     Notification(NotificationPacket),
     Update(Box<UpdatePacket>),
+    RouteRefresh(RouteRefreshPacket),
 }
