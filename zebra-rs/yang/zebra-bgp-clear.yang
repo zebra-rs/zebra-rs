@@ -1,0 +1,124 @@
+module zebra-bgp-clear {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-clear";
+  prefix "zbc";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR / IOS-XR style operational `clear bgp <afi> <peer> [soft [in|out]]`
+     command surface. Sits alongside the legacy `/clear/ip/bgp/soft-{in,out}
+     <addr>` paths in configure.yang — both are dispatched by the same
+     daemon-side handlers, so callers can use either grammar.
+
+     Path layout (per AFI container — ipv4 / ipv6 / vpnv4 / evpn):
+
+       /clear/bgp/<afi>/neighbor                  hard reset
+       /clear/bgp/<afi>/neighbor/soft             soft, both directions
+       /clear/bgp/<afi>/neighbor/soft/in          soft, inbound only
+       /clear/bgp/<afi>/neighbor/soft/out         soft, outbound only
+
+     The list key on `neighbor` is a `peer-id-or-all` — either the peer's
+     IP literal, or the keyword `all` to target every peer at that AFI.";
+
+  /* =========================================================
+   * Types
+   * ========================================================= */
+
+  typedef peer-id-or-all {
+    description
+      "BGP peer address (IPv4 or IPv6), or the literal `all` meaning
+       every peer at the enclosing AFI/SAFI. The same typedef is used
+       across all four AFI containers — under vpnv4 the runtime only
+       resolves IPv4 transports (and reports `peer not found` for IPv6
+       inputs); evpn accepts either v4 or v6 transports natively.";
+    type union {
+      type inet:ipv4-address;
+      type inet:ipv6-address;
+      type string {
+        pattern "all";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Reusable action subtree
+   * ========================================================= */
+
+  grouping bgp-clear-neighbor-actions {
+    description
+      "The `neighbor <key> [soft [in|out]]` subtree that hangs off
+       every AFI container under /clear/bgp/. Used by ipv4, ipv6,
+       vpnv4, evpn alike.";
+    list neighbor {
+      ext:presence "BGP neighbor clear actions";
+      key address;
+      leaf address {
+        ext:dynamic "bgp:neighbor";
+        type peer-id-or-all;
+      }
+      container soft {
+        presence
+          "Soft-clear (both directions when bare; narrow with `in` or `out`)";
+        ext:help "Re-apply policy without bouncing the session";
+        leaf in {
+          type empty;
+          ext:help "Inbound only";
+        }
+        leaf out {
+          type empty;
+          ext:help "Outbound only";
+        }
+        must "not(in and out)" {
+          error-message "soft in and soft out are mutually exclusive";
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augment into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:clear" {
+    description
+      "Add the `bgp <afi> ...` clear surface to /configure:clear.
+       Each AFI container reuses the same neighbor/soft grouping.";
+    container bgp {
+      ext:help "BGP clear actions";
+      container ipv4 {
+        ext:help "IPv4 unicast";
+        uses bgp-clear-neighbor-actions;
+      }
+      container ipv6 {
+        ext:help "IPv6 unicast";
+        uses bgp-clear-neighbor-actions;
+      }
+      container vpnv4 {
+        ext:help "VPNv4 (BGP/MPLS-VPN, RFC 4364)";
+        uses bgp-clear-neighbor-actions;
+      }
+      container evpn {
+        ext:help "L2VPN EVPN (RFC 7432)";
+        uses bgp-clear-neighbor-actions;
+      }
+    }
+  }
+}

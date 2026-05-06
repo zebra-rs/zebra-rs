@@ -1181,6 +1181,81 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }
 
+/// Action selector for the `clear bgp <afi> <peer> ...` family of
+/// operational commands. `Hard` bounces the session; the soft variants
+/// re-evaluate without disturbing the BGP FSM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgpClearOp {
+    Hard,
+    SoftBoth,
+    SoftIn,
+    SoftOut,
+}
+
+/// Drive `clear bgp <afi> <peer-or-all> [soft [in|out]]` requests from
+/// the new YANG schema in zebra-bgp-clear.yang. The first arg is the
+/// list key — either an IP literal or the keyword `all`.
+///
+/// Filtering by `(afi, safi)` only matters when the key is `all`; for
+/// a concrete peer address we look it up directly and skip the filter
+/// (the caller asked for *that* peer specifically). EVPN soft-in is
+/// not yet wired into `route_soft_in_peer`, so a soft-in/soft-both on
+/// EVPN logs a "not yet implemented" notice and leaves the session
+/// alone — Phase 5 of the EVPN work in route.rs lifts that.
+pub fn clear_bgp_action(
+    bgp: &mut Bgp,
+    args: &mut Args,
+    afi: bgp_packet::Afi,
+    safi: bgp_packet::Safi,
+    op: BgpClearOp,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(target) = args.string() else {
+        return Ok("missing peer or 'all' argument".to_string());
+    };
+
+    if matches!(op, BgpClearOp::SoftIn | BgpClearOp::SoftBoth) && safi == bgp_packet::Safi::Evpn {
+        return Ok("%% EVPN soft-in is not yet implemented".to_string());
+    }
+
+    let targets: Vec<IpAddr> = if target == "all" {
+        bgp.peers
+            .iter()
+            .filter_map(|(_, p)| p.is_afi_safi(afi, safi).then_some(p.address))
+            .collect()
+    } else {
+        match target.parse::<IpAddr>() {
+            Ok(addr) => vec![addr],
+            Err(_) => return Ok(format!("invalid peer or 'all': {}", target)),
+        }
+    };
+
+    if targets.is_empty() {
+        return Ok("%% no matching peers".to_string());
+    }
+
+    for addr in &targets {
+        let Some(peer_idx) = bgp.peers.get(addr).map(|p| p.ident) else {
+            continue;
+        };
+        match op {
+            BgpClearOp::Hard => {
+                let _ = bgp.tx.try_send(Message::Event(peer_idx, Event::Stop));
+            }
+            BgpClearOp::SoftBoth => {
+                apply_soft_in_peer(bgp, peer_idx);
+                apply_soft_out_peer(bgp, peer_idx);
+            }
+            BgpClearOp::SoftIn => apply_soft_in_peer(bgp, peer_idx),
+            BgpClearOp::SoftOut => apply_soft_out_peer(bgp, peer_idx),
+        }
+    }
+    Ok(format!(
+        "%% cleared {} peer(s) (op={:?})",
+        targets.len(),
+        op
+    ))
+}
+
 // Soft-clear outbound: re-apply outbound policy and refresh
 // Adj-RIB-Out for this peer without bouncing the session. Returns
 // immediately if the peer isn't established (nothing to refresh).
