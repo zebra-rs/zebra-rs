@@ -137,6 +137,15 @@ pub enum Message {
     VrfDel {
         name: String,
     },
+    /// Bind / unbind an interface to a VRF master device.
+    /// `vrf == Some(name)` enslaves; `vrf == None` clears the binding
+    /// (sets IFLA_MASTER = 0). The handler tolerates the interface or
+    /// the VRF not yet existing in our tables and stages the intent in
+    /// `pending_vrf_bind` so it fires when the missing piece arrives.
+    LinkVrfBind {
+        ifname: String,
+        vrf: Option<String>,
+    },
     MacAdd {
         vni: u32,
         mac: MacAddr,
@@ -245,6 +254,11 @@ pub struct Rib {
     /// `Message::VrfDel` removes the entry and releases the id.
     pub vrfs: BTreeMap<String, Vrf>,
     pub vrf_id_alloc: VrfIdAllocator,
+    /// Operator intent for per-interface VRF binding, keyed by ifname.
+    /// `Some(vrf)` = enslave; `None` = unbind. The handler retries this
+    /// when a missing interface or VRF master appears later, and clears
+    /// the entry once the netlink call succeeds.
+    pub pending_vrf_bind: BTreeMap<String, Option<String>>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
@@ -348,6 +362,7 @@ impl Rib {
             vxlan: BTreeMap::new(),
             vrfs: BTreeMap::new(),
             vrf_id_alloc: VrfIdAllocator::new(),
+            pending_vrf_bind: BTreeMap::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
@@ -863,20 +878,37 @@ impl Rib {
                     tracing::warn!("vrf_add({}) failed — id space exhausted", name);
                     return;
                 };
-                if self.fib_handle.vrf_add(&name, table_id).await.is_none() {
+                let Some(ifindex) = self.fib_handle.vrf_add(&name, table_id).await else {
                     // Netlink rejected the create — release the id so
                     // the next attempt isn't penalised by a leak.
                     self.vrf_id_alloc.release(table_id);
                     return;
-                }
+                };
                 self.vrfs.insert(
                     name.clone(),
                     Vrf {
                         name: name.clone(),
                         table_id,
+                        ifindex,
                     },
                 );
-                tracing::info!("vrf_add: {} table_id={}", name, table_id);
+                tracing::info!(
+                    "vrf_add: {} table_id={} ifindex={}",
+                    name,
+                    table_id,
+                    ifindex
+                );
+                // Replay any interface bindings that were waiting for
+                // this VRF to come up.
+                let to_replay: Vec<(String, Option<String>)> = self
+                    .pending_vrf_bind
+                    .iter()
+                    .filter(|(_, vrf)| vrf.as_deref() == Some(name.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                for (ifname, vrf) in to_replay {
+                    let _ = self.tx.send(Message::LinkVrfBind { ifname, vrf });
+                }
             }
             Message::VrfDel { name } => {
                 let Some(vrf) = self.vrfs.remove(&name) else {
@@ -890,6 +922,50 @@ impl Rib {
                 self.fib_handle.vrf_del(&name).await;
                 self.vrf_id_alloc.release(vrf.table_id);
                 tracing::info!("vrf_del: {} (table_id={})", name, vrf.table_id);
+            }
+            Message::LinkVrfBind { ifname, vrf } => {
+                // Always record operator intent so a later kernel
+                // NewLink (interface appears) or VrfAdd (master is
+                // created) can fire the bind without the operator
+                // re-issuing the command.
+                if vrf.is_none() {
+                    self.pending_vrf_bind.remove(&ifname);
+                } else {
+                    self.pending_vrf_bind
+                        .insert(ifname.clone(), vrf.clone());
+                }
+
+                let Some(link) = self.links.values().find(|l| l.name == ifname) else {
+                    tracing::info!(
+                        "link_vrf_bind: interface {} not present yet — pending",
+                        ifname
+                    );
+                    return;
+                };
+                let ifindex = link.index;
+
+                let master = match &vrf {
+                    Some(vrf_name) => match self.vrfs.get(vrf_name) {
+                        Some(v) => v.ifindex,
+                        None => {
+                            tracing::info!(
+                                "link_vrf_bind: vrf {} not present yet — pending",
+                                vrf_name
+                            );
+                            return;
+                        }
+                    },
+                    None => 0,
+                };
+
+                self.fib_handle.link_set_master(ifindex, master).await;
+                tracing::info!(
+                    "link_vrf_bind: ifname={} ifindex={} master={} vrf={:?}",
+                    ifname,
+                    ifindex,
+                    master,
+                    vrf
+                );
             }
             Message::BlockAdd { name, config } => {
                 let block = config.to_block(&name);

@@ -980,10 +980,23 @@ impl Rib {
 
 pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
-    writeln!(buf, " {:<32}{:>10}", "Name", "Table-ID").unwrap();
-    writeln!(buf, " {:-<32}  {:-<10}", "", "").unwrap();
+    writeln!(buf, " {:<24}{:>10}  Members", "Name", "Table-ID").unwrap();
+    writeln!(buf, " {:-<24}  {:-<10}  {:-<32}", "", "", "").unwrap();
     for vrf in rib.vrfs.values() {
-        writeln!(buf, " {:<32}{:>10}", vrf.name, vrf.table_id).unwrap();
+        let members: Vec<&str> = rib
+            .links
+            .values()
+            .filter(|l| l.master == Some(vrf.ifindex))
+            .map(|l| l.name.as_str())
+            .collect();
+        writeln!(
+            buf,
+            " {:<24}{:>10}  {}",
+            vrf.name,
+            vrf.table_id,
+            members.join(", ")
+        )
+        .unwrap();
     }
     buf
 }
