@@ -5,7 +5,7 @@ use nom_derive::*;
 
 use crate::{
     Afi, AfiSafi, BGP_EXTENDED_PACKET_LEN, BGP_PACKET_LEN, BgpHeader, BgpPacket, BgpParseError,
-    BgpType, NotificationPacket, OpenPacket, Safi, UpdatePacket,
+    BgpType, NotificationPacket, OpenPacket, RouteRefreshPacket, Safi, UpdatePacket,
 };
 
 #[derive(Default, Debug, Clone)]
@@ -89,6 +89,10 @@ impl BgpPacket {
             BgpType::Keepalive => {
                 let (input, header) = BgpHeader::parse_be(input)?;
                 Ok((input, BgpPacket::Keepalive(header)))
+            }
+            BgpType::RouteRefresh => {
+                let (input, packet) = RouteRefreshPacket::parse_packet(input)?;
+                Ok((input, BgpPacket::RouteRefresh(packet)))
             }
             _ => Err(BgpParseError::NomError(
                 "Unknown BGP packet type".to_string(),

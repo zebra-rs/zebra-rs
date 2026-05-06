@@ -1,0 +1,108 @@
+module zebra-bgp-soft-reconfiguration {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-soft-reconfiguration";
+  prefix "zbsr";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-neighbor soft-reconfiguration inbound knob.
+
+     Adds the classical `neighbor X soft-reconfiguration inbound`
+     vocabulary directly under each BGP neighbor:
+
+       router bgp {
+         neighbor 10.0.0.5 {
+           peer-as 65501;
+           soft-reconfiguration {
+             inbound true;
+           }
+         }
+       }
+
+     When enabled, the operator can re-apply inbound policy without a
+     session reset by issuing `clear ... soft in`; the peer's
+     pre-policy Adj-RIB-In is replayed locally instead of relying on
+     the peer sending a Route Refresh (RFC 2918). This is the
+     traditional knob exposed by FRR / Cisco IOS / Quagga and
+     complements — does not replace — the Route-Refresh capability
+     advertised in OPEN.
+
+     The IETF BGP model (ietf-bgp@2023-07-05) only models the
+     operational `clear` action with mode `soft-in / soft-out / soft`;
+     it has no persistent config leaf for stored-mode soft-in. This
+     overlay fills that gap.";
+
+  revision 2026-05-05 {
+    description "Initial revision.";
+    reference "FRR `neighbor X soft-reconfiguration inbound`.";
+  }
+
+  grouping bgp-neighbor-soft-reconfiguration-extension {
+    description
+      "FRR-style soft-reconfiguration leaves on a BGP neighbor.";
+
+    container soft-reconfiguration {
+      description
+        "Soft-reconfiguration knobs for this neighbor.";
+
+      leaf inbound {
+        ext:help "Store received UPDATEs so inbound policy can be re-applied without a session reset";
+        type boolean;
+        default "false";
+        description
+          "When true, retain the peer's pre-policy Adj-RIB-In so that
+           `clear ... soft in` can replay received UPDATEs through the
+           current inbound policy without sending a Route Refresh or
+           tearing down the session. Costs memory proportional to the
+           number of routes received from this peer.
+
+           When false (default), `clear ... soft in` falls back to
+           sending a BGP Route Refresh (RFC 2918) if the peer
+           negotiated the capability.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach soft-reconfiguration to BGP neighbors in the
+       candidate-set subtree.";
+    uses bgp-neighbor-soft-reconfiguration-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X soft-reconfiguration inbound`
+       is path-valid.";
+    uses bgp-neighbor-soft-reconfiguration-extension;
+  }
+}

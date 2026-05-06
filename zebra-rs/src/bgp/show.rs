@@ -1111,6 +1111,11 @@ struct Neighbor<'a> {
     cap_map: CapAfiMap,
     count: HashMap<&'a str, PeerCounter>,
     reflector_client: bool,
+    // FRR-style `neighbor X soft-reconfiguration inbound` flag
+    // (zebra-bgp-soft-reconfiguration.yang). When true, the peer's
+    // pre-policy Adj-RIB-In is retained so `clear ... soft in` can
+    // replay it locally without sending Route Refresh.
+    soft_reconfig_in: bool,
 }
 
 const ONE_DAY_SECOND: u64 = 60 * 60 * 24;
@@ -1231,6 +1236,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         cap_map: peer.cap_map.clone(),
         count: HashMap::default(),
         reflector_client: peer.reflector_client,
+        soft_reconfig_in: peer.config.soft_reconfig_in,
     };
 
     // Timers.
@@ -1304,6 +1310,11 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             idle_hold_rem
         )?;
     }
+
+    if neighbor.soft_reconfig_in {
+        writeln!(out, "  Inbound soft reconfiguration allowed")?;
+    }
+
     writeln!(out)?;
 
     if neighbor.state == "Established" {
