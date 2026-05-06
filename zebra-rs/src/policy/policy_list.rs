@@ -45,6 +45,9 @@ pub struct PolicyEntry {
     // Set.
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
+    pub set_community_name: Option<String>,
+    pub set_community: Option<CommunitySet>,
+    pub set_community_additive: bool,
     // Action.
     pub action: Option<PolicyAction>,
 }
@@ -67,6 +70,13 @@ pub fn policy_entry_sync(
                 policy.community_set = Some(community_set.clone());
             } else {
                 policy.community_set = None;
+            }
+        }
+        if let Some(name) = &policy.set_community_name {
+            if let Some(community_set) = community_set.config.get(name) {
+                policy.set_community = Some(community_set.clone());
+            } else {
+                policy.set_community = None;
             }
         }
     }
@@ -271,6 +281,39 @@ impl ConfigBuilder {
                 entry.med = None;
                 Ok(())
             })
+            .path("/entry/set/community-set")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let community_set = args.string().context(ARG_ERR)?;
+                entry.set_community_name = Some(community_set);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_community_name = None;
+                entry.set_community = None;
+                Ok(())
+            })
+            .path("/entry/set/community-additive")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let additive = args.boolean().context(ARG_ERR)?;
+                entry.set_community_additive = additive;
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_community_additive = false;
+                Ok(())
+            })
             .path("/entry/action")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -336,6 +379,14 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             }
             if let Some(med) = &entry.med {
                 let _ = writeln!(buf, "  set: med {}", med);
+            }
+            if let Some(set_community) = &entry.set_community_name {
+                let suffix = if entry.set_community_additive {
+                    " additive"
+                } else {
+                    ""
+                };
+                let _ = writeln!(buf, "  set: community {}{}", set_community, suffix);
             }
         }
         if let Some(default_action) = &policy.default_action {

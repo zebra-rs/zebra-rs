@@ -850,6 +850,12 @@ module config {
             leaf "next-hop" {
               type inet:ipv4-address;
             }
+            leaf "community-set" {
+              type string;
+            }
+            leaf "community-additive" {
+              type boolean;
+            }
           }
           leaf "action" {
             ext:sort "1";
