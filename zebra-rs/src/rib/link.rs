@@ -133,7 +133,7 @@ impl fmt::Display for LinkType {
     }
 }
 
-fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
+fn link_info_show(rib: &Rib, link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
     writeln!(buf, "Interface: {}", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
     if link.link_type == LinkType::Ethernet {
@@ -158,7 +158,10 @@ fn link_info_show(link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut Stri
     )
     .unwrap();
     writeln!(buf, "  {}", link.flags).unwrap();
-    writeln!(buf, "  VRF Binding: Not bound").unwrap();
+    let vrf_label = link_vrf_name(rib, link)
+        .map(|n| format!("vrf {}", n))
+        .unwrap_or_else(|| "Not bound".to_string());
+    writeln!(buf, "  VRF Binding: {}", vrf_label).unwrap();
     writeln!(
         buf,
         "  Label switching is {}",
@@ -219,12 +222,13 @@ pub fn link_brief_show(rib: &Rib, buf: &mut String) {
 
     for link in rib.links.values() {
         let status = if link.is_up() { "Up" } else { "Down" };
+        let vrf = link_vrf_name(rib, link).unwrap_or("default");
         let addrs = link.addr4.iter().chain(link.addr6.iter());
 
         let mut addrs_iter = addrs.peekable();
         if addrs_iter.peek().is_none() {
             // No addresses
-            writeln!(buf, "{:<16} {:<6} {:<14}", link.name, status, "default").unwrap();
+            writeln!(buf, "{:<16} {:<6} {:<14}", link.name, status, vrf).unwrap();
         } else {
             let mut first = true;
             for addr in addrs_iter {
@@ -232,7 +236,7 @@ pub fn link_brief_show(rib: &Rib, buf: &mut String) {
                     writeln!(
                         buf,
                         "{:<16} {:<6} {:<14} {}",
-                        link.name, status, "default", addr.addr
+                        link.name, status, vrf, addr.addr
                     )
                     .unwrap();
                     first = false;
@@ -262,7 +266,9 @@ pub fn link_brief_show_json(rib: &Rib) -> String {
             } else {
                 "Down".to_string()
             },
-            vrf: "default".to_string(),
+            vrf: link_vrf_name(rib, link)
+                .map(str::to_string)
+                .unwrap_or_else(|| "default".to_string()),
             addresses,
         };
 
@@ -278,7 +284,7 @@ pub fn link_detailed_show_json(rib: &Rib, link_name: Option<&str>) -> String {
     if let Some(name) = link_name {
         // Show single interface
         if let Some(link) = rib.link_by_name(name) {
-            interfaces.push(link_to_detailed_json(link));
+            interfaces.push(link_to_detailed_json(rib, link));
         } else {
             let error = serde_json::json!({
                 "error": format!("interface {} not found", name)
@@ -288,14 +294,14 @@ pub fn link_detailed_show_json(rib: &Rib, link_name: Option<&str>) -> String {
     } else {
         // Show all interfaces
         for link in rib.links.values() {
-            interfaces.push(link_to_detailed_json(link));
+            interfaces.push(link_to_detailed_json(rib, link));
         }
     }
 
     serde_json::to_string_pretty(&interfaces).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn link_to_detailed_json(link: &Link) -> InterfaceDetailed {
+fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
     let inet_addresses: Vec<InterfaceAddress> = link
         .addr4
         .iter()
@@ -323,7 +329,9 @@ fn link_to_detailed_json(link: &Link) -> InterfaceDetailed {
             "Down".to_string()
         },
         flags: format!("{}", link.flags),
-        vrf_binding: "Not bound".to_string(),
+        vrf_binding: link_vrf_name(rib, link)
+            .map(|n| format!("vrf {}", n))
+            .unwrap_or_else(|| "Not bound".to_string()),
         label_switching: if link.label {
             "enabled".to_string()
         } else {
@@ -344,7 +352,7 @@ pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
             return link_detailed_show_json(rib, None);
         } else {
             for (_, link) in rib.links.iter() {
-                link_info_show(link, &mut buf, &cb);
+                link_info_show(rib, link, &mut buf, &cb);
             }
         }
     } else {
@@ -363,7 +371,7 @@ pub fn link_show(rib: &Rib, mut args: Args, json: bool) -> String {
             return link_detailed_show_json(rib, Some(&link_name));
         } else {
             if let Some(link) = rib.link_by_name(&link_name) {
-                link_info_show(link, &mut buf, &cb)
+                link_info_show(rib, link, &mut buf, &cb)
             } else {
                 write!(buf, "% interface {} not found", link_name).unwrap();
             }
@@ -546,6 +554,18 @@ impl Rib {
             && prev_evpn_bridge != Some(bridge)
         {
             self.rescan_fdb_for_bridge(bridge);
+        }
+
+        // If a VRF binding is pending for this interface (operator
+        // configured it before the kernel device appeared, or before
+        // the VRF master was created), replay it now.
+        let ifname = self
+            .links
+            .get(&ifindex)
+            .map(|l| l.name.clone())
+            .unwrap_or_default();
+        if let Some(vrf) = self.pending_vrf_bind.get(&ifname).cloned() {
+            let _ = self.tx.send(Message::LinkVrfBind { ifname, vrf });
         }
     }
 
@@ -881,6 +901,19 @@ pub async fn link_config_exec(
                 println!("Interface {} not found", ifname);
             }
         }
+    } else if path == "/interface/vrf" {
+        // `set interface X vrf Y`   → enslave X to VRF master Y.
+        // `delete interface X vrf [Y]` → unbind X from whatever VRF it
+        // currently sits in. The optional Y on delete is ignored: the
+        // intent is unambiguous and we want to tolerate either form.
+        let vrf = if op.is_set() {
+            Some(args.string().context("missing vrf name")?)
+        } else {
+            // Drain any trailing token so it isn't picked up later.
+            let _ = args.string();
+            None
+        };
+        let _ = rib.tx.send(Message::LinkVrfBind { ifname, vrf });
     }
     Ok(())
 }
@@ -893,6 +926,18 @@ pub fn link_lookup(rib: &Rib, name: String) -> Option<u32> {
     }
 
     None
+}
+
+/// Resolve the VRF a link is enslaved to, by matching `link.master`
+/// against the ifindex of each known VRF master device. Returns
+/// `Some(name)` if the link is in a configured VRF, `None` for the
+/// default VRF or for slaves of non-VRF masters (e.g. bridges).
+pub fn link_vrf_name<'a>(rib: &'a Rib, link: &Link) -> Option<&'a str> {
+    let master = link.master?;
+    rib.vrfs
+        .values()
+        .find(|v| v.ifindex == master)
+        .map(|v| v.name.as_str())
 }
 
 #[cfg(test)]
