@@ -16,7 +16,7 @@ use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
 use crate::isis_event_trace;
 use crate::rib::link::LinkAddr;
-use crate::rib::{Link, MacAddr};
+use crate::rib::{Link, LinkFlagsExt, MacAddr};
 
 use super::config::{IsisConfig, MtId};
 use super::ifsm::{self, has_level};
@@ -887,6 +887,49 @@ struct LinkInfo {
     is_up: bool,
     link_type: String,
     level: String,
+    dis: String,
+    adjacency: String,
+}
+
+// Pick the level whose DIS / adjacency state is displayed in the
+// summary view. Mirrors the prior behaviour (L2 only when the circuit
+// is L2-only; otherwise L1) so single-level operators see the level
+// they actually run, and L1L2 collapses to the more-common L1 view —
+// `show isis interface detail` is the place to see both levels.
+fn summary_level(link: &IsisLink) -> Level {
+    if link.state.level() == IsLevel::L2 {
+        Level::L2
+    } else {
+        Level::L1
+    }
+}
+
+// DIS column. Loopback gets N/A regardless of the configured
+// link-type because the kernel device can't carry an adjacency.
+// Non-LAN circuits also show N/A — DIS election only runs on LAN.
+fn dis_column(link: &IsisLink, level: Level) -> &'static str {
+    if link.flags.is_loopback() {
+        return "N/A";
+    }
+    if link.config.link_type() != LinkType::Lan {
+        return "N/A";
+    }
+    match link.state.dis_status.get(&level) {
+        DisStatus::Myself => "DIS",
+        DisStatus::Other => "Other",
+        DisStatus::NotSelected => "Selecting",
+    }
+}
+
+// Adjacency column: the LAN ID (sys-id + circuit-id) once the
+// pseudonode LSP has confirmed our adjacency. `link.state.adj` is
+// cleared on link-down and on DIS reset, so "Down" here means we
+// have no usable adjacency for this level.
+fn adjacency_column(link: &IsisLink, level: Level) -> String {
+    match link.state.adj.get(&level) {
+        Some((adj, _)) => format!("Up {}", adj),
+        None => "Down".to_string(),
+    }
 }
 
 pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
@@ -894,49 +937,44 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
         let mut links = Vec::new();
         for (_ifindex, link) in isis.links.iter() {
             if link.config.enabled() {
+                let level = summary_level(link);
                 links.push(LinkInfo {
                     name: link.state.name.clone(),
                     ifindex: link.ifindex,
                     is_up: link.state.is_up(),
                     link_type: link.config.link_type().to_string(),
                     level: link.state.level.to_string(),
+                    dis: dis_column(link, level).to_string(),
+                    adjacency: adjacency_column(link, level),
                 });
             }
         }
         return Ok(serde_json::to_string_pretty(&links).unwrap());
     }
-    let mut buf = String::from("  Interface   CircId   State    Type     Level\n");
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "  {:<11} {:<8} {:<8} {:<8} {:<5} {:<9} Adjacency",
+        "Interface", "CircId", "State", "Type", "Level", "DIS",
+    )?;
     for (_ifindex, link) in isis.links.iter() {
-        if link.config.enabled() {
-            let mut dis_status = if link.state.level == IsLevel::L2 {
-                match link.state.dis_status.get(&Level::L2) {
-                    DisStatus::NotSelected => "no DIS is selected",
-                    DisStatus::Other => "is not DIS",
-                    DisStatus::Myself => "is DIS",
-                }
-            } else {
-                match link.state.dis_status.get(&Level::L1) {
-                    DisStatus::NotSelected => "no DIS is selected",
-                    DisStatus::Other => "is not DIS",
-                    DisStatus::Myself => "is DIS",
-                }
-            };
-            if link.config.link_type() != LinkType::Lan {
-                dis_status = "";
-            }
-            let link_state = if link.state.is_up() { "Up" } else { "Down" };
-            writeln!(
-                buf,
-                "  {:<11} 0x{:02X}     {:<8} {:<8} {} {}",
-                link.state.name,
-                link.ifindex,
-                link_state,
-                link.config.link_type().to_string(),
-                link.state.level,
-                dis_status,
-            )
-            .unwrap();
+        if !link.config.enabled() {
+            continue;
         }
+        let level = summary_level(link);
+        let link_state = if link.state.is_up() { "Up" } else { "Down" };
+        let circ_id = format!("0x{:02X}", link.ifindex);
+        writeln!(
+            buf,
+            "  {:<11} {:<8} {:<8} {:<8} {:<5} {:<9} {}",
+            link.state.name,
+            circ_id,
+            link_state,
+            link.config.link_type().to_string(),
+            link.state.level.to_string(),
+            dis_column(link, level),
+            adjacency_column(link, level),
+        )?;
     }
     Ok(buf)
 }

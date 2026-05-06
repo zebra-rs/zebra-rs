@@ -425,7 +425,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         // pseudonode adjacency, so transitioning now would leave us in
         // Other-with-adj=None — CSNPs would be dropped (packet.rs
         // csnp_recv guards on adj.is_some()), the self LSP would miss
-        // its pseudonode reach entry, and `show isis adjacency` would
+        // its pseudonode reach entry, and `show isis interface` would
         // report an inconsistent DIS without a binding. Election
         // outcome is recorded (`nbr.is_dis = true`); the late-LAN-ID
         // path in hello_recv re-fires DisSelection once lan_id arrives,
