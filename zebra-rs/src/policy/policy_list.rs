@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::net::Ipv4Addr;
 
 use anyhow::{Context, Error, Result};
 use strum_macros::{Display, EnumString};
@@ -49,6 +50,7 @@ pub struct PolicyEntry {
     pub set_community: Option<CommunitySet>,
     pub set_community_additive: bool,
     pub set_as_path_prepend: Option<Vec<u32>>,
+    pub set_next_hop: Option<Ipv4Addr>,
     // Action.
     pub action: Option<PolicyAction>,
 }
@@ -339,6 +341,22 @@ impl ConfigBuilder {
                 entry.set_as_path_prepend = None;
                 Ok(())
             })
+            .path("/entry/set/next-hop")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let addr = args.v4addr().context(ARG_ERR)?;
+                entry.set_next_hop = Some(addr);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_next_hop = None;
+                Ok(())
+            })
             .path("/entry/action")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -420,6 +438,9 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
                     .collect::<Vec<_>>()
                     .join(" ");
                 let _ = writeln!(buf, "  set: as-path-prepend {}", s);
+            }
+            if let Some(nh) = &entry.set_next_hop {
+                let _ = writeln!(buf, "  set: next-hop {}", nh);
             }
         }
         if let Some(default_action) = &policy.default_action {
