@@ -1,8 +1,8 @@
-mod vtysh {
-    tonic::include_proto!("vtysh");
+mod vty {
+    tonic::include_proto!("vty");
 }
-pub use vtysh::ApplyCode;
-pub use vtysh::ExecCode;
+pub use vty::ApplyCode;
+pub use vty::ExecCode;
 
 mod manager;
 pub use manager::ConfigManager;

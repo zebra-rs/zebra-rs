@@ -1,12 +1,12 @@
 use anyhow::Result;
 use std::process::exit;
 use tonic::Request;
-use vtysh::exec_client::ExecClient;
-use vtysh::show_client::ShowClient;
-use vtysh::{ExecRequest, ExecType, ShowRequest};
+use vty::exec_client::ExecClient;
+use vty::show_client::ShowClient;
+use vty::{ExecRequest, ExecType, ShowRequest};
 
-pub mod vtysh {
-    tonic::include_proto!("vtysh");
+pub mod vty {
+    tonic::include_proto!("vty");
 }
 
 pub async fn show(host: &str, command: &str, json: bool) -> Result<()> {

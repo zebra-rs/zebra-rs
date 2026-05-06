@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-pub mod vtysh {
-    tonic::include_proto!("vtysh");
+pub mod vty {
+    tonic::include_proto!("vty");
 }
 pub mod apply;
 pub mod clear;

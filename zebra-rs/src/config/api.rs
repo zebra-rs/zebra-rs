@@ -1,4 +1,4 @@
-use super::vtysh::CommandPath;
+use super::vty::CommandPath;
 use super::{ApplyCode, Completion, ExecCode};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::Sender;

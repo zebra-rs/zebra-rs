@@ -2,7 +2,7 @@
 
 syntax = "proto3";
 
-package vtysh;
+package vty;
 
 // The Command execution.
 service Exec {

@@ -4,11 +4,11 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::exit;
 use tonic::Request;
-use vtysh::apply_client::ApplyClient;
-use vtysh::{ApplyCode, ApplyRequest};
+use vty::apply_client::ApplyClient;
+use vty::{ApplyCode, ApplyRequest};
 
-pub mod vtysh {
-    tonic::include_proto!("vtysh");
+pub mod vty {
+    tonic::include_proto!("vty");
 }
 
 fn print_help() {

@@ -1,12 +1,12 @@
 use anyhow::Result;
 use std::process::exit;
 use tonic::Request;
-use vtysh::clear_client::ClearClient;
-use vtysh::exec_client::ExecClient;
-use vtysh::{ClearRequest, ExecRequest, ExecType};
+use vty::clear_client::ClearClient;
+use vty::exec_client::ExecClient;
+use vty::{ClearRequest, ExecRequest, ExecType};
 
-pub mod vtysh {
-    tonic::include_proto!("vtysh");
+pub mod vty {
+    tonic::include_proto!("vty");
 }
 
 pub async fn clear(host: &str, command: &str) -> Result<()> {
