@@ -27,7 +27,6 @@ impl Isis {
         self.show_add("/show/isis/dis/history", link::show_dis_history);
         self.show_add("/show/isis/neighbor", neigh::show);
         self.show_add("/show/isis/neighbor/detail", neigh::show_detail);
-        self.show_add("/show/isis/adjacency", show_isis_adjacency);
         self.show_add("/show/isis/database", show_isis_database);
         self.show_add("/show/isis/database/detail", show_isis_database_detail);
         self.show_add("/show/isis/hostname", hostname::show);
@@ -1169,25 +1168,6 @@ fn show_isis_database_detail(
 
         Ok(result)
     }
-}
-
-fn show_isis_adjacency(
-    top: &Isis,
-    _args: Args,
-    _json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
-    let mut buf = String::new();
-
-    for (_, link) in top.links.iter() {
-        writeln!(buf, "Interface: {}", top.ifname(link.ifindex))?;
-        if let Some((adj, _)) = &link.state.adj.get(&Level::L1) {
-            writeln!(buf, "  L1 Adj: {}", adj)?;
-        }
-        if let Some((adj, _)) = &link.state.adj.get(&Level::L2) {
-            writeln!(buf, "  L2 Adj: {}", adj).unwrap();
-        }
-    }
-    Ok(buf)
 }
 
 fn show_isis_spf(
