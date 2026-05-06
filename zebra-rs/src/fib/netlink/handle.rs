@@ -36,7 +36,7 @@ use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::IlmEntry;
-use crate::rib::route::DEBUG_ADDR;
+use crate::rib::route::{DEBUG_ADDR, DEBUG_EVPN};
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
     Vxlan, link,
@@ -1661,17 +1661,21 @@ impl FibHandle {
     /// Register VXLAN interface with its VNI for FDB operations
     /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
     pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
-        tracing::info!(
-            "[FIB] Registered VXLAN VNI {} with ifindex {}",
-            vni,
-            ifindex
-        );
+        if DEBUG_EVPN {
+            tracing::info!(
+                "[FIB] Registered VXLAN VNI {} with ifindex {}",
+                vni,
+                ifindex
+            );
+        }
         self.vni_ifindex_map.insert(vni, ifindex);
     }
 
     /// Unregister VXLAN interface mapping
     pub fn unregister_vxlan_ifindex(&mut self, vni: u32) {
-        tracing::info!("[FIB] Unregistered VXLAN VNI {}", vni);
+        if DEBUG_EVPN {
+            tracing::info!("[FIB] Unregistered VXLAN VNI {}", vni);
+        }
         self.vni_ifindex_map.remove(&vni);
     }
 
@@ -1708,23 +1712,27 @@ impl FibHandle {
         esi: Option<[u8; 10]>,
     ) {
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::info!(
-                "mac_add: no local VXLAN for VNI {} — skipping (mac {})",
-                vni,
-                mac
-            );
+            if DEBUG_EVPN {
+                tracing::info!(
+                    "mac_add: no local VXLAN for VNI {} — skipping (mac {})",
+                    vni,
+                    mac
+                );
+            }
             return;
         };
 
-        tracing::info!(
-            "mac_add: VNI {} mac {} ifindex {} dst {}",
-            vni,
-            mac,
-            vxlan_ifindex,
-            tunnel_endpoint
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "-".into()),
-        );
+        if DEBUG_EVPN {
+            tracing::info!(
+                "mac_add: VNI {} mac {} ifindex {} dst {}",
+                vni,
+                mac,
+                vxlan_ifindex,
+                tunnel_endpoint
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "-".into()),
+            );
+        }
 
         // Entry 1 — bridge master FDB. No VXLAN-specific attrs.
         // NUD_REACHABLE matches what Linux records for kernel-learned
@@ -1770,6 +1778,7 @@ impl FibHandle {
         // will be wired in Phase 5 when ECMP nexthop groups are supported.
         if let Some(esi_val) = esi
             && esi_val != [0u8; 10]
+            && DEBUG_EVPN
         {
             tracing::info!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
         }
@@ -1866,15 +1875,19 @@ impl FibHandle {
         // `unwrap_or(vni)` would have issued a stray RTM_DELNEIGH
         // against a random interface.
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::info!(
-                "mac_del: no local VXLAN for VNI {} — skipping (mac {})",
-                vni,
-                mac
-            );
+            if DEBUG_EVPN {
+                tracing::info!(
+                    "mac_del: no local VXLAN for VNI {} — skipping (mac {})",
+                    vni,
+                    mac
+                );
+            }
             return;
         };
 
-        tracing::info!("mac_del: VNI {} mac {} ifindex {}", vni, mac, vxlan_ifindex);
+        if DEBUG_EVPN {
+            tracing::info!("mac_del: VNI {} mac {} ifindex {}", vni, mac, vxlan_ifindex);
+        }
 
         // Mirror `mac_add` — remove BOTH the bridge master entry and
         // the VXLAN self entry. NUD state is irrelevant on delete
@@ -1937,20 +1950,24 @@ impl FibHandle {
         _seq: u32,
     ) {
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::info!(
-                "mdb_add: no local VXLAN for VNI {} — skipping (group {})",
-                vni,
-                group
-            );
+            if DEBUG_EVPN {
+                tracing::info!(
+                    "mdb_add: no local VXLAN for VNI {} — skipping (group {})",
+                    vni,
+                    group
+                );
+            }
             return;
         };
 
-        tracing::info!(
-            "mdb_add: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
-            vni,
-            group,
-            vxlan_ifindex,
-        );
+        if DEBUG_EVPN {
+            tracing::info!(
+                "mdb_add: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
+                vni,
+                group,
+                vxlan_ifindex,
+            );
+        }
 
         const NTF_SELF: u8 = 0x02;
         const NTF_EXT_LEARNED: u8 = 0x10;
@@ -1977,20 +1994,24 @@ impl FibHandle {
     /// Counterpart of `mdb_add`; same rationale on naming.
     pub async fn mdb_del(&self, vni: u32, group: IpAddr, _source: Option<IpAddr>, _ifindex: u32) {
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            tracing::info!(
-                "mdb_del: no local VXLAN for VNI {} — skipping (group {})",
-                vni,
-                group
-            );
+            if DEBUG_EVPN {
+                tracing::info!(
+                    "mdb_del: no local VXLAN for VNI {} — skipping (group {})",
+                    vni,
+                    group
+                );
+            }
             return;
         };
 
-        tracing::info!(
-            "mdb_del: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
-            vni,
-            group,
-            vxlan_ifindex,
-        );
+        if DEBUG_EVPN {
+            tracing::info!(
+                "mdb_del: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
+                vni,
+                group,
+                vxlan_ifindex,
+            );
+        }
 
         const NTF_SELF: u8 = 0x02;
 

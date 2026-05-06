@@ -9,6 +9,7 @@ use prefix_trie::PrefixMap;
 
 use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
 use crate::policy::{CommunityMatcher, PolicyList, StandardMatcher};
+use crate::rib::route::DEBUG_EVPN;
 use crate::rib::{self, MacAddr, api::FdbEntry};
 
 use super::cap::CapAfiMap;
@@ -1427,7 +1428,9 @@ fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
                     ((ec.val[3] as u32) << 16) | ((ec.val[4] as u32) << 8) | (ec.val[5] as u32);
 
                 if vni > 0 && vni < 0x1000000 {
-                    tracing::info!("extract_vni_from_attr: RT yields VNI {}", vni);
+                    if DEBUG_EVPN {
+                        tracing::info!("extract_vni_from_attr: RT yields VNI {}", vni);
+                    }
                     return Some(vni);
                 }
             }
