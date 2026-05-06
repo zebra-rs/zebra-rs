@@ -352,12 +352,11 @@ pub async fn list_bridges_with_prefix(prefix: &str) -> Result<Vec<String>> {
     for line in text.lines() {
         // `ip -o link show` emits lines like:
         //   "12: br_3f2a: <BROADCAST,...> mtu 1500 ..."
-        if let Some(rest) = line.split_once(": ") {
-            if let Some((name, _)) = rest.1.split_once(": ") {
-                if name.starts_with(prefix) {
-                    out.push(name.to_string());
-                }
-            }
+        if let Some(rest) = line.split_once(": ")
+            && let Some((name, _)) = rest.1.split_once(": ")
+            && name.starts_with(prefix)
+        {
+            out.push(name.to_string());
         }
     }
     Ok(out)
