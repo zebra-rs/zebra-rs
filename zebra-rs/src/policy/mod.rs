@@ -19,4 +19,7 @@ pub use prefix::*;
 pub mod community;
 pub use community::*;
 
+pub mod aspath;
+pub use aspath::*;
+
 pub mod show;
