@@ -788,6 +788,15 @@ module config {
         ext:dynamic "rib:interface";
         type string;
       }
+      leaf vrf {
+        type leafref {
+          path "/vrf/name";
+        }
+        description
+          "Enslave this interface to the named VRF master device.
+           Omitted means the interface lives in the default routing
+           instance.";
+      }
       container ipv4 {
         leaf address {
           type inet:ipv4-prefix;
@@ -889,6 +898,20 @@ module config {
             }
             leaf "next-hop" {
               type inet:ipv4-address;
+            }
+            leaf "community-set" {
+              type string;
+            }
+            leaf "community-additive" {
+              type boolean;
+            }
+            leaf "as-path-prepend" {
+              type string;
+              description
+                "Space-separated list of AS numbers to prepend to the
+                 AS-path. Example: '65001 65001 65002' prepends three
+                 segments. Equivalent to IOS-XR 'prepend as-path' or
+                 FRR 'set as-path prepend'.";
             }
           }
           leaf "action" {

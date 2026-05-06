@@ -8,7 +8,7 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
 use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
-use crate::policy::PolicyList;
+use crate::policy::{CommunityMatcher, PolicyList, StandardMatcher};
 use crate::rib::{self, MacAddr, api::FdbEntry};
 
 use super::cap::CapAfiMap;
@@ -2168,8 +2168,20 @@ pub fn policy_list_apply(
         if !entry_matches(entry, nlri, &bgp_attr) {
             continue;
         }
+        if let Some(local_pref) = &entry.local_pref {
+            bgp_attr.local_pref = Some(LocalPref::new(*local_pref));
+        }
         if let Some(med) = &entry.med {
             bgp_attr.med = Some(Med { med: *med });
+        }
+        if let Some(set_community) = &entry.set_community {
+            apply_set_community(&mut bgp_attr, set_community, entry.set_community_additive);
+        }
+        if let Some(prepend) = &entry.set_as_path_prepend {
+            apply_set_as_path_prepend(&mut bgp_attr, prepend);
+        }
+        if let Some(addr) = &entry.set_next_hop {
+            bgp_attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
         }
         return Some(bgp_attr);
     }
@@ -2228,6 +2240,57 @@ fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: 
         }
     }
     true
+}
+
+/// Apply a `set community <community-set> [additive]` action to `bgp_attr`.
+///
+/// Only `Standard::Exact` matchers contribute concrete values; regex and
+/// extended-community matchers are skipped (extended communities live in
+/// a separate BGP attribute, and regex patterns are not concrete values).
+/// With `additive = false` the existing community list is replaced; with
+/// `additive = true` the new values are merged in. The result is always
+/// sorted and deduplicated.
+fn apply_set_community(
+    bgp_attr: &mut BgpAttr,
+    set_community: &crate::policy::CommunitySet,
+    additive: bool,
+) {
+    let new_vals: Vec<u32> = set_community
+        .vals
+        .iter()
+        .filter_map(|m| match m {
+            CommunityMatcher::Standard(StandardMatcher::Exact(v)) => Some(v.0),
+            _ => None,
+        })
+        .collect();
+    if new_vals.is_empty() && !additive {
+        // Replace with empty: drop the attribute entirely.
+        bgp_attr.com = None;
+        return;
+    }
+    let mut com = if additive {
+        bgp_attr.com.clone().unwrap_or_default()
+    } else {
+        Community::new()
+    };
+    for v in new_vals {
+        com.push(v);
+    }
+    com.sort_uniq();
+    bgp_attr.com = Some(com);
+}
+
+/// Apply a `set as-path-prepend <asn>...` action by prepending the given
+/// ASNs onto the existing AS-path (or installing a new one if absent).
+fn apply_set_as_path_prepend(bgp_attr: &mut BgpAttr, asns: &[u32]) {
+    if asns.is_empty() {
+        return;
+    }
+    let prepend_path = As4Path::from(asns.to_vec());
+    match bgp_attr.aspath.as_mut() {
+        Some(existing) => existing.prepend_mut(prepend_path),
+        None => bgp_attr.aspath = Some(prepend_path),
+    }
 }
 
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
@@ -2978,5 +3041,222 @@ mod policy_apply_tests {
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_origin).is_none());
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_med).is_none());
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_path).is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use std::net::Ipv4Addr;
+
+    use bgp_packet::{
+        As4Path, BgpAttr, BgpNexthop, Community, CommunityValue, Ipv4Nlri, LocalPref,
+    };
+    use ipnet::Ipv4Net;
+
+    use super::policy_list_apply;
+    use crate::policy::{CommunityMatcher, CommunitySet, PolicyList};
+
+    fn nlri(s: &str) -> Ipv4Nlri {
+        Ipv4Nlri {
+            id: 0,
+            prefix: Ipv4Net::from_str(s).unwrap(),
+        }
+    }
+
+    fn community_set(members: &[&str]) -> CommunitySet {
+        let mut set = CommunitySet::default();
+        for m in members {
+            set.vals
+                .insert(CommunityMatcher::from_str(m).unwrap_or_else(|_| panic!("parse {m}")));
+        }
+        set
+    }
+
+    fn com_val(s: &str) -> u32 {
+        CommunityValue::from_readable_str(s)
+            .unwrap_or_else(|| panic!("parse {s}"))
+            .0
+    }
+
+    #[test]
+    fn policy_list_apply_sets_local_pref() {
+        let mut list = PolicyList::default();
+        list.entry(10).local_pref = Some(250);
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default())
+            .expect("entry with no match clause should apply");
+        assert_eq!(out.local_pref.expect("local_pref applied").local_pref, 250);
+    }
+
+    #[test]
+    fn policy_list_apply_sets_local_pref_and_med() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.local_pref = Some(150);
+        entry.med = Some(42);
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        assert_eq!(out.local_pref.unwrap().local_pref, 150);
+        assert_eq!(out.med.unwrap().med, 42);
+    }
+
+    #[test]
+    fn policy_list_apply_local_pref_overrides_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).local_pref = Some(200);
+
+        let attr = BgpAttr {
+            local_pref: Some(LocalPref::new(100)),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        assert_eq!(out.local_pref.unwrap().local_pref, 200);
+    }
+
+    #[test]
+    fn policy_list_apply_community_replace() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.set_community = Some(community_set(&["100:200", "no-export"]));
+        entry.set_community_additive = false;
+
+        // Existing community 999:999 must be wiped on replace.
+        let attr = BgpAttr {
+            com: Some(Community(vec![com_val("999:999")])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let com = out.com.expect("community attribute set");
+        assert!(com.contains(&com_val("100:200")));
+        assert!(com.contains(&CommunityValue::NO_EXPORT.value()));
+        assert!(!com.contains(&com_val("999:999")));
+        assert_eq!(com.0.len(), 2);
+    }
+
+    #[test]
+    fn policy_list_apply_community_additive() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.set_community = Some(community_set(&["100:200"]));
+        entry.set_community_additive = true;
+
+        let attr = BgpAttr {
+            com: Some(Community(vec![com_val("999:999")])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let com = out.com.expect("community attribute set");
+        assert!(com.contains(&com_val("100:200")));
+        assert!(com.contains(&com_val("999:999")));
+        assert_eq!(com.0.len(), 2);
+    }
+
+    #[test]
+    fn policy_list_apply_community_additive_dedups() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.set_community = Some(community_set(&["100:200"]));
+        entry.set_community_additive = true;
+
+        // 100:200 already present — additive should not duplicate.
+        let attr = BgpAttr {
+            com: Some(Community(vec![com_val("100:200")])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let com = out.com.expect("community attribute set");
+        assert_eq!(com.0, vec![com_val("100:200")]);
+    }
+
+    #[test]
+    fn policy_list_apply_community_replace_skips_regex() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        // Mix concrete + regex; only 100:200 is materializable.
+        entry.set_community = Some(community_set(&["100:200", "^65000:.*"]));
+        entry.set_community_additive = false;
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        let com = out.com.expect("community attribute set");
+        assert_eq!(com.0, vec![com_val("100:200")]);
+    }
+
+    #[test]
+    fn policy_list_apply_as_path_prepend_onto_empty() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_as_path_prepend = Some(vec![65001, 65001]);
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        let path = out.aspath.expect("aspath set");
+        assert_eq!(path.length(), 2);
+        assert_eq!(path.as_path_display(), "65001 65001");
+    }
+
+    #[test]
+    fn policy_list_apply_as_path_prepend_onto_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_as_path_prepend = Some(vec![65001]);
+
+        // Existing path: 100 200 (origin AS at the right).
+        let attr = BgpAttr {
+            aspath: Some(As4Path::from(vec![100, 200])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let path = out.aspath.expect("aspath set");
+        assert_eq!(path.as_path_display(), "65001 100 200");
+        assert_eq!(path.length(), 3);
+    }
+
+    #[test]
+    fn policy_list_apply_as_path_prepend_multi_asn() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_as_path_prepend = Some(vec![65001, 65002, 65003]);
+
+        let attr = BgpAttr {
+            aspath: Some(As4Path::from(vec![100])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let path = out.aspath.expect("aspath set");
+        assert_eq!(path.as_path_display(), "65001 65002 65003 100");
+        assert_eq!(path.length(), 4);
+    }
+
+    #[test]
+    fn policy_list_apply_sets_next_hop() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_next_hop = Some(Ipv4Addr::new(10, 1, 1, 1));
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        match out.nexthop.expect("nexthop set") {
+            BgpNexthop::Ipv4(a) => assert_eq!(a, Ipv4Addr::new(10, 1, 1, 1)),
+            other => panic!("expected Ipv4 nexthop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn policy_list_apply_next_hop_overrides_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_next_hop = Some(Ipv4Addr::new(10, 1, 1, 1));
+
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1))),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        match out.nexthop.unwrap() {
+            BgpNexthop::Ipv4(a) => assert_eq!(a, Ipv4Addr::new(10, 1, 1, 1)),
+            other => panic!("expected Ipv4 nexthop, got {:?}", other),
+        }
     }
 }
