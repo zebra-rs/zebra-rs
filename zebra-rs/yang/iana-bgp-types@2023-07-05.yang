@@ -288,7 +288,7 @@ module iana-bgp-types {
       "RFC4760: Multiprotocol Extentions for BGP-4.";
   }
 
-  identity ipv4-unicast {
+  identity ipv4 {
     base afi-safi-type;
     description
       "IPv4 unicast (AFI,SAFI = 1,1)";
@@ -296,15 +296,7 @@ module iana-bgp-types {
       "RFC4760: Multiprotocol Extentions for BGP-4.";
   }
 
-  identity ipv4-labeled-unicast {
-    base afi-safi-type;
-    description
-      "Labeled IPv4 unicast (AFI,SAFI = 1,4)";
-    reference
-      "RFC 8277: Using BGP to Bind MPLS Labels to Address Prefixes.";
-  }
-
-  identity ipv6-unicast {
+  identity ipv6 {
     base afi-safi-type;
     description
       "IPv6 unicast (AFI,SAFI = 2,1)";
@@ -312,31 +304,15 @@ module iana-bgp-types {
       "RFC4760: Multiprotocol Extentions for BGP-4.";
   }
 
-  identity ipv6-labeled-unicast {
-    base afi-safi-type;
-    description
-      "Labeled IPv6 unicast (AFI,SAFI = 2,4)";
-    reference
-      "RFC 8277: Using BGP to Bind MPLS Labels to Address Prefixes.";
-  }
-
-  identity l3vpn-ipv4-unicast {
+  identity vpnv4 {
     base afi-safi-type;
     description
       "Unicast IPv4 MPLS L3VPN (AFI,SAFI = 1,128)";
     reference
       "RFC 4364: BGP/MPLS IP Virtual Private Networks (VPNs).";
   }
-  identity l3vpn-ipv4-multicast {
-    base afi-safi-type;
-    description
-      "Multicast IPv4 MPLS L3VPN (AFI,SAFI = 1,129)";
-    reference
-      "RFC 6514: BGP Encodings and Procedures for Multicast in
-       MPLS/BGP IP VPNs.";
-  }
 
-  identity l3vpn-ipv6-unicast {
+  identity vpnv6 {
     base afi-safi-type;
     description
       "Unicast IPv6 MPLS L3VPN (AFI,SAFI = 2,128)";
@@ -345,30 +321,12 @@ module iana-bgp-types {
        for IPv6 VPN.";
   }
 
-  identity l3vpn-ipv6-multicast {
-    base afi-safi-type;
-    description
-      "Multicast IPv6 MPLS L3VPN (AFI,SAFI = 2,129)";
-    reference
-      "RFC 6514: BGP Encodings and Procedures for Multicast in
-       MPLS/BGP IP VPNs.";
-  }
-
-  identity l2vpn-evpn {
+  identity evpn {
     base afi-safi-type;
     description
       "BGP MPLS Based Ethernet VPN (AFI,SAFI = 25,70)";
     reference
       "RFC 7432: BGP MPLS-Based Ethernet VPN.";
-  }
-
-  identity l2vpn-vpls {
-    base afi-safi-type;
-    description
-      "BGP-signalled VPLS (AFI,SAFI = 25,65)";
-    reference
-      "RFC 4761: Virtual Private LAN Service (VPLS) Using BGP for
-       Auto-Discovery and Signaling.";
   }
 
   /* BGP Remove Private AS Identities. */

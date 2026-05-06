@@ -83,7 +83,7 @@ pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
     /// FRR-style `advertise-all-vni` knob under `router bgp afi-safi
-    /// l2vpn-evpn`. When true, every locally-configured VXLAN VNI
+    /// evpn`. When true, every locally-configured VXLAN VNI
     /// participates in EVPN advertisement: Type-2 (MAC/IP) routes
     /// from the kernel's bridge FDB and Type-3 (Inclusive Multicast)
     /// routes per local VTEP. Bridge -> VNI mapping is inferred from

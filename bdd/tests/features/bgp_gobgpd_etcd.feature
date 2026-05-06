@@ -35,7 +35,7 @@ Feature: BGP RR tests with gobgpd clients and etcd
 
   Config files:
   - rr.yaml: AS 64512, zebra-rs RR with cluster-id 198.18.39.94, peers to all gobgpd clients
-  - gobgpd clients configured as RR clients with l3vpn-ipv4-unicast AFI/SAFI
+  - gobgpd clients configured as RR clients with vpnv4 AFI/SAFI
   - etcd: Key-value store backend for zebra-rs configuration
 
   Scenario: Setup topology and establish BGP session

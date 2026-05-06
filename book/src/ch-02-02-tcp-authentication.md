@@ -112,7 +112,7 @@ router:
       peer-as: 65002
       enabled: true
       afi-safi:
-      - name: ipv4-unicast
+      - name: ipv4
         enabled: true
       tcp-md5:
         encoding: clear
@@ -151,7 +151,7 @@ router:
       peer-as: 65002
       enabled: true
       afi-safi:
-      - name: ipv4-unicast
+      - name: ipv4
         enabled: true
       tcp-ao:
         key-chain: BGP-AO
