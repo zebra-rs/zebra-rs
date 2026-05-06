@@ -850,6 +850,20 @@ module config {
             leaf "next-hop" {
               type inet:ipv4-address;
             }
+            leaf "community-set" {
+              type string;
+            }
+            leaf "community-additive" {
+              type boolean;
+            }
+            leaf "as-path-prepend" {
+              type string;
+              description
+                "Space-separated list of AS numbers to prepend to the
+                 AS-path. Example: '65001 65001 65002' prepends three
+                 segments. Equivalent to IOS-XR 'prepend as-path' or
+                 FRR 'set as-path prepend'.";
+            }
           }
           leaf "action" {
             ext:sort "1";
