@@ -19,6 +19,10 @@ use super::{Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
 
+// Flip to true to log EVPN-related diagnostic traces (e.g., VNI
+// extraction from RT extended communities).
+const DEBUG_EVPN: bool = false;
+
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum BgpRibType {
     IBGP,
@@ -1427,7 +1431,9 @@ fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
                     ((ec.val[3] as u32) << 16) | ((ec.val[4] as u32) << 8) | (ec.val[5] as u32);
 
                 if vni > 0 && vni < 0x1000000 {
-                    tracing::info!("extract_vni_from_attr: RT yields VNI {}", vni);
+                    if DEBUG_EVPN {
+                        tracing::info!("extract_vni_from_attr: RT yields VNI {}", vni);
+                    }
                     return Some(vni);
                 }
             }
