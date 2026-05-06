@@ -17,7 +17,7 @@ router:
     neighbor:
     - remote-address: 192.168.0.1
       afi-safi:
-      - name: ipv4-unicast
+      - name: ipv4
         enabled: true
       apply-policy:
         in: HOGE

@@ -26,13 +26,13 @@ Feature: BGP L2VPN/EVPN capability negotiation
   ```
 
   Both peers enable two AFI/SAFIs:
-    - ipv4-unicast (so the session has a fallback AF and matches the
+    - ipv4 (so the session has a fallback AF and matches the
       established BDD pattern)
-    - l2vpn-evpn  (the AF this scenario is actually validating)
+    - evpn  (the AF this scenario is actually validating)
 
   Config files:
-  - z1-1.yaml: AS 65001, peer to 192.168.0.2, l2vpn-evpn enabled
-  - z2-1.yaml: AS 65001, peer to 192.168.0.1, l2vpn-evpn enabled
+  - z1-1.yaml: AS 65001, peer to 192.168.0.2, evpn enabled
+  - z2-1.yaml: AS 65001, peer to 192.168.0.1, evpn enabled
 
   Scenario: Setup topology and establish iBGP session with EVPN capability
     Given a clean test environment

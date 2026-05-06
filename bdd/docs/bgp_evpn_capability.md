@@ -24,8 +24,8 @@ Multicast) lands in follow-up features.
 
 ## Config Files
 
-- z1-1.yaml: AS 65001, peer to 192.168.0.2, l2vpn-evpn enabled
-- z2-1.yaml: AS 65001, peer to 192.168.0.1, l2vpn-evpn enabled
+- z1-1.yaml: AS 65001, peer to 192.168.0.2, evpn enabled
+- z2-1.yaml: AS 65001, peer to 192.168.0.1, evpn enabled
 
 ## Test Scenarios
 

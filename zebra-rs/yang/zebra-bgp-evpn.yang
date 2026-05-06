@@ -26,7 +26,7 @@ module zebra-bgp-evpn {
     "EVPN service extensions to the BGP candidate-config tree.
 
      Adds the FRR-style `advertise-all-vni` knob under the BGP
-     global AFI/SAFI list — when enabled for the `l2vpn-evpn`
+     global AFI/SAFI list — when enabled for the `evpn`
      AFI/SAFI, every locally-configured VXLAN VNI participates in
      EVPN advertisement (Type-2 MAC/IP + Type-3 Inclusive Multicast)
      with auto-derived RD and RT.
@@ -37,12 +37,12 @@ module zebra-bgp-evpn {
          neighbor 10.0.0.1 {
            peer-as 65001;
            afi-safi {
-             name l2vpn-evpn;
+             name evpn;
              enabled true;
            }
          }
          afi-safi {
-           name l2vpn-evpn;
+           name evpn;
            advertise-all-vni true;
          }
        }
@@ -57,7 +57,7 @@ module zebra-bgp-evpn {
   grouping bgp-afi-safi-evpn-extension {
     description
       "Per-AFI/SAFI EVPN extensions on the global afi-safi list. Only
-       meaningful when the list entry's name is `bt:l2vpn-evpn` —
+       meaningful when the list entry's name is `bt:evpn` —
        harmless and ignored on other AFI/SAFIs.";
     leaf advertise-all-vni {
       type boolean;
@@ -89,7 +89,7 @@ module zebra-bgp-evpn {
   augment "/configure:delete/config:router/bgp:bgp/bgp:afi-safi" {
     description
       "Same attachment for the delete subtree so
-       `delete router bgp afi-safi l2vpn-evpn advertise-all-vni`
+       `delete router bgp afi-safi evpn advertise-all-vni`
        is path-valid.";
     uses bgp-afi-safi-evpn-extension;
   }

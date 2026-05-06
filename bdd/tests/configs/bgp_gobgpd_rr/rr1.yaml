@@ -68,7 +68,7 @@ router:
     neighbor:
     - remote-address: 198.18.37.17
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -90,7 +90,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.30
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -112,7 +112,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.81
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -134,7 +134,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.82
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -156,7 +156,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.83
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -178,7 +178,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.88
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -200,7 +200,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.89
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -222,7 +222,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.90
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -244,7 +244,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.91
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -266,7 +266,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.92
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -288,7 +288,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.93
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -310,7 +310,7 @@ router:
       rtc: true
     - remote-address: 198.18.37.94
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -332,7 +332,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.97
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -354,7 +354,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.110
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -376,7 +376,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.129
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -398,7 +398,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.130
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -420,7 +420,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.131
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -442,7 +442,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.136
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -464,7 +464,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.137
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -486,7 +486,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.138
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -508,7 +508,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.139
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -530,7 +530,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.140
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -552,7 +552,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.141
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -574,7 +574,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.142
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -596,7 +596,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.145
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:
@@ -618,7 +618,7 @@ router:
       rtc: true
     - remote-address: 198.18.39.158
       afi-safi:
-      - name: l3vpn-ipv4-unicast
+      - name: vpnv4
         enabled: true
         add-path: send
         graceful-restart:

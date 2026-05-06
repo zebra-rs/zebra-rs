@@ -374,7 +374,7 @@ fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
 fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
-    // The leaf only carries meaning for l2vpn-evpn; ignore on other
+    // The leaf only carries meaning for evpn; ignore on other
     // AFI/SAFIs. The YANG `advertise-all-vni` extension is augmented
     // into the global afi-safi list which spans every AF, so we have
     // to filter at the callback.
@@ -1013,7 +1013,7 @@ impl Bgp {
         self.callback_add("/router/bgp/afi-safi/network", config_network);
 
         // EVPN: FRR-style `advertise-all-vni` under
-        // `router bgp afi-safi l2vpn-evpn`. Augmented in by
+        // `router bgp afi-safi evpn`. Augmented in by
         // zebra-bgp-evpn.yang. Schema-only consumer for now —
         // origination from Rib::neighbors lands in a follow-up.
         self.callback_add(

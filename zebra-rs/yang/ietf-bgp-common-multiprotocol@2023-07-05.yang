@@ -162,8 +162,8 @@ submodule ietf-bgp-common-multiprotocol {
        for AFI-SAFI entries";
     // import and export policy included for the afi/safi
     uses rt-pol:apply-policy-group;
-    container ipv4-unicast {
-      when "../name = 'bt:ipv4-unicast'" {
+    container ipv4 {
+      when "../name = 'bt:ipv4'" {
         description
           "Include this container for IPv4 Unicast specific
            configuration";
@@ -174,8 +174,8 @@ submodule ietf-bgp-common-multiprotocol {
       uses mp-ipv4-ipv6-unicast-common;
       // placeholder for IPv4 unicast specific configuration
     }
-    container ipv6-unicast {
-      when "../name = 'bt:ipv6-unicast'" {
+    container ipv6 {
+      when "../name = 'bt:ipv6'" {
         description
           "Include this container for IPv6 Unicast specific
            configuration";
@@ -187,32 +187,8 @@ submodule ietf-bgp-common-multiprotocol {
       // placeholder for IPv6 unicast specific configuration
       // options
     }
-    container ipv4-labeled-unicast {
-      when "../name = 'bt:ipv4-labeled-unicast'" {
-        description
-          "Include this container for IPv4 Labeled Unicast specific
-           configuration";
-      }
-      description
-        "IPv4 Labeled Unicast configuration options";
-      uses mp-all-afi-safi-common;
-      // placeholder for IPv4 Labeled Unicast specific config
-      // options
-    }
-    container ipv6-labeled-unicast {
-      when "../name = 'bt:ipv6-labeled-unicast'" {
-        description
-          "Include this container for IPv6 Labeled Unicast specific
-           configuration";
-      }
-      description
-        "IPv6 Labeled Unicast configuration options";
-      uses mp-all-afi-safi-common;
-      // placeholder for IPv6 Labeled Unicast specific config
-      // options.
-    }
-    container l3vpn-ipv4-unicast {
-      when "../name = 'bt:l3vpn-ipv4-unicast'" {
+    container vpnv4 {
+      when "../name = 'bt:vpnv4'" {
         description
           "Include this container for IPv4 Unicast L3VPN specific
            configuration";
@@ -223,8 +199,8 @@ submodule ietf-bgp-common-multiprotocol {
       uses mp-l3vpn-ipv4-ipv6-unicast-common;
       // placeholder for IPv4 Unicast L3VPN specific config options.
     }
-    container l3vpn-ipv6-unicast {
-      when "../name = 'bt:l3vpn-ipv6-unicast'" {
+    container vpnv6 {
+      when "../name = 'bt:vpnv6'" {
         description
           "Include this container for unicast IPv6 L3VPN specific
            configuration";
@@ -236,47 +212,8 @@ submodule ietf-bgp-common-multiprotocol {
       // placeholder for IPv6 Unicast L3VPN specific configuration
       // options
     }
-    container l3vpn-ipv4-multicast {
-      when "../name = 'bt:l3vpn-ipv4-multicast'" {
-        description
-          "Include this container for multicast IPv6 L3VPN specific
-           configuration";
-      }
-      description
-        "Multicast IPv4 L3VPN configuration options";
-      // include common L3VPN multicast options
-      uses mp-l3vpn-ipv4-ipv6-multicast-common;
-      // placeholder for IPv4 Multicast L3VPN specific configuration
-      // options
-    }
-    container l3vpn-ipv6-multicast {
-      when "../name = 'bt:l3vpn-ipv6-multicast'" {
-        description
-          "Include this container for multicast IPv6 L3VPN specific
-           configuration";
-      }
-      description
-        "Multicast IPv6 L3VPN configuration options";
-      // include common L3VPN multicast options
-      uses mp-l3vpn-ipv4-ipv6-multicast-common;
-      // placeholder for IPv6 Multicast L3VPN specific configuration
-      // options
-    }
-    container l2vpn-vpls {
-      when "../name = 'bt:l2vpn-vpls'" {
-        description
-          "Include this container for BGP-signalled VPLS specific
-           configuration";
-      }
-      description
-        "BGP-signalled VPLS configuration options";
-      // include common L2VPN options
-      uses mp-l2vpn-common;
-      // placeholder for BGP-signalled VPLS specific configuration
-      // options
-    }
-    container l2vpn-evpn {
-      when "../name = 'bt:l2vpn-evpn'" {
+    container evpn {
+      when "../name = 'bt:evpn'" {
         description
           "Include this container for BGP EVPN specific
            configuration";
@@ -324,15 +261,6 @@ submodule ietf-bgp-common-multiprotocol {
        and IPv6";
     // placeholder -- specific configuration options that are generic
     // across IPv[46] unicast address families.
-    uses mp-all-afi-safi-common;
-  }
-
-  grouping mp-l3vpn-ipv4-ipv6-multicast-common {
-    description
-      "Common configuration applied across L3VPN for IPv4
-       and IPv6";
-    // placeholder -- specific configuration options that are
-    // generic across IPv[46] multicast address families.
     uses mp-all-afi-safi-common;
   }
 

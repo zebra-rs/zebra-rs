@@ -447,14 +447,14 @@ submodule ietf-bgp-rib {
             description
               "AFI,SAFI name.";
           }
-          container ipv4-unicast {
-            when "../name = 'bt:ipv4-unicast'" {
+          container ipv4 {
+            when "../name = 'bt:ipv4'" {
               description
                 "Include this container for IPv4 unicast RIB.";
             }
             description
               "Routing tables for IPv4 unicast -- active when the
-               afi-safi name is ipv4-unicast.";
+               afi-safi name is ipv4.";
 
             container loc-rib {
               config false;
@@ -566,14 +566,14 @@ submodule ietf-bgp-rib {
             }
           }
 
-          container ipv6-unicast {
-            when "../name = 'bt:ipv6-unicast'" {
+          container ipv6 {
+            when "../name = 'bt:ipv6'" {
               description
                 "Include this container for IPv6 unicast RIB.";
             }
             description
               "Routing tables for IPv6 unicast -- active when the
-               afi-safi name is ipv6-unicast.";
+               afi-safi name is ipv6.";
 
             container loc-rib {
               config false;

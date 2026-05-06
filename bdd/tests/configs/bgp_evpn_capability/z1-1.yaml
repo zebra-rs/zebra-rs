@@ -8,7 +8,7 @@ router:
       enabled: true
       peer-as: 65001
       afi-safi:
-      - name: ipv4-unicast
+      - name: ipv4
         enabled: true
-      - name: l2vpn-evpn
+      - name: evpn
         enabled: true
