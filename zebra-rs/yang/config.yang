@@ -773,6 +773,15 @@ module config {
         ext:dynamic "rib:interface";
         type string;
       }
+      leaf vrf {
+        type leafref {
+          path "/vrf/name";
+        }
+        description
+          "Enslave this interface to the named VRF master device.
+           Omitted means the interface lives in the default routing
+           instance.";
+      }
       container ipv4 {
         leaf address {
           type inet:ipv4-prefix;
