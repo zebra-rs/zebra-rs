@@ -1388,6 +1388,32 @@ impl FibHandle {
         }
     }
 
+    /// Set or clear the IFLA_MASTER (renamed to `Controller` in
+    /// netlink-packet-route) of `ifindex`. Pass `master == 0` to detach
+    /// (equivalent to `ip link set <link> nomaster`); a non-zero value
+    /// enslaves the link to that master device. Used for VRF interface
+    /// binding.
+    pub async fn link_set_master(&self, ifindex: u32, master: u32) {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+        msg.attributes.push(LinkAttribute::Controller(master));
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                tracing::warn!(
+                    "link_set_master(ifindex={}, master={}) error: {}",
+                    ifindex,
+                    master,
+                    e
+                );
+            }
+        }
+    }
+
     pub async fn addr_add_ipv4(
         &self,
         ifindex: u32,
