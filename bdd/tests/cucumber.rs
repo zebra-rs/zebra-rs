@@ -267,7 +267,7 @@ async fn ping_should_fail(world: &mut World, namespace: String, target: String) 
 #[when(expr = "I start zebra-rs in namespace {string}")]
 async fn start_zebra_rs(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
-    let log_file = format!("{}.log", scoped);
+    let log_file = format!("logs/{}.log", scoped);
     let pid_file = world.pid_file(&namespace);
 
     let _child = netns::spawn_in_netns(
@@ -627,6 +627,13 @@ async fn verify_clean_environment(world: &mut World) {
 
 #[tokio::main]
 async fn main() {
+    // Per-namespace daemon logs land in `logs/` so they don't litter
+    // the bdd crate root alongside features/configs. Created up front
+    // because `start_zebra_rs` doesn't go through netns helpers and
+    // would otherwise fail with "no such file or directory" when
+    // zebra-rs opens its --log-file.
+    let _ = fs::create_dir_all("logs");
+
     // Scope Allure output by PID so concurrent `cargo test` invocations
     // don't clobber each other's results.json.
     let _ = fs::create_dir_all("allure-results");
