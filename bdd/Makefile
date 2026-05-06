@@ -32,6 +32,10 @@ bgp_evpn_capability:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_evpn_capability"
 
+bgp_route_map_match:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_route_map_match"
+
 generate:
 	rm -rf allure-report
 	allure generate
@@ -51,4 +55,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 bgp_evpn_capability generate open docs FORCE
+.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 bgp_evpn_capability bgp_route_map_match generate open docs FORCE

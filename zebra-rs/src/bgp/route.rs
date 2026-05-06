@@ -2165,48 +2165,81 @@ pub fn policy_list_apply(
     mut bgp_attr: BgpAttr,
 ) -> Option<BgpAttr> {
     for (_, entry) in policy_list.entry.iter() {
-        let mut prefix_matched: Option<bool> = None;
-        if let Some(prefix_set) = &entry.prefix_set {
-            if prefix_set.matches(nlri.prefix) {
-                prefix_matched = Some(true);
-            } else {
-                prefix_matched = Some(false);
-            }
+        if !entry_matches(entry, nlri, &bgp_attr) {
+            continue;
         }
-        let mut community_matched: Option<bool> = None;
-        if let Some(community_set) = &entry.community_set {
-            if community_set.matches(&bgp_attr) {
-                community_matched = Some(true);
-            } else {
-                community_matched = Some(false);
-            }
+        if let Some(local_pref) = &entry.local_pref {
+            bgp_attr.local_pref = Some(LocalPref::new(*local_pref));
         }
-        // If we matched to the statement or no match statement at all.
-        match (prefix_matched, community_matched) {
-            (None | Some(true), None | Some(true)) => {
-                if let Some(local_pref) = &entry.local_pref {
-                    bgp_attr.local_pref = Some(LocalPref::new(*local_pref));
-                }
-                if let Some(med) = &entry.med {
-                    bgp_attr.med = Some(Med { med: *med });
-                }
-                if let Some(set_community) = &entry.set_community {
-                    apply_set_community(&mut bgp_attr, set_community, entry.set_community_additive);
-                }
-                if let Some(prepend) = &entry.set_as_path_prepend {
-                    apply_set_as_path_prepend(&mut bgp_attr, prepend);
-                }
-                if let Some(addr) = &entry.set_next_hop {
-                    bgp_attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
-                }
-                return Some(bgp_attr);
-            }
-            (_, _) => {
-                //
-            }
+        if let Some(med) = &entry.med {
+            bgp_attr.med = Some(Med { med: *med });
         }
+        if let Some(set_community) = &entry.set_community {
+            apply_set_community(&mut bgp_attr, set_community, entry.set_community_additive);
+        }
+        if let Some(prepend) = &entry.set_as_path_prepend {
+            apply_set_as_path_prepend(&mut bgp_attr, prepend);
+        }
+        if let Some(addr) = &entry.set_next_hop {
+            bgp_attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+        }
+        return Some(bgp_attr);
     }
     None
+}
+
+fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: &BgpAttr) -> bool {
+    if let Some(prefix_set) = &entry.prefix_set
+        && !prefix_set.matches(nlri.prefix)
+    {
+        return false;
+    }
+    if let Some(community_set) = &entry.community_set
+        && !community_set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(as_path_set) = &entry.as_path_set
+        && !as_path_set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(next_hop_set) = &entry.next_hop_set {
+        let Some(BgpNexthop::Ipv4(addr)) = bgp_attr.nexthop.as_ref() else {
+            return false;
+        };
+        let net = ipnet::Ipv4Net::new(*addr, 32).expect("valid /32 nexthop");
+        if !next_hop_set.matches(net) {
+            return false;
+        }
+    }
+    if let Some(eq) = entry.match_med_eq {
+        let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+        if med != eq {
+            return false;
+        }
+    }
+    if let Some(ge) = entry.match_med_ge {
+        let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+        if med < ge {
+            return false;
+        }
+    }
+    if let Some(le) = entry.match_med_le {
+        let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+        if med > le {
+            return false;
+        }
+    }
+    if let Some(want) = entry.match_origin {
+        let Some(have) = bgp_attr.origin else {
+            return false;
+        };
+        if have != want {
+            return false;
+        }
+    }
+    true
 }
 
 /// Apply a `set community <community-set> [additive]` action to `bgp_attr`.
@@ -2864,6 +2897,151 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
     // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
     encap.val[5] = 8;
     encap
+}
+
+#[cfg(test)]
+mod policy_apply_tests {
+    use std::str::FromStr;
+
+    use bgp_packet::{As4Path, BgpNexthop, Med, Origin};
+    use ipnet::Ipv4Net;
+
+    use super::*;
+    use crate::policy::prefix::set::PrefixSetEntry;
+    use crate::policy::{AsPathMatcher, AsPathSet, PolicyList, PrefixSet};
+
+    fn nlri(prefix: &str) -> Ipv4Nlri {
+        Ipv4Nlri {
+            id: 0,
+            prefix: Ipv4Net::from_str(prefix).unwrap(),
+        }
+    }
+
+    fn attr_with(path: &str, med: Option<u32>, origin: Option<Origin>) -> BgpAttr {
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(As4Path::from_str(path).unwrap());
+        attr.med = med.map(|m| Med { med: m });
+        attr.origin = origin;
+        attr
+    }
+
+    #[test]
+    fn match_as_path_set() {
+        let mut set = AsPathSet::default();
+        set.vals
+            .insert(AsPathMatcher::from_str("\\b65001\\b").unwrap());
+
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.as_path_set = Some(set);
+
+        let attr_match = attr_with("65001 65002 65003", None, None);
+        let attr_miss = attr_with("65010 65020", None, None);
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_match).is_some());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_miss).is_none());
+    }
+
+    #[test]
+    fn match_med_eq_ge_le() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.match_med_ge = Some(100);
+        entry.match_med_le = Some(200);
+
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(150), None))
+                .is_some()
+        );
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(50), None)).is_none()
+        );
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(250), None))
+                .is_none()
+        );
+
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.match_med_eq = Some(100);
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(100), None))
+                .is_some()
+        );
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(101), None))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn match_origin() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.match_origin = Some(Origin::Egp);
+
+        assert!(
+            policy_list_apply(
+                &list,
+                &nlri("10.0.0.0/8"),
+                attr_with("1", None, Some(Origin::Egp))
+            )
+            .is_some()
+        );
+        assert!(
+            policy_list_apply(
+                &list,
+                &nlri("10.0.0.0/8"),
+                attr_with("1", None, Some(Origin::Igp))
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn match_next_hop_set() {
+        let mut next_hop = PrefixSet::default();
+        next_hop.prefixes.insert(
+            Ipv4Net::from_str("10.0.0.0/8").unwrap().into(),
+            PrefixSetEntry::default(),
+        );
+
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.next_hop_set = Some(next_hop);
+
+        let mut attr_in = attr_with("1", None, None);
+        attr_in.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(10, 1, 1, 1)));
+
+        let mut attr_out = attr_with("1", None, None);
+        attr_out.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(192, 168, 0, 1)));
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_in).is_some());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_out).is_none());
+    }
+
+    #[test]
+    fn multiple_match_clauses_all_required() {
+        let mut set = AsPathSet::default();
+        set.vals
+            .insert(AsPathMatcher::from_str("^65001\\b").unwrap());
+
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.as_path_set = Some(set);
+        entry.match_origin = Some(Origin::Igp);
+        entry.match_med_le = Some(50);
+
+        let pass = attr_with("65001 65002", Some(40), Some(Origin::Igp));
+        let bad_origin = attr_with("65001 65002", Some(40), Some(Origin::Egp));
+        let bad_med = attr_with("65001 65002", Some(60), Some(Origin::Igp));
+        let bad_path = attr_with("65010 65002", Some(40), Some(Origin::Igp));
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), pass).is_some());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_origin).is_none());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_med).is_none());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_path).is_none());
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,26 @@
+prefix-set:
+- name: WRONG-SUBNET
+  prefixes:
+  - prefix: 10.10.0.0/16
+    le: 32
+policy-options:
+  policy:
+  - name: IN-NEXTHOP
+    entry:
+    - number: 10
+      match:
+        next-hop-set: WRONG-SUBNET
+router:
+  bgp:
+    global:
+      as: 65002
+      identifier: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4-unicast
+        enabled: true
+      apply-policy:
+        in: IN-NEXTHOP
+      enabled: true
+      peer-as: 65001

@@ -3,11 +3,15 @@ use std::fmt::Write;
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Error, Result};
+use bgp_packet::Origin;
 use strum_macros::{Display, EnumString};
 
 use crate::config::{Args, ConfigOp};
 
-use super::{CommunitySet, CommunitySetConfig, Policy, PrefixSet, PrefixSetConfig};
+use super::{
+    AsPathSet, AsPathSetConfig, CommunitySet, CommunitySetConfig, Policy, PrefixSet,
+    PrefixSetConfig,
+};
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyList {
@@ -36,6 +40,15 @@ pub enum PolicyAction {
     Reject,
 }
 
+fn parse_origin(s: &str) -> Result<Origin> {
+    match s {
+        "igp" => Ok(Origin::Igp),
+        "egp" => Ok(Origin::Egp),
+        "incomplete" => Ok(Origin::Incomplete),
+        other => Err(anyhow::anyhow!("invalid origin: {}", other)),
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyEntry {
     // Match.
@@ -43,6 +56,14 @@ pub struct PolicyEntry {
     pub prefix_set: Option<PrefixSet>,
     pub community_set_name: Option<String>,
     pub community_set: Option<CommunitySet>,
+    pub as_path_set_name: Option<String>,
+    pub as_path_set: Option<AsPathSet>,
+    pub next_hop_set_name: Option<String>,
+    pub next_hop_set: Option<PrefixSet>,
+    pub match_med_eq: Option<u32>,
+    pub match_med_ge: Option<u32>,
+    pub match_med_le: Option<u32>,
+    pub match_origin: Option<Origin>,
     // Set.
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
@@ -59,6 +80,7 @@ pub fn policy_entry_sync(
     policy_list: &mut PolicyList,
     prefix_set: &PrefixSetConfig,
     community_set: &CommunitySetConfig,
+    as_path_set: &AsPathSetConfig,
 ) {
     for (_, policy) in policy_list.entry.iter_mut() {
         if let Some(name) = &policy.prefix_set_name {
@@ -73,6 +95,20 @@ pub fn policy_entry_sync(
                 policy.community_set = Some(community_set.clone());
             } else {
                 policy.community_set = None;
+            }
+        }
+        if let Some(name) = &policy.as_path_set_name {
+            if let Some(as_path_set) = as_path_set.config.get(name) {
+                policy.as_path_set = Some(as_path_set.clone());
+            } else {
+                policy.as_path_set = None;
+            }
+        }
+        if let Some(name) = &policy.next_hop_set_name {
+            if let Some(prefix_set) = prefix_set.config.get(name) {
+                policy.next_hop_set = Some(prefix_set.clone());
+            } else {
+                policy.next_hop_set = None;
             }
         }
         if let Some(name) = &policy.set_community_name {
@@ -125,6 +161,7 @@ impl PolicyConfig {
         cache: &mut BTreeMap<String, PolicyList>,
         prefix_config: &PrefixSetConfig,
         community_config: &CommunitySetConfig,
+        as_path_config: &AsPathSetConfig,
         syncer: S,
     ) {
         while let Some((name, mut s)) = cache.pop_first() {
@@ -132,7 +169,7 @@ impl PolicyConfig {
                 syncer.policy_list_remove(&name);
                 config.remove(&name);
             } else {
-                policy_entry_sync(&mut s, prefix_config, community_config);
+                policy_entry_sync(&mut s, prefix_config, community_config, as_path_config);
                 syncer.policy_list_update(&name, &s);
                 config.insert(name, s);
             }
@@ -250,6 +287,91 @@ impl ConfigBuilder {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
                 entry.community_set_name = None;
+                Ok(())
+            })
+            .path("/entry/match/as-path-set")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let as_path_set = args.string().context(ARG_ERR)?;
+                entry.as_path_set_name = Some(as_path_set);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.as_path_set_name = None;
+                Ok(())
+            })
+            .path("/entry/match/next-hop-set")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let next_hop_set = args.string().context(ARG_ERR)?;
+                entry.next_hop_set_name = Some(next_hop_set);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.next_hop_set_name = None;
+                Ok(())
+            })
+            .path("/entry/match/med-eq")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_med_eq = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_med_eq = None;
+                Ok(())
+            })
+            .path("/entry/match/med-ge")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_med_ge = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_med_ge = None;
+                Ok(())
+            })
+            .path("/entry/match/med-le")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_med_le = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_med_le = None;
+                Ok(())
+            })
+            .path("/entry/match/origin")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                let origin_str = args.string().context(ARG_ERR)?;
+                entry.match_origin = Some(parse_origin(&origin_str).context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_origin = None;
                 Ok(())
             })
             .path("/entry/set/local-preference")
@@ -416,6 +538,24 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             }
             if let Some(community_set) = &entry.community_set_name {
                 let _ = writeln!(buf, "  match: community_set {}", community_set);
+            }
+            if let Some(as_path_set) = &entry.as_path_set_name {
+                let _ = writeln!(buf, "  match: as_path_set {}", as_path_set);
+            }
+            if let Some(next_hop_set) = &entry.next_hop_set_name {
+                let _ = writeln!(buf, "  match: next_hop_set {}", next_hop_set);
+            }
+            if let Some(med) = &entry.match_med_eq {
+                let _ = writeln!(buf, "  match: med eq {}", med);
+            }
+            if let Some(med) = &entry.match_med_ge {
+                let _ = writeln!(buf, "  match: med ge {}", med);
+            }
+            if let Some(med) = &entry.match_med_le {
+                let _ = writeln!(buf, "  match: med le {}", med);
+            }
+            if let Some(origin) = &entry.match_origin {
+                let _ = writeln!(buf, "  match: origin {:?}", origin);
             }
             if let Some(local_pref) = &entry.local_pref {
                 let _ = writeln!(buf, "  set: local-pref {}", local_pref);
