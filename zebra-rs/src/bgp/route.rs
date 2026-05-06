@@ -2197,6 +2197,9 @@ pub fn policy_list_apply(
                         entry.set_community_additive,
                     );
                 }
+                if let Some(prepend) = &entry.set_as_path_prepend {
+                    apply_set_as_path_prepend(&mut bgp_attr, prepend);
+                }
                 return Some(bgp_attr);
             }
             (_, _) => {
@@ -2243,6 +2246,19 @@ fn apply_set_community(
     }
     com.sort_uniq();
     bgp_attr.com = Some(com);
+}
+
+/// Apply a `set as-path-prepend <asn>...` action by prepending the given
+/// ASNs onto the existing AS-path (or installing a new one if absent).
+fn apply_set_as_path_prepend(bgp_attr: &mut BgpAttr, asns: &[u32]) {
+    if asns.is_empty() {
+        return;
+    }
+    let prepend_path = As4Path::from(asns.to_vec());
+    match bgp_attr.aspath.as_mut() {
+        Some(existing) => existing.prepend_mut(prepend_path),
+        None => bgp_attr.aspath = Some(prepend_path),
+    }
 }
 
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
@@ -2855,7 +2871,7 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
 mod tests {
     use std::str::FromStr;
 
-    use bgp_packet::{BgpAttr, Community, CommunityValue, Ipv4Nlri, LocalPref};
+    use bgp_packet::{As4Path, BgpAttr, Community, CommunityValue, Ipv4Nlri, LocalPref};
     use ipnet::Ipv4Net;
 
     use super::policy_list_apply;
@@ -2988,5 +3004,49 @@ mod tests {
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
         let com = out.com.expect("community attribute set");
         assert_eq!(com.0, vec![com_val("100:200")]);
+    }
+
+    #[test]
+    fn policy_list_apply_as_path_prepend_onto_empty() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_as_path_prepend = Some(vec![65001, 65001]);
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        let path = out.aspath.expect("aspath set");
+        assert_eq!(path.length(), 2);
+        assert_eq!(path.as_path_display(), "65001 65001");
+    }
+
+    #[test]
+    fn policy_list_apply_as_path_prepend_onto_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_as_path_prepend = Some(vec![65001]);
+
+        // Existing path: 100 200 (origin AS at the right).
+        let attr = BgpAttr {
+            aspath: Some(As4Path::from(vec![100, 200])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let path = out.aspath.expect("aspath set");
+        assert_eq!(path.as_path_display(), "65001 100 200");
+        assert_eq!(path.length(), 3);
+    }
+
+    #[test]
+    fn policy_list_apply_as_path_prepend_multi_asn() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_as_path_prepend = Some(vec![65001, 65002, 65003]);
+
+        let attr = BgpAttr {
+            aspath: Some(As4Path::from(vec![100])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let path = out.aspath.expect("aspath set");
+        assert_eq!(path.as_path_display(), "65001 65002 65003 100");
+        assert_eq!(path.length(), 4);
     }
 }
