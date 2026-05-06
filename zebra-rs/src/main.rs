@@ -56,6 +56,12 @@ struct Arg {
         help = "Re-install configured addresses removed by the kernel (cool-down on burst); off by default"
     )]
     enable_addr_recovery: bool,
+
+    #[arg(
+        long,
+        help = "Write PID to this file on startup; in --daemon mode replaces /var/run/zebra-rs.pid"
+    )]
+    pid_file: Option<String>,
 }
 
 // 1. Option Yang path
@@ -111,9 +117,9 @@ fn system_path(arg: &Arg) -> PathBuf {
     }
 }
 
-fn daemonize() -> anyhow::Result<()> {
+fn daemonize(pid_file: Option<&str>) -> anyhow::Result<()> {
     let daemonize = Daemonize::new()
-        .pid_file("/var/run/zebra-rs.pid") // Every method except `new` and `start`
+        .pid_file(pid_file.unwrap_or("/var/run/zebra-rs.pid"))
         .chown_pid_file(true) // is optional, see `Daemonize` documentation
         .working_directory("/") // for default behaviour.
         .umask(0o027) // Set umask, `0o027` by default.
@@ -123,6 +129,11 @@ fn daemonize() -> anyhow::Result<()> {
         Ok(_) => Ok(()),
         Err(e) => Err(anyhow::anyhow!("Failed to daemonize: {}", e)),
     }
+}
+
+fn write_pid_file(path: &str) -> anyhow::Result<()> {
+    std::fs::write(path, format!("{}\n", std::process::id()))
+        .map_err(|e| anyhow::anyhow!("Failed to write PID to {}: {}", path, e))
 }
 
 #[tokio::main]
@@ -168,7 +179,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Daemonize if requested (after tracing setup)
     if arg.daemon {
-        daemonize()?;
+        daemonize(arg.pid_file.as_deref())?;
+    } else if let Some(ref path) = arg.pid_file {
+        write_pid_file(path)?;
     }
 
     tracing::info!("zebra-rs started");

@@ -1,6 +1,15 @@
 use anyhow::{Context, Result, bail};
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::fs;
 use tokio::process::Command;
+
+/// Per-process counter for generating unique temporary veth names in
+/// `connect_netns_pair`. Names get renamed and moved into namespaces
+/// immediately after creation, so they only need to be unique on the
+/// host between `ip link add` and `ip link set`.
+static PAIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Run a command and check for success
 async fn run_cmd(args: &[&str], error_msg: &str) -> Result<()> {
@@ -106,15 +115,23 @@ pub async fn delete_bridge(bridge_name: &str) -> Result<()> {
     .await
 }
 
-/// Create a veth pair and connect namespace to bridge with IP
-pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str) -> Result<()> {
-    let veth_host = format!("v{}", netns);
-    let veth_ns = format!("v{}ns", netns);
-
+/// Create a veth pair and connect a namespace to a bridge.
+///
+/// `veth_host` must be unique in the host's default namespace.
+/// `veth_ns` is the name the veth takes inside `netns` and need only be
+/// unique within that namespace; YAML configs and feature-file step
+/// arguments reference this name, so callers typically pick the bare
+/// `v{logical}ns` form (e.g. `vz1ns`).
+pub async fn connect_netns_to_bridge(
+    netns: &str,
+    bridge_name: &str,
+    veth_host: &str,
+    veth_ns: &str,
+) -> Result<()> {
     // Create veth pair
     run_cmd(
         &[
-            "ip", "link", "add", &veth_host, "type", "veth", "peer", "name", &veth_ns,
+            "ip", "link", "add", veth_host, "type", "veth", "peer", "name", veth_ns,
         ],
         &format!("Failed to create veth pair for {}", netns),
     )
@@ -122,27 +139,27 @@ pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str) -> Result<(
 
     // Move veth to namespace
     run_cmd(
-        &["ip", "link", "set", &veth_ns, "netns", netns],
+        &["ip", "link", "set", veth_ns, "netns", netns],
         &format!("Failed to move veth to namespace {}", netns),
     )
     .await?;
 
     // Add host veth to bridge
     run_cmd(
-        &["ip", "link", "set", &veth_host, "master", bridge_name],
+        &["ip", "link", "set", veth_host, "master", bridge_name],
         &format!("Failed to add veth to bridge {}", bridge_name),
     )
     .await?;
 
     // Bring up host veth
     run_cmd(
-        &["ip", "link", "set", &veth_host, "up"],
+        &["ip", "link", "set", veth_host, "up"],
         &format!("Failed to bring up host veth {}", veth_host),
     )
     .await?;
 
     // Bring up namespace veth
-    exec_in_netns(netns, "ip", &["link", "set", &veth_ns, "up"]).await?;
+    exec_in_netns(netns, "ip", &["link", "set", veth_ns, "up"]).await?;
 
     Ok(())
 }
@@ -157,13 +174,19 @@ pub async fn connect_netns_to_bridge(netns: &str, bridge_name: &str) -> Result<(
 /// then `ip link set <link> netns <ns> name <newname>` moves and renames
 /// each end in one atomic step.
 pub async fn connect_netns_pair(
+    short_id: &str,
     netns_a: &str,
     iface_a: &str,
     netns_b: &str,
     iface_b: &str,
 ) -> Result<()> {
-    let tmp_a = format!("vp{}{}a", netns_a, netns_b);
-    let tmp_b = format!("vp{}{}b", netns_a, netns_b);
+    // Temporary names live briefly in the host namespace; they need to be
+    // unique on the host between `ip link add` and `ip link set ... netns`.
+    // Using `short_id` plus a per-process counter keeps them well under
+    // IFNAMSIZ (15) regardless of how long `netns_a` / `netns_b` are.
+    let n = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_a = format!("v{}_p{}a", short_id, n);
+    let tmp_b = format!("v{}_p{}b", short_id, n);
 
     run_cmd(
         &[
@@ -204,12 +227,13 @@ pub async fn connect_netns_pair(
     Ok(())
 }
 
-/// Delete the veth interface for a namespace (host side)
-pub async fn delete_veth(netns: &str) -> Result<()> {
-    let veth_host = format!("v{}", netns);
-    // Ignore errors as the veth might not exist
+/// Delete a host-side veth interface by name. Best-effort: missing
+/// interface is not an error.
+pub async fn delete_veth(veth_host: &str) -> Result<()> {
     let _ = Command::new("sudo")
-        .args(["ip", "link", "del", &veth_host])
+        .args(["ip", "link", "del", veth_host])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await;
     Ok(())
@@ -234,11 +258,10 @@ pub async fn spawn_in_netns(
         .with_context(|| format!("Failed to spawn {} in netns {}", cmd, netns))
 }
 
-/// Bring the namespace-side veth (the one created by connect_netns_to_bridge)
-/// administratively up or down.
-pub async fn set_link_state(netns: &str, up: bool) -> Result<()> {
-    let veth_ns = format!("v{}ns", netns);
-    set_interface_state(netns, &veth_ns, up).await
+/// Bring the namespace-side veth administratively up or down.
+/// Caller passes the veth name (typically `v{logical}ns`).
+pub async fn set_link_state(netns: &str, veth: &str, up: bool) -> Result<()> {
+    set_interface_state(netns, veth, up).await
 }
 
 /// Bring an arbitrary interface inside a namespace administratively up or down.
@@ -248,16 +271,113 @@ pub async fn set_interface_state(netns: &str, interface: &str, up: bool) -> Resu
     Ok(())
 }
 
-/// Kill all zebra-rs processes on the host (across all namespaces).
-/// Errors are ignored — it's fine if no process is running.
-pub async fn killall_zebra_rs() -> Result<()> {
+/// Read a PID from a file. Returns None if the file is missing or
+/// unparseable.
+async fn read_pid(path: &Path) -> Option<u32> {
+    let contents = fs::read_to_string(path).await.ok()?;
+    contents.trim().parse::<u32>().ok()
+}
+
+/// Returns true if the PID written in `path` is currently a live
+/// process. Sends signal 0 (no-op signal that still triggers the
+/// permission/existence check). Missing file or unparseable contents
+/// count as not alive.
+pub async fn pidfile_alive(path: &Path) -> bool {
+    let Some(pid) = read_pid(path).await else {
+        return false;
+    };
+    Command::new("sudo")
+        .args(["kill", "-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// SIGKILL the PID recorded in `path` and remove the file. Best-effort:
+/// missing file, dead process, or unparseable contents are not errors.
+///
+/// We delete via `sudo rm` because zebra-rs is launched with `sudo ip
+/// netns exec ...`, so the pid file is owned by root and `/tmp` has
+/// the sticky bit set — non-root deletion silently fails.
+pub async fn kill_pidfile(path: &Path) -> Result<()> {
+    if let Some(pid) = read_pid(path).await {
+        let _ = Command::new("sudo")
+            .args(["kill", "-9", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
     let _ = Command::new("sudo")
-        .args(["killall", "-9", "zebra-rs"])
+        .arg("rm")
+        .arg("-f")
+        .arg(path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .await;
     Ok(())
+}
+
+/// List all network namespaces whose name starts with `prefix`.
+pub async fn list_netns_with_prefix(prefix: &str) -> Result<Vec<String>> {
+    let output = Command::new("sudo")
+        .args(["ip", "netns", "list"])
+        .stdout(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to list network namespaces")?;
+    let list = String::from_utf8_lossy(&output.stdout);
+    Ok(list
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| name.starts_with(prefix))
+        .map(String::from)
+        .collect())
+}
+
+/// List host bridges whose name starts with `prefix`.
+pub async fn list_bridges_with_prefix(prefix: &str) -> Result<Vec<String>> {
+    let output = Command::new("sudo")
+        .args(["ip", "-o", "link", "show", "type", "bridge"])
+        .stdout(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to list bridges")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // `ip -o link show` emits lines like:
+        //   "12: br_3f2a: <BROADCAST,...> mtu 1500 ..."
+        if let Some(rest) = line.split_once(": ") {
+            if let Some((name, _)) = rest.1.split_once(": ") {
+                if name.starts_with(prefix) {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// List PID files in `dir` whose filename starts with `prefix` and ends
+/// with `.pid`. Returns absolute paths.
+pub async fn list_pidfiles(dir: &Path, prefix: &str) -> Result<Vec<std::path::PathBuf>> {
+    let mut entries = fs::read_dir(dir)
+        .await
+        .with_context(|| format!("Failed to read dir {:?}", dir))?;
+    let mut out = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(prefix) && name.ends_with(".pid") {
+            out.push(entry.path());
+        }
+    }
+    Ok(out)
 }
 
 /// Ping an IPv6 target from inside a namespace. Returns true on success,
