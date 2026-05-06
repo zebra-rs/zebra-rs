@@ -133,12 +133,7 @@ impl fmt::Display for LinkType {
     }
 }
 
-fn link_info_show(
-    rib: &Rib,
-    link: &Link,
-    buf: &mut String,
-    cb: &impl Fn(&String, &mut String),
-) {
+fn link_info_show(rib: &Rib, link: &Link, buf: &mut String, cb: &impl Fn(&String, &mut String)) {
     writeln!(buf, "Interface: {}", link.name).unwrap();
     write!(buf, "  Hardware is {}", link.link_type).unwrap();
     if link.link_type == LinkType::Ethernet {
