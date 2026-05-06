@@ -48,6 +48,7 @@ pub struct PolicyEntry {
     pub set_community_name: Option<String>,
     pub set_community: Option<CommunitySet>,
     pub set_community_additive: bool,
+    pub set_as_path_prepend: Option<Vec<u32>>,
     // Action.
     pub action: Option<PolicyAction>,
 }
@@ -314,6 +315,30 @@ impl ConfigBuilder {
                 entry.set_community_additive = false;
                 Ok(())
             })
+            .path("/entry/set/as-path-prepend")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let raw = args.string().context(ARG_ERR)?;
+                let asns: Vec<u32> = raw
+                    .split_whitespace()
+                    .map(|s| s.parse::<u32>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("as-path-prepend: invalid AS number")?;
+                if asns.is_empty() {
+                    anyhow::bail!("as-path-prepend: empty AS list");
+                }
+                entry.set_as_path_prepend = Some(asns);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_as_path_prepend = None;
+                Ok(())
+            })
             .path("/entry/action")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -387,6 +412,14 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
                     ""
                 };
                 let _ = writeln!(buf, "  set: community {}{}", set_community, suffix);
+            }
+            if let Some(prepend) = &entry.set_as_path_prepend {
+                let s = prepend
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let _ = writeln!(buf, "  set: as-path-prepend {}", s);
             }
         }
         if let Some(default_action) = &policy.default_action {
