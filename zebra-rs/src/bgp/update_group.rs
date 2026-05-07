@@ -295,21 +295,16 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
 
 // ── IPv4 unicast send / cache_remove / flush (Phase 3) ──
 //
-// These functions own the per-attr-bucket batching that used to live
-// on `Peer` (cache_ipv4 + cache_ipv4_rev + cache_ipv4_timer). Moving
-// them to the group lets one encoded UPDATE serve every non-source
-// member, with per-member split-horizon pruning at flush time.
-//
-// Phase 3a (this commit): scaffolding only. `flush_ipv4` is wired
-// to `Message::FlushUpdateGroupIpv4` in `Bgp::serve` but no caller
-// produces that message yet — `send_ipv4` is still dead until Phase
-// 3b migrates `route_advertise_to_peers`, `route_advertise_to_addpath`,
-// and friends off `Peer::send_ipv4`. Phase 3d then removes the
-// per-peer `cache_ipv4` fields entirely.
+// Owns the per-attr-bucket batching that used to live on `Peer`
+// (cache_ipv4 + cache_ipv4_rev + cache_ipv4_timer). Moving the
+// state here lets one encoded UPDATE serve every non-source
+// member of a group, with per-member split-horizon pruning at
+// flush time. Per-peer paths that target a single peer
+// (`route_sync_ipv4`, `route_soft_out_peer_table`) bypass the
+// group cache via `send_ipv4_direct` — encoding stays per-attr-
+// batched without fanning out to the whole group.
 
-#[allow(dead_code)]
 const ADV_TIMER_IBGP_SECS: u64 = 5;
-#[allow(dead_code)]
 const ADV_TIMER_EBGP_SECS: u64 = 30;
 
 /// Bucket the (nlri, attr, source_ident) into the group's IPv4
@@ -317,7 +312,6 @@ const ADV_TIMER_EBGP_SECS: u64 = 30;
 /// already running. The `tx` channel is the global Bgp tx (every
 /// peer carries a clone of it); on fire it delivers
 /// `Message::FlushUpdateGroupIpv4` back to `Bgp::serve`.
-#[allow(dead_code)]
 pub fn send_ipv4(
     group: &mut UpdateGroup,
     nlri: Ipv4Nlri,
@@ -356,7 +350,6 @@ pub fn cache_remove_ipv4(group: &mut UpdateGroup, prefix: ipnet::Ipv4Net, id: u3
     }
 }
 
-#[allow(dead_code)]
 fn start_adv_timer_ipv4(
     tx: &mpsc::Sender<Message>,
     id: &UpdateGroupId,
@@ -508,6 +501,37 @@ pub fn flush_ipv4(
                     group.counters.messages_replicated += pruned_bytes.len() as u64;
                 }
             }
+        }
+    }
+}
+
+/// Per-peer batched encode + send. Used by the route_sync_ipv4 and
+/// route_soft_out_peer_table paths that target a SINGLE peer — the
+/// group cache would fan-out to every member, so those callers
+/// bypass it and use this direct path instead.
+///
+/// Builds local per-attr buckets, encodes once per bucket via
+/// `encode_ipv4_update`, and ships every UPDATE byte buffer to the
+/// peer's `packet_tx`. Per-attr clustering preserves the wire-level
+/// efficiency the cache provided (one MP_REACH UPDATE per shared
+/// attr-set rather than one per NLRI).
+pub(super) fn send_ipv4_direct(peer: &Peer, entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)>) {
+    if entries.is_empty() {
+        return;
+    }
+    let mut buckets: HashMap<Arc<BgpAttr>, Vec<Ipv4Nlri>> = HashMap::new();
+    for (attr, nlri) in entries {
+        buckets.entry(attr).or_default().push(nlri);
+    }
+    let max_packet_size = if peer.opt.extended_message {
+        bgp_packet::BGP_EXTENDED_PACKET_LEN
+    } else {
+        bgp_packet::BGP_PACKET_LEN
+    };
+    for (attr, nlris) in buckets {
+        let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size);
+        for buf in bytes_list {
+            peer.send_packet(buf);
         }
     }
 }
