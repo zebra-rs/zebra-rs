@@ -1,65 +1,64 @@
 community-set:
 - name: 198.18.37.16/28
-  member:
+  members:
   - rt:^64371:.*$
 - name: 198.18.37.80/28
-  member:
+  members:
   - rt:^456:.*$
 - name: 198.18.39.80/28
-  member:
+  members:
   - rt:^31746:.*$
 - name: 198.18.39.96/28
-  member:
+  members:
   - rt:^14815:.*$
 - name: 198.18.39.128/28
-  member:
+  members:
   - rt:^2481:.*$
 - name: 198.18.39.144/28
-  member:
+  members:
   - rt:^10334:.*$
 - name: 198.18.39.160/28
-  member:
+  members:
   - rt:^51451:.*$
 - name: TENANT-RTS-20e08c2f48cf46e686beed9691459776
-  member:
+  members:
   - rt:^5882:.*$
-policy-options:
-  policy:
-  - name: 198.18.37.16/28
-    entry:
-    - number: 10
-      match:
-        community-set: 198.18.37.16/28
-  - name: 198.18.37.80/28
-    entry:
-    - number: 10
-      match:
-        community-set: 198.18.37.80/28
-  - name: 198.18.39.80/28
-    entry:
-    - number: 10
-      match:
-        community-set: 198.18.39.80/28
-  - name: 198.18.39.96/28
-    entry:
-    - number: 10
-      match:
-        community-set: 198.18.39.96/28
-  - name: 198.18.39.128/28
-    entry:
-    - number: 10
-      match:
-        community-set: 198.18.39.128/28
-  - name: 198.18.39.144/28
-    entry:
-    - number: 10
-      match:
-        community-set: 198.18.39.144/28
-  - name: 198.18.39.160/28
-    entry:
-    - number: 10
-      match:
-        community-set: 198.18.39.160/28
+policy:
+- name: 198.18.37.16/28
+  entry:
+  - number: 10
+    match:
+      community-set: 198.18.37.16/28
+- name: 198.18.37.80/28
+  entry:
+  - number: 10
+    match:
+      community-set: 198.18.37.80/28
+- name: 198.18.39.80/28
+  entry:
+  - number: 10
+    match:
+      community-set: 198.18.39.80/28
+- name: 198.18.39.96/28
+  entry:
+  - number: 10
+    match:
+      community-set: 198.18.39.96/28
+- name: 198.18.39.128/28
+  entry:
+  - number: 10
+    match:
+      community-set: 198.18.39.128/28
+- name: 198.18.39.144/28
+  entry:
+  - number: 10
+    match:
+      community-set: 198.18.39.144/28
+- name: 198.18.39.160/28
+  entry:
+  - number: 10
+    match:
+      community-set: 198.18.39.160/28
 router:
   bgp:
     global:
@@ -76,7 +75,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.16/28
         out: 198.18.37.16/28
       enabled: true
@@ -98,7 +97,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.16/28
         out: 198.18.37.16/28
       enabled: true
@@ -120,7 +119,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -142,7 +141,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -164,7 +163,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -186,7 +185,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -208,7 +207,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -230,7 +229,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -252,7 +251,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -274,7 +273,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -296,7 +295,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -318,7 +317,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
       enabled: true
@@ -340,7 +339,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.96/28
         out: 198.18.39.96/28
       enabled: true
@@ -362,7 +361,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.96/28
         out: 198.18.39.96/28
       enabled: true
@@ -384,7 +383,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -406,7 +405,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -428,7 +427,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -450,7 +449,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -472,7 +471,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -494,7 +493,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -516,7 +515,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -538,7 +537,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -560,7 +559,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -582,7 +581,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
       enabled: true
@@ -604,7 +603,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.144/28
         out: 198.18.39.144/28
       enabled: true
@@ -626,7 +625,7 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
-      apply-policy:
+      policy:
         in: 198.18.39.144/28
         out: 198.18.39.144/28
       enabled: true

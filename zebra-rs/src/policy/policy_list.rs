@@ -148,7 +148,7 @@ impl PolicyConfig {
             .context(CONFIG_ERR)?;
 
         let name = args.string().context(POLICY_NAME_ERR)?;
-        if !path.starts_with("/policy-options/policy/entry") {
+        if !path.starts_with("/policy/entry") {
             handler(&mut self.config, &mut self.cache, name, 0, &mut args)
         } else {
             let seq = args.u32().context(ENTRY_SEQ_ERR)?;
@@ -511,7 +511,7 @@ impl ConfigBuilder {
     }
 
     pub fn path(mut self, path: &str) -> Self {
-        let prefix = "/policy-options/policy";
+        let prefix = "/policy";
         self.path = format!("{prefix}{path}");
         self
     }

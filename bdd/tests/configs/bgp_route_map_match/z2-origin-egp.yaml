@@ -1,10 +1,9 @@
-policy-options:
-  policy:
-  - name: IN-ORIGIN
-    entry:
-    - number: 10
-      match:
-        origin: egp
+policy:
+- name: IN-ORIGIN
+  entry:
+  - number: 10
+    match:
+      origin: egp
 router:
   bgp:
     global:
@@ -15,7 +14,7 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      apply-policy:
+      policy:
         in: IN-ORIGIN
       enabled: true
       peer-as: 65001

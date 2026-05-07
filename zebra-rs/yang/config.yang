@@ -709,7 +709,7 @@ module config {
       leaf name {
         type string;
       }
-      leaf-list member {
+      leaf-list members {
         type string;
         description
           "Members of the community set";
@@ -722,7 +722,7 @@ module config {
       leaf name {
         type string;
       }
-      leaf-list member {
+      leaf-list members {
         type string;
         description
           "Regular expression members matched against the route's
@@ -815,93 +815,91 @@ module config {
         uses vrf-route-target-policy;
       }
     }
-    container policy-options {
+    list policy {
       ext:sort "4";
-      list policy {
-        key "name";
-        leaf "name" {
-          type string;
+      key "name";
+      leaf "name" {
+        type string;
+      }
+      leaf "default-action" {
+        ext:sort "10";
+        type enumeration {
+          enum accept;
+          enum reject;
         }
-        leaf "default-action" {
-          ext:sort "10";
+      }
+      list entry {
+        ext:sort "5";
+        key "number";
+        leaf "number" {
+          type uint32;
+        }
+        container "match" {
+          ext:sort "7";
+          leaf "prefix-set" {
+            type string;
+          }
+          leaf "community-set" {
+            type string;
+          }
+          leaf "as-path-set" {
+            type string;
+          }
+          leaf "next-hop-set" {
+            type string;
+            description
+              "Reference to a prefix-set whose members are matched
+               against the route's BGP NEXT_HOP attribute.";
+          }
+          leaf "med-eq" {
+            type uint32;
+          }
+          leaf "med-ge" {
+            type uint32;
+          }
+          leaf "med-le" {
+            type uint32;
+          }
+          leaf "origin" {
+            type enumeration {
+              enum igp;
+              enum egp;
+              enum incomplete;
+            }
+          }
+        }
+        container "set" {
+          ext:sort "3";
+          leaf "local-preference" {
+            type uint32;
+          }
+          leaf "med" {
+            type uint32;
+          }
+          leaf "next-hop" {
+            type inet:ipv4-address;
+          }
+          leaf "community-set" {
+            type string;
+          }
+          leaf "community-additive" {
+            type boolean;
+          }
+          leaf "as-path-prepend" {
+            type string;
+            description
+              "Space-separated list of AS numbers to prepend to the
+               AS-path. Example: '65001 65001 65002' prepends three
+               segments. Equivalent to IOS-XR 'prepend as-path' or
+               FRR 'set as-path prepend'.";
+          }
+        }
+        leaf "action" {
+          ext:sort "1";
           type enumeration {
             enum accept;
             enum reject;
-          }
-        }
-        list entry {
-          ext:sort "5";
-          key "number";
-          leaf "number" {
-            type uint32;
-          }
-          container "match" {
-            ext:sort "7";
-            leaf "prefix-set" {
-              type string;
-            }
-            leaf "community-set" {
-              type string;
-            }
-            leaf "as-path-set" {
-              type string;
-            }
-            leaf "next-hop-set" {
-              type string;
-              description
-                "Reference to a prefix-set whose members are matched
-                 against the route's BGP NEXT_HOP attribute.";
-            }
-            leaf "med-eq" {
-              type uint32;
-            }
-            leaf "med-ge" {
-              type uint32;
-            }
-            leaf "med-le" {
-              type uint32;
-            }
-            leaf "origin" {
-              type enumeration {
-                enum igp;
-                enum egp;
-                enum incomplete;
-              }
-            }
-          }
-          container "set" {
-            ext:sort "3";
-            leaf "local-preference" {
-              type uint32;
-            }
-            leaf "med" {
-              type uint32;
-            }
-            leaf "next-hop" {
-              type inet:ipv4-address;
-            }
-            leaf "community-set" {
-              type string;
-            }
-            leaf "community-additive" {
-              type boolean;
-            }
-            leaf "as-path-prepend" {
-              type string;
-              description
-                "Space-separated list of AS numbers to prepend to the
-                 AS-path. Example: '65001 65001 65002' prepends three
-                 segments. Equivalent to IOS-XR 'prepend as-path' or
-                 FRR 'set as-path prepend'.";
-            }
-          }
-          leaf "action" {
-            ext:sort "1";
-            type enumeration {
-              enum accept;
-              enum reject;
-              enum pass;
-            }
+            enum pass;
           }
         }
       }

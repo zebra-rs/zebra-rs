@@ -2,13 +2,12 @@ prefix-set:
 - name: out-test
   prefixes:
   - prefix: 10.0.0.1/32
-policy-options:
-  policy:
-  - name: out-test
-    entry:
-    - number: 10
-      match:
-        prefix-set: out-test
+policy:
+- name: out-test
+  entry:
+  - number: 10
+    match:
+      prefix-set: out-test
 router:
   bgp:
     global:
@@ -19,7 +18,7 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      apply-policy:
+      policy:
         out: out-test
       enabled: true
       peer-as: 65002
