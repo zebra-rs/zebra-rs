@@ -6,6 +6,7 @@ pub use constant::*;
 
 pub mod auth;
 pub mod config;
+pub mod neighbor_group;
 pub mod peer;
 pub mod peer_map;
 pub mod show;

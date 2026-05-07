@@ -30,6 +30,10 @@ module configure {
     prefix zbc;
   }
 
+  import zebra-bgp-neighbor-group {
+    prefix zbng;
+  }
+
   container set {
     ext:help "Set configuration";
     uses "config:config";

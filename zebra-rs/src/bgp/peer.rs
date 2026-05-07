@@ -171,6 +171,12 @@ pub struct PeerConfig {
     pub soft_reconfig_in: bool,
     pub timer: timer::Config,
     pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
+    /// Reference to a `neighbor-group` (zebra-bgp-neighbor-group.yang)
+    /// whose attributes this peer should inherit. Recorded on
+    /// `set router bgp neighbor <addr> neighbor-group <name>`. The
+    /// runtime stores the reference but does not yet resolve
+    /// inheritance — that's a follow-up.
+    pub neighbor_group: Option<String>,
 }
 
 impl Default for PeerConfig {
@@ -187,6 +193,7 @@ impl Default for PeerConfig {
             soft_reconfig_in: Default::default(),
             timer: Default::default(),
             sub: Default::default(),
+            neighbor_group: None,
         }
     }
 }
