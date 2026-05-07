@@ -340,9 +340,12 @@ pub fn send_ipv4(
 /// Remove an NLRI from the group's IPv4 pending-advert cache. The
 /// flush timer keeps running; an empty bucket is dropped.
 /// Idempotent — calling on an absent NLRI is a no-op.
-#[allow(dead_code)]
-pub fn cache_remove_ipv4(group: &mut UpdateGroup, prefix: ipnet::Ipv4Net) {
-    let nlri = Ipv4Nlri { id: 0, prefix };
+///
+/// `id` is the AddPath path-id (zero for non-AddPath). Bucket entries
+/// are keyed by the full `Ipv4Nlri`, so AddPath and non-AddPath
+/// withdrawals must pass distinct ids when both modes are mixed.
+pub fn cache_remove_ipv4(group: &mut UpdateGroup, prefix: ipnet::Ipv4Net, id: u32) {
+    let nlri = Ipv4Nlri { id, prefix };
     if let Some(attr) = group.cache_ipv4_rev.remove(&nlri)
         && let Some(bucket) = group.cache_ipv4.get_mut(&attr)
     {
