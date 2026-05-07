@@ -371,15 +371,10 @@ impl Bgp {
                     tx: &self.tx,
                     rib_tx: &self.rib_tx,
                     attr_store: &mut self.attr_store,
+                    update_groups: &mut self.update_groups,
                 };
 
-                fsm(
-                    &mut bgp_ref,
-                    &mut self.peers,
-                    &mut self.update_groups,
-                    ident,
-                    event,
-                );
+                fsm(&mut bgp_ref, &mut self.peers, ident, event);
             }
             Message::Accept(socket, sockaddr) => {
                 // println!("Accept: {:?}", sockaddr);

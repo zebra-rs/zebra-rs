@@ -138,6 +138,14 @@ pub struct UpdateGroupAf {
     pub next_seq: u32,
 }
 
+impl UpdateGroupAf {
+    /// Look up a mutable reference to the group with the given id.
+    /// Linear search; group counts per AFI/SAFI are bounded.
+    pub fn group_by_id_mut(&mut self, id: &UpdateGroupId) -> Option<&mut UpdateGroup> {
+        self.groups.values_mut().find(|g| &g.id == id)
+    }
+}
+
 /// Top-level container on `Bgp`.
 pub type UpdateGroupMap = BTreeMap<AfiSafi, UpdateGroupAf>;
 
@@ -349,5 +357,41 @@ mod tests {
         assert_eq!(id.to_string(), "vpnv4.7");
         let id = UpdateGroupId::new(Afi::L2vpn, Safi::Evpn, 2);
         assert_eq!(id.to_string(), "evpn.2");
+    }
+
+    /// Phase 2 hook: the counter-bump path uses `group_by_id_mut`
+    /// to find the group from a peer's back-reference id. Verifies
+    /// the lookup finds the group and that mutating returned
+    /// reference persists.
+    #[test]
+    fn group_by_id_mut_finds_and_mutates() {
+        let mut af = UpdateGroupAf::default();
+        let sig = base_sig();
+        let id = UpdateGroupId::new(Afi::Ip, Safi::Unicast, 0);
+        af.groups.insert(
+            sig.clone(),
+            UpdateGroup {
+                id: id.clone(),
+                sig,
+                members: BTreeSet::new(),
+                created_at: std::time::Instant::now(),
+                counters: UpdateGroupCounters::default(),
+            },
+        );
+        af.next_seq = 1;
+
+        // Lookup hit
+        let group = af.group_by_id_mut(&id).expect("group exists");
+        group.counters.policy_runs = 5;
+        group.counters.policy_denials = 2;
+
+        // Reload via lookup, verify the mutation persisted.
+        let again = af.group_by_id_mut(&id).expect("group still exists");
+        assert_eq!(again.counters.policy_runs, 5);
+        assert_eq!(again.counters.policy_denials, 2);
+
+        // Lookup miss: unknown id returns None.
+        let missing = UpdateGroupId::new(Afi::Ip, Safi::Unicast, 99);
+        assert!(af.group_by_id_mut(&missing).is_none());
     }
 }

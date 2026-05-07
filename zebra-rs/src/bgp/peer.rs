@@ -489,6 +489,7 @@ pub struct BgpTop<'a> {
     pub tx: &'a mpsc::Sender<Message>,
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub attr_store: &'a mut BgpAttrStore,
+    pub update_groups: &'a mut super::update_group::UpdateGroupMap,
 }
 
 pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
@@ -540,13 +541,7 @@ fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMa
     }
 }
 
-pub fn fsm(
-    bgp_ref: &mut BgpTop,
-    peer_map: &mut PeerMap,
-    update_groups: &mut super::update_group::UpdateGroupMap,
-    id: usize,
-    event: Event,
-) {
+pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event) {
     // Phase 1: Compute new state (single match, only &mut Peer)
     let (prev_state, effect) = {
         let peer = peer_map.get_mut_by_idx(id).unwrap();
@@ -591,9 +586,9 @@ pub fn fsm(
             .map(|p| p.state.is_established())
             .unwrap_or(false);
         if prev_state.is_established() && !now_established {
-            super::update_group::detach(update_groups, peer_map, id);
+            super::update_group::detach(bgp_ref.update_groups, peer_map, id);
         } else if !prev_state.is_established() && now_established {
-            super::update_group::attach(update_groups, peer_map, id);
+            super::update_group::attach(bgp_ref.update_groups, peer_map, id);
         }
     }
 }
@@ -1169,6 +1164,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             tx: &bgp.tx,
             rib_tx: &bgp.rib_tx,
             attr_store: &mut bgp.attr_store,
+            update_groups: &mut bgp.update_groups,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1196,6 +1192,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         tx: &bgp.tx,
         rib_tx: &bgp.rib_tx,
         attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }
