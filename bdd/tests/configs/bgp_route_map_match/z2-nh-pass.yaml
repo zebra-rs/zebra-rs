@@ -3,13 +3,12 @@ prefix-set:
   prefixes:
   - prefix: 192.168.0.0/24
     le: 32
-policy-options:
-  policy:
-  - name: IN-NEXTHOP
-    entry:
-    - number: 10
-      match:
-        next-hop-set: PEER-SUBNET
+policy:
+- name: IN-NEXTHOP
+  entry:
+  - number: 10
+    match:
+      next-hop-set: PEER-SUBNET
 router:
   bgp:
     global:
@@ -20,7 +19,7 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      apply-policy:
+      policy:
         in: IN-NEXTHOP
       enabled: true
       peer-as: 65001

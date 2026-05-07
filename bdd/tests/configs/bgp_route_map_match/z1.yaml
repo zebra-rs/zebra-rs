@@ -3,15 +3,14 @@ prefix-set:
   prefixes:
   - prefix: 0.0.0.0/0
     le: 32
-policy-options:
-  policy:
-  - name: SET-MED-100
-    entry:
-    - number: 10
-      match:
-        prefix-set: ALL-V4
-      set:
-        med: 100
+policy:
+- name: SET-MED-100
+  entry:
+  - number: 10
+    match:
+      prefix-set: ALL-V4
+    set:
+      med: 100
 router:
   bgp:
     global:
@@ -22,7 +21,7 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      apply-policy:
+      policy:
         out: SET-MED-100
       enabled: true
       peer-as: 65002

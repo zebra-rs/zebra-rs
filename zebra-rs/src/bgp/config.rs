@@ -173,7 +173,7 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 ///
 /// Always-Unregister-before-Register avoids the watcher leak that
 /// previously occurred when the operator switched a peer from
-/// `apply-policy in hoge` to `apply-policy in fuga` — the "hoge"
+/// `policy in hoge` to `policy in fuga` — the "hoge"
 /// watcher would otherwise stay registered forever.
 fn policy_attach_msgs(
     policy_tx: &tokio::sync::mpsc::UnboundedSender<policy::Message>,
@@ -1022,8 +1022,8 @@ impl Bgp {
         );
 
         // Applying policy.
-        self.callback_peer("/apply-policy/in", config_policy_in);
-        self.callback_peer("/apply-policy/out", config_policy_out);
+        self.callback_peer("/policy/in", config_policy_in);
+        self.callback_peer("/policy/out", config_policy_out);
         self.callback_peer("/prefix-set/in", config_prefix_in);
         self.callback_peer("/prefix-set/out", config_prefix_out);
 

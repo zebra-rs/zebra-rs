@@ -130,7 +130,7 @@ impl ConfigBuilder {
                 }
                 Ok(())
             })
-            .path("/member")
+            .path("/members")
             .set(|config, cache, name, args| {
                 let set = cache_get(config, cache, name).context(CONFIG_ERR)?;
                 while let Some(member_str) = args.string() {

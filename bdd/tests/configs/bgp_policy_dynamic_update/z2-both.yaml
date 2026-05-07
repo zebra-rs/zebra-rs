@@ -3,13 +3,12 @@ prefix-set:
   prefixes:
   - prefix: 1.1.1.1/32
   - prefix: 2.2.2.2/32
-policy-options:
-  policy:
-  - name: HOGE
-    entry:
-    - number: 10
-      match:
-        prefix-set: HOGE
+policy:
+- name: HOGE
+  entry:
+  - number: 10
+    match:
+      prefix-set: HOGE
 router:
   bgp:
     global:
@@ -20,7 +19,7 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      apply-policy:
+      policy:
         in: HOGE
       enabled: true
       peer-as: 65001

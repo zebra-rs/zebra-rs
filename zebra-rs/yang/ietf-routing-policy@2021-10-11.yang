@@ -497,7 +497,7 @@ module ietf-routing-policy {
       "Top-level container for routing policy applications.  This
        grouping is intended to be used in routing models where
        needed.";
-    container apply-policy {
+    container policy {
       description
         "Anchor point for routing policies in the model.
          Import and export policies are with respect to the local

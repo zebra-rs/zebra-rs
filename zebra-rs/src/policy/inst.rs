@@ -35,7 +35,7 @@ pub enum Message {
         policy_type: PolicyType,
     },
     /// Counterpart of `Register`. Sent by a protocol when a peer
-    /// detaches a policy (operator runs `delete apply-policy in X`,
+    /// detaches a policy (operator runs `delete policy in X`,
     /// or rebinds to a different name). Without this the watcher
     /// list grows unbounded as peers churn or rename their policy
     /// references.
@@ -278,7 +278,7 @@ impl Policy {
         match msg.op {
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                if path.as_str().starts_with("/policy-options") {
+                if path.as_str().starts_with("/policy") {
                     let _ = self.policy_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/prefix-set") {
                     let _ = self.prefix_config.exec(path, args, msg.op);
@@ -388,11 +388,11 @@ impl Policy {
 /// of the changed sets, skipping policies that were already directly
 /// committed in this same batch. This is what makes
 ///
-///     set policy-options prefix-set hoge prefixes 2.2.2.2/32
+///     set prefix-set hoge prefixes 2.2.2.2/32
 ///
-/// reach a peer attached via `apply-policy in <policy that
-/// matches prefix-set hoge>` — the prefix-set edit alone wouldn't
-/// fire `policy_list_update` for that policy without this cascade.
+/// reach a peer attached via `policy in <policy that matches
+/// prefix-set hoge>` — the prefix-set edit alone wouldn't fire
+/// `policy_list_update` for that policy without this cascade.
 #[allow(clippy::too_many_arguments)]
 fn cascade_indirect_policy_updates(
     policy_config: &mut BTreeMap<String, PolicyList>,
