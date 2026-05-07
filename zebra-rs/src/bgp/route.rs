@@ -939,14 +939,52 @@ fn route_advertise_to_peers(
                     };
                     peer.send_vpnv4(vpnv4_nlri, attr, true);
                 } else {
-                    peer.send_ipv4(nlri, attr, true);
+                    // IPv4 unicast: bucket into the group's pending
+                    // cache (Phase 3b). Source ident comes from the
+                    // selected best path so split-horizon pruning at
+                    // flush time can drop NLRIs from their originator.
+                    let source_ident = new_best.map(|b| b.ident).unwrap_or(peer.ident);
+                    let group_id = peer.update_group_id.get(&afi_safi).cloned();
+                    if let Some(gid) = group_id
+                        && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                        && let Some(group) = af.group_by_id_mut(&gid)
+                    {
+                        super::update_group::send_ipv4(
+                            group,
+                            nlri,
+                            attr,
+                            source_ident,
+                            bgp.tx,
+                            true,
+                        );
+                    } else {
+                        // Fallback for an Established peer that
+                        // somehow isn't in a group — should not
+                        // happen, but the per-peer cache still works.
+                        peer.send_ipv4(nlri, attr, true);
+                    }
                 }
             }
             AdvertiseOutcome::Withdraw => {
                 if let Some(ref rd) = rd {
                     peer.cache_remove_vpnv4(*rd, prefix, 0);
                 } else {
+                    // Per-peer cleanup covers any IPv4 entries left
+                    // by paths still on the per-peer cache (addpath /
+                    // soft-out / sync) — these migrate in 3c/3d.
                     peer.cache_remove_ipv4(prefix, 0);
+                    // Group cache cleanup (Phase 3b). Skipped for
+                    // split-horizon Withdraws: the source peer never
+                    // contributed an entry, but other group members
+                    // may have. Removing here would clobber theirs.
+                    let is_split_horizon = new_best.map(|b| b.ident == peer.ident).unwrap_or(false);
+                    if !is_split_horizon
+                        && let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
+                        && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                        && let Some(group) = af.group_by_id_mut(&gid)
+                    {
+                        super::update_group::cache_remove_ipv4(group, prefix);
+                    }
                 }
                 if peer.adj_out.contains_key(rd, &prefix) {
                     route_withdraw_ipv4(peer, rd, prefix, 0);
