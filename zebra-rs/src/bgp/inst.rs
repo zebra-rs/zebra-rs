@@ -157,6 +157,11 @@ pub struct Bgp {
     /// `PeerConfig::neighbor_group` is not wired in the runtime
     /// yet — that lands in a follow-up.
     pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
+    /// IOS-XR-style update-groups, keyed by `(AfiSafi, signature)`.
+    /// Phase-1: signature + membership tracking only — the advertise
+    /// pipeline does not yet share work across members. See
+    /// `docs/design/bgp-update-groups.md`.
+    pub update_groups: super::update_group::UpdateGroupMap,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
@@ -211,6 +216,7 @@ impl Bgp {
             listen_fd_v6: None,
             key_chains: HashMap::new(),
             neighbor_groups: super::neighbor_group::empty_map(),
+            update_groups: super::update_group::empty_map(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
@@ -367,7 +373,13 @@ impl Bgp {
                     attr_store: &mut self.attr_store,
                 };
 
-                fsm(&mut bgp_ref, &mut self.peers, ident, event);
+                fsm(
+                    &mut bgp_ref,
+                    &mut self.peers,
+                    &mut self.update_groups,
+                    ident,
+                    event,
+                );
             }
             Message::Accept(socket, sockaddr) => {
                 // println!("Accept: {:?}", sockaddr);

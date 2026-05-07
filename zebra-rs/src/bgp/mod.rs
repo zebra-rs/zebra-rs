@@ -10,6 +10,8 @@ pub mod neighbor_group;
 pub mod peer;
 pub mod peer_map;
 pub mod show;
+pub mod show_update_group;
+pub mod update_group;
 
 pub mod cap;
 

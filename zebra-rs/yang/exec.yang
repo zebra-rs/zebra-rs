@@ -89,6 +89,19 @@ module exec {
         }
       }
     }
+    container bgp {
+      ext:help "BGP information";
+      list update-group {
+        ext:help "BGP update-groups (IOS-XR style)";
+        ext:presence "BGP update-group summary";
+        key id;
+        leaf id {
+          ext:help "Update-group ID, e.g. ipv4-unicast.0";
+          ext:dynamic "bgp:update-group";
+          type string;
+        }
+      }
+    }
     container ip {
       ext:help "Show IP commands";
       leaf route {

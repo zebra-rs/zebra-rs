@@ -2023,5 +2023,11 @@ impl Bgp {
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
+        // IOS-XR style update-group observability — kept under
+        // `show bgp ...` (not `show ip bgp ...`) per the design doc.
+        self.show_add(
+            "/show/bgp/update-group",
+            super::show_update_group::show_bgp_update_group,
+        );
     }
 }
