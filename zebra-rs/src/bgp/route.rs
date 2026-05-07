@@ -721,6 +721,7 @@ fn route_advertise_to_addpath(
     } else {
         (Afi::Ip, Safi::Unicast)
     };
+    let afi_safi = AfiSafi::new(afi, safi);
 
     let peer_addrs: Vec<IpAddr> = peers
         .iter()
@@ -744,10 +745,10 @@ fn route_advertise_to_addpath(
                 continue;
             }
             let attr = bgp.attr_store.intern(attr);
-            let mut rib = rib.clone();
-            rib.attr = attr.clone();
+            let mut rib_clone = rib.clone();
+            rib_clone.attr = attr.clone();
 
-            peer.adj_out.add(rd, nlri.prefix, rib);
+            peer.adj_out.add(rd, nlri.prefix, rib_clone);
             if let Some(ref rd) = rd {
                 let vpnv4_nlri = Vpnv4Nlri {
                     label: Label::default(),
@@ -756,7 +757,20 @@ fn route_advertise_to_addpath(
                 };
                 peer.send_vpnv4(vpnv4_nlri, attr, true);
             } else {
-                peer.send_ipv4(nlri, attr, true);
+                // IPv4 unicast addpath: bucket into the group cache
+                // (Phase 3c). All addpath-enabled peers share the
+                // same `addpath_send: true` signature, so the group
+                // contains only addpath peers — fan-out at flush
+                // time goes only to other addpath peers.
+                let group_id = peer.update_group_id.get(&afi_safi).cloned();
+                if let Some(gid) = group_id
+                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                    && let Some(group) = af.group_by_id_mut(&gid)
+                {
+                    super::update_group::send_ipv4(group, nlri, attr, rib.ident, bgp.tx, true);
+                } else {
+                    peer.send_ipv4(nlri, attr, true);
+                }
             }
         }
     }
@@ -767,7 +781,7 @@ fn route_withdraw_from_addpath(
     prefix: Ipv4Net,
     removed: &BgpRib,
     _source_peer: usize,
-    _bgp: &mut BgpTop,
+    bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
     let (afi, safi) = if rd.is_some() {
@@ -775,6 +789,7 @@ fn route_withdraw_from_addpath(
     } else {
         (Afi::Ip, Safi::Unicast)
     };
+    let afi_safi = AfiSafi::new(afi, safi);
 
     let peer_addrs: Vec<IpAddr> = peers
         .iter()
@@ -790,7 +805,19 @@ fn route_withdraw_from_addpath(
         if let Some(ref rd) = rd {
             peer.cache_remove_vpnv4(*rd, prefix, removed.local_id);
         } else {
+            // Per-peer cleanup covers any IPv4 entries left by paths
+            // still on the per-peer cache. Idempotent if already gone.
             peer.cache_remove_ipv4(prefix, removed.local_id);
+            // Group cache cleanup (Phase 3c). Idempotent across the
+            // peer-iteration: first peer in the group cleans the
+            // bucket; subsequent peers find it gone.
+            let group_id = peer.update_group_id.get(&afi_safi).cloned();
+            if let Some(gid) = group_id
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::cache_remove_ipv4(group, prefix, removed.local_id);
+            }
         }
         route_withdraw_ipv4(peer, rd, prefix, removed.local_id);
         peer.adj_out.remove(rd, prefix, removed.local_id);
@@ -983,7 +1010,7 @@ fn route_advertise_to_peers(
                         && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                         && let Some(group) = af.group_by_id_mut(&gid)
                     {
-                        super::update_group::cache_remove_ipv4(group, prefix);
+                        super::update_group::cache_remove_ipv4(group, prefix, 0);
                     }
                 }
                 if peer.adj_out.contains_key(rd, &prefix) {
