@@ -7,14 +7,14 @@ use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::bytes::complete::take;
-use nom::error::{make_error, ErrorKind};
-use nom::number::complete::{be_u24, be_u32, be_u64, be_u8};
+use nom::error::{ErrorKind, make_error};
+use nom::number::complete::{be_u8, be_u24, be_u32, be_u64};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use packet_utils::{Algo, SidLabelTlv};
 
 use super::util::{Emit, ParseBe};
-use super::{many0_complete, OspfLsType, OspfType};
+use super::{OspfLsType, OspfType, many0_complete};
 
 // OSPF version.
 const OSPF_VERSION: u8 = 2;
