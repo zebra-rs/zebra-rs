@@ -130,6 +130,21 @@ fn clear_peer_listener_auth(bgp: &mut Bgp, addr: &IpAddr) {
     }
 }
 
+/// `set router bgp neighbor <addr> neighbor-group <name>` —
+/// stores the reference on the peer's `PeerConfig`. No inheritance
+/// resolution yet; follow-up reads this and merges fields from
+/// `Bgp::neighbor_groups`.
+fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.neighbor_group = if op == ConfigOp::Set {
+        args.string()
+    } else {
+        None
+    };
+    Some(())
+}
+
 fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         if let Some(addr) = args.v4addr() {
@@ -940,6 +955,19 @@ impl Bgp {
         self.callback_add("/router/bgp/global/hostname", config_global_hostname);
         self.callback_peer("", config_peer);
         self.callback_peer("/peer-as", config_peer_as);
+        // Per-peer reference to a `neighbor-group`. Storage only —
+        // resolution lands in the follow-up that adds field-level
+        // override semantics.
+        self.callback_peer("/neighbor-group", config_peer_neighbor_group);
+        // `set router bgp neighbor-groups neighbor-group <name> [...]`.
+        self.callback_add(
+            "/router/bgp/neighbor-groups/neighbor-group",
+            super::neighbor_group::config_neighbor_group,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-groups/neighbor-group/peer-as",
+            super::neighbor_group::config_neighbor_group_peer_as,
+        );
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/transport/local-address", config_transport_local_address);

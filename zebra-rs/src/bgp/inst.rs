@@ -149,6 +149,14 @@ pub struct Bgp {
     // by config callbacks for /key-chains/... and referenced from a
     // peer's AoConfig.key_chain leafref.
     pub key_chains: HashMap<String, super::auth::KeyChain>,
+
+    /// IOS-XR-style `neighbor-group` definitions
+    /// (zebra-bgp-neighbor-group.yang). Phase-1 storage: each entry
+    /// holds the group's overridable defaults; field-level
+    /// inheritance into peers that reference a group via
+    /// `PeerConfig::neighbor_group` is not wired in the runtime
+    /// yet — that lands in a follow-up.
+    pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
     /// Debug configuration flags
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
@@ -202,6 +210,7 @@ impl Bgp {
             listen_fd_v4: None,
             listen_fd_v6: None,
             key_chains: HashMap::new(),
+            neighbor_groups: super::neighbor_group::empty_map(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,

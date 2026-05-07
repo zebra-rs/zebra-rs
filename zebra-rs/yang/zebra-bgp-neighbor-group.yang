@@ -1,0 +1,133 @@
+module zebra-bgp-neighbor-group {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-neighbor-group";
+  prefix "zbng";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "IOS-XR-style `neighbor-group` for zebra-rs BGP. Sits alongside
+     the existing `peer-groups/peer-group` with a deliberately
+     focused attribute surface — the goal is to make the common
+     'these N peers share these few attributes' case ergonomic,
+     not to mirror every leaf of `neighbor-group-config`.
+
+     This first cut exposes only `peer-as`. The runtime currently
+     stores the group definition and per-neighbor reference but
+     does NOT yet resolve inheritance — that lands in a follow-up.
+     Field-level override semantics: any field set explicitly on
+     the neighbor wins; otherwise the neighbor inherits from the
+     referenced group.
+
+     Resulting CLI / config shape (target):
+
+       router bgp {
+         neighbor-groups {
+           neighbor-group RR-CLIENTS {
+             peer-as 65000;
+           }
+         }
+         neighbor 10.0.0.1 {
+           neighbor-group RR-CLIENTS;
+         }
+         neighbor 10.0.0.2 {
+           neighbor-group RR-CLIENTS;
+         }
+       }
+
+     The reference leaf accepts a plain string (not a leafref) so
+     a `neighbor X { neighbor-group G; }` block is path-valid even
+     before `neighbor-group G` has been declared — the same
+     staging-friendly pattern other zebra-bgp-* augments use.";
+
+  grouping bgp-neighbor-groups-extension {
+    description
+      "Top-level `neighbor-groups` container hung off `router bgp`.";
+    container neighbor-groups {
+      ext:help "BGP neighbor-groups (IOS-XR style)";
+      list neighbor-group {
+        key "name";
+        description
+          "List of BGP neighbor-groups configured on the local
+           system, uniquely identified by name.";
+        leaf name {
+          type string;
+          description
+            "Name of the neighbor-group.";
+        }
+        leaf peer-as {
+          type inet:as-number;
+          description
+            "AS number inherited by neighbors that reference this
+             group. A `peer-as` set on the neighbor itself wins.";
+        }
+      }
+    }
+  }
+
+  grouping bgp-neighbor-attach-extension {
+    description
+      "Per-neighbor reference leaf attaching the neighbor to a
+       neighbor-group.";
+    leaf neighbor-group {
+      type string;
+      description
+        "Name of the `neighbor-group` whose attributes this
+         neighbor inherits. Resolved at config commit; per-leaf
+         values set on the neighbor override the group.";
+    }
+  }
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the `neighbor-groups` container to `router bgp` in
+       the candidate-set subtree.";
+    uses bgp-neighbor-groups-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor-groups neighbor-group X` is
+       path-valid.";
+    uses bgp-neighbor-groups-extension;
+  }
+
+  augment "/configure:set/config:router/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach the `neighbor-group` reference leaf to each BGP
+       neighbor entry in the candidate-set subtree.";
+    uses bgp-neighbor-attach-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree.";
+    uses bgp-neighbor-attach-extension;
+  }
+}
