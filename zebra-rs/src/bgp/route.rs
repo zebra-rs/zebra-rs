@@ -798,6 +798,62 @@ fn route_withdraw_from_addpath(
 }
 
 /// Advertise route changes to all appropriate peers
+/// Outcome of running the canonical-member transform + outbound
+/// policy for a route. Identical for every member of an
+/// `update-group` for a given (route, AFI/SAFI), modulo per-peer
+/// split-horizon (handled before cache lookup) and per-peer RTC
+/// (applied after).
+#[derive(Clone)]
+enum AdvertiseOutcome {
+    Advertise(Ipv4Nlri, BgpAttr),
+    Withdraw,
+}
+
+/// Run `route_update_ipv4` + `route_apply_policy_out` for `peer`.
+/// Caller has already verified split-horizon does NOT fire for this
+/// peer (`best.ident != peer.ident`); other filters inside
+/// `route_update_ipv4` (notably the iBGP-iBGP rule) depend only on
+/// signature fields, so the result is identical for every other
+/// non-source member of the same update-group.
+fn compute_advertise_outcome(
+    peer: &mut Peer,
+    prefix: &Ipv4Net,
+    best: &BgpRib,
+    bgp: &mut BgpTop,
+    add_path: bool,
+) -> AdvertiseOutcome {
+    if let Some((nlri, attr)) = route_update_ipv4(peer, prefix, best, bgp, add_path) {
+        if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
+            AdvertiseOutcome::Advertise(nlri, attr)
+        } else {
+            AdvertiseOutcome::Withdraw
+        }
+    } else {
+        AdvertiseOutcome::Withdraw
+    }
+}
+
+/// Bump per-group counters for one cache miss. `denied` is true when
+/// the computed outcome was `Withdraw` because the outbound policy
+/// returned None — distinguishes deny-by-policy from skip-by-no-best.
+fn bump_group_counters_on_miss(
+    bgp: &mut BgpTop,
+    afi_safi: AfiSafi,
+    id: &super::update_group::UpdateGroupId,
+    denied: bool,
+) {
+    let Some(af) = bgp.update_groups.get_mut(&afi_safi) else {
+        return;
+    };
+    let Some(group) = af.group_by_id_mut(id) else {
+        return;
+    };
+    group.counters.policy_runs += 1;
+    if denied {
+        group.counters.policy_denials += 1;
+    }
+}
+
 fn route_advertise_to_peers(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
@@ -815,6 +871,7 @@ fn route_advertise_to_peers(
     } else {
         (Afi::Ip, Safi::Unicast)
     };
+    let afi_safi = AfiSafi::new(afi, safi);
 
     let peer_addrs: Vec<IpAddr> = peers
         .iter()
@@ -824,40 +881,50 @@ fn route_advertise_to_peers(
         .map(|(addr, _)| *addr)
         .collect();
 
+    // Per-call memo: outcome cached per update-group id for the
+    // span of this advertisement only. Members of the same group
+    // share the post-policy outcome (modulo split-horizon, which is
+    // checked per-peer before lookup so the canonical computation
+    // is always run on a non-source peer).
+    let mut memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome> = BTreeMap::new();
+
     for peer_addr in peer_addrs {
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
         let add_path = peer.opt.is_add_path_send(afi, safi);
+        let group_id = peer.update_group_id.get(&afi_safi).cloned();
 
-        // Build the update/withdrawal for this peer
-        let (nlri_opt, attr_opt) = {
-            if let Some(best) = new_best {
-                // Try to advertise the new best path
-                if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, best, bgp, add_path) {
-                    // Apply outbound policy
-                    if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
-                        (Some(nlri), Some(attr))
-                    } else {
-                        (Some(nlri), None) // Policy denied - will send withdrawal
-                    }
-                } else {
-                    (None, None) // Filtered by split-horizon, etc.
-                }
-            } else {
-                (None, None) // No best path
+        let outcome = match new_best {
+            None => AdvertiseOutcome::Withdraw,
+            Some(best) if best.ident == peer.ident => {
+                // Split-horizon: source peer does not receive its own
+                // route back. Cache must not be poisoned by this
+                // outcome — fall through directly.
+                AdvertiseOutcome::Withdraw
             }
+            Some(best) => match group_id.as_ref() {
+                Some(gid) => {
+                    if let Some(cached) = memo.get(gid) {
+                        cached.clone()
+                    } else {
+                        let outcome = compute_advertise_outcome(peer, &prefix, best, bgp, add_path);
+                        let denied = matches!(outcome, AdvertiseOutcome::Withdraw);
+                        memo.insert(gid.clone(), outcome.clone());
+                        bump_group_counters_on_miss(bgp, afi_safi, gid, denied);
+                        outcome
+                    }
+                }
+                None => compute_advertise_outcome(peer, &prefix, best, bgp, add_path),
+            },
         };
 
-        // Now apply the update/withdrawal
-        match (nlri_opt, attr_opt) {
-            (Some(nlri), Some(attr)) => {
-                if let Some(_rd) = rd {
-                    // RTC match.
-                    if !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
-                        continue;
-                    }
+        match outcome {
+            AdvertiseOutcome::Advertise(nlri, attr) => {
+                if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+                    // RTC: per-peer; varies independently of group
+                    // signature. Skip without withdrawing.
+                    continue;
                 }
-                // Send update
                 let attr = bgp.attr_store.intern(attr);
                 if let Some(best) = new_best {
                     let mut rib = best.clone();
@@ -875,14 +942,12 @@ fn route_advertise_to_peers(
                     peer.send_ipv4(nlri, attr, true);
                 }
             }
-            _ => {
-                // We remove the cache.
+            AdvertiseOutcome::Withdraw => {
                 if let Some(ref rd) = rd {
                     peer.cache_remove_vpnv4(*rd, prefix, 0);
                 } else {
                     peer.cache_remove_ipv4(prefix, 0);
                 }
-                // Send withdrawal if we had previously advertised
                 if peer.adj_out.contains_key(rd, &prefix) {
                     route_withdraw_ipv4(peer, rd, prefix, 0);
                     peer.adj_out.remove(rd, prefix, 0);
@@ -2788,6 +2853,7 @@ impl Bgp {
             tx: &self.tx,
             rib_tx: &self.rib_tx,
             attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
         };
 
         if !selected.is_empty() {
@@ -2813,6 +2879,7 @@ impl Bgp {
             tx: &self.tx,
             rib_tx: &self.rib_tx,
             attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -2939,6 +3006,7 @@ impl Bgp {
             tx: &self.tx,
             rib_tx: &self.rib_tx,
             attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
         };
 
         if !selected.is_empty() {
@@ -3056,6 +3124,7 @@ impl Bgp {
             tx: &self.tx,
             rib_tx: &self.rib_tx,
             attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
         };
 
         if !selected.is_empty() {
