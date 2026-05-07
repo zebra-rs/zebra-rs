@@ -26,6 +26,10 @@ module configure {
       "RFC XXXX: YANG Model for Border Gateway Protocol (BGP-4).";
   }
 
+  import zebra-bgp-clear {
+    prefix zbc;
+  }
+
   container set {
     ext:help "Set configuration";
     uses "config:config";
