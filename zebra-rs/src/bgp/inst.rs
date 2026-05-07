@@ -71,6 +71,10 @@ pub enum Message {
     Event(usize, Event),
     Accept(TcpStream, SocketAddr),
     Show(Sender<String>),
+    /// Adv-debounce timer expired for an IPv4-unicast update-group:
+    /// drain the group's pending cache, encode one UPDATE per attr
+    /// bucket, and ship to each member with split-horizon pruning.
+    FlushUpdateGroupIpv4(super::update_group::UpdateGroupId),
 }
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
@@ -382,6 +386,14 @@ impl Bgp {
             }
             Message::Show(tx) => {
                 let _ = self.tx.try_send(Message::Show(tx));
+            }
+            Message::FlushUpdateGroupIpv4(group_id) => {
+                super::update_group::flush_ipv4(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &mut self.attr_store,
+                    &group_id,
+                );
             }
         }
     }

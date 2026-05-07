@@ -20,15 +20,20 @@
 //! L2VPN EVPN — the three families the advertise pipeline currently
 //! handles.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
-use bgp_packet::{Afi, AfiSafi, Safi};
+use bgp_packet::{Afi, AfiSafi, BgpAttr, Ipv4Nlri, Safi, UpdatePacket};
+use tokio::sync::mpsc;
 
+use super::BgpAttrStore;
+use super::inst::Message;
 use super::peer::{Peer, PeerType};
 use super::peer_map::PeerMap;
 use crate::bgp::InOut;
+use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
@@ -118,7 +123,7 @@ pub struct UpdateGroupCounters {
 }
 
 /// One update-group: a signature and the peers currently sharing it.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct UpdateGroup {
     pub id: UpdateGroupId,
     pub sig: UpdateGroupSig,
@@ -127,6 +132,20 @@ pub struct UpdateGroup {
     pub members: BTreeSet<usize>,
     pub created_at: Instant,
     pub counters: UpdateGroupCounters,
+
+    // ── IPv4 unicast pending advertisement cache (Phase 3) ──
+    //
+    // Buckets pending advertisements by attribute so a single
+    // MP_REACH UPDATE can carry every NLRI sharing one attr-set.
+    // Per (attr → NLRI → source-ident); split-horizon uses the
+    // source-ident at flush time to prune NLRIs from the
+    // member-peer that originated them.
+    pub cache_ipv4: HashMap<Arc<BgpAttr>, HashMap<Ipv4Nlri, usize>>,
+    /// Reverse map for O(1) cache_remove. NLRI → bucket key.
+    pub cache_ipv4_rev: HashMap<Ipv4Nlri, Arc<BgpAttr>>,
+    /// Adv-debounce timer. Started on first send; on fire,
+    /// `Bgp::serve` drains the cache and ships UPDATEs to members.
+    pub cache_ipv4_timer: Option<Timer>,
 }
 
 /// Per-AFI/SAFI bookkeeping: the active groups plus a monotonic seq
@@ -219,6 +238,9 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
                 members: BTreeSet::new(),
                 created_at: Instant::now(),
                 counters: UpdateGroupCounters::default(),
+                cache_ipv4: HashMap::new(),
+                cache_ipv4_rev: HashMap::new(),
+                cache_ipv4_timer: None,
             }
         });
         entry.members.insert(peer_idx);
@@ -269,6 +291,241 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
             }
         }
     }
+}
+
+// ── IPv4 unicast send / cache_remove / flush (Phase 3) ──
+//
+// These functions own the per-attr-bucket batching that used to live
+// on `Peer` (cache_ipv4 + cache_ipv4_rev + cache_ipv4_timer). Moving
+// them to the group lets one encoded UPDATE serve every non-source
+// member, with per-member split-horizon pruning at flush time.
+//
+// Phase 3a (this commit): scaffolding only. `flush_ipv4` is wired
+// to `Message::FlushUpdateGroupIpv4` in `Bgp::serve` but no caller
+// produces that message yet — `send_ipv4` is still dead until Phase
+// 3b migrates `route_advertise_to_peers`, `route_advertise_to_addpath`,
+// and friends off `Peer::send_ipv4`. Phase 3d then removes the
+// per-peer `cache_ipv4` fields entirely.
+
+#[allow(dead_code)]
+const ADV_TIMER_IBGP_SECS: u64 = 5;
+#[allow(dead_code)]
+const ADV_TIMER_EBGP_SECS: u64 = 30;
+
+/// Bucket the (nlri, attr, source_ident) into the group's IPv4
+/// pending-advert cache. Also kicks the adv-debounce timer if not
+/// already running. The `tx` channel is the global Bgp tx (every
+/// peer carries a clone of it); on fire it delivers
+/// `Message::FlushUpdateGroupIpv4` back to `Bgp::serve`.
+#[allow(dead_code)]
+pub fn send_ipv4(
+    group: &mut UpdateGroup,
+    nlri: Ipv4Nlri,
+    attr: Arc<BgpAttr>,
+    source_ident: usize,
+    tx: &mpsc::Sender<Message>,
+    kick_timer: bool,
+) {
+    group
+        .cache_ipv4
+        .entry(attr.clone())
+        .or_default()
+        .insert(nlri.clone(), source_ident);
+    group.cache_ipv4_rev.insert(nlri, attr);
+    if kick_timer && group.cache_ipv4_timer.is_none() {
+        group.cache_ipv4_timer = Some(start_adv_timer_ipv4(tx, &group.id, group.sig.peer_type));
+    }
+}
+
+/// Remove an NLRI from the group's IPv4 pending-advert cache. The
+/// flush timer keeps running; an empty bucket is dropped.
+/// Idempotent — calling on an absent NLRI is a no-op.
+#[allow(dead_code)]
+pub fn cache_remove_ipv4(group: &mut UpdateGroup, prefix: ipnet::Ipv4Net) {
+    let nlri = Ipv4Nlri { id: 0, prefix };
+    if let Some(attr) = group.cache_ipv4_rev.remove(&nlri)
+        && let Some(bucket) = group.cache_ipv4.get_mut(&attr)
+    {
+        bucket.remove(&nlri);
+        if bucket.is_empty() {
+            group.cache_ipv4.remove(&attr);
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn start_adv_timer_ipv4(
+    tx: &mpsc::Sender<Message>,
+    id: &UpdateGroupId,
+    peer_type: PeerType,
+) -> Timer {
+    let secs = match peer_type {
+        PeerType::IBGP => ADV_TIMER_IBGP_SECS,
+        PeerType::EBGP => ADV_TIMER_EBGP_SECS,
+    };
+    let tx = tx.clone();
+    let id = id.clone();
+    Timer::once(secs, move || {
+        let tx = tx.clone();
+        let id = id.clone();
+        async move {
+            let _ = tx.send(Message::FlushUpdateGroupIpv4(id)).await;
+        }
+    })
+}
+
+/// Drain the IPv4 cache and ship UPDATEs to every member. Called
+/// from `Bgp::serve` on `Message::FlushUpdateGroupIpv4`. The flush
+/// is at-most-once per timer fire — we clear the timer slot here so
+/// the next `send_ipv4` re-arms it.
+///
+/// Per attr-bucket we encode at most:
+/// - one **canonical** UPDATE containing every NLRI in the bucket
+///   (sent to members whose ident does not appear as a source-ident
+///   in the bucket — split-horizon clean for them);
+/// - one **pruned** UPDATE per source-member, with that member's
+///   sourced NLRIs removed.
+///
+/// `messages_formatted` increments per encoded variant;
+/// `messages_replicated` per (UPDATE, member) pair sent;
+/// `bytes_formatted` accumulates the encoded byte counts.
+pub fn flush_ipv4(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    _attr_store: &mut BgpAttrStore,
+    id: &UpdateGroupId,
+) {
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let Some(af) = update_groups.get_mut(&afi_safi) else {
+        return;
+    };
+    let Some(group) = af.group_by_id_mut(id) else {
+        return;
+    };
+
+    // Snapshot the cache and clear the timer slot so the next send
+    // re-arms it. Drains both forward and reverse maps; the bucket
+    // shape is `(attr, [(nlri, source_ident)])`.
+    group.cache_ipv4_timer = None;
+    let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv4Nlri, usize)>)> = group
+        .cache_ipv4
+        .drain()
+        .map(|(attr, set)| (attr, set.into_iter().collect()))
+        .collect();
+    group.cache_ipv4_rev.clear();
+
+    if buckets.is_empty() {
+        return;
+    }
+
+    // Snapshot member idents + their packet_tx + max-packet-size
+    // before mutating peer state; downstream sends only need the
+    // cloned tx and the size, not a peer borrow.
+    let max_packet_size = if group.sig.extended_message {
+        bgp_packet::BGP_EXTENDED_PACKET_LEN
+    } else {
+        bgp_packet::BGP_PACKET_LEN
+    };
+    let member_idents: Vec<usize> = group.members.iter().copied().collect();
+
+    // Resolve packet_tx for each member up front.
+    let members: Vec<(usize, Option<mpsc::UnboundedSender<bytes::BytesMut>>)> = member_idents
+        .iter()
+        .map(|ident| {
+            let tx = peers.get_by_idx(*ident).and_then(|p| p.packet_tx.clone());
+            (*ident, tx)
+        })
+        .collect();
+
+    for (attr, entries) in buckets {
+        // Members that need split-horizon pruning: any whose ident
+        // appears as a source-ident in this bucket. Common case is
+        // empty (group has no source-members for this bucket), in
+        // which case every member shares the canonical UPDATE.
+        let source_idents: BTreeSet<usize> = entries.iter().map(|(_, src)| *src).collect();
+        let pruned_members: Vec<usize> = member_idents
+            .iter()
+            .copied()
+            .filter(|m| source_idents.contains(m))
+            .collect();
+
+        // Canonical UPDATE: every NLRI in the bucket.
+        let canonical: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
+        let canonical_bytes = encode_ipv4_update(&attr, &canonical, max_packet_size);
+        let canonical_byte_total: usize = canonical_bytes.iter().map(|b| b.len()).sum();
+
+        // Bump per-attr-bucket counters: one formatted variant
+        // (canonical), bytes summed.
+        if let Some(group) = af.group_by_id_mut(id) {
+            group.counters.messages_formatted += canonical_bytes.len() as u64;
+            group.counters.bytes_formatted += canonical_byte_total as u64;
+        }
+
+        // Send canonical to every non-pruned member.
+        for (ident, packet_tx) in &members {
+            if pruned_members.contains(ident) {
+                continue;
+            }
+            if let Some(tx) = packet_tx {
+                for bytes in &canonical_bytes {
+                    let _ = tx.send(bytes.clone());
+                }
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.messages_replicated += canonical_bytes.len() as u64;
+                }
+            }
+        }
+
+        // Per pruned member: encode bucket minus its sourced
+        // NLRIs, then send.
+        for prune_ident in pruned_members {
+            let nlris: Vec<Ipv4Nlri> = entries
+                .iter()
+                .filter(|(_, src)| *src != prune_ident)
+                .map(|(n, _)| n.clone())
+                .collect();
+            if nlris.is_empty() {
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.split_horizon_excluded += 1;
+                }
+                continue;
+            }
+            let pruned_bytes = encode_ipv4_update(&attr, &nlris, max_packet_size);
+            let pruned_byte_total: usize = pruned_bytes.iter().map(|b| b.len()).sum();
+            if let Some(group) = af.group_by_id_mut(id) {
+                group.counters.messages_formatted += pruned_bytes.len() as u64;
+                group.counters.bytes_formatted += pruned_byte_total as u64;
+                group.counters.split_horizon_excluded += 1;
+            }
+            if let Some((_, Some(tx))) = members.iter().find(|(i, _)| *i == prune_ident) {
+                for bytes in &pruned_bytes {
+                    let _ = tx.send(bytes.clone());
+                }
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.messages_replicated += pruned_bytes.len() as u64;
+                }
+            }
+        }
+    }
+}
+
+/// Encode one or more UPDATE PDUs carrying `nlris` under `attr`.
+/// Pagination is handled by `UpdatePacket::pop_ipv4`, which respects
+/// `max_packet_size`. Returns the encoded byte buffers; the caller
+/// is responsible for fan-out.
+fn encode_ipv4_update(
+    attr: &Arc<BgpAttr>,
+    nlris: &[Ipv4Nlri],
+    max_packet_size: usize,
+) -> Vec<bytes::BytesMut> {
+    let mut update = UpdatePacket::with_max_packet_size(max_packet_size);
+    update.bgp_attr = Some((**attr).clone());
+    update.ipv4_update = nlris.to_vec();
+    let mut out = Vec::new();
+    while let Some(bytes) = update.pop_ipv4() {
+        out.push(bytes);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -376,6 +633,9 @@ mod tests {
                 members: BTreeSet::new(),
                 created_at: std::time::Instant::now(),
                 counters: UpdateGroupCounters::default(),
+                cache_ipv4: HashMap::new(),
+                cache_ipv4_rev: HashMap::new(),
+                cache_ipv4_timer: None,
             },
         );
         af.next_seq = 1;
