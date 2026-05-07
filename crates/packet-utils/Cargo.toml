@@ -1,24 +1,10 @@
 [package]
 name = "packet-utils"
-version = "0.9.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "Common utilities for protocol packet parsing"
-license = "MIT/Apache-2.0"
-keywords = ["packet","routing","protocol","parser","nom"]
-homepage = "https://github.com/zebra-rs/zebra-rs"
-repository = "https://github.com/zebra-rs/zebra-rs.git"
-authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
-categories = ["parser-implementations"]
-readme = "README.md"
-edition = "2024"
-
-include = [
-  "LICENSE-*",
-  "README.md",
-  ".gitignore",
-  "Cargo.toml",
-  "src/*.rs",
-  "tests/*.rs",
-]
 
 [dependencies]
 bitfield-struct = "0.11"

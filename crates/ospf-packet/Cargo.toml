@@ -1,25 +1,10 @@
 [package]
 name = "ospf-packet"
-version = "0.9.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "Parser for the OSPFv2 and OSPFv3 protocol"
-license = "MIT/Apache-2.0"
-keywords = ["OSPF","routing","protocol","parser","nom"]
-homepage = "https://github.com/zebra-rs/ospf-packet"
-repository = "https://github.com/zebra-rs/ospf-packet.git"
-authors = ["Kunihiro Ishiguro <kunihiro@zebra.dev>"]
-categories = ["parser-implementations"]
-readme = "README.md"
-edition = "2018"
-
-include = [
-  "LICENSE-*",
-  "README.md",
-  ".gitignore",
-  "Cargo.toml",
-  "src/*.rs",
-  "tests/*.rs",
-]
-
 
 [dependencies]
 packet-utils = { path = "../packet-utils" }
