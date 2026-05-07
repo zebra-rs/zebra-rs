@@ -1101,21 +1101,6 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
     }
 }
 
-pub fn clear(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt::Error> {
-    let Some(addr) = args.addr() else {
-        return Ok("peer not found".to_string());
-    };
-
-    let Some(peer) = bgp.peers.get(&addr) else {
-        return Ok("peer not found".to_string());
-    };
-
-    match bgp.tx.try_send(Message::Event(peer.ident, Event::Stop)) {
-        Ok(()) => Ok(format!("%% peer {} is cleared", addr)),
-        Err(e) => Ok(format!("%% failed to clear peer {}: {}", addr, e)),
-    }
-}
-
 /// Replay Adj-RIB-In through the current inbound policy for `peer_idx`,
 /// without bouncing the session. If the peer has `soft-reconfiguration
 /// inbound` configured we replay locally from the stored Adj-RIB-In.
@@ -1123,10 +1108,9 @@ pub fn clear(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt
 /// advertised the capability. With neither, the call is a silent no-op
 /// — the peer will only converge on its next update.
 ///
-/// Used by both the CLI (`clear_soft_in`) and the policy-update path
-/// in `process_policy_msg`. The CLI variant additionally formats a
-/// human-readable status string; this helper performs the side
-/// effects only.
+/// Used by both the `clear bgp <afi> <peer> soft in` CLI dispatcher
+/// (`clear_bgp_action`) and the policy-update path in
+/// `process_policy_msg`.
 pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
     let Some(peer) = bgp.peers.get_by_idx(peer_idx) else {
         return;
@@ -1254,145 +1238,4 @@ pub fn clear_bgp_action(
         targets.len(),
         op
     ))
-}
-
-// Soft-clear outbound: re-apply outbound policy and refresh
-// Adj-RIB-Out for this peer without bouncing the session. Returns
-// immediately if the peer isn't established (nothing to refresh).
-pub fn clear_soft_out(
-    bgp: &mut Bgp,
-    args: &mut Args,
-) -> std::result::Result<String, std::fmt::Error> {
-    let Some(addr) = args.addr() else {
-        return Ok("peer not found".to_string());
-    };
-
-    let Some(peer) = bgp.peers.get(&addr) else {
-        return Ok("peer not found".to_string());
-    };
-
-    if !peer.state.is_established() {
-        return Ok(format!("%% peer {} is not established", addr));
-    }
-    let peer_idx = peer.ident;
-
-    let mut bgp_ref = BgpTop {
-        router_id: &bgp.router_id,
-        local_rib: &mut bgp.local_rib,
-        tx: &bgp.tx,
-        rib_tx: &bgp.rib_tx,
-        attr_store: &mut bgp.attr_store,
-    };
-    super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
-
-    Ok(format!("%% peer {} soft-out done", addr))
-}
-
-// Soft-clear inbound: replay the stored Adj-RIB-In through the current
-// inbound policy and reconcile Loc-RIB. Requires
-// `neighbor X soft-reconfiguration inbound`. When the flag is off,
-// fall back is "send Route Refresh" — Phase 5 wires that path; for
-// now we surface a clear error.
-pub fn clear_soft_in(
-    bgp: &mut Bgp,
-    args: &mut Args,
-) -> std::result::Result<String, std::fmt::Error> {
-    let Some(addr) = args.addr() else {
-        return Ok("peer not found".to_string());
-    };
-
-    let Some(peer) = bgp.peers.get(&addr) else {
-        return Ok("peer not found".to_string());
-    };
-
-    if !peer.state.is_established() {
-        return Ok(format!("%% peer {} is not established", addr));
-    }
-
-    // Stored mode: replay Adj-RIB-In locally. Doesn't touch the wire,
-    // so works even when the peer doesn't speak Route Refresh.
-    if peer.config.soft_reconfig_in {
-        let peer_idx = peer.ident;
-        let mut bgp_ref = BgpTop {
-            router_id: &bgp.router_id,
-            local_rib: &mut bgp.local_rib,
-            tx: &bgp.tx,
-            rib_tx: &bgp.rib_tx,
-            attr_store: &mut bgp.attr_store,
-        };
-        super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
-        return Ok(format!("%% peer {} soft-in done (stored replay)", addr));
-    }
-
-    // Fallback: ask the peer to re-send via RFC 2918 Route Refresh,
-    // if they advertised the capability. One REFRESH per negotiated
-    // (afi, safi) — peer.cap_recv.mp tracks what the peer can
-    // actually carry.
-    if peer.cap_recv.refresh.is_none() {
-        return Ok(format!(
-            "%% peer {addr}: no stored Adj-RIB-In and peer did not advertise Route Refresh capability; \
-             enable `neighbor {addr} soft-reconfiguration inbound` or hard-clear the session"
-        ));
-    }
-    let pairs: Vec<(u16, u8)> = peer
-        .cap_recv
-        .mp
-        .keys()
-        .map(|af| (u16::from(af.afi), u8::from(af.safi)))
-        .collect();
-
-    let peer = bgp.peers.get_mut(&addr).expect("peer exists");
-    for (afi, safi) in &pairs {
-        peer_send_route_refresh(peer, *afi, *safi);
-    }
-    Ok(format!(
-        "%% peer {} soft-in done (sent {} Route Refresh)",
-        addr,
-        pairs.len()
-    ))
-}
-
-pub fn clear_keepalive(bgp: &Bgp, args: &mut Args) -> std::result::Result<String, std::fmt::Error> {
-    let Some(addr) = args.addr() else {
-        return Ok("peer not found".to_string());
-    };
-
-    let Some(peer) = bgp.peers.get(&addr) else {
-        return Ok("peer not found".to_string());
-    };
-
-    match bgp
-        .tx
-        .try_send(Message::Event(peer.ident, Event::KeepaliveTimerExpires))
-    {
-        Ok(()) => Ok(format!("%% peer {} keepalive expire event is sent", addr)),
-        Err(e) => Ok(format!(
-            "%% failed to send keepalive event for {}: {}",
-            addr, e
-        )),
-    }
-}
-
-pub fn clear_keepalive_recv(
-    bgp: &Bgp,
-    args: &mut Args,
-) -> std::result::Result<String, std::fmt::Error> {
-    let Some(addr) = args.addr() else {
-        return Ok("peer not found".to_string());
-    };
-
-    let Some(peer) = bgp.peers.get(&addr) else {
-        return Ok("peer not found".to_string());
-    };
-
-    match bgp
-        .tx
-        .try_send(Message::Event(peer.ident, Event::KeepAliveMsg))
-    {
-        Ok(()) => Ok(format!("%% peer {} keepalive recv event is sent", addr)),
-        Err(e) => Ok(format!(
-            "%% failed to send keepalive recv event for {}: {}",
-            addr, e
-        )),
-    }
 }

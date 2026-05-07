@@ -101,62 +101,6 @@ module configure {
   }
 
   container clear {
-    container ip {
-      container bgp {
-        list neighbors {
-          ext:presence "BGP all neighbor information";
-          key name;
-          leaf name {
-            ext:dynamic "bgp:neighbor";
-            // Accept either family — the BGP runtime keys peers
-            // by `IpAddr` regardless of family, and the path stays
-            // under `ip` purely as a CLI-vocabulary convention.
-            type union {
-              type inet:ipv4-address;
-              type inet:ipv6-address;
-            }
-          }
-        }
-        // Test for manual clear of keepalive timer.
-        leaf keepalive {
-          type union {
-            type inet:ipv4-address;
-            type inet:ipv6-address;
-          }
-        }
-        // Test for manual clear of keepalive timer.
-        leaf keepalive-recv {
-          type union {
-            type inet:ipv4-address;
-            type inet:ipv6-address;
-          }
-        }
-        // Soft-clear outbound: re-apply outbound policy to Loc-RIB
-        // and re-advertise to the named neighbor without bouncing the
-        // session. No persistent state is required (Loc-RIB already
-        // holds the routes); previously-advertised prefixes that
-        // newly fail outbound policy are withdrawn.
-        leaf soft-out {
-          type union {
-            type inet:ipv4-address;
-            type inet:ipv6-address;
-          }
-        }
-        // Soft-clear inbound: replay the peer's stored Adj-RIB-In
-        // through the current inbound policy. Requires
-        // `neighbor X soft-reconfiguration inbound` to be enabled —
-        // otherwise the per-peer pre-policy state is not preserved
-        // across policy changes. Phase 5 will fall back to sending a
-        // BGP Route Refresh (RFC 2918) when stored mode is off and
-        // the peer negotiated the capability.
-        leaf soft-in {
-          type union {
-            type inet:ipv4-address;
-            type inet:ipv6-address;
-          }
-        }
-      }
-    }
     container isis {
       // Force-recalculate the IS-IS SPF for both L1 and L2 instead
       // of waiting for the next LSDB update or the debounce timer.

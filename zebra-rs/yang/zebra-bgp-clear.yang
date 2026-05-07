@@ -24,9 +24,7 @@ module zebra-bgp-clear {
 
   description
     "FRR / IOS-XR style operational `clear bgp <afi> <peer> [soft [in|out]]`
-     command surface. Sits alongside the legacy `/clear/ip/bgp/soft-{in,out}
-     <addr>` paths in configure.yang — both are dispatched by the same
-     daemon-side handlers, so callers can use either grammar.
+     command surface.
 
      Path layout (per AFI container — ipv4 / ipv6 / vpnv4 / evpn):
 

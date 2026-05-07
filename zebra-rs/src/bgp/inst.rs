@@ -21,8 +21,7 @@ use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 /// Map a `/clear/bgp/<afi>/neighbor[/soft[/in|out]]` path (from
 /// zebra-bgp-clear.yang) to the (AFI, SAFI, op) triple the BGP runtime
-/// understands. Returns None for unrecognised paths so the caller can
-/// fall through to the legacy `/clear/ip/bgp/...` arms.
+/// understands. Returns None for unrecognised paths.
 fn parse_clear_bgp_path(
     path: &str,
 ) -> Option<(bgp_packet::Afi, bgp_packet::Safi, peer::BgpClearOp)> {
@@ -396,35 +395,13 @@ impl Bgp {
                 msg.resp.unwrap().send(self.peer_comps()).unwrap();
             }
             ConfigOp::Clear => {
+                // FRR-style `clear bgp <afi> <peer-or-all> [soft [in|out]]`
+                // surface (zebra-bgp-clear.yang). The first segment after
+                // `/clear/bgp/` is the AFI; the remainder selects the
+                // operation.
                 let (path, mut args) = path_from_command(&msg.paths);
-                match path.as_str() {
-                    "/clear/ip/bgp/neighbors" => {
-                        let _ = peer::clear(self, &mut args);
-                    }
-                    "/clear/ip/bgp/keepalive" => {
-                        let _ = peer::clear_keepalive(self, &mut args);
-                    }
-                    "/clear/ip/bgp/keepalive-recv" => {
-                        let _ = peer::clear_keepalive_recv(self, &mut args);
-                    }
-                    "/clear/ip/bgp/soft-out" => {
-                        let _ = peer::clear_soft_out(self, &mut args);
-                    }
-                    "/clear/ip/bgp/soft-in" => {
-                        let _ = peer::clear_soft_in(self, &mut args);
-                    }
-                    other if other.starts_with("/clear/bgp/") => {
-                        // FRR-style `clear bgp <afi> <peer-or-all> [soft [in|out]]`
-                        // surface (zebra-bgp-clear.yang). Single dispatch table:
-                        // first segment after `/clear/bgp/` is the AFI; remainder
-                        // selects the operation.
-                        if let Some((afi, safi, op)) = parse_clear_bgp_path(other) {
-                            let _ = peer::clear_bgp_action(self, &mut args, afi, safi, op);
-                        }
-                    }
-                    _ => {
-                        //
-                    }
+                if let Some((afi, safi, op)) = parse_clear_bgp_path(&path) {
+                    let _ = peer::clear_bgp_action(self, &mut args, afi, safi, op);
                 }
             }
         }
