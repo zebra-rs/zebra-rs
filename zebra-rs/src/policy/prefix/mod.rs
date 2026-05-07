@@ -5,3 +5,5 @@ pub mod config;
 pub use config::PrefixSetConfig;
 
 pub mod show;
+
+mod trie;

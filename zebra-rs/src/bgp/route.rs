@@ -3240,7 +3240,7 @@ mod policy_apply_tests {
     #[test]
     fn match_next_hop_set() {
         let mut next_hop = PrefixSet::default();
-        next_hop.prefixes.insert(
+        next_hop.insert(
             Ipv4Net::from_str("10.0.0.0/8").unwrap().into(),
             PrefixSetEntry::default(),
         );
