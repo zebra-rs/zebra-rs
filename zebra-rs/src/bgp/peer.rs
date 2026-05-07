@@ -204,7 +204,7 @@ pub struct PeerSubConfig {
     pub llgr: Option<u32>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub enum PeerType {
     IBGP,
     EBGP,
@@ -219,7 +219,7 @@ impl PeerType {
         *self == PeerType::EBGP
     }
 
-    pub fn to_str(&self) -> &'static str {
+    pub fn to_str(self) -> &'static str {
         match self {
             Self::IBGP => "internal",
             Self::EBGP => "external",
@@ -356,6 +356,10 @@ pub struct Peer {
     // successful removal or when no AO key is present for this
     // peer.
     pub last_ao_installed: Option<(u8, u8)>,
+    /// Back-reference into `Bgp::update_groups`. One entry per AFI/SAFI
+    /// the peer is in; written by `update_group::attach` on entering
+    /// Established and cleared by `detach` on leaving. Empty otherwise.
+    pub update_group_id: BTreeMap<AfiSafi, super::update_group::UpdateGroupId>,
 }
 
 impl Peer {
@@ -414,6 +418,7 @@ impl Peer {
             cache_vpnv4_timer: None,
             cache_evpn_timer: None,
             last_ao_installed: None,
+            update_group_id: BTreeMap::new(),
         };
         peer.config
             .mp
@@ -535,7 +540,13 @@ fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMa
     }
 }
 
-pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event) {
+pub fn fsm(
+    bgp_ref: &mut BgpTop,
+    peer_map: &mut PeerMap,
+    update_groups: &mut super::update_group::UpdateGroupMap,
+    id: usize,
+    event: Event,
+) {
     // Phase 1: Compute new state (single match, only &mut Peer)
     let (prev_state, effect) = {
         let peer = peer_map.get_mut_by_idx(id).unwrap();
@@ -567,6 +578,23 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
     // Phase 4: route_clean if leaving Established (needs peer_map)
     if prev_state.is_established() && !peer_map.get_by_idx(id).unwrap().state.is_established() {
         route_clean(id, bgp_ref, peer_map);
+    }
+
+    // Phase 5: maintain update-group membership across the
+    // Established boundary. Detach must run *after* route_clean so
+    // observability sees the peer leave the group only once routes
+    // have been torn down; attach runs after route_sync so the
+    // group reflects the post-sync state.
+    {
+        let now_established = peer_map
+            .get_by_idx(id)
+            .map(|p| p.state.is_established())
+            .unwrap_or(false);
+        if prev_state.is_established() && !now_established {
+            super::update_group::detach(update_groups, peer_map, id);
+        } else if !prev_state.is_established() && now_established {
+            super::update_group::attach(update_groups, peer_map, id);
+        }
     }
 }
 
