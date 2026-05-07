@@ -15,7 +15,7 @@ use crate::rib::{self, MacAddr, api::FdbEntry};
 use super::cap::CapAfiMap;
 use super::peer::{BgpTop, Event, Peer, PeerType};
 use super::peer_map::PeerMap;
-use super::timer::{start_adv_timer_ipv4, start_adv_timer_vpnv4};
+use super::timer::start_adv_timer_vpnv4;
 use super::{Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
@@ -769,7 +769,11 @@ fn route_advertise_to_addpath(
                 {
                     super::update_group::send_ipv4(group, nlri, attr, rib.ident, bgp.tx, true);
                 } else {
-                    peer.send_ipv4(nlri, attr, true);
+                    tracing::warn!(
+                        peer = %peer.address,
+                        prefix = %prefix,
+                        "IPv4 addpath advertise: peer Established but not in any update-group; advertise skipped"
+                    );
                 }
             }
         }
@@ -805,12 +809,9 @@ fn route_withdraw_from_addpath(
         if let Some(ref rd) = rd {
             peer.cache_remove_vpnv4(*rd, prefix, removed.local_id);
         } else {
-            // Per-peer cleanup covers any IPv4 entries left by paths
-            // still on the per-peer cache. Idempotent if already gone.
-            peer.cache_remove_ipv4(prefix, removed.local_id);
-            // Group cache cleanup (Phase 3c). Idempotent across the
-            // peer-iteration: first peer in the group cleans the
-            // bucket; subsequent peers find it gone.
+            // Group cache cleanup. Idempotent across the peer
+            // iteration: first peer in the group cleans the bucket;
+            // subsequent peers find it gone.
             let group_id = peer.update_group_id.get(&afi_safi).cloned();
             if let Some(gid) = group_id
                 && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
@@ -985,10 +986,17 @@ fn route_advertise_to_peers(
                             true,
                         );
                     } else {
-                        // Fallback for an Established peer that
-                        // somehow isn't in a group — should not
-                        // happen, but the per-peer cache still works.
-                        peer.send_ipv4(nlri, attr, true);
+                        // Established peer with no IPv4 unicast
+                        // group is a bug — `update_group::attach`
+                        // is supposed to enroll every peer that
+                        // reaches Established. Skip the advertise
+                        // rather than silently dropping it on the
+                        // floor or panicking.
+                        tracing::warn!(
+                            peer = %peer.address,
+                            prefix = %prefix,
+                            "IPv4 advertise: peer is Established but not in any update-group; advertise skipped"
+                        );
                     }
                 }
             }
@@ -996,14 +1004,10 @@ fn route_advertise_to_peers(
                 if let Some(ref rd) = rd {
                     peer.cache_remove_vpnv4(*rd, prefix, 0);
                 } else {
-                    // Per-peer cleanup covers any IPv4 entries left
-                    // by paths still on the per-peer cache (addpath /
-                    // soft-out / sync) — these migrate in 3c/3d.
-                    peer.cache_remove_ipv4(prefix, 0);
-                    // Group cache cleanup (Phase 3b). Skipped for
-                    // split-horizon Withdraws: the source peer never
-                    // contributed an entry, but other group members
-                    // may have. Removing here would clobber theirs.
+                    // Group cache cleanup. Skipped for split-horizon
+                    // Withdraws: the source peer never contributed
+                    // an entry, but other group members may have.
+                    // Removing here would clobber theirs.
                     let is_split_horizon = new_best.map(|b| b.ident == peer.ident).unwrap_or(false);
                     if !is_split_horizon
                         && let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
@@ -1316,6 +1320,11 @@ fn route_soft_out_peer_table(
     };
 
     let mut newly_advertised: BTreeSet<Ipv4Net> = BTreeSet::new();
+    // Soft-out targets a single peer; the per-group cache would
+    // fan out to every member. Accumulate IPv4 unicast entries
+    // and emit via `send_ipv4_direct` at the end so encoding
+    // stays per-attr-batched without touching the group cache.
+    let mut ipv4_entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
 
     for (prefix, rib) in &selected {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
@@ -1344,10 +1353,17 @@ fn route_soft_out_peer_table(
             };
             peer.send_vpnv4(vpnv4_nlri, attr, true);
         } else {
-            peer.send_ipv4(nlri, attr, true);
+            ipv4_entries.push((attr, nlri));
         }
 
         newly_advertised.insert(*prefix);
+    }
+
+    // Direct-emit IPv4 unicast batch (no group fan-out).
+    if rd.is_none()
+        && let Some(peer) = peers.get_by_idx(peer_idx)
+    {
+        super::update_group::send_ipv4_direct(peer, ipv4_entries);
     }
 
     let to_withdraw: Vec<Ipv4Net> = was_advertised
@@ -1356,10 +1372,12 @@ fn route_soft_out_peer_table(
         .collect();
     for prefix in to_withdraw {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        match rd {
-            Some(rd) => peer.cache_remove_vpnv4(rd, prefix, 0),
-            None => peer.cache_remove_ipv4(prefix, 0),
-        };
+        if let Some(rd) = rd {
+            peer.cache_remove_vpnv4(rd, prefix, 0);
+        }
+        // No IPv4 cache to remove from — direct-encode means there
+        // was never a pending bucket to drop. adj_out + the on-wire
+        // withdraw still happen.
         peer.adj_out.remove(rd, prefix, 0);
         route_withdraw_ipv4(peer, rd, prefix, 0);
     }
@@ -1992,7 +2010,6 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.adj_in.v4.0.clear();
     peer.adj_out.v4.0.clear();
 
-    peer.cache_ipv4.clear();
     peer.cache_vpnv4.clear();
 
     // IPv4 VPN.
@@ -2383,47 +2400,6 @@ impl Peer {
         }
     }
 
-    pub fn send_ipv4(&mut self, nlri: Ipv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
-        self.cache_ipv4
-            .entry(attr.clone())
-            .or_default()
-            .insert(nlri.clone());
-        self.cache_ipv4_rev.insert(nlri, attr);
-        if timer && self.cache_ipv4_timer.is_none() {
-            self.cache_ipv4_timer = Some(start_adv_timer_ipv4(self));
-        }
-    }
-
-    pub fn cache_remove_ipv4(&mut self, prefix: Ipv4Net, id: u32) {
-        let nlri = Ipv4Nlri { id, prefix };
-        if let Some(attr) = self.cache_ipv4_rev.remove(&nlri)
-            && let Some(set) = self.cache_ipv4.get_mut(&attr)
-        {
-            set.remove(&nlri);
-            if set.is_empty() {
-                self.cache_ipv4.remove(&attr);
-            }
-        }
-    }
-
-    // Flush BGP update.
-    pub fn flush_ipv4(&mut self) {
-        let packet_tx = self.packet_tx.clone();
-        let max_size = self.max_packet_size();
-        for (attr, nlris) in self.cache_ipv4.drain() {
-            let mut update = UpdatePacket::with_max_packet_size(max_size);
-            update.bgp_attr = Some((*attr).clone());
-            update.ipv4_update = nlris.into_iter().collect();
-
-            while let Some(bytes) = update.pop_ipv4() {
-                if let Some(ref tx) = packet_tx {
-                    let _ = tx.send(bytes);
-                }
-            }
-        }
-        self.cache_ipv4_rev.clear();
-    }
-
     pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
         self.cache_vpnv4
             .entry(attr.clone())
@@ -2682,7 +2658,12 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             .collect()
     };
 
-    // Advertise all best paths to the peer
+    // Sync targets a single peer; the per-group cache would fan
+    // out to every member, double-sending to peers that already
+    // have these routes. Accumulate locally and emit via
+    // `send_ipv4_direct`, which preserves the per-attr batching
+    // (one MP_REACH UPDATE per shared attr-set).
+    let mut entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
     for (prefix, mut rib) in routes {
         let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
             continue;
@@ -2697,11 +2678,10 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         let arc_attr = rib.attr.clone();
         peer.adj_out.add(None, nlri.prefix, rib);
 
-        // Send the routes.
-        peer.send_ipv4(nlri, arc_attr, false);
+        entries.push((arc_attr, nlri));
     }
 
-    peer.flush_ipv4();
+    super::update_group::send_ipv4_direct(peer, entries);
 
     // Send End-of-RIB marker for IPv4 Unicast
     send_eor_ipv4_unicast(peer);
