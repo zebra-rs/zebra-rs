@@ -20,6 +20,13 @@
 
 - [SRv6](ch-04-00-srv6.md)
 
+## Policy
+
+- [Policy](ch-05-00-policy.md)
+  - [Control Flow](ch-05-01-policy-control-flow.md)
+  - [Match](ch-05-02-policy-match.md)
+  - [Set](ch-05-03-policy-set.md)
+
 ## Logging and Monitoring
 
 - [Logging Configuration](ch-03-00-logging-overview.md)
