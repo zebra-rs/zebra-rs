@@ -110,6 +110,45 @@ impl NumericMatch {
     }
 }
 
+/// Operator for numeric set actions (`set local-preference`,
+/// `set med`) of shape `{set NUM | add NUM | sub NUM}`.
+/// `Set` overwrites the attribute; `Add` and `Sub` mutate the
+/// route's current value (treating absence as 0). Underflow on
+/// `Sub` and overflow on `Add` saturate; arithmetic never drops
+/// the route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumericSet {
+    Set(u32),
+    Add(u32),
+    Sub(u32),
+}
+
+impl NumericSet {
+    pub fn op_str(&self) -> &'static str {
+        match self {
+            NumericSet::Set(_) => "set",
+            NumericSet::Add(_) => "add",
+            NumericSet::Sub(_) => "sub",
+        }
+    }
+
+    pub fn value(&self) -> u32 {
+        match self {
+            NumericSet::Set(v) | NumericSet::Add(v) | NumericSet::Sub(v) => *v,
+        }
+    }
+
+    /// Apply the action to the route's current value, treating
+    /// absence as 0 and saturating on overflow / underflow.
+    pub fn apply(&self, current: u32) -> u32 {
+        match self {
+            NumericSet::Set(v) => *v,
+            NumericSet::Add(v) => current.saturating_add(*v),
+            NumericSet::Sub(v) => current.saturating_sub(*v),
+        }
+    }
+}
+
 /// Operation applied by `set community NAME {|additive|delete}`.
 /// `Replace` overwrites the COMMUNITIES attribute with the set's
 /// members; `Additive` merges them in; `Delete` removes them
@@ -163,8 +202,8 @@ pub struct PolicyEntry {
     pub match_weight: Option<NumericMatch>,
     pub match_origin: Option<Origin>,
     // Set.
-    pub local_pref: Option<u32>,
-    pub med: Option<u32>,
+    pub local_pref: Option<NumericSet>,
+    pub med: Option<NumericSet>,
     pub set_community: Option<SetCommunityConfig>,
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<Ipv4Addr>,
@@ -735,32 +774,110 @@ impl ConfigBuilder {
                 entry.match_origin = None;
                 Ok(())
             })
-            .path("/entry/set/local-preference")
+            // `set local-preference {set|add|sub} NUM` — presence
+            // container with mandatory choice; `set` overwrites,
+            // `add`/`sub` mutate the route's current value with
+            // saturating arithmetic.
+            .path("/entry/set/local-preference/set")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let local_pref = args.u32().context(ARG_ERR)?;
-                entry.local_pref = Some(local_pref);
-
+                entry.local_pref = Some(NumericSet::Set(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.local_pref = None;
+                if matches!(entry.local_pref, Some(NumericSet::Set(_))) {
+                    entry.local_pref = None;
+                }
                 Ok(())
             })
-            .path("/entry/set/med")
+            .path("/entry/set/local-preference/add")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let med = args.u32().context(ARG_ERR)?;
-                entry.med = Some(med);
-
+                entry.local_pref = Some(NumericSet::Add(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.local_pref, Some(NumericSet::Add(_))) {
+                    entry.local_pref = None;
+                }
+                Ok(())
+            })
+            .path("/entry/set/local-preference/sub")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.local_pref = Some(NumericSet::Sub(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.local_pref, Some(NumericSet::Sub(_))) {
+                    entry.local_pref = None;
+                }
+                Ok(())
+            })
+            .path("/entry/set/local-preference")
+            .del(|policy, cache, name, seq, _args| {
+                // Container-level delete clears the whole action.
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.local_pref = None;
+                Ok(())
+            })
+            // `set med {set|add|sub} NUM` — same shape.
+            .path("/entry/set/med/set")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.med = Some(NumericSet::Set(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.med, Some(NumericSet::Set(_))) {
+                    entry.med = None;
+                }
+                Ok(())
+            })
+            .path("/entry/set/med/add")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.med = Some(NumericSet::Add(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.med, Some(NumericSet::Add(_))) {
+                    entry.med = None;
+                }
+                Ok(())
+            })
+            .path("/entry/set/med/sub")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.med = Some(NumericSet::Sub(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.med, Some(NumericSet::Sub(_))) {
+                    entry.med = None;
+                }
+                Ok(())
+            })
+            .path("/entry/set/med")
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
@@ -1000,11 +1117,11 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(origin) = &entry.match_origin {
                 let _ = writeln!(buf, "  match: origin {:?}", origin);
             }
-            if let Some(local_pref) = &entry.local_pref {
-                let _ = writeln!(buf, "  set: local-pref {}", local_pref);
+            if let Some(s) = &entry.local_pref {
+                let _ = writeln!(buf, "  set: local-preference {} {}", s.op_str(), s.value());
             }
-            if let Some(med) = &entry.med {
-                let _ = writeln!(buf, "  set: med {}", med);
+            if let Some(s) = &entry.med {
+                let _ = writeln!(buf, "  set: med {} {}", s.op_str(), s.value());
             }
             if let Some(cfg) = &entry.set_community {
                 let suffix = match cfg.mode {

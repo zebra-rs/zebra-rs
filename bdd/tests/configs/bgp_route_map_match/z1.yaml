@@ -11,7 +11,8 @@ policy:
     match:
       prefix: ALL-V4
     set:
-      med: 100
+      med:
+        set: 100
 router:
   bgp:
     global:
