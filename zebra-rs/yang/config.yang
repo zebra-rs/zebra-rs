@@ -821,13 +821,6 @@ module config {
       leaf "name" {
         type string;
       }
-      leaf "default-action" {
-        ext:sort "10";
-        type enumeration {
-          enum accept;
-          enum reject;
-        }
-      }
       list entry {
         ext:sort "5";
         key "number";
@@ -836,29 +829,61 @@ module config {
         }
         container "match" {
           ext:sort "7";
-          leaf "prefix-set" {
-            type string;
-          }
-          leaf "community-set" {
-            type string;
-          }
-          leaf "as-path-set" {
-            type string;
-          }
-          leaf "next-hop-set" {
+          leaf "prefix" {
             type string;
             description
-              "Reference to a prefix-set whose members are matched
-               against the route's BGP NEXT_HOP attribute.";
+              "Reference to a `prefix-set` by name.";
           }
-          leaf "med-eq" {
-            type uint32;
+          leaf "community" {
+            type string;
+            description
+              "Reference to a `community-set` by name.";
           }
-          leaf "med-ge" {
-            type uint32;
+          leaf "as-path" {
+            type string;
+            description
+              "Reference to an `as-path-set` by name.";
           }
-          leaf "med-le" {
-            type uint32;
+          leaf "next-hop" {
+            type string;
+            description
+              "Reference to a `prefix-set` by name; its members
+               are matched against the route's BGP NEXT_HOP
+               attribute.";
+          }
+          container "med" {
+            presence "match med";
+            description
+              "Match the route's MULTI_EXIT_DISC against a single
+               operator + value. Exactly one of `eq`, `le`, `ge`
+               must be set when the container is present —
+               schema-enforced via the `op` choice.";
+            choice "op" {
+              mandatory true;
+              description
+                "Comparison operator. Each case carries a
+                 mandatory uint32 operand; the bare-keyword case
+                 names mirror the CLI shape `match med eq NUM`,
+                 `match med le NUM`, `match med ge NUM`.";
+              case eq-case {
+                leaf "eq" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case le-case {
+                leaf "le" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case ge-case {
+                leaf "ge" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
           }
           leaf "origin" {
             type enumeration {
@@ -879,11 +904,47 @@ module config {
           leaf "next-hop" {
             type inet:ipv4-address;
           }
-          leaf "community-set" {
-            type string;
-          }
-          leaf "community-additive" {
-            type boolean;
+          container "community" {
+            presence "set community";
+            description
+              "Apply a community-set to the route. The choice
+               between {replace-case|additive-case|delete-case}
+               selects the operation: replace (default) overwrites
+               the COMMUNITIES attribute with the set's members,
+               additive merges them in, delete removes them from
+               the existing attribute (set difference).";
+            leaf "name" {
+              type string;
+              mandatory true;
+              description
+                "Reference to a community-set by name.";
+            }
+            choice "mode" {
+              default replace-case;
+              description
+                "Operation applied to the route's COMMUNITIES
+                 attribute. The bare-keyword `additive` and
+                 `delete` cases mirror the CLI shape.";
+              case replace-case {
+                description "Default — overwrite the attribute.";
+              }
+              case additive-case {
+                leaf "additive" {
+                  type empty;
+                  description
+                    "Merge the set's members into the existing
+                     COMMUNITIES attribute.";
+                }
+              }
+              case delete-case {
+                leaf "delete" {
+                  type empty;
+                  description
+                    "Remove the set's members from the existing
+                     COMMUNITIES attribute.";
+                }
+              }
+            }
           }
           container "as-path-prepend" {
             presence "Prepend `asn` onto AS_PATH `repeat` times.";
@@ -911,10 +972,16 @@ module config {
         }
         leaf "action" {
           ext:sort "1";
+          description
+            "Terminal action when the entry matches.
+             `permit` accepts the route and stops scanning.
+             `deny` rejects the route.
+             `next` falls through to the next entry without
+             a verdict.";
           type enumeration {
-            enum accept;
-            enum reject;
-            enum pass;
+            enum permit;
+            enum deny;
+            enum next;
           }
         }
       }

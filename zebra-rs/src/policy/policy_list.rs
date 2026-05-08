@@ -16,7 +16,6 @@ use super::{
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyList {
     pub entry: BTreeMap<u32, PolicyEntry>,
-    pub default_action: Option<PolicyAction>,
     pub delete: bool,
 }
 
@@ -32,12 +31,12 @@ impl PolicyList {
 
 #[derive(EnumString, Display, Clone, Debug, PartialEq)]
 pub enum PolicyAction {
-    #[strum(serialize = "accept")]
-    Accept,
-    #[strum(serialize = "pass")]
-    Pass,
-    #[strum(serialize = "reject")]
-    Reject,
+    #[strum(serialize = "permit")]
+    Permit,
+    #[strum(serialize = "next")]
+    Next,
+    #[strum(serialize = "deny")]
+    Deny,
 }
 
 fn parse_origin(s: &str) -> Result<Origin> {
@@ -64,6 +63,48 @@ impl AsPathPrependConfig {
     }
 }
 
+/// Operator for `match med {eq|le|ge} NUM`. The operand is bundled
+/// into the variant so the type itself encodes "exactly one operator
+/// with its value".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MedMatch {
+    Eq(u32),
+    Le(u32),
+    Ge(u32),
+}
+
+/// Operation applied by `set community NAME {|additive|delete}`.
+/// `Replace` overwrites the COMMUNITIES attribute with the set's
+/// members; `Additive` merges them in; `Delete` removes them
+/// (set difference).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SetCommunityMode {
+    #[default]
+    Replace,
+    Additive,
+    Delete,
+}
+
+/// Set-action config for `set community NAME {|additive|delete}`.
+/// `name` references a community-set; `resolved` is populated by
+/// `policy_entry_sync` from the community-set registry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetCommunityConfig {
+    pub name: String,
+    pub mode: SetCommunityMode,
+    pub resolved: Option<CommunitySet>,
+}
+
+impl SetCommunityConfig {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            mode: SetCommunityMode::Replace,
+            resolved: None,
+        }
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyEntry {
     // Match.
@@ -75,16 +116,12 @@ pub struct PolicyEntry {
     pub as_path_set: Option<AsPathSet>,
     pub next_hop_set_name: Option<String>,
     pub next_hop_set: Option<PrefixSet>,
-    pub match_med_eq: Option<u32>,
-    pub match_med_ge: Option<u32>,
-    pub match_med_le: Option<u32>,
+    pub match_med: Option<MedMatch>,
     pub match_origin: Option<Origin>,
     // Set.
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
-    pub set_community_name: Option<String>,
-    pub set_community: Option<CommunitySet>,
-    pub set_community_additive: bool,
+    pub set_community: Option<SetCommunityConfig>,
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<Ipv4Addr>,
     // Action.
@@ -126,12 +163,8 @@ pub fn policy_entry_sync(
                 policy.next_hop_set = None;
             }
         }
-        if let Some(name) = &policy.set_community_name {
-            if let Some(community_set) = community_set.config.get(name) {
-                policy.set_community = Some(community_set.clone());
-            } else {
-                policy.set_community = None;
-            }
+        if let Some(cfg) = policy.set_community.as_mut() {
+            cfg.resolved = community_set.config.get(&cfg.name).cloned();
         }
     }
 }
@@ -272,7 +305,7 @@ impl ConfigBuilder {
                 list.entry.remove(&seq).context(ARG_ERR)?;
                 Ok(())
             })
-            .path("/entry/match/prefix-set")
+            .path("/entry/match/prefix")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -288,7 +321,7 @@ impl ConfigBuilder {
                 entry.prefix_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/community-set")
+            .path("/entry/match/community")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -304,7 +337,7 @@ impl ConfigBuilder {
                 entry.community_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/as-path-set")
+            .path("/entry/match/as-path")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -320,7 +353,7 @@ impl ConfigBuilder {
                 entry.as_path_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/next-hop-set")
+            .path("/entry/match/next-hop")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -336,43 +369,62 @@ impl ConfigBuilder {
                 entry.next_hop_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/med-eq")
+            // `match med {eq|le|ge} NUM` — presence container with
+            // a `choice op` enforcing exactly-one operator. Each
+            // case carries a mandatory uint32 operand; setting any
+            // case writes the variant; deleting it (or the
+            // container) clears the whole match.
+            .path("/entry/match/med/eq")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med_eq = Some(args.u32().context(ARG_ERR)?);
+                entry.match_med = Some(MedMatch::Eq(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.match_med_eq = None;
+                if matches!(entry.match_med, Some(MedMatch::Eq(_))) {
+                    entry.match_med = None;
+                }
                 Ok(())
             })
-            .path("/entry/match/med-ge")
+            .path("/entry/match/med/le")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med_ge = Some(args.u32().context(ARG_ERR)?);
+                entry.match_med = Some(MedMatch::Le(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.match_med_ge = None;
+                if matches!(entry.match_med, Some(MedMatch::Le(_))) {
+                    entry.match_med = None;
+                }
                 Ok(())
             })
-            .path("/entry/match/med-le")
+            .path("/entry/match/med/ge")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med_le = Some(args.u32().context(ARG_ERR)?);
+                entry.match_med = Some(MedMatch::Ge(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.match_med_le = None;
+                if matches!(entry.match_med, Some(MedMatch::Ge(_))) {
+                    entry.match_med = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/med")
+            .del(|policy, cache, name, seq, _args| {
+                // Container-level delete clears the whole match.
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_med = None;
                 Ok(())
             })
             .path("/entry/match/origin")
@@ -421,37 +473,77 @@ impl ConfigBuilder {
                 entry.med = None;
                 Ok(())
             })
-            .path("/entry/set/community-set")
+            // `set community NAME {|additive|delete}` — presence
+            // container with a mandatory `name` and a `choice mode`
+            // whose three cases are bare keywords (or empty for
+            // replace). YANG fires per-leaf callbacks; we maintain a
+            // single `SetCommunityConfig` and patch in/out the mode.
+            .path("/entry/set/community/name")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let community_set = args.string().context(ARG_ERR)?;
-                entry.set_community_name = Some(community_set);
-
+                let community_name = args.string().context(ARG_ERR)?;
+                match entry.set_community.as_mut() {
+                    Some(cfg) => cfg.name = community_name,
+                    None => entry.set_community = Some(SetCommunityConfig::new(community_name)),
+                }
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.set_community_name = None;
+                // `name` is mandatory; deleting it invalidates the
+                // whole config.
                 entry.set_community = None;
                 Ok(())
             })
-            .path("/entry/set/community-additive")
-            .set(|policy, cache, name, seq, args| {
+            .path("/entry/set/community/additive")
+            .set(|policy, cache, name, seq, _args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let additive = args.boolean().context(ARG_ERR)?;
-                entry.set_community_additive = additive;
-
+                if let Some(cfg) = entry.set_community.as_mut() {
+                    cfg.mode = SetCommunityMode::Additive;
+                }
+                // No-op if name not yet set; the YANG choice ensures
+                // additive and delete are mutually exclusive at the
+                // schema level.
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.set_community_additive = false;
+                if let Some(cfg) = entry.set_community.as_mut()
+                    && cfg.mode == SetCommunityMode::Additive
+                {
+                    cfg.mode = SetCommunityMode::Replace;
+                }
+                Ok(())
+            })
+            .path("/entry/set/community/delete")
+            .set(|policy, cache, name, seq, _args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                if let Some(cfg) = entry.set_community.as_mut() {
+                    cfg.mode = SetCommunityMode::Delete;
+                }
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if let Some(cfg) = entry.set_community.as_mut()
+                    && cfg.mode == SetCommunityMode::Delete
+                {
+                    cfg.mode = SetCommunityMode::Replace;
+                }
+                Ok(())
+            })
+            .path("/entry/set/community")
+            .del(|policy, cache, name, seq, _args| {
+                // Container-level delete clears the whole config.
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_community = None;
                 Ok(())
             })
             // `set as-path-prepend ASN [repeat NUM]` is modeled as
@@ -543,19 +635,6 @@ impl ConfigBuilder {
                 entry.action = None;
                 Ok(())
             })
-            .path("/default-action")
-            .set(|policy, cache, name, _seq, args| {
-                let _list = cache_get(policy, cache, &name).context(ARG_ERR)?;
-                let _default_action = args.string().context(ARG_ERR)?;
-
-                Ok(())
-            })
-            .del(|policy, cache, name, seq, _args| {
-                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
-                let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.action = None;
-                Ok(())
-            })
     }
 
     pub fn path(mut self, path: &str) -> Self {
@@ -593,14 +672,13 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(next_hop_set) = &entry.next_hop_set_name {
                 let _ = writeln!(buf, "  match: next_hop_set {}", next_hop_set);
             }
-            if let Some(med) = &entry.match_med_eq {
-                let _ = writeln!(buf, "  match: med eq {}", med);
-            }
-            if let Some(med) = &entry.match_med_ge {
-                let _ = writeln!(buf, "  match: med ge {}", med);
-            }
-            if let Some(med) = &entry.match_med_le {
-                let _ = writeln!(buf, "  match: med le {}", med);
+            if let Some(med) = &entry.match_med {
+                let (op, value) = match med {
+                    MedMatch::Eq(v) => ("eq", v),
+                    MedMatch::Le(v) => ("le", v),
+                    MedMatch::Ge(v) => ("ge", v),
+                };
+                let _ = writeln!(buf, "  match: med {} {}", op, value);
             }
             if let Some(origin) = &entry.match_origin {
                 let _ = writeln!(buf, "  match: origin {:?}", origin);
@@ -611,13 +689,13 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(med) = &entry.med {
                 let _ = writeln!(buf, "  set: med {}", med);
             }
-            if let Some(set_community) = &entry.set_community_name {
-                let suffix = if entry.set_community_additive {
-                    " additive"
-                } else {
-                    ""
+            if let Some(cfg) = &entry.set_community {
+                let suffix = match cfg.mode {
+                    SetCommunityMode::Replace => "",
+                    SetCommunityMode::Additive => " additive",
+                    SetCommunityMode::Delete => " delete",
                 };
-                let _ = writeln!(buf, "  set: community {}{}", set_community, suffix);
+                let _ = writeln!(buf, "  set: community {}{}", cfg.name, suffix);
             }
             if let Some(prepend) = &entry.set_as_path_prepend {
                 let _ = writeln!(
@@ -629,9 +707,6 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(nh) = &entry.set_next_hop {
                 let _ = writeln!(buf, "  set: next-hop {}", nh);
             }
-        }
-        if let Some(default_action) = &policy.default_action {
-            let _ = writeln!(buf, " default-action: {}", default_action);
         }
     }
     Ok(buf)
@@ -653,13 +728,13 @@ mod tests {
         let prefix = Ipv4Net::from_str("1.1.1.1/32").unwrap();
         prefix_set.insert(prefix.into(), PrefixSetEntry::default());
 
-        // Create a policy-list with entry that matches "pset" and has action accept (permit)
+        // Create a policy-list with an entry that matches "pset" and permits.
         let mut plist = PolicyList::default();
 
-        // Entry 10: match prefix-set "pset" and action accept
+        // Entry 10: match prefix-set "pset" and action permit.
         let entry = plist.entry(10);
         entry.prefix_set_name = Some("pset".to_string());
-        entry.action = Some(PolicyAction::Accept);
+        entry.action = Some(PolicyAction::Permit);
 
         // Verify the policy list configuration
         assert_eq!(plist.entry.len(), 1);
@@ -667,10 +742,10 @@ mod tests {
         assert_eq!(entry.prefix_set_name, Some("pset".to_string()));
 
         match &entry.action {
-            Some(PolicyAction::Accept) => {
-                // Test passes - action is Accept (permit)
+            Some(PolicyAction::Permit) => {
+                // Test passes - action is Permit.
             }
-            _ => panic!("Expected PolicyAction::Accept"),
+            _ => panic!("Expected PolicyAction::Permit"),
         }
 
         // Verify prefix-set contains the correct prefix

@@ -7,7 +7,7 @@ policy:
   entry:
   - number: 10
     match:
-      prefix-set: out-test
+      prefix: out-test
 router:
   bgp:
     global:
