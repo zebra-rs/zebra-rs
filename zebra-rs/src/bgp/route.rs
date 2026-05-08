@@ -538,7 +538,8 @@ pub fn route_apply_policy_in(
     peer: &mut Peer,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
-) -> Option<BgpAttr> {
+    weight: u32,
+) -> Option<PolicyDecision> {
     let config = peer.prefix_set.get(&InOut::Input);
     if config.name.is_some() {
         let Some(prefix_set) = &config.prefix_set else {
@@ -553,16 +554,20 @@ pub fn route_apply_policy_in(
         let Some(policy_list) = &config.policy_list else {
             return None;
         };
-        return policy_list_apply(policy_list, nlri, bgp_attr);
+        return policy_list_apply(policy_list, nlri, bgp_attr, weight);
     }
-    Some(bgp_attr)
+    Some(PolicyDecision {
+        attr: bgp_attr,
+        weight,
+    })
 }
 
 pub fn route_apply_policy_out(
     peer: &mut Peer,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
-) -> Option<BgpAttr> {
+    weight: u32,
+) -> Option<PolicyDecision> {
     let config = peer.prefix_set.get(&InOut::Output);
     if config.name.is_some() {
         let Some(prefix_set) = &config.prefix_set else {
@@ -577,12 +582,15 @@ pub fn route_apply_policy_out(
         let Some(policy_list) = &config.policy_list else {
             return None;
         };
-        return policy_list_apply(policy_list, nlri, bgp_attr);
+        return policy_list_apply(policy_list, nlri, bgp_attr, weight);
     } else {
         // Temporary comment out.
         // return None;
     }
-    Some(bgp_attr)
+    Some(PolicyDecision {
+        attr: bgp_attr,
+        weight,
+    })
 }
 
 pub fn route_ipv4_update(
@@ -669,20 +677,24 @@ pub fn route_ipv4_update(
     );
 
     // Register to peer's AdjRibIn and update stats
-    let attr = {
+    let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         peer.adj_in.add(rd, nlri.prefix, rib.clone());
 
-        // Apply policy.
-        route_apply_policy_in(peer, nlri, attr.clone())
+        // Apply policy. Carry the rib's current weight (0 here,
+        // since this is the first time the route enters the local
+        // RIB) so any `set weight NUM` clause in the in-policy can
+        // override it.
+        route_apply_policy_in(peer, nlri, attr.clone(), rib.weight)
     };
 
     // Perform BGP Path selection.
-    let Some(attr) = attr else {
+    let Some(decision) = decision else {
         route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers, false);
         return;
     };
-    rib.attr = bgp.attr_store.intern(attr);
+    rib.attr = bgp.attr_store.intern(decision.attr);
+    rib.weight = decision.weight;
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
     // Advertise to peers if best path changed.
@@ -735,8 +747,9 @@ fn route_advertise_to_addpath(
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
         if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true)
-            && let Some(attr) = route_apply_policy_out(peer, &nlri, attr)
+            && let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight)
         {
+            let attr = decision.attr;
             // RTC match.
             if let Some(_rd) = rd
                 && !peer.rtcv4.is_empty()
@@ -851,8 +864,8 @@ fn compute_advertise_outcome(
     add_path: bool,
 ) -> AdvertiseOutcome {
     if let Some((nlri, attr)) = route_update_ipv4(peer, prefix, best, bgp, add_path) {
-        if let Some(attr) = route_apply_policy_out(peer, &nlri, attr) {
-            AdvertiseOutcome::Advertise(nlri, attr)
+        if let Some(decision) = route_apply_policy_out(peer, &nlri, attr, best.weight) {
+            AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
             AdvertiseOutcome::Withdraw
         }
@@ -1333,9 +1346,10 @@ fn route_soft_out_peer_table(
         let Some((nlri, attr)) = route_update_ipv4(peer, prefix, rib, bgp, add_path) else {
             continue;
         };
-        let Some(attr) = route_apply_policy_out(peer, &nlri, attr) else {
+        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
             continue;
         };
+        let attr = decision.attr;
         if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
             continue;
         }
@@ -1461,9 +1475,10 @@ fn route_soft_in_peer_table(
             // attributes. The Adj-RIB-In keeps the original attr; only
             // the Loc-RIB candidate gets the post-policy version.
             let pre_attr: BgpAttr = (*stored.attr).clone();
+            let pre_weight = stored.weight;
             let post_attr_opt = {
                 let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-                route_apply_policy_in(peer, &nlri, pre_attr)
+                route_apply_policy_in(peer, &nlri, pre_attr, pre_weight)
             };
 
             match post_attr_opt {
@@ -1473,9 +1488,10 @@ fn route_soft_in_peer_table(
                     // place so subsequent replays still see it.
                     route_ipv4_withdraw(peer_idx, &nlri, rd, None, bgp, peers, false);
                 }
-                Some(post_attr) => {
+                Some(decision) => {
                     let mut new_rib = stored.clone();
-                    new_rib.attr = bgp.attr_store.intern(post_attr);
+                    new_rib.attr = bgp.attr_store.intern(decision.attr);
+                    new_rib.weight = decision.weight;
                     let (_, selected, next_id) = bgp.local_rib.update(rd, prefix, new_rib.clone());
 
                     if !selected.is_empty() {
@@ -2519,14 +2535,29 @@ impl Peer {
 /// fall through with `next` and the policy ends): returns `None`.
 /// Operators express "default permit" by appending an
 /// unconditional final entry with `action: permit`.
+/// Outcome of applying a policy-list to a route. `attr` is the
+/// (possibly modified) BGP attribute set; `weight` is the local
+/// per-router BGP weight. `weight` is not on the wire — it lives
+/// on `BgpRib::weight` and is used in best-path tie-breaking.
+#[derive(Debug, Clone)]
+pub struct PolicyDecision {
+    pub attr: BgpAttr,
+    pub weight: u32,
+}
+
 pub fn policy_list_apply(
     policy_list: &PolicyList,
     nlri: &Ipv4Nlri,
-    mut bgp_attr: BgpAttr,
-) -> Option<BgpAttr> {
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
     use crate::policy::PolicyAction;
+    let mut decision = PolicyDecision {
+        attr: bgp_attr,
+        weight,
+    };
     for (_, entry) in policy_list.entry.iter() {
-        if !entry_matches(entry, nlri, &bgp_attr) {
+        if !entry_matches(entry, nlri, &decision.attr, decision.weight) {
             continue;
         }
         match entry.action {
@@ -2539,30 +2570,34 @@ pub fn policy_list_apply(
                 // attribute, then either return (Permit) or fall
                 // through to the next entry (Next).
                 if let Some(action) = &entry.local_pref {
-                    let current = bgp_attr
+                    let current = decision
+                        .attr
                         .local_pref
                         .as_ref()
                         .map(|l| l.local_pref)
                         .unwrap_or(0);
-                    bgp_attr.local_pref = Some(LocalPref::new(action.apply(current)));
+                    decision.attr.local_pref = Some(LocalPref::new(action.apply(current)));
                 }
                 if let Some(action) = &entry.med {
-                    let current = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
-                    bgp_attr.med = Some(Med {
+                    let current = decision.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+                    decision.attr.med = Some(Med {
                         med: action.apply(current),
                     });
                 }
+                if let Some(w) = entry.weight {
+                    decision.weight = w;
+                }
                 if let Some(cfg) = &entry.set_community {
-                    apply_set_community(&mut bgp_attr, cfg);
+                    apply_set_community(&mut decision.attr, cfg);
                 }
                 if let Some(prepend) = &entry.set_as_path_prepend {
-                    apply_set_as_path_prepend(&mut bgp_attr, prepend);
+                    apply_set_as_path_prepend(&mut decision.attr, prepend);
                 }
                 if let Some(addr) = &entry.set_next_hop {
-                    bgp_attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+                    decision.attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
                 }
                 if entry.action == PolicyAction::Permit {
-                    return Some(bgp_attr);
+                    return Some(decision);
                 }
                 // Next: continue with the modified attribute.
             }
@@ -2572,7 +2607,12 @@ pub fn policy_list_apply(
     None
 }
 
-fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: &BgpAttr) -> bool {
+fn entry_matches(
+    entry: &crate::policy::PolicyEntry,
+    nlri: &Ipv4Nlri,
+    bgp_attr: &BgpAttr,
+    weight: u32,
+) -> bool {
     if let Some(prefix_set) = &entry.prefix_set
         && !prefix_set.matches(nlri.prefix)
     {
@@ -2644,15 +2684,10 @@ fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: 
             return false;
         }
     }
-    if let Some(m) = &entry.match_weight {
-        // BGP weight is a per-router/per-route attribute that the
-        // local router carries in its RIB, not on the wire. Until
-        // we plumb a weight field through BgpAttr, treat absence
-        // as 0 — only `eq 0` / `le N` style matches will succeed.
-        let weight = 0u32;
-        if !m.matches(weight) {
-            return false;
-        }
+    if let Some(m) = &entry.match_weight
+        && !m.matches(weight)
+    {
+        return false;
     }
     if let Some(want) = entry.match_origin {
         let Some(have) = bgp_attr.origin else {
@@ -2770,12 +2805,12 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
 
-        let Some(attr) = route_apply_policy_out(peer, &nlri, attr) else {
+        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
             continue;
         };
 
         // Register to AdjOut.
-        rib.attr = bgp.attr_store.intern(attr);
+        rib.attr = bgp.attr_store.intern(decision.attr);
         let arc_attr = rib.attr.clone();
         peer.adj_out.add(None, nlri.prefix, rib);
 
@@ -2827,9 +2862,10 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 continue;
             };
 
-            let Some(attr) = route_apply_policy_out(peer, &nlri, attr) else {
+            let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
                 continue;
             };
+            let attr = decision.attr;
 
             // RTC
             if !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
@@ -3363,6 +3399,15 @@ mod policy_apply_tests {
     use super::*;
     use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList};
 
+    /// Test wrapper that preserves the legacy `Option<BgpAttr>`
+    /// shape — weight defaults to 0 and is dropped from the
+    /// result. Tests that need to assert on weight call
+    /// `super::policy_list_apply` directly with an explicit
+    /// weight argument.
+    fn policy_list_apply(list: &PolicyList, nlri: &Ipv4Nlri, attr: BgpAttr) -> Option<BgpAttr> {
+        super::policy_list_apply(list, nlri, attr, 0).map(|d| d.attr)
+    }
+
     fn nlri(prefix: &str) -> Ipv4Nlri {
         Ipv4Nlri {
             id: 0,
@@ -3625,10 +3670,9 @@ mod policy_apply_tests {
     }
 
     #[test]
-    fn match_weight_treats_absent_as_zero() {
-        // Weight is not yet plumbed onto BgpAttr; the matcher reads
-        // 0 as a placeholder. Lock that contract: `eq 0` and `le N`
-        // with N>=0 succeed; `ge 1` fails.
+    fn match_weight_default_zero() {
+        // The test wrapper passes weight=0; verify default-zero
+        // semantics — `eq 0` matches, `ge 1` does not.
         let mut list = PolicyList::default();
         list.entry(10).match_weight = Some(NumericMatch::Eq(0));
         assert!(
@@ -3640,6 +3684,30 @@ mod policy_apply_tests {
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", None, None)).is_none()
         );
+    }
+
+    #[test]
+    fn match_weight_with_incoming_weight() {
+        // When the caller passes a non-zero weight, the matcher
+        // must read that value, not 0.
+        let mut list = PolicyList::default();
+        list.entry(10).match_weight = Some(NumericMatch::Eq(500));
+        let attr = attr_with("1", None, None);
+        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr.clone(), 500);
+        assert!(d.is_some(), "weight=500 should match Eq(500)");
+        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr, 0);
+        assert!(d.is_none(), "weight=0 should not match Eq(500)");
+    }
+
+    #[test]
+    fn set_weight_overrides_incoming() {
+        // `set weight 999` makes the decision carry that value
+        // regardless of the incoming weight.
+        let mut list = PolicyList::default();
+        list.entry(10).weight = Some(999);
+        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", None, None), 7)
+            .expect("permit");
+        assert_eq!(d.weight, 999);
     }
 
     #[test]
@@ -3730,12 +3798,18 @@ mod tests {
     };
     use ipnet::Ipv4Net;
 
-    use super::policy_list_apply;
     use crate::policy::prefix::set::PrefixSetEntry;
     use crate::policy::{
         AsPathPrependConfig, CommunityMatcher, CommunitySet, NumericSet, PolicyList, PrefixSet,
         SetCommunityConfig, SetCommunityMode,
     };
+
+    /// Test wrapper that preserves the legacy `Option<BgpAttr>`
+    /// shape; weight defaults to 0. Weight-aware tests call
+    /// `super::policy_list_apply` directly.
+    fn policy_list_apply(list: &PolicyList, nlri: &Ipv4Nlri, attr: BgpAttr) -> Option<BgpAttr> {
+        super::policy_list_apply(list, nlri, attr, 0).map(|d| d.attr)
+    }
 
     fn set_community_cfg(members: &[&str], mode: SetCommunityMode) -> SetCommunityConfig {
         SetCommunityConfig {
