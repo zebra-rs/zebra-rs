@@ -332,6 +332,20 @@ impl As4Path {
         self.length
     }
 
+    /// Returns the count of distinct ASes across all segments
+    /// (sequences, sets, confederation segments). Used by the
+    /// policy engine for `match as-path-len-uniq`.
+    pub fn unique_length(&self) -> u32 {
+        use std::collections::HashSet;
+        let mut seen: HashSet<u32> = HashSet::new();
+        for seg in &self.segs {
+            for asn in &seg.asn {
+                seen.insert(*asn);
+            }
+        }
+        seen.len() as u32
+    }
+
     /// Prepend an AS path to this path.
     /// Returns a new AS path with `other` prepended to `self`.
     pub fn prepend(&self, other: Self) -> Self {

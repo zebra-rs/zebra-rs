@@ -2591,12 +2591,43 @@ fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: 
     }
     if let Some(med_match) = &entry.match_med {
         let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
-        let ok = match med_match {
-            crate::policy::MedMatch::Eq(v) => med == *v,
-            crate::policy::MedMatch::Le(v) => med <= *v,
-            crate::policy::MedMatch::Ge(v) => med >= *v,
-        };
-        if !ok {
+        if !med_match.matches(med) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_as_path_len {
+        let len = bgp_attr.aspath.as_ref().map(|p| p.length()).unwrap_or(0);
+        if !m.matches(len) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_as_path_len_uniq {
+        let uniq = bgp_attr
+            .aspath
+            .as_ref()
+            .map(|p| p.unique_length())
+            .unwrap_or(0);
+        if !m.matches(uniq) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_local_pref {
+        let lp = bgp_attr
+            .local_pref
+            .as_ref()
+            .map(|l| l.local_pref)
+            .unwrap_or(0);
+        if !m.matches(lp) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_weight {
+        // BGP weight is a per-router/per-route attribute that the
+        // local router carries in its RIB, not on the wire. Until
+        // we plumb a weight field through BgpAttr, treat absence
+        // as 0 — only `eq 0` / `le N` style matches will succeed.
+        let weight = 0u32;
+        if !m.matches(weight) {
             return false;
         }
     }
@@ -3308,7 +3339,7 @@ mod policy_apply_tests {
 
     use super::*;
     use crate::policy::prefix::set::PrefixSetEntry;
-    use crate::policy::{AsPathMatcher, AsPathSet, MedMatch, PolicyList, PrefixSet};
+    use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList, PrefixSet};
 
     fn nlri(prefix: &str) -> Ipv4Nlri {
         Ipv4Nlri {
@@ -3345,7 +3376,7 @@ mod policy_apply_tests {
     #[test]
     fn match_med_ge() {
         let mut list = PolicyList::default();
-        list.entry(10).match_med = Some(MedMatch::Ge(100));
+        list.entry(10).match_med = Some(NumericMatch::Ge(100));
 
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(150), None))
@@ -3364,7 +3395,7 @@ mod policy_apply_tests {
     #[test]
     fn match_med_le() {
         let mut list = PolicyList::default();
-        list.entry(10).match_med = Some(MedMatch::Le(200));
+        list.entry(10).match_med = Some(NumericMatch::Le(200));
 
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(150), None))
@@ -3384,7 +3415,7 @@ mod policy_apply_tests {
     #[test]
     fn match_med_eq() {
         let mut list = PolicyList::default();
-        list.entry(10).match_med = Some(MedMatch::Eq(100));
+        list.entry(10).match_med = Some(NumericMatch::Eq(100));
 
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(100), None))
@@ -3452,7 +3483,7 @@ mod policy_apply_tests {
         let entry = list.entry(10);
         entry.as_path_set = Some(set);
         entry.match_origin = Some(Origin::Igp);
-        entry.match_med = Some(MedMatch::Le(50));
+        entry.match_med = Some(NumericMatch::Le(50));
 
         let pass = attr_with("65001 65002", Some(40), Some(Origin::Igp));
         let bad_origin = attr_with("65001 65002", Some(40), Some(Origin::Egp));
@@ -3463,6 +3494,116 @@ mod policy_apply_tests {
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_origin).is_none());
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_med).is_none());
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), bad_path).is_none());
+    }
+
+    #[test]
+    fn match_as_path_len() {
+        // `1 2 3 4 5` -> length 5.
+        let mut list = PolicyList::default();
+        list.entry(10).match_as_path_len = Some(NumericMatch::Eq(5));
+        assert!(
+            policy_list_apply(
+                &list,
+                &nlri("10.0.0.0/8"),
+                attr_with("1 2 3 4 5", None, None)
+            )
+            .is_some()
+        );
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1 2 3 4", None, None))
+                .is_none()
+        );
+
+        let mut list = PolicyList::default();
+        list.entry(10).match_as_path_len = Some(NumericMatch::Ge(3));
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1 2 3", None, None)).is_some()
+        );
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1 2", None, None)).is_none()
+        );
+    }
+
+    #[test]
+    fn match_as_path_len_uniq() {
+        // `1 2 1 2 1` -> length 5, unique 2.
+        let mut list = PolicyList::default();
+        list.entry(10).match_as_path_len_uniq = Some(NumericMatch::Eq(2));
+        assert!(
+            policy_list_apply(
+                &list,
+                &nlri("10.0.0.0/8"),
+                attr_with("1 2 1 2 1", None, None)
+            )
+            .is_some()
+        );
+        // `1 2 3 4 5` -> length 5, unique 5: `eq 2` should miss.
+        assert!(
+            policy_list_apply(
+                &list,
+                &nlri("10.0.0.0/8"),
+                attr_with("1 2 3 4 5", None, None)
+            )
+            .is_none()
+        );
+
+        let mut list = PolicyList::default();
+        list.entry(10).match_as_path_len_uniq = Some(NumericMatch::Le(3));
+        assert!(
+            policy_list_apply(
+                &list,
+                &nlri("10.0.0.0/8"),
+                attr_with("1 2 1 2 1", None, None)
+            )
+            .is_some()
+        );
+        assert!(
+            policy_list_apply(
+                &list,
+                &nlri("10.0.0.0/8"),
+                attr_with("1 2 3 4 5", None, None)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn match_local_preference() {
+        use bgp_packet::LocalPref;
+        let mut list = PolicyList::default();
+        list.entry(10).match_local_pref = Some(NumericMatch::Ge(100));
+
+        let mut attr_hi = attr_with("1", None, None);
+        attr_hi.local_pref = Some(LocalPref::new(150));
+        let mut attr_eq = attr_with("1", None, None);
+        attr_eq.local_pref = Some(LocalPref::new(100));
+        let mut attr_lo = attr_with("1", None, None);
+        attr_lo.local_pref = Some(LocalPref::new(50));
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_hi).is_some());
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_eq).is_some(),
+            "ge accepts equality"
+        );
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_lo).is_none());
+    }
+
+    #[test]
+    fn match_weight_treats_absent_as_zero() {
+        // Weight is not yet plumbed onto BgpAttr; the matcher reads
+        // 0 as a placeholder. Lock that contract: `eq 0` and `le N`
+        // with N>=0 succeed; `ge 1` fails.
+        let mut list = PolicyList::default();
+        list.entry(10).match_weight = Some(NumericMatch::Eq(0));
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", None, None)).is_some()
+        );
+
+        let mut list = PolicyList::default();
+        list.entry(10).match_weight = Some(NumericMatch::Ge(1));
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", None, None)).is_none()
+        );
     }
 }
 

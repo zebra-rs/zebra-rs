@@ -885,6 +885,117 @@ module config {
               }
             }
           }
+          container "as-path-len" {
+            presence "match as-path-len";
+            description
+              "Match the total length of the route's AS_PATH
+               (count of ASes across all segments) against
+               `eq`/`le`/`ge` NUM. Same shape as `match med`.";
+            choice "op" {
+              mandatory true;
+              case eq-case {
+                leaf "eq" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case le-case {
+                leaf "le" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case ge-case {
+                leaf "ge" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
+          }
+          container "as-path-len-uniq" {
+            presence "match as-path-len-uniq";
+            description
+              "Match the count of distinct ASes in the route's
+               AS_PATH (duplicates collapsed) against
+               `eq`/`le`/`ge` NUM. Same shape as `match med`.";
+            choice "op" {
+              mandatory true;
+              case eq-case {
+                leaf "eq" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case le-case {
+                leaf "le" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case ge-case {
+                leaf "ge" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
+          }
+          container "local-preference" {
+            presence "match local-preference";
+            description
+              "Match the route's LOCAL_PREF attribute against
+               `eq`/`le`/`ge` NUM. Same shape as `match med`.";
+            choice "op" {
+              mandatory true;
+              case eq-case {
+                leaf "eq" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case le-case {
+                leaf "le" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case ge-case {
+                leaf "ge" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
+          }
+          container "weight" {
+            presence "match weight";
+            description
+              "Match the route's BGP weight (per-router,
+               implementation attribute) against `eq`/`le`/`ge`
+               NUM. Same shape as `match med`.";
+            choice "op" {
+              mandatory true;
+              case eq-case {
+                leaf "eq" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case le-case {
+                leaf "le" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case ge-case {
+                leaf "ge" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
+          }
           leaf "origin" {
             type enumeration {
               enum igp;
