@@ -428,9 +428,9 @@ fn cascade_indirect_policy_updates(
                 || e.community_set_name
                     .as_ref()
                     .is_some_and(|n| changed_community_sets.contains(n))
-                || e.set_community_name
+                || e.set_community
                     .as_ref()
-                    .is_some_and(|n| changed_community_sets.contains(n))
+                    .is_some_and(|c| changed_community_sets.contains(&c.name))
                 || e.as_path_set_name
                     .as_ref()
                     .is_some_and(|n| changed_as_path_sets.contains(n))

@@ -2519,8 +2519,8 @@ pub fn policy_list_apply(
         if let Some(med) = &entry.med {
             bgp_attr.med = Some(Med { med: *med });
         }
-        if let Some(set_community) = &entry.set_community {
-            apply_set_community(&mut bgp_attr, set_community, entry.set_community_additive);
+        if let Some(cfg) = &entry.set_community {
+            apply_set_community(&mut bgp_attr, cfg);
         }
         if let Some(prepend) = &entry.set_as_path_prepend {
             apply_set_as_path_prepend(&mut bgp_attr, prepend);
@@ -2595,12 +2595,14 @@ fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: 
 /// With `additive = false` the existing community list is replaced; with
 /// `additive = true` the new values are merged in. The result is always
 /// sorted and deduplicated.
-fn apply_set_community(
-    bgp_attr: &mut BgpAttr,
-    set_community: &crate::policy::CommunitySet,
-    additive: bool,
-) {
-    let new_vals: Vec<u32> = set_community
+fn apply_set_community(bgp_attr: &mut BgpAttr, cfg: &crate::policy::SetCommunityConfig) {
+    // Unresolved name (community-set was deleted or never defined):
+    // skip silently rather than touch the attribute. policy_entry_sync
+    // re-resolves on changes.
+    let Some(set) = cfg.resolved.as_ref() else {
+        return;
+    };
+    let new_vals: Vec<u32> = set
         .vals
         .iter()
         .filter_map(|m| match m {
@@ -2608,21 +2610,40 @@ fn apply_set_community(
             _ => None,
         })
         .collect();
-    if new_vals.is_empty() && !additive {
-        // Replace with empty: drop the attribute entirely.
-        bgp_attr.com = None;
-        return;
+
+    use crate::policy::SetCommunityMode;
+    match cfg.mode {
+        SetCommunityMode::Replace => {
+            if new_vals.is_empty() {
+                bgp_attr.com = None;
+                return;
+            }
+            let mut com = Community::new();
+            for v in new_vals {
+                com.push(v);
+            }
+            com.sort_uniq();
+            bgp_attr.com = Some(com);
+        }
+        SetCommunityMode::Additive => {
+            let mut com = bgp_attr.com.clone().unwrap_or_default();
+            for v in new_vals {
+                com.push(v);
+            }
+            com.sort_uniq();
+            bgp_attr.com = Some(com);
+        }
+        SetCommunityMode::Delete => {
+            // Set difference: drop matching values from existing
+            // community attribute. No-op if attribute absent.
+            let Some(mut com) = bgp_attr.com.clone() else {
+                return;
+            };
+            let drop: std::collections::HashSet<u32> = new_vals.into_iter().collect();
+            com.0.retain(|v| !drop.contains(v));
+            bgp_attr.com = if com.0.is_empty() { None } else { Some(com) };
+        }
     }
-    let mut com = if additive {
-        bgp_attr.com.clone().unwrap_or_default()
-    } else {
-        Community::new()
-    };
-    for v in new_vals {
-        com.push(v);
-    }
-    com.sort_uniq();
-    bgp_attr.com = Some(com);
 }
 
 /// Apply a `set as-path-prepend ASN repeat NUM` action by prepending
@@ -3411,7 +3432,18 @@ mod tests {
     use ipnet::Ipv4Net;
 
     use super::policy_list_apply;
-    use crate::policy::{AsPathPrependConfig, CommunityMatcher, CommunitySet, PolicyList};
+    use crate::policy::{
+        AsPathPrependConfig, CommunityMatcher, CommunitySet, PolicyList, SetCommunityConfig,
+        SetCommunityMode,
+    };
+
+    fn set_community_cfg(members: &[&str], mode: SetCommunityMode) -> SetCommunityConfig {
+        SetCommunityConfig {
+            name: "test".into(),
+            mode,
+            resolved: Some(community_set(members)),
+        }
+    }
 
     fn nlri(s: &str) -> Ipv4Nlri {
         Ipv4Nlri {
@@ -3475,8 +3507,10 @@ mod tests {
     fn policy_list_apply_community_replace() {
         let mut list = PolicyList::default();
         let entry = list.entry(10);
-        entry.set_community = Some(community_set(&["100:200", "no-export"]));
-        entry.set_community_additive = false;
+        entry.set_community = Some(set_community_cfg(
+            &["100:200", "no-export"],
+            SetCommunityMode::Replace,
+        ));
 
         // Existing community 999:999 must be wiped on replace.
         let attr = BgpAttr {
@@ -3496,8 +3530,7 @@ mod tests {
     fn policy_list_apply_community_additive() {
         let mut list = PolicyList::default();
         let entry = list.entry(10);
-        entry.set_community = Some(community_set(&["100:200"]));
-        entry.set_community_additive = true;
+        entry.set_community = Some(set_community_cfg(&["100:200"], SetCommunityMode::Additive));
 
         let attr = BgpAttr {
             com: Some(Community(vec![com_val("999:999")])),
@@ -3515,8 +3548,7 @@ mod tests {
     fn policy_list_apply_community_additive_dedups() {
         let mut list = PolicyList::default();
         let entry = list.entry(10);
-        entry.set_community = Some(community_set(&["100:200"]));
-        entry.set_community_additive = true;
+        entry.set_community = Some(set_community_cfg(&["100:200"], SetCommunityMode::Additive));
 
         // 100:200 already present — additive should not duplicate.
         let attr = BgpAttr {
@@ -3534,12 +3566,56 @@ mod tests {
         let mut list = PolicyList::default();
         let entry = list.entry(10);
         // Mix concrete + regex; only 100:200 is materializable.
-        entry.set_community = Some(community_set(&["100:200", "^65000:.*"]));
-        entry.set_community_additive = false;
+        entry.set_community = Some(set_community_cfg(
+            &["100:200", "^65000:.*"],
+            SetCommunityMode::Replace,
+        ));
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
         let com = out.com.expect("community attribute set");
         assert_eq!(com.0, vec![com_val("100:200")]);
+    }
+
+    #[test]
+    fn policy_list_apply_community_delete_removes_matching() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.set_community = Some(set_community_cfg(
+            &["100:200", "no-export"],
+            SetCommunityMode::Delete,
+        ));
+
+        // Existing has both targets and a non-target — only the
+        // targets are removed; non-target survives.
+        let attr = BgpAttr {
+            com: Some(Community(vec![
+                com_val("100:200"),
+                com_val("999:999"),
+                CommunityValue::NO_EXPORT.value(),
+            ])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        let com = out.com.expect("community attribute survives");
+        assert_eq!(com.0, vec![com_val("999:999")]);
+    }
+
+    #[test]
+    fn policy_list_apply_community_delete_drops_attr_when_empty() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.set_community = Some(set_community_cfg(&["100:200"], SetCommunityMode::Delete));
+
+        // Single value matches the deletion → attribute should be
+        // None rather than an empty Community vec.
+        let attr = BgpAttr {
+            com: Some(Community(vec![com_val("100:200")])),
+            ..Default::default()
+        };
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        assert!(out.com.is_none());
     }
 
     #[test]

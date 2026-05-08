@@ -821,13 +821,6 @@ module config {
       leaf "name" {
         type string;
       }
-      leaf "default-action" {
-        ext:sort "10";
-        type enumeration {
-          enum accept;
-          enum reject;
-        }
-      }
       list entry {
         ext:sort "5";
         key "number";
@@ -879,11 +872,47 @@ module config {
           leaf "next-hop" {
             type inet:ipv4-address;
           }
-          leaf "community-set" {
-            type string;
-          }
-          leaf "community-additive" {
-            type boolean;
+          container "community" {
+            presence "set community";
+            description
+              "Apply a community-set to the route. The choice
+               between {replace-case|additive-case|delete-case}
+               selects the operation: replace (default) overwrites
+               the COMMUNITIES attribute with the set's members,
+               additive merges them in, delete removes them from
+               the existing attribute (set difference).";
+            leaf "name" {
+              type string;
+              mandatory true;
+              description
+                "Reference to a community-set by name.";
+            }
+            choice "mode" {
+              default replace-case;
+              description
+                "Operation applied to the route's COMMUNITIES
+                 attribute. The bare-keyword `additive` and
+                 `delete` cases mirror the CLI shape.";
+              case replace-case {
+                description "Default — overwrite the attribute.";
+              }
+              case additive-case {
+                leaf "additive" {
+                  type empty;
+                  description
+                    "Merge the set's members into the existing
+                     COMMUNITIES attribute.";
+                }
+              }
+              case delete-case {
+                leaf "delete" {
+                  type empty;
+                  description
+                    "Remove the set's members from the existing
+                     COMMUNITIES attribute.";
+                }
+              }
+            }
           }
           container "as-path-prepend" {
             presence "Prepend `asn` onto AS_PATH `repeat` times.";
