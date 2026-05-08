@@ -2558,21 +2558,14 @@ fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: 
             return false;
         }
     }
-    if let Some(eq) = entry.match_med_eq {
+    if let Some(med_match) = &entry.match_med {
         let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
-        if med != eq {
-            return false;
-        }
-    }
-    if let Some(ge) = entry.match_med_ge {
-        let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
-        if med < ge {
-            return false;
-        }
-    }
-    if let Some(le) = entry.match_med_le {
-        let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
-        if med > le {
+        let ok = match med_match {
+            crate::policy::MedMatch::Eq(v) => med == *v,
+            crate::policy::MedMatch::Le(v) => med <= *v,
+            crate::policy::MedMatch::Ge(v) => med >= *v,
+        };
+        if !ok {
             return false;
         }
     }
@@ -3284,7 +3277,7 @@ mod policy_apply_tests {
 
     use super::*;
     use crate::policy::prefix::set::PrefixSetEntry;
-    use crate::policy::{AsPathMatcher, AsPathSet, PolicyList, PrefixSet};
+    use crate::policy::{AsPathMatcher, AsPathSet, MedMatch, PolicyList, PrefixSet};
 
     fn nlri(prefix: &str) -> Ipv4Nlri {
         Ipv4Nlri {
@@ -3319,27 +3312,49 @@ mod policy_apply_tests {
     }
 
     #[test]
-    fn match_med_eq_ge_le() {
+    fn match_med_ge() {
         let mut list = PolicyList::default();
-        let entry = list.entry(10);
-        entry.match_med_ge = Some(100);
-        entry.match_med_le = Some(200);
+        list.entry(10).match_med = Some(MedMatch::Ge(100));
 
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(150), None))
                 .is_some()
         );
         assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(100), None))
+                .is_some(),
+            "ge accepts equality"
+        );
+        assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(50), None)).is_none()
+        );
+    }
+
+    #[test]
+    fn match_med_le() {
+        let mut list = PolicyList::default();
+        list.entry(10).match_med = Some(MedMatch::Le(200));
+
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(150), None))
+                .is_some()
+        );
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(200), None))
+                .is_some(),
+            "le accepts equality"
         );
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(250), None))
                 .is_none()
         );
+    }
 
+    #[test]
+    fn match_med_eq() {
         let mut list = PolicyList::default();
-        let entry = list.entry(10);
-        entry.match_med_eq = Some(100);
+        list.entry(10).match_med = Some(MedMatch::Eq(100));
+
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", Some(100), None))
                 .is_some()
@@ -3406,7 +3421,7 @@ mod policy_apply_tests {
         let entry = list.entry(10);
         entry.as_path_set = Some(set);
         entry.match_origin = Some(Origin::Igp);
-        entry.match_med_le = Some(50);
+        entry.match_med = Some(MedMatch::Le(50));
 
         let pass = attr_with("65001 65002", Some(40), Some(Origin::Igp));
         let bad_origin = attr_with("65001 65002", Some(40), Some(Origin::Egp));

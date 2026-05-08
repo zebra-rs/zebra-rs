@@ -844,14 +844,39 @@ module config {
               "Reference to a prefix-set whose members are matched
                against the route's BGP NEXT_HOP attribute.";
           }
-          leaf "med-eq" {
-            type uint32;
-          }
-          leaf "med-ge" {
-            type uint32;
-          }
-          leaf "med-le" {
-            type uint32;
+          container "med" {
+            presence "match med";
+            description
+              "Match the route's MULTI_EXIT_DISC against a single
+               operator + value. Exactly one of `eq`, `le`, `ge`
+               must be set when the container is present —
+               schema-enforced via the `op` choice.";
+            choice "op" {
+              mandatory true;
+              description
+                "Comparison operator. Each case carries a
+                 mandatory uint32 operand; the bare-keyword case
+                 names mirror the CLI shape `match med eq NUM`,
+                 `match med le NUM`, `match med ge NUM`.";
+              case eq-case {
+                leaf "eq" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case le-case {
+                leaf "le" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case ge-case {
+                leaf "ge" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
           }
           leaf "origin" {
             type enumeration {

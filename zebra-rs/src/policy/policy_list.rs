@@ -63,6 +63,16 @@ impl AsPathPrependConfig {
     }
 }
 
+/// Operator for `match med {eq|le|ge} NUM`. The operand is bundled
+/// into the variant so the type itself encodes "exactly one operator
+/// with its value".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MedMatch {
+    Eq(u32),
+    Le(u32),
+    Ge(u32),
+}
+
 /// Operation applied by `set community NAME {|additive|delete}`.
 /// `Replace` overwrites the COMMUNITIES attribute with the set's
 /// members; `Additive` merges them in; `Delete` removes them
@@ -106,9 +116,7 @@ pub struct PolicyEntry {
     pub as_path_set: Option<AsPathSet>,
     pub next_hop_set_name: Option<String>,
     pub next_hop_set: Option<PrefixSet>,
-    pub match_med_eq: Option<u32>,
-    pub match_med_ge: Option<u32>,
-    pub match_med_le: Option<u32>,
+    pub match_med: Option<MedMatch>,
     pub match_origin: Option<Origin>,
     // Set.
     pub local_pref: Option<u32>,
@@ -361,43 +369,62 @@ impl ConfigBuilder {
                 entry.next_hop_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/med-eq")
+            // `match med {eq|le|ge} NUM` — presence container with
+            // a `choice op` enforcing exactly-one operator. Each
+            // case carries a mandatory uint32 operand; setting any
+            // case writes the variant; deleting it (or the
+            // container) clears the whole match.
+            .path("/entry/match/med/eq")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med_eq = Some(args.u32().context(ARG_ERR)?);
+                entry.match_med = Some(MedMatch::Eq(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.match_med_eq = None;
+                if matches!(entry.match_med, Some(MedMatch::Eq(_))) {
+                    entry.match_med = None;
+                }
                 Ok(())
             })
-            .path("/entry/match/med-ge")
+            .path("/entry/match/med/le")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med_ge = Some(args.u32().context(ARG_ERR)?);
+                entry.match_med = Some(MedMatch::Le(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.match_med_ge = None;
+                if matches!(entry.match_med, Some(MedMatch::Le(_))) {
+                    entry.match_med = None;
+                }
                 Ok(())
             })
-            .path("/entry/match/med-le")
+            .path("/entry/match/med/ge")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med_le = Some(args.u32().context(ARG_ERR)?);
+                entry.match_med = Some(MedMatch::Ge(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.match_med_le = None;
+                if matches!(entry.match_med, Some(MedMatch::Ge(_))) {
+                    entry.match_med = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/med")
+            .del(|policy, cache, name, seq, _args| {
+                // Container-level delete clears the whole match.
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_med = None;
                 Ok(())
             })
             .path("/entry/match/origin")
@@ -645,14 +672,13 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(next_hop_set) = &entry.next_hop_set_name {
                 let _ = writeln!(buf, "  match: next_hop_set {}", next_hop_set);
             }
-            if let Some(med) = &entry.match_med_eq {
-                let _ = writeln!(buf, "  match: med eq {}", med);
-            }
-            if let Some(med) = &entry.match_med_ge {
-                let _ = writeln!(buf, "  match: med ge {}", med);
-            }
-            if let Some(med) = &entry.match_med_le {
-                let _ = writeln!(buf, "  match: med le {}", med);
+            if let Some(med) = &entry.match_med {
+                let (op, value) = match med {
+                    MedMatch::Eq(v) => ("eq", v),
+                    MedMatch::Le(v) => ("le", v),
+                    MedMatch::Ge(v) => ("ge", v),
+                };
+                let _ = writeln!(buf, "  match: med {} {}", op, value);
             }
             if let Some(origin) = &entry.match_origin {
                 let _ = writeln!(buf, "  match: origin {:?}", origin);
