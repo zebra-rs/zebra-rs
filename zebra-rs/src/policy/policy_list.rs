@@ -73,14 +73,40 @@ impl AsPathPrependConfig {
     }
 }
 
-/// Operator for `match med {eq|le|ge} NUM`. The operand is bundled
-/// into the variant so the type itself encodes "exactly one operator
-/// with its value".
+/// Operator for numeric match clauses (`match med`,
+/// `match as-path-len`, `match as-path-len-uniq`,
+/// `match local-preference`, `match weight`) of shape
+/// `{eq|le|ge} NUM`. The operand is bundled into the variant so
+/// the type itself encodes "exactly one operator with its value".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MedMatch {
+pub enum NumericMatch {
     Eq(u32),
     Le(u32),
     Ge(u32),
+}
+
+impl NumericMatch {
+    pub fn op_str(&self) -> &'static str {
+        match self {
+            NumericMatch::Eq(_) => "eq",
+            NumericMatch::Le(_) => "le",
+            NumericMatch::Ge(_) => "ge",
+        }
+    }
+
+    pub fn value(&self) -> u32 {
+        match self {
+            NumericMatch::Eq(v) | NumericMatch::Le(v) | NumericMatch::Ge(v) => *v,
+        }
+    }
+
+    pub fn matches(&self, v: u32) -> bool {
+        match self {
+            NumericMatch::Eq(target) => v == *target,
+            NumericMatch::Le(target) => v <= *target,
+            NumericMatch::Ge(target) => v >= *target,
+        }
+    }
 }
 
 /// Operation applied by `set community NAME {|additive|delete}`.
@@ -126,7 +152,11 @@ pub struct PolicyEntry {
     pub as_path_set: Option<AsPathSet>,
     pub next_hop_set_name: Option<String>,
     pub next_hop_set: Option<PrefixSet>,
-    pub match_med: Option<MedMatch>,
+    pub match_med: Option<NumericMatch>,
+    pub match_as_path_len: Option<NumericMatch>,
+    pub match_as_path_len_uniq: Option<NumericMatch>,
+    pub match_local_pref: Option<NumericMatch>,
+    pub match_weight: Option<NumericMatch>,
     pub match_origin: Option<Origin>,
     // Set.
     pub local_pref: Option<u32>,
@@ -388,13 +418,13 @@ impl ConfigBuilder {
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med = Some(MedMatch::Eq(args.u32().context(ARG_ERR)?));
+                entry.match_med = Some(NumericMatch::Eq(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                if matches!(entry.match_med, Some(MedMatch::Eq(_))) {
+                if matches!(entry.match_med, Some(NumericMatch::Eq(_))) {
                     entry.match_med = None;
                 }
                 Ok(())
@@ -403,13 +433,13 @@ impl ConfigBuilder {
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med = Some(MedMatch::Le(args.u32().context(ARG_ERR)?));
+                entry.match_med = Some(NumericMatch::Le(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                if matches!(entry.match_med, Some(MedMatch::Le(_))) {
+                if matches!(entry.match_med, Some(NumericMatch::Le(_))) {
                     entry.match_med = None;
                 }
                 Ok(())
@@ -418,13 +448,13 @@ impl ConfigBuilder {
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-                entry.match_med = Some(MedMatch::Ge(args.u32().context(ARG_ERR)?));
+                entry.match_med = Some(NumericMatch::Ge(args.u32().context(ARG_ERR)?));
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                if matches!(entry.match_med, Some(MedMatch::Ge(_))) {
+                if matches!(entry.match_med, Some(NumericMatch::Ge(_))) {
                     entry.match_med = None;
                 }
                 Ok(())
@@ -435,6 +465,218 @@ impl ConfigBuilder {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
                 entry.match_med = None;
+                Ok(())
+            })
+            // `match as-path-len {eq|le|ge} NUM` — same shape as med.
+            .path("/entry/match/as-path-len/eq")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_as_path_len = Some(NumericMatch::Eq(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_as_path_len, Some(NumericMatch::Eq(_))) {
+                    entry.match_as_path_len = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/as-path-len/le")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_as_path_len = Some(NumericMatch::Le(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_as_path_len, Some(NumericMatch::Le(_))) {
+                    entry.match_as_path_len = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/as-path-len/ge")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_as_path_len = Some(NumericMatch::Ge(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_as_path_len, Some(NumericMatch::Ge(_))) {
+                    entry.match_as_path_len = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/as-path-len")
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_as_path_len = None;
+                Ok(())
+            })
+            // `match as-path-len-uniq {eq|le|ge} NUM` — same shape.
+            .path("/entry/match/as-path-len-uniq/eq")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_as_path_len_uniq = Some(NumericMatch::Eq(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_as_path_len_uniq, Some(NumericMatch::Eq(_))) {
+                    entry.match_as_path_len_uniq = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/as-path-len-uniq/le")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_as_path_len_uniq = Some(NumericMatch::Le(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_as_path_len_uniq, Some(NumericMatch::Le(_))) {
+                    entry.match_as_path_len_uniq = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/as-path-len-uniq/ge")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_as_path_len_uniq = Some(NumericMatch::Ge(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_as_path_len_uniq, Some(NumericMatch::Ge(_))) {
+                    entry.match_as_path_len_uniq = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/as-path-len-uniq")
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_as_path_len_uniq = None;
+                Ok(())
+            })
+            // `match local-preference {eq|le|ge} NUM` — same shape.
+            .path("/entry/match/local-preference/eq")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_local_pref = Some(NumericMatch::Eq(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_local_pref, Some(NumericMatch::Eq(_))) {
+                    entry.match_local_pref = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/local-preference/le")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_local_pref = Some(NumericMatch::Le(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_local_pref, Some(NumericMatch::Le(_))) {
+                    entry.match_local_pref = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/local-preference/ge")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_local_pref = Some(NumericMatch::Ge(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_local_pref, Some(NumericMatch::Ge(_))) {
+                    entry.match_local_pref = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/local-preference")
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_local_pref = None;
+                Ok(())
+            })
+            // `match weight {eq|le|ge} NUM` — same shape.
+            .path("/entry/match/weight/eq")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_weight = Some(NumericMatch::Eq(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_weight, Some(NumericMatch::Eq(_))) {
+                    entry.match_weight = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/weight/le")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_weight = Some(NumericMatch::Le(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_weight, Some(NumericMatch::Le(_))) {
+                    entry.match_weight = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/weight/ge")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_weight = Some(NumericMatch::Ge(args.u32().context(ARG_ERR)?));
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.match_weight, Some(NumericMatch::Ge(_))) {
+                    entry.match_weight = None;
+                }
+                Ok(())
+            })
+            .path("/entry/match/weight")
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_weight = None;
                 Ok(())
             })
             .path("/entry/match/origin")
@@ -682,13 +924,30 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(next_hop_set) = &entry.next_hop_set_name {
                 let _ = writeln!(buf, "  match: next_hop_set {}", next_hop_set);
             }
-            if let Some(med) = &entry.match_med {
-                let (op, value) = match med {
-                    MedMatch::Eq(v) => ("eq", v),
-                    MedMatch::Le(v) => ("le", v),
-                    MedMatch::Ge(v) => ("ge", v),
-                };
-                let _ = writeln!(buf, "  match: med {} {}", op, value);
+            if let Some(m) = &entry.match_med {
+                let _ = writeln!(buf, "  match: med {} {}", m.op_str(), m.value());
+            }
+            if let Some(m) = &entry.match_as_path_len {
+                let _ = writeln!(buf, "  match: as-path-len {} {}", m.op_str(), m.value());
+            }
+            if let Some(m) = &entry.match_as_path_len_uniq {
+                let _ = writeln!(
+                    buf,
+                    "  match: as-path-len-uniq {} {}",
+                    m.op_str(),
+                    m.value()
+                );
+            }
+            if let Some(m) = &entry.match_local_pref {
+                let _ = writeln!(
+                    buf,
+                    "  match: local-preference {} {}",
+                    m.op_str(),
+                    m.value()
+                );
+            }
+            if let Some(m) = &entry.match_weight {
+                let _ = writeln!(buf, "  match: weight {} {}", m.op_str(), m.value());
             }
             if let Some(origin) = &entry.match_origin {
                 let _ = writeln!(buf, "  match: origin {:?}", origin);
