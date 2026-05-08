@@ -52,11 +52,8 @@ run:
 	#target/release/zebra-rs --log-format elasticsearch
 	#target/release/zebra-rs --log-output file
 
-format:
-	cargo fmt --all
-
-allclean:
-	rm -rf ${HOME}/.cargo/git
+clean:
+	cargo cache --remove-dir all
 	rm -rf target
 	rm -f Cargo.lock
 
