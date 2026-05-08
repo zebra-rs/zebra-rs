@@ -208,6 +208,7 @@ pub struct PolicyEntry {
     pub set_community: Option<SetCommunityConfig>,
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<Ipv4Addr>,
+    pub set_origin: Option<Origin>,
     // Action.
     pub action: PolicyAction,
 }
@@ -1044,6 +1045,20 @@ impl ConfigBuilder {
                 entry.set_next_hop = None;
                 Ok(())
             })
+            .path("/entry/set/origin")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                let s = args.string().context(ARG_ERR)?;
+                entry.set_origin = Some(parse_origin(&s).context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_origin = None;
+                Ok(())
+            })
             .path("/entry/action")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
@@ -1157,6 +1172,9 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             }
             if let Some(nh) = &entry.set_next_hop {
                 let _ = writeln!(buf, "  set: next-hop {}", nh);
+            }
+            if let Some(o) = &entry.set_origin {
+                let _ = writeln!(buf, "  set: origin {:?}", o);
             }
         }
     }

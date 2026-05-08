@@ -2596,6 +2596,9 @@ pub fn policy_list_apply(
                 if let Some(addr) = &entry.set_next_hop {
                     decision.attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
                 }
+                if let Some(origin) = entry.set_origin {
+                    decision.attr.origin = Some(origin);
+                }
                 if entry.action == PolicyAction::Permit {
                     return Some(decision);
                 }
@@ -3697,6 +3700,28 @@ mod policy_apply_tests {
         assert!(d.is_some(), "weight=500 should match Eq(500)");
         let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr, 0);
         assert!(d.is_none(), "weight=0 should not match Eq(500)");
+    }
+
+    #[test]
+    fn set_origin_overrides_incoming() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_origin = Some(Origin::Egp);
+
+        let attr = attr_with("1", None, Some(Origin::Igp));
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        assert_eq!(out.origin, Some(Origin::Egp));
+    }
+
+    #[test]
+    fn set_origin_on_absent() {
+        // Originating an ORIGIN attribute on a route that didn't
+        // carry one previously.
+        let mut list = PolicyList::default();
+        list.entry(10).set_origin = Some(Origin::Incomplete);
+
+        let attr = attr_with("1", None, None);
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        assert_eq!(out.origin, Some(Origin::Incomplete));
     }
 
     #[test]
