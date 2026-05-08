@@ -32,6 +32,8 @@ policy:
 - name: out-shared
   entry:
   - number: 10
+    action: permit
 - name: out-different
   entry:
   - number: 10
+    action: permit

@@ -6,6 +6,7 @@ policy:
 - name: IN-ASPATH
   entry:
   - number: 10
+    action: permit
     match:
       as-path: FROM-65999
 router:

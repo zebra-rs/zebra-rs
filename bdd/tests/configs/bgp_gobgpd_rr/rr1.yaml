@@ -27,36 +27,43 @@ policy:
 - name: 198.18.37.16/28
   entry:
   - number: 10
+    action: permit
     match:
       community: 198.18.37.16/28
 - name: 198.18.37.80/28
   entry:
   - number: 10
+    action: permit
     match:
       community: 198.18.37.80/28
 - name: 198.18.39.80/28
   entry:
   - number: 10
+    action: permit
     match:
       community: 198.18.39.80/28
 - name: 198.18.39.96/28
   entry:
   - number: 10
+    action: permit
     match:
       community: 198.18.39.96/28
 - name: 198.18.39.128/28
   entry:
   - number: 10
+    action: permit
     match:
       community: 198.18.39.128/28
 - name: 198.18.39.144/28
   entry:
   - number: 10
+    action: permit
     match:
       community: 198.18.39.144/28
 - name: 198.18.39.160/28
   entry:
   - number: 10
+    action: permit
     match:
       community: 198.18.39.160/28
 router:

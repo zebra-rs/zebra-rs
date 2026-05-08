@@ -6,6 +6,7 @@ policy:
 - name: out-test
   entry:
   - number: 10
+    action: permit
     match:
       prefix: out-test
 router:

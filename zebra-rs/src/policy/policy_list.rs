@@ -29,8 +29,18 @@ impl PolicyList {
     }
 }
 
-#[derive(EnumString, Display, Clone, Debug, PartialEq)]
+/// Per-entry terminal action. `permit` accepts the route and stops
+/// scanning. `deny` rejects the route. `next` falls through to the
+/// next entry (after applying any `set`).
+///
+/// `Default` returns `Permit` so a partially-constructed
+/// `PolicyEntry` (e.g. mid config commit, before the YANG callback
+/// has fired) doesn't silently flip semantics. The YANG schema
+/// requires `action` to be explicitly set on every entry, so the
+/// default is only ever observed transiently.
+#[derive(EnumString, Display, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PolicyAction {
+    #[default]
     #[strum(serialize = "permit")]
     Permit,
     #[strum(serialize = "next")]
@@ -125,7 +135,7 @@ pub struct PolicyEntry {
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<Ipv4Addr>,
     // Action.
-    pub action: Option<PolicyAction>,
+    pub action: PolicyAction,
 }
 
 pub fn policy_entry_sync(
@@ -623,16 +633,16 @@ impl ConfigBuilder {
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let action: PolicyAction = args.string().context(ARG_ERR)?.parse()?;
-                entry.action = Some(action);
-
+                entry.action = args.string().context(ARG_ERR)?.parse()?;
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.action = None;
+                // YANG marks `action` mandatory; deleting just the
+                // leaf reverts to the default (Permit). The whole
+                // entry should be deleted to remove the policy line.
+                entry.action = PolicyAction::default();
                 Ok(())
             })
     }
@@ -734,19 +744,13 @@ mod tests {
         // Entry 10: match prefix-set "pset" and action permit.
         let entry = plist.entry(10);
         entry.prefix_set_name = Some("pset".to_string());
-        entry.action = Some(PolicyAction::Permit);
+        entry.action = PolicyAction::Permit;
 
         // Verify the policy list configuration
         assert_eq!(plist.entry.len(), 1);
         let entry = plist.entry.get(&10).unwrap();
         assert_eq!(entry.prefix_set_name, Some("pset".to_string()));
-
-        match &entry.action {
-            Some(PolicyAction::Permit) => {
-                // Test passes - action is Permit.
-            }
-            _ => panic!("Expected PolicyAction::Permit"),
-        }
+        assert_eq!(entry.action, PolicyAction::Permit);
 
         // Verify prefix-set contains the correct prefix
         assert_eq!(prefix_set.len(), 1);
