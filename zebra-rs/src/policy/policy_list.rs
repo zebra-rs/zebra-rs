@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use anyhow::{Context, Error, Result};
 use bgp_packet::Origin;
@@ -110,6 +110,17 @@ impl NumericMatch {
     }
 }
 
+/// Target for `set next-hop`. Either an explicit address or the
+/// `self` keyword, which resolves at apply time to the local
+/// router identifier used for the BGP session that's advertising
+/// the route. IPv6 addresses are parsed and stored but currently
+/// do not affect the route — `BgpNexthop` is IPv4-only today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetNextHop {
+    Address(IpAddr),
+    SelfAddr,
+}
+
 /// Operator for numeric set actions (`set local-preference`,
 /// `set med`) of shape `{set NUM | add NUM | sub NUM}`.
 /// `Set` overwrites the attribute; `Add` and `Sub` mutate the
@@ -207,7 +218,7 @@ pub struct PolicyEntry {
     pub weight: Option<u32>,
     pub set_community: Option<SetCommunityConfig>,
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
-    pub set_next_hop: Option<Ipv4Addr>,
+    pub set_next_hop: Option<SetNextHop>,
     pub set_origin: Option<Origin>,
     // Action.
     pub action: PolicyAction,
@@ -1029,16 +1040,40 @@ impl ConfigBuilder {
                 entry.set_as_path_prepend = None;
                 Ok(())
             })
-            .path("/entry/set/next-hop")
+            // `set next-hop {ADDR|self}` — choice between a literal
+            // address (IPv4 or IPv6) and the `self` keyword.
+            .path("/entry/set/next-hop/address")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let addr = args.v4addr().context(ARG_ERR)?;
-                entry.set_next_hop = Some(addr);
-
+                let s = args.string().context(ARG_ERR)?;
+                entry.set_next_hop = Some(SetNextHop::Address(s.parse::<IpAddr>()?));
                 Ok(())
             })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.set_next_hop, Some(SetNextHop::Address(_))) {
+                    entry.set_next_hop = None;
+                }
+                Ok(())
+            })
+            .path("/entry/set/next-hop/self")
+            .set(|policy, cache, name, seq, _args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.set_next_hop = Some(SetNextHop::SelfAddr);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if matches!(entry.set_next_hop, Some(SetNextHop::SelfAddr)) {
+                    entry.set_next_hop = None;
+                }
+                Ok(())
+            })
+            .path("/entry/set/next-hop")
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
@@ -1171,7 +1206,14 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
                 );
             }
             if let Some(nh) = &entry.set_next_hop {
-                let _ = writeln!(buf, "  set: next-hop {}", nh);
+                match nh {
+                    SetNextHop::Address(a) => {
+                        let _ = writeln!(buf, "  set: next-hop {}", a);
+                    }
+                    SetNextHop::SelfAddr => {
+                        let _ = writeln!(buf, "  set: next-hop self");
+                    }
+                }
             }
             if let Some(o) = &entry.set_origin {
                 let _ = writeln!(buf, "  set: origin {:?}", o);

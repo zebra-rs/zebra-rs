@@ -1126,8 +1126,34 @@ module config {
                per-router and is not advertised in BGP
                updates.";
           }
-          leaf "next-hop" {
-            type inet:ipv4-address;
+          container "next-hop" {
+            presence "set next-hop";
+            description
+              "Set the route's BGP NEXT_HOP attribute. Either an
+               explicit IPv4/IPv6 address, or the keyword `self`,
+               which resolves at apply time to the local router
+               identifier used for the session that's advertising
+               the route. IPv6 addresses parse and store but
+               currently do not affect the route's NEXT_HOP —
+               BgpNexthop is IPv4-only today.";
+            choice "target" {
+              mandatory true;
+              case address-case {
+                leaf "address" {
+                  type union {
+                    type inet:ipv4-address;
+                    type inet:ipv6-address;
+                  }
+                  mandatory true;
+                }
+              }
+              case self-case {
+                leaf "self" {
+                  type empty;
+                  mandatory true;
+                }
+              }
+            }
           }
           leaf "origin" {
             type enumeration {
