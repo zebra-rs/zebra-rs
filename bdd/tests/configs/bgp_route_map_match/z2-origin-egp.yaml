@@ -2,6 +2,7 @@ policy:
 - name: IN-ORIGIN
   entry:
   - number: 10
+    action: permit
     match:
       origin: egp
 router:

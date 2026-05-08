@@ -972,12 +972,18 @@ module config {
         }
         leaf "action" {
           ext:sort "1";
+          mandatory true;
           description
-            "Terminal action when the entry matches.
-             `permit` accepts the route and stops scanning.
-             `deny` rejects the route.
-             `next` falls through to the next entry without
-             a verdict.";
+            "Terminal action when the entry matches. Mandatory
+             on every entry; the policy walker honors the value.
+             `permit` accepts the route and stops scanning, after
+             applying any `set` clauses.
+             `deny` rejects the route. No `set` clauses are
+             applied.
+             `next` applies any `set` clauses, then falls through
+             to the next entry. Default-deny applies when no entry
+             matches (or all matching entries fall through with
+             `next`).";
           type enumeration {
             enum permit;
             enum deny;

@@ -2,6 +2,7 @@ policy:
 - name: IN-MED
   entry:
   - number: 10
+    action: permit
     match:
       med-eq: 100
 router:

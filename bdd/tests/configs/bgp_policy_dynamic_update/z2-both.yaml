@@ -7,6 +7,7 @@ policy:
 - name: HOGE
   entry:
   - number: 10
+    action: permit
     match:
       prefix: HOGE
 router:

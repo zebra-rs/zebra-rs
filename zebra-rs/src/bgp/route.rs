@@ -2504,32 +2504,63 @@ impl Peer {
     }
 }
 
+/// Apply a policy to a route. Walks entries in numeric-key order;
+/// on each match consults the entry's terminal action:
+///
+/// - **`permit`**: apply any `set` clauses, return the modified
+///   attribute (the route is accepted).
+/// - **`next`**: apply any `set` clauses, then continue to the
+///   next entry. Lets one entry decorate a route while another
+///   later entry decides the verdict.
+/// - **`deny`**: do NOT apply any `set` clauses; return `None`
+///   (the route is dropped).
+///
+/// Default-deny when no entry matches (or all matching entries
+/// fall through with `next` and the policy ends): returns `None`.
+/// Operators express "default permit" by appending an
+/// unconditional final entry with `action: permit`.
 pub fn policy_list_apply(
     policy_list: &PolicyList,
     nlri: &Ipv4Nlri,
     mut bgp_attr: BgpAttr,
 ) -> Option<BgpAttr> {
+    use crate::policy::PolicyAction;
     for (_, entry) in policy_list.entry.iter() {
         if !entry_matches(entry, nlri, &bgp_attr) {
             continue;
         }
-        if let Some(local_pref) = &entry.local_pref {
-            bgp_attr.local_pref = Some(LocalPref::new(*local_pref));
+        match entry.action {
+            PolicyAction::Deny => {
+                // Drop the route without applying any set clauses.
+                return None;
+            }
+            PolicyAction::Permit | PolicyAction::Next => {
+                // Apply the entry's set clauses to the working
+                // attribute, then either return (Permit) or fall
+                // through to the next entry (Next).
+                if let Some(local_pref) = &entry.local_pref {
+                    bgp_attr.local_pref = Some(LocalPref::new(*local_pref));
+                }
+                if let Some(med) = &entry.med {
+                    bgp_attr.med = Some(Med { med: *med });
+                }
+                if let Some(cfg) = &entry.set_community {
+                    apply_set_community(&mut bgp_attr, cfg);
+                }
+                if let Some(prepend) = &entry.set_as_path_prepend {
+                    apply_set_as_path_prepend(&mut bgp_attr, prepend);
+                }
+                if let Some(addr) = &entry.set_next_hop {
+                    bgp_attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+                }
+                if entry.action == PolicyAction::Permit {
+                    return Some(bgp_attr);
+                }
+                // Next: continue with the modified attribute.
+            }
         }
-        if let Some(med) = &entry.med {
-            bgp_attr.med = Some(Med { med: *med });
-        }
-        if let Some(cfg) = &entry.set_community {
-            apply_set_community(&mut bgp_attr, cfg);
-        }
-        if let Some(prepend) = &entry.set_as_path_prepend {
-            apply_set_as_path_prepend(&mut bgp_attr, prepend);
-        }
-        if let Some(addr) = &entry.set_next_hop {
-            bgp_attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
-        }
-        return Some(bgp_attr);
     }
+    // End of list reached without a permit verdict — default deny.
     None
 }
 
@@ -3447,9 +3478,10 @@ mod tests {
     use ipnet::Ipv4Net;
 
     use super::policy_list_apply;
+    use crate::policy::prefix::set::PrefixSetEntry;
     use crate::policy::{
-        AsPathPrependConfig, CommunityMatcher, CommunitySet, PolicyList, SetCommunityConfig,
-        SetCommunityMode,
+        AsPathPrependConfig, CommunityMatcher, CommunitySet, PolicyList, PrefixSet,
+        SetCommunityConfig, SetCommunityMode,
     };
 
     fn set_community_cfg(members: &[&str], mode: SetCommunityMode) -> SetCommunityConfig {
@@ -3710,5 +3742,94 @@ mod tests {
             BgpNexthop::Ipv4(a) => assert_eq!(a, Ipv4Addr::new(10, 1, 1, 1)),
             other => panic!("expected Ipv4 nexthop, got {:?}", other),
         }
+    }
+
+    // ── Phase A: control-flow semantics for permit / next / deny ──
+
+    #[test]
+    fn policy_action_deny_drops_route_and_skips_set() {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.local_pref = Some(999);
+        entry.action = crate::policy::PolicyAction::Deny;
+
+        // Match clause empty → entry matches every route.
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default());
+        assert!(out.is_none(), "deny must drop the route");
+    }
+
+    #[test]
+    fn policy_action_next_applies_set_and_falls_through() {
+        let mut list = PolicyList::default();
+        list.entry(10).local_pref = Some(150);
+        list.entry(10).action = crate::policy::PolicyAction::Next;
+        // Entry 20 takes the verdict.
+        list.entry(20).med = Some(42);
+        list.entry(20).action = crate::policy::PolicyAction::Permit;
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        // Both decorations applied: entry 10's local_pref AND
+        // entry 20's med.
+        assert_eq!(out.local_pref.unwrap().local_pref, 150);
+        assert_eq!(out.med.unwrap().med, 42);
+    }
+
+    #[test]
+    fn policy_action_default_deny_when_no_entry_matches() {
+        let mut list = PolicyList::default();
+        // Entry only matches a non-default prefix.
+        let entry = list.entry(10);
+        let mut pset = PrefixSet::default();
+        pset.insert(
+            Ipv4Net::from_str("192.168.0.0/16").unwrap().into(),
+            PrefixSetEntry::default(),
+        );
+        entry.prefix_set = Some(pset);
+        entry.action = crate::policy::PolicyAction::Permit;
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default());
+        assert!(out.is_none(), "no match → default deny");
+    }
+
+    #[test]
+    fn policy_action_next_falling_through_to_end_of_list_is_default_deny() {
+        let mut list = PolicyList::default();
+        list.entry(10).local_pref = Some(150);
+        list.entry(10).action = crate::policy::PolicyAction::Next;
+        // No further entries — fall-through past the end of the
+        // policy is default-deny.
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default());
+        assert!(
+            out.is_none(),
+            "next falling through end of policy → default deny"
+        );
+    }
+
+    #[test]
+    fn policy_action_default_permit_via_unconditional_final_entry() {
+        // The "default permit" idiom: a final entry with no match
+        // clauses and action=permit accepts everything that fell
+        // through.
+        let mut list = PolicyList::default();
+        let mut pset = PrefixSet::default();
+        pset.insert(
+            Ipv4Net::from_str("10.0.0.0/8").unwrap().into(),
+            PrefixSetEntry::default(),
+        );
+        let entry = list.entry(10);
+        entry.prefix_set = Some(pset);
+        entry.action = crate::policy::PolicyAction::Deny;
+
+        // Final unconditional permit — the "default permit" idiom.
+        list.entry(20).action = crate::policy::PolicyAction::Permit;
+
+        // 10.0.0.0/24 hits entry 10 (deny).
+        let denied = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default());
+        assert!(denied.is_none());
+
+        // 192.168.0.0/24 falls through to entry 20 (permit).
+        let permitted = policy_list_apply(&list, &nlri("192.168.0.0/24"), BgpAttr::default());
+        assert!(permitted.is_some());
     }
 }

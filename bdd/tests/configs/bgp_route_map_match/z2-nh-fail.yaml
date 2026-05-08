@@ -7,6 +7,7 @@ policy:
 - name: IN-NEXTHOP
   entry:
   - number: 10
+    action: permit
     match:
       next-hop: WRONG-SUBNET
 router:
