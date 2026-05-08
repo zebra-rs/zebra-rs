@@ -204,6 +204,7 @@ pub struct PolicyEntry {
     // Set.
     pub local_pref: Option<NumericSet>,
     pub med: Option<NumericSet>,
+    pub weight: Option<u32>,
     pub set_community: Option<SetCommunityConfig>,
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<Ipv4Addr>,
@@ -884,6 +885,19 @@ impl ConfigBuilder {
                 entry.med = None;
                 Ok(())
             })
+            .path("/entry/set/weight")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.weight = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.weight = None;
+                Ok(())
+            })
             // `set community NAME {|additive|delete}` — presence
             // container with a mandatory `name` and a `choice mode`
             // whose three cases are bare keywords (or empty for
@@ -1122,6 +1136,9 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             }
             if let Some(s) = &entry.med {
                 let _ = writeln!(buf, "  set: med {} {}", s.op_str(), s.value());
+            }
+            if let Some(w) = &entry.weight {
+                let _ = writeln!(buf, "  set: weight {}", w);
             }
             if let Some(cfg) = &entry.set_community {
                 let suffix = match cfg.mode {

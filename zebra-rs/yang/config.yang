@@ -1117,6 +1117,15 @@ module config {
               }
             }
           }
+          leaf "weight" {
+            type uint32;
+            description
+              "Set the route's local BGP weight. Higher weight
+               wins in best-path selection. Default 0 (unless
+               the route is locally originated). Weight is
+               per-router and is not advertised in BGP
+               updates.";
+          }
           leaf "next-hop" {
             type inet:ipv4-address;
           }
