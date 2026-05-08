@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::{Context, Error, Result};
 use bgp_packet::Origin;
@@ -150,8 +150,7 @@ pub struct PolicyEntry {
     pub community_set: Option<CommunitySet>,
     pub as_path_set_name: Option<String>,
     pub as_path_set: Option<AsPathSet>,
-    pub next_hop_set_name: Option<String>,
-    pub next_hop_set: Option<PrefixSet>,
+    pub match_next_hop: Option<IpAddr>,
     pub match_med: Option<NumericMatch>,
     pub match_as_path_len: Option<NumericMatch>,
     pub match_as_path_len_uniq: Option<NumericMatch>,
@@ -194,13 +193,6 @@ pub fn policy_entry_sync(
                 policy.as_path_set = Some(as_path_set.clone());
             } else {
                 policy.as_path_set = None;
-            }
-        }
-        if let Some(name) = &policy.next_hop_set_name {
-            if let Some(prefix_set) = prefix_set.config.get(name) {
-                policy.next_hop_set = Some(prefix_set.clone());
-            } else {
-                policy.next_hop_set = None;
             }
         }
         if let Some(cfg) = policy.set_community.as_mut() {
@@ -393,20 +385,21 @@ impl ConfigBuilder {
                 entry.as_path_set_name = None;
                 Ok(())
             })
+            // `match next-hop ADDR` — direct IPv4/IPv6 address
+            // compared for exact equality against the route's
+            // BGP NEXT_HOP attribute.
             .path("/entry/match/next-hop")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let next_hop_set = args.string().context(ARG_ERR)?;
-                entry.next_hop_set_name = Some(next_hop_set);
-
+                let s = args.string().context(ARG_ERR)?;
+                entry.match_next_hop = Some(s.parse::<IpAddr>()?);
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
-                entry.next_hop_set_name = None;
+                entry.match_next_hop = None;
                 Ok(())
             })
             // `match med {eq|le|ge} NUM` — presence container with
@@ -921,8 +914,8 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(as_path_set) = &entry.as_path_set_name {
                 let _ = writeln!(buf, "  match: as_path_set {}", as_path_set);
             }
-            if let Some(next_hop_set) = &entry.next_hop_set_name {
-                let _ = writeln!(buf, "  match: next_hop_set {}", next_hop_set);
+            if let Some(addr) = &entry.match_next_hop {
+                let _ = writeln!(buf, "  match: next-hop {}", addr);
             }
             if let Some(m) = &entry.match_med {
                 let _ = writeln!(buf, "  match: med {} {}", m.op_str(), m.value());

@@ -33,8 +33,8 @@ All four match types are exercised against an established eBGP session
 - z2-med-eq-fail.yaml: input policy `match med-eq 999` — no match.
 - z2-med-range-pass.yaml: input policy `match med-ge 50, med-le 200`
 - z2-med-range-fail.yaml: input policy `match med-ge 200` — MED=100
-- z2-nh-pass.yaml: input policy `match next-hop-set PEER-SUBNET`
-- z2-nh-fail.yaml: input policy `match next-hop-set WRONG-SUBNET`
+- z2-nh-pass.yaml: input policy `match next-hop 192.168.0.1` — matches the peer's address
+- z2-nh-fail.yaml: input policy `match next-hop 10.10.10.10` — does not match
 
 ## Test Scenarios
 
@@ -49,6 +49,6 @@ All four match types are exercised against an established eBGP session
 | match med-eq rejects routes with a different MED value | |
 | match med-ge and med-le accept routes inside the range | |
 | match med-ge rejects routes below the floor | |
-| match next-hop-set accepts routes whose nexthop is in the prefix-set | |
-| match next-hop-set rejects routes whose nexthop is outside the prefix-set | |
+| match next-hop accepts routes whose nexthop equals the configured address | |
+| match next-hop rejects routes whose nexthop is a different address | |
 | Teardown topology | |

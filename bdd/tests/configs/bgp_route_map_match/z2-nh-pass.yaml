@@ -1,15 +1,10 @@
-prefix-set:
-- name: PEER-SUBNET
-  prefixes:
-  - prefix: 192.168.0.0/24
-    le: 32
 policy:
 - name: IN-NEXTHOP
   entry:
   - number: 10
     action: permit
     match:
-      next-hop: PEER-SUBNET
+      next-hop: 192.168.0.1
 router:
   bgp:
     global:

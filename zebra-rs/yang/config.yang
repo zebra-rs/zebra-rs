@@ -845,11 +845,15 @@ module config {
               "Reference to an `as-path-set` by name.";
           }
           leaf "next-hop" {
-            type string;
+            type union {
+              type inet:ipv4-address;
+              type inet:ipv6-address;
+            }
             description
-              "Reference to a `prefix-set` by name; its members
-               are matched against the route's BGP NEXT_HOP
-               attribute.";
+              "Direct IP address. Compared for exact equality
+               against the route's BGP NEXT_HOP attribute. To
+               match a range of addresses, use `match prefix`
+               with a prefix-set instead.";
           }
           container "med" {
             presence "match med";
