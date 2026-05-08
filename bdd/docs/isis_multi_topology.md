@@ -4,8 +4,32 @@
 
 As a network operator
 I want two zebra-rs instances to participate in IS-IS multi-topology
-Test Topology (same shape as isis_ipv6 but both sides emit MT TLVs):
+routing for IPv6 unicast (MT 2), exchanging TLV 229 / 222 / 237 in
+their LSPs and installing IPv6 reachability through the per-MT SPF
+result, so dual-stack networks can run independent IPv4 and IPv6
+topologies.
+
+## Test Topology
+
+```
+  ┌────────────────────────────────────────┐
+  │                  br0                   │
+  └────────────┬───────────────┬───────────┘
+               │               │
+       2001:db8:1::1/64   2001:db8:1::2/64
+            (vz1ns)             (vz2ns)
+          ┌────┴────┐     ┌────┴────┐
+          │   z1    │     │   z2    │
+          │ +MT 2   │     │ +MT 2   │
+          └─────────┘     └─────────┘
+   lo: 2001:db8:0:ffff::1   lo: 2001:db8:0:ffff::2
+              /128                  /128
+```
+
+## Notes
+
 Both configs add `multi-topology ipv6-unicast;` under `router/isis/`
+so the LSPs carry TLV 229 (capability), TLV 222 (MT IS Reach), and
 TLV 237 (MT IPv6 Reach).
 
 ## Test Scenarios

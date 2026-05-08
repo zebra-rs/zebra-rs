@@ -4,7 +4,11 @@
 
 As a network operator
 I want two zebra-rs instances to form an IS-IS L2 adjacency over a
+shared link, exchange IPv6 reachability via TLV 232 (link-local IIH)
+and TLV 236 (Ipv6Reach in LSPs), and install reciprocal IPv6 routes
+to each other's loopback so traffic can flow end-to-end.
 Using an isolated test topology with two zebra-rs instances connected
+via a shared bridge.
 
 ## Test Topology
 

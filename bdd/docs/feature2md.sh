@@ -23,6 +23,14 @@ fi
 # Extract feature name (remove "Feature: " prefix)
 FEATURE_NAME=$(grep "^Feature:" "$INPUT_FILE" | sed 's/Feature: //')
 
+# Section header detection — accept an optional parenthesized
+# qualifier between the keyword and the trailing colon, so both
+# `Test Topology:` and `Test Topology (linear chain, ...):` are
+# recognized. Same for `Config files (in foo/):` etc.
+TOPO_RE='^  Test Topology[^:]*:'
+CFG_RE='^  Config files[^:]*:'
+SCEN_RE='^  Scenario:'
+
 # Start building markdown
 {
     echo "# $FEATURE_NAME"
@@ -30,32 +38,87 @@ FEATURE_NAME=$(grep "^Feature:" "$INPUT_FILE" | sed 's/Feature: //')
     echo "## Overview"
     echo ""
 
-    # Extract description lines (lines after Feature: until Test Topology or Scenario)
-    awk '/^Feature:/{found=1; next} /^  Test Topology:|^  Scenario:/{exit} found && /^  [A-Z]/{print}' "$INPUT_FILE" | sed 's/^  //'
+    # Description: indented non-blank lines between `Feature:`
+    # and the first section header (Test Topology / Config files /
+    # Scenario). Continuation lines that start lowercase (e.g.
+    # "so a static IPv6 route ...") still belong to the same
+    # paragraph and must be captured — using `[^ ]` instead of
+    # `[A-Z]` ensures that.
+    awk -v topo="$TOPO_RE" -v cfg="$CFG_RE" -v scen="$SCEN_RE" '
+        /^Feature:/{found=1; next}
+        $0 ~ topo || $0 ~ cfg || $0 ~ scen {exit}
+        found && /^  [^ ]/{sub(/^  /, ""); print}
+    ' "$INPUT_FILE"
 
     echo ""
 
-    # Check if there's a Test Topology section
-    if grep -q "Test Topology:" "$INPUT_FILE"; then
+    # Test Topology section
+    if grep -qE 'Test Topology[^:]*:' "$INPUT_FILE"; then
         echo "## Test Topology"
         echo ""
-        # Extract topology block (from ``` to ```)
-        awk '/Test Topology:/{found=1; next} found && /^  ```$/{if(in_block) exit; in_block=1; print "```"; next} found && in_block{print}' "$INPUT_FILE"
+        # Extract topology block (from ``` to ```). The opening
+        # fence is rewritten to a bare ``` so the rendered code
+        # block starts at column 0.
+        awk -v topo="$TOPO_RE" '
+            $0 ~ topo {found=1; next}
+            found && /^  ```$/ {
+                if (in_block) exit
+                in_block = 1
+                print "```"
+                next
+            }
+            found && in_block {print}
+        ' "$INPUT_FILE"
         echo '```'
         echo ""
     fi
 
-    # Check if there's a Config files section
-    if grep -q "Config files:" "$INPUT_FILE"; then
-        echo "## Config Files"
+    # Notes section — bullet items and prose between the end of
+    # the topology block and the Config files / Scenario header.
+    # These describe the test setup but aren't part of the
+    # diagram or the config file list. Skip silently if the
+    # feature doesn't carry any.
+    NOTES=$(awk -v cfg="$CFG_RE" -v scen="$SCEN_RE" '
+        /^  ```$/ {
+            if (!in_topo && !after_topo) {
+                in_topo = 1
+            } else if (in_topo) {
+                in_topo = 0
+                after_topo = 1
+            }
+            next
+        }
+        in_topo {next}
+        after_topo && ($0 ~ cfg || $0 ~ scen) {exit}
+        after_topo && /^   *[^ ]/{sub(/^  /, ""); print}
+    ' "$INPUT_FILE")
+    if [ -n "$NOTES" ]; then
+        echo "## Notes"
         echo ""
-        # Extract config files section
-        awk '/Config files:/{found=1; next} /^  Scenario:/{exit} found && /^  - /{print}' "$INPUT_FILE" | sed 's/^  //'
+        echo "$NOTES"
         echo ""
     fi
 
-    # Extract additional notes (lines between Config files and first Scenario that aren't config items)
-    ADDITIONAL=$(awk '/Config files:/{found=1; next} /^  Scenario:/{exit} found && !/^  - / && /^  [0-9A-Za-z]/{print}' "$INPUT_FILE" | sed 's/^  //')
+    # Config Files section
+    if grep -qE 'Config files[^:]*:' "$INPUT_FILE"; then
+        echo "## Config Files"
+        echo ""
+        awk -v cfg="$CFG_RE" -v scen="$SCEN_RE" '
+            $0 ~ cfg {found=1; next}
+            $0 ~ scen {exit}
+            found && /^  - /{sub(/^  /, ""); print}
+        ' "$INPUT_FILE"
+        echo ""
+    fi
+
+    # Additional prose between Config files and the first
+    # Scenario (non-bullet, non-empty lines). Preserved for
+    # back-compat with features that put trailing notes there.
+    ADDITIONAL=$(awk -v cfg="$CFG_RE" -v scen="$SCEN_RE" '
+        $0 ~ cfg {found=1; next}
+        $0 ~ scen {exit}
+        found && !/^  - / && /^  [0-9A-Za-z]/{sub(/^  /, ""); print}
+    ' "$INPUT_FILE")
     if [ -n "$ADDITIONAL" ]; then
         echo "$ADDITIONAL"
         echo ""
