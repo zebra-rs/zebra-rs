@@ -8,8 +8,8 @@ use crate::config::{
 };
 
 use super::{
-    AsPathSetConfig, CommunitySetConfig, PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig,
-    policy_entry_sync,
+    AsPathSetConfig, CommunitySetConfig, ExtCommunitySetConfig, LargeCommunitySetConfig,
+    PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig, policy_entry_sync,
 };
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
@@ -165,6 +165,8 @@ pub struct Policy {
     pub policy_config: PolicyConfig,
     pub prefix_config: PrefixSetConfig,
     pub community_config: CommunitySetConfig,
+    pub ext_community_config: ExtCommunitySetConfig,
+    pub large_community_config: LargeCommunitySetConfig,
     pub as_path_config: AsPathSetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
     pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
@@ -190,6 +192,8 @@ impl Policy {
             policy_config: PolicyConfig::new(),
             prefix_config: PrefixSetConfig::new(),
             community_config: CommunitySetConfig::new(),
+            ext_community_config: ExtCommunitySetConfig::new(),
+            large_community_config: LargeCommunitySetConfig::new(),
             as_path_config: AsPathSetConfig::new(),
             clients: BTreeMap::new(),
             watch_prefix: BTreeMap::new(),
@@ -284,6 +288,10 @@ impl Policy {
                     let _ = self.prefix_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/community-set") {
                     let _ = self.community_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/ext-community-set") {
+                    let _ = self.ext_community_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/large-community-set") {
+                    let _ = self.large_community_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/as-path-set") {
                     let _ = self.as_path_config.exec(path, args, msg.op);
                 }
@@ -300,6 +308,10 @@ impl Policy {
                     self.prefix_config.cache.keys().cloned().collect();
                 let changed_community_sets: std::collections::BTreeSet<String> =
                     self.community_config.cache.keys().cloned().collect();
+                let changed_ext_community_sets: std::collections::BTreeSet<String> =
+                    self.ext_community_config.cache.keys().cloned().collect();
+                let changed_large_community_sets: std::collections::BTreeSet<String> =
+                    self.large_community_config.cache.keys().cloned().collect();
                 let changed_as_path_sets: std::collections::BTreeSet<String> =
                     self.as_path_config.cache.keys().cloned().collect();
                 let changed_policies: std::collections::BTreeSet<String> =
@@ -317,6 +329,10 @@ impl Policy {
                 );
                 // Sync community-set.
                 self.community_config.commit();
+                // Sync ext-community-set.
+                self.ext_community_config.commit();
+                // Sync large-community-set.
+                self.large_community_config.commit();
                 // Sync as-path-set.
                 self.as_path_config.commit();
 
@@ -330,6 +346,8 @@ impl Policy {
                     &mut self.policy_config.cache,
                     &self.prefix_config,
                     &self.community_config,
+                    &self.ext_community_config,
+                    &self.large_community_config,
                     &self.as_path_config,
                     syncer,
                 );
@@ -343,11 +361,15 @@ impl Policy {
                     &mut self.policy_config.config,
                     &self.prefix_config,
                     &self.community_config,
+                    &self.ext_community_config,
+                    &self.large_community_config,
                     &self.as_path_config,
                     &self.watch_policy,
                     &self.clients,
                     &changed_prefix_sets,
                     &changed_community_sets,
+                    &changed_ext_community_sets,
+                    &changed_large_community_sets,
                     &changed_as_path_sets,
                     &changed_policies,
                 );
@@ -398,16 +420,22 @@ fn cascade_indirect_policy_updates(
     policy_config: &mut BTreeMap<String, PolicyList>,
     prefix_config: &PrefixSetConfig,
     community_config: &CommunitySetConfig,
+    ext_community_config: &ExtCommunitySetConfig,
+    large_community_config: &LargeCommunitySetConfig,
     as_path_config: &AsPathSetConfig,
     watch_policy: &BTreeMap<String, Vec<PolicyWatch>>,
     clients: &BTreeMap<String, UnboundedSender<PolicyRx>>,
     changed_prefix_sets: &std::collections::BTreeSet<String>,
     changed_community_sets: &std::collections::BTreeSet<String>,
+    changed_ext_community_sets: &std::collections::BTreeSet<String>,
+    changed_large_community_sets: &std::collections::BTreeSet<String>,
     changed_as_path_sets: &std::collections::BTreeSet<String>,
     changed_policies: &std::collections::BTreeSet<String>,
 ) {
     if changed_prefix_sets.is_empty()
         && changed_community_sets.is_empty()
+        && changed_ext_community_sets.is_empty()
+        && changed_large_community_sets.is_empty()
         && changed_as_path_sets.is_empty()
     {
         return;
@@ -428,6 +456,12 @@ fn cascade_indirect_policy_updates(
                 || e.set_community
                     .as_ref()
                     .is_some_and(|c| changed_community_sets.contains(&c.name))
+                || e.ext_community_set_name
+                    .as_ref()
+                    .is_some_and(|n| changed_ext_community_sets.contains(n))
+                || e.large_community_set_name
+                    .as_ref()
+                    .is_some_and(|n| changed_large_community_sets.contains(n))
                 || e.as_path_set_name
                     .as_ref()
                     .is_some_and(|n| changed_as_path_sets.contains(n))
@@ -435,7 +469,14 @@ fn cascade_indirect_policy_updates(
         if !needs_resync {
             continue;
         }
-        policy_entry_sync(policy_list, prefix_config, community_config, as_path_config);
+        policy_entry_sync(
+            policy_list,
+            prefix_config,
+            community_config,
+            ext_community_config,
+            large_community_config,
+            as_path_config,
+        );
         if let Some(watches) = watch_policy.get(name) {
             for watch in watches {
                 if let Some(tx) = clients.get(&watch.proto) {

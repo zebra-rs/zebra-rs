@@ -716,6 +716,42 @@ module config {
       }
     }
 
+    list ext-community-set {
+      ext:sort "5";
+      key "name";
+      leaf name {
+        type string;
+      }
+      leaf-list members {
+        type string;
+        description
+          "Ext-community matchers. Each member is one of:
+            - `rt:ASN:NN` / `rt:IPv4:NN` (Route Target),
+            - `soo:ASN:NN` / `soo:IPv4:NN` (Site-of-Origin),
+            - `rt:<regex>` / `soo:<regex>` (regex applied to the
+              value portion after the `rt:`/`soo:` prefix).
+           Standard-community syntax is rejected here; use
+           `community-set` for those.";
+      }
+    }
+
+    list large-community-set {
+      ext:sort "5";
+      key "name";
+      leaf name {
+        type string;
+      }
+      leaf-list members {
+        type string;
+        description
+          "Large-community matchers. Each member is either an
+           exact `A:B:C` triple (three colon-separated uint32s
+           per RFC 8092) or a regex applied to the textual
+           `A:B:C` form of each LARGE_COMMUNITIES element on
+           the route.";
+      }
+    }
+
     list as-path-set {
       ext:sort "5";
       key "name";
@@ -838,6 +874,20 @@ module config {
             type string;
             description
               "Reference to a `community-set` by name.";
+          }
+          leaf "ext-community" {
+            type string;
+            description
+              "Reference to an `ext-community-set` by name. The
+               set's members are checked against the route's
+               EXT_COMMUNITIES attribute.";
+          }
+          leaf "large-community" {
+            type string;
+            description
+              "Reference to a `large-community-set` by name. The
+               set's members are checked against the route's
+               LARGE_COMMUNITIES attribute.";
           }
           leaf "as-path" {
             type string;

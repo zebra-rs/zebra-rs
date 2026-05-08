@@ -9,7 +9,8 @@ use strum_macros::{Display, EnumString};
 use crate::config::{Args, ConfigOp};
 
 use super::{
-    AsPathSet, AsPathSetConfig, CommunitySet, CommunitySetConfig, Policy, PrefixSet,
+    AsPathSet, AsPathSetConfig, CommunitySet, CommunitySetConfig, ExtCommunitySet,
+    ExtCommunitySetConfig, LargeCommunitySet, LargeCommunitySetConfig, Policy, PrefixSet,
     PrefixSetConfig,
 };
 
@@ -148,6 +149,10 @@ pub struct PolicyEntry {
     pub prefix_set: Option<PrefixSet>,
     pub community_set_name: Option<String>,
     pub community_set: Option<CommunitySet>,
+    pub ext_community_set_name: Option<String>,
+    pub ext_community_set: Option<ExtCommunitySet>,
+    pub large_community_set_name: Option<String>,
+    pub large_community_set: Option<LargeCommunitySet>,
     pub as_path_set_name: Option<String>,
     pub as_path_set: Option<AsPathSet>,
     pub match_next_hop: Option<IpAddr>,
@@ -171,6 +176,8 @@ pub fn policy_entry_sync(
     policy_list: &mut PolicyList,
     prefix_set: &PrefixSetConfig,
     community_set: &CommunitySetConfig,
+    ext_community_set: &ExtCommunitySetConfig,
+    large_community_set: &LargeCommunitySetConfig,
     as_path_set: &AsPathSetConfig,
 ) {
     for (_, policy) in policy_list.entry.iter_mut() {
@@ -187,6 +194,12 @@ pub fn policy_entry_sync(
             } else {
                 policy.community_set = None;
             }
+        }
+        if let Some(name) = &policy.ext_community_set_name {
+            policy.ext_community_set = ext_community_set.config.get(name).cloned();
+        }
+        if let Some(name) = &policy.large_community_set_name {
+            policy.large_community_set = large_community_set.config.get(name).cloned();
         }
         if let Some(name) = &policy.as_path_set_name {
             if let Some(as_path_set) = as_path_set.config.get(name) {
@@ -236,11 +249,14 @@ impl PolicyConfig {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn commit<S: crate::policy::Syncer>(
         config: &mut BTreeMap<String, PolicyList>,
         cache: &mut BTreeMap<String, PolicyList>,
         prefix_config: &PrefixSetConfig,
         community_config: &CommunitySetConfig,
+        ext_community_config: &ExtCommunitySetConfig,
+        large_community_config: &LargeCommunitySetConfig,
         as_path_config: &AsPathSetConfig,
         syncer: S,
     ) {
@@ -249,7 +265,14 @@ impl PolicyConfig {
                 syncer.policy_list_remove(&name);
                 config.remove(&name);
             } else {
-                policy_entry_sync(&mut s, prefix_config, community_config, as_path_config);
+                policy_entry_sync(
+                    &mut s,
+                    prefix_config,
+                    community_config,
+                    ext_community_config,
+                    large_community_config,
+                    as_path_config,
+                );
                 syncer.policy_list_update(&name, &s);
                 config.insert(name, s);
             }
@@ -367,6 +390,32 @@ impl ConfigBuilder {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
                 entry.community_set_name = None;
+                Ok(())
+            })
+            .path("/entry/match/ext-community")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.ext_community_set_name = Some(args.string().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.ext_community_set_name = None;
+                Ok(())
+            })
+            .path("/entry/match/large-community")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.large_community_set_name = Some(args.string().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.large_community_set_name = None;
                 Ok(())
             })
             .path("/entry/match/as-path")
@@ -910,6 +959,12 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             }
             if let Some(community_set) = &entry.community_set_name {
                 let _ = writeln!(buf, "  match: community_set {}", community_set);
+            }
+            if let Some(name) = &entry.ext_community_set_name {
+                let _ = writeln!(buf, "  match: ext-community {}", name);
+            }
+            if let Some(name) = &entry.large_community_set_name {
+                let _ = writeln!(buf, "  match: large-community {}", name);
             }
             if let Some(as_path_set) = &entry.as_path_set_name {
                 let _ = writeln!(buf, "  match: as_path_set {}", as_path_set);
