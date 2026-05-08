@@ -1060,11 +1060,62 @@ module config {
         }
         container "set" {
           ext:sort "3";
-          leaf "local-preference" {
-            type uint32;
+          container "local-preference" {
+            presence "set local-preference";
+            description
+              "Set the route's LOCAL_PREF attribute. Exactly one
+               of `set` (overwrite), `add` (saturating add to the
+               current value, treating absence as 0), or `sub`
+               (saturating subtract) must be present.";
+            choice "op" {
+              mandatory true;
+              case set-case {
+                leaf "set" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case add-case {
+                leaf "add" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case sub-case {
+                leaf "sub" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
           }
-          leaf "med" {
-            type uint32;
+          container "med" {
+            presence "set med";
+            description
+              "Set the route's MULTI_EXIT_DISC. Same shape as
+               `set local-preference`: choice of `set`/`add`/`sub`
+               with a uint32 operand. `add`/`sub` saturate.";
+            choice "op" {
+              mandatory true;
+              case set-case {
+                leaf "set" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case add-case {
+                leaf "add" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+              case sub-case {
+                leaf "sub" {
+                  type uint32;
+                  mandatory true;
+                }
+              }
+            }
           }
           leaf "next-hop" {
             type inet:ipv4-address;

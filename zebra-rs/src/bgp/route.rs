@@ -2538,11 +2538,19 @@ pub fn policy_list_apply(
                 // Apply the entry's set clauses to the working
                 // attribute, then either return (Permit) or fall
                 // through to the next entry (Next).
-                if let Some(local_pref) = &entry.local_pref {
-                    bgp_attr.local_pref = Some(LocalPref::new(*local_pref));
+                if let Some(action) = &entry.local_pref {
+                    let current = bgp_attr
+                        .local_pref
+                        .as_ref()
+                        .map(|l| l.local_pref)
+                        .unwrap_or(0);
+                    bgp_attr.local_pref = Some(LocalPref::new(action.apply(current)));
                 }
-                if let Some(med) = &entry.med {
-                    bgp_attr.med = Some(Med { med: *med });
+                if let Some(action) = &entry.med {
+                    let current = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+                    bgp_attr.med = Some(Med {
+                        med: action.apply(current),
+                    });
                 }
                 if let Some(cfg) = &entry.set_community {
                     apply_set_community(&mut bgp_attr, cfg);
@@ -3725,7 +3733,7 @@ mod tests {
     use super::policy_list_apply;
     use crate::policy::prefix::set::PrefixSetEntry;
     use crate::policy::{
-        AsPathPrependConfig, CommunityMatcher, CommunitySet, PolicyList, PrefixSet,
+        AsPathPrependConfig, CommunityMatcher, CommunitySet, NumericSet, PolicyList, PrefixSet,
         SetCommunityConfig, SetCommunityMode,
     };
 
@@ -3762,7 +3770,7 @@ mod tests {
     #[test]
     fn policy_list_apply_sets_local_pref() {
         let mut list = PolicyList::default();
-        list.entry(10).local_pref = Some(250);
+        list.entry(10).local_pref = Some(NumericSet::Set(250));
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default())
             .expect("entry with no match clause should apply");
@@ -3773,8 +3781,8 @@ mod tests {
     fn policy_list_apply_sets_local_pref_and_med() {
         let mut list = PolicyList::default();
         let entry = list.entry(10);
-        entry.local_pref = Some(150);
-        entry.med = Some(42);
+        entry.local_pref = Some(NumericSet::Set(150));
+        entry.med = Some(NumericSet::Set(42));
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
         assert_eq!(out.local_pref.unwrap().local_pref, 150);
@@ -3784,7 +3792,7 @@ mod tests {
     #[test]
     fn policy_list_apply_local_pref_overrides_existing() {
         let mut list = PolicyList::default();
-        list.entry(10).local_pref = Some(200);
+        list.entry(10).local_pref = Some(NumericSet::Set(200));
 
         let attr = BgpAttr {
             local_pref: Some(LocalPref::new(100)),
@@ -3793,6 +3801,75 @@ mod tests {
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
         assert_eq!(out.local_pref.unwrap().local_pref, 200);
+    }
+
+    #[test]
+    fn policy_list_apply_local_pref_add_to_existing() {
+        let mut list = PolicyList::default();
+        list.entry(10).local_pref = Some(NumericSet::Add(50));
+
+        let attr = BgpAttr {
+            local_pref: Some(LocalPref::new(100)),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        assert_eq!(out.local_pref.unwrap().local_pref, 150);
+    }
+
+    #[test]
+    fn policy_list_apply_local_pref_add_to_absent_treats_as_zero() {
+        let mut list = PolicyList::default();
+        list.entry(10).local_pref = Some(NumericSet::Add(75));
+
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
+        assert_eq!(out.local_pref.unwrap().local_pref, 75);
+    }
+
+    #[test]
+    fn policy_list_apply_local_pref_sub_saturates_at_zero() {
+        let mut list = PolicyList::default();
+        list.entry(10).local_pref = Some(NumericSet::Sub(200));
+
+        let attr = BgpAttr {
+            local_pref: Some(LocalPref::new(100)),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        assert_eq!(
+            out.local_pref.unwrap().local_pref,
+            0,
+            "underflow saturates at 0"
+        );
+    }
+
+    #[test]
+    fn policy_list_apply_med_add_saturates_at_max() {
+        let mut list = PolicyList::default();
+        list.entry(10).med = Some(NumericSet::Add(10));
+
+        let attr = BgpAttr {
+            med: Some(bgp_packet::Med { med: u32::MAX - 5 }),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        assert_eq!(
+            out.med.unwrap().med,
+            u32::MAX,
+            "overflow saturates at u32::MAX"
+        );
+    }
+
+    #[test]
+    fn policy_list_apply_med_sub_clamps_to_zero() {
+        let mut list = PolicyList::default();
+        list.entry(10).med = Some(NumericSet::Sub(100));
+
+        let attr = BgpAttr {
+            med: Some(bgp_packet::Med { med: 30 }),
+            ..Default::default()
+        };
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
+        assert_eq!(out.med.unwrap().med, 0);
     }
 
     #[test]
@@ -3995,7 +4072,7 @@ mod tests {
     fn policy_action_deny_drops_route_and_skips_set() {
         let mut list = PolicyList::default();
         let entry = list.entry(10);
-        entry.local_pref = Some(999);
+        entry.local_pref = Some(NumericSet::Set(999));
         entry.action = crate::policy::PolicyAction::Deny;
 
         // Match clause empty → entry matches every route.
@@ -4006,10 +4083,10 @@ mod tests {
     #[test]
     fn policy_action_next_applies_set_and_falls_through() {
         let mut list = PolicyList::default();
-        list.entry(10).local_pref = Some(150);
+        list.entry(10).local_pref = Some(NumericSet::Set(150));
         list.entry(10).action = crate::policy::PolicyAction::Next;
         // Entry 20 takes the verdict.
-        list.entry(20).med = Some(42);
+        list.entry(20).med = Some(NumericSet::Set(42));
         list.entry(20).action = crate::policy::PolicyAction::Permit;
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
@@ -4039,7 +4116,7 @@ mod tests {
     #[test]
     fn policy_action_next_falling_through_to_end_of_list_is_default_deny() {
         let mut list = PolicyList::default();
-        list.entry(10).local_pref = Some(150);
+        list.entry(10).local_pref = Some(NumericSet::Set(150));
         list.entry(10).action = crate::policy::PolicyAction::Next;
         // No further entries — fall-through past the end of the
         // policy is default-deny.
