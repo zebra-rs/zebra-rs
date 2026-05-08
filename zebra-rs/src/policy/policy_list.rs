@@ -31,12 +31,12 @@ impl PolicyList {
 
 #[derive(EnumString, Display, Clone, Debug, PartialEq)]
 pub enum PolicyAction {
-    #[strum(serialize = "accept")]
-    Accept,
-    #[strum(serialize = "pass")]
-    Pass,
-    #[strum(serialize = "reject")]
-    Reject,
+    #[strum(serialize = "permit")]
+    Permit,
+    #[strum(serialize = "next")]
+    Next,
+    #[strum(serialize = "deny")]
+    Deny,
 }
 
 fn parse_origin(s: &str) -> Result<Origin> {
@@ -728,13 +728,13 @@ mod tests {
         let prefix = Ipv4Net::from_str("1.1.1.1/32").unwrap();
         prefix_set.insert(prefix.into(), PrefixSetEntry::default());
 
-        // Create a policy-list with entry that matches "pset" and has action accept (permit)
+        // Create a policy-list with an entry that matches "pset" and permits.
         let mut plist = PolicyList::default();
 
-        // Entry 10: match prefix-set "pset" and action accept
+        // Entry 10: match prefix-set "pset" and action permit.
         let entry = plist.entry(10);
         entry.prefix_set_name = Some("pset".to_string());
-        entry.action = Some(PolicyAction::Accept);
+        entry.action = Some(PolicyAction::Permit);
 
         // Verify the policy list configuration
         assert_eq!(plist.entry.len(), 1);
@@ -742,10 +742,10 @@ mod tests {
         assert_eq!(entry.prefix_set_name, Some("pset".to_string()));
 
         match &entry.action {
-            Some(PolicyAction::Accept) => {
-                // Test passes - action is Accept (permit)
+            Some(PolicyAction::Permit) => {
+                // Test passes - action is Permit.
             }
-            _ => panic!("Expected PolicyAction::Accept"),
+            _ => panic!("Expected PolicyAction::Permit"),
         }
 
         // Verify prefix-set contains the correct prefix

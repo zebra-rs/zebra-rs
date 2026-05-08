@@ -965,10 +965,16 @@ module config {
         }
         leaf "action" {
           ext:sort "1";
+          description
+            "Terminal action when the entry matches.
+             `permit` accepts the route and stops scanning.
+             `deny` rejects the route.
+             `next` falls through to the next entry without
+             a verdict.";
           type enumeration {
-            enum accept;
-            enum reject;
-            enum pass;
+            enum permit;
+            enum deny;
+            enum next;
           }
         }
       }
