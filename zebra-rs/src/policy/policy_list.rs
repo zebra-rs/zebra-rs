@@ -305,7 +305,7 @@ impl ConfigBuilder {
                 list.entry.remove(&seq).context(ARG_ERR)?;
                 Ok(())
             })
-            .path("/entry/match/prefix-set")
+            .path("/entry/match/prefix")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -321,7 +321,7 @@ impl ConfigBuilder {
                 entry.prefix_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/community-set")
+            .path("/entry/match/community")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -337,7 +337,7 @@ impl ConfigBuilder {
                 entry.community_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/as-path-set")
+            .path("/entry/match/as-path")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -353,7 +353,7 @@ impl ConfigBuilder {
                 entry.as_path_set_name = None;
                 Ok(())
             })
-            .path("/entry/match/next-hop-set")
+            .path("/entry/match/next-hop")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);

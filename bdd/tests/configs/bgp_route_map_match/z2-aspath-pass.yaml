@@ -7,7 +7,7 @@ policy:
   entry:
   - number: 10
     match:
-      as-path-set: FROM-65001
+      as-path: FROM-65001
 router:
   bgp:
     global:
