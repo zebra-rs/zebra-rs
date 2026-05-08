@@ -1,15 +1,10 @@
-prefix-set:
-- name: WRONG-SUBNET
-  prefixes:
-  - prefix: 10.10.0.0/16
-    le: 32
 policy:
 - name: IN-NEXTHOP
   entry:
   - number: 10
     action: permit
     match:
-      next-hop: WRONG-SUBNET
+      next-hop: 10.10.10.10
 router:
   bgp:
     global:

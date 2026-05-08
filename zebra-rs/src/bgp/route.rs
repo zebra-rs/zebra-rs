@@ -2580,12 +2580,17 @@ fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: 
     {
         return false;
     }
-    if let Some(next_hop_set) = &entry.next_hop_set {
-        let Some(BgpNexthop::Ipv4(addr)) = bgp_attr.nexthop.as_ref() else {
+    if let Some(want) = &entry.match_next_hop {
+        // Exact equality. BgpAttr.nexthop is currently IPv4-only,
+        // so an IPv6 entry never matches today; that's acceptable
+        // until v6 nexthop is plumbed through.
+        let std::net::IpAddr::V4(want_v4) = want else {
             return false;
         };
-        let net = ipnet::Ipv4Net::new(*addr, 32).expect("valid /32 nexthop");
-        if !next_hop_set.matches(net) {
+        let Some(BgpNexthop::Ipv4(have_v4)) = bgp_attr.nexthop.as_ref() else {
+            return false;
+        };
+        if want_v4 != have_v4 {
             return false;
         }
     }
@@ -3338,8 +3343,7 @@ mod policy_apply_tests {
     use ipnet::Ipv4Net;
 
     use super::*;
-    use crate::policy::prefix::set::PrefixSetEntry;
-    use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList, PrefixSet};
+    use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList};
 
     fn nlri(prefix: &str) -> Ipv4Nlri {
         Ipv4Nlri {
@@ -3452,25 +3456,39 @@ mod policy_apply_tests {
     }
 
     #[test]
-    fn match_next_hop_set() {
-        let mut next_hop = PrefixSet::default();
-        next_hop.insert(
-            Ipv4Net::from_str("10.0.0.0/8").unwrap().into(),
-            PrefixSetEntry::default(),
-        );
-
+    fn match_next_hop_exact() {
         let mut list = PolicyList::default();
         let entry = list.entry(10);
-        entry.next_hop_set = Some(next_hop);
+        entry.match_next_hop = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 1, 1)));
 
-        let mut attr_in = attr_with("1", None, None);
-        attr_in.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(10, 1, 1, 1)));
+        let mut attr_match = attr_with("1", None, None);
+        attr_match.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(10, 1, 1, 1)));
 
-        let mut attr_out = attr_with("1", None, None);
-        attr_out.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(192, 168, 0, 1)));
+        let mut attr_diff = attr_with("1", None, None);
+        attr_diff.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(10, 1, 1, 2)));
 
-        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_in).is_some());
-        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_out).is_none());
+        let attr_none = attr_with("1", None, None);
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_match).is_some());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_diff).is_none());
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_none).is_none(),
+            "absent nexthop should not match"
+        );
+    }
+
+    #[test]
+    fn match_next_hop_v6_never_matches_v4_attr() {
+        // BgpAttr.nexthop is IPv4-only today. An IPv6 next-hop in
+        // the entry is accepted by YANG/parse but never matches
+        // the route. Locks that contract.
+        let mut list = PolicyList::default();
+        list.entry(10).match_next_hop = Some(std::net::IpAddr::V6("2001:db8::1".parse().unwrap()));
+
+        let mut attr = attr_with("1", None, None);
+        attr.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(10, 1, 1, 1)));
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).is_none());
     }
 
     #[test]

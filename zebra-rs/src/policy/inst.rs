@@ -422,9 +422,6 @@ fn cascade_indirect_policy_updates(
             e.prefix_set_name
                 .as_ref()
                 .is_some_and(|n| changed_prefix_sets.contains(n))
-                || e.next_hop_set_name
-                    .as_ref()
-                    .is_some_and(|n| changed_prefix_sets.contains(n))
                 || e.community_set_name
                     .as_ref()
                     .is_some_and(|n| changed_community_sets.contains(n))
