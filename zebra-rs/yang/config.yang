@@ -885,13 +885,28 @@ module config {
           leaf "community-additive" {
             type boolean;
           }
-          leaf "as-path-prepend" {
-            type string;
+          container "as-path-prepend" {
+            presence "Prepend `asn` onto AS_PATH `repeat` times.";
             description
-              "Space-separated list of AS numbers to prepend to the
-               AS-path. Example: '65001 65001 65002' prepends three
-               segments. Equivalent to IOS-XR 'prepend as-path' or
-               FRR 'set as-path prepend'.";
+              "Prepend a single AS number to AS_PATH. The same `asn`
+               is prepended `repeat` times — equivalent to IOS-XR's
+               `prepend as-path NUM repeats N` and the typical
+               BGP traffic-engineering knob for biasing best-path
+               selection on the receiver.";
+            leaf "asn" {
+              type inet:as-number;
+              mandatory true;
+              description
+                "AS number to prepend onto AS_PATH.";
+            }
+            leaf "repeat" {
+              type uint8 {
+                range "1..255";
+              }
+              default "1";
+              description
+                "Number of times to prepend `asn`. Default 1.";
+            }
           }
         }
         leaf "action" {
