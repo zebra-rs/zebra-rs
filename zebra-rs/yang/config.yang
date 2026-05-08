@@ -1129,6 +1129,16 @@ module config {
           leaf "next-hop" {
             type inet:ipv4-address;
           }
+          leaf "origin" {
+            type enumeration {
+              enum igp;
+              enum egp;
+              enum incomplete;
+            }
+            description
+              "Set the route's ORIGIN attribute. Mirrors the
+               three values that `match origin` accepts.";
+          }
           container "community" {
             presence "set community";
             description
