@@ -554,7 +554,7 @@ pub fn route_apply_policy_in(
         let Some(policy_list) = &config.policy_list else {
             return None;
         };
-        return policy_list_apply(policy_list, nlri, bgp_attr, weight);
+        return policy_list_apply(policy_list, nlri, bgp_attr, weight, peer.router_id);
     }
     Some(PolicyDecision {
         attr: bgp_attr,
@@ -582,7 +582,11 @@ pub fn route_apply_policy_out(
         let Some(policy_list) = &config.policy_list else {
             return None;
         };
-        return policy_list_apply(policy_list, nlri, bgp_attr, weight);
+        // For `set next-hop self` on an outbound advertisement,
+        // the local-router-id of the session is the natural
+        // "self" anchor. We pass `peer.router_id` here for
+        // both directions; outbound is the typical use case.
+        return policy_list_apply(policy_list, nlri, bgp_attr, weight, peer.router_id);
     } else {
         // Temporary comment out.
         // return None;
@@ -2550,8 +2554,9 @@ pub fn policy_list_apply(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    local_addr: Ipv4Addr,
 ) -> Option<PolicyDecision> {
-    use crate::policy::PolicyAction;
+    use crate::policy::{PolicyAction, SetNextHop};
     let mut decision = PolicyDecision {
         attr: bgp_attr,
         weight,
@@ -2593,8 +2598,21 @@ pub fn policy_list_apply(
                 if let Some(prepend) = &entry.set_as_path_prepend {
                     apply_set_as_path_prepend(&mut decision.attr, prepend);
                 }
-                if let Some(addr) = &entry.set_next_hop {
-                    decision.attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+                if let Some(nh) = &entry.set_next_hop {
+                    match nh {
+                        SetNextHop::Address(IpAddr::V4(addr)) => {
+                            decision.attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+                        }
+                        SetNextHop::Address(IpAddr::V6(_)) => {
+                            // BgpNexthop is IPv4-only today; an
+                            // IPv6 target parses but has no
+                            // effect. Phase H follow-up wires
+                            // BgpNexthop::Ipv6 + the emit path.
+                        }
+                        SetNextHop::SelfAddr => {
+                            decision.attr.nexthop = Some(BgpNexthop::Ipv4(local_addr));
+                        }
+                    }
                 }
                 if let Some(origin) = entry.set_origin {
                     decision.attr.origin = Some(origin);
@@ -3403,12 +3421,14 @@ mod policy_apply_tests {
     use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList};
 
     /// Test wrapper that preserves the legacy `Option<BgpAttr>`
-    /// shape — weight defaults to 0 and is dropped from the
-    /// result. Tests that need to assert on weight call
-    /// `super::policy_list_apply` directly with an explicit
-    /// weight argument.
+    /// shape — weight defaults to 0, local_addr defaults to
+    /// 0.0.0.0, and both are dropped from the result. Tests that
+    /// need to assert on weight or `set next-hop self` call
+    /// `super::policy_list_apply` directly with explicit
+    /// arguments.
     fn policy_list_apply(list: &PolicyList, nlri: &Ipv4Nlri, attr: BgpAttr) -> Option<BgpAttr> {
-        super::policy_list_apply(list, nlri, attr, 0).map(|d| d.attr)
+        super::policy_list_apply(list, nlri, attr, 0, std::net::Ipv4Addr::UNSPECIFIED)
+            .map(|d| d.attr)
     }
 
     fn nlri(prefix: &str) -> Ipv4Nlri {
@@ -3696,10 +3716,60 @@ mod policy_apply_tests {
         let mut list = PolicyList::default();
         list.entry(10).match_weight = Some(NumericMatch::Eq(500));
         let attr = attr_with("1", None, None);
-        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr.clone(), 500);
+        let local = std::net::Ipv4Addr::UNSPECIFIED;
+        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr.clone(), 500, local);
         assert!(d.is_some(), "weight=500 should match Eq(500)");
-        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr, 0);
+        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr, 0, local);
         assert!(d.is_none(), "weight=0 should not match Eq(500)");
+    }
+
+    #[test]
+    fn set_next_hop_self_uses_local_addr() {
+        // `set next-hop self` resolves at apply time to the
+        // `local_addr` argument passed to `policy_list_apply`.
+        let mut list = PolicyList::default();
+        list.entry(10).set_next_hop = Some(crate::policy::SetNextHop::SelfAddr);
+
+        let local = std::net::Ipv4Addr::new(192, 0, 2, 7);
+        let attr = attr_with("1", None, None);
+        let d =
+            super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr, 0, local).expect("permit");
+        match d.attr.nexthop.expect("nexthop set") {
+            BgpNexthop::Ipv4(a) => assert_eq!(a, local),
+            other => panic!("expected Ipv4 nexthop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_next_hop_v4_address() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_next_hop = Some(crate::policy::SetNextHop::Address(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 1, 1)),
+        ));
+        let attr = attr_with("1", None, None);
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        match out.nexthop.expect("nexthop set") {
+            BgpNexthop::Ipv4(a) => assert_eq!(a, std::net::Ipv4Addr::new(10, 1, 1, 1)),
+            other => panic!("expected Ipv4 nexthop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_next_hop_v6_is_inert_today() {
+        // BgpNexthop is IPv4-only. An IPv6 target on the entry
+        // parses cleanly but does not modify the route's nexthop
+        // — locked in until BgpNexthop::Ipv6 is plumbed.
+        let mut list = PolicyList::default();
+        list.entry(10).set_next_hop = Some(crate::policy::SetNextHop::Address(
+            std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+        ));
+        let mut attr = attr_with("1", None, None);
+        attr.nexthop = Some(BgpNexthop::Ipv4(std::net::Ipv4Addr::new(192, 0, 2, 1)));
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        match out.nexthop.expect("untouched") {
+            BgpNexthop::Ipv4(a) => assert_eq!(a, std::net::Ipv4Addr::new(192, 0, 2, 1)),
+            other => panic!("expected Ipv4 nexthop, got {:?}", other),
+        }
     }
 
     #[test]
@@ -3730,8 +3800,14 @@ mod policy_apply_tests {
         // regardless of the incoming weight.
         let mut list = PolicyList::default();
         list.entry(10).weight = Some(999);
-        let d = super::policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", None, None), 7)
-            .expect("permit");
+        let d = super::policy_list_apply(
+            &list,
+            &nlri("10.0.0.0/8"),
+            attr_with("1", None, None),
+            7,
+            std::net::Ipv4Addr::UNSPECIFIED,
+        )
+        .expect("permit");
         assert_eq!(d.weight, 999);
     }
 
@@ -3816,7 +3892,7 @@ mod policy_apply_tests {
 mod tests {
     use std::str::FromStr;
 
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use bgp_packet::{
         As4Path, BgpAttr, BgpNexthop, Community, CommunityValue, Ipv4Nlri, LocalPref,
@@ -3826,14 +3902,16 @@ mod tests {
     use crate::policy::prefix::set::PrefixSetEntry;
     use crate::policy::{
         AsPathPrependConfig, CommunityMatcher, CommunitySet, NumericSet, PolicyList, PrefixSet,
-        SetCommunityConfig, SetCommunityMode,
+        SetCommunityConfig, SetCommunityMode, SetNextHop,
     };
 
     /// Test wrapper that preserves the legacy `Option<BgpAttr>`
-    /// shape; weight defaults to 0. Weight-aware tests call
+    /// shape; weight defaults to 0, local_addr to 0.0.0.0.
+    /// Weight-aware / next-hop-self tests call
     /// `super::policy_list_apply` directly.
     fn policy_list_apply(list: &PolicyList, nlri: &Ipv4Nlri, attr: BgpAttr) -> Option<BgpAttr> {
-        super::policy_list_apply(list, nlri, attr, 0).map(|d| d.attr)
+        super::policy_list_apply(list, nlri, attr, 0, std::net::Ipv4Addr::UNSPECIFIED)
+            .map(|d| d.attr)
     }
 
     fn set_community_cfg(members: &[&str], mode: SetCommunityMode) -> SetCommunityConfig {
@@ -4139,7 +4217,8 @@ mod tests {
     #[test]
     fn policy_list_apply_sets_next_hop() {
         let mut list = PolicyList::default();
-        list.entry(10).set_next_hop = Some(Ipv4Addr::new(10, 1, 1, 1));
+        list.entry(10).set_next_hop =
+            Some(SetNextHop::Address(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1))));
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
         match out.nexthop.expect("nexthop set") {
@@ -4151,7 +4230,8 @@ mod tests {
     #[test]
     fn policy_list_apply_next_hop_overrides_existing() {
         let mut list = PolicyList::default();
-        list.entry(10).set_next_hop = Some(Ipv4Addr::new(10, 1, 1, 1));
+        list.entry(10).set_next_hop =
+            Some(SetNextHop::Address(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1))));
 
         let attr = BgpAttr {
             nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1))),
