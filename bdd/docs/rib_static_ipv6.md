@@ -4,7 +4,9 @@
 
 As a network operator
 I want IPv6 static routes to recover after the egress interface goes
+down and back up.
 Using an isolated test topology with two zebra-rs instances connected
+via a shared bridge.
 
 ## Test Topology
 
