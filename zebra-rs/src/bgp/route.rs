@@ -8,7 +8,7 @@ use ipnet::Ipv4Net;
 use prefix_trie::PrefixMap;
 
 use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
-use crate::policy::{CommunityMatcher, PolicyList, StandardMatcher};
+use crate::policy::{AsPathPrependConfig, CommunityMatcher, PolicyList, StandardMatcher};
 use crate::rib::route::DEBUG_EVPN;
 use crate::rib::{self, MacAddr, api::FdbEntry};
 
@@ -2625,13 +2625,15 @@ fn apply_set_community(
     bgp_attr.com = Some(com);
 }
 
-/// Apply a `set as-path-prepend <asn>...` action by prepending the given
-/// ASNs onto the existing AS-path (or installing a new one if absent).
-fn apply_set_as_path_prepend(bgp_attr: &mut BgpAttr, asns: &[u32]) {
-    if asns.is_empty() {
+/// Apply a `set as-path-prepend ASN repeat NUM` action by prepending
+/// `cfg.asn` `cfg.repeat` times onto the existing AS-path (or
+/// installing a new one if absent). `repeat` is bounded `1..=255` by
+/// the YANG schema; a zero would be a no-op anyway.
+fn apply_set_as_path_prepend(bgp_attr: &mut BgpAttr, cfg: &AsPathPrependConfig) {
+    if cfg.repeat == 0 {
         return;
     }
-    let prepend_path = As4Path::from(asns.to_vec());
+    let prepend_path = As4Path::from(vec![cfg.asn; cfg.repeat as usize]);
     match bgp_attr.aspath.as_mut() {
         Some(existing) => existing.prepend_mut(prepend_path),
         None => bgp_attr.aspath = Some(prepend_path),
@@ -3409,7 +3411,7 @@ mod tests {
     use ipnet::Ipv4Net;
 
     use super::policy_list_apply;
-    use crate::policy::{CommunityMatcher, CommunitySet, PolicyList};
+    use crate::policy::{AsPathPrependConfig, CommunityMatcher, CommunitySet, PolicyList};
 
     fn nlri(s: &str) -> Ipv4Nlri {
         Ipv4Nlri {
@@ -3543,7 +3545,10 @@ mod tests {
     #[test]
     fn policy_list_apply_as_path_prepend_onto_empty() {
         let mut list = PolicyList::default();
-        list.entry(10).set_as_path_prepend = Some(vec![65001, 65001]);
+        list.entry(10).set_as_path_prepend = Some(AsPathPrependConfig {
+            asn: 65001,
+            repeat: 2,
+        });
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
         let path = out.aspath.expect("aspath set");
@@ -3554,7 +3559,7 @@ mod tests {
     #[test]
     fn policy_list_apply_as_path_prepend_onto_existing() {
         let mut list = PolicyList::default();
-        list.entry(10).set_as_path_prepend = Some(vec![65001]);
+        list.entry(10).set_as_path_prepend = Some(AsPathPrependConfig::new(65001));
 
         // Existing path: 100 200 (origin AS at the right).
         let attr = BgpAttr {
@@ -3569,9 +3574,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_list_apply_as_path_prepend_multi_asn() {
+    fn policy_list_apply_as_path_prepend_repeat_three_onto_existing() {
         let mut list = PolicyList::default();
-        list.entry(10).set_as_path_prepend = Some(vec![65001, 65002, 65003]);
+        list.entry(10).set_as_path_prepend = Some(AsPathPrependConfig {
+            asn: 65001,
+            repeat: 3,
+        });
 
         let attr = BgpAttr {
             aspath: Some(As4Path::from(vec![100])),
@@ -3580,7 +3588,7 @@ mod tests {
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
         let path = out.aspath.expect("aspath set");
-        assert_eq!(path.as_path_display(), "65001 65002 65003 100");
+        assert_eq!(path.as_path_display(), "65001 65001 65001 100");
         assert_eq!(path.length(), 4);
     }
 

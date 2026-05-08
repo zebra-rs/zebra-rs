@@ -49,6 +49,21 @@ fn parse_origin(s: &str) -> Result<Origin> {
     }
 }
 
+/// Set-action config for `set as-path-prepend ASN repeat NUM`.
+/// At apply time the same ASN is prepended `repeat` times onto
+/// AS_PATH — equivalent to IOS-XR's `prepend as-path NUM repeats N`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AsPathPrependConfig {
+    pub asn: u32,
+    pub repeat: u8,
+}
+
+impl AsPathPrependConfig {
+    pub fn new(asn: u32) -> Self {
+        Self { asn, repeat: 1 }
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct PolicyEntry {
     // Match.
@@ -70,7 +85,7 @@ pub struct PolicyEntry {
     pub set_community_name: Option<String>,
     pub set_community: Option<CommunitySet>,
     pub set_community_additive: bool,
-    pub set_as_path_prepend: Option<Vec<u32>>,
+    pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<Ipv4Addr>,
     // Action.
     pub action: Option<PolicyAction>,
@@ -439,25 +454,58 @@ impl ConfigBuilder {
                 entry.set_community_additive = false;
                 Ok(())
             })
-            .path("/entry/set/as-path-prepend")
+            // `set as-path-prepend ASN [repeat NUM]` is modeled as
+            // a presence container with two leaves. YANG fires
+            // callbacks per leaf, so we patch the partial config
+            // incrementally; a missing `repeat` defaults to 1
+            // (matches the YANG default).
+            .path("/entry/set/as-path-prepend/asn")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
-
-                let raw = args.string().context(ARG_ERR)?;
-                let asns: Vec<u32> = raw
-                    .split_whitespace()
-                    .map(|s| s.parse::<u32>())
-                    .collect::<Result<Vec<_>, _>>()
-                    .context("as-path-prepend: invalid AS number")?;
-                if asns.is_empty() {
-                    anyhow::bail!("as-path-prepend: empty AS list");
+                let asn = args.u32().context("as-path-prepend asn: parse")?;
+                match entry.set_as_path_prepend.as_mut() {
+                    Some(cfg) => cfg.asn = asn,
+                    None => entry.set_as_path_prepend = Some(AsPathPrependConfig::new(asn)),
                 }
-                entry.set_as_path_prepend = Some(asns);
-
                 Ok(())
             })
             .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                // `asn` is mandatory; deleting it invalidates the
+                // whole config.
+                entry.set_as_path_prepend = None;
+                Ok(())
+            })
+            .path("/entry/set/as-path-prepend/repeat")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                let repeat = args.u8().context("as-path-prepend repeat: parse")?;
+                if repeat == 0 {
+                    anyhow::bail!("as-path-prepend repeat: must be >= 1");
+                }
+                if let Some(cfg) = entry.set_as_path_prepend.as_mut() {
+                    cfg.repeat = repeat;
+                }
+                // If asn isn't set yet the leaf order is unusual but
+                // valid (commit will fire the asn callback next);
+                // silently no-op rather than synthesizing an invalid
+                // config.
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                if let Some(cfg) = entry.set_as_path_prepend.as_mut() {
+                    cfg.repeat = 1;
+                }
+                Ok(())
+            })
+            .path("/entry/set/as-path-prepend")
+            .del(|policy, cache, name, seq, _args| {
+                // Container-level delete clears the whole config.
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
                 entry.set_as_path_prepend = None;
@@ -572,12 +620,11 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
                 let _ = writeln!(buf, "  set: community {}{}", set_community, suffix);
             }
             if let Some(prepend) = &entry.set_as_path_prepend {
-                let s = prepend
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let _ = writeln!(buf, "  set: as-path-prepend {}", s);
+                let _ = writeln!(
+                    buf,
+                    "  set: as-path-prepend {} repeat {}",
+                    prepend.asn, prepend.repeat
+                );
             }
             if let Some(nh) = &entry.set_next_hop {
                 let _ = writeln!(buf, "  set: next-hop {}", nh);
