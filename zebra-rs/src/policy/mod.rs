@@ -19,6 +19,12 @@ pub use prefix::*;
 pub mod community;
 pub use community::*;
 
+pub mod ext_community;
+pub use ext_community::*;
+
+pub mod large_community;
+pub use large_community::*;
+
 pub mod aspath;
 pub use aspath::*;
 

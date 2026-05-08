@@ -2575,6 +2575,16 @@ fn entry_matches(entry: &crate::policy::PolicyEntry, nlri: &Ipv4Nlri, bgp_attr: 
     {
         return false;
     }
+    if let Some(set) = &entry.ext_community_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(set) = &entry.large_community_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
     if let Some(as_path_set) = &entry.as_path_set
         && !as_path_set.matches(bgp_attr)
     {
@@ -3622,6 +3632,82 @@ mod policy_apply_tests {
         assert!(
             policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", None, None)).is_none()
         );
+    }
+
+    #[test]
+    fn match_ext_community_exact() {
+        use bgp_packet::ExtCommunity;
+        use std::collections::BTreeSet;
+        let mut set = crate::policy::ExtCommunitySet::default();
+        set.vals.insert(
+            crate::policy::ExtCommunityMatcher::from_str("rt:65001:100")
+                .expect("parses rt:65001:100"),
+        );
+        let _: &BTreeSet<_> = &set.vals; // type sanity
+
+        let mut list = PolicyList::default();
+        list.entry(10).ext_community_set = Some(set);
+
+        let mut attr_match = attr_with("1", None, None);
+        attr_match.ecom = Some(ExtCommunity::from_str("rt:65001:100").unwrap());
+        let mut attr_miss = attr_with("1", None, None);
+        attr_miss.ecom = Some(ExtCommunity::from_str("rt:65001:200").unwrap());
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_match).is_some());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_miss).is_none());
+        // Absent ecom => no match
+        assert!(
+            policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_with("1", None, None)).is_none()
+        );
+    }
+
+    #[test]
+    fn match_ext_community_regex() {
+        use bgp_packet::ExtCommunity;
+        let mut set = crate::policy::ExtCommunitySet::default();
+        set.vals
+            .insert(crate::policy::ExtCommunityMatcher::from_str("rt:^65001:.*").unwrap());
+
+        let mut list = PolicyList::default();
+        list.entry(10).ext_community_set = Some(set);
+
+        let mut attr_match = attr_with("1", None, None);
+        attr_match.ecom = Some(ExtCommunity::from_str("rt:65001:100 rt:65002:200").unwrap());
+        let mut attr_miss = attr_with("1", None, None);
+        attr_miss.ecom = Some(ExtCommunity::from_str("rt:65003:100").unwrap());
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_match).is_some());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_miss).is_none());
+    }
+
+    #[test]
+    fn match_large_community_exact_and_regex() {
+        use bgp_packet::LargeCommunity;
+        let mut set = crate::policy::LargeCommunitySet::default();
+        set.vals
+            .insert(crate::policy::LargeCommunityMatcher::from_str("65001:100:200").unwrap());
+
+        let mut list = PolicyList::default();
+        list.entry(10).large_community_set = Some(set);
+
+        let mut attr_match = attr_with("1", None, None);
+        attr_match.lcom = Some(LargeCommunity::from_str("65001:100:200 65002:300:400").unwrap());
+        let mut attr_miss = attr_with("1", None, None);
+        attr_miss.lcom = Some(LargeCommunity::from_str("65001:100:201").unwrap());
+
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_match).is_some());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_miss).is_none());
+
+        // Regex variant
+        let mut set = crate::policy::LargeCommunitySet::default();
+        set.vals
+            .insert(crate::policy::LargeCommunityMatcher::from_str("^65001:.*:.*$").unwrap());
+        let mut list = PolicyList::default();
+        list.entry(10).large_community_set = Some(set);
+
+        let mut attr_regex = attr_with("1", None, None);
+        attr_regex.lcom = Some(LargeCommunity::from_str("65001:9:9").unwrap());
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_regex).is_some());
     }
 }
 
