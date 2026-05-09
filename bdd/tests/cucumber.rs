@@ -18,7 +18,7 @@ impl World {
             hash ^= *byte as u32;
             hash = hash.wrapping_mul(0x0100_0193);
         }
-        format!("{:04x}", hash & 0xffff)
+        format!("{:08x}", hash)
     }
 
     fn ns(&self, logical: &str) -> String {
@@ -30,7 +30,10 @@ impl World {
     }
 
     fn host_veth(&self, logical: &str) -> String {
-        format!("v{}_{}", self.short_id(), logical)
+        // `{ns}_{hash}` order (no `v` prefix) so `ip link` output
+        // groups veths by namespace name, which is the field
+        // operators read first when debugging a failed run.
+        format!("{}_{}", logical, self.short_id())
     }
 
     fn ns_veth(&self, logical: &str) -> String {
