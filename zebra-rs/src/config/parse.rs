@@ -599,9 +599,15 @@ pub fn parse(
     }
 
     // Elem for set/delete/exec func.
+    //
+    // A `mandatory true` leaf nested under `choice`/`case` is only
+    // required when its case is selected (RFC 7950 §7.6.5). libyang
+    // flattens cases into the parent `dir` but tags each entry with
+    // its choice/case names — skip those here so the validator does
+    // not demand sibling cases that the user did not select.
     let mut mandatory = Vec::<String>::new();
     for entry in mx.matched_entry.dir.borrow().iter() {
-        if entry.mandatory {
+        if entry.mandatory && entry.choice.borrow().is_none() {
             mandatory.push(entry.name.clone());
         }
     }
