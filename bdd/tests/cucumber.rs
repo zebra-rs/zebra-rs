@@ -157,6 +157,10 @@ async fn create_namespace_with_ip(
         .await
         .expect("Failed to connect namespace to bridge");
 
+    netns::exec_in_netns(&scoped_ns, "ip", &["addr", "add", &ip, "dev", &ns_veth])
+        .await
+        .expect("Failed to assign IP address to namespace veth");
+
     println!(
         "✓ Namespace {} created with IP {} on bridge {}",
         scoped_ns, ip, scoped_br
