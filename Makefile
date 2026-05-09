@@ -60,22 +60,6 @@ clean:
 perf:
 	sudo perf record -g --call-graph dwarf ./target/release/zebra-rs
 
-# Integration tests (bdd)
-test:
-	mkdir -p bdd/allure-results
-	cargo test -p bdd --test cucumber -- --concurrency=1
-
-test-ibgp:
-	mkdir -p bdd/allure-results
-	cargo test -p bdd --test cucumber -- --concurrency=1 --tags "@bgp_basic_ibgp"
-
-test-ebgp:
-	mkdir -p bdd/allure-results
-	cargo test -p bdd --test cucumber -- --concurrency=1 --tags "@bgp_basic_ebgp"
-
-test-rr:
-	mkdir -p bdd/allure-results
-	cargo test -p bdd --test cucumber -- --concurrency=1 --tags "@bgp_basic_rr"
-
-test-report:
-	cd bdd && rm -rf allure-report && allure generate && allure open
+# Integration tests (cucumber/bdd) live in bdd/Makefile. Run them
+# from there, e.g. `make -C bdd run`, `make -C bdd ibgp`,
+# `make -C bdd open`.
