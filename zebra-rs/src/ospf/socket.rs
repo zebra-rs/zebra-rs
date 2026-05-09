@@ -16,7 +16,7 @@ pub fn ospf_socket_ipv4() -> Result<Socket, std::io::Error> {
     socket.set_reuse_address(true)?;
     socket.set_multicast_loop_v4(false)?;
     socket.set_multicast_ttl_v4(1)?;
-    socket.set_tos(libc::IPTOS_PREC_INTERNETCONTROL as u32)?;
+    socket.set_tos_v4(libc::IPTOS_PREC_INTERNETCONTROL as u32)?;
     set_ipv4_pktinfo(&socket);
 
     Ok(socket)

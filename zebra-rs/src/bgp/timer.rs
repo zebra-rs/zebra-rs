@@ -1,7 +1,7 @@
 use std::cmp::min;
 
 use bgp_packet::{AfiSafi, OpenPacket};
-use rand::Rng;
+use rand::RngExt;
 
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;

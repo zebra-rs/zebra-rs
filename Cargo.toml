@@ -23,11 +23,12 @@ license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 anyhow = "1.0"
-prost = "0.13"
+prost = "0.14"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-tonic = "0.13"
-tonic-build = "0.13"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 clap = { version = "4", features = ["derive"] }
 
 # Workspace-wide clippy configuration. Crates inherit this via

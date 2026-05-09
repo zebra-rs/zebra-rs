@@ -10,6 +10,7 @@ prost.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
+tonic-prost.workspace = true
 
 # MCP server dependencies
 serde = { version = "1.0", features = ["derive"] }
@@ -18,7 +19,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
-tonic-build.workspace = true
+tonic-prost-build.workspace = true
 
 [lints]
 workspace = true
