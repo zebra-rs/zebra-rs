@@ -1615,41 +1615,41 @@ pub fn graph(
             collect_adjacency_sids(&lsp, &mut adjacency_sids);
         }
 
-        // Create graph node
-        let node = create_graph_node(top, level, node_id, &sys_id, &lsp);
-        graph.insert(node_id, node);
+        // Create graph vertex
+        let vertex = create_graph_vertex(top, level, node_id, &sys_id, &lsp);
+        graph.insert(node_id, vertex);
     }
 
     (graph, source_node, adjacency_sids)
 }
 
-/// Create a graph node from an LSP
-fn create_graph_node(
+/// Create a graph vertex from an LSP
+fn create_graph_vertex(
     top: &mut IsisTop,
     level: Level,
     node_id: usize,
     sys_id: &IsisSysId,
     lsp: &IsisLsp,
-) -> spf::Node {
+) -> spf::Vertex {
     // Get hostname if available
-    let node_name = top
+    let vertex_name = top
         .hostname
         .get(&level)
         .get(sys_id)
         .map(|(hostname, _)| hostname.clone())
         .unwrap_or_else(|| sys_id.to_string());
 
-    let mut node = spf::Node {
+    let mut vertex = spf::Vertex {
         id: node_id,
-        name: node_name,
+        name: vertex_name,
         sys_id: sys_id.to_string(),
         ..Default::default()
     };
 
     // Process outgoing links
-    process_outgoing_links(top, level, node_id, sys_id, lsp, &mut node.olinks);
+    process_outgoing_links(top, level, node_id, sys_id, lsp, &mut vertex.olinks);
 
-    node
+    vertex
 }
 
 /// Process outgoing links from Extended IS Reachability TLVs
@@ -1778,37 +1778,37 @@ pub fn graph_mt2(
         if is_originated {
             source_node = Some(node_id);
         }
-        let node = create_graph_node_mt2(top, level, node_id, &sys_id, &lsp);
-        graph.insert(node_id, node);
+        let vertex = create_graph_vertex_mt2(top, level, node_id, &sys_id, &lsp);
+        graph.insert(node_id, vertex);
     }
 
     (graph, source_node, adjacency_sids)
 }
 
-fn create_graph_node_mt2(
+fn create_graph_vertex_mt2(
     top: &mut IsisTop,
     level: Level,
     node_id: usize,
     sys_id: &IsisSysId,
     lsp: &IsisLsp,
-) -> spf::Node {
-    let node_name = top
+) -> spf::Vertex {
+    let vertex_name = top
         .hostname
         .get(&level)
         .get(sys_id)
         .map(|(hostname, _)| hostname.clone())
         .unwrap_or_else(|| sys_id.to_string());
 
-    let mut node = spf::Node {
+    let mut vertex = spf::Vertex {
         id: node_id,
-        name: node_name,
+        name: vertex_name,
         sys_id: sys_id.to_string(),
         ..Default::default()
     };
 
-    process_outgoing_links_mt2(top, level, node_id, sys_id, lsp, &mut node.olinks);
+    process_outgoing_links_mt2(top, level, node_id, sys_id, lsp, &mut vertex.olinks);
 
-    node
+    vertex
 }
 
 fn process_outgoing_links_mt2(
