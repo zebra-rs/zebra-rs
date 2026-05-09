@@ -133,7 +133,7 @@ impl Path {
 pub fn spf_calc(
     graph: &Graph,
     root: usize,
-    x: Option<usize>,
+    x: &[usize],
     opt: &SpfOpt,
     direct: &SpfDirect,
 ) -> BTreeMap<usize, Path> {
@@ -155,19 +155,15 @@ pub fn spf_calc(
             continue;
         };
 
-        // For TI-LFA, we skip the failed vertex.
-        if let Some(x) = x
-            && edge.id == x
-        {
+        // For TI-LFA / SRLG, skip any excluded vertex (do not relax
+        // edges out of it).
+        if x.contains(&edge.id) {
             continue;
         }
 
         for link in edge.links(direct).iter() {
-            // For TI-LFA, we skip a link which connects to the failed vertex.
-            if let Some(x) = x
-                && let Some(next) = graph.get(&link.id(direct))
-                && next.id == x
-            {
+            // Skip links that connect to an excluded vertex.
+            if x.contains(&link.id(direct)) {
                 continue;
             }
 
@@ -243,18 +239,19 @@ pub fn spf_calc(
 }
 
 pub fn spf(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
-    spf_calc(graph, root, None, opt, &SpfDirect::Normal)
+    spf_calc(graph, root, &[], opt, &SpfDirect::Normal)
 }
 
 pub fn spf_reverse(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
-    spf_calc(graph, root, None, opt, &SpfDirect::Reverse)
+    spf_calc(graph, root, &[], opt, &SpfDirect::Reverse)
 }
 
-pub fn path_has_x(path: &[usize], x: usize) -> bool {
-    path.contains(&x)
+/// True if `path` contains any of the excluded vertices in `x`.
+pub fn path_has_x(path: &[usize], x: &[usize]) -> bool {
+    path.iter().any(|p| x.contains(p))
 }
 
-pub fn p_space_vertices(graph: &Graph, s: usize, x: usize) -> HashSet<usize> {
+pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> HashSet<usize> {
     let spf = spf(graph, s, &SpfOpt::full_path());
 
     spf.iter()
@@ -268,7 +265,7 @@ pub fn p_space_vertices(graph: &Graph, s: usize, x: usize) -> HashSet<usize> {
         .collect::<HashSet<_>>()
 }
 
-pub fn q_space_vertices(graph: &Graph, d: usize, x: usize) -> HashSet<usize> {
+pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> {
     let spf = spf_reverse(graph, d, &SpfOpt::full_path());
 
     spf.iter()
@@ -282,8 +279,8 @@ pub fn q_space_vertices(graph: &Graph, d: usize, x: usize) -> HashSet<usize> {
         .collect::<HashSet<_>>()
 }
 
-pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<usize>> {
-    spf_calc(graph, s, Some(x), &SpfOpt::full_path(), &SpfDirect::Normal)
+pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<usize>> {
+    spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal)
         .remove(&d)
         .map_or_else(Vec::new, |data| data.paths)
 }
@@ -381,7 +378,7 @@ pub fn repair_list_print(graph: &Graph, repair_list: &Vec<SrSegment>) {
     }
 }
 
-pub fn tilfa(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<SrSegment>> {
+pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegment>> {
     let p_vertices = p_space_vertices(graph, s, x);
     let q_vertices = q_space_vertices(graph, d, x);
     let mut pc_paths = pc_paths(graph, s, d, x);
@@ -678,7 +675,7 @@ mod tests {
         // *  First, P(S, N1) is computed and results in [N3, N2, R1].
         let s = 0;
         let d = 7;
-        let x = 1;
+        let x: &[usize] = &[1];
 
         let p = p_space_vertices(&graph, s, x);
         let mut p_vertices = BTreeSet::<String>::new();
@@ -795,7 +792,7 @@ mod tests {
 
         let s = 0;
         let d = 7;
-        let x = 1;
+        let x: &[usize] = &[1];
 
         let repair_paths = tilfa(&graph, s, d, x);
         assert_eq!(repair_paths.len(), 1);
