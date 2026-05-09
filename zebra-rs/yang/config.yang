@@ -922,19 +922,16 @@ module config {
               case eq-case {
                 leaf "eq" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case le-case {
                 leaf "le" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case ge-case {
                 leaf "ge" {
                   type uint32;
-                  mandatory true;
                 }
               }
             }
@@ -950,19 +947,16 @@ module config {
               case eq-case {
                 leaf "eq" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case le-case {
                 leaf "le" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case ge-case {
                 leaf "ge" {
                   type uint32;
-                  mandatory true;
                 }
               }
             }
@@ -978,19 +972,16 @@ module config {
               case eq-case {
                 leaf "eq" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case le-case {
                 leaf "le" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case ge-case {
                 leaf "ge" {
                   type uint32;
-                  mandatory true;
                 }
               }
             }
@@ -1005,19 +996,16 @@ module config {
               case eq-case {
                 leaf "eq" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case le-case {
                 leaf "le" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case ge-case {
                 leaf "ge" {
                   type uint32;
-                  mandatory true;
                 }
               }
             }
@@ -1033,19 +1021,16 @@ module config {
               case eq-case {
                 leaf "eq" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case le-case {
                 leaf "le" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case ge-case {
                 leaf "ge" {
                   type uint32;
-                  mandatory true;
                 }
               }
             }
@@ -1072,19 +1057,16 @@ module config {
               case set-case {
                 leaf "set" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case add-case {
                 leaf "add" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case sub-case {
                 leaf "sub" {
                   type uint32;
-                  mandatory true;
                 }
               }
             }
@@ -1100,19 +1082,16 @@ module config {
               case set-case {
                 leaf "set" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case add-case {
                 leaf "add" {
                   type uint32;
-                  mandatory true;
                 }
               }
               case sub-case {
                 leaf "sub" {
                   type uint32;
-                  mandatory true;
                 }
               }
             }
@@ -1144,13 +1123,11 @@ module config {
                     type inet:ipv4-address;
                     type inet:ipv6-address;
                   }
-                  mandatory true;
                 }
               }
               case self-case {
                 leaf "self" {
                   type empty;
-                  mandatory true;
                 }
               }
             }
