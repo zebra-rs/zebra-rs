@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use ospf_packet::*;
-use rand::Rng;
+use rand::RngExt;
 use tokio::time::Instant;
 
 use crate::ospf::ospf_db_desc_send;

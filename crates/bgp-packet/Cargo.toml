@@ -7,7 +7,7 @@ license.workspace = true
 description = "Parser for the BGP protocol"
 
 [dependencies]
-bitfield-struct = "0.11.0"
+bitfield-struct = "0.13"
 bitflags = "2.6.0"
 byteorder = "1.5"
 bytes = "1.9"
@@ -21,9 +21,9 @@ num_enum = "0.7.5"
 regex = "1.11.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-strum = "0.27.2"
-strum_macros = "0.27.2"
-thiserror = "1.0"
+strum = "0.28"
+strum_macros = "0.28"
+thiserror = "2"
 
 [dev-dependencies]
 hex-literal = "1.0"

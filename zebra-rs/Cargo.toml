@@ -17,11 +17,12 @@ prost.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
-console-subscriber = "0.4"
+tonic-prost.workspace = true
+console-subscriber = "0.5"
 libyang = { git = "https://github.com/zebra-rs/libyang", rev = "52413c2859e73364c7d877f942268cb69c65f4a2" }
 #libyang = { path = "../../libyang" }
 regex = "1.10"
-similar = "2"
+similar = "3"
 dirs = "6"
 async-trait = "0.1"
 prefix-trie = "0.8.2"
@@ -37,10 +38,10 @@ serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 alphanumeric-sort = "1.5.3"
 bitflags = "2.6.0"
-sysctl = "0.6"
+sysctl = "0.7"
 #nanomsg = "0.7.2"
-socket2 = "0.5.8"
-nix = { version = "0.30", features = ["fs", "net", "socket", "uio", "user"] }
+socket2 = "0.6"
+nix = { version = "0.31", features = ["fs", "net", "socket", "uio", "user"] }
 libc = "0.2.167"
 bgp-packet = { path = "../crates/bgp-packet" }
 bgp-macros = { path = "../crates/bgp-macros" }
@@ -48,16 +49,16 @@ ospf-packet = { path = "../crates/ospf-packet" }
 ospf-macros = { path = "../crates/ospf-macros" }
 isis-packet = { path = "../crates/isis-packet" }
 isis-macros = { path = "../crates/isis-macros" }
-bitfield-struct = "0.11"
-rand = "0.9"
+bitfield-struct = "0.13"
+rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 hostname = "0.4"
-bit-vec = "0.8.0"
+bit-vec = "0.9"
 audit = "0.7.3"
 daemonize = "0.5"
 hex = "0.4.3"
-strum = "0.27"
-strum_macros = "0.27"
+strum = "0.28"
+strum_macros = "0.28"
 num_enum = "0.7.5"
 nanomsg = "0.7.2"
 itertools = "0.14.0"
@@ -72,10 +73,10 @@ futures = "0.3"
 scan_fmt = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nix = { version = "0.30", features = ["net"] }
+nix = { version = "0.31", features = ["net"] }
 ioctl-rs = "0.2.0"
 net-route = "0.4.2"
 
 [build-dependencies]
-tonic-build.workspace = true
+tonic-prost-build.workspace = true
 chrono = "0.4"

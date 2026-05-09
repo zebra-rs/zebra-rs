@@ -7,7 +7,7 @@ license.workspace = true
 description = "Common utilities for protocol packet parsing"
 
 [dependencies]
-bitfield-struct = "0.11"
+bitfield-struct = "0.13"
 byteorder = "1.5"
 bytes = "1.9"
 fletcher = "1.0.0"
@@ -18,9 +18,9 @@ nom = "8"
 nom-derive = { git = "https://github.com/rust-bakery/nom-derive", branch = "master" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-strum = "0.27.2"
-strum_macros = "0.27.2"
-thiserror = "1.0"
+strum = "0.28"
+strum_macros = "0.28"
+thiserror = "2"
 
 [dev-dependencies]
 hex-literal = "1.0"
