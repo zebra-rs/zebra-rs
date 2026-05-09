@@ -1,12 +1,12 @@
-# vty: GNU bash 5.2 with vtysh integration patches.
+# vty: GNU bash 5.3 with vtysh integration patches.
 #
 # bash sources are fetched at build time and cached locally.
 # This directory contains only the deltas.
 
-BASH_VERSION  := 5.2.21
+BASH_VERSION  := 5.3
 BASH_TARBALL  := bash-$(BASH_VERSION).tar.gz
 BASH_URL      := https://ftp.gnu.org/gnu/bash/$(BASH_TARBALL)
-BASH_SHA256   := c8e31bdc59b69aaffc5b36509905ba3e5cbb12747091d27b4b977f078560d5b8
+BASH_SHA256   := 0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba
 
 CACHE_DIR     ?= $(HOME)/.cache/zebra-rs
 TARBALL       := $(CACHE_DIR)/$(BASH_TARBALL)
