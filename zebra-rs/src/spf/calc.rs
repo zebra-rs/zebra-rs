@@ -444,6 +444,58 @@ mod tests {
 
     use super::*;
 
+    // RFC 9855 §5 TI-LFA topology, modelled as all-LAN. Each
+    // router-pair becomes a pseudonode (router → PN cost = the
+    // router's interface metric; PN → router cost = 0). SPF cost
+    // from S to every router must match `tilfa_graph()` — the
+    // pseudonode hops are zero-cost, so totals are preserved.
+    //
+    // Sys-id mapping (cosmetic only; the algorithm uses the usize id):
+    //   S : 49.0000.0000.0000.0001.00
+    //   N1: 49.0000.0000.0000.0002.00
+    //   N2: 49.0000.0000.0000.0003.00
+    //   N3: 49.0000.0000.0000.0004.00
+    //   R1: 49.0000.0000.0000.0005.00
+    //   R2: 49.0000.0000.0000.0006.00
+    //   R3: 49.0000.0000.0000.0007.00
+    //   D : 49.0000.0000.0000.0008.00
+    #[test]
+    fn isis_lan() {
+        let lan = isis_lan_graph();
+        let p2p = tilfa_graph();
+
+        let opt = SpfOpt::full_path();
+        let lan_tree = spf(&lan, 0, &opt);
+        let p2p_tree = spf(&p2p, 0, &opt);
+
+        // Cost to every router (id 0..=7) must match the P2P model
+        // exactly — LAN pseudonodes add path length but no cost.
+        for rtr in 0..=7 {
+            let lan_cost = lan_tree.get(&rtr).map(|p| p.cost);
+            let p2p_cost = p2p_tree.get(&rtr).map(|p| p.cost);
+            assert_eq!(
+                lan_cost, p2p_cost,
+                "router {rtr}: LAN cost {lan_cost:?} != P2P cost {p2p_cost:?}"
+            );
+        }
+
+        // All 11 pseudonodes (ids 8..=18) must appear in the SPF
+        // tree — confirms they are actually traversed, not orphaned.
+        for pn in 8..=18 {
+            assert!(
+                lan_tree.contains_key(&pn),
+                "pseudonode {pn} missing from SPF tree"
+            );
+        }
+
+        // S → D shortest path: S → PN_S_N1(8) → N1(1) → PN_N1_D(13) → D(7),
+        // total cost 1 + 0 + 1 + 0 = 2 (same as P2P).
+        let d = lan_tree.get(&7).expect("D reachable from S");
+        assert_eq!(d.cost, 2);
+        assert_eq!(d.paths.len(), 1, "no ECMP expected at D");
+        assert_eq!(d.paths[0], vec![8, 1, 13, 7]);
+    }
+
     #[test]
     fn ecmp() {
         let mut graph = BTreeMap::new();
@@ -646,6 +698,75 @@ mod tests {
                 .ilinks
                 .push(Link::new(from, to, cost));
         }
+        graph
+    }
+
+    /// Attach a pseudonode (one per IS-IS LAN) to the graph.
+    ///
+    /// `members` is a list of (router_id, router-side cost). For each
+    /// member the helper appends:
+    ///   router → PN  with the router's interface cost
+    ///   PN     → router  with cost 0  (always — IS-IS LAN modelling)
+    /// olinks/ilinks stay symmetric so reverse SPF (used by Q-space)
+    /// works the same as for P2P links.
+    fn add_lan(graph: &mut Graph, pn_id: usize, name: &str, members: &[(usize, u32)]) {
+        graph.insert(pn_id, Vertex::new(name, pn_id));
+        for &(rtr, cost) in members {
+            graph
+                .get_mut(&rtr)
+                .unwrap()
+                .olinks
+                .push(Link::new(rtr, pn_id, cost));
+            graph
+                .get_mut(&pn_id)
+                .unwrap()
+                .ilinks
+                .push(Link::new(rtr, pn_id, cost));
+            graph
+                .get_mut(&pn_id)
+                .unwrap()
+                .olinks
+                .push(Link::new(pn_id, rtr, 0));
+            graph
+                .get_mut(&rtr)
+                .unwrap()
+                .ilinks
+                .push(Link::new(pn_id, rtr, 0));
+        }
+    }
+
+    /// Same systems as `tilfa_graph()`, but each underlying point-to-point
+    /// link is rebuilt as an IS-IS LAN with one pseudonode (ids 8..=18).
+    /// SPF cost between any two routers is preserved by construction.
+    fn isis_lan_graph() -> Graph {
+        let mut graph = BTreeMap::new();
+
+        for r in [
+            Vertex::new("S", 0),
+            Vertex::new("N1", 1),
+            Vertex::new("N2", 2),
+            Vertex::new("N3", 3),
+            Vertex::new("R1", 4),
+            Vertex::new("R2", 5),
+            Vertex::new("R3", 6),
+            Vertex::new("D", 7),
+        ] {
+            graph.insert(r.id, r);
+        }
+
+        // 11 LANs, one pseudonode each. Costs mirror tilfa_graph().
+        add_lan(&mut graph, 8, "PN_S_N1", &[(0, 1), (1, 1)]);
+        add_lan(&mut graph, 9, "PN_S_N2", &[(0, 1), (2, 1)]);
+        add_lan(&mut graph, 10, "PN_S_N3", &[(0, 1000), (3, 1000)]);
+        add_lan(&mut graph, 11, "PN_N1_R1", &[(1, 1), (4, 1)]);
+        add_lan(&mut graph, 12, "PN_N1_R2", &[(1, 1), (5, 1)]);
+        add_lan(&mut graph, 13, "PN_N1_D", &[(1, 1), (7, 1)]);
+        add_lan(&mut graph, 14, "PN_N2_R1", &[(2, 1), (4, 1)]);
+        add_lan(&mut graph, 15, "PN_N3_R1", &[(3, 1000), (4, 1000)]);
+        add_lan(&mut graph, 16, "PN_R1_R2", &[(4, 1000), (5, 1000)]);
+        add_lan(&mut graph, 17, "PN_R2_R3", &[(5, 1000), (6, 1000)]);
+        add_lan(&mut graph, 18, "PN_R3_D", &[(6, 1), (7, 1)]);
+
         graph
     }
 
