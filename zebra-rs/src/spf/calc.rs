@@ -356,37 +356,72 @@ pub fn intersect(
 #[derive(Debug)]
 pub enum SrSegment {
     NodeSid(usize),
-    AdjSid(usize, usize),
+    /// Adjacency SID. `via` carries the IS-IS LAN pseudonode that
+    /// the adjacency traverses, when applicable; `None` for a P2P
+    /// link. Encoders are expected to resolve `(from, to, via)`
+    /// to the correct LAN-Adj-SID at label allocation time.
+    AdjSid(usize, usize, Option<usize>),
 }
 
-pub fn make_repair_list(pc_inter: &[Intersect], s: usize, d: usize) -> Vec<SrSegment> {
+/// Walk the PCPath/intersect sequence and emit an SR repair list.
+///
+/// IS-IS LAN pseudonodes are skipped over for emission purposes —
+/// they own no Node-SID and the adjacency they represent is
+/// captured by the surrounding routers' AdjSid `via` field. The
+/// most recently traversed pseudonode is held in `pending_via`
+/// and consumed by the next AdjSid emission.
+pub fn make_repair_list(
+    pc_inter: &[Intersect],
+    s: usize,
+    d: usize,
+    graph: &Graph,
+) -> Vec<SrSegment> {
     let mut sr_segments = Vec::new();
 
-    let mut prev_id = None;
+    let mut prev_id: Option<usize> = None;
     let mut p_mode = false;
     let mut q_mode = false;
+    // Most recent pseudonode traversed since the last router.
+    // Consumed (and reset) by the next AdjSid emission.
+    let mut pending_via: Option<usize> = None;
+    let mut first_router = true;
 
-    for (index, inter) in pc_inter.iter().enumerate() {
-        if index == 0 {
+    for inter in pc_inter {
+        // Pseudonodes contribute no segment of their own; they
+        // become the `via` of the adjacency between the surrounding
+        // routers. q_mode is intentionally not updated here: a PN
+        // can land in q_space incidentally (e.g. PN_R3_D's reverse
+        // path is just [PN_R3_D]), but the Q-node concept only
+        // applies to real routers.
+        if graph.get(&inter.id).is_some_and(|v| v.is_pseudo_node()) {
+            pending_via = Some(inter.id);
+            continue;
+        }
+
+        if first_router {
             if inter.p {
                 p_mode = true;
             } else {
-                sr_segments.push(SrSegment::AdjSid(s, inter.id));
+                sr_segments.push(SrSegment::AdjSid(s, inter.id, pending_via));
+                pending_via = None;
             }
+            first_router = false;
         } else if p_mode {
             if !inter.p {
-                if let Some(prev_id) = prev_id {
-                    sr_segments.push(SrSegment::NodeSid(prev_id));
+                if let Some(prev) = prev_id {
+                    sr_segments.push(SrSegment::NodeSid(prev));
                 }
                 if !q_mode {
-                    sr_segments.push(SrSegment::AdjSid(prev_id.unwrap(), inter.id));
+                    sr_segments.push(SrSegment::AdjSid(prev_id.unwrap(), inter.id, pending_via));
+                    pending_via = None;
                 }
                 p_mode = false;
             }
-        } else if let Some(prev_id) = prev_id
+        } else if let Some(prev) = prev_id
             && !q_mode
         {
-            sr_segments.push(SrSegment::AdjSid(prev_id, inter.id));
+            sr_segments.push(SrSegment::AdjSid(prev, inter.id, pending_via));
+            pending_via = None;
         }
 
         if inter.q {
@@ -395,25 +430,25 @@ pub fn make_repair_list(pc_inter: &[Intersect], s: usize, d: usize) -> Vec<SrSeg
         prev_id = Some(inter.id);
     }
 
-    if !q_mode && let Some(prev_id) = prev_id {
-        sr_segments.push(SrSegment::AdjSid(prev_id, d));
+    if !q_mode && let Some(prev) = prev_id {
+        sr_segments.push(SrSegment::AdjSid(prev, d, pending_via));
     }
 
     sr_segments
 }
 
 pub fn repair_list_print(graph: &Graph, repair_list: &Vec<SrSegment>) {
+    let name = |id: &usize| graph.get(id).map(|n| n.name.as_str()).unwrap_or("?");
     for list in repair_list {
         match list {
             SrSegment::NodeSid(nid) => {
-                print!("NodeSid({}) ", graph.get(nid).map(|n| &n.name).unwrap());
+                print!("NodeSid({}) ", name(nid));
             }
-            SrSegment::AdjSid(from, to) => {
-                print!(
-                    "AdjSid({}, {}) ",
-                    graph.get(from).map(|n| &n.name).unwrap(),
-                    graph.get(to).map(|n| &n.name).unwrap()
-                );
+            SrSegment::AdjSid(from, to, None) => {
+                print!("AdjSid({}, {}) ", name(from), name(to));
+            }
+            SrSegment::AdjSid(from, to, Some(via)) => {
+                print!("AdjSid({}, {}, via {}) ", name(from), name(to), name(via));
             }
         }
     }
@@ -431,19 +466,13 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegmen
         // AdjSid(prev, d) emission.
         path.pop();
 
-        // Strip pseudonodes from the PCPath. They are zero-cost
-        // transit hops in the IS-IS LAN model and carry no SR
-        // identifier (no Node-SID, and no useful Adj-SID via the
-        // PN). The router-only path is what the SR repair list
-        // operates on; router-level adjacencies remain correct
-        // because the PN-side cost is always zero.
-        path.retain(|id| graph.get(id).is_none_or(|v| !v.is_pseudo_node()));
-
-        // Intersect.
+        // Intersect over the full PCPath including pseudonodes.
+        // make_repair_list folds each pseudonode into the `via`
+        // field of the surrounding adjacency.
         let pc_inter = intersect(path, &p_vertices, &q_vertices);
 
         // Convert PC intersects into repair list.
-        let repair_list = make_repair_list(&pc_inter, s, d);
+        let repair_list = make_repair_list(&pc_inter, s, d, graph);
 
         repair_lists.push(repair_list);
     }
@@ -834,16 +863,14 @@ mod tests {
     }
 
     fn seg_disp(graph: &Graph, seg: &SrSegment) -> String {
+        let name = |id: &usize| graph.get(id).map(|n| n.name.clone()).unwrap();
         match seg {
-            SrSegment::NodeSid(id) => {
-                format!("NodeSid({})", graph.get(id).map(|n| &n.name).unwrap())
+            SrSegment::NodeSid(id) => format!("NodeSid({})", name(id)),
+            SrSegment::AdjSid(from, to, None) => {
+                format!("AdjSid({}, {})", name(from), name(to))
             }
-            SrSegment::AdjSid(from, to) => {
-                format!(
-                    "AdjSid({}, {})",
-                    graph.get(from).map(|n| &n.name).unwrap(),
-                    graph.get(to).map(|n| &n.name).unwrap()
-                )
+            SrSegment::AdjSid(from, to, Some(via)) => {
+                format!("AdjSid({}, {}, via {})", name(from), name(to), name(via))
             }
         }
     }
@@ -952,7 +979,7 @@ mod tests {
             // failure of node N1 is: <Node-SID(R1), Adj-Sid(R1-R2), Adj-Sid(R2-R3)>.
 
             // Make repair list.
-            let repair_list = make_repair_list(&pc_inter, s, d);
+            let repair_list = make_repair_list(&pc_inter, s, d, &graph);
 
             assert_eq!(repair_list.len(), 3);
             let first_segment = repair_list.first().unwrap();
@@ -998,9 +1025,11 @@ mod tests {
     }
 
     /// Same TI-LFA scenario as `tilfa_api`, run against the all-LAN
-    /// topology. Pseudonodes carry no SR segment, so the repair
-    /// list must be identical to the P2P case:
-    ///   <NodeSid(R1), AdjSid(R1, R2), AdjSid(R2, R3)>
+    /// topology. The router-level segments are identical to the
+    /// P2P case but each AdjSid carries a `via` referencing the
+    /// IS-IS LAN pseudonode that the adjacency traverses:
+    ///   <NodeSid(R1), AdjSid(R1, R2, via PN_R1_R2),
+    ///                 AdjSid(R2, R3, via PN_R2_R3)>
     #[test]
     fn tilfa_lan_api() {
         let graph = isis_lan_graph();
@@ -1014,7 +1043,13 @@ mod tests {
 
         assert_eq!(repair_list.len(), 3);
         assert_eq!(seg_disp(&graph, &repair_list[0]), "NodeSid(R1)");
-        assert_eq!(seg_disp(&graph, &repair_list[1]), "AdjSid(R1, R2)");
-        assert_eq!(seg_disp(&graph, &repair_list[2]), "AdjSid(R2, R3)");
+        assert_eq!(
+            seg_disp(&graph, &repair_list[1]),
+            "AdjSid(R1, R2, via PN_R1_R2)"
+        );
+        assert_eq!(
+            seg_disp(&graph, &repair_list[2]),
+            "AdjSid(R2, R3, via PN_R2_R3)"
+        );
     }
 }
