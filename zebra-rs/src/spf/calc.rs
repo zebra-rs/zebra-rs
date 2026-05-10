@@ -172,7 +172,6 @@ pub fn spf_calc(
     opt: &SpfOpt,
     direct: &SpfDirect,
 ) -> BTreeMap<usize, Path> {
-    let mut spf = BTreeMap::<usize, Path>::new();
     let mut paths = HashMap::<usize, Path>::new();
     let mut bt = BTreeMap::<(u32, usize), Path>::new();
 
@@ -184,8 +183,6 @@ pub fn spf_calc(
     bt.insert((c.cost, root), c);
 
     while let Some((_, v)) = bt.pop_first() {
-        spf.insert(v.id, v.clone());
-
         let Some(edge) = graph.get(&v.id) else {
             continue;
         };
@@ -270,7 +267,16 @@ pub fn spf_calc(
             }
         }
     }
-    spf
+
+    // Materialise the result from `paths` rather than snapshotting
+    // each vertex at pop time. When two equal-cost predecessors
+    // contribute ECMP paths to a vertex V whose id sorts between
+    // them in the (cost, id) priority queue, V is popped between
+    // the two relaxations — the second contribution lands in
+    // `paths` but its bt-update silently drops because V is no
+    // longer in bt. Reading from `paths` at the end picks up the
+    // final state regardless of pop ordering.
+    paths.into_iter().collect()
 }
 
 pub fn spf(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
@@ -421,8 +427,17 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegmen
     // PCPaths.
     let mut repair_lists = vec![];
     for path in &mut pc_paths {
-        // Remove D.
+        // Remove D — make_repair_list adds it back via the trailing
+        // AdjSid(prev, d) emission.
         path.pop();
+
+        // Strip pseudonodes from the PCPath. They are zero-cost
+        // transit hops in the IS-IS LAN model and carry no SR
+        // identifier (no Node-SID, and no useful Adj-SID via the
+        // PN). The router-only path is what the SR repair list
+        // operates on; router-level adjacencies remain correct
+        // because the PN-side cost is always zero.
+        path.retain(|id| graph.get(id).is_none_or(|v| !v.is_pseudo_node()));
 
         // Intersect.
         let pc_inter = intersect(path, &p_vertices, &q_vertices);
@@ -980,5 +995,26 @@ mod tests {
 
         let third_disp = seg_disp(&graph, third_segment);
         assert_eq!(third_disp, "AdjSid(R2, R3)");
+    }
+
+    /// Same TI-LFA scenario as `tilfa_api`, run against the all-LAN
+    /// topology. Pseudonodes carry no SR segment, so the repair
+    /// list must be identical to the P2P case:
+    ///   <NodeSid(R1), AdjSid(R1, R2), AdjSid(R2, R3)>
+    #[test]
+    fn tilfa_lan_api() {
+        let graph = isis_lan_graph();
+        let s = 0;
+        let d = 7;
+        let x: &[usize] = &[1]; // failed vertex N1
+
+        let repair_paths = tilfa(&graph, s, d, x);
+        assert_eq!(repair_paths.len(), 1);
+        let repair_list = repair_paths.first().unwrap();
+
+        assert_eq!(repair_list.len(), 3);
+        assert_eq!(seg_disp(&graph, &repair_list[0]), "NodeSid(R1)");
+        assert_eq!(seg_disp(&graph, &repair_list[1]), "AdjSid(R1, R2)");
+        assert_eq!(seg_disp(&graph, &repair_list[2]), "AdjSid(R2, R3)");
     }
 }
