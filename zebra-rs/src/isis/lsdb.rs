@@ -350,7 +350,21 @@ pub fn insert_self_originate(
     if let Some(bytes) = bytes {
         lsa.bytes = bytes;
     }
-    top.lsdb.get_mut(&level).map.insert(key, lsa)
+    let prev = top.lsdb.get_mut(&level).map.insert(key, lsa);
+    // Schedule SPF on self-origination too. The regular receive
+    // path (`insert_lsp`) does this via `spf_schedule(LinkTop)`;
+    // without it here, an LSP we just regenerated (router LSP
+    // after adjacency UP, pseudonode LSP after we (re-)become DIS)
+    // would not refresh the graph until some peer LSP arrives.
+    // After a link bounce the graph could stay stale — z1's TLV
+    // pointing at z1.NN-00 sees the PN LSP missing from the LSDB
+    // at SPF time and drops the edge. Inlined here because IsisTop
+    // and LinkTop both expose spf_timer/tx but spf_schedule's
+    // signature is over LinkTop.
+    if top.spf_timer.get(&level).is_none() {
+        *top.spf_timer.get_mut(&level) = Some(crate::isis::inst::spf_timer(top.tx, level));
+    }
+    prev
 }
 
 pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {

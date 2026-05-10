@@ -197,8 +197,8 @@ fn config_net(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let nsap = args.string()?.parse::<Nsap>().unwrap();
 
     if op.is_set() {
-        isis.lsp_map.get_mut(&Level::L1).get(&nsap.sys_id());
-        isis.lsp_map.get_mut(&Level::L2).get(&nsap.sys_id());
+        isis.lsp_map.get_mut(&Level::L1).get_sys(&nsap.sys_id());
+        isis.lsp_map.get_mut(&Level::L2).get_sys(&nsap.sys_id());
         isis.config.net = nsap;
     } else {
         isis.config.net = Nsap::default();
