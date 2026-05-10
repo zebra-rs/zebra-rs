@@ -5,6 +5,8 @@ const CTLNAMES: &[(&str, &str)] = &[
     ("net.ipv6.conf.all.forwarding", "1"),
     ("net.ipv6.conf.all.seg6_enabled", "1"),
     ("net.ipv6.conf.default.seg6_enabled", "1"),
+    ("net.ipv6.conf.all.keep_addr_on_down", "1"),
+    ("net.ipv6.conf.default.keep_addr_on_down", "1"),
     ("net.vrf.strict_mode", "1"),
     ("net.mpls.platform_labels", "1048575"),
 ];
