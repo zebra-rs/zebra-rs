@@ -51,3 +51,15 @@ Feature: IS-IS SRv6 end-to-end with H.Encap and End.DT6
     And I apply config "z4.conf" to namespace "z4"
     And I wait 45 seconds
     Then ping from "z1" to "2001:db8:ff00:5::2" should succeed
+
+  Scenario: Teardown topology
+    Given the test topology exists
+    When I stop zebra-rs in namespace "z1"
+    And I stop zebra-rs in namespace "z2"
+    And I stop zebra-rs in namespace "z3"
+    And I stop zebra-rs in namespace "z4"
+    And I delete namespace "z1"
+    And I delete namespace "z2"
+    And I delete namespace "z3"
+    And I delete namespace "z4"
+    Then the test environment should be clean
