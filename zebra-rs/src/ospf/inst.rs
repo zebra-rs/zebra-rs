@@ -1332,7 +1332,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
         }
     }
 
-    // Process each Router-LSA to build graph nodes and edges.
+    // Process each Router-LSA to build graph vertices and edges.
     for (adv_router, originated, lsa_data) in &router_lsas {
         let node_id = top.lsp_map.get(*adv_router);
 
@@ -1340,7 +1340,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
             source_node = Some(node_id);
         }
 
-        let mut node = spf::Node {
+        let mut vertex = spf::Vertex {
             id: node_id,
             name: adv_router.to_string(),
             sys_id: adv_router.to_string(),
@@ -1353,7 +1353,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                     OspfLinkType::P2p | OspfLinkType::VirtualLink => {
                         // Point-to-Point or Virtual Link: link_id = neighbor router ID.
                         let to_id = top.lsp_map.get(link.link_id);
-                        node.olinks.push(spf::Link {
+                        vertex.olinks.push(spf::Link {
                             from: node_id,
                             to: to_id,
                             cost: link.tos_0_metric as u32,
@@ -1366,7 +1366,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                             for attached_router in attached {
                                 if *attached_router != *adv_router {
                                     let to_id = top.lsp_map.get(*attached_router);
-                                    node.olinks.push(spf::Link {
+                                    vertex.olinks.push(spf::Link {
                                         from: node_id,
                                         to: to_id,
                                         cost: link.tos_0_metric as u32,
@@ -1382,7 +1382,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
             }
         }
 
-        graph.insert(node_id, node);
+        graph.insert(node_id, vertex);
     }
 
     (graph, source_node)

@@ -2,7 +2,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-pub type Graph = BTreeMap<usize, Node>;
+pub type Graph = BTreeMap<usize, Vertex>;
 
 #[derive(Default)]
 pub struct SpfOpt {
@@ -27,7 +27,7 @@ impl SpfOpt {
 }
 
 #[derive(Debug, Default, Eq, PartialEq, Clone)]
-pub struct Node {
+pub struct Vertex {
     pub id: usize,
     pub name: String,
     pub sys_id: String,
@@ -42,7 +42,7 @@ pub enum SpfDirect {
     Reverse,
 }
 
-impl Node {
+impl Vertex {
     #[allow(dead_code)]
     pub fn new(name: &str, id: usize) -> Self {
         Self {
@@ -133,7 +133,7 @@ impl Path {
 pub fn spf_calc(
     graph: &Graph,
     root: usize,
-    x: Option<usize>,
+    x: &[usize],
     opt: &SpfOpt,
     direct: &SpfDirect,
 ) -> BTreeMap<usize, Path> {
@@ -155,19 +155,15 @@ pub fn spf_calc(
             continue;
         };
 
-        // For TI-LFA, we skip down node.
-        if let Some(x) = x
-            && edge.id == x
-        {
+        // For TI-LFA / SRLG, skip any excluded vertex (do not relax
+        // edges out of it).
+        if x.contains(&edge.id) {
             continue;
         }
 
         for link in edge.links(direct).iter() {
-            // For TI-LFA, we skip a link which connects to down node.
-            if let Some(x) = x
-                && let Some(next) = graph.get(&link.id(direct))
-                && next.id == x
-            {
+            // Skip links that connect to an excluded vertex.
+            if x.contains(&link.id(direct)) {
                 continue;
             }
 
@@ -243,47 +239,48 @@ pub fn spf_calc(
 }
 
 pub fn spf(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
-    spf_calc(graph, root, None, opt, &SpfDirect::Normal)
+    spf_calc(graph, root, &[], opt, &SpfDirect::Normal)
 }
 
 pub fn spf_reverse(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
-    spf_calc(graph, root, None, opt, &SpfDirect::Reverse)
+    spf_calc(graph, root, &[], opt, &SpfDirect::Reverse)
 }
 
-pub fn path_has_x(path: &[usize], x: usize) -> bool {
-    path.contains(&x)
+/// True if `path` contains any of the excluded vertices in `x`.
+pub fn path_has_x(path: &[usize], x: &[usize]) -> bool {
+    path.iter().any(|p| x.contains(p))
 }
 
-pub fn p_space_nodes(graph: &Graph, s: usize, x: usize) -> HashSet<usize> {
+pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> HashSet<usize> {
     let spf = spf(graph, s, &SpfOpt::full_path());
 
     spf.iter()
-        .filter_map(|(node, path)| {
-            if *node == s {
-                return None; // Skip the source node
+        .filter_map(|(vertex, path)| {
+            if *vertex == s {
+                return None; // Skip the source vertex
             }
             let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
-            if has_valid_paths { Some(*node) } else { None }
-        })
-        .collect::<HashSet<_>>() // Collect into HashSet instead of Vec
-}
-
-pub fn q_space_nodes(graph: &Graph, d: usize, x: usize) -> HashSet<usize> {
-    let spf = spf_reverse(graph, d, &SpfOpt::full_path());
-
-    spf.iter()
-        .filter_map(|(node, path)| {
-            if *node == d {
-                return None; // Skip the source node
-            }
-            let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
-            if has_valid_paths { Some(*node) } else { None }
+            if has_valid_paths { Some(*vertex) } else { None }
         })
         .collect::<HashSet<_>>()
 }
 
-pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<usize>> {
-    spf_calc(graph, s, Some(x), &SpfOpt::full_path(), &SpfDirect::Normal)
+pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> {
+    let spf = spf_reverse(graph, d, &SpfOpt::full_path());
+
+    spf.iter()
+        .filter_map(|(vertex, path)| {
+            if *vertex == d {
+                return None; // Skip the source vertex
+            }
+            let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
+            if has_valid_paths { Some(*vertex) } else { None }
+        })
+        .collect::<HashSet<_>>()
+}
+
+pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<usize>> {
+    spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal)
         .remove(&d)
         .map_or_else(Vec::new, |data| data.paths)
 }
@@ -381,9 +378,9 @@ pub fn repair_list_print(graph: &Graph, repair_list: &Vec<SrSegment>) {
     }
 }
 
-pub fn tilfa(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<SrSegment>> {
-    let p_nodes = p_space_nodes(graph, s, x);
-    let q_nodes = q_space_nodes(graph, d, x);
+pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegment>> {
+    let p_vertices = p_space_vertices(graph, s, x);
+    let q_vertices = q_space_vertices(graph, d, x);
     let mut pc_paths = pc_paths(graph, s, d, x);
 
     // PCPaths.
@@ -393,7 +390,7 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<SrSegment>>
         path.pop();
 
         // Intersect.
-        let pc_inter = intersect(path, &p_nodes, &q_nodes);
+        let pc_inter = intersect(path, &p_vertices, &q_vertices);
 
         // Convert PC intersects into repair list.
         let repair_list = make_repair_list(&pc_inter, s, d);
@@ -405,15 +402,15 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: usize) -> Vec<Vec<SrSegment>>
 
 pub fn disp(spf: &BTreeMap<usize, Path>, full_path: bool) {
     if full_path {
-        for (node, path) in spf {
-            println!("node: {} nexthops: {}", node, path.paths.len());
+        for (vertex, path) in spf {
+            println!("vertex: {} nexthops: {}", vertex, path.paths.len());
             for p in &path.paths {
                 println!("  metric {} path {:?}", path.cost, p);
             }
         }
     } else {
-        for (node, nhops) in spf {
-            println!("node: {} nexthops: {}", node, nhops.nexthops.len());
+        for (vertex, nhops) in spf {
+            println!("vertex: {} nexthops: {}", vertex, nhops.nexthops.len());
             for p in &nhops.nexthops {
                 println!("  metric {} path {:?}", nhops.cost, p);
             }
@@ -425,15 +422,15 @@ use std::fmt::Write;
 
 pub fn disp_out(buf: &mut String, spf: &BTreeMap<usize, Path>, full_path: bool) {
     if full_path {
-        for (node, path) in spf {
-            let _ = writeln!(buf, "node: {} nexthops: {}", node, path.paths.len());
+        for (vertex, path) in spf {
+            let _ = writeln!(buf, "vertex: {} nexthops: {}", vertex, path.paths.len());
             for p in &path.paths {
                 let _ = writeln!(buf, "  metric {} path {:?}", path.cost, p);
             }
         }
     } else {
-        for (node, nhops) in spf {
-            let _ = writeln!(buf, "node: {} nexthops: {}", node, nhops.nexthops.len());
+        for (vertex, nhops) in spf {
+            let _ = writeln!(buf, "vertex: {} nexthops: {}", vertex, nhops.nexthops.len());
             for p in &nhops.nexthops {
                 let _ = writeln!(buf, "  metric {} path {:?}", nhops.cost, p);
             }
@@ -447,24 +444,76 @@ mod tests {
 
     use super::*;
 
+    // RFC 9855 §5 TI-LFA topology, modelled as all-LAN. Each
+    // router-pair becomes a pseudonode (router → PN cost = the
+    // router's interface metric; PN → router cost = 0). SPF cost
+    // from S to every router must match `tilfa_graph()` — the
+    // pseudonode hops are zero-cost, so totals are preserved.
+    //
+    // Sys-id mapping (cosmetic only; the algorithm uses the usize id):
+    //   S : 49.0000.0000.0000.0001.00
+    //   N1: 49.0000.0000.0000.0002.00
+    //   N2: 49.0000.0000.0000.0003.00
+    //   N3: 49.0000.0000.0000.0004.00
+    //   R1: 49.0000.0000.0000.0005.00
+    //   R2: 49.0000.0000.0000.0006.00
+    //   R3: 49.0000.0000.0000.0007.00
+    //   D : 49.0000.0000.0000.0008.00
+    #[test]
+    fn isis_lan() {
+        let lan = isis_lan_graph();
+        let p2p = tilfa_graph();
+
+        let opt = SpfOpt::full_path();
+        let lan_tree = spf(&lan, 0, &opt);
+        let p2p_tree = spf(&p2p, 0, &opt);
+
+        // Cost to every router (id 0..=7) must match the P2P model
+        // exactly — LAN pseudonodes add path length but no cost.
+        for rtr in 0..=7 {
+            let lan_cost = lan_tree.get(&rtr).map(|p| p.cost);
+            let p2p_cost = p2p_tree.get(&rtr).map(|p| p.cost);
+            assert_eq!(
+                lan_cost, p2p_cost,
+                "router {rtr}: LAN cost {lan_cost:?} != P2P cost {p2p_cost:?}"
+            );
+        }
+
+        // All 11 pseudonodes (ids 8..=18) must appear in the SPF
+        // tree — confirms they are actually traversed, not orphaned.
+        for pn in 8..=18 {
+            assert!(
+                lan_tree.contains_key(&pn),
+                "pseudonode {pn} missing from SPF tree"
+            );
+        }
+
+        // S → D shortest path: S → PN_S_N1(8) → N1(1) → PN_N1_D(13) → D(7),
+        // total cost 1 + 0 + 1 + 0 = 2 (same as P2P).
+        let d = lan_tree.get(&7).expect("D reachable from S");
+        assert_eq!(d.cost, 2);
+        assert_eq!(d.paths.len(), 1, "no ECMP expected at D");
+        assert_eq!(d.paths[0], vec![8, 1, 13, 7]);
+    }
+
     #[test]
     fn ecmp() {
         let mut graph = BTreeMap::new();
 
-        // First, insert all nodes
-        let nodes = vec![
-            Node::new("N1", 0),
-            Node::new("N2", 1),
-            Node::new("N3", 2),
-            Node::new("N4", 3),
-            Node::new("N5", 4),
+        // First, insert all vertices
+        let vertices = vec![
+            Vertex::new("N1", 0),
+            Vertex::new("N2", 1),
+            Vertex::new("N3", 2),
+            Vertex::new("N4", 3),
+            Vertex::new("N5", 4),
         ];
 
-        for node in nodes {
-            graph.insert(node.id, node);
+        for vertex in vertices {
+            graph.insert(vertex.id, vertex);
         }
 
-        // Define links between nodes
+        // Define links between vertices
         let links = vec![
             (0, 1, 10),
             (0, 2, 10),
@@ -480,7 +529,7 @@ mod tests {
             (4, 3, 10),
         ];
 
-        // Now add links to the respective nodes stored in our BTreeMap
+        // Now add links to the respective vertices stored in our BTreeMap
         for (from, to, cost) in links {
             graph
                 .get_mut(&from)
@@ -493,31 +542,31 @@ mod tests {
         let mut opt = SpfOpt::new();
         let tree = spf(&graph, 0, &opt);
 
-        // node: 0 nexthops: 1
+        // vertex:0 nexthops: 1
         //   metric 0 path []
-        // node: 1 nexthops: 1
+        // vertex:1 nexthops: 1
         //   metric 10 path [1]
-        // node: 2 nexthops: 1
+        // vertex:2 nexthops: 1
         //   metric 10 path [2]
-        // node: 3 nexthops: 2
+        // vertex:3 nexthops: 2
         //   metric 20 path [2]
         //   metric 20 path [1]
-        // node: 4 nexthops: 2
+        // vertex:4 nexthops: 2
         //   metric 30 path [1]
         //   metric 30 path [2]
 
-        // Verify source node has only one nexthop with metric = 0 and empty
+        // Verify source vertex has only one nexthop with metric = 0 and empty
         // path.
         let Some(s) = tree.get(&0) else {
-            panic!("SPF does not have source node");
+            panic!("SPF does not have source vertex");
         };
         assert_eq!(s.cost, 0);
         assert_eq!(s.nexthops.len(), 1);
         assert!(s.nexthops.iter().next().unwrap().is_empty());
 
-        // Verify ECMP node.
+        // Verify ECMP vertex.
         let Some(n) = tree.get(&3) else {
-            panic!("SPF node 3 does not exist");
+            panic!("SPF vertex 3 does not exist");
         };
         assert_eq!(n.cost, 20);
         assert_eq!(n.nexthops.len(), 2);
@@ -528,30 +577,30 @@ mod tests {
         opt.full_path = true;
         let tree = spf(&graph, 0, &opt);
 
-        // node: 0 nexthops: 1
+        // vertex:0 nexthops: 1
         //   metric 0 path []
-        // node: 1 nexthops: 1
+        // vertex:1 nexthops: 1
         //   metric 10 path [1]
-        // node: 2 nexthops: 1
+        // vertex:2 nexthops: 1
         //   metric 10 path [2]
-        // node: 3 nexthops: 2
+        // vertex:3 nexthops: 2
         //   metric 20 path [1, 3]
         //   metric 20 path [2, 3]
-        // node: 4 nexthops: 2
+        // vertex:4 nexthops: 2
         //   metric 30 path [1, 3, 4]
         //   metric 30 path [2, 3, 4]
 
-        // Source node.
+        // Source vertex.
         let Some(s) = tree.get(&0) else {
-            panic!("SPF does not have source node");
+            panic!("SPF does not have source vertex");
         };
         assert_eq!(s.cost, 0);
         assert_eq!(s.nexthops.len(), 1);
         assert!(s.nexthops.iter().next().unwrap().is_empty());
 
-        // Node 4.
+        // Vertex 4.
         let Some(n) = tree.get(&4) else {
-            panic!("SPF node 4 does not exist");
+            panic!("SPF vertex 4 does not exist");
         };
         assert_eq!(n.cost, 30);
         assert_eq!(n.paths.len(), 2);
@@ -563,20 +612,20 @@ mod tests {
         opt.path_max = Some(1);
         let tree = spf(&graph, 0, &opt);
 
-        // node: 0 nexthops: 1
+        // vertex:0 nexthops: 1
         //   metric 0 path []
-        // node: 1 nexthops: 1
+        // vertex:1 nexthops: 1
         //   metric 10 path [1]
-        // node: 2 nexthops: 1
+        // vertex:2 nexthops: 1
         //   metric 10 path [2]
-        // node: 3 nexthops: 1
+        // vertex:3 nexthops: 1
         //   metric 20 path [1, 3]
-        // node: 4 nexthops: 1
+        // vertex:4 nexthops: 1
         //   metric 30 path [1, 3, 4]
 
-        // Node 3.
+        // Vertex 3.
         let Some(n) = tree.get(&3) else {
-            panic!("SPF node 3 does not exist");
+            panic!("SPF vertex 3 does not exist");
         };
         assert_eq!(n.cost, 20);
         assert_eq!(n.paths.len(), 1);
@@ -586,20 +635,20 @@ mod tests {
     fn tilfa_graph() -> Graph {
         let mut graph = BTreeMap::new();
 
-        // Insert nodes
-        let nodes = [
-            Node::new("S", 0),
-            Node::new("N1", 1),
-            Node::new("N2", 2),
-            Node::new("N3", 3),
-            Node::new("R1", 4),
-            Node::new("R2", 5),
-            Node::new("R3", 6),
-            Node::new("D", 7),
+        // Insert vertices
+        let vertices = [
+            Vertex::new("S", 0),
+            Vertex::new("N1", 1),
+            Vertex::new("N2", 2),
+            Vertex::new("N3", 3),
+            Vertex::new("R1", 4),
+            Vertex::new("R2", 5),
+            Vertex::new("R3", 6),
+            Vertex::new("D", 7),
         ];
 
-        for node in nodes.iter() {
-            graph.insert(node.id, node.clone());
+        for vertex in vertices.iter() {
+            graph.insert(vertex.id, vertex.clone());
         }
 
         // Define links
@@ -636,7 +685,7 @@ mod tests {
             (7, 6, 1), // R3
         ];
 
-        // Insert links into nodes
+        // Insert links into vertices
         for (from, to, cost) in links {
             graph
                 .get_mut(&from)
@@ -649,6 +698,75 @@ mod tests {
                 .ilinks
                 .push(Link::new(from, to, cost));
         }
+        graph
+    }
+
+    /// Attach a pseudonode (one per IS-IS LAN) to the graph.
+    ///
+    /// `members` is a list of (router_id, router-side cost). For each
+    /// member the helper appends:
+    ///   router → PN  with the router's interface cost
+    ///   PN     → router  with cost 0  (always — IS-IS LAN modelling)
+    /// olinks/ilinks stay symmetric so reverse SPF (used by Q-space)
+    /// works the same as for P2P links.
+    fn add_lan(graph: &mut Graph, pn_id: usize, name: &str, members: &[(usize, u32)]) {
+        graph.insert(pn_id, Vertex::new(name, pn_id));
+        for &(rtr, cost) in members {
+            graph
+                .get_mut(&rtr)
+                .unwrap()
+                .olinks
+                .push(Link::new(rtr, pn_id, cost));
+            graph
+                .get_mut(&pn_id)
+                .unwrap()
+                .ilinks
+                .push(Link::new(rtr, pn_id, cost));
+            graph
+                .get_mut(&pn_id)
+                .unwrap()
+                .olinks
+                .push(Link::new(pn_id, rtr, 0));
+            graph
+                .get_mut(&rtr)
+                .unwrap()
+                .ilinks
+                .push(Link::new(pn_id, rtr, 0));
+        }
+    }
+
+    /// Same systems as `tilfa_graph()`, but each underlying point-to-point
+    /// link is rebuilt as an IS-IS LAN with one pseudonode (ids 8..=18).
+    /// SPF cost between any two routers is preserved by construction.
+    fn isis_lan_graph() -> Graph {
+        let mut graph = BTreeMap::new();
+
+        for r in [
+            Vertex::new("S", 0),
+            Vertex::new("N1", 1),
+            Vertex::new("N2", 2),
+            Vertex::new("N3", 3),
+            Vertex::new("R1", 4),
+            Vertex::new("R2", 5),
+            Vertex::new("R3", 6),
+            Vertex::new("D", 7),
+        ] {
+            graph.insert(r.id, r);
+        }
+
+        // 11 LANs, one pseudonode each. Costs mirror tilfa_graph().
+        add_lan(&mut graph, 8, "PN_S_N1", &[(0, 1), (1, 1)]);
+        add_lan(&mut graph, 9, "PN_S_N2", &[(0, 1), (2, 1)]);
+        add_lan(&mut graph, 10, "PN_S_N3", &[(0, 1000), (3, 1000)]);
+        add_lan(&mut graph, 11, "PN_N1_R1", &[(1, 1), (4, 1)]);
+        add_lan(&mut graph, 12, "PN_N1_R2", &[(1, 1), (5, 1)]);
+        add_lan(&mut graph, 13, "PN_N1_D", &[(1, 1), (7, 1)]);
+        add_lan(&mut graph, 14, "PN_N2_R1", &[(2, 1), (4, 1)]);
+        add_lan(&mut graph, 15, "PN_N3_R1", &[(3, 1000), (4, 1000)]);
+        add_lan(&mut graph, 16, "PN_R1_R2", &[(4, 1000), (5, 1000)]);
+        add_lan(&mut graph, 17, "PN_R2_R3", &[(5, 1000), (6, 1000)]);
+        add_lan(&mut graph, 18, "PN_R3_D", &[(6, 1), (7, 1)]);
+
         graph
     }
 
@@ -671,33 +789,34 @@ mod tests {
     fn tilfa_test() {
         let graph = tilfa_graph();
 
-        let node_name = |graph: &Graph, id: usize| graph.get(&id).map(|n| &n.name).unwrap().clone();
+        let vertex_name =
+            |graph: &Graph, id: usize| graph.get(&id).map(|n| &n.name).unwrap().clone();
 
         // TI-LFA draft
         // *  First, P(S, N1) is computed and results in [N3, N2, R1].
         let s = 0;
         let d = 7;
-        let x = 1;
+        let x: &[usize] = &[1];
 
-        let p = p_space_nodes(&graph, s, x);
-        let mut p_nodes = BTreeSet::<String>::new();
+        let p = p_space_vertices(&graph, s, x);
+        let mut p_vertices = BTreeSet::<String>::new();
         for n in p.iter() {
-            let name = node_name(&graph, *n);
-            p_nodes.insert(name);
+            let name = vertex_name(&graph, *n);
+            p_vertices.insert(name);
         }
         assert_eq!(
-            p_nodes,
+            p_vertices,
             BTreeSet::from(["N3".into(), "N2".into(), "R1".into()])
         );
 
         // Then, Q(D, N1) is computed and results in [R3].
-        let q = q_space_nodes(&graph, d, x);
-        let mut q_nodes = BTreeSet::<String>::new();
+        let q = q_space_vertices(&graph, d, x);
+        let mut q_vertices = BTreeSet::<String>::new();
         for n in q.iter() {
-            let name = node_name(&graph, *n);
-            q_nodes.insert(name);
+            let name = vertex_name(&graph, *n);
+            q_vertices.insert(name);
         }
-        assert_eq!(q_nodes, BTreeSet::from(["R3".into()]));
+        assert_eq!(q_vertices, BTreeSet::from(["R3".into()]));
 
         // *  The expected post-convergence path from S to D considering the
         // failure of N1 is <N2 -> R1 -> R2 -> R3 -> D> (we are naming it
@@ -705,12 +824,12 @@ mod tests {
         let mut pc_paths = pc_paths(&graph, s, d, x);
         assert_eq!(pc_paths.len(), 1);
         let pc_path = pc_paths.first().unwrap();
-        let mut pc_nodes = Vec::<String>::new();
+        let mut pc_vertices = Vec::<String>::new();
         for n in pc_path.iter() {
-            let name = node_name(&graph, *n);
-            pc_nodes.push(name);
+            let name = vertex_name(&graph, *n);
+            pc_vertices.push(name);
         }
-        assert_eq!(pc_nodes, vec!["N2", "R1", "R2", "R3", "D"]);
+        assert_eq!(pc_vertices, vec!["N2", "R1", "R2", "R3", "D"]);
 
         // * P(S, N1) intersection with PCPath is [N2, R1], R1 being the deeper
         // downstream node in PCPath, it can be assumed to be used as P node
@@ -729,7 +848,7 @@ mod tests {
 
             print!("  ");
             for i in pc_inter.iter() {
-                let name = node_name(&graph, i.id);
+                let name = vertex_name(&graph, i.id);
                 print!(" {}", name);
             }
             println!();
@@ -750,7 +869,7 @@ mod tests {
             let mut p_inter = Vec::<String>::new();
             for i in pc_inter.iter() {
                 if i.p {
-                    let name = node_name(&graph, i.id);
+                    let name = vertex_name(&graph, i.id);
                     p_inter.push(name);
                 };
             }
@@ -760,7 +879,7 @@ mod tests {
             let mut q_inter = Vec::<String>::new();
             for i in pc_inter.iter().rev() {
                 if i.q {
-                    let name = node_name(&graph, i.id);
+                    let name = vertex_name(&graph, i.id);
                     q_inter.push(name);
                 };
             }
@@ -794,7 +913,7 @@ mod tests {
 
         let s = 0;
         let d = 7;
-        let x = 1;
+        let x: &[usize] = &[1];
 
         let repair_paths = tilfa(&graph, s, d, x);
         assert_eq!(repair_paths.len(), 1);
