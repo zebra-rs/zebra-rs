@@ -32,3 +32,10 @@ pub fn sysctl_seg6_enable(ifname: &String) -> anyhow::Result<()> {
     let _ = ctl.set_value_string("1")?;
     Ok(())
 }
+
+pub fn sysctl_keep_addr_on_down(ifname: &String) -> anyhow::Result<()> {
+    let ctlname = format!("net.ipv6.conf.{}.keep_addr_on_down", ifname);
+    let ctl = sysctl::Ctl::new(ctlname.as_str())?;
+    let _ = ctl.set_value_string("1")?;
+    Ok(())
+}
