@@ -1562,25 +1562,59 @@ impl ReachMapV6 {
     }
 }
 
+/// Stable mapping between IS-IS LSP identities and the integer
+/// vertex ids used by the SPF graph. Keyed by `IsisNeighborId`
+/// (sys_id + pseudo_id) so router LSPs and pseudonode LSPs from
+/// the same DIS get distinct ids; LSP fragments collapse to the
+/// same vertex because the fragment byte is not part of the key.
+///
+/// A parallel `val_sys` Vec keeps the existing `resolve(id) ->
+/// &IsisSysId` accessor working — every entry in `val` has its
+/// sys-id portion mirrored at the same index. Pseudonode-aware
+/// consumers should use `resolve_neighbor` to see the full
+/// `IsisNeighborId` (sys_id + pseudo_id).
 #[derive(Default)]
 pub struct LspMap {
-    map: BTreeMap<IsisSysId, usize>,
-    val: Vec<IsisSysId>,
+    map: BTreeMap<IsisNeighborId, usize>,
+    val: Vec<IsisNeighborId>,
+    val_sys: Vec<IsisSysId>,
 }
 
 impl LspMap {
-    pub fn get(&mut self, sys_id: &IsisSysId) -> usize {
-        if let Some(index) = self.map.get(sys_id) {
+    /// Allocate or fetch the vertex id for a (sys_id, pseudo_id)
+    /// tuple. Use `get_sys` for the common real-router case.
+    pub fn get(&mut self, neighbor_id: &IsisNeighborId) -> usize {
+        if let Some(index) = self.map.get(neighbor_id) {
             *index
         } else {
             let index = self.val.len();
-            self.map.insert(*sys_id, index);
-            self.val.push(*sys_id);
+            self.map.insert(*neighbor_id, index);
+            self.val.push(*neighbor_id);
+            self.val_sys.push(neighbor_id.sys_id());
             index
         }
     }
 
+    /// Allocate or fetch the vertex id for a real router (the
+    /// pseudo_id = 0 case). Pseudonode LSPs must use `get` with
+    /// the full neighbor id.
+    pub fn get_sys(&mut self, sys_id: &IsisSysId) -> usize {
+        self.get(&IsisNeighborId::from_sys_id(sys_id, 0))
+    }
+
+    /// Resolve the vertex id back to its sys-id portion. For
+    /// pseudonode entries this returns the DIS's sys-id (the
+    /// pseudo_id byte is discarded); use `resolve_neighbor` if
+    /// you need to distinguish.
     pub fn resolve(&self, id: usize) -> Option<&IsisSysId> {
+        self.val_sys.get(id)
+    }
+
+    /// Pseudonode-aware resolve. Returns the full neighbor id
+    /// (sys_id + pseudo_id). Real router entries have pseudo_id
+    /// == 0.
+    #[allow(dead_code)]
+    pub fn resolve_neighbor(&self, id: usize) -> Option<&IsisNeighborId> {
         self.val.get(id)
     }
 }
@@ -1607,7 +1641,7 @@ pub fn graph(
 
     // Now process the nodes without holding an immutable borrow on LSDB
     for (sys_id, is_originated, lsp) in nodes_to_process {
-        let node_id = top.lsp_map.get_mut(&level).get(&sys_id);
+        let node_id = top.lsp_map.get_mut(&level).get_sys(&sys_id);
 
         // Check if this is our own originated LSP
         if is_originated {
@@ -1695,7 +1729,7 @@ fn process_neighbor_link(
 
                         // Create link to this destination
                         let to_sys_id = neighbor_entry.neighbor_id.sys_id();
-                        let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+                        let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
 
                         links.push(spf::Link {
                             from: from_id,
@@ -1707,7 +1741,7 @@ fn process_neighbor_link(
             }
         } else {
             let to_sys_id = neighbor_lsp_id.sys_id();
-            let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+            let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
 
             links.push(spf::Link {
                 from: from_id,
@@ -1774,7 +1808,7 @@ pub fn graph_mt2(
     }
 
     for (sys_id, is_originated, lsp) in nodes_to_process {
-        let node_id = top.lsp_map.get_mut(&level).get(&sys_id);
+        let node_id = top.lsp_map.get_mut(&level).get_sys(&sys_id);
         if is_originated {
             source_node = Some(node_id);
         }
@@ -1872,7 +1906,7 @@ fn process_neighbor_link_mt2(
                 if !mt2_capable {
                     continue;
                 }
-                let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+                let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
                 links.push(spf::Link {
                     from: from_id,
                     to: to_id,
@@ -1894,7 +1928,7 @@ fn process_neighbor_link_mt2(
     if !mt2_capable {
         return;
     }
-    let to_id = top.lsp_map.get_mut(&level).get(&to_sys_id);
+    let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
     links.push(spf::Link {
         from: from_id,
         to: to_id,
