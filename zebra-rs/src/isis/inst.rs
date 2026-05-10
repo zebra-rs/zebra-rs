@@ -1617,6 +1617,12 @@ impl LspMap {
     pub fn resolve_neighbor(&self, id: usize) -> Option<&IsisNeighborId> {
         self.val.get(id)
     }
+
+    /// True if `id` corresponds to an IS-IS pseudonode entry.
+    /// Used by RIB walks to skip transit-only vertices.
+    pub fn is_pseudo(&self, id: usize) -> bool {
+        self.val.get(id).is_some_and(|n| n.pseudo_id() != 0)
+    }
 }
 
 /// Build SPF graph from IS-IS LSDB
@@ -1704,75 +1710,64 @@ fn create_graph_vertex(
     };
 
     // Process outgoing links
-    process_outgoing_links(top, level, node_id, &sys_id, lsp, &mut vertex.olinks);
+    process_outgoing_links(top, level, node_id, lsp, &mut vertex.olinks);
 
     vertex
 }
 
-/// Process outgoing links from Extended IS Reachability TLVs
+/// Process outgoing links from Extended IS Reachability TLVs.
+///
+/// Emits one edge per TLV 22 entry, no flattening: a router LSP
+/// targeting a pseudonode LAN produces R→PN with cost = the
+/// router's interface metric, and the pseudonode's own LSP
+/// produces PN→R back-edges (cost = the metric advertised in the
+/// PN LSP, typically 0). TI-LFA can therefore see and surface
+/// the LAN identity instead of router-to-router shortcuts.
 fn process_outgoing_links(
     top: &mut IsisTop,
     level: Level,
     from_id: usize,
-    from_sys_id: &IsisSysId,
     lsp: &IsisLsp,
     links: &mut Vec<spf::Link>,
 ) {
     for tlv in &lsp.tlvs {
         if let IsisTlv::ExtIsReach(ext_reach) = tlv {
             for entry in &ext_reach.entries {
-                process_neighbor_link(top, level, from_id, from_sys_id, entry, links);
+                process_neighbor_link(top, level, from_id, entry, links);
             }
         }
     }
 }
 
-/// Process a single neighbor link entry
+/// Process a single neighbor link entry — emit one edge to the
+/// neighbor (router or pseudonode), no flattening.
 fn process_neighbor_link(
     top: &mut IsisTop,
     level: Level,
     from_id: usize,
-    from_sys_id: &IsisSysId,
     entry: &IsisTlvExtIsReachEntry,
     links: &mut Vec<spf::Link>,
 ) {
     let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
 
-    if let Some(neighbor_lsa) = top.lsdb.get(&level).get(&neighbor_lsp_id) {
-        // Look up the neighbor's LSP
-        if neighbor_lsp_id.is_pseudo() {
-            // Check the neighbor's links back to us
-            for tlv in &neighbor_lsa.lsp.tlvs {
-                if let IsisTlv::ExtIsReach(ext_reach) = tlv {
-                    for neighbor_entry in &ext_reach.entries {
-                        // Skip if this is a link back to ourselves
-                        if neighbor_entry.neighbor_id.sys_id() == *from_sys_id {
-                            continue;
-                        }
-
-                        // Create link to this destination
-                        let to_sys_id = neighbor_entry.neighbor_id.sys_id();
-                        let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
-
-                        links.push(spf::Link {
-                            from: from_id,
-                            to: to_id,
-                            cost: entry.metric + neighbor_entry.metric,
-                        });
-                    }
-                }
-            }
-        } else {
-            let to_sys_id = neighbor_lsp_id.sys_id();
-            let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
-
-            links.push(spf::Link {
-                from: from_id,
-                to: to_id,
-                cost: entry.metric,
-            });
-        }
+    // Drop the edge if the target LSP isn't in our LSDB. The
+    // matching Vertex would never be constructed, so an edge to
+    // it would land on a vertex id whose graph entry is missing —
+    // SPF tolerates this (silent skip) but it pollutes lsp_map.
+    if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
+        return;
     }
+
+    let to_id = top
+        .lsp_map
+        .get_mut(&level)
+        .get(&neighbor_lsp_id.neighbor_id());
+
+    links.push(spf::Link {
+        from: from_id,
+        to: to_id,
+        cost: entry.metric,
+    });
 }
 
 /// Collect adjacency SIDs from our originated LSP
@@ -1885,7 +1880,7 @@ fn create_graph_vertex_mt2(
         ..Default::default()
     };
 
-    process_outgoing_links_mt2(top, level, node_id, &sys_id, lsp, &mut vertex.olinks);
+    process_outgoing_links_mt2(top, level, node_id, lsp, &mut vertex.olinks);
 
     vertex
 }
@@ -1894,54 +1889,20 @@ fn process_outgoing_links_mt2(
     top: &mut IsisTop,
     level: Level,
     from_id: usize,
-    from_sys_id: &IsisSysId,
     lsp: &IsisLsp,
     links: &mut Vec<spf::Link>,
 ) {
-    for tlv in &lsp.tlvs {
-        if let IsisTlv::MtIsReach(mt_reach) = tlv
-            && mt_reach.mt.id() == 2
-        {
-            for entry in &mt_reach.entries {
-                process_neighbor_link_mt2(top, level, from_id, from_sys_id, entry, links);
-            }
-        }
-    }
-}
-
-fn process_neighbor_link_mt2(
-    top: &mut IsisTop,
-    level: Level,
-    from_id: usize,
-    from_sys_id: &IsisSysId,
-    entry: &IsisTlvExtIsReachEntry,
-    links: &mut Vec<spf::Link>,
-) {
-    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
-
-    let Some(neighbor_lsa) = top.lsdb.get(&level).get(&neighbor_lsp_id) else {
-        return;
-    };
-
-    if neighbor_lsp_id.is_pseudo() {
-        // LAN segment. The pseudonode LSP is originated by the DIS
-        // and lists every router attached to the LAN in TLV 22 with
-        // metric 0; pseudonode origination doesn't currently emit
-        // TLV 222, so we walk TLV 22 here and gate each LAN-attached
-        // router on its own MT 2 capability via mt_membership.
-        // Result: from_id reaches every MT-2-capable router on the
-        // LAN at cost = (entry.metric + neighbor_entry.metric).
-        let neighbor_lsp = neighbor_lsa.lsp.clone();
-        for tlv in &neighbor_lsp.tlvs {
+    if lsp.lsp_id.is_pseudo() {
+        // Pseudonode LSPs do not advertise MtIsReach. Their TLV 22
+        // entries list every attached router; in MT 2 we want one
+        // edge per attached router that participates in MT 2.
+        for tlv in &lsp.tlvs {
             let IsisTlv::ExtIsReach(ext_reach) = tlv else {
                 continue;
             };
-            for neighbor_entry in &ext_reach.entries {
-                let to_sys_id = neighbor_entry.neighbor_id.sys_id();
-                if to_sys_id == *from_sys_id {
-                    // Skip back-edge to ourselves.
-                    continue;
-                }
+            for entry in &ext_reach.entries {
+                let neighbor_id = entry.neighbor_id;
+                let to_sys_id = neighbor_id.sys_id();
                 let mt2_capable = top
                     .mt_membership
                     .get(&level)
@@ -1951,29 +1912,67 @@ fn process_neighbor_link_mt2(
                 if !mt2_capable {
                     continue;
                 }
-                let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
+                let to_id = top.lsp_map.get_mut(&level).get(&neighbor_id);
                 links.push(spf::Link {
                     from: from_id,
                     to: to_id,
-                    cost: entry.metric + neighbor_entry.metric,
+                    cost: entry.metric,
                 });
             }
         }
         return;
     }
 
-    // P2P / direct neighbor.
-    let to_sys_id = neighbor_lsp_id.sys_id();
-    let mt2_capable = top
-        .mt_membership
-        .get(&level)
-        .get(&to_sys_id)
-        .map(|set| set.contains(&MtId::Ipv6Unicast))
-        .unwrap_or(false);
-    if !mt2_capable {
+    // Real router source: walk the MT 2 reach TLVs and emit one
+    // edge per entry, no flattening.
+    for tlv in &lsp.tlvs {
+        if let IsisTlv::MtIsReach(mt_reach) = tlv
+            && mt_reach.mt.id() == 2
+        {
+            for entry in &mt_reach.entries {
+                process_neighbor_link_mt2(top, level, from_id, entry, links);
+            }
+        }
+    }
+}
+
+fn process_neighbor_link_mt2(
+    top: &mut IsisTop,
+    level: Level,
+    from_id: usize,
+    entry: &IsisTlvExtIsReachEntry,
+    links: &mut Vec<spf::Link>,
+) {
+    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
+
+    if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
         return;
     }
-    let to_id = top.lsp_map.get_mut(&level).get_sys(&to_sys_id);
+
+    // Edge gating differs by neighbour kind:
+    //   - Pseudonode targets are unconditional. Pseudonodes do not
+    //     advertise MT 2 capability themselves; their attached-router
+    //     gating happens above when the PN's olinks are built.
+    //   - Real router targets must advertise MT 2; non-MT-2 routers
+    //     are not in the MT 2 graph, so emitting an edge to them
+    //     would be a dangling reference.
+    if !neighbor_lsp_id.is_pseudo() {
+        let to_sys_id = neighbor_lsp_id.sys_id();
+        let mt2_capable = top
+            .mt_membership
+            .get(&level)
+            .get(&to_sys_id)
+            .map(|set| set.contains(&MtId::Ipv6Unicast))
+            .unwrap_or(false);
+        if !mt2_capable {
+            return;
+        }
+    }
+
+    let to_id = top
+        .lsp_map
+        .get_mut(&level)
+        .get(&neighbor_lsp_id.neighbor_id());
     links.push(spf::Link {
         from: from_id,
         to: to_id,
@@ -2374,6 +2373,12 @@ fn build_rib_from_spf(
             continue;
         }
 
+        // Skip pseudonode entries — they are transit-only and do not
+        // own a destination prefix to install.
+        if top.lsp_map.get(&level).is_pseudo(*node) {
+            continue;
+        }
+
         // Resolve node to system ID
         let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) else {
             continue;
@@ -2382,20 +2387,30 @@ fn build_rib_from_spf(
         // Build nexthop map. SPF runs in full-path mode (see
         // perform_spf_calculation), so each `p` is the full path
         // [first_hop, ..., destination]; we still index `p[0]` for the
-        // first-hop semantics the v4 path has always used.
+        // first-hop semantics the v4 path has always used. With
+        // pseudonodes now in the graph, p[0] can be a PN whose
+        // sys-id resolves to the DIS — skip leading PN hops to land
+        // on the actual nexthop *router* before looking up neighbours.
         let mut spf_nhops = BTreeMap::new();
         for p in &nhops.paths {
-            // p.is_empty() means myself
-            if !p.is_empty()
-                && let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0])
-            {
+            if p.is_empty() {
+                continue; // self
+            }
+            let mut nhop_idx = 0;
+            while nhop_idx < p.len() && top.lsp_map.get(&level).is_pseudo(p[nhop_idx]) {
+                nhop_idx += 1;
+            }
+            if nhop_idx >= p.len() {
+                continue;
+            }
+            if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) {
                 // Find nhop from links
                 for (ifindex, link) in top.links.iter() {
                     if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
                         for (addr, _) in nbr.addr4.iter() {
                             let nhop = SpfNexthop {
                                 ifindex: *ifindex,
-                                adjacency: p[0] == *node,
+                                adjacency: p[nhop_idx] == *node,
                                 sys_id: Some(*nhop_id),
                             };
                             spf_nhops.insert(*addr, nhop);
@@ -2505,6 +2520,11 @@ fn build_rib_from_spf_v6(
             continue;
         }
 
+        // Skip pseudonode entries — transit-only, no IPv6 prefixes.
+        if top.lsp_map.get(&level).is_pseudo(*node) {
+            continue;
+        }
+
         let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) else {
             continue;
         };
@@ -2526,8 +2546,14 @@ fn build_rib_from_spf_v6(
             }
             // In legacy mode, every node on the path must advertise IPv6.
             // In MT 2 mode the graph itself is pre-filtered, so we skip.
+            // Pseudonode hops bypass the IPv6 NLPID check — they don't
+            // advertise capabilities of their own; the gating is on the
+            // attached routers.
             if !mt2_mode {
                 for &hop in p {
+                    if top.lsp_map.get(&level).is_pseudo(hop) {
+                        continue;
+                    }
                     let Some(hop_sys_id) = top.lsp_map.get(&level).resolve(hop) else {
                         continue 'next_path;
                     };
@@ -2537,11 +2563,20 @@ fn build_rib_from_spf_v6(
                 }
             }
 
-            let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[0]) else {
+            // Skip leading pseudonode hops to land on the actual nexthop
+            // router whose adjacency carries the link-local v6 address.
+            let mut nhop_idx = 0;
+            while nhop_idx < p.len() && top.lsp_map.get(&level).is_pseudo(p[nhop_idx]) {
+                nhop_idx += 1;
+            }
+            if nhop_idx >= p.len() {
+                continue;
+            }
+            let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) else {
                 continue;
             };
             let nhop_sys_id = *nhop_id;
-            let is_adjacency = p[0] == *node;
+            let is_adjacency = p[nhop_idx] == *node;
             for (ifindex, link) in top.links.iter() {
                 if let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) {
                     for addr in nbr.addr6l.iter() {
