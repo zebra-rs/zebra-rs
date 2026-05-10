@@ -55,3 +55,12 @@ Feature: IS-IS IPv6 single-topology
     And I wait 30 seconds
     Then ping from "z1" to "2001:db8:0:ffff::2" should succeed
     And ping from "z2" to "2001:db8:0:ffff::1" should succeed
+
+  Scenario: Teardown topology
+    Given the test topology exists
+    When I stop zebra-rs in namespace "z1"
+    And I stop zebra-rs in namespace "z2"
+    And I delete namespace "z1"
+    And I delete namespace "z2"
+    And I delete bridge "br0"
+    Then the test environment should be clean
