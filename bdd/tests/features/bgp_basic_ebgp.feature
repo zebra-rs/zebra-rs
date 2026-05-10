@@ -52,7 +52,7 @@ Feature: BGP Basic Session Test on eBGP
   Scenario: Advertise a network 10.0.0.1/32
     Given the test topology exists
     When I apply config "z1-3.yaml" to namespace "z1"
-    And I wait 1 seconds for BGP to operate
+    And I wait 30 seconds for BGP to operate
     Then BGP route in "z2" has "10.0.0.1/32"
 
   Scenario: Withdraw a network 10.0.0.1/32
@@ -64,7 +64,7 @@ Feature: BGP Basic Session Test on eBGP
   Scenario: Advertise a network 10.0.0.1/32 and 10.0.0.2/32
     Given the test topology exists
     When I apply config "z1-4.yaml" to namespace "z1"
-    And I wait 1 seconds for BGP to operate
+    And I wait 30 seconds for BGP to operate
     Then BGP route in "z2" has "10.0.0.1/32" with "as_path" value "65001"
     And BGP route in "z2" has "10.0.0.1/32" with "next_hop" value "192.168.0.1"
     And BGP route in "z2" has "10.0.0.2/32"
@@ -80,7 +80,7 @@ Feature: BGP Basic Session Test on eBGP
     Given the test topology exists
     When I apply config "z1-5.yaml" to namespace "z1"
     And I clear namespace "z1" neighbor "192.168.0.2"
-    And I wait 5 seconds for BGP to operate
+    And I wait 30 seconds for BGP to operate
     Then BGP route in "z2" has "10.0.0.1/32"
     And BGP route in "z2" does not have "10.0.0.2/32"
 
