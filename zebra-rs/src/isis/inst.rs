@@ -411,6 +411,9 @@ impl Isis {
     }
 
     fn process_lsp_originate(&mut self, level: Level, seq_floor: Option<u32>) {
+        if !has_level(self.config.is_type(), level) {
+            return;
+        }
         let mut top = self.top();
         let mut lsp = lsp_generate(&mut top, level, seq_floor);
         // tracing::info!("[LSP:Gen] {}", lsp.lsp_id);
@@ -462,6 +465,9 @@ impl Isis {
         neighbor_id: IsisNeighborId,
         base: Option<u32>,
     ) {
+        if !has_level(self.config.is_type(), level) {
+            return;
+        }
         let mut top = self.top();
 
         let Some(ifindex) = resolve_dis_ifindex(top.links, level, neighbor_id) else {
