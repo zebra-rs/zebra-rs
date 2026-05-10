@@ -367,13 +367,6 @@ module config {
         container segment-routing {
           container mpls {
             presence "Enable Segment Routing over MPLS dataplane";
-            leaf block {
-              // Name of a block defined under the global
-              // /segment-routing/block list. Held as a string (not a
-              // leafref) so an IS-IS config can be staged before the
-              // global block is committed.
-              type string;
-            }
           }
           container srv6 {
             presence "Enable Segment Routing over IPv6 dataplane";
