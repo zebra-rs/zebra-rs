@@ -26,11 +26,23 @@ impl SpfOpt {
     }
 }
 
+/// Whether this Vertex represents a real routing system or an
+/// IS-IS LAN pseudonode. Pseudonodes are transit-only — they do
+/// not own a Node-SID and must not be selected as a TI-LFA repair
+/// segment endpoint.
+#[derive(Debug, Default, Eq, PartialEq, Clone)]
+pub enum VertexType {
+    #[default]
+    Node,
+    PseudoNode,
+}
+
 #[derive(Debug, Default, Eq, PartialEq, Clone)]
 pub struct Vertex {
     pub id: usize,
     pub name: String,
     pub sys_id: String,
+    pub vtype: VertexType,
     pub olinks: Vec<Link>,
     pub ilinks: Vec<Link>,
 }
@@ -43,15 +55,38 @@ pub enum SpfDirect {
 }
 
 impl Vertex {
+    /// Construct a Vertex representing a real routing system
+    /// (IS-IS Node / OSPF router). `sys_id` defaults to `name` —
+    /// callers with distinct hostname vs sys-id should use a
+    /// struct literal instead.
     #[allow(dead_code)]
-    pub fn new(name: &str, id: usize) -> Self {
+    pub fn new_node(name: &str, id: usize) -> Self {
         Self {
             id,
             name: name.into(),
-            sys_id: name.into(), // Default to name for backward compatibility
+            sys_id: name.into(),
+            vtype: VertexType::Node,
             olinks: Vec::new(),
             ilinks: Vec::new(),
         }
+    }
+
+    /// Construct a Vertex representing an IS-IS LAN pseudonode.
+    #[allow(dead_code)]
+    pub fn new_pseudo_node(name: &str, id: usize) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            sys_id: name.into(),
+            vtype: VertexType::PseudoNode,
+            olinks: Vec::new(),
+            ilinks: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_pseudo_node(&self) -> bool {
+        self.vtype == VertexType::PseudoNode
     }
 
     pub fn links(&self, direct: &SpfDirect) -> &Vec<Link> {
@@ -137,7 +172,6 @@ pub fn spf_calc(
     opt: &SpfOpt,
     direct: &SpfDirect,
 ) -> BTreeMap<usize, Path> {
-    let mut spf = BTreeMap::<usize, Path>::new();
     let mut paths = HashMap::<usize, Path>::new();
     let mut bt = BTreeMap::<(u32, usize), Path>::new();
 
@@ -149,8 +183,6 @@ pub fn spf_calc(
     bt.insert((c.cost, root), c);
 
     while let Some((_, v)) = bt.pop_first() {
-        spf.insert(v.id, v.clone());
-
         let Some(edge) = graph.get(&v.id) else {
             continue;
         };
@@ -235,7 +267,16 @@ pub fn spf_calc(
             }
         }
     }
-    spf
+
+    // Materialise the result from `paths` rather than snapshotting
+    // each vertex at pop time. When two equal-cost predecessors
+    // contribute ECMP paths to a vertex V whose id sorts between
+    // them in the (cost, id) priority queue, V is popped between
+    // the two relaxations — the second contribution lands in
+    // `paths` but its bt-update silently drops because V is no
+    // longer in bt. Reading from `paths` at the end picks up the
+    // final state regardless of pop ordering.
+    paths.into_iter().collect()
 }
 
 pub fn spf(graph: &Graph, root: usize, opt: &SpfOpt) -> BTreeMap<usize, Path> {
@@ -315,37 +356,72 @@ pub fn intersect(
 #[derive(Debug)]
 pub enum SrSegment {
     NodeSid(usize),
-    AdjSid(usize, usize),
+    /// Adjacency SID. `via` carries the IS-IS LAN pseudonode that
+    /// the adjacency traverses, when applicable; `None` for a P2P
+    /// link. Encoders are expected to resolve `(from, to, via)`
+    /// to the correct LAN-Adj-SID at label allocation time.
+    AdjSid(usize, usize, Option<usize>),
 }
 
-pub fn make_repair_list(pc_inter: &[Intersect], s: usize, d: usize) -> Vec<SrSegment> {
+/// Walk the PCPath/intersect sequence and emit an SR repair list.
+///
+/// IS-IS LAN pseudonodes are skipped over for emission purposes —
+/// they own no Node-SID and the adjacency they represent is
+/// captured by the surrounding routers' AdjSid `via` field. The
+/// most recently traversed pseudonode is held in `pending_via`
+/// and consumed by the next AdjSid emission.
+pub fn make_repair_list(
+    pc_inter: &[Intersect],
+    s: usize,
+    d: usize,
+    graph: &Graph,
+) -> Vec<SrSegment> {
     let mut sr_segments = Vec::new();
 
-    let mut prev_id = None;
+    let mut prev_id: Option<usize> = None;
     let mut p_mode = false;
     let mut q_mode = false;
+    // Most recent pseudonode traversed since the last router.
+    // Consumed (and reset) by the next AdjSid emission.
+    let mut pending_via: Option<usize> = None;
+    let mut first_router = true;
 
-    for (index, inter) in pc_inter.iter().enumerate() {
-        if index == 0 {
+    for inter in pc_inter {
+        // Pseudonodes contribute no segment of their own; they
+        // become the `via` of the adjacency between the surrounding
+        // routers. q_mode is intentionally not updated here: a PN
+        // can land in q_space incidentally (e.g. PN_R3_D's reverse
+        // path is just [PN_R3_D]), but the Q-node concept only
+        // applies to real routers.
+        if graph.get(&inter.id).is_some_and(|v| v.is_pseudo_node()) {
+            pending_via = Some(inter.id);
+            continue;
+        }
+
+        if first_router {
             if inter.p {
                 p_mode = true;
             } else {
-                sr_segments.push(SrSegment::AdjSid(s, inter.id));
+                sr_segments.push(SrSegment::AdjSid(s, inter.id, pending_via));
+                pending_via = None;
             }
+            first_router = false;
         } else if p_mode {
             if !inter.p {
-                if let Some(prev_id) = prev_id {
-                    sr_segments.push(SrSegment::NodeSid(prev_id));
+                if let Some(prev) = prev_id {
+                    sr_segments.push(SrSegment::NodeSid(prev));
                 }
                 if !q_mode {
-                    sr_segments.push(SrSegment::AdjSid(prev_id.unwrap(), inter.id));
+                    sr_segments.push(SrSegment::AdjSid(prev_id.unwrap(), inter.id, pending_via));
+                    pending_via = None;
                 }
                 p_mode = false;
             }
-        } else if let Some(prev_id) = prev_id
+        } else if let Some(prev) = prev_id
             && !q_mode
         {
-            sr_segments.push(SrSegment::AdjSid(prev_id, inter.id));
+            sr_segments.push(SrSegment::AdjSid(prev, inter.id, pending_via));
+            pending_via = None;
         }
 
         if inter.q {
@@ -354,25 +430,25 @@ pub fn make_repair_list(pc_inter: &[Intersect], s: usize, d: usize) -> Vec<SrSeg
         prev_id = Some(inter.id);
     }
 
-    if !q_mode && let Some(prev_id) = prev_id {
-        sr_segments.push(SrSegment::AdjSid(prev_id, d));
+    if !q_mode && let Some(prev) = prev_id {
+        sr_segments.push(SrSegment::AdjSid(prev, d, pending_via));
     }
 
     sr_segments
 }
 
 pub fn repair_list_print(graph: &Graph, repair_list: &Vec<SrSegment>) {
+    let name = |id: &usize| graph.get(id).map(|n| n.name.as_str()).unwrap_or("?");
     for list in repair_list {
         match list {
             SrSegment::NodeSid(nid) => {
-                print!("NodeSid({}) ", graph.get(nid).map(|n| &n.name).unwrap());
+                print!("NodeSid({}) ", name(nid));
             }
-            SrSegment::AdjSid(from, to) => {
-                print!(
-                    "AdjSid({}, {}) ",
-                    graph.get(from).map(|n| &n.name).unwrap(),
-                    graph.get(to).map(|n| &n.name).unwrap()
-                );
+            SrSegment::AdjSid(from, to, None) => {
+                print!("AdjSid({}, {}) ", name(from), name(to));
+            }
+            SrSegment::AdjSid(from, to, Some(via)) => {
+                print!("AdjSid({}, {}, via {}) ", name(from), name(to), name(via));
             }
         }
     }
@@ -386,14 +462,17 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegmen
     // PCPaths.
     let mut repair_lists = vec![];
     for path in &mut pc_paths {
-        // Remove D.
+        // Remove D — make_repair_list adds it back via the trailing
+        // AdjSid(prev, d) emission.
         path.pop();
 
-        // Intersect.
+        // Intersect over the full PCPath including pseudonodes.
+        // make_repair_list folds each pseudonode into the `via`
+        // field of the surrounding adjacency.
         let pc_inter = intersect(path, &p_vertices, &q_vertices);
 
         // Convert PC intersects into repair list.
-        let repair_list = make_repair_list(&pc_inter, s, d);
+        let repair_list = make_repair_list(&pc_inter, s, d, graph);
 
         repair_lists.push(repair_list);
     }
@@ -481,10 +560,23 @@ mod tests {
 
         // All 11 pseudonodes (ids 8..=18) must appear in the SPF
         // tree — confirms they are actually traversed, not orphaned.
+        // Each must also carry VertexType::PseudoNode so the
+        // (forthcoming) pseudonode-aware repair-list logic can
+        // distinguish them from real routers.
         for pn in 8..=18 {
             assert!(
                 lan_tree.contains_key(&pn),
                 "pseudonode {pn} missing from SPF tree"
+            );
+            assert!(
+                lan.get(&pn).unwrap().is_pseudo_node(),
+                "vertex {pn} should be tagged VertexType::PseudoNode"
+            );
+        }
+        for rtr in 0..=7 {
+            assert!(
+                !lan.get(&rtr).unwrap().is_pseudo_node(),
+                "vertex {rtr} should be tagged VertexType::Node"
             );
         }
 
@@ -502,11 +594,11 @@ mod tests {
 
         // First, insert all vertices
         let vertices = vec![
-            Vertex::new("N1", 0),
-            Vertex::new("N2", 1),
-            Vertex::new("N3", 2),
-            Vertex::new("N4", 3),
-            Vertex::new("N5", 4),
+            Vertex::new_node("N1", 0),
+            Vertex::new_node("N2", 1),
+            Vertex::new_node("N3", 2),
+            Vertex::new_node("N4", 3),
+            Vertex::new_node("N5", 4),
         ];
 
         for vertex in vertices {
@@ -637,14 +729,14 @@ mod tests {
 
         // Insert vertices
         let vertices = [
-            Vertex::new("S", 0),
-            Vertex::new("N1", 1),
-            Vertex::new("N2", 2),
-            Vertex::new("N3", 3),
-            Vertex::new("R1", 4),
-            Vertex::new("R2", 5),
-            Vertex::new("R3", 6),
-            Vertex::new("D", 7),
+            Vertex::new_node("S", 0),
+            Vertex::new_node("N1", 1),
+            Vertex::new_node("N2", 2),
+            Vertex::new_node("N3", 3),
+            Vertex::new_node("R1", 4),
+            Vertex::new_node("R2", 5),
+            Vertex::new_node("R3", 6),
+            Vertex::new_node("D", 7),
         ];
 
         for vertex in vertices.iter() {
@@ -710,7 +802,7 @@ mod tests {
     /// olinks/ilinks stay symmetric so reverse SPF (used by Q-space)
     /// works the same as for P2P links.
     fn add_lan(graph: &mut Graph, pn_id: usize, name: &str, members: &[(usize, u32)]) {
-        graph.insert(pn_id, Vertex::new(name, pn_id));
+        graph.insert(pn_id, Vertex::new_pseudo_node(name, pn_id));
         for &(rtr, cost) in members {
             graph
                 .get_mut(&rtr)
@@ -742,14 +834,14 @@ mod tests {
         let mut graph = BTreeMap::new();
 
         for r in [
-            Vertex::new("S", 0),
-            Vertex::new("N1", 1),
-            Vertex::new("N2", 2),
-            Vertex::new("N3", 3),
-            Vertex::new("R1", 4),
-            Vertex::new("R2", 5),
-            Vertex::new("R3", 6),
-            Vertex::new("D", 7),
+            Vertex::new_node("S", 0),
+            Vertex::new_node("N1", 1),
+            Vertex::new_node("N2", 2),
+            Vertex::new_node("N3", 3),
+            Vertex::new_node("R1", 4),
+            Vertex::new_node("R2", 5),
+            Vertex::new_node("R3", 6),
+            Vertex::new_node("D", 7),
         ] {
             graph.insert(r.id, r);
         }
@@ -771,16 +863,14 @@ mod tests {
     }
 
     fn seg_disp(graph: &Graph, seg: &SrSegment) -> String {
+        let name = |id: &usize| graph.get(id).map(|n| n.name.clone()).unwrap();
         match seg {
-            SrSegment::NodeSid(id) => {
-                format!("NodeSid({})", graph.get(id).map(|n| &n.name).unwrap())
+            SrSegment::NodeSid(id) => format!("NodeSid({})", name(id)),
+            SrSegment::AdjSid(from, to, None) => {
+                format!("AdjSid({}, {})", name(from), name(to))
             }
-            SrSegment::AdjSid(from, to) => {
-                format!(
-                    "AdjSid({}, {})",
-                    graph.get(from).map(|n| &n.name).unwrap(),
-                    graph.get(to).map(|n| &n.name).unwrap()
-                )
+            SrSegment::AdjSid(from, to, Some(via)) => {
+                format!("AdjSid({}, {}, via {})", name(from), name(to), name(via))
             }
         }
     }
@@ -889,7 +979,7 @@ mod tests {
             // failure of node N1 is: <Node-SID(R1), Adj-Sid(R1-R2), Adj-Sid(R2-R3)>.
 
             // Make repair list.
-            let repair_list = make_repair_list(&pc_inter, s, d);
+            let repair_list = make_repair_list(&pc_inter, s, d, &graph);
 
             assert_eq!(repair_list.len(), 3);
             let first_segment = repair_list.first().unwrap();
@@ -932,5 +1022,34 @@ mod tests {
 
         let third_disp = seg_disp(&graph, third_segment);
         assert_eq!(third_disp, "AdjSid(R2, R3)");
+    }
+
+    /// Same TI-LFA scenario as `tilfa_api`, run against the all-LAN
+    /// topology. The router-level segments are identical to the
+    /// P2P case but each AdjSid carries a `via` referencing the
+    /// IS-IS LAN pseudonode that the adjacency traverses:
+    ///   <NodeSid(R1), AdjSid(R1, R2, via PN_R1_R2),
+    ///                 AdjSid(R2, R3, via PN_R2_R3)>
+    #[test]
+    fn tilfa_lan_api() {
+        let graph = isis_lan_graph();
+        let s = 0;
+        let d = 7;
+        let x: &[usize] = &[1]; // failed vertex N1
+
+        let repair_paths = tilfa(&graph, s, d, x);
+        assert_eq!(repair_paths.len(), 1);
+        let repair_list = repair_paths.first().unwrap();
+
+        assert_eq!(repair_list.len(), 3);
+        assert_eq!(seg_disp(&graph, &repair_list[0]), "NodeSid(R1)");
+        assert_eq!(
+            seg_disp(&graph, &repair_list[1]),
+            "AdjSid(R1, R2, via PN_R1_R2)"
+        );
+        assert_eq!(
+            seg_disp(&graph, &repair_list[2]),
+            "AdjSid(R2, R3, via PN_R2_R3)"
+        );
     }
 }
