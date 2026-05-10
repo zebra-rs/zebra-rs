@@ -26,11 +26,23 @@ impl SpfOpt {
     }
 }
 
+/// Whether this Vertex represents a real routing system or an
+/// IS-IS LAN pseudonode. Pseudonodes are transit-only — they do
+/// not own a Node-SID and must not be selected as a TI-LFA repair
+/// segment endpoint.
+#[derive(Debug, Default, Eq, PartialEq, Clone)]
+pub enum VertexType {
+    #[default]
+    Node,
+    PseudoNode,
+}
+
 #[derive(Debug, Default, Eq, PartialEq, Clone)]
 pub struct Vertex {
     pub id: usize,
     pub name: String,
     pub sys_id: String,
+    pub vtype: VertexType,
     pub olinks: Vec<Link>,
     pub ilinks: Vec<Link>,
 }
@@ -43,15 +55,38 @@ pub enum SpfDirect {
 }
 
 impl Vertex {
+    /// Construct a Vertex representing a real routing system
+    /// (IS-IS Node / OSPF router). `sys_id` defaults to `name` —
+    /// callers with distinct hostname vs sys-id should use a
+    /// struct literal instead.
     #[allow(dead_code)]
-    pub fn new(name: &str, id: usize) -> Self {
+    pub fn new_node(name: &str, id: usize) -> Self {
         Self {
             id,
             name: name.into(),
-            sys_id: name.into(), // Default to name for backward compatibility
+            sys_id: name.into(),
+            vtype: VertexType::Node,
             olinks: Vec::new(),
             ilinks: Vec::new(),
         }
+    }
+
+    /// Construct a Vertex representing an IS-IS LAN pseudonode.
+    #[allow(dead_code)]
+    pub fn new_pseudo_node(name: &str, id: usize) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            sys_id: name.into(),
+            vtype: VertexType::PseudoNode,
+            olinks: Vec::new(),
+            ilinks: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_pseudo_node(&self) -> bool {
+        self.vtype == VertexType::PseudoNode
     }
 
     pub fn links(&self, direct: &SpfDirect) -> &Vec<Link> {
@@ -481,10 +516,23 @@ mod tests {
 
         // All 11 pseudonodes (ids 8..=18) must appear in the SPF
         // tree — confirms they are actually traversed, not orphaned.
+        // Each must also carry VertexType::PseudoNode so the
+        // (forthcoming) pseudonode-aware repair-list logic can
+        // distinguish them from real routers.
         for pn in 8..=18 {
             assert!(
                 lan_tree.contains_key(&pn),
                 "pseudonode {pn} missing from SPF tree"
+            );
+            assert!(
+                lan.get(&pn).unwrap().is_pseudo_node(),
+                "vertex {pn} should be tagged VertexType::PseudoNode"
+            );
+        }
+        for rtr in 0..=7 {
+            assert!(
+                !lan.get(&rtr).unwrap().is_pseudo_node(),
+                "vertex {rtr} should be tagged VertexType::Node"
             );
         }
 
@@ -502,11 +550,11 @@ mod tests {
 
         // First, insert all vertices
         let vertices = vec![
-            Vertex::new("N1", 0),
-            Vertex::new("N2", 1),
-            Vertex::new("N3", 2),
-            Vertex::new("N4", 3),
-            Vertex::new("N5", 4),
+            Vertex::new_node("N1", 0),
+            Vertex::new_node("N2", 1),
+            Vertex::new_node("N3", 2),
+            Vertex::new_node("N4", 3),
+            Vertex::new_node("N5", 4),
         ];
 
         for vertex in vertices {
@@ -637,14 +685,14 @@ mod tests {
 
         // Insert vertices
         let vertices = [
-            Vertex::new("S", 0),
-            Vertex::new("N1", 1),
-            Vertex::new("N2", 2),
-            Vertex::new("N3", 3),
-            Vertex::new("R1", 4),
-            Vertex::new("R2", 5),
-            Vertex::new("R3", 6),
-            Vertex::new("D", 7),
+            Vertex::new_node("S", 0),
+            Vertex::new_node("N1", 1),
+            Vertex::new_node("N2", 2),
+            Vertex::new_node("N3", 3),
+            Vertex::new_node("R1", 4),
+            Vertex::new_node("R2", 5),
+            Vertex::new_node("R3", 6),
+            Vertex::new_node("D", 7),
         ];
 
         for vertex in vertices.iter() {
@@ -710,7 +758,7 @@ mod tests {
     /// olinks/ilinks stay symmetric so reverse SPF (used by Q-space)
     /// works the same as for P2P links.
     fn add_lan(graph: &mut Graph, pn_id: usize, name: &str, members: &[(usize, u32)]) {
-        graph.insert(pn_id, Vertex::new(name, pn_id));
+        graph.insert(pn_id, Vertex::new_pseudo_node(name, pn_id));
         for &(rtr, cost) in members {
             graph
                 .get_mut(&rtr)
@@ -742,14 +790,14 @@ mod tests {
         let mut graph = BTreeMap::new();
 
         for r in [
-            Vertex::new("S", 0),
-            Vertex::new("N1", 1),
-            Vertex::new("N2", 2),
-            Vertex::new("N3", 3),
-            Vertex::new("R1", 4),
-            Vertex::new("R2", 5),
-            Vertex::new("R3", 6),
-            Vertex::new("D", 7),
+            Vertex::new_node("S", 0),
+            Vertex::new_node("N1", 1),
+            Vertex::new_node("N2", 2),
+            Vertex::new_node("N3", 3),
+            Vertex::new_node("R1", 4),
+            Vertex::new_node("R2", 5),
+            Vertex::new_node("R3", 6),
+            Vertex::new_node("D", 7),
         ] {
             graph.insert(r.id, r);
         }
