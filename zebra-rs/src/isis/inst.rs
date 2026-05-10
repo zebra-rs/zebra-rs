@@ -1628,29 +1628,32 @@ pub fn graph(
     let mut source_node = None;
     let mut adjacency_sids = BTreeMap::new();
 
-    // First collect all the nodes we need to process
+    // Collect every LSP (router and pseudonode) — pseudonode LSPs
+    // become VertexType::PseudoNode entries in the SPF graph so
+    // TI-LFA can surface LAN identity. Fragments collapse into one
+    // entry because LspMap keys by IsisNeighborId (no fragment byte).
     let mut nodes_to_process = Vec::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
-        if !lsa.lsp.lsp_id.is_pseudo() {
-            let sys_id = lsa.lsp.lsp_id.sys_id();
-            let is_originated = lsa.originated;
-            let lsp = lsa.lsp.clone();
-            nodes_to_process.push((sys_id, is_originated, lsp));
-        }
+        let neighbor_id = lsa.lsp.lsp_id.neighbor_id();
+        let is_originated = lsa.originated;
+        let lsp = lsa.lsp.clone();
+        nodes_to_process.push((neighbor_id, is_originated, lsp));
     }
 
     // Now process the nodes without holding an immutable borrow on LSDB
-    for (sys_id, is_originated, lsp) in nodes_to_process {
-        let node_id = top.lsp_map.get_mut(&level).get_sys(&sys_id);
+    for (neighbor_id, is_originated, lsp) in nodes_to_process {
+        let node_id = top.lsp_map.get_mut(&level).get(&neighbor_id);
 
-        // Check if this is our own originated LSP
-        if is_originated {
+        // SPF source must be our router LSP, never our pseudonode
+        // LSP (we may originate one if we're DIS for a LAN, but
+        // that vertex is transit-only).
+        if is_originated && !lsp.lsp_id.is_pseudo() {
             source_node = Some(node_id);
             collect_adjacency_sids(&lsp, &mut adjacency_sids);
         }
 
         // Create graph vertex
-        let vertex = create_graph_vertex(top, level, node_id, &sys_id, &lsp);
+        let vertex = create_graph_vertex(top, level, node_id, &neighbor_id, &lsp);
         graph.insert(node_id, vertex);
     }
 
@@ -1662,26 +1665,46 @@ fn create_graph_vertex(
     top: &mut IsisTop,
     level: Level,
     node_id: usize,
-    sys_id: &IsisSysId,
+    neighbor_id: &IsisNeighborId,
     lsp: &IsisLsp,
 ) -> spf::Vertex {
-    // Get hostname if available
-    let vertex_name = top
-        .hostname
-        .get(&level)
-        .get(sys_id)
-        .map(|(hostname, _)| hostname.clone())
-        .unwrap_or_else(|| sys_id.to_string());
+    let sys_id = neighbor_id.sys_id();
+    let is_pseudo = lsp.lsp_id.is_pseudo();
+
+    // For real routers: use the advertised hostname when present,
+    // falling back to the sys-id string.
+    // For pseudonodes: synthesise a name "PN_<dis_hostname>_<n>" so
+    // that the SR repair list (AdjSid via PN_X) is human-legible.
+    let vertex_name = if is_pseudo {
+        let dis = top
+            .hostname
+            .get(&level)
+            .get(&sys_id)
+            .map(|(hostname, _)| hostname.clone())
+            .unwrap_or_else(|| sys_id.to_string());
+        format!("PN_{}_{}", dis, neighbor_id.pseudo_id())
+    } else {
+        top.hostname
+            .get(&level)
+            .get(&sys_id)
+            .map(|(hostname, _)| hostname.clone())
+            .unwrap_or_else(|| sys_id.to_string())
+    };
 
     let mut vertex = spf::Vertex {
         id: node_id,
         name: vertex_name,
         sys_id: sys_id.to_string(),
+        vtype: if is_pseudo {
+            spf::VertexType::PseudoNode
+        } else {
+            spf::VertexType::Node
+        },
         ..Default::default()
     };
 
     // Process outgoing links
-    process_outgoing_links(top, level, node_id, sys_id, lsp, &mut vertex.olinks);
+    process_outgoing_links(top, level, node_id, &sys_id, lsp, &mut vertex.olinks);
 
     vertex
 }
@@ -1785,34 +1808,39 @@ pub fn graph_mt2(
 
     let mut nodes_to_process = Vec::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
-        if !lsa.lsp.lsp_id.is_pseudo() {
-            let sys_id = lsa.lsp.lsp_id.sys_id();
-            let is_originated = lsa.originated;
-            // Filter peers by MT 2 capability. Our own LSP (originated
-            // == true) is always included — we wouldn't be running
-            // graph_mt2 unless local config has MT 2 on.
-            if !is_originated {
-                let mt2_capable = top
-                    .mt_membership
-                    .get(&level)
-                    .get(&sys_id)
-                    .map(|set| set.contains(&MtId::Ipv6Unicast))
-                    .unwrap_or(false);
-                if !mt2_capable {
-                    continue;
-                }
+        let neighbor_id = lsa.lsp.lsp_id.neighbor_id();
+        let is_originated = lsa.originated;
+        let is_pseudo = lsa.lsp.lsp_id.is_pseudo();
+
+        // MT 2 capability is a per-router attribute (TLV 229);
+        // pseudonodes don't carry it. Include all pseudonode LSPs
+        // unconditionally — their attached-router participation is
+        // already gated when the link emission picks neighbours.
+        // Real router peers still gate by mt2 capability.
+        if !is_originated && !is_pseudo {
+            let sys_id = neighbor_id.sys_id();
+            let mt2_capable = top
+                .mt_membership
+                .get(&level)
+                .get(&sys_id)
+                .map(|set| set.contains(&MtId::Ipv6Unicast))
+                .unwrap_or(false);
+            if !mt2_capable {
+                continue;
             }
-            let lsp = lsa.lsp.clone();
-            nodes_to_process.push((sys_id, is_originated, lsp));
         }
+        let lsp = lsa.lsp.clone();
+        nodes_to_process.push((neighbor_id, is_originated, lsp));
     }
 
-    for (sys_id, is_originated, lsp) in nodes_to_process {
-        let node_id = top.lsp_map.get_mut(&level).get_sys(&sys_id);
-        if is_originated {
+    for (neighbor_id, is_originated, lsp) in nodes_to_process {
+        let node_id = top.lsp_map.get_mut(&level).get(&neighbor_id);
+        // Same source rule as graph(): only set when our own router
+        // LSP is processed, never a pseudonode we may have originated.
+        if is_originated && !lsp.lsp_id.is_pseudo() {
             source_node = Some(node_id);
         }
-        let vertex = create_graph_vertex_mt2(top, level, node_id, &sys_id, &lsp);
+        let vertex = create_graph_vertex_mt2(top, level, node_id, &neighbor_id, &lsp);
         graph.insert(node_id, vertex);
     }
 
@@ -1823,24 +1851,41 @@ fn create_graph_vertex_mt2(
     top: &mut IsisTop,
     level: Level,
     node_id: usize,
-    sys_id: &IsisSysId,
+    neighbor_id: &IsisNeighborId,
     lsp: &IsisLsp,
 ) -> spf::Vertex {
-    let vertex_name = top
-        .hostname
-        .get(&level)
-        .get(sys_id)
-        .map(|(hostname, _)| hostname.clone())
-        .unwrap_or_else(|| sys_id.to_string());
+    let sys_id = neighbor_id.sys_id();
+    let is_pseudo = lsp.lsp_id.is_pseudo();
+
+    let vertex_name = if is_pseudo {
+        let dis = top
+            .hostname
+            .get(&level)
+            .get(&sys_id)
+            .map(|(hostname, _)| hostname.clone())
+            .unwrap_or_else(|| sys_id.to_string());
+        format!("PN_{}_{}", dis, neighbor_id.pseudo_id())
+    } else {
+        top.hostname
+            .get(&level)
+            .get(&sys_id)
+            .map(|(hostname, _)| hostname.clone())
+            .unwrap_or_else(|| sys_id.to_string())
+    };
 
     let mut vertex = spf::Vertex {
         id: node_id,
         name: vertex_name,
         sys_id: sys_id.to_string(),
+        vtype: if is_pseudo {
+            spf::VertexType::PseudoNode
+        } else {
+            spf::VertexType::Node
+        },
         ..Default::default()
     };
 
-    process_outgoing_links_mt2(top, level, node_id, sys_id, lsp, &mut vertex.olinks);
+    process_outgoing_links_mt2(top, level, node_id, &sys_id, lsp, &mut vertex.olinks);
 
     vertex
 }
