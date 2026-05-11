@@ -33,6 +33,8 @@ jobs:
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-key: ${{ matrix.dist }}
 
       - name: Install build dependencies
         run: |
