@@ -1012,7 +1012,8 @@ struct LevelInfo {
     csnp_interval: u64,
     psnp_interval: u64,
     lan_priority: u8,
-    dis_status: String,
+    dis: String,
+    adjacency: String,
 }
 
 pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std::fmt::Result {
@@ -1041,25 +1042,14 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std
         link.config.psnp_interval()
     )?;
 
-    // DIS status.
-    let dis_status = match link.state.dis_status.get(&level) {
-        DisStatus::NotSelected => "no DIS is selected",
-        DisStatus::Other => "is not DIS",
-        DisStatus::Myself => "is DIS",
-    };
+    // DIS + Adjacency — same tokens as `show isis interface`.
     writeln!(
         buf,
-        "    LAN prirority: {}, {}",
+        "    LAN priority: {}, DIS status: {}",
         link.config.priority(),
-        dis_status
+        dis_column(link, level),
     )?;
-
-    // DIS Lan ID.
-    if let Some((lan_id, _)) = link.state.adj.get(&level) {
-        writeln!(buf, "    LAN ID: {}", lan_id)?;
-    } else {
-        writeln!(buf, "    LAN ID: Not set")?;
-    }
+    writeln!(buf, "    Adjacency: {}", adjacency_column(link, level))?;
 
     // Hello.
     if let Some(hello) = link.state.hello.get(&level) {
@@ -1075,17 +1065,6 @@ fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
         "no".to_string()
     };
 
-    let dis_status = if link.config.link_type() == LinkType::Lan {
-        match link.state.dis_status.get(&level) {
-            DisStatus::NotSelected => "no DIS is selected",
-            DisStatus::Other => "is not DIS",
-            DisStatus::Myself => "is DIS",
-        }
-        .to_string()
-    } else {
-        String::new()
-    };
-
     LevelInfo {
         metric: link.config.metric(),
         active_neighbors: *link.state.nbrs_up.get(&level),
@@ -1095,7 +1074,8 @@ fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
         csnp_interval: link.config.csnp_interval(),
         psnp_interval: link.config.psnp_interval(),
         lan_priority: link.config.priority(),
-        dis_status,
+        dis: dis_column(link, level).to_string(),
+        adjacency: adjacency_column(link, level),
     }
 }
 
