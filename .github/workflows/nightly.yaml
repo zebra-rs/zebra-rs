@@ -89,7 +89,7 @@ jobs:
       - name: Install container base tools
         run: |
           apt-get update
-          apt-get install -y curl git ca-certificates sudo build-essential pkg-config
+          apt-get install -y curl git ca-certificates sudo build-essential pkg-config xxd
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update -y
-          apt-get install -y protobuf-compiler libnanomsg-dev bison
+          apt-get install -y protobuf-compiler libnanomsg-dev bison xxd
 
       - name: Install nfpm
         run: |
