@@ -1,0 +1,190 @@
+name: Nightly Rolling Build
+
+on:
+  # push:
+  #  branches: [main]
+  # schedule:
+  #  - cron: '0 18 * * *'    # 03:00 JST (UTC 18:00)
+  workflow_dispatch:
+
+permissions:
+  contents: write           # Required to push the nightly tag and release
+
+jobs:
+  # =====================================================================
+  # Native runners: Ubuntu 22.04 and 24.04
+  # =====================================================================
+  build-native:
+    name: Build ${{ matrix.dist }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { dist: jammy, arch: amd64, runner: ubuntu-22.04 }
+          - { dist: jammy, arch: arm64, runner: ubuntu-22.04-arm }
+          - { dist: noble, arch: amd64, runner: ubuntu-24.04 }
+          - { dist: noble, arch: arm64, runner: ubuntu-24.04-arm }
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y protobuf-compiler libnanomsg-dev bison
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | \
+            sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Build vty
+        run: make -C vty
+
+      - name: Build .deb
+        run: make -C packaging ${{ matrix.arch }}
+
+      - name: Rename .deb with dist suffix
+        run: |
+          cd packaging
+          for f in *.deb; do
+            # zebra-rs_0.5.0_arm64.deb -> zebra-rs_0.5.0-noble_arm64.deb
+            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-${{ matrix.dist }}_\2.deb/")
+            mv "$f" "$new"
+          done
+          ls -la *.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.dist }}-${{ matrix.arch }}
+          path: ./packaging/*.deb
+
+  # =====================================================================
+  # Container-based: Ubuntu 26.04 (until native runners are available)
+  # https://github.com/actions/runner-images/issues/13964
+  # =====================================================================
+  build-container:
+    name: Build questing-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:26.04
+
+    steps:
+      - name: Install container base tools
+        run: |
+          apt-get update
+          apt-get install -y curl git ca-certificates sudo build-essential pkg-config
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -y
+          apt-get install -y protobuf-compiler libnanomsg-dev bison
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
+            > /etc/apt/sources.list.d/goreleaser.list
+          apt-get update
+          apt-get install -y nfpm
+
+      - name: Build vty
+        run: make -C vty
+
+      - name: Build .deb
+        run: make -C packaging ${{ matrix.arch }}
+
+      - name: Rename .deb with dist suffix
+        run: |
+          cd packaging
+          for f in *.deb; do
+            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-questing_\2.deb/")
+            mv "$f" "$new"
+          done
+          ls -la *.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-questing-${{ matrix.arch }}
+          path: ./packaging/*.deb
+
+  # =====================================================================
+  # Publish all six .deb files as a Rolling "nightly" Release
+  # =====================================================================
+  release:
+    name: Publish Nightly Release
+    needs: [build-native, build-container]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Needed to move tags
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: List collected .deb files
+        run: ls -la artifacts/
+
+      - name: Force-move nightly tag to current commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly
+          git push -f origin nightly
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "Nightly Build"
+          prerelease: true
+          body: |
+            Rolling nightly build from commit ${{ github.sha }}
+
+            Built at: ${{ github.event.repository.updated_at }}
+
+            ## Downloads
+
+            Choose the file matching your Ubuntu version and architecture:
+
+            | Ubuntu             | x86_64                   | ARM64                    |
+            |--------------------|--------------------------|--------------------------|
+            | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
+            | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
+            | 26.04 (questing)   | `*-questing_amd64.deb`   | `*-questing_arm64.deb`   |
+
+            Install:
+            ```
+            curl -LO https://github.com/${{ github.repository }}/releases/download/nightly/<filename>.deb
+            sudo apt install ./<filename>.deb
+            ```
+          files: artifacts/*.deb
