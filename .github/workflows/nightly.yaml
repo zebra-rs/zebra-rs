@@ -75,7 +75,7 @@ jobs:
   # https://github.com/actions/runner-images/issues/13964
   # =====================================================================
   build-container:
-    name: Build questing-${{ matrix.arch }}
+    name: Build resolute-${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -121,7 +121,7 @@ jobs:
         run: |
           cd packaging
           for f in *.deb; do
-            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-questing_\2.deb/")
+            new=$(echo "$f" | sed -E "s/_([^_]+)_([^_]+)\.deb$/_\1-resolute_\2.deb/")
             mv "$f" "$new"
           done
           ls -la *.deb
@@ -129,7 +129,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deb-questing-${{ matrix.arch }}
+          name: deb-resolute-${{ matrix.arch }}
           path: ./packaging/*.deb
 
   # =====================================================================
@@ -182,7 +182,7 @@ jobs:
             |--------------------|--------------------------|--------------------------|
             | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
             | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
-            | 26.04 (questing)   | `*-questing_amd64.deb`   | `*-questing_arm64.deb`   |
+            | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
 
             Install:
             ```
