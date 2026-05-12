@@ -32,6 +32,7 @@ use crate::{
     context::Context,
     rib::RibRxChannel,
 };
+use isis_packet::srv6::EncapType;
 // use spf_rs as spf;
 use crate::context::Timer;
 use crate::spf;
@@ -80,6 +81,12 @@ pub struct Isis {
     /// by show callbacks to render the MT-aware view.
     pub mt_membership: Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: Levels<IsisLabelMap>,
+
+    /// Peer SRv6 End SID per system id. Populated from the IsisTlvSrv6
+    /// sub-TLV `IsisSubSrv6EndSid` carried inside each peer's LSP
+    /// (parallel to label_map for SR-MPLS). Used by TI-LFA Step 4d to
+    /// assemble the SRH segment list for a 1-segment repair.
+    pub srv6_end_map: Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
@@ -134,6 +141,7 @@ pub struct IsisTop<'a> {
     pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
+    pub srv6_end_map: &'a mut Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -191,6 +199,7 @@ impl Isis {
             mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
             mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),
             label_map: Levels::<IsisLabelMap>::default(),
+            srv6_end_map: Levels::<BTreeMap<IsisSysId, Ipv6Addr>>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
@@ -587,6 +596,7 @@ impl Isis {
             mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
             mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
+            srv6_end_map: &mut self.srv6_end_map,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
@@ -622,6 +632,7 @@ impl Isis {
             mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
             mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
+            srv6_end_map: &mut self.srv6_end_map,
             spf_timer: &mut self.spf_timer,
             rib_tx: &self.rib_tx,
             sr_locator: &self.sr_locator,
@@ -2001,6 +2012,10 @@ pub struct SpfRoute {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+    /// SPF vertex id this route was built from. Set by
+    /// `build_rib_from_spf`; used by TI-LFA Step 4c to join routes
+    /// with per-destination repair candidates from Step 4b.
+    pub dest_vertex: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2008,6 +2023,11 @@ pub struct SpfNexthop {
     pub ifindex: u32,
     pub adjacency: bool,
     pub sys_id: Option<IsisSysId>,
+    /// TI-LFA post-convergence repair for this primary nexthop. Empty
+    /// (None) until ti_lfa_compute runs and fills it in; for now no
+    /// caller sets it. Sorted-after-primary install is handled by
+    /// `build_rib_nexthop` via the metric-offset convention.
+    pub backup: Option<RepairPathMpls>,
 }
 
 // IPv6 single-topology mirror of SpfRoute / SpfNexthop. Nexthop key is the
@@ -2019,6 +2039,9 @@ pub struct SpfRouteV6 {
     pub nhops: BTreeMap<Ipv6Addr, SpfNexthopV6>,
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+    /// Same role as `SpfRoute.dest_vertex` — populated by
+    /// `build_rib_from_spf_v6` for Step 4d's repair-path join.
+    pub dest_vertex: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2026,7 +2049,41 @@ pub struct SpfNexthopV6 {
     pub ifindex: u32,
     pub adjacency: bool,
     pub sys_id: Option<IsisSysId>,
+    /// TI-LFA post-convergence repair for this primary nexthop. The
+    /// SRv6 form carries an SRH segment list + encap mode instead of
+    /// an MPLS label stack.
+    pub backup: Option<RepairPathSrv6>,
 }
+
+/// TI-LFA SR-MPLS repair path. Today's repair-path computation is not
+/// wired in yet — once `ti_lfa_compute` lands, `SpfNexthop.backup`
+/// will be populated with the egress info and the SR-MPLS label stack
+/// (typically `[prefix-SID(P), adj-SID(P→Q)]` for the 2-label case).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairPathMpls {
+    pub ifindex: u32,
+    pub addr: Ipv4Addr,
+    pub labels: Vec<rib::Label>,
+}
+
+/// TI-LFA SRv6 repair path. The segment list expresses the post-
+/// convergence path as IPv6 endpoint SIDs — typically
+/// `[End(P), End.X(P→Q)]` for the 2-segment case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairPathSrv6 {
+    pub ifindex: u32,
+    pub addr: Ipv6Addr,
+    pub segs: Vec<Ipv6Addr>,
+    pub encap: EncapType,
+}
+
+/// Sort offset between the primary nhop's metric and its TI-LFA
+/// backup's metric inside a `NexthopList`. The value is RIB-internal
+/// and never reaches the wire — it only governs the metric-sort that
+/// puts the primary at `.nexthops[0]`. See the design discussion that
+/// landed PR #489: blanket `+1` keeps show output legible and avoids
+/// `u32::MAX` sentinels.
+pub const BACKUP_METRIC_OFFSET: u32 = 1;
 
 pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
 pub type DiffResultV6<'a> = spf::TableDiffResult<'a, Ipv6Net, SpfRouteV6>;
@@ -2054,27 +2111,87 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
+    // Flatten primaries and (when present) their TI-LFA repair backups
+    // into a single Vec at distinct metrics; build_rib_nexthop groups
+    // them by metric and routes Multi-vs-List dispatch from there.
+    let backup_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
+    let nhops: Vec<rib::NexthopUni> = route
+        .nhops
+        .iter()
+        .flat_map(|(key, value)| {
+            let primary = nhop_to_nexthop_uni(key, route, value);
+            let backup = value
+                .backup
+                .as_ref()
+                .map(|b| backup_to_nexthop_uni(b, backup_metric));
+            std::iter::once(primary).chain(backup)
+        })
+        .collect();
+    rib.nexthop = build_rib_nexthop(nhops);
+    rib
+}
 
-    rib.nexthop = if route.nhops.len() == 1 {
-        if let Some((key, value)) = route.nhops.iter().next() {
-            rib::Nexthop::Uni(nhop_to_nexthop_uni(key, route, value))
+fn backup_to_nexthop_uni(backup: &RepairPathMpls, metric: u32) -> rib::NexthopUni {
+    let mut nhop = rib::NexthopUni::new(
+        std::net::IpAddr::V4(backup.addr),
+        metric,
+        backup.labels.clone(),
+    );
+    nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
+    nhop
+}
+
+// Dispatch a flat list of NexthopUni into the right rib::Nexthop
+// variant. Group nhops by metric (BTreeMap iter is ascending), then:
+//
+//   - 0 groups          -> Nexthop::default()
+//   - 1 group, 1 nhop   -> Nexthop::Uni
+//   - 1 group, N nhops  -> Nexthop::Multi (ECMP)
+//   - >1 groups         -> Nexthop::List, one member per metric:
+//                            * single-nhop group -> NexthopMember::Uni
+//                            * multi-nhop group  -> NexthopMember::Multi
+//
+// Today every caller passes all primaries at route.metric, so only
+// the first three arms fire. The grouped-List arm is the slot TI-LFA
+// repair install will populate when it appends backup nhops at
+// primary.metric + 1; ECMP-primary + ECMP-backup naturally collapses
+// to a List of two Multi members.
+fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
+    if nhops.is_empty() {
+        return rib::Nexthop::default();
+    }
+    let mut groups: BTreeMap<u32, Vec<rib::NexthopUni>> = BTreeMap::new();
+    for n in nhops {
+        groups.entry(n.metric).or_default().push(n);
+    }
+    if groups.len() == 1 {
+        let (metric, mut grp) = groups.into_iter().next().unwrap();
+        if grp.len() == 1 {
+            rib::Nexthop::Uni(grp.pop().unwrap())
         } else {
-            rib::Nexthop::default()
+            rib::Nexthop::Multi(rib::NexthopMulti {
+                metric,
+                nexthops: grp,
+                ..Default::default()
+            })
         }
     } else {
-        let multi = rib::NexthopMulti {
-            metric: route.metric,
-            nexthops: route
-                .nhops
-                .iter()
-                .map(|(key, value)| nhop_to_nexthop_uni(key, route, value))
-                .collect(),
-            ..Default::default()
-        };
-        rib::Nexthop::Multi(multi)
-    };
-
-    rib
+        let members: Vec<_> = groups
+            .into_iter()
+            .map(|(metric, mut grp)| {
+                if grp.len() == 1 {
+                    rib::NexthopMember::Uni(grp.pop().unwrap())
+                } else {
+                    rib::NexthopMember::Multi(rib::NexthopMulti {
+                        metric,
+                        nexthops: grp,
+                        ..Default::default()
+                    })
+                }
+            })
+            .collect();
+        rib::Nexthop::List(rib::NexthopList { nexthops: members })
+    }
 }
 
 pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
@@ -2138,27 +2255,29 @@ fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
-
-    rib.nexthop = if route.nhops.len() == 1 {
-        if let Some((key, value)) = route.nhops.iter().next() {
-            rib::Nexthop::Uni(nhop_to_nexthop_uni_v6(key, route, value))
-        } else {
-            rib::Nexthop::default()
-        }
-    } else {
-        let multi = rib::NexthopMulti {
-            metric: route.metric,
-            nexthops: route
-                .nhops
-                .iter()
-                .map(|(key, value)| nhop_to_nexthop_uni_v6(key, route, value))
-                .collect(),
-            ..Default::default()
-        };
-        rib::Nexthop::Multi(multi)
-    };
-
+    let backup_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
+    let nhops: Vec<rib::NexthopUni> = route
+        .nhops
+        .iter()
+        .flat_map(|(key, value)| {
+            let primary = nhop_to_nexthop_uni_v6(key, route, value);
+            let backup = value
+                .backup
+                .as_ref()
+                .map(|b| backup_to_nexthop_uni_v6(b, backup_metric));
+            std::iter::once(primary).chain(backup)
+        })
+        .collect();
+    rib.nexthop = build_rib_nexthop(nhops);
     rib
+}
+
+fn backup_to_nexthop_uni_v6(backup: &RepairPathSrv6, metric: u32) -> rib::NexthopUni {
+    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(backup.addr), metric, vec![]);
+    nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
+    nhop.segs = backup.segs.clone();
+    nhop.encap_type = Some(backup.encap);
+    nhop
 }
 
 pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6) {
@@ -2354,6 +2473,7 @@ fn build_adjacency_ilm(
                         ifindex: *ifindex,
                         adjacency: true,
                         sys_id: Some(*nhop_id),
+                        backup: None,
                     };
                     nhops.insert(*addr, nhop);
                 }
@@ -2427,6 +2547,7 @@ fn build_rib_from_spf(
                                 ifindex: *ifindex,
                                 adjacency: p[nhop_idx] == *node,
                                 sys_id: Some(*nhop_id),
+                                backup: None,
                             };
                             spf_nhops.insert(*addr, nhop);
                         }
@@ -2465,6 +2586,7 @@ fn build_rib_from_spf(
                     nhops: spf_nhops.clone(),
                     sid,
                     prefix_sid,
+                    dest_vertex: Some(*node),
                 };
 
                 if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -2599,6 +2721,7 @@ fn build_rib_from_spf_v6(
                             ifindex: *ifindex,
                             adjacency: is_adjacency,
                             sys_id: Some(nhop_sys_id),
+                            backup: None,
                         };
                         spf_nhops.insert(*addr, nhop);
                     }
@@ -2623,6 +2746,7 @@ fn build_rib_from_spf_v6(
                     nhops: spf_nhops.clone(),
                     sid: None,
                     prefix_sid: None,
+                    dest_vertex: Some(*node),
                 };
 
                 if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -2700,6 +2824,458 @@ fn apply_routing_updates(
 /// that SPF + `mt2_reach_map_v6` for the IPv6 RIB instead of the
 /// legacy result. RFC 5120 §3.4 strict-MT semantics — peers that
 /// didn't advertise MT 2 don't appear in the IPv6 forwarding table.
+/// Post-convergence SPF result for one protected outgoing edge from
+/// `source`. Populated by `link_protection_spf`; consumed by the P/Q
+/// identification step that lands next. The `allow(dead_code)` is
+/// temporary — every field gets read once Step 4b lands.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct ProtectedEdgeSpf {
+    /// Vertex id on the far side of the protected link.
+    nbr_vertex: usize,
+    /// Cost of the protected edge in the primary graph. The future
+    /// P-space computation uses this to bound the reverse SPF.
+    edge_cost: u32,
+    /// Per-destination post-convergence paths. Only destinations that
+    /// had at least one primary path through `nbr_vertex` appear here;
+    /// destinations the modified graph can't reach are skipped.
+    repairs: BTreeMap<usize, spf::Path>,
+}
+
+/// Clone `graph` and snip the directed edge `(src -> dst)` in both
+/// the olinks and ilinks indexes. Used by both forward SPF (which
+/// reads olinks) and reverse SPF (which reads ilinks) so both
+/// directions of the protected link disappear from the modified
+/// topology.
+fn graph_minus_edge(graph: &spf::Graph, src: usize, dst: usize) -> spf::Graph {
+    let mut modified = graph.clone();
+    if let Some(s) = modified.get_mut(&src) {
+        s.olinks.retain(|l| l.to != dst);
+    }
+    if let Some(d) = modified.get_mut(&dst) {
+        d.ilinks.retain(|l| l.from != src);
+    }
+    modified
+}
+
+/// P-node and Q-node on the post-convergence path for one (protected
+/// edge, destination) pair. Populated by `identify_pq_nodes`.
+///
+/// When `p == q` the path passes through a single PQ-overlap vertex:
+/// 1-label repair (push that vertex's prefix-SID). When they differ,
+/// 2-label repair is required: push prefix-SID(P) then adj-SID(P→next
+/// on path).
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+struct PQNodes {
+    /// Last vertex on the post-conv path that is reachable from the
+    /// post-conv first-hop without traversing the protected link
+    /// (i.e. the deepest vertex in eP-space).
+    p: usize,
+    /// First vertex on the post-conv path (walking from source) that
+    /// reaches the destination without traversing the protected
+    /// link (i.e. the shallowest vertex in Q-space).
+    q: usize,
+}
+
+/// Identify the P-node and Q-node on a single post-convergence path.
+/// Returns None when the modified topology can't reach the
+/// destination, leaving the (protected edge, dest) pair unprotected.
+///
+/// Algorithm (RFC 9490 §6 sketch, simplified for link protection):
+///   1. Build the post-failure graph (protected edge removed in both
+///      directions).
+///   2. Forward SPF from the post-conv first-hop -> eP-space set.
+///   3. Reverse SPF from the destination -> Q-space set.
+///   4. Walk the post-conv path; record the deepest in-eP vertex
+///      (P-candidate) and the shallowest in-Q vertex (Q-candidate).
+///   5. If the P-candidate is at or beyond the Q-candidate on the
+///      path, the path contains a PQ-overlap: collapse to one
+///      vertex (the deepest PQ vertex). Otherwise return P and Q
+///      separately for 2-label assembly.
+fn identify_pq_nodes(
+    graph: &spf::Graph,
+    source: usize,
+    nbr_vertex: usize,
+    dest: usize,
+    post_conv_path: &[usize],
+) -> Option<PQNodes> {
+    let v1 = *post_conv_path.first()?;
+    let modified = graph_minus_edge(graph, source, nbr_vertex);
+    let ep = spf::spf(&modified, v1, &spf::SpfOpt::full_path());
+    let q = spf::spf_reverse(&modified, dest, &spf::SpfOpt::full_path());
+
+    let mut last_p = None;
+    let mut first_q = None;
+    for (i, v) in post_conv_path.iter().enumerate() {
+        if ep.contains_key(v) {
+            last_p = Some((i, *v));
+        }
+        if q.contains_key(v) && first_q.is_none() {
+            first_q = Some((i, *v));
+        }
+    }
+    let (p_i, p_v) = last_p?;
+    let (q_i, q_v) = first_q?;
+    if p_i >= q_i {
+        // PQ-overlap: pick the deepest vertex that's in both spaces.
+        let pq = post_conv_path
+            .iter()
+            .rev()
+            .find(|v| ep.contains_key(v) && q.contains_key(v))
+            .copied()?;
+        Some(PQNodes { p: pq, q: pq })
+    } else {
+        Some(PQNodes { p: p_v, q: q_v })
+    }
+}
+
+/// For each outgoing edge from `source`, clone the graph, remove that
+/// edge, and re-run SPF. The returned vector has one entry per
+/// outgoing edge; each entry lists destinations whose primary path
+/// crossed the protected link plus the post-convergence path the
+/// modified graph produces for them.
+///
+/// Link protection only (RFC 9490 §3.2). Node protection (excluding
+/// the neighbor vertex entirely via `spf_calc`'s `x` parameter) is a
+/// follow-up — adding it later is a parameter flip on this function.
+fn link_protection_spf(
+    graph: &spf::Graph,
+    source: usize,
+    primary: &BTreeMap<usize, spf::Path>,
+) -> Vec<ProtectedEdgeSpf> {
+    let Some(source_vertex) = graph.get(&source) else {
+        return vec![];
+    };
+    let olinks = source_vertex.olinks.clone();
+    olinks
+        .iter()
+        .enumerate()
+        .map(|(edge_idx, edge)| {
+            // Clone the graph and snip exactly this one olink from
+            // source. The reverse direction (nbr -> source) is left
+            // in place because SPF only relaxes outgoing edges — for
+            // forward SPF from source the reverse link is invisible.
+            let mut modified = graph.clone();
+            if let Some(src) = modified.get_mut(&source) {
+                src.olinks.remove(edge_idx);
+            }
+            let post = spf::spf(&modified, source, &spf::SpfOpt::full_path());
+
+            let mut repairs = BTreeMap::new();
+            for (dest, primary_path) in primary {
+                if *dest == source {
+                    continue;
+                }
+                // Did any primary path to D go through the protected
+                // neighbor as its first hop? .paths[i][0] is the
+                // first hop, .paths[i][last] is the destination.
+                let affected = primary_path
+                    .paths
+                    .iter()
+                    .any(|p| p.first() == Some(&edge.to));
+                if !affected {
+                    continue;
+                }
+                if let Some(post_path) = post.get(dest)
+                    && !post_path.paths.is_empty()
+                {
+                    repairs.insert(*dest, post_path.clone());
+                }
+            }
+
+            ProtectedEdgeSpf {
+                nbr_vertex: edge.to,
+                edge_cost: edge.cost,
+                repairs,
+            }
+        })
+        .collect()
+}
+
+/// Output of Step 4b — for one (protected neighbor, destination)
+/// pair, all the data Step 4c needs to install the backup nexthop.
+#[derive(Debug)]
+struct RepairCandidate {
+    pq: PQNodes,
+    /// Egress ifindex of the local link to the post-conv first-hop.
+    repair_ifindex: u32,
+    /// IPv4 address of the post-conv first-hop on that link.
+    repair_addr: Ipv4Addr,
+}
+
+/// IPv6 sibling of `find_local_nhop_v4`. Returns the first link-
+/// local IPv6 address on a local link to the post-conv first-hop
+/// router. SRv6 dataplane resolution wants link-local just like the
+/// primary path does (it pins the egress without the kernel having
+/// to second-guess the SRH).
+fn find_local_nhop_v6(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u32, Ipv6Addr)> {
+    let mut idx = 0;
+    while idx < path.len() && top.lsp_map.get(&level).is_pseudo(path[idx]) {
+        idx += 1;
+    }
+    let v = *path.get(idx)?;
+    let sys_id = *top.lsp_map.get(&level).resolve(v)?;
+    for (ifindex, link) in top.links.iter() {
+        if let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id)
+            && let Some(addr) = nbr.addr6l.first()
+        {
+            return Some((*ifindex, *addr));
+        }
+    }
+    None
+}
+
+/// Resolve the local-link IPv4 egress for the first non-pseudonode
+/// vertex on a post-convergence path. Mirrors the leading-pseudonode
+/// skip in `build_rib_from_spf` so a LAN repair lands on the actual
+/// router behind the DIS pseudonode rather than the pseudonode
+/// itself.
+fn find_local_nhop_v4(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u32, Ipv4Addr)> {
+    let mut idx = 0;
+    while idx < path.len() && top.lsp_map.get(&level).is_pseudo(path[idx]) {
+        idx += 1;
+    }
+    let v = *path.get(idx)?;
+    let sys_id = *top.lsp_map.get(&level).resolve(v)?;
+    for (ifindex, link) in top.links.iter() {
+        if let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id)
+            && let Some((addr, _)) = nbr.addr4.iter().next()
+        {
+            return Some((*ifindex, *addr));
+        }
+    }
+    None
+}
+
+/// For every (protected edge, destination) that survives PQ
+/// identification AND has a resolvable local egress to its post-conv
+/// first-hop, build a RepairCandidate. The key is
+/// (protected_nbr_sys_id, dest_vertex) so the install pass can match
+/// against SpfNexthop.sys_id (already populated by build_rib_from_spf)
+/// and SpfRoute.dest_vertex (added alongside this commit).
+fn resolve_repairs_mpls(
+    top: &IsisTop,
+    level: Level,
+    graph: &spf::Graph,
+    source: usize,
+    protected: &[ProtectedEdgeSpf],
+) -> BTreeMap<(IsisSysId, usize), RepairCandidate> {
+    let mut out = BTreeMap::new();
+    for edge in protected {
+        let Some(nbr_sys) = top.lsp_map.get(&level).resolve(edge.nbr_vertex) else {
+            continue;
+        };
+        let nbr_sys = *nbr_sys;
+        for (dest, post_path) in &edge.repairs {
+            let Some(path_vec) = post_path.paths.first() else {
+                continue;
+            };
+            let Some(pq) = identify_pq_nodes(graph, source, edge.nbr_vertex, *dest, path_vec)
+            else {
+                continue;
+            };
+            let Some((repair_ifindex, repair_addr)) = find_local_nhop_v4(top, level, path_vec)
+            else {
+                continue;
+            };
+            out.insert(
+                (nbr_sys, *dest),
+                RepairCandidate {
+                    pq,
+                    repair_ifindex,
+                    repair_addr,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// TI-LFA SR-MPLS repair-path install. Steps 4a/4b produce repair
+/// candidates per (protected nbr sys_id, destination vertex); this
+/// step iterates `routes` and writes `SpfNexthop.backup` on every
+/// primary nhop whose sys_id matches a protected neighbor for a
+/// destination that has a viable PQ-overlap-at-destination case
+/// (single-label repair via the destination's prefix-SID).
+///
+/// Other cases (PQ-overlap deeper than the dest, or 2-label gap)
+/// stay unannotated for now — follow-ups extend the assembly with
+/// transit prefix-SID + adj-SID lookups against the LSDB.
+fn ti_lfa_compute_mpls(
+    top: &mut IsisTop,
+    level: Level,
+    graph: &spf::Graph,
+    source: usize,
+    primary: &BTreeMap<usize, spf::Path>,
+    routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
+) {
+    if !(top.config.ti_lfa_enabled && top.config.sr_mpls_enabled) {
+        return;
+    }
+    let protected = link_protection_spf(graph, source, primary);
+    let repairs = resolve_repairs_mpls(top, level, graph, source, &protected);
+    if !repairs.is_empty() {
+        apply_repairs_mpls(routes, &repairs);
+    }
+}
+
+/// Write `SpfNexthop.backup` on every primary nhop whose
+/// (nbr sys_id, dest_vertex) appears in `repairs` for the
+/// PQ-overlap-at-destination case (single-label repair, label is
+/// the destination's own prefix-SID). Other PQ shapes are skipped
+/// — they need transit prefix-SID + adj-SID lookups that aren't
+/// implemented yet.
+fn apply_repairs_mpls(
+    routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
+    repairs: &BTreeMap<(IsisSysId, usize), RepairCandidate>,
+) {
+    for (_prefix, route) in routes.iter_mut() {
+        let Some(dest_v) = route.dest_vertex else {
+            continue;
+        };
+        let Some(label) = route.sid else {
+            continue;
+        };
+        for nhop in route.nhops.values_mut() {
+            let Some(nbr_sys) = nhop.sys_id else {
+                continue;
+            };
+            let Some(cand) = repairs.get(&(nbr_sys, dest_v)) else {
+                continue;
+            };
+            if cand.pq.p != dest_v || cand.pq.q != dest_v {
+                continue;
+            }
+            nhop.backup = Some(RepairPathMpls {
+                ifindex: cand.repair_ifindex,
+                addr: cand.repair_addr,
+                labels: vec![rib::Label::Explicit(label)],
+            });
+        }
+    }
+}
+
+/// SRv6 sibling of `RepairCandidate`. Carries the same PQ + repair-
+/// nexthop info plus the destination's pre-resolved End SID — the
+/// single segment a PQ-overlap-at-dest repair pushes into the SRH.
+#[derive(Debug)]
+struct RepairCandidateSrv6 {
+    pq: PQNodes,
+    repair_ifindex: u32,
+    repair_addr: Ipv6Addr,
+    /// Destination's End SID, pre-resolved via `top.srv6_end_map` so
+    /// the install pass doesn't need the LSDB any more.
+    dest_end_sid: Option<Ipv6Addr>,
+}
+
+/// SRv6 mirror of `resolve_repairs_mpls`. Walks Step 4a's per-edge
+/// post-conv SPF, runs PQ identification, looks up the local IPv6
+/// egress, and grabs the destination's End SID from the LSDB cache
+/// (Step 4d slice 1's `srv6_end_map`).
+fn resolve_repairs_srv6(
+    top: &IsisTop,
+    level: Level,
+    graph: &spf::Graph,
+    source: usize,
+    protected: &[ProtectedEdgeSpf],
+) -> BTreeMap<(IsisSysId, usize), RepairCandidateSrv6> {
+    let mut out = BTreeMap::new();
+    for edge in protected {
+        let Some(nbr_sys) = top.lsp_map.get(&level).resolve(edge.nbr_vertex) else {
+            continue;
+        };
+        let nbr_sys = *nbr_sys;
+        for (dest, post_path) in &edge.repairs {
+            let Some(path_vec) = post_path.paths.first() else {
+                continue;
+            };
+            let Some(pq) = identify_pq_nodes(graph, source, edge.nbr_vertex, *dest, path_vec)
+            else {
+                continue;
+            };
+            let Some((repair_ifindex, repair_addr)) = find_local_nhop_v6(top, level, path_vec)
+            else {
+                continue;
+            };
+            let dest_end_sid = top
+                .lsp_map
+                .get(&level)
+                .resolve(*dest)
+                .and_then(|sys_id| top.srv6_end_map.get(&level).get(sys_id))
+                .copied();
+            out.insert(
+                (nbr_sys, *dest),
+                RepairCandidateSrv6 {
+                    pq,
+                    repair_ifindex,
+                    repair_addr,
+                    dest_end_sid,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// SRv6 sibling of `apply_repairs_mpls`. Writes `SpfNexthopV6.backup`
+/// on every primary nhop whose (nbr sys_id, dest_vertex) appears in
+/// `repairs` for the PQ-overlap-at-destination case. The segment
+/// list is `[End(dest)]` and the encap is `HEncap` (full SRH push;
+/// `HEncap.Red` is opt-in per the project default).
+fn apply_repairs_srv6(
+    routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
+    repairs: &BTreeMap<(IsisSysId, usize), RepairCandidateSrv6>,
+) {
+    for (_prefix, route) in routes.iter_mut() {
+        let Some(dest_v) = route.dest_vertex else {
+            continue;
+        };
+        for nhop in route.nhops.values_mut() {
+            let Some(nbr_sys) = nhop.sys_id else {
+                continue;
+            };
+            let Some(cand) = repairs.get(&(nbr_sys, dest_v)) else {
+                continue;
+            };
+            if cand.pq.p != dest_v || cand.pq.q != dest_v {
+                continue;
+            }
+            let Some(end_sid) = cand.dest_end_sid else {
+                continue;
+            };
+            nhop.backup = Some(RepairPathSrv6 {
+                ifindex: cand.repair_ifindex,
+                addr: cand.repair_addr,
+                segs: vec![end_sid],
+                encap: EncapType::HEncap,
+            });
+        }
+    }
+}
+
+/// TI-LFA SRv6 repair-path install. Same shape as `ti_lfa_compute_mpls`
+/// (Step 4c) — call Step 4a's link-protection SPF, resolve PQ-nodes
+/// per (protected nbr, dest), then write `SpfNexthopV6.backup` on
+/// primary nhops with a PQ-overlap-at-destination repair.
+fn ti_lfa_compute_srv6(
+    top: &mut IsisTop,
+    level: Level,
+    graph: &spf::Graph,
+    source: usize,
+    primary: &BTreeMap<usize, spf::Path>,
+    routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
+) {
+    if !(top.config.ti_lfa_enabled && top.config.sr_srv6_enabled) {
+        return;
+    }
+    let protected = link_protection_spf(graph, source, primary);
+    let repairs = resolve_repairs_srv6(top, level, graph, source, &protected);
+    if !repairs.is_empty() {
+        apply_repairs_srv6(routes, &repairs);
+    }
+}
+
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     *top.spf_timer.get_mut(&level) = None;
 
@@ -2712,7 +3288,8 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         // Full-path mode so the legacy v6 builder can apply RFC 1195
         // §5 strict NLPID gating across every transit node.
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
-        let rib = build_rib_from_spf(top, level, source, &spf_result);
+        let mut rib = build_rib_from_spf(top, level, source, &spf_result);
+        ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
 
         let mt2_enabled =
             top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
@@ -2724,7 +3301,8 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
             *top.mt2_graph.get_mut(&level) = Some(mt2_graph.clone());
             if let Some(mt2_src) = mt2_source {
                 let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
-                let rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
+                let mut rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
+                ti_lfa_compute_srv6(top, level, &mt2_graph, mt2_src, &mt2_spf, &mut rib_v6);
                 *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
                 rib_v6
             } else {
@@ -2736,7 +3314,9 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
             // graph + reach_map_v6 for IPv6.
             *top.mt2_graph.get_mut(&level) = None;
             *top.mt2_spf_result.get_mut(&level) = None;
-            build_rib_from_spf_v6(top, level, source, &spf_result, false)
+            let mut rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result, false);
+            ti_lfa_compute_srv6(top, level, &graph, source, &spf_result, &mut rib_v6);
+            rib_v6
         };
 
         *top.spf_result.get_mut(&level) = Some(spf_result);
@@ -2841,5 +3421,616 @@ mod tests {
         let neighbor_id = IsisNeighborId::default();
         assert!(resolve_dis_ifindex(&links, Level::L1, neighbor_id).is_none());
         assert!(resolve_dis_ifindex(&links, Level::L2, neighbor_id).is_none());
+    }
+
+    fn mk_uni(addr: &str, metric: u32) -> rib::NexthopUni {
+        rib::NexthopUni::new(addr.parse().unwrap(), metric, vec![])
+    }
+
+    #[test]
+    fn build_rib_nexthop_empty_yields_default() {
+        let nh = build_rib_nexthop(vec![]);
+        assert_eq!(nh, rib::Nexthop::default());
+    }
+
+    #[test]
+    fn build_rib_nexthop_single_yields_uni() {
+        let only = mk_uni("10.0.0.1", 20);
+        let nh = build_rib_nexthop(vec![only.clone()]);
+        assert!(matches!(nh, rib::Nexthop::Uni(ref u) if u == &only));
+    }
+
+    #[test]
+    fn build_rib_nexthop_same_metric_yields_multi() {
+        // ECMP: every primary at the IGP metric — Multi is the
+        // existing pre-TI-LFA shape.
+        let a = mk_uni("10.0.0.1", 20);
+        let b = mk_uni("10.0.0.2", 20);
+        let nh = build_rib_nexthop(vec![a, b]);
+        let rib::Nexthop::Multi(m) = nh else {
+            panic!("expected Multi, got {nh:?}");
+        };
+        assert_eq!(m.metric, 20);
+        assert_eq!(m.nexthops.len(), 2);
+    }
+
+    #[test]
+    fn build_rib_nexthop_mixed_metric_yields_list_sorted() {
+        // Mixed metrics signal primary + backup — Nexthop::List is
+        // the FRR slot TI-LFA fills, sorted ascending so .nexthops[0]
+        // is the primary. Singleton-per-metric groups become Uni
+        // members.
+        let primary = mk_uni("10.0.0.1", 20);
+        let backup = mk_uni("10.0.0.5", 21);
+        // Insert backup first to exercise sort.
+        let nh = build_rib_nexthop(vec![backup.clone(), primary.clone()]);
+        let rib::Nexthop::List(list) = nh else {
+            panic!("expected List, got {nh:?}");
+        };
+        assert_eq!(list.nexthops.len(), 2);
+        assert_eq!(list.nexthops[0], rib::NexthopMember::Uni(primary));
+        assert_eq!(list.nexthops[1], rib::NexthopMember::Uni(backup));
+    }
+
+    #[test]
+    fn build_rib_nexthop_ecmp_primary_plus_ecmp_backup_yields_list_of_multi() {
+        // Two ECMP primaries at metric 20 + two backups at metric 21
+        // collapse into a List of two Multi members: one per metric
+        // group, ECMP-aware. This is the shape TI-LFA emits when
+        // both the primary and the post-convergence path are
+        // multi-pathed.
+        let p1 = mk_uni("10.0.0.1", 20);
+        let p2 = mk_uni("10.0.0.2", 20);
+        let b1 = mk_uni("10.0.0.5", 21);
+        let b2 = mk_uni("10.0.0.6", 21);
+        // Insert mixed order to exercise BTreeMap grouping + sort.
+        let nh = build_rib_nexthop(vec![b1.clone(), p1.clone(), b2.clone(), p2.clone()]);
+        let rib::Nexthop::List(list) = nh else {
+            panic!("expected List, got {nh:?}");
+        };
+        assert_eq!(list.nexthops.len(), 2);
+
+        let rib::NexthopMember::Multi(primary_grp) = &list.nexthops[0] else {
+            panic!("expected Multi primary, got {:?}", list.nexthops[0]);
+        };
+        assert_eq!(primary_grp.metric, 20);
+        assert_eq!(primary_grp.nexthops.len(), 2);
+
+        let rib::NexthopMember::Multi(backup_grp) = &list.nexthops[1] else {
+            panic!("expected Multi backup, got {:?}", list.nexthops[1]);
+        };
+        assert_eq!(backup_grp.metric, 21);
+        assert_eq!(backup_grp.nexthops.len(), 2);
+    }
+
+    #[test]
+    fn make_rib_entry_without_backup_yields_uni() {
+        // Identity check: today every SpfNexthop has backup=None, so
+        // make_rib_entry still emits a Nexthop::Uni for a 1-nhop route.
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            "10.0.0.1".parse().unwrap(),
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: None,
+            },
+        );
+        let route = SpfRoute {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: None,
+        };
+        let entry = make_rib_entry(&route);
+        assert!(matches!(entry.nexthop, rib::Nexthop::Uni(_)));
+    }
+
+    #[test]
+    fn make_rib_entry_with_mpls_backup_yields_list_at_metric_plus_one() {
+        // SpfNexthop with backup -> List([primary at 20, backup at 21]).
+        // Verifies BACKUP_METRIC_OFFSET + the flat_map plumbing in
+        // make_rib_entry feed build_rib_nexthop a mixed-metric Vec
+        // that collapses to a sorted List.
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let backup_addr: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: Some(RepairPathMpls {
+                    ifindex: 20,
+                    addr: backup_addr,
+                    labels: vec![rib::Label::Implicit(16002), rib::Label::Explicit(24007)],
+                }),
+            },
+        );
+        let route = SpfRoute {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: None,
+        };
+        let entry = make_rib_entry(&route);
+
+        let rib::Nexthop::List(list) = &entry.nexthop else {
+            panic!("expected List, got {:?}", entry.nexthop);
+        };
+        assert_eq!(list.nexthops.len(), 2);
+
+        let rib::NexthopMember::Uni(p) = &list.nexthops[0] else {
+            panic!("expected Uni primary, got {:?}", list.nexthops[0]);
+        };
+        assert_eq!(p.metric, 20);
+        assert_eq!(p.addr, std::net::IpAddr::V4(primary_addr));
+
+        let rib::NexthopMember::Uni(b) = &list.nexthops[1] else {
+            panic!("expected Uni backup, got {:?}", list.nexthops[1]);
+        };
+        assert_eq!(b.metric, 21);
+        assert_eq!(b.addr, std::net::IpAddr::V4(backup_addr));
+        assert_eq!(b.mpls.len(), 2);
+        assert_eq!(b.ifindex_origin, Some(20));
+    }
+
+    #[test]
+    fn make_rib_entry_v6_with_srv6_backup_carries_segs_and_encap() {
+        // The IPv6 mirror: SpfNexthopV6 with an SRv6 repair populates
+        // the backup NexthopUni's segs + encap_type. The label stack
+        // stays empty — SRv6 doesn't use MPLS.
+        let primary_addr: Ipv6Addr = "fe80::a:2".parse().unwrap();
+        let backup_addr: Ipv6Addr = "fe80::a:5".parse().unwrap();
+        let end_sid: Ipv6Addr = "2001:db8:a:2::".parse().unwrap();
+        let endx_sid: Ipv6Addr = "2001:db8:a:2:c000::".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthopV6 {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: Some(RepairPathSrv6 {
+                    ifindex: 20,
+                    addr: backup_addr,
+                    segs: vec![end_sid, endx_sid],
+                    encap: EncapType::HEncap,
+                }),
+            },
+        );
+        let route = SpfRouteV6 {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: None,
+        };
+        let entry = make_rib_entry_v6(&route);
+
+        let rib::Nexthop::List(list) = &entry.nexthop else {
+            panic!("expected List, got {:?}", entry.nexthop);
+        };
+        assert_eq!(list.nexthops.len(), 2);
+        let rib::NexthopMember::Uni(b) = &list.nexthops[1] else {
+            panic!("expected Uni backup, got {:?}", list.nexthops[1]);
+        };
+        assert_eq!(b.metric, 21);
+        assert_eq!(b.segs, vec![end_sid, endx_sid]);
+        assert_eq!(b.encap_type, Some(EncapType::HEncap));
+        assert!(b.mpls.is_empty());
+    }
+
+    // Small TI-LFA topology for the link-protection loop. Four
+    // vertices, costs chosen so the primary S->D path goes via A
+    // (cost 2) and removing S->A forces the post-conv path via B
+    // (cost 3). A itself becomes unreachable when S->A is cut.
+    //
+    //        1            1
+    //   S---------A--------+
+    //   |                  |
+    //   |2                 |
+    //   |        1         v
+    //   B------------------D
+    //
+    fn build_link_protection_fixture() -> (spf::Graph, BTreeMap<usize, spf::Path>) {
+        use crate::spf::{Link, Vertex};
+        let mut graph = spf::Graph::new();
+        for (id, name) in [(0, "S"), (1, "A"), (2, "B"), (3, "D")] {
+            graph.insert(id, Vertex::new_node(name, id));
+        }
+        let edges = [
+            (0, 1, 1),
+            (0, 2, 2),
+            (1, 3, 1),
+            (2, 3, 1),
+            // reverse edges so SPF from D could also be done
+            (1, 0, 1),
+            (2, 0, 2),
+            (3, 1, 1),
+            (3, 2, 1),
+        ];
+        for (from, to, cost) in edges {
+            graph
+                .get_mut(&from)
+                .unwrap()
+                .olinks
+                .push(Link::new(from, to, cost));
+        }
+        let primary = spf::spf(&graph, 0, &spf::SpfOpt::full_path());
+        (graph, primary)
+    }
+
+    #[test]
+    fn link_protection_spf_finds_post_conv_for_affected_destinations() {
+        let (graph, primary) = build_link_protection_fixture();
+        // Primary D goes via A (cost 2).
+        assert_eq!(primary[&3].cost, 2);
+        assert_eq!(primary[&3].paths, vec![vec![1, 3]]);
+
+        let protected = link_protection_spf(&graph, 0, &primary);
+        // S has two olinks: S->A (idx 0) and S->B (idx 1).
+        assert_eq!(protected.len(), 2);
+
+        // Protecting S->A: D and A are both affected (D's primary went
+        // through A; A is itself reached directly via the protected
+        // edge). Post-convergence both reroute through B.
+        let pe_a = protected.iter().find(|p| p.nbr_vertex == 1).unwrap();
+        assert_eq!(pe_a.edge_cost, 1);
+        // D's post-conv path: S -> B -> D (cost 3).
+        let d_repair = pe_a.repairs.get(&3).expect("D should have a repair");
+        assert_eq!(d_repair.cost, 3);
+        assert_eq!(d_repair.paths, vec![vec![2, 3]]);
+        // A's post-conv path: S -> B -> D -> A (cost 4) — the link is
+        // out, but the node is reachable via the back side of the
+        // fixture's ring.
+        let a_repair = pe_a.repairs.get(&1).expect("A should have a repair");
+        assert_eq!(a_repair.cost, 4);
+        assert_eq!(a_repair.paths, vec![vec![2, 3, 1]]);
+
+        // Protecting S->B: only B itself is affected (it's the
+        // direct neighbor on the protected edge); D's primary goes
+        // via A so it's untouched.
+        let pe_b = protected.iter().find(|p| p.nbr_vertex == 2).unwrap();
+        assert!(!pe_b.repairs.contains_key(&3), "D should be unaffected");
+        let b_repair = pe_b.repairs.get(&2).expect("B should have a repair");
+        assert_eq!(b_repair.cost, 3);
+        assert_eq!(b_repair.paths, vec![vec![1, 3, 2]]);
+    }
+
+    #[test]
+    fn link_protection_spf_returns_empty_when_source_missing() {
+        let (graph, primary) = build_link_protection_fixture();
+        assert!(link_protection_spf(&graph, 99, &primary).is_empty());
+    }
+
+    #[test]
+    fn graph_minus_edge_drops_olink_and_ilink() {
+        let (graph, _) = build_link_protection_fixture();
+        let pruned = graph_minus_edge(&graph, 0, 1);
+        // S has S->A removed.
+        assert!(!pruned[&0].olinks.iter().any(|l| l.to == 1));
+        // A has its inbound edge from S removed too.
+        assert!(!pruned[&1].ilinks.iter().any(|l| l.from == 0));
+        // S->B and other links intact.
+        assert!(pruned[&0].olinks.iter().any(|l| l.to == 2));
+    }
+
+    #[test]
+    fn identify_pq_nodes_finds_overlap_at_destination_in_ring_fixture() {
+        // Protected link S->A; post-conv path to D is [B, D].
+        // Every vertex on this path is in eP-space (reachable from
+        // B post-failure) and in Q-space (reaches D post-failure).
+        // The deepest PQ-overlap vertex is D — a 1-label repair via
+        // D's prefix-SID.
+        let (graph, _) = build_link_protection_fixture();
+        let post_path = vec![2usize, 3];
+        let pq = identify_pq_nodes(&graph, 0, 1, 3, &post_path).expect("PQ should exist");
+        assert_eq!(pq, PQNodes { p: 3, q: 3 });
+    }
+
+    #[test]
+    fn identify_pq_nodes_returns_none_for_empty_path() {
+        let (graph, _) = build_link_protection_fixture();
+        assert!(identify_pq_nodes(&graph, 0, 1, 3, &[]).is_none());
+    }
+
+    fn mk_sys_id(byte: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, byte],
+        }
+    }
+
+    #[test]
+    fn apply_repairs_mpls_writes_backup_on_pq_overlap_at_dest() {
+        // Route to 1.1.1.1/32 with dest_vertex=3, prefix-SID label
+        // 16001, primary nhop via 10.0.0.1 with sys_id 0...01.
+        // Repair candidate: PQ-overlap at dest_vertex, repair via
+        // 10.0.0.5 on ifindex 20. apply_repairs_mpls should pin a
+        // RepairPathMpls onto the primary nhop carrying the dest's
+        // prefix-SID as a single Explicit label.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let backup_addr: Ipv4Addr = "10.0.0.5".parse().unwrap();
+
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv4Net, SpfRoute>::new();
+        let prefix: Ipv4Net = "1.1.1.1/32".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRoute {
+                metric: 20,
+                nhops,
+                sid: Some(16001),
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidate {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr: backup_addr,
+            },
+        );
+
+        apply_repairs_mpls(&mut routes, &repairs);
+
+        let route = routes.get(&prefix).expect("route should be present");
+        let nhop = route
+            .nhops
+            .get(&primary_addr)
+            .expect("primary nhop should be present");
+        let backup = nhop.backup.as_ref().expect("backup should be populated");
+        assert_eq!(backup.ifindex, 20);
+        assert_eq!(backup.addr, backup_addr);
+        assert_eq!(backup.labels, vec![rib::Label::Explicit(16001)]);
+    }
+
+    #[test]
+    fn apply_repairs_mpls_skips_two_label_case_for_now() {
+        // P != Q (== gap, would need an adj-SID lookup the 1-label
+        // commit doesn't implement). Backup stays None.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 5usize;
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv4Net, SpfRoute>::new();
+        let prefix: Ipv4Net = "2.2.2.2/32".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRoute {
+                metric: 20,
+                nhops,
+                sid: Some(16002),
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidate {
+                pq: PQNodes { p: 2, q: 4 }, // gap: P=2, Q=4, neither is dest_v
+                repair_ifindex: 20,
+                repair_addr: "10.0.0.5".parse().unwrap(),
+            },
+        );
+
+        apply_repairs_mpls(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        assert!(nhop.backup.is_none(), "2-label case should not populate");
+    }
+
+    #[test]
+    fn apply_repairs_srv6_writes_backup_with_end_sid_segment() {
+        // SRv6 mirror of the MPLS happy path. Route to a /128 dst
+        // with dest_vertex=3, primary nhop fe80::aa via sys_id 0...01.
+        // Repair has PQ-overlap at the destination AND a resolved
+        // End SID — backup should be populated with segs=[end_sid]
+        // and encap=HEncap.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv6Addr = "fe80::aa".parse().unwrap();
+        let repair_addr: Ipv6Addr = "fe80::bb".parse().unwrap();
+        let end_sid: Ipv6Addr = "2001:db8:a:2::".parse().unwrap();
+
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthopV6 {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
+        let prefix: Ipv6Net = "2001:db8:a::1/128".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRouteV6 {
+                metric: 20,
+                nhops,
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidateSrv6 {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr,
+                dest_end_sid: Some(end_sid),
+            },
+        );
+
+        apply_repairs_srv6(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        let backup = nhop.backup.as_ref().expect("backup should be populated");
+        assert_eq!(backup.ifindex, 20);
+        assert_eq!(backup.addr, repair_addr);
+        assert_eq!(backup.segs, vec![end_sid]);
+        assert_eq!(backup.encap, EncapType::HEncap);
+    }
+
+    #[test]
+    fn apply_repairs_srv6_skips_when_end_sid_missing() {
+        // PQ-overlap-at-dest but no End SID resolved for the
+        // destination (e.g. peer didn't advertise an IsisTlvSrv6).
+        // Backup stays None — the install pass refuses to push an
+        // empty SRH.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv6Addr = "fe80::aa".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthopV6 {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
+        let prefix: Ipv6Net = "2001:db8:a::2/128".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRouteV6 {
+                metric: 20,
+                nhops,
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidateSrv6 {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr: "fe80::bb".parse().unwrap(),
+                dest_end_sid: None,
+            },
+        );
+
+        apply_repairs_srv6(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        assert!(nhop.backup.is_none());
+    }
+
+    #[test]
+    fn apply_repairs_mpls_skips_when_route_sid_missing() {
+        // If the destination has no prefix-SID we can't build a
+        // 1-label repair, so the nhop stays unannotated.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv4Net, SpfRoute>::new();
+        let prefix: Ipv4Net = "3.3.3.3/32".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRoute {
+                metric: 20,
+                nhops,
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidate {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr: "10.0.0.5".parse().unwrap(),
+            },
+        );
+
+        apply_repairs_mpls(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        assert!(nhop.backup.is_none());
     }
 }

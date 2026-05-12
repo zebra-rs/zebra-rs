@@ -32,6 +32,7 @@ impl Isis {
         self.show_add("/show/isis/hostname", hostname::show);
         self.show_add("/show/isis/graph", show_isis_graph);
         self.show_add("/show/isis/spf", show_isis_spf);
+        self.show_add("/show/isis/spf/detail", show_isis_spf_detail);
         self.show_add("/show/isis/topology", show_isis_topology);
     }
 }
@@ -1173,19 +1174,61 @@ fn show_isis_database_detail(
 fn show_isis_spf(
     isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(spf_json(isis, /* detail = */ false));
+    }
     let mut buf = String::new();
+    write_spf_brief(isis, &mut buf);
+    Ok(buf)
+}
 
+fn show_isis_spf_detail(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(spf_json(isis, /* detail = */ true));
+    }
+    let mut buf = String::new();
+    write_spf_status_banner(isis, &mut buf);
+    write_spf_brief(isis, &mut buf);
+    // Per-destination repair-path detail is rendered here once
+    // SpfNexthop.backup lands (Step 2 of the TI-LFA branch plan).
+    // The CLI surface and JSON shape are locked now so downstream
+    // tooling can wire against the path/keys without churn.
+    let _ = writeln!(
+        buf,
+        "(per-destination TI-LFA repair-path detail not yet implemented)"
+    );
+    Ok(buf)
+}
+
+fn write_spf_status_banner(isis: &Isis, buf: &mut String) {
+    let ti_lfa = isis.config.ti_lfa_enabled;
+    let sr_mpls = isis.config.sr_mpls_enabled;
+    let sr_srv6 = isis.config.sr_srv6_enabled;
+    let _ = writeln!(
+        buf,
+        "TI-LFA: {} (sr-mpls: {}, srv6: {})",
+        if ti_lfa { "enabled" } else { "disabled" },
+        if sr_mpls { "on" } else { "off" },
+        if sr_srv6 { "on" } else { "off" },
+    );
+}
+
+fn write_spf_brief(isis: &Isis, buf: &mut String) {
     // Legacy single-topology SPF — drives IPv4 RIB always, plus
     // IPv6 RIB when MT 2 is off. Print L1 then L2.
     if let Some(spf) = isis.spf_result.get(&Level::L1) {
         let _ = writeln!(buf, "L1 SPF (single-topology / MT 0)");
-        spf::disp_out(&mut buf, spf, false);
+        spf::disp_out(buf, spf, false);
     }
     if let Some(spf) = isis.spf_result.get(&Level::L2) {
         let _ = writeln!(buf, "L2 SPF (single-topology / MT 0)");
-        spf::disp_out(&mut buf, spf, false);
+        spf::disp_out(buf, spf, false);
     }
 
     // MT 2 SPF — only computed when local config has MT 2 in
@@ -1194,14 +1237,60 @@ fn show_isis_spf(
     // operators can compare metrics across topologies.
     if let Some(spf) = isis.mt2_spf_result.get(&Level::L1) {
         let _ = writeln!(buf, "L1 SPF (MT 2 / IPv6 unicast)");
-        spf::disp_out(&mut buf, spf, false);
+        spf::disp_out(buf, spf, false);
     }
     if let Some(spf) = isis.mt2_spf_result.get(&Level::L2) {
         let _ = writeln!(buf, "L2 SPF (MT 2 / IPv6 unicast)");
-        spf::disp_out(&mut buf, spf, false);
+        spf::disp_out(buf, spf, false);
     }
+}
 
-    Ok(buf)
+fn spf_json(isis: &Isis, detail: bool) -> String {
+    // Minimal JSON skeleton — keys are stable now so downstream
+    // tooling can lock against them. `levels[*].vertices` and
+    // `levels[*].destinations` fill in once the SPF result and the
+    // per-destination repair view are serialized; for now the
+    // counts give operators something to assert against.
+    let view = SpfShowJson {
+        ti_lfa_enabled: isis.config.ti_lfa_enabled,
+        sr_mpls_enabled: isis.config.sr_mpls_enabled,
+        sr_srv6_enabled: isis.config.sr_srv6_enabled,
+        detail,
+        levels: [
+            ("L1-single", isis.spf_result.get(&Level::L1)),
+            ("L2-single", isis.spf_result.get(&Level::L2)),
+            ("L1-mt2", isis.mt2_spf_result.get(&Level::L1)),
+            ("L2-mt2", isis.mt2_spf_result.get(&Level::L2)),
+        ]
+        .into_iter()
+        .filter_map(|(name, spf)| {
+            spf.as_ref().map(|s| {
+                (
+                    name.to_string(),
+                    SpfLevelJson {
+                        vertex_count: s.len(),
+                    },
+                )
+            })
+        })
+        .collect(),
+    };
+    serde_json::to_string_pretty(&view)
+        .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize SPF view: {}\"}}", e))
+}
+
+#[derive(Serialize)]
+struct SpfShowJson {
+    ti_lfa_enabled: bool,
+    sr_mpls_enabled: bool,
+    sr_srv6_enabled: bool,
+    detail: bool,
+    levels: std::collections::BTreeMap<String, SpfLevelJson>,
+}
+
+#[derive(Serialize)]
+struct SpfLevelJson {
+    vertex_count: usize,
 }
 
 #[cfg(test)]
