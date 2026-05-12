@@ -670,4 +670,39 @@ mod tests {
         long.emit(&mut buf);
         assert_eq!(buf.len(), 252);
     }
+
+    #[test]
+    fn adj_sid_flag_ipv4_baseline_is_l_and_v_only() {
+        // RFC 8667 §2.2.1: F=0 (IPv4), L=1 (local), V=1 (label value),
+        // B=S=P=0. Bit positions: L=0x10, V=0x20.
+        let byte: u8 = AdjSidFlags::lan_adj_flag_ipv4().into();
+        assert_eq!(byte, 0x30);
+    }
+
+    #[test]
+    fn adj_sid_emits_b_flag_when_protected() {
+        // TI-LFA on: the B-flag (bit 6, 0x40) layered on top of the
+        // V|L baseline yields 0x70 as the first sub-TLV body byte.
+        let sub = IsisSubAdjSid {
+            flags: AdjSidFlags::lan_adj_flag_ipv4().with_b_flag(true),
+            weight: 0,
+            sid: SidLabelValue::Label(16001),
+        };
+        let mut buf = BytesMut::new();
+        sub.emit(&mut buf);
+        assert_eq!(buf[0], 0x70);
+    }
+
+    #[test]
+    fn lan_adj_sid_emits_b_flag_when_protected() {
+        let sub = IsisSubLanAdjSid {
+            flags: AdjSidFlags::lan_adj_flag_ipv4().with_b_flag(true),
+            weight: 0,
+            system_id: IsisSysId::default(),
+            sid: SidLabelValue::Label(16001),
+        };
+        let mut buf = BytesMut::new();
+        sub.emit(&mut buf);
+        assert_eq!(buf[0], 0x70);
+    }
 }
