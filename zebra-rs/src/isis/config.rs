@@ -65,6 +65,7 @@ impl Isis {
             "/router/isis/segment-routing/srv6/locator",
             config_sr_srv6_locator,
         );
+        self.callback_add("/router/isis/fast-reroute/ti-lfa", config_fr_ti_lfa);
         self.callback_add("/router/isis/multi-topology", config_mt);
         self.callback_add(
             "/router/isis/interface/multi-topology/metric",
@@ -142,6 +143,12 @@ pub struct IsisConfig {
     /// /segment-routing/locator list. Same staging-friendly rationale
     /// as sr_mpls_block.
     pub sr_srv6_locator: Option<String>,
+
+    /// Set when /router/isis/fast-reroute/ti-lfa is committed (the
+    /// presence-marked YANG container). Will gate post-convergence
+    /// SPF + SR-label backup install once the repair-path computation
+    /// lands; for now no code reads it.
+    pub fr_ti_lfa_enabled: bool,
 
     /// True when `/router/isis/multi-topology` carries an MT id.
     /// Drives whether IS-IS originates TLV 229 and the per-MT reach
@@ -321,6 +328,11 @@ fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
         isis.config.sr_srv6_locator = None;
     }
     isis.reconcile_locator_watch();
+    Some(())
+}
+
+fn config_fr_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    isis.config.fr_ti_lfa_enabled = op.is_set();
     Some(())
 }
 
