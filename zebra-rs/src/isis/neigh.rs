@@ -14,7 +14,7 @@ use crate::rib;
 use crate::rib::MacAddr;
 use crate::rib::{Locator, Sid, SidAllocationType, SidBehavior, SidContext, SidOwner};
 
-use super::link::LinkType;
+use super::link::NetworkType;
 use super::nfsm::NfsmState;
 use super::{Isis, Level, Message, NeighborAddr4, NeighborAddr6};
 
@@ -23,7 +23,7 @@ use super::{Isis, Level, Message, NeighborAddr4, NeighborAddr6};
 pub struct Neighbor {
     pub tx: UnboundedSender<Message>,
     pub ifindex: u32,
-    pub link_type: LinkType,
+    pub network_type: NetworkType,
     pub sys_id: IsisSysId,
     // Hello parameters
     pub priority: u8,            // LAN
@@ -59,7 +59,7 @@ impl Neighbor {
     pub fn new(
         tx: UnboundedSender<Message>,
         ifindex: u32,
-        link_type: LinkType,
+        network_type: NetworkType,
         sys_id: IsisSysId,
         mac: Option<MacAddr>,
     ) -> Self {
@@ -80,7 +80,7 @@ impl Neighbor {
             is_dis: false,
             circuit_id: None,
             hold_time: 0,
-            link_type,
+            network_type,
             endx_sid: None,
             created: true,
         }

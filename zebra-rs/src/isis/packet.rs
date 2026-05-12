@@ -18,7 +18,7 @@ use crate::rib::MacAddr;
 use super::flood;
 use super::ifsm::has_level;
 use super::inst::{Packet, PacketMessage};
-use super::link::{LinkTop, LinkType};
+use super::link::{LinkTop, NetworkType};
 use super::lsdb;
 use super::{LabelPool, Level};
 
@@ -161,7 +161,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         .or_insert(Neighbor::new(
             link.tx.clone(),
             link.ifindex,
-            LinkType::Lan,
+            NetworkType::Lan,
             pdu.source_id,
             mac,
         ));
@@ -342,7 +342,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             .or_insert(Neighbor::new(
                 link.tx.clone(),
                 link.ifindex,
-                LinkType::P2p,
+                NetworkType::P2p,
                 pdu.source_id,
                 mac,
             ));
