@@ -114,13 +114,14 @@ struct NodeJson {
     pub id: usize,
     pub name: String,
     pub sys_id: String,
-    pub links: Vec<LinkJson>,
+    pub olinks: Vec<LinkJson>,
+    pub ilinks: Vec<LinkJson>,
 }
 
 #[derive(Serialize)]
 struct LinkJson {
-    pub to_id: usize,
-    pub to_name: String,
+    pub id: usize,
+    pub name: String,
     pub cost: u32,
 }
 
@@ -162,10 +163,13 @@ fn show_isis_graph(
                 } else {
                     writeln!(buf, "  {} (id: {})", node.sys_id, node.id)?;
                 }
-                if !node.links.is_empty() {
+                if !node.olinks.is_empty() || !node.ilinks.is_empty() {
                     writeln!(buf, "    Links:")?;
-                    for link in &node.links {
-                        writeln!(buf, "      -> {} (cost: {})", link.to_name, link.cost)?;
+                    for link in &node.olinks {
+                        writeln!(buf, "      -> {} (cost: {})", link.name, link.cost)?;
+                    }
+                    for link in &node.ilinks {
+                        writeln!(buf, "      <- {} (cost: {})", link.name, link.cost)?;
                     }
                 }
             }
@@ -185,15 +189,29 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
 
     // Collect all nodes with their links
     for (id, node) in graph.iter() {
-        let mut node_links = Vec::new();
+        // Collect all outgoing olinks from this node
+        let mut node_olinks = Vec::new();
 
-        // Collect all outgoing links from this node
         for link in &node.olinks {
             // Get the destination node name
             if let Some(to_node) = graph.get(&link.to) {
-                node_links.push(LinkJson {
-                    to_id: link.to,
-                    to_name: to_node.name.clone(),
+                node_olinks.push(LinkJson {
+                    id: link.to,
+                    name: to_node.name.clone(),
+                    cost: link.cost,
+                });
+            }
+        }
+
+        // Collect all outgoing ilinks from this node
+        let mut node_ilinks = Vec::new();
+
+        for link in &node.ilinks {
+            // Get the destination node name
+            if let Some(from_node) = graph.get(&link.from) {
+                node_ilinks.push(LinkJson {
+                    id: link.from,
+                    name: from_node.name.clone(),
                     cost: link.cost,
                 });
             }
@@ -203,7 +221,8 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
             id: *id,
             name: node.name.clone(),
             sys_id: node.sys_id.clone(),
-            links: node_links,
+            olinks: node_olinks,
+            ilinks: node_ilinks,
         });
     }
 
