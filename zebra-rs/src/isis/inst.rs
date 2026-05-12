@@ -32,6 +32,7 @@ use crate::{
     context::Context,
     rib::RibRxChannel,
 };
+use isis_packet::srv6::EncapType;
 // use spf_rs as spf;
 use crate::context::Timer;
 use crate::spf;
@@ -2008,6 +2009,11 @@ pub struct SpfNexthop {
     pub ifindex: u32,
     pub adjacency: bool,
     pub sys_id: Option<IsisSysId>,
+    /// TI-LFA post-convergence repair for this primary nexthop. Empty
+    /// (None) until ti_lfa_compute runs and fills it in; for now no
+    /// caller sets it. Sorted-after-primary install is handled by
+    /// `build_rib_nexthop` via the metric-offset convention.
+    pub backup: Option<RepairPathMpls>,
 }
 
 // IPv6 single-topology mirror of SpfRoute / SpfNexthop. Nexthop key is the
@@ -2026,7 +2032,41 @@ pub struct SpfNexthopV6 {
     pub ifindex: u32,
     pub adjacency: bool,
     pub sys_id: Option<IsisSysId>,
+    /// TI-LFA post-convergence repair for this primary nexthop. The
+    /// SRv6 form carries an SRH segment list + encap mode instead of
+    /// an MPLS label stack.
+    pub backup: Option<RepairPathSrv6>,
 }
+
+/// TI-LFA SR-MPLS repair path. Today's repair-path computation is not
+/// wired in yet — once `ti_lfa_compute` lands, `SpfNexthop.backup`
+/// will be populated with the egress info and the SR-MPLS label stack
+/// (typically `[prefix-SID(P), adj-SID(P→Q)]` for the 2-label case).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairPathMpls {
+    pub ifindex: u32,
+    pub addr: Ipv4Addr,
+    pub labels: Vec<rib::Label>,
+}
+
+/// TI-LFA SRv6 repair path. The segment list expresses the post-
+/// convergence path as IPv6 endpoint SIDs — typically
+/// `[End(P), End.X(P→Q)]` for the 2-segment case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairPathSrv6 {
+    pub ifindex: u32,
+    pub addr: Ipv6Addr,
+    pub segs: Vec<Ipv6Addr>,
+    pub encap: EncapType,
+}
+
+/// Sort offset between the primary nhop's metric and its TI-LFA
+/// backup's metric inside a `NexthopList`. The value is RIB-internal
+/// and never reaches the wire — it only governs the metric-sort that
+/// puts the primary at `.nexthops[0]`. See the design discussion that
+/// landed PR #489: blanket `+1` keeps show output legible and avoids
+/// `u32::MAX` sentinels.
+pub const BACKUP_METRIC_OFFSET: u32 = 1;
 
 pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
 pub type DiffResultV6<'a> = spf::TableDiffResult<'a, Ipv6Net, SpfRouteV6>;
@@ -2054,16 +2094,34 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
+    // Flatten primaries and (when present) their TI-LFA repair backups
+    // into a single Vec at distinct metrics; build_rib_nexthop groups
+    // them by metric and routes Multi-vs-List dispatch from there.
+    let backup_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
     let nhops: Vec<rib::NexthopUni> = route
         .nhops
         .iter()
-        .map(|(key, value)| nhop_to_nexthop_uni(key, route, value))
+        .flat_map(|(key, value)| {
+            let primary = nhop_to_nexthop_uni(key, route, value);
+            let backup = value
+                .backup
+                .as_ref()
+                .map(|b| backup_to_nexthop_uni(b, backup_metric));
+            std::iter::once(primary).chain(backup)
+        })
         .collect();
-    // TI-LFA backup nhops (at primary.metric + 1) will be appended
-    // here once SpfNexthop carries a backup field; build_rib_nexthop
-    // then routes them into Nexthop::List by detecting mixed metrics.
     rib.nexthop = build_rib_nexthop(nhops);
     rib
+}
+
+fn backup_to_nexthop_uni(backup: &RepairPathMpls, metric: u32) -> rib::NexthopUni {
+    let mut nhop = rib::NexthopUni::new(
+        std::net::IpAddr::V4(backup.addr),
+        metric,
+        backup.labels.clone(),
+    );
+    nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
+    nhop
 }
 
 // Dispatch a flat list of NexthopUni into the right rib::Nexthop
@@ -2180,13 +2238,29 @@ fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
+    let backup_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
     let nhops: Vec<rib::NexthopUni> = route
         .nhops
         .iter()
-        .map(|(key, value)| nhop_to_nexthop_uni_v6(key, route, value))
+        .flat_map(|(key, value)| {
+            let primary = nhop_to_nexthop_uni_v6(key, route, value);
+            let backup = value
+                .backup
+                .as_ref()
+                .map(|b| backup_to_nexthop_uni_v6(b, backup_metric));
+            std::iter::once(primary).chain(backup)
+        })
         .collect();
     rib.nexthop = build_rib_nexthop(nhops);
     rib
+}
+
+fn backup_to_nexthop_uni_v6(backup: &RepairPathSrv6, metric: u32) -> rib::NexthopUni {
+    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(backup.addr), metric, vec![]);
+    nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
+    nhop.segs = backup.segs.clone();
+    nhop.encap_type = Some(backup.encap);
+    nhop
 }
 
 pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6) {
@@ -2382,6 +2456,7 @@ fn build_adjacency_ilm(
                         ifindex: *ifindex,
                         adjacency: true,
                         sys_id: Some(*nhop_id),
+                        backup: None,
                     };
                     nhops.insert(*addr, nhop);
                 }
@@ -2455,6 +2530,7 @@ fn build_rib_from_spf(
                                 ifindex: *ifindex,
                                 adjacency: p[nhop_idx] == *node,
                                 sys_id: Some(*nhop_id),
+                                backup: None,
                             };
                             spf_nhops.insert(*addr, nhop);
                         }
@@ -2627,6 +2703,7 @@ fn build_rib_from_spf_v6(
                             ifindex: *ifindex,
                             adjacency: is_adjacency,
                             sys_id: Some(nhop_sys_id),
+                            backup: None,
                         };
                         spf_nhops.insert(*addr, nhop);
                     }
@@ -2949,5 +3026,124 @@ mod tests {
         };
         assert_eq!(backup_grp.metric, 21);
         assert_eq!(backup_grp.nexthops.len(), 2);
+    }
+
+    #[test]
+    fn make_rib_entry_without_backup_yields_uni() {
+        // Identity check: today every SpfNexthop has backup=None, so
+        // make_rib_entry still emits a Nexthop::Uni for a 1-nhop route.
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            "10.0.0.1".parse().unwrap(),
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: None,
+            },
+        );
+        let route = SpfRoute {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+        };
+        let entry = make_rib_entry(&route);
+        assert!(matches!(entry.nexthop, rib::Nexthop::Uni(_)));
+    }
+
+    #[test]
+    fn make_rib_entry_with_mpls_backup_yields_list_at_metric_plus_one() {
+        // SpfNexthop with backup -> List([primary at 20, backup at 21]).
+        // Verifies BACKUP_METRIC_OFFSET + the flat_map plumbing in
+        // make_rib_entry feed build_rib_nexthop a mixed-metric Vec
+        // that collapses to a sorted List.
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let backup_addr: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: Some(RepairPathMpls {
+                    ifindex: 20,
+                    addr: backup_addr,
+                    labels: vec![rib::Label::Implicit(16002), rib::Label::Explicit(24007)],
+                }),
+            },
+        );
+        let route = SpfRoute {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+        };
+        let entry = make_rib_entry(&route);
+
+        let rib::Nexthop::List(list) = &entry.nexthop else {
+            panic!("expected List, got {:?}", entry.nexthop);
+        };
+        assert_eq!(list.nexthops.len(), 2);
+
+        let rib::NexthopMember::Uni(p) = &list.nexthops[0] else {
+            panic!("expected Uni primary, got {:?}", list.nexthops[0]);
+        };
+        assert_eq!(p.metric, 20);
+        assert_eq!(p.addr, std::net::IpAddr::V4(primary_addr));
+
+        let rib::NexthopMember::Uni(b) = &list.nexthops[1] else {
+            panic!("expected Uni backup, got {:?}", list.nexthops[1]);
+        };
+        assert_eq!(b.metric, 21);
+        assert_eq!(b.addr, std::net::IpAddr::V4(backup_addr));
+        assert_eq!(b.mpls.len(), 2);
+        assert_eq!(b.ifindex_origin, Some(20));
+    }
+
+    #[test]
+    fn make_rib_entry_v6_with_srv6_backup_carries_segs_and_encap() {
+        // The IPv6 mirror: SpfNexthopV6 with an SRv6 repair populates
+        // the backup NexthopUni's segs + encap_type. The label stack
+        // stays empty — SRv6 doesn't use MPLS.
+        let primary_addr: Ipv6Addr = "fe80::a:2".parse().unwrap();
+        let backup_addr: Ipv6Addr = "fe80::a:5".parse().unwrap();
+        let end_sid: Ipv6Addr = "2001:db8:a:2::".parse().unwrap();
+        let endx_sid: Ipv6Addr = "2001:db8:a:2:c000::".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthopV6 {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: Some(RepairPathSrv6 {
+                    ifindex: 20,
+                    addr: backup_addr,
+                    segs: vec![end_sid, endx_sid],
+                    encap: EncapType::HEncap,
+                }),
+            },
+        );
+        let route = SpfRouteV6 {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+        };
+        let entry = make_rib_entry_v6(&route);
+
+        let rib::Nexthop::List(list) = &entry.nexthop else {
+            panic!("expected List, got {:?}", entry.nexthop);
+        };
+        assert_eq!(list.nexthops.len(), 2);
+        let rib::NexthopMember::Uni(b) = &list.nexthops[1] else {
+            panic!("expected Uni backup, got {:?}", list.nexthops[1]);
+        };
+        assert_eq!(b.metric, 21);
+        assert_eq!(b.segs, vec![end_sid, endx_sid]);
+        assert_eq!(b.encap_type, Some(EncapType::HEncap));
+        assert!(b.mpls.is_empty());
     }
 }
