@@ -2002,6 +2002,10 @@ pub struct SpfRoute {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+    /// SPF vertex id this route was built from. Set by
+    /// `build_rib_from_spf`; used by TI-LFA Step 4c to join routes
+    /// with per-destination repair candidates from Step 4b.
+    pub dest_vertex: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2025,6 +2029,9 @@ pub struct SpfRouteV6 {
     pub nhops: BTreeMap<Ipv6Addr, SpfNexthopV6>,
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+    /// Same role as `SpfRoute.dest_vertex` — populated by
+    /// `build_rib_from_spf_v6` for Step 4d's repair-path join.
+    pub dest_vertex: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2569,6 +2576,7 @@ fn build_rib_from_spf(
                     nhops: spf_nhops.clone(),
                     sid,
                     prefix_sid,
+                    dest_vertex: Some(*node),
                 };
 
                 if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -2728,6 +2736,7 @@ fn build_rib_from_spf_v6(
                     nhops: spf_nhops.clone(),
                     sid: None,
                     prefix_sid: None,
+                    dest_vertex: Some(*node),
                 };
 
                 if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -2974,51 +2983,144 @@ fn link_protection_spf(
         .collect()
 }
 
-/// Walk every (protected edge, destination) pair from
-/// `link_protection_spf` and resolve the P-node / Q-node on its
-/// post-convergence path. The returned vector has one entry per
-/// destination that has at least one viable repair; entries where
-/// the modified topology can't reach the destination drop out.
-///
-/// `_path` is `Vec<usize>` (the post-conv path vertices) so the
-/// label/segment assembly step can read the adjacent (P, next) pair
-/// without re-running SPF — it's the same data used to identify Q.
-fn resolve_pq_for_edges(
+/// Output of Step 4b — for one (protected neighbor, destination)
+/// pair, all the data Step 4c needs to install the backup nexthop.
+#[derive(Debug)]
+struct RepairCandidate {
+    pq: PQNodes,
+    /// Egress ifindex of the local link to the post-conv first-hop.
+    repair_ifindex: u32,
+    /// IPv4 address of the post-conv first-hop on that link.
+    repair_addr: Ipv4Addr,
+}
+
+/// Resolve the local-link IPv4 egress for the first non-pseudonode
+/// vertex on a post-convergence path. Mirrors the leading-pseudonode
+/// skip in `build_rib_from_spf` so a LAN repair lands on the actual
+/// router behind the DIS pseudonode rather than the pseudonode
+/// itself.
+fn find_local_nhop_v4(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u32, Ipv4Addr)> {
+    let mut idx = 0;
+    while idx < path.len() && top.lsp_map.get(&level).is_pseudo(path[idx]) {
+        idx += 1;
+    }
+    let v = *path.get(idx)?;
+    let sys_id = *top.lsp_map.get(&level).resolve(v)?;
+    for (ifindex, link) in top.links.iter() {
+        if let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id)
+            && let Some((addr, _)) = nbr.addr4.iter().next()
+        {
+            return Some((*ifindex, *addr));
+        }
+    }
+    None
+}
+
+/// For every (protected edge, destination) that survives PQ
+/// identification AND has a resolvable local egress to its post-conv
+/// first-hop, build a RepairCandidate. The key is
+/// (protected_nbr_sys_id, dest_vertex) so the install pass can match
+/// against SpfNexthop.sys_id (already populated by build_rib_from_spf)
+/// and SpfRoute.dest_vertex (added alongside this commit).
+fn resolve_repairs_mpls(
+    top: &IsisTop,
+    level: Level,
     graph: &spf::Graph,
     source: usize,
     protected: &[ProtectedEdgeSpf],
-) -> Vec<(usize, usize, PQNodes, Vec<usize>)> {
-    // tuple = (nbr_vertex, dest, PQNodes, post_conv_path)
-    let mut out = Vec::new();
+) -> BTreeMap<(IsisSysId, usize), RepairCandidate> {
+    let mut out = BTreeMap::new();
     for edge in protected {
+        let Some(nbr_sys) = top.lsp_map.get(&level).resolve(edge.nbr_vertex) else {
+            continue;
+        };
+        let nbr_sys = *nbr_sys;
         for (dest, post_path) in &edge.repairs {
             let Some(path_vec) = post_path.paths.first() else {
                 continue;
             };
-            if let Some(pq) = identify_pq_nodes(graph, source, edge.nbr_vertex, *dest, path_vec) {
-                out.push((edge.nbr_vertex, *dest, pq, path_vec.clone()));
-            }
+            let Some(pq) = identify_pq_nodes(graph, source, edge.nbr_vertex, *dest, path_vec)
+            else {
+                continue;
+            };
+            let Some((repair_ifindex, repair_addr)) = find_local_nhop_v4(top, level, path_vec)
+            else {
+                continue;
+            };
+            out.insert(
+                (nbr_sys, *dest),
+                RepairCandidate {
+                    pq,
+                    repair_ifindex,
+                    repair_addr,
+                },
+            );
         }
     }
     out
 }
 
-/// TI-LFA SR-MPLS repair-path computation. Steps 4a/4b produce the
-/// (protected edge, dest, PQ-nodes, post-conv path) records; the
-/// label-stack assembly that pushes those into `SpfNexthop.backup`
-/// lands in Step 4c.
+/// TI-LFA SR-MPLS repair-path install. Steps 4a/4b produce repair
+/// candidates per (protected nbr sys_id, destination vertex); this
+/// step iterates `routes` and writes `SpfNexthop.backup` on every
+/// primary nhop whose sys_id matches a protected neighbor for a
+/// destination that has a viable PQ-overlap-at-destination case
+/// (single-label repair via the destination's prefix-SID).
+///
+/// Other cases (PQ-overlap deeper than the dest, or 2-label gap)
+/// stay unannotated for now — follow-ups extend the assembly with
+/// transit prefix-SID + adj-SID lookups against the LSDB.
 fn ti_lfa_compute_mpls(
     top: &mut IsisTop,
-    _level: Level,
+    level: Level,
     graph: &spf::Graph,
     source: usize,
     primary: &BTreeMap<usize, spf::Path>,
-    _routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
+    routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
 ) {
-    if top.config.ti_lfa_enabled && top.config.sr_mpls_enabled {
-        let protected = link_protection_spf(graph, source, primary);
-        let _candidates = resolve_pq_for_edges(graph, source, &protected);
-        // SR-MPLS label-stack assembly lands here.
+    if !(top.config.ti_lfa_enabled && top.config.sr_mpls_enabled) {
+        return;
+    }
+    let protected = link_protection_spf(graph, source, primary);
+    let repairs = resolve_repairs_mpls(top, level, graph, source, &protected);
+    if !repairs.is_empty() {
+        apply_repairs_mpls(routes, &repairs);
+    }
+}
+
+/// Write `SpfNexthop.backup` on every primary nhop whose
+/// (nbr sys_id, dest_vertex) appears in `repairs` for the
+/// PQ-overlap-at-destination case (single-label repair, label is
+/// the destination's own prefix-SID). Other PQ shapes are skipped
+/// — they need transit prefix-SID + adj-SID lookups that aren't
+/// implemented yet.
+fn apply_repairs_mpls(
+    routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
+    repairs: &BTreeMap<(IsisSysId, usize), RepairCandidate>,
+) {
+    for (_prefix, route) in routes.iter_mut() {
+        let Some(dest_v) = route.dest_vertex else {
+            continue;
+        };
+        let Some(label) = route.sid else {
+            continue;
+        };
+        for nhop in route.nhops.values_mut() {
+            let Some(nbr_sys) = nhop.sys_id else {
+                continue;
+            };
+            let Some(cand) = repairs.get(&(nbr_sys, dest_v)) else {
+                continue;
+            };
+            if cand.pq.p != dest_v || cand.pq.q != dest_v {
+                continue;
+            }
+            nhop.backup = Some(RepairPathMpls {
+                ifindex: cand.repair_ifindex,
+                addr: cand.repair_addr,
+                labels: vec![rib::Label::Explicit(label)],
+            });
+        }
     }
 }
 
@@ -3026,7 +3128,7 @@ fn ti_lfa_compute_mpls(
 /// segment-list assembly (End / End.X) lands in Step 4d.
 fn ti_lfa_compute_srv6(
     top: &mut IsisTop,
-    _level: Level,
+    level: Level,
     graph: &spf::Graph,
     source: usize,
     primary: &BTreeMap<usize, spf::Path>,
@@ -3034,8 +3136,8 @@ fn ti_lfa_compute_srv6(
 ) {
     if top.config.ti_lfa_enabled && top.config.sr_srv6_enabled {
         let protected = link_protection_spf(graph, source, primary);
-        let _candidates = resolve_pq_for_edges(graph, source, &protected);
-        // SRv6 End/End.X segment-list assembly lands here.
+        let _repairs = resolve_repairs_mpls(top, level, graph, source, &protected);
+        // SRv6 End/End.X segment-list assembly lands in Step 4d.
     }
 }
 
@@ -3285,6 +3387,7 @@ mod tests {
             nhops,
             sid: None,
             prefix_sid: None,
+            dest_vertex: None,
         };
         let entry = make_rib_entry(&route);
         assert!(matches!(entry.nexthop, rib::Nexthop::Uni(_)));
@@ -3317,6 +3420,7 @@ mod tests {
             nhops,
             sid: None,
             prefix_sid: None,
+            dest_vertex: None,
         };
         let entry = make_rib_entry(&route);
 
@@ -3369,6 +3473,7 @@ mod tests {
             nhops,
             sid: None,
             prefix_sid: None,
+            dest_vertex: None,
         };
         let entry = make_rib_entry_v6(&route);
 
@@ -3497,5 +3602,178 @@ mod tests {
     fn identify_pq_nodes_returns_none_for_empty_path() {
         let (graph, _) = build_link_protection_fixture();
         assert!(identify_pq_nodes(&graph, 0, 1, 3, &[]).is_none());
+    }
+
+    fn mk_sys_id(byte: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, byte],
+        }
+    }
+
+    #[test]
+    fn apply_repairs_mpls_writes_backup_on_pq_overlap_at_dest() {
+        // Route to 1.1.1.1/32 with dest_vertex=3, prefix-SID label
+        // 16001, primary nhop via 10.0.0.1 with sys_id 0...01.
+        // Repair candidate: PQ-overlap at dest_vertex, repair via
+        // 10.0.0.5 on ifindex 20. apply_repairs_mpls should pin a
+        // RepairPathMpls onto the primary nhop carrying the dest's
+        // prefix-SID as a single Explicit label.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let backup_addr: Ipv4Addr = "10.0.0.5".parse().unwrap();
+
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv4Net, SpfRoute>::new();
+        let prefix: Ipv4Net = "1.1.1.1/32".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRoute {
+                metric: 20,
+                nhops,
+                sid: Some(16001),
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidate {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr: backup_addr,
+            },
+        );
+
+        apply_repairs_mpls(&mut routes, &repairs);
+
+        let route = routes.get(&prefix).expect("route should be present");
+        let nhop = route
+            .nhops
+            .get(&primary_addr)
+            .expect("primary nhop should be present");
+        let backup = nhop.backup.as_ref().expect("backup should be populated");
+        assert_eq!(backup.ifindex, 20);
+        assert_eq!(backup.addr, backup_addr);
+        assert_eq!(backup.labels, vec![rib::Label::Explicit(16001)]);
+    }
+
+    #[test]
+    fn apply_repairs_mpls_skips_two_label_case_for_now() {
+        // P != Q (== gap, would need an adj-SID lookup the 1-label
+        // commit doesn't implement). Backup stays None.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 5usize;
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv4Net, SpfRoute>::new();
+        let prefix: Ipv4Net = "2.2.2.2/32".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRoute {
+                metric: 20,
+                nhops,
+                sid: Some(16002),
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidate {
+                pq: PQNodes { p: 2, q: 4 }, // gap: P=2, Q=4, neither is dest_v
+                repair_ifindex: 20,
+                repair_addr: "10.0.0.5".parse().unwrap(),
+            },
+        );
+
+        apply_repairs_mpls(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        assert!(nhop.backup.is_none(), "2-label case should not populate");
+    }
+
+    #[test]
+    fn apply_repairs_mpls_skips_when_route_sid_missing() {
+        // If the destination has no prefix-SID we can't build a
+        // 1-label repair, so the nhop stays unannotated.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv4Net, SpfRoute>::new();
+        let prefix: Ipv4Net = "3.3.3.3/32".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRoute {
+                metric: 20,
+                nhops,
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidate {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr: "10.0.0.5".parse().unwrap(),
+            },
+        );
+
+        apply_repairs_mpls(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        assert!(nhop.backup.is_none());
     }
 }
