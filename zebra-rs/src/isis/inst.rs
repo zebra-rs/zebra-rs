@@ -2842,17 +2842,21 @@ struct ProtectedEdgeSpf {
     repairs: BTreeMap<usize, spf::Path>,
 }
 
-/// Clone `graph` and snip the directed edge `(src -> dst)` in both
-/// the olinks and ilinks indexes. Used by both forward SPF (which
-/// reads olinks) and reverse SPF (which reads ilinks) so both
-/// directions of the protected link disappear from the modified
-/// topology.
+/// Clone `graph` and snip the link between `src` and `dst` in both
+/// directions — link protection means the physical link is down, so
+/// both src->dst and dst->src disappear from the post-failure
+/// topology. Removes the forward edge from `src.olinks` /
+/// `dst.ilinks` and the reverse edge from `dst.olinks` /
+/// `src.ilinks` so forward SPF (olinks) and reverse SPF (ilinks)
+/// both see the modified topology consistently.
 fn graph_minus_edge(graph: &spf::Graph, src: usize, dst: usize) -> spf::Graph {
     let mut modified = graph.clone();
     if let Some(s) = modified.get_mut(&src) {
         s.olinks.retain(|l| l.to != dst);
+        s.ilinks.retain(|l| l.from != dst);
     }
     if let Some(d) = modified.get_mut(&dst) {
+        d.olinks.retain(|l| l.to != src);
         d.ilinks.retain(|l| l.from != src);
     }
     modified
@@ -2993,15 +2997,20 @@ fn link_protection_spf(
         .collect()
 }
 
-/// Output of Step 4b — for one (protected neighbor, destination)
-/// pair, all the data Step 4c needs to install the backup nexthop.
+/// Output of `resolve_repairs_mpls` — for one (protected neighbor,
+/// destination) pair, the local egress and the pre-resolved MPLS
+/// label stack that `spf::tilfa()` + label lookup produced.
 #[derive(Debug)]
 struct RepairCandidate {
-    pq: PQNodes,
     /// Egress ifindex of the local link to the post-conv first-hop.
     repair_ifindex: u32,
     /// IPv4 address of the post-conv first-hop on that link.
     repair_addr: Ipv4Addr,
+    /// Segment list translated to MPLS labels. Each NodeSid /
+    /// AdjSid from `spf::tilfa()` becomes one `Label::Explicit`.
+    /// An empty stack is a valid trivial repair — the post-conv
+    /// first-hop already forwards correctly without an SR push.
+    labels: Vec<rib::Label>,
 }
 
 /// IPv6 sibling of `find_local_nhop_v4`. Returns the first link-
@@ -3048,12 +3057,158 @@ fn find_local_nhop_v4(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u3
     None
 }
 
-/// For every (protected edge, destination) that survives PQ
-/// identification AND has a resolvable local egress to its post-conv
-/// first-hop, build a RepairCandidate. The key is
-/// (protected_nbr_sys_id, dest_vertex) so the install pass can match
-/// against SpfNexthop.sys_id (already populated by build_rib_from_spf)
-/// and SpfRoute.dest_vertex (added alongside this commit).
+/// Resolve a peer-advertised SID to an absolute MPLS label, using
+/// the originator's SR block when the SID is Index-encoded.
+/// `block_kind` picks the global SRGB (prefix-SIDs) or the local
+/// SRLB (adjacency-SIDs).
+enum SrBlockKind {
+    Global,
+    Local,
+}
+
+fn resolve_sid_to_label(
+    top: &IsisTop,
+    level: Level,
+    originator: &IsisSysId,
+    sid: &SidLabelValue,
+    block_kind: SrBlockKind,
+) -> Option<u32> {
+    match sid {
+        SidLabelValue::Label(l) => Some(*l),
+        SidLabelValue::Index(idx) => {
+            let block = top.label_map.get(&level).get(originator)?;
+            match block_kind {
+                SrBlockKind::Global => Some(block.global.start + idx),
+                SrBlockKind::Local => Some(block.local.as_ref()?.start + idx),
+            }
+        }
+    }
+}
+
+/// Look up `vertex`'s prefix-SID (NodeSID) as an absolute MPLS label.
+/// Walks the vertex's IPv4 reach entries (typically the loopback)
+/// for the first prefix-SID sub-TLV, then resolves Index against the
+/// originator's SRGB.
+fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Option<u32> {
+    let sys_id = *top.lsp_map.get(&level).resolve(vertex)?;
+    let entries = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id)?;
+    for entry in entries.iter() {
+        let Some(prefix_sid) = entry.prefix_sid() else {
+            continue;
+        };
+        if let Some(label) =
+            resolve_sid_to_label(top, level, &sys_id, &prefix_sid.sid, SrBlockKind::Global)
+        {
+            return Some(label);
+        }
+    }
+    None
+}
+
+/// Look up the adjacency-SID `from` advertises for the link to `to`.
+/// For LAN adjacencies (`via_pseudonode = Some(pn)`) the IS Reach
+/// entry's neighbor_id matches the pseudonode and the LanAdjSid
+/// sub-TLV's `system_id` field identifies the LAN member. For P2P
+/// adjacencies the neighbor_id is `(to_sys, 0)` and any AdjSid
+/// sub-TLV under it qualifies. Index-encoded SIDs resolve against
+/// the originator's SRLB.
+fn adj_sid_label_for_link(
+    top: &IsisTop,
+    level: Level,
+    from_vertex: usize,
+    to_vertex: usize,
+    via_pseudonode: Option<usize>,
+) -> Option<u32> {
+    let from_sys = *top.lsp_map.get(&level).resolve(from_vertex)?;
+    let target_neighbor_id = if let Some(via_v) = via_pseudonode {
+        *top.lsp_map.get(&level).resolve_neighbor(via_v)?
+    } else {
+        let to_sys = *top.lsp_map.get(&level).resolve(to_vertex)?;
+        IsisNeighborId::from_sys_id(&to_sys, 0)
+    };
+
+    let lsp_key = IsisLspId::new(from_sys, 0, 0);
+    let lsa = top.lsdb.get(&level).get(&lsp_key)?;
+    for tlv in &lsa.lsp.tlvs {
+        let IsisTlv::ExtIsReach(reach) = tlv else {
+            continue;
+        };
+        for entry in &reach.entries {
+            if entry.neighbor_id != target_neighbor_id {
+                continue;
+            }
+            for sub in &entry.subs {
+                match sub {
+                    neigh::IsisSubTlv::AdjSid(adj) => {
+                        if let Some(l) = resolve_sid_to_label(
+                            top,
+                            level,
+                            &from_sys,
+                            &adj.sid,
+                            SrBlockKind::Local,
+                        ) {
+                            return Some(l);
+                        }
+                    }
+                    neigh::IsisSubTlv::LanAdjSid(lan_adj) => {
+                        let Some(to_sys) = top.lsp_map.get(&level).resolve(to_vertex) else {
+                            continue;
+                        };
+                        if &lan_adj.system_id == to_sys
+                            && let Some(l) = resolve_sid_to_label(
+                                top,
+                                level,
+                                &from_sys,
+                                &lan_adj.sid,
+                                SrBlockKind::Local,
+                            )
+                        {
+                            return Some(l);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Translate a TI-LFA repair list from `spf::tilfa()` into an
+/// MPLS label stack. Returns None when any segment fails to resolve
+/// — we refuse to install a partial stack since the resulting label
+/// path would diverge from the post-convergence path the algorithm
+/// computed.
+fn repair_segments_to_mpls_labels(
+    top: &IsisTop,
+    level: Level,
+    segments: &[spf::SrSegment],
+) -> Option<Vec<rib::Label>> {
+    let mut labels = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let label = match seg {
+            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v)?,
+            spf::SrSegment::AdjSid(from, to, via) => {
+                adj_sid_label_for_link(top, level, *from, *to, *via)?
+            }
+        };
+        labels.push(rib::Label::Explicit(label));
+    }
+    Some(labels)
+}
+
+/// For each (protected edge, affected destination) returned by
+/// `link_protection_spf`, build the post-failure topology and call
+/// `spf::tilfa()` to produce the RFC 9490 segment list. Each
+/// `SrSegment` is resolved to an MPLS label against the LSDB, and
+/// the resulting stack is packed into a `RepairCandidate` keyed by
+/// (protected nbr sys_id, destination vertex).
+///
+/// `spf::tilfa()` already handles P-space / Q-space / PC-paths /
+/// `make_repair_list`, so this function is pure plumbing — convert
+/// segments to MPLS labels and pair them with the local egress.
+/// Pure link protection: pass the edge-removed graph with `x = []`
+/// (no node exclusion).
 fn resolve_repairs_mpls(
     top: &IsisTop,
     level: Level,
@@ -3067,12 +3222,18 @@ fn resolve_repairs_mpls(
             continue;
         };
         let nbr_sys = *nbr_sys;
+        // One modified graph per protected link, reused across
+        // every affected destination on this edge.
+        let modified = graph_minus_edge(graph, source, edge.nbr_vertex);
         for (dest, post_path) in &edge.repairs {
             let Some(path_vec) = post_path.paths.first() else {
                 continue;
             };
-            let Some(pq) = identify_pq_nodes(graph, source, edge.nbr_vertex, *dest, path_vec)
-            else {
+            let mut repair_lists = spf::tilfa(&modified, source, *dest, &[]);
+            let Some(segments) = repair_lists.first_mut().map(std::mem::take) else {
+                continue;
+            };
+            let Some(labels) = repair_segments_to_mpls_labels(top, level, &segments) else {
                 continue;
             };
             let Some((repair_ifindex, repair_addr)) = find_local_nhop_v4(top, level, path_vec)
@@ -3082,9 +3243,9 @@ fn resolve_repairs_mpls(
             out.insert(
                 (nbr_sys, *dest),
                 RepairCandidate {
-                    pq,
                     repair_ifindex,
                     repair_addr,
+                    labels,
                 },
             );
         }
@@ -3092,16 +3253,10 @@ fn resolve_repairs_mpls(
     out
 }
 
-/// TI-LFA SR-MPLS repair-path install. Steps 4a/4b produce repair
-/// candidates per (protected nbr sys_id, destination vertex); this
-/// step iterates `routes` and writes `SpfNexthop.backup` on every
-/// primary nhop whose sys_id matches a protected neighbor for a
-/// destination that has a viable PQ-overlap-at-destination case
-/// (single-label repair via the destination's prefix-SID).
-///
-/// Other cases (PQ-overlap deeper than the dest, or 2-label gap)
-/// stay unannotated for now — follow-ups extend the assembly with
-/// transit prefix-SID + adj-SID lookups against the LSDB.
+/// TI-LFA SR-MPLS repair-path install. `resolve_repairs_mpls`
+/// produces a (protected nbr sys_id, dest vertex) -> RepairCandidate
+/// map; this step writes `SpfNexthop.backup` on every primary nhop
+/// whose key matches.
 fn ti_lfa_compute_mpls(
     top: &mut IsisTop,
     level: Level,
@@ -3120,21 +3275,16 @@ fn ti_lfa_compute_mpls(
     }
 }
 
-/// Write `SpfNexthop.backup` on every primary nhop whose
-/// (nbr sys_id, dest_vertex) appears in `repairs` for the
-/// PQ-overlap-at-destination case (single-label repair, label is
-/// the destination's own prefix-SID). Other PQ shapes are skipped
-/// — they need transit prefix-SID + adj-SID lookups that aren't
-/// implemented yet.
+/// Copy each pre-resolved RepairCandidate into the matching primary
+/// nhop's `backup` field. The label stack — including the
+/// NodeSID(P) + AdjSid(P->Q) ... AdjSid(...) sequence produced by
+/// `make_repair_list` — was already assembled in resolve.
 fn apply_repairs_mpls(
     routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
     repairs: &BTreeMap<(IsisSysId, usize), RepairCandidate>,
 ) {
     for (_prefix, route) in routes.iter_mut() {
         let Some(dest_v) = route.dest_vertex else {
-            continue;
-        };
-        let Some(label) = route.sid else {
             continue;
         };
         for nhop in route.nhops.values_mut() {
@@ -3144,13 +3294,10 @@ fn apply_repairs_mpls(
             let Some(cand) = repairs.get(&(nbr_sys, dest_v)) else {
                 continue;
             };
-            if cand.pq.p != dest_v || cand.pq.q != dest_v {
-                continue;
-            }
             nhop.backup = Some(RepairPathMpls {
                 ifindex: cand.repair_ifindex,
                 addr: cand.repair_addr,
-                labels: vec![rib::Label::Explicit(label)],
+                labels: cand.labels.clone(),
             });
         }
     }
@@ -3709,14 +3856,20 @@ mod tests {
     }
 
     #[test]
-    fn graph_minus_edge_drops_olink_and_ilink() {
+    fn graph_minus_edge_drops_both_directions() {
+        // Link protection assumes the physical link is down, so the
+        // helper removes both directed edges: S->A and A->S. Reverse
+        // SPF (used by Q-space) sees the same modified topology as
+        // forward SPF (used by P-space / PC-paths).
         let (graph, _) = build_link_protection_fixture();
         let pruned = graph_minus_edge(&graph, 0, 1);
-        // S has S->A removed.
+        // Forward direction S->A removed (olinks on S, ilinks on A).
         assert!(!pruned[&0].olinks.iter().any(|l| l.to == 1));
-        // A has its inbound edge from S removed too.
         assert!(!pruned[&1].ilinks.iter().any(|l| l.from == 0));
-        // S->B and other links intact.
+        // Reverse direction A->S removed (olinks on A, ilinks on S).
+        assert!(!pruned[&1].olinks.iter().any(|l| l.to == 0));
+        assert!(!pruned[&0].ilinks.iter().any(|l| l.from == 1));
+        // Unrelated links intact.
         assert!(pruned[&0].olinks.iter().any(|l| l.to == 2));
     }
 
@@ -3785,12 +3938,9 @@ mod tests {
         repairs.insert(
             (nbr_sys, dest_v),
             RepairCandidate {
-                pq: PQNodes {
-                    p: dest_v,
-                    q: dest_v,
-                },
                 repair_ifindex: 20,
                 repair_addr: backup_addr,
+                labels: vec![rib::Label::Explicit(16001)],
             },
         );
 
@@ -3808,9 +3958,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_repairs_mpls_skips_two_label_case_for_now() {
-        // P != Q (== gap, would need an adj-SID lookup the 1-label
-        // commit doesn't implement). Backup stays None.
+    fn apply_repairs_mpls_writes_multi_segment_label_stack() {
+        // Now that resolve_repairs_mpls calls spf::tilfa() and
+        // pre-resolves labels via the LSDB, apply just copies the
+        // stack verbatim. The textbook 2-segment case from RFC 9490
+        // §6 is [NodeSID(P), AdjSID(P->Q)] — both Explicit labels in
+        // the resulting Vec<rib::Label>.
         let nbr_sys = mk_sys_id(1);
         let dest_v = 5usize;
         let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
@@ -3841,9 +3994,12 @@ mod tests {
         repairs.insert(
             (nbr_sys, dest_v),
             RepairCandidate {
-                pq: PQNodes { p: 2, q: 4 }, // gap: P=2, Q=4, neither is dest_v
                 repair_ifindex: 20,
                 repair_addr: "10.0.0.5".parse().unwrap(),
+                labels: vec![
+                    rib::Label::Explicit(16100), // NodeSID(P)
+                    rib::Label::Explicit(24007), // AdjSID(P -> Q)
+                ],
             },
         );
 
@@ -3855,7 +4011,11 @@ mod tests {
             .nhops
             .get(&primary_addr)
             .unwrap();
-        assert!(nhop.backup.is_none(), "2-label case should not populate");
+        let backup = nhop.backup.as_ref().expect("backup should be populated");
+        assert_eq!(
+            backup.labels,
+            vec![rib::Label::Explicit(16100), rib::Label::Explicit(24007),]
+        );
     }
 
     #[test]
@@ -3981,9 +4141,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_repairs_mpls_skips_when_route_sid_missing() {
-        // If the destination has no prefix-SID we can't build a
-        // 1-label repair, so the nhop stays unannotated.
+    fn apply_repairs_mpls_writes_empty_stack_for_trivial_repair() {
+        // make_repair_list returns an empty SrSegment list when the
+        // post-conv first-hop is already in the PQ-overlap — no SR
+        // push is needed. The candidate carries `labels: vec![]`;
+        // apply just copies it.
         let nbr_sys = mk_sys_id(1);
         let dest_v = 3usize;
         let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
@@ -4014,23 +4176,23 @@ mod tests {
         repairs.insert(
             (nbr_sys, dest_v),
             RepairCandidate {
-                pq: PQNodes {
-                    p: dest_v,
-                    q: dest_v,
-                },
                 repair_ifindex: 20,
                 repair_addr: "10.0.0.5".parse().unwrap(),
+                labels: vec![],
             },
         );
 
         apply_repairs_mpls(&mut routes, &repairs);
 
-        let nhop = routes
+        let backup = routes
             .get(&prefix)
             .unwrap()
             .nhops
             .get(&primary_addr)
-            .unwrap();
-        assert!(nhop.backup.is_none());
+            .unwrap()
+            .backup
+            .as_ref()
+            .expect("trivial repair still installs a backup nhop");
+        assert!(backup.labels.is_empty());
     }
 }
