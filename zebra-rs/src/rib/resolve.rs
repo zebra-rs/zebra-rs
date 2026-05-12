@@ -64,7 +64,7 @@ fn entry_nexthop_ifindex(entry: &RibEntry) -> Option<u32> {
     match &entry.nexthop {
         Nexthop::Uni(uni) if uni.ifindex().is_some() => uni.ifindex(),
         Nexthop::Multi(multi) => first_ifindex(&multi.nexthops),
-        Nexthop::List(list) => first_ifindex(&list.nexthops),
+        Nexthop::List(list) => list.iter_unis().find_map(|u| u.ifindex()),
         _ => None,
     }
 }
@@ -84,8 +84,8 @@ fn entry_nexthop_addr(entry: &RibEntry) -> Option<IpAddr> {
             .filter(|u| u.ifindex().is_none())
             .map(|u| u.addr),
         Nexthop::List(list) => list
-            .nexthops
-            .first()
+            .iter_unis()
+            .next()
             .filter(|u| u.ifindex().is_none())
             .map(|u| u.addr),
         _ => None,

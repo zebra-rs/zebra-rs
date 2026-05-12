@@ -12,7 +12,8 @@ use super::entry::RibEntry;
 use super::inst::{IlmEntry, Rib};
 use super::nexthop::NexthopUni;
 use super::{
-    Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMulti, RibEntries, RibType,
+    Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMember, NexthopMulti, RibEntries,
+    RibType,
 };
 
 // Flip to true to re-enable IPv6 RIB/FIB diagnostic trace.
@@ -912,10 +913,10 @@ fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, _ifdown: bool) {
             entry.valid = false;
         }
         Nexthop::List(list) => {
-            for uni in list.nexthops.iter_mut() {
+            for uni in list.iter_unis_mut() {
                 nexthop_uni_resolve(uni, nmap);
             }
-            for uni in list.nexthops.iter() {
+            for uni in list.iter_unis() {
                 if uni.valid {
                     entry.metric = uni.metric;
                     entry.valid = uni.valid;
@@ -1001,7 +1002,7 @@ fn rib_resolve_nexthop(
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
         let mut _pro_valid = false;
-        for uni in pro.nexthops.iter_mut() {
+        for uni in pro.iter_unis_mut() {
             let valid = resolve_nexthop_uni(uni, nmap, table);
             if valid {
                 _pro_valid = true;
@@ -1050,9 +1051,9 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                         Nexthop::Uni(euni)
                     } else {
                         let mut pro = NexthopList::default();
-                        pro.nexthops.push(uni.clone());
-                        pro.nexthops.push(euni);
-                        pro.nexthops.sort_by_key(|n| n.metric);
+                        pro.nexthops.push(NexthopMember::Uni(uni.clone()));
+                        pro.nexthops.push(NexthopMember::Uni(euni));
+                        pro.nexthops.sort_by_key(|m| m.metric());
                         e.metric = pro.metric();
                         Nexthop::List(pro)
                     }
@@ -1061,16 +1062,15 @@ fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, 
                     // Current One.
                     let mut btree = BTreeMap::new();
 
-                    for l in list.nexthops.iter() {
-                        // println!("");
-                        btree.insert(l.metric, l.clone());
+                    for member in list.nexthops.iter() {
+                        btree.insert(member.metric(), member.clone());
                     }
 
                     let Nexthop::Uni(uni) = entry.nexthop else {
                         return;
                     };
 
-                    btree.insert(uni.metric, uni);
+                    btree.insert(uni.metric, NexthopMember::Uni(uni));
 
                     let vec: Vec<_> = btree.values().cloned().collect();
                     let list = NexthopList { nexthops: vec };
@@ -1103,11 +1103,14 @@ fn rib_replace_system(
         Nexthop::Uni(uni) => uni.metric == entry.metric,
         Nexthop::Multi(multi) => multi.metric == entry.metric,
         Nexthop::List(list) => {
-            list.nexthops.retain(|x| x.metric != entry.metric);
+            list.nexthops.retain(|m| m.metric() != entry.metric);
             if list.nexthops.len() == 1 {
-                let uni = list.nexthops.pop().unwrap();
-                e.metric = uni.metric;
-                e.nexthop = Nexthop::Uni(uni);
+                let member = list.nexthops.pop().unwrap();
+                e.metric = member.metric();
+                e.nexthop = match member {
+                    NexthopMember::Uni(u) => Nexthop::Uni(u),
+                    NexthopMember::Multi(m) => Nexthop::Multi(m),
+                };
             }
             false
         }
@@ -1262,9 +1265,9 @@ fn rib_add_system_v6(
                         Nexthop::Uni(euni)
                     } else {
                         let mut pro = NexthopList::default();
-                        pro.nexthops.push(uni.clone());
-                        pro.nexthops.push(euni);
-                        pro.nexthops.sort_by_key(|n| n.metric);
+                        pro.nexthops.push(NexthopMember::Uni(uni.clone()));
+                        pro.nexthops.push(NexthopMember::Uni(euni));
+                        pro.nexthops.sort_by_key(|m| m.metric());
                         e.metric = pro.metric();
                         Nexthop::List(pro)
                     }
@@ -1273,16 +1276,15 @@ fn rib_add_system_v6(
                     // Current One.
                     let mut btree = BTreeMap::new();
 
-                    for l in list.nexthops.iter() {
-                        // println!("");
-                        btree.insert(l.metric, l.clone());
+                    for member in list.nexthops.iter() {
+                        btree.insert(member.metric(), member.clone());
                     }
 
                     let Nexthop::Uni(uni) = entry.nexthop else {
                         return;
                     };
 
-                    btree.insert(uni.metric, uni);
+                    btree.insert(uni.metric, NexthopMember::Uni(uni));
 
                     let vec: Vec<_> = btree.values().cloned().collect();
                     let list = NexthopList { nexthops: vec };
@@ -1313,11 +1315,14 @@ fn rib_replace_system_v6(
         Nexthop::Uni(uni) => uni.metric == entry.metric,
         Nexthop::Multi(multi) => multi.metric == entry.metric,
         Nexthop::List(list) => {
-            list.nexthops.retain(|x| x.metric != entry.metric);
+            list.nexthops.retain(|m| m.metric() != entry.metric);
             if list.nexthops.len() == 1 {
-                let uni = list.nexthops.pop().unwrap();
-                e.metric = uni.metric;
-                e.nexthop = Nexthop::Uni(uni);
+                let member = list.nexthops.pop().unwrap();
+                e.metric = member.metric();
+                e.nexthop = match member {
+                    NexthopMember::Uni(u) => Nexthop::Uni(u),
+                    NexthopMember::Multi(m) => Nexthop::Multi(m),
+                };
             }
             false
         }
@@ -1388,7 +1393,7 @@ fn rib_resolve_nexthop_v6(
         resolve_nexthop_multi(multi, nmap, set);
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
-        for uni in pro.nexthops.iter_mut() {
+        for uni in pro.iter_unis_mut() {
             let _ = resolve_nexthop_uni_v6(uni, nmap, table);
         }
     }

@@ -318,8 +318,8 @@ impl FibHandle {
                 self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
             }
             Nexthop::List(pro) => {
-                for uni in pro.nexthops.iter() {
-                    self.route_ipv4_add_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                for member in pro.nexthops.iter() {
+                    self.route_ipv4_add_uni(prefix, entry, &member.as_nexthop())
                         .await;
                 }
             }
@@ -427,8 +427,8 @@ impl FibHandle {
                 self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
             }
             Nexthop::List(list) => {
-                for uni in &list.nexthops {
-                    self.route_ipv4_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                for member in &list.nexthops {
+                    self.route_ipv4_del_uni(prefix, entry, &member.as_nexthop())
                         .await;
                 }
             }
@@ -621,8 +621,8 @@ impl FibHandle {
                 self.route_ipv6_add_uni(prefix, entry, &entry.nexthop).await;
             }
             Nexthop::List(pro) => {
-                for uni in pro.nexthops.iter() {
-                    self.route_ipv6_add_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                for member in pro.nexthops.iter() {
+                    self.route_ipv6_add_uni(prefix, entry, &member.as_nexthop())
                         .await;
                 }
             }
@@ -752,8 +752,8 @@ impl FibHandle {
                 self.route_ipv6_del_uni(prefix, entry, &entry.nexthop).await;
             }
             Nexthop::List(list) => {
-                for uni in &list.nexthops {
-                    self.route_ipv6_del_uni(prefix, entry, &Nexthop::Uni(uni.clone()))
+                for member in &list.nexthops {
+                    self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop())
                         .await;
                 }
             }

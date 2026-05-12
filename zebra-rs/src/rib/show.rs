@@ -165,8 +165,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
             })
             .collect(),
         Nexthop::List(pro) => pro
-            .nexthops
-            .iter()
+            .iter_unis()
             .map(|uni| NexthopJson {
                 address: Some(uni.addr.to_string()),
                 interface: rib.link_name(uni.ifindex().unwrap_or(0)),
@@ -279,8 +278,7 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
             })
             .collect(),
         Nexthop::List(pro) => pro
-            .nexthops
-            .iter()
+            .iter_unis()
             .map(|uni| NexthopJson {
                 address: Some(uni.addr.to_string()),
                 interface: rib.link_name(uni.ifindex().unwrap_or(0)),
@@ -443,7 +441,7 @@ pub fn rib_entry_show(
                 }
             }
             Nexthop::List(pro) => {
-                for (i, uni) in pro.nexthops.iter().enumerate() {
+                for (i, uni) in pro.iter_unis().enumerate() {
                     if i != 0 {
                         buf.push_str(&" ".repeat(offset));
                     }
@@ -589,7 +587,7 @@ pub fn rib_entry_show_v6(
                 }
             }
             Nexthop::List(pro) => {
-                for (i, uni) in pro.nexthops.iter().enumerate() {
+                for (i, uni) in pro.iter_unis().enumerate() {
                     if i != 0 {
                         buf.push_str(&" ".repeat(offset));
                     }
