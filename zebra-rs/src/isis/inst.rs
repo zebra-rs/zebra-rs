@@ -2054,27 +2054,42 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
-
-    rib.nexthop = if route.nhops.len() == 1 {
-        if let Some((key, value)) = route.nhops.iter().next() {
-            rib::Nexthop::Uni(nhop_to_nexthop_uni(key, route, value))
-        } else {
-            rib::Nexthop::default()
-        }
-    } else {
-        let multi = rib::NexthopMulti {
-            metric: route.metric,
-            nexthops: route
-                .nhops
-                .iter()
-                .map(|(key, value)| nhop_to_nexthop_uni(key, route, value))
-                .collect(),
-            ..Default::default()
-        };
-        rib::Nexthop::Multi(multi)
-    };
-
+    let nhops: Vec<rib::NexthopUni> = route
+        .nhops
+        .iter()
+        .map(|(key, value)| nhop_to_nexthop_uni(key, route, value))
+        .collect();
+    // TI-LFA backup nhops (at primary.metric + 1) will be appended
+    // here once SpfNexthop carries a backup field; build_rib_nexthop
+    // then routes them into Nexthop::List by detecting mixed metrics.
+    rib.nexthop = build_rib_nexthop(nhops);
     rib
+}
+
+// Dispatch a flat list of NexthopUni into the right rib::Nexthop
+// variant. Empty -> default; single -> Uni; N at one metric -> Multi
+// (ECMP); N at mixed metrics -> List sorted ascending (FRR primary
+// at .nexthops[0], backups at the tail). The mixed-metric branch is
+// dead today but is the slot TI-LFA repair paths will populate.
+fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
+    match nhops.len() {
+        0 => rib::Nexthop::default(),
+        1 => rib::Nexthop::Uni(nhops.into_iter().next().unwrap()),
+        _ => {
+            let first_metric = nhops[0].metric;
+            if nhops.iter().all(|n| n.metric == first_metric) {
+                rib::Nexthop::Multi(rib::NexthopMulti {
+                    metric: first_metric,
+                    nexthops: nhops,
+                    ..Default::default()
+                })
+            } else {
+                let mut sorted = nhops;
+                sorted.sort_by_key(|n| n.metric);
+                rib::Nexthop::List(rib::NexthopList { nexthops: sorted })
+            }
+        }
+    }
 }
 
 pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
@@ -2138,26 +2153,12 @@ fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
-
-    rib.nexthop = if route.nhops.len() == 1 {
-        if let Some((key, value)) = route.nhops.iter().next() {
-            rib::Nexthop::Uni(nhop_to_nexthop_uni_v6(key, route, value))
-        } else {
-            rib::Nexthop::default()
-        }
-    } else {
-        let multi = rib::NexthopMulti {
-            metric: route.metric,
-            nexthops: route
-                .nhops
-                .iter()
-                .map(|(key, value)| nhop_to_nexthop_uni_v6(key, route, value))
-                .collect(),
-            ..Default::default()
-        };
-        rib::Nexthop::Multi(multi)
-    };
-
+    let nhops: Vec<rib::NexthopUni> = route
+        .nhops
+        .iter()
+        .map(|(key, value)| nhop_to_nexthop_uni_v6(key, route, value))
+        .collect();
+    rib.nexthop = build_rib_nexthop(nhops);
     rib
 }
 
@@ -2841,5 +2842,53 @@ mod tests {
         let neighbor_id = IsisNeighborId::default();
         assert!(resolve_dis_ifindex(&links, Level::L1, neighbor_id).is_none());
         assert!(resolve_dis_ifindex(&links, Level::L2, neighbor_id).is_none());
+    }
+
+    fn mk_uni(addr: &str, metric: u32) -> rib::NexthopUni {
+        rib::NexthopUni::new(addr.parse().unwrap(), metric, vec![])
+    }
+
+    #[test]
+    fn build_rib_nexthop_empty_yields_default() {
+        let nh = build_rib_nexthop(vec![]);
+        assert_eq!(nh, rib::Nexthop::default());
+    }
+
+    #[test]
+    fn build_rib_nexthop_single_yields_uni() {
+        let only = mk_uni("10.0.0.1", 20);
+        let nh = build_rib_nexthop(vec![only.clone()]);
+        assert!(matches!(nh, rib::Nexthop::Uni(ref u) if u == &only));
+    }
+
+    #[test]
+    fn build_rib_nexthop_same_metric_yields_multi() {
+        // ECMP: every primary at the IGP metric — Multi is the
+        // existing pre-TI-LFA shape.
+        let a = mk_uni("10.0.0.1", 20);
+        let b = mk_uni("10.0.0.2", 20);
+        let nh = build_rib_nexthop(vec![a, b]);
+        let rib::Nexthop::Multi(m) = nh else {
+            panic!("expected Multi, got {nh:?}");
+        };
+        assert_eq!(m.metric, 20);
+        assert_eq!(m.nexthops.len(), 2);
+    }
+
+    #[test]
+    fn build_rib_nexthop_mixed_metric_yields_list_sorted() {
+        // Mixed metrics signal primary + backup — Nexthop::List is
+        // the FRR slot TI-LFA fills, sorted ascending so .nexthops[0]
+        // is the primary.
+        let primary = mk_uni("10.0.0.1", 20);
+        let backup = mk_uni("10.0.0.5", 21);
+        // Insert backup first to exercise sort.
+        let nh = build_rib_nexthop(vec![backup.clone(), primary.clone()]);
+        let rib::Nexthop::List(list) = nh else {
+            panic!("expected List, got {nh:?}");
+        };
+        assert_eq!(list.nexthops.len(), 2);
+        assert_eq!(list.nexthops[0], primary);
+        assert_eq!(list.nexthops[1], backup);
     }
 }
