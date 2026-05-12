@@ -2067,28 +2067,55 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
 }
 
 // Dispatch a flat list of NexthopUni into the right rib::Nexthop
-// variant. Empty -> default; single -> Uni; N at one metric -> Multi
-// (ECMP); N at mixed metrics -> List sorted ascending (FRR primary
-// at .nexthops[0], backups at the tail). The mixed-metric branch is
-// dead today but is the slot TI-LFA repair paths will populate.
+// variant. Group nhops by metric (BTreeMap iter is ascending), then:
+//
+//   - 0 groups          -> Nexthop::default()
+//   - 1 group, 1 nhop   -> Nexthop::Uni
+//   - 1 group, N nhops  -> Nexthop::Multi (ECMP)
+//   - >1 groups         -> Nexthop::List, one member per metric:
+//                            * single-nhop group -> NexthopMember::Uni
+//                            * multi-nhop group  -> NexthopMember::Multi
+//
+// Today every caller passes all primaries at route.metric, so only
+// the first three arms fire. The grouped-List arm is the slot TI-LFA
+// repair install will populate when it appends backup nhops at
+// primary.metric + 1; ECMP-primary + ECMP-backup naturally collapses
+// to a List of two Multi members.
 fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
-    match nhops.len() {
-        0 => rib::Nexthop::default(),
-        1 => rib::Nexthop::Uni(nhops.into_iter().next().unwrap()),
-        _ => {
-            let first_metric = nhops[0].metric;
-            if nhops.iter().all(|n| n.metric == first_metric) {
-                rib::Nexthop::Multi(rib::NexthopMulti {
-                    metric: first_metric,
-                    nexthops: nhops,
-                    ..Default::default()
-                })
-            } else {
-                let mut sorted = nhops;
-                sorted.sort_by_key(|n| n.metric);
-                rib::Nexthop::List(rib::NexthopList { nexthops: sorted })
-            }
+    if nhops.is_empty() {
+        return rib::Nexthop::default();
+    }
+    let mut groups: BTreeMap<u32, Vec<rib::NexthopUni>> = BTreeMap::new();
+    for n in nhops {
+        groups.entry(n.metric).or_default().push(n);
+    }
+    if groups.len() == 1 {
+        let (metric, mut grp) = groups.into_iter().next().unwrap();
+        if grp.len() == 1 {
+            rib::Nexthop::Uni(grp.pop().unwrap())
+        } else {
+            rib::Nexthop::Multi(rib::NexthopMulti {
+                metric,
+                nexthops: grp,
+                ..Default::default()
+            })
         }
+    } else {
+        let members: Vec<_> = groups
+            .into_iter()
+            .map(|(metric, mut grp)| {
+                if grp.len() == 1 {
+                    rib::NexthopMember::Uni(grp.pop().unwrap())
+                } else {
+                    rib::NexthopMember::Multi(rib::NexthopMulti {
+                        metric,
+                        nexthops: grp,
+                        ..Default::default()
+                    })
+                }
+            })
+            .collect();
+        rib::Nexthop::List(rib::NexthopList { nexthops: members })
     }
 }
 
@@ -2879,7 +2906,8 @@ mod tests {
     fn build_rib_nexthop_mixed_metric_yields_list_sorted() {
         // Mixed metrics signal primary + backup — Nexthop::List is
         // the FRR slot TI-LFA fills, sorted ascending so .nexthops[0]
-        // is the primary.
+        // is the primary. Singleton-per-metric groups become Uni
+        // members.
         let primary = mk_uni("10.0.0.1", 20);
         let backup = mk_uni("10.0.0.5", 21);
         // Insert backup first to exercise sort.
@@ -2888,7 +2916,38 @@ mod tests {
             panic!("expected List, got {nh:?}");
         };
         assert_eq!(list.nexthops.len(), 2);
-        assert_eq!(list.nexthops[0], primary);
-        assert_eq!(list.nexthops[1], backup);
+        assert_eq!(list.nexthops[0], rib::NexthopMember::Uni(primary));
+        assert_eq!(list.nexthops[1], rib::NexthopMember::Uni(backup));
+    }
+
+    #[test]
+    fn build_rib_nexthop_ecmp_primary_plus_ecmp_backup_yields_list_of_multi() {
+        // Two ECMP primaries at metric 20 + two backups at metric 21
+        // collapse into a List of two Multi members: one per metric
+        // group, ECMP-aware. This is the shape TI-LFA emits when
+        // both the primary and the post-convergence path are
+        // multi-pathed.
+        let p1 = mk_uni("10.0.0.1", 20);
+        let p2 = mk_uni("10.0.0.2", 20);
+        let b1 = mk_uni("10.0.0.5", 21);
+        let b2 = mk_uni("10.0.0.6", 21);
+        // Insert mixed order to exercise BTreeMap grouping + sort.
+        let nh = build_rib_nexthop(vec![b1.clone(), p1.clone(), b2.clone(), p2.clone()]);
+        let rib::Nexthop::List(list) = nh else {
+            panic!("expected List, got {nh:?}");
+        };
+        assert_eq!(list.nexthops.len(), 2);
+
+        let rib::NexthopMember::Multi(primary_grp) = &list.nexthops[0] else {
+            panic!("expected Multi primary, got {:?}", list.nexthops[0]);
+        };
+        assert_eq!(primary_grp.metric, 20);
+        assert_eq!(primary_grp.nexthops.len(), 2);
+
+        let rib::NexthopMember::Multi(backup_grp) = &list.nexthops[1] else {
+            panic!("expected Multi backup, got {:?}", list.nexthops[1]);
+        };
+        assert_eq!(backup_grp.metric, 21);
+        assert_eq!(backup_grp.nexthops.len(), 2);
     }
 }
