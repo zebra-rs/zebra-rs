@@ -1,9 +1,12 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
+use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::{IsisProto, IsisSysId, IsisTlv, Nsap};
+use prefix_trie::PrefixMap;
 use serde::Serialize;
 
+use super::inst::{SpfRoute, SpfRouteV6};
 use super::{Isis, inst::ShowCallback};
 
 use crate::config::Args;
@@ -33,6 +36,11 @@ impl Isis {
         self.show_add("/show/isis/graph", show_isis_graph);
         self.show_add("/show/isis/spf", show_isis_spf);
         self.show_add("/show/isis/spf/detail", show_isis_spf_detail);
+        self.show_add("/show/isis/repair-list", show_isis_repair_list);
+        self.show_add(
+            "/show/isis/repair-list/detail",
+            show_isis_repair_list_detail,
+        );
         self.show_add("/show/isis/topology", show_isis_topology);
     }
 }
@@ -1206,6 +1214,198 @@ fn show_isis_spf_detail(
     Ok(buf)
 }
 
+// ---- show isis repair-list / repair-list detail ----------------------
+//
+// Walks isis.rib (IPv4 / SR-MPLS) and isis.rib_v6 (IPv6 / SRv6) for
+// nhops whose `backup` is populated by TI-LFA, and renders one row per
+// (prefix, primary nhop) with the repair next-hop and label / segment
+// stack. Detail mode adds a NodeSID/AdjSID breakdown per segment.
+
+#[derive(Serialize)]
+struct RepairListJson {
+    routes: Vec<RepairRowJson>,
+}
+
+#[derive(Serialize)]
+struct RepairRowJson {
+    level: String,
+    family: &'static str,
+    prefix: String,
+    primary_nexthop: String,
+    primary_ifindex: u32,
+    primary_metric: u32,
+    repair_nexthop: String,
+    repair_ifindex: u32,
+    repair_metric: u32,
+    segments: Vec<RepairSegmentJson>,
+}
+
+#[derive(Serialize)]
+struct RepairSegmentJson {
+    /// "NodeSID" / "AdjSID" for SR-MPLS, "End" / "End.X" for SRv6.
+    kind: &'static str,
+    /// MPLS label value as a number, or SRv6 segment address as a string.
+    value: String,
+}
+
+/// First segment is conventionally the prefix-SID of the P-node
+/// (1-label / 1-segment repair → that's the destination itself);
+/// any subsequent segment is the AdjSID / End.X bridging P→Q.
+fn mpls_segment_kind(idx: usize) -> &'static str {
+    if idx == 0 { "NodeSID" } else { "AdjSID" }
+}
+
+fn srv6_segment_kind(idx: usize) -> &'static str {
+    if idx == 0 { "End" } else { "End.X" }
+}
+
+fn label_value_str(label: &crate::rib::Label) -> String {
+    match label {
+        crate::rib::Label::Implicit(l) => format!("{l} (implicit-null)"),
+        crate::rib::Label::Explicit(l) => format!("{l}"),
+    }
+}
+
+fn collect_repair_rows(isis: &Isis) -> Vec<RepairRowJson> {
+    let mut rows = Vec::new();
+    for level in [Level::L1, Level::L2] {
+        let v4: &PrefixMap<Ipv4Net, SpfRoute> = isis.rib.get(&level);
+        for (prefix, route) in v4.iter() {
+            for (addr, nhop) in route.nhops.iter() {
+                let Some(backup) = nhop.backup.as_ref() else {
+                    continue;
+                };
+                let segments = backup
+                    .labels
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, label)| RepairSegmentJson {
+                        kind: mpls_segment_kind(idx),
+                        value: label_value_str(label),
+                    })
+                    .collect();
+                rows.push(RepairRowJson {
+                    level: format!("{level:?}"),
+                    family: "ipv4",
+                    prefix: prefix.to_string(),
+                    primary_nexthop: addr.to_string(),
+                    primary_ifindex: nhop.ifindex,
+                    primary_metric: route.metric,
+                    repair_nexthop: backup.addr.to_string(),
+                    repair_ifindex: backup.ifindex,
+                    repair_metric: route.metric.saturating_add(1),
+                    segments,
+                });
+            }
+        }
+        let v6: &PrefixMap<Ipv6Net, SpfRouteV6> = isis.rib_v6.get(&level);
+        for (prefix, route) in v6.iter() {
+            for (addr, nhop) in route.nhops.iter() {
+                let Some(backup) = nhop.backup.as_ref() else {
+                    continue;
+                };
+                let segments = backup
+                    .segs
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, seg)| RepairSegmentJson {
+                        kind: srv6_segment_kind(idx),
+                        value: seg.to_string(),
+                    })
+                    .collect();
+                rows.push(RepairRowJson {
+                    level: format!("{level:?}"),
+                    family: "ipv6",
+                    prefix: prefix.to_string(),
+                    primary_nexthop: addr.to_string(),
+                    primary_ifindex: nhop.ifindex,
+                    primary_metric: route.metric,
+                    repair_nexthop: backup.addr.to_string(),
+                    repair_ifindex: backup.ifindex,
+                    repair_metric: route.metric.saturating_add(1),
+                    segments,
+                });
+            }
+        }
+    }
+    rows
+}
+
+fn show_isis_repair_list(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let rows = collect_repair_rows(isis);
+    if json {
+        return Ok(
+            serde_json::to_string_pretty(&RepairListJson { routes: rows })
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+        );
+    }
+    let mut buf = String::new();
+    if rows.is_empty() {
+        let _ = writeln!(buf, "(no TI-LFA repair-list entries)");
+        return Ok(buf);
+    }
+    writeln!(
+        buf,
+        "{:<5} {:<5} {:<22} {:<22} {:<22} Segments",
+        "Level", "AFI", "Prefix", "Primary via", "Repair via",
+    )?;
+    for row in &rows {
+        let segs: Vec<String> = row.segments.iter().map(|s| s.value.clone()).collect();
+        writeln!(
+            buf,
+            "{:<5} {:<5} {:<22} {:<22} {:<22} [{}]",
+            row.level,
+            row.family,
+            row.prefix,
+            row.primary_nexthop,
+            row.repair_nexthop,
+            segs.join(", "),
+        )?;
+    }
+    Ok(buf)
+}
+
+fn show_isis_repair_list_detail(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let rows = collect_repair_rows(isis);
+    if json {
+        return Ok(
+            serde_json::to_string_pretty(&RepairListJson { routes: rows })
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+        );
+    }
+    let mut buf = String::new();
+    write_spf_status_banner(isis, &mut buf);
+    if rows.is_empty() {
+        let _ = writeln!(buf, "(no TI-LFA repair-list entries)");
+        return Ok(buf);
+    }
+    for row in &rows {
+        writeln!(buf, "{} {} {}", row.level, row.family, row.prefix)?;
+        writeln!(
+            buf,
+            "  Primary: via {} (ifindex {}), metric {}",
+            row.primary_nexthop, row.primary_ifindex, row.primary_metric,
+        )?;
+        writeln!(
+            buf,
+            "  Repair:  via {} (ifindex {}), metric {}",
+            row.repair_nexthop, row.repair_ifindex, row.repair_metric,
+        )?;
+        for seg in &row.segments {
+            writeln!(buf, "    {} {}", seg.kind, seg.value)?;
+        }
+    }
+    Ok(buf)
+}
+
 fn write_spf_status_banner(isis: &Isis, buf: &mut String) {
     let ti_lfa = isis.config.ti_lfa_enabled;
     let sr_mpls = isis.config.sr_mpls_enabled;
@@ -1347,5 +1547,33 @@ mod tests {
         };
         let row = render_locator_row("LOC_N1", Some(&loc));
         assert!(row.trim_end().ends_with("Down"));
+    }
+
+    #[test]
+    fn mpls_segment_kind_first_is_node_rest_is_adj() {
+        // Convention: index 0 is the P-node's prefix-SID (NodeSID),
+        // any subsequent label is an AdjSID bridging P->Q.
+        assert_eq!(mpls_segment_kind(0), "NodeSID");
+        assert_eq!(mpls_segment_kind(1), "AdjSID");
+        assert_eq!(mpls_segment_kind(7), "AdjSID");
+    }
+
+    #[test]
+    fn srv6_segment_kind_first_is_end_rest_is_endx() {
+        // SRv6 analogue: End first, then End.X for adjacency hops.
+        assert_eq!(srv6_segment_kind(0), "End");
+        assert_eq!(srv6_segment_kind(1), "End.X");
+    }
+
+    #[test]
+    fn label_value_str_marks_implicit_null() {
+        assert_eq!(
+            label_value_str(&crate::rib::Label::Implicit(3)),
+            "3 (implicit-null)"
+        );
+        assert_eq!(
+            label_value_str(&crate::rib::Label::Explicit(16002)),
+            "16002"
+        );
     }
 }

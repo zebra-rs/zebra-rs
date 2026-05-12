@@ -239,6 +239,14 @@ module exec {
           type empty;
         }
       }
+      container repair-list {
+        ext:help "IS-IS TI-LFA repair-list";
+        presence "IS-IS repair-list";
+        leaf detail {
+          ext:help "IS-IS repair-list detail (per-segment NodeSID/AdjSID breakdown)";
+          type empty;
+        }
+      }
       leaf topology {
         ext:help "IS-IS SPF tree (per-AFI today; per-MT once multi-topology lands)";
         type empty;
