@@ -1706,16 +1706,13 @@ pub fn graph(
                         .get_mut(&level)
                         .get(&neighbor_lsp_id.neighbor_id());
 
-                    graph.get_mut(&node_id).unwrap().olinks.push(spf::Link::new(
-                        node_id,
-                        to_id,
-                        entry.metric,
-                    ));
-                    graph.get_mut(&to_id).unwrap().ilinks.push(spf::Link::new(
-                        node_id,
-                        to_id,
-                        entry.metric,
-                    ));
+                    let link = spf::Link::new(node_id, to_id, entry.metric);
+                    if let Some(from_id) = graph.get_mut(&node_id) {
+                        from_id.olinks.push(link.clone());
+                    }
+                    if let Some(to_id) = graph.get_mut(&to_id) {
+                        to_id.ilinks.push(link);
+                    }
                 }
             }
         }
