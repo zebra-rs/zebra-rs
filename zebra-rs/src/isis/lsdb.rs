@@ -109,6 +109,10 @@ pub struct LspView<'a> {
     /// emitted; vec because in principle a peer could advertise more
     /// than one (multicast variants etc.). PR 4 only consumes mt=2.
     pub mt_ipv6_reach: Vec<&'a IsisTlvMtIpv6Reach>,
+    /// SRv6 locator TLV — carries the originator's locator(s) and
+    /// the End SID sub-TLV inside each one. Used to populate
+    /// `srv6_end_map` for TI-LFA SRv6 repair-path assembly.
+    pub srv6: Option<&'a IsisTlvSrv6>,
 }
 
 pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
@@ -132,6 +136,9 @@ pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
             }
             IsisTlv::MtIpv6Reach(mt_v6) => {
                 view.mt_ipv6_reach.push(mt_v6);
+            }
+            IsisTlv::Srv6(srv6) => {
+                view.srv6 = Some(srv6);
             }
             _ => {
                 //
@@ -265,6 +272,26 @@ fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
             .insert(key.sys_id(), mt2_v6_entries);
     } else {
         top.mt2_reach_map_v6.get_mut(&level).remove(&key.sys_id());
+    }
+
+    // SRv6 End SID — first one across all locators wins. Empty /
+    // absent TLV removes any stale entry for this peer so the map
+    // stays in sync with the LSDB.
+    let mut end_sid = None;
+    if let Some(srv6_tlv) = lsp.srv6 {
+        'outer: for locator in &srv6_tlv.locators {
+            for sub in &locator.subs {
+                if let prefix::IsisSubTlv::Srv6EndSid(es) = sub {
+                    end_sid = Some(es.sid);
+                    break 'outer;
+                }
+            }
+        }
+    }
+    if let Some(sid) = end_sid {
+        top.srv6_end_map.get_mut(&level).insert(key.sys_id(), sid);
+    } else {
+        top.srv6_end_map.get_mut(&level).remove(&key.sys_id());
     }
 }
 

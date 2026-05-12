@@ -81,6 +81,12 @@ pub struct Isis {
     /// by show callbacks to render the MT-aware view.
     pub mt_membership: Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: Levels<IsisLabelMap>,
+
+    /// Peer SRv6 End SID per system id. Populated from the IsisTlvSrv6
+    /// sub-TLV `IsisSubSrv6EndSid` carried inside each peer's LSP
+    /// (parallel to label_map for SR-MPLS). Used by TI-LFA Step 4d to
+    /// assemble the SRH segment list for a 1-segment repair.
+    pub srv6_end_map: Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
@@ -135,6 +141,9 @@ pub struct IsisTop<'a> {
     pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
+    // Read by TI-LFA Step 4d's SRv6 install path; allow until then.
+    #[allow(dead_code)]
+    pub srv6_end_map: &'a mut Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -192,6 +201,7 @@ impl Isis {
             mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
             mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),
             label_map: Levels::<IsisLabelMap>::default(),
+            srv6_end_map: Levels::<BTreeMap<IsisSysId, Ipv6Addr>>::default(),
             rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
             rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
@@ -588,6 +598,7 @@ impl Isis {
             mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
             mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
+            srv6_end_map: &mut self.srv6_end_map,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
@@ -623,6 +634,7 @@ impl Isis {
             mt2_reach_map_v6: &mut self.mt2_reach_map_v6,
             mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
+            srv6_end_map: &mut self.srv6_end_map,
             spf_timer: &mut self.spf_timer,
             rib_tx: &self.rib_tx,
             sr_locator: &self.sr_locator,
