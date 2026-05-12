@@ -333,6 +333,13 @@ fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
 
 fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     isis.config.ti_lfa_enabled = op.is_set();
+    // Adj-SID B-flag (RFC 8667 §2.2.1) is built from ti_lfa_enabled
+    // at LSP-generation time, so the toggle is only observable after
+    // a fresh origination. has_level() inside process_lsp_originate
+    // filters out the level that doesn't apply for level-1-only /
+    // level-2-only instances, so sending both unconditionally is safe.
+    let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
+    let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     Some(())
 }
 

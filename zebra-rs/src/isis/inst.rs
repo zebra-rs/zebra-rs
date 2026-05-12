@@ -1179,16 +1179,25 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
             for (_key, value) in nbr.addr4.iter() {
                 if let Some(label) = value.label {
+                    // RFC 8667 §2.2.1 B-flag: "Adj-SID is eligible for
+                    // protection." We flip it on whenever TI-LFA is
+                    // enabled on this instance — i.e. we're asserting
+                    // a TI-LFA repair has been (or will be) computed
+                    // for this adjacency. Per-adjacency truthfulness
+                    // (B=0 on islands where no repair exists) is a
+                    // follow-up once the repair-path SPF lands.
+                    let flags =
+                        AdjSidFlags::lan_adj_flag_ipv4().with_b_flag(top.config.ti_lfa_enabled);
                     if nbr.link_type.is_p2p() {
                         let sub = IsisSubAdjSid {
-                            flags: AdjSidFlags::lan_adj_flag_ipv4(),
+                            flags,
                             weight: 0,
                             sid: SidLabelValue::Label(label),
                         };
                         is_reach.subs.push(neigh::IsisSubTlv::AdjSid(sub));
                     } else {
                         let sub = IsisSubLanAdjSid {
-                            flags: AdjSidFlags::lan_adj_flag_ipv4(),
+                            flags,
                             weight: 0,
                             system_id: nbr.sys_id,
                             sid: SidLabelValue::Label(label),
