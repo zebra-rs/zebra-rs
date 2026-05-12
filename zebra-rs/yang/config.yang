@@ -380,6 +380,18 @@ module config {
           }
         }
 
+        container fast-reroute {
+          // IS-IS fast-reroute mechanisms. Empty container is a no-op;
+          // the per-mechanism child presence containers turn features on.
+          container ti-lfa {
+            // Topology-Independent Loop-Free Alternate (TI-LFA, RFC 9490).
+            // Computes a post-convergence repair path expressed as
+            // SR-MPLS labels, so segment-routing/mpls must also be
+            // enabled for the repair to install in the dataplane.
+            presence "Enable Topology-Independent LFA (TI-LFA)";
+          }
+        }
+
         leaf multi-topology {
           // RFC 5120 M-ISIS Multi Topology (MT). IPv6 unicast is the
           // only option used in the industry today, so the enum
