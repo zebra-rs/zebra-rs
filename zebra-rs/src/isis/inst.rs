@@ -141,8 +141,6 @@ pub struct IsisTop<'a> {
     pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
-    // Read by TI-LFA Step 4d's SRv6 install path; allow until then.
-    #[allow(dead_code)]
     pub srv6_end_map: &'a mut Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
@@ -3006,6 +3004,28 @@ struct RepairCandidate {
     repair_addr: Ipv4Addr,
 }
 
+/// IPv6 sibling of `find_local_nhop_v4`. Returns the first link-
+/// local IPv6 address on a local link to the post-conv first-hop
+/// router. SRv6 dataplane resolution wants link-local just like the
+/// primary path does (it pins the egress without the kernel having
+/// to second-guess the SRH).
+fn find_local_nhop_v6(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u32, Ipv6Addr)> {
+    let mut idx = 0;
+    while idx < path.len() && top.lsp_map.get(&level).is_pseudo(path[idx]) {
+        idx += 1;
+    }
+    let v = *path.get(idx)?;
+    let sys_id = *top.lsp_map.get(&level).resolve(v)?;
+    for (ifindex, link) in top.links.iter() {
+        if let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id)
+            && let Some(addr) = nbr.addr6l.first()
+        {
+            return Some((*ifindex, *addr));
+        }
+    }
+    None
+}
+
 /// Resolve the local-link IPv4 egress for the first non-pseudonode
 /// vertex on a post-convergence path. Mirrors the leading-pseudonode
 /// skip in `build_rib_from_spf` so a LAN repair lands on the actual
@@ -3136,20 +3156,123 @@ fn apply_repairs_mpls(
     }
 }
 
-/// TI-LFA SRv6 repair-path computation. Mirrors the MPLS variant;
-/// segment-list assembly (End / End.X) lands in Step 4d.
+/// SRv6 sibling of `RepairCandidate`. Carries the same PQ + repair-
+/// nexthop info plus the destination's pre-resolved End SID — the
+/// single segment a PQ-overlap-at-dest repair pushes into the SRH.
+#[derive(Debug)]
+struct RepairCandidateSrv6 {
+    pq: PQNodes,
+    repair_ifindex: u32,
+    repair_addr: Ipv6Addr,
+    /// Destination's End SID, pre-resolved via `top.srv6_end_map` so
+    /// the install pass doesn't need the LSDB any more.
+    dest_end_sid: Option<Ipv6Addr>,
+}
+
+/// SRv6 mirror of `resolve_repairs_mpls`. Walks Step 4a's per-edge
+/// post-conv SPF, runs PQ identification, looks up the local IPv6
+/// egress, and grabs the destination's End SID from the LSDB cache
+/// (Step 4d slice 1's `srv6_end_map`).
+fn resolve_repairs_srv6(
+    top: &IsisTop,
+    level: Level,
+    graph: &spf::Graph,
+    source: usize,
+    protected: &[ProtectedEdgeSpf],
+) -> BTreeMap<(IsisSysId, usize), RepairCandidateSrv6> {
+    let mut out = BTreeMap::new();
+    for edge in protected {
+        let Some(nbr_sys) = top.lsp_map.get(&level).resolve(edge.nbr_vertex) else {
+            continue;
+        };
+        let nbr_sys = *nbr_sys;
+        for (dest, post_path) in &edge.repairs {
+            let Some(path_vec) = post_path.paths.first() else {
+                continue;
+            };
+            let Some(pq) = identify_pq_nodes(graph, source, edge.nbr_vertex, *dest, path_vec)
+            else {
+                continue;
+            };
+            let Some((repair_ifindex, repair_addr)) = find_local_nhop_v6(top, level, path_vec)
+            else {
+                continue;
+            };
+            let dest_end_sid = top
+                .lsp_map
+                .get(&level)
+                .resolve(*dest)
+                .and_then(|sys_id| top.srv6_end_map.get(&level).get(sys_id))
+                .copied();
+            out.insert(
+                (nbr_sys, *dest),
+                RepairCandidateSrv6 {
+                    pq,
+                    repair_ifindex,
+                    repair_addr,
+                    dest_end_sid,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// SRv6 sibling of `apply_repairs_mpls`. Writes `SpfNexthopV6.backup`
+/// on every primary nhop whose (nbr sys_id, dest_vertex) appears in
+/// `repairs` for the PQ-overlap-at-destination case. The segment
+/// list is `[End(dest)]` and the encap is `HEncap` (full SRH push;
+/// `HEncap.Red` is opt-in per the project default).
+fn apply_repairs_srv6(
+    routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
+    repairs: &BTreeMap<(IsisSysId, usize), RepairCandidateSrv6>,
+) {
+    for (_prefix, route) in routes.iter_mut() {
+        let Some(dest_v) = route.dest_vertex else {
+            continue;
+        };
+        for nhop in route.nhops.values_mut() {
+            let Some(nbr_sys) = nhop.sys_id else {
+                continue;
+            };
+            let Some(cand) = repairs.get(&(nbr_sys, dest_v)) else {
+                continue;
+            };
+            if cand.pq.p != dest_v || cand.pq.q != dest_v {
+                continue;
+            }
+            let Some(end_sid) = cand.dest_end_sid else {
+                continue;
+            };
+            nhop.backup = Some(RepairPathSrv6 {
+                ifindex: cand.repair_ifindex,
+                addr: cand.repair_addr,
+                segs: vec![end_sid],
+                encap: EncapType::HEncap,
+            });
+        }
+    }
+}
+
+/// TI-LFA SRv6 repair-path install. Same shape as `ti_lfa_compute_mpls`
+/// (Step 4c) — call Step 4a's link-protection SPF, resolve PQ-nodes
+/// per (protected nbr, dest), then write `SpfNexthopV6.backup` on
+/// primary nhops with a PQ-overlap-at-destination repair.
 fn ti_lfa_compute_srv6(
     top: &mut IsisTop,
     level: Level,
     graph: &spf::Graph,
     source: usize,
     primary: &BTreeMap<usize, spf::Path>,
-    _routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
+    routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
 ) {
-    if top.config.ti_lfa_enabled && top.config.sr_srv6_enabled {
-        let protected = link_protection_spf(graph, source, primary);
-        let _repairs = resolve_repairs_mpls(top, level, graph, source, &protected);
-        // SRv6 End/End.X segment-list assembly lands in Step 4d.
+    if !(top.config.ti_lfa_enabled && top.config.sr_srv6_enabled) {
+        return;
+    }
+    let protected = link_protection_spf(graph, source, primary);
+    let repairs = resolve_repairs_srv6(top, level, graph, source, &protected);
+    if !repairs.is_empty() {
+        apply_repairs_srv6(routes, &repairs);
     }
 }
 
@@ -3733,6 +3856,128 @@ mod tests {
             .get(&primary_addr)
             .unwrap();
         assert!(nhop.backup.is_none(), "2-label case should not populate");
+    }
+
+    #[test]
+    fn apply_repairs_srv6_writes_backup_with_end_sid_segment() {
+        // SRv6 mirror of the MPLS happy path. Route to a /128 dst
+        // with dest_vertex=3, primary nhop fe80::aa via sys_id 0...01.
+        // Repair has PQ-overlap at the destination AND a resolved
+        // End SID — backup should be populated with segs=[end_sid]
+        // and encap=HEncap.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv6Addr = "fe80::aa".parse().unwrap();
+        let repair_addr: Ipv6Addr = "fe80::bb".parse().unwrap();
+        let end_sid: Ipv6Addr = "2001:db8:a:2::".parse().unwrap();
+
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthopV6 {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
+        let prefix: Ipv6Net = "2001:db8:a::1/128".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRouteV6 {
+                metric: 20,
+                nhops,
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidateSrv6 {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr,
+                dest_end_sid: Some(end_sid),
+            },
+        );
+
+        apply_repairs_srv6(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        let backup = nhop.backup.as_ref().expect("backup should be populated");
+        assert_eq!(backup.ifindex, 20);
+        assert_eq!(backup.addr, repair_addr);
+        assert_eq!(backup.segs, vec![end_sid]);
+        assert_eq!(backup.encap, EncapType::HEncap);
+    }
+
+    #[test]
+    fn apply_repairs_srv6_skips_when_end_sid_missing() {
+        // PQ-overlap-at-dest but no End SID resolved for the
+        // destination (e.g. peer didn't advertise an IsisTlvSrv6).
+        // Backup stays None — the install pass refuses to push an
+        // empty SRH.
+        let nbr_sys = mk_sys_id(1);
+        let dest_v = 3usize;
+        let primary_addr: Ipv6Addr = "fe80::aa".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthopV6 {
+                ifindex: 10,
+                adjacency: false,
+                sys_id: Some(nbr_sys),
+                backup: None,
+            },
+        );
+        let mut routes = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
+        let prefix: Ipv6Net = "2001:db8:a::2/128".parse().unwrap();
+        routes.insert(
+            prefix,
+            SpfRouteV6 {
+                metric: 20,
+                nhops,
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: Some(dest_v),
+            },
+        );
+
+        let mut repairs = BTreeMap::new();
+        repairs.insert(
+            (nbr_sys, dest_v),
+            RepairCandidateSrv6 {
+                pq: PQNodes {
+                    p: dest_v,
+                    q: dest_v,
+                },
+                repair_ifindex: 20,
+                repair_addr: "fe80::bb".parse().unwrap(),
+                dest_end_sid: None,
+            },
+        );
+
+        apply_repairs_srv6(&mut routes, &repairs);
+
+        let nhop = routes
+            .get(&prefix)
+            .unwrap()
+            .nhops
+            .get(&primary_addr)
+            .unwrap();
+        assert!(nhop.backup.is_none());
     }
 
     #[test]
