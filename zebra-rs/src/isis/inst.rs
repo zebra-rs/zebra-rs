@@ -1676,9 +1676,7 @@ pub fn graph(
     for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
         let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
 
-        // SPF source must be our router LSP, never our pseudonode
-        // LSP (we may originate one if we're DIS for a LAN, but
-        // that vertex is transit-only).
+        // Figure out source id.
         if *is_originated && !lsp.lsp_id.is_pseudo() {
             source_node = Some(node_id);
             collect_adjacency_sids(lsp, &mut adjacency_sids);
@@ -1732,29 +1730,22 @@ fn create_graph_vertex(
     let sys_id = neighbor_id.sys_id();
     let is_pseudo = lsp.lsp_id.is_pseudo();
 
-    // For real routers: use the advertised hostname when present,
-    // falling back to the sys-id string.
-    // For pseudonodes: synthesise a name "PN_<dis_hostname>_<n>" so
-    // that the SR repair list (AdjSid via PN_X) is human-legible.
-    let vertex_name = if is_pseudo {
-        let dis = top
-            .hostname
-            .get(&level)
-            .get(&sys_id)
-            .map(|(hostname, _)| hostname.clone())
-            .unwrap_or_else(|| sys_id.to_string());
-        format!("PN_{}_{}", dis, neighbor_id.pseudo_id())
+    let hostname = top
+        .hostname
+        .get(&level)
+        .get(&sys_id)
+        .map(|(hostname, _)| hostname.clone())
+        .unwrap_or_else(|| sys_id.to_string());
+
+    let hostname = if is_pseudo {
+        format!("{}.{}", hostname, neighbor_id.pseudo_id())
     } else {
-        top.hostname
-            .get(&level)
-            .get(&sys_id)
-            .map(|(hostname, _)| hostname.clone())
-            .unwrap_or_else(|| sys_id.to_string())
+        hostname
     };
 
     spf::Vertex {
         id: node_id,
-        name: vertex_name,
+        name: hostname,
         sys_id: sys_id.to_string(),
         vtype: if is_pseudo {
             spf::VertexType::PseudoNode
