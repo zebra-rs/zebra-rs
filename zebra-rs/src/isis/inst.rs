@@ -2823,6 +2823,94 @@ struct ProtectedEdgeSpf {
     repairs: BTreeMap<usize, spf::Path>,
 }
 
+/// Clone `graph` and snip the directed edge `(src -> dst)` in both
+/// the olinks and ilinks indexes. Used by both forward SPF (which
+/// reads olinks) and reverse SPF (which reads ilinks) so both
+/// directions of the protected link disappear from the modified
+/// topology.
+fn graph_minus_edge(graph: &spf::Graph, src: usize, dst: usize) -> spf::Graph {
+    let mut modified = graph.clone();
+    if let Some(s) = modified.get_mut(&src) {
+        s.olinks.retain(|l| l.to != dst);
+    }
+    if let Some(d) = modified.get_mut(&dst) {
+        d.ilinks.retain(|l| l.from != src);
+    }
+    modified
+}
+
+/// P-node and Q-node on the post-convergence path for one (protected
+/// edge, destination) pair. Populated by `identify_pq_nodes`.
+///
+/// When `p == q` the path passes through a single PQ-overlap vertex:
+/// 1-label repair (push that vertex's prefix-SID). When they differ,
+/// 2-label repair is required: push prefix-SID(P) then adj-SID(P→next
+/// on path).
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+struct PQNodes {
+    /// Last vertex on the post-conv path that is reachable from the
+    /// post-conv first-hop without traversing the protected link
+    /// (i.e. the deepest vertex in eP-space).
+    p: usize,
+    /// First vertex on the post-conv path (walking from source) that
+    /// reaches the destination without traversing the protected
+    /// link (i.e. the shallowest vertex in Q-space).
+    q: usize,
+}
+
+/// Identify the P-node and Q-node on a single post-convergence path.
+/// Returns None when the modified topology can't reach the
+/// destination, leaving the (protected edge, dest) pair unprotected.
+///
+/// Algorithm (RFC 9490 §6 sketch, simplified for link protection):
+///   1. Build the post-failure graph (protected edge removed in both
+///      directions).
+///   2. Forward SPF from the post-conv first-hop -> eP-space set.
+///   3. Reverse SPF from the destination -> Q-space set.
+///   4. Walk the post-conv path; record the deepest in-eP vertex
+///      (P-candidate) and the shallowest in-Q vertex (Q-candidate).
+///   5. If the P-candidate is at or beyond the Q-candidate on the
+///      path, the path contains a PQ-overlap: collapse to one
+///      vertex (the deepest PQ vertex). Otherwise return P and Q
+///      separately for 2-label assembly.
+fn identify_pq_nodes(
+    graph: &spf::Graph,
+    source: usize,
+    nbr_vertex: usize,
+    dest: usize,
+    post_conv_path: &[usize],
+) -> Option<PQNodes> {
+    let v1 = *post_conv_path.first()?;
+    let modified = graph_minus_edge(graph, source, nbr_vertex);
+    let ep = spf::spf(&modified, v1, &spf::SpfOpt::full_path());
+    let q = spf::spf_reverse(&modified, dest, &spf::SpfOpt::full_path());
+
+    let mut last_p = None;
+    let mut first_q = None;
+    for (i, v) in post_conv_path.iter().enumerate() {
+        if ep.contains_key(v) {
+            last_p = Some((i, *v));
+        }
+        if q.contains_key(v) && first_q.is_none() {
+            first_q = Some((i, *v));
+        }
+    }
+    let (p_i, p_v) = last_p?;
+    let (q_i, q_v) = first_q?;
+    if p_i >= q_i {
+        // PQ-overlap: pick the deepest vertex that's in both spaces.
+        let pq = post_conv_path
+            .iter()
+            .rev()
+            .find(|v| ep.contains_key(v) && q.contains_key(v))
+            .copied()?;
+        Some(PQNodes { p: pq, q: pq })
+    } else {
+        Some(PQNodes { p: p_v, q: q_v })
+    }
+}
+
 /// For each outgoing edge from `source`, clone the graph, remove that
 /// edge, and re-run SPF. The returned vector has one entry per
 /// outgoing edge; each entry lists destinations whose primary path
@@ -2886,11 +2974,39 @@ fn link_protection_spf(
         .collect()
 }
 
-/// TI-LFA SR-MPLS repair-path computation. Step 4a wires the per-edge
-/// link-protection loop; subsequent commits will identify P / Q and
-/// build the SR-MPLS label stack from the post-convergence paths.
-/// Today the computed map is dropped — `SpfNexthop.backup` stays None
-/// everywhere so the RIB output matches the pre-TI-LFA install.
+/// Walk every (protected edge, destination) pair from
+/// `link_protection_spf` and resolve the P-node / Q-node on its
+/// post-convergence path. The returned vector has one entry per
+/// destination that has at least one viable repair; entries where
+/// the modified topology can't reach the destination drop out.
+///
+/// `_path` is `Vec<usize>` (the post-conv path vertices) so the
+/// label/segment assembly step can read the adjacent (P, next) pair
+/// without re-running SPF — it's the same data used to identify Q.
+fn resolve_pq_for_edges(
+    graph: &spf::Graph,
+    source: usize,
+    protected: &[ProtectedEdgeSpf],
+) -> Vec<(usize, usize, PQNodes, Vec<usize>)> {
+    // tuple = (nbr_vertex, dest, PQNodes, post_conv_path)
+    let mut out = Vec::new();
+    for edge in protected {
+        for (dest, post_path) in &edge.repairs {
+            let Some(path_vec) = post_path.paths.first() else {
+                continue;
+            };
+            if let Some(pq) = identify_pq_nodes(graph, source, edge.nbr_vertex, *dest, path_vec) {
+                out.push((edge.nbr_vertex, *dest, pq, path_vec.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// TI-LFA SR-MPLS repair-path computation. Steps 4a/4b produce the
+/// (protected edge, dest, PQ-nodes, post-conv path) records; the
+/// label-stack assembly that pushes those into `SpfNexthop.backup`
+/// lands in Step 4c.
 fn ti_lfa_compute_mpls(
     top: &mut IsisTop,
     _level: Level,
@@ -2900,13 +3016,14 @@ fn ti_lfa_compute_mpls(
     _routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
 ) {
     if top.config.ti_lfa_enabled && top.config.sr_mpls_enabled {
-        let _protected = link_protection_spf(graph, source, primary);
-        // P/Q identification + label-stack assembly land here.
+        let protected = link_protection_spf(graph, source, primary);
+        let _candidates = resolve_pq_for_edges(graph, source, &protected);
+        // SR-MPLS label-stack assembly lands here.
     }
 }
 
 /// TI-LFA SRv6 repair-path computation. Mirrors the MPLS variant;
-/// segment-list assembly (End / End.X) lands in a follow-up commit.
+/// segment-list assembly (End / End.X) lands in Step 4d.
 fn ti_lfa_compute_srv6(
     top: &mut IsisTop,
     _level: Level,
@@ -2916,9 +3033,9 @@ fn ti_lfa_compute_srv6(
     _routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
 ) {
     if top.config.ti_lfa_enabled && top.config.sr_srv6_enabled {
-        let _protected = link_protection_spf(graph, source, primary);
-        // P/Q identification + End/End.X segment-list assembly land
-        // here.
+        let protected = link_protection_spf(graph, source, primary);
+        let _candidates = resolve_pq_for_edges(graph, source, &protected);
+        // SRv6 End/End.X segment-list assembly lands here.
     }
 }
 
@@ -3349,5 +3466,36 @@ mod tests {
     fn link_protection_spf_returns_empty_when_source_missing() {
         let (graph, primary) = build_link_protection_fixture();
         assert!(link_protection_spf(&graph, 99, &primary).is_empty());
+    }
+
+    #[test]
+    fn graph_minus_edge_drops_olink_and_ilink() {
+        let (graph, _) = build_link_protection_fixture();
+        let pruned = graph_minus_edge(&graph, 0, 1);
+        // S has S->A removed.
+        assert!(!pruned[&0].olinks.iter().any(|l| l.to == 1));
+        // A has its inbound edge from S removed too.
+        assert!(!pruned[&1].ilinks.iter().any(|l| l.from == 0));
+        // S->B and other links intact.
+        assert!(pruned[&0].olinks.iter().any(|l| l.to == 2));
+    }
+
+    #[test]
+    fn identify_pq_nodes_finds_overlap_at_destination_in_ring_fixture() {
+        // Protected link S->A; post-conv path to D is [B, D].
+        // Every vertex on this path is in eP-space (reachable from
+        // B post-failure) and in Q-space (reaches D post-failure).
+        // The deepest PQ-overlap vertex is D — a 1-label repair via
+        // D's prefix-SID.
+        let (graph, _) = build_link_protection_fixture();
+        let post_path = vec![2usize, 3];
+        let pq = identify_pq_nodes(&graph, 0, 1, 3, &post_path).expect("PQ should exist");
+        assert_eq!(pq, PQNodes { p: 3, q: 3 });
+    }
+
+    #[test]
+    fn identify_pq_nodes_returns_none_for_empty_path() {
+        let (graph, _) = build_link_protection_fixture();
+        assert!(identify_pq_nodes(&graph, 0, 1, 3, &[]).is_none());
     }
 }
