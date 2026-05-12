@@ -5,7 +5,7 @@ use isis_packet::srv6::EncapType;
 
 use crate::rib::entry::RibEntry;
 use crate::rib::nexthop::{Label, NexthopUni};
-use crate::rib::{Nexthop, NexthopList, NexthopMulti, RibType, SidBehavior};
+use crate::rib::{Nexthop, NexthopList, NexthopMember, NexthopMulti, RibType, SidBehavior};
 
 use super::config::StaticFamily;
 
@@ -194,7 +194,7 @@ impl<F: StaticFamily> StaticRoute<F> {
                     mpls_label: n.labels.clone(),
                     ..Default::default()
                 };
-                pro.nexthops.push(nhop);
+                pro.nexthops.push(NexthopMember::Uni(nhop));
             }
             entry.nexthop = Nexthop::List(pro);
         }

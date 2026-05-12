@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::fib::FibHandle;
 
 use super::nexthop::{GroupTrait, NexthopUni};
-use super::{Nexthop, NexthopMap, NexthopMulti, RibSubType, RibType};
+use super::{Nexthop, NexthopMap, NexthopMember, NexthopMulti, RibSubType, RibType};
 
 pub type RibEntries = Vec<RibEntry>;
 
@@ -97,8 +97,7 @@ impl RibEntry {
                 .iter()
                 .any(|nhop| nmap.get(nhop.gid).is_some_and(|group| group.is_valid())),
             Nexthop::List(pro) => pro
-                .nexthops
-                .iter()
+                .iter_unis()
                 .any(|nhop| nmap.get(nhop.gid).is_some_and(|group| group.is_valid())),
             _ => false,
         }
@@ -115,8 +114,16 @@ impl RibEntry {
             multi_group_sync(multi, nmap, fib).await;
         }
         if let Nexthop::List(pro) = &mut self.nexthop {
-            for uni in pro.nexthops.iter_mut() {
-                uni_group_sync(uni, nmap, fib).await;
+            for member in pro.nexthops.iter_mut() {
+                match member {
+                    NexthopMember::Uni(uni) => uni_group_sync(uni, nmap, fib).await,
+                    NexthopMember::Multi(multi) => {
+                        for uni in multi.nexthops.iter_mut() {
+                            uni_group_sync(uni, nmap, fib).await;
+                        }
+                        multi_group_sync(multi, nmap, fib).await;
+                    }
+                }
             }
         }
     }
@@ -140,8 +147,18 @@ impl RibEntry {
                 }
             }
             Nexthop::List(pro) => {
-                for uni in &pro.nexthops {
-                    self.handle_nexthop_group(nmap, fib, uni.gid).await;
+                for member in &pro.nexthops {
+                    match member {
+                        NexthopMember::Uni(uni) => {
+                            self.handle_nexthop_group(nmap, fib, uni.gid).await;
+                        }
+                        NexthopMember::Multi(multi) => {
+                            self.handle_nexthop_group(nmap, fib, multi.gid).await;
+                            for uni in &multi.nexthops {
+                                self.handle_nexthop_group(nmap, fib, uni.gid).await;
+                            }
+                        }
+                    }
                 }
             }
         }

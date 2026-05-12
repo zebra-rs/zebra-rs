@@ -122,15 +122,67 @@ impl Default for Nexthop {
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
 pub struct NexthopList {
-    pub nexthops: Vec<NexthopUni>,
+    pub nexthops: Vec<NexthopMember>,
+}
+
+// A path within a NexthopList. Uni is a single nexthop at one metric
+// (the only shape produced today, since every existing caller is the
+// inter-protocol merge that combines two single-nexthop entries at
+// different distances). Multi is an ECMP group at one shared metric —
+// the slot TI-LFA's "ECMP primary + per-primary repair" install fills.
+// `#[serde(untagged)]` so JSON output preserves the pre-refactor flat
+// shape: each member serializes as its inner type.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
+pub enum NexthopMember {
+    Uni(NexthopUni),
+    // Multi is constructed in tests but no production code path
+    // emits one yet — TI-LFA's "ECMP primary + per-primary repair"
+    // install will be the first real user. Drop the allow when that
+    // lands.
+    #[allow(dead_code)]
+    Multi(NexthopMulti),
+}
+
+impl NexthopMember {
+    pub fn metric(&self) -> u32 {
+        match self {
+            Self::Uni(u) => u.metric,
+            Self::Multi(m) => m.metric,
+        }
+    }
+
+    /// Wrap the member back into a top-level `Nexthop`, used by the
+    /// FIB writer to re-dispatch member install through the existing
+    /// per-variant install paths.
+    pub fn as_nexthop(&self) -> Nexthop {
+        match self {
+            Self::Uni(u) => Nexthop::Uni(u.clone()),
+            Self::Multi(m) => Nexthop::Multi(m.clone()),
+        }
+    }
 }
 
 impl NexthopList {
     pub fn metric(&self) -> u32 {
-        match self.nexthops.first() {
-            Some(nhop) => nhop.metric,
-            None => 0,
-        }
+        self.nexthops.first().map_or(0, |m| m.metric())
+    }
+
+    /// Walk every `NexthopUni` leaf in member order. Uni members
+    /// yield once; Multi members yield each inner uni in turn.
+    pub fn iter_unis(&self) -> impl Iterator<Item = &NexthopUni> + '_ {
+        self.nexthops.iter().flat_map(|m| match m {
+            NexthopMember::Uni(u) => std::slice::from_ref(u).iter(),
+            NexthopMember::Multi(grp) => grp.nexthops.iter(),
+        })
+    }
+
+    /// Mutable counterpart of `iter_unis`, used by the resolver.
+    pub fn iter_unis_mut(&mut self) -> impl Iterator<Item = &mut NexthopUni> + '_ {
+        self.nexthops.iter_mut().flat_map(|m| match m {
+            NexthopMember::Uni(u) => std::slice::from_mut(u).iter_mut(),
+            NexthopMember::Multi(grp) => grp.nexthops.iter_mut(),
+        })
     }
 }
 
@@ -144,4 +196,82 @@ pub struct NexthopMulti {
 
     // Nexthop Group id for multipath.
     pub gid: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_uni(addr: &str, metric: u32) -> NexthopUni {
+        NexthopUni::new(addr.parse().unwrap(), metric, vec![])
+    }
+
+    #[test]
+    fn list_metric_returns_first_member_metric() {
+        // Primary (metric 20) sorted ahead of backup (metric 21):
+        // NexthopList::metric() returns 20.
+        let list = NexthopList {
+            nexthops: vec![
+                NexthopMember::Uni(mk_uni("10.0.0.1", 20)),
+                NexthopMember::Uni(mk_uni("10.0.0.5", 21)),
+            ],
+        };
+        assert_eq!(list.metric(), 20);
+    }
+
+    #[test]
+    fn list_metric_returns_zero_when_empty() {
+        let list = NexthopList::default();
+        assert_eq!(list.metric(), 0);
+    }
+
+    #[test]
+    fn member_metric_delegates_to_inner() {
+        let uni_member = NexthopMember::Uni(mk_uni("10.0.0.1", 20));
+        let multi = NexthopMulti {
+            metric: 30,
+            nexthops: vec![mk_uni("10.0.0.2", 30), mk_uni("10.0.0.3", 30)],
+            ..Default::default()
+        };
+        let multi_member = NexthopMember::Multi(multi);
+        assert_eq!(uni_member.metric(), 20);
+        assert_eq!(multi_member.metric(), 30);
+    }
+
+    #[test]
+    fn iter_unis_flattens_multi_members() {
+        // A list with a Uni primary and a 2-uni Multi backup yields
+        // three NexthopUni references — caller doesn't need to know
+        // about the grouping.
+        let multi = NexthopMulti {
+            metric: 21,
+            nexthops: vec![mk_uni("10.0.0.5", 21), mk_uni("10.0.0.6", 21)],
+            ..Default::default()
+        };
+        let list = NexthopList {
+            nexthops: vec![
+                NexthopMember::Uni(mk_uni("10.0.0.1", 20)),
+                NexthopMember::Multi(multi),
+            ],
+        };
+        let addrs: Vec<_> = list.iter_unis().map(|u| u.addr.to_string()).collect();
+        assert_eq!(addrs, vec!["10.0.0.1", "10.0.0.5", "10.0.0.6"]);
+    }
+
+    #[test]
+    fn as_nexthop_redispatches_to_top_level_variant() {
+        // FIB writer relies on this to reuse the existing per-variant
+        // install paths for each member.
+        let uni = mk_uni("10.0.0.1", 20);
+        let uni_member = NexthopMember::Uni(uni.clone());
+        assert_eq!(uni_member.as_nexthop(), Nexthop::Uni(uni));
+
+        let multi = NexthopMulti {
+            metric: 21,
+            nexthops: vec![mk_uni("10.0.0.5", 21)],
+            ..Default::default()
+        };
+        let multi_member = NexthopMember::Multi(multi.clone());
+        assert_eq!(multi_member.as_nexthop(), Nexthop::Multi(multi));
+    }
 }
