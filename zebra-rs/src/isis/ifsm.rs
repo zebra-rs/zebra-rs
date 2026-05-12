@@ -11,7 +11,7 @@ use crate::rib::MacAddr;
 use crate::rib::link_ext::LinkFlagsExt;
 
 use super::inst::{Packet, PacketMessage};
-use super::link::{Afis, HelloPaddingPolicy, LinkTop, LinkType};
+use super::link::{Afis, HelloPaddingPolicy, LinkTop, NetworkType};
 use super::neigh::Neighbor;
 use super::{Level, Message, NfsmState};
 
@@ -213,7 +213,7 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         return Ok(());
     }
 
-    let hello = if link.config.link_type() == LinkType::P2p {
+    let hello = if link.config.network_type() == NetworkType::P2p {
         IsisPdu::P2pHello(hello_p2p_generate(link, level))
     } else {
         match level {

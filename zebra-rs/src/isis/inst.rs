@@ -1199,7 +1199,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     // follow-up once the repair-path SPF lands.
                     let flags =
                         AdjSidFlags::lan_adj_flag_ipv4().with_b_flag(top.config.ti_lfa_enabled);
-                    if nbr.link_type.is_p2p() {
+                    if nbr.network_type.is_p2p() {
                         let sub = IsisSubAdjSid {
                             flags,
                             weight: 0,
@@ -1222,7 +1222,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             // §8.2 (LAN). One per up adjacency, only when an End.X
             // SID has been allocated against the resolved locator.
             if let Some((_, sid_addr)) = nbr.endx_sid {
-                if nbr.link_type.is_p2p() {
+                if nbr.network_type.is_p2p() {
                     let sub = IsisSubSrv6EndXSid {
                         flags: 0,
                         algo: Algo::Spf,
@@ -1283,7 +1283,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             };
             for (_, nbr) in link.state.nbrs.get(&level).iter() {
                 if let Some((_, sid_addr)) = nbr.endx_sid {
-                    if nbr.link_type.is_p2p() {
+                    if nbr.network_type.is_p2p() {
                         let sub = IsisSubSrv6EndXSid {
                             flags: 0,
                             algo: Algo::Spf,

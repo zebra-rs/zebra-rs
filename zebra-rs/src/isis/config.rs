@@ -81,7 +81,10 @@ impl Isis {
             "/router/isis/interface/circuit-type",
             link::config_circuit_type,
         );
-        self.callback_add("/router/isis/interface/link-type", link::config_link_type);
+        self.callback_add(
+            "/router/isis/interface/network-type",
+            link::config_network_type,
+        );
         self.callback_add(
             "/router/isis/interface/hello/padding",
             link::config_hello_padding,

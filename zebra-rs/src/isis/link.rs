@@ -147,8 +147,8 @@ pub struct LinkTop<'a> {
 impl<'a> LinkTop<'a> {
     pub fn is_p2p(&self) -> bool {
         // When we have user configuration.
-        if let Some(link_type) = self.config.link_type {
-            return link_type == LinkType::P2p;
+        if let Some(network_type) = self.config.network_type {
+            return network_type == NetworkType::P2p;
         }
         // Otherwise check interface flags.
         (*self.flags & LinkFlags::Pointopoint) == LinkFlags::Pointopoint
@@ -186,7 +186,7 @@ pub struct LinkConfig {
     pub circuit_type: Option<IsLevel>,
 
     /// Link type one of LAN or Point-to-point.
-    pub link_type: Option<LinkType>,
+    pub network_type: Option<NetworkType>,
 
     // Metric of this Link.
     pub metric: Option<u32>,
@@ -211,7 +211,7 @@ pub struct LinkConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, EnumString, Display)]
-pub enum LinkType {
+pub enum NetworkType {
     #[strum(serialize = "loopback")]
     Loopback,
     #[strum(serialize = "lan")]
@@ -220,7 +220,7 @@ pub enum LinkType {
     P2p,
 }
 
-impl LinkType {
+impl NetworkType {
     pub fn is_p2p(&self) -> bool {
         *self == Self::P2p
     }
@@ -239,8 +239,8 @@ impl LinkConfig {
         self.circuit_type.unwrap_or(IsLevel::L1L2)
     }
 
-    pub fn link_type(&self) -> LinkType {
-        self.link_type.unwrap_or(LinkType::Lan)
+    pub fn network_type(&self) -> NetworkType {
+        self.network_type.unwrap_or(NetworkType::Lan)
     }
 
     pub fn metric(&self) -> u32 {
@@ -834,17 +834,17 @@ pub fn config_circuit_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
-pub fn config_link_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+pub fn config_network_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let link_type = args.string()?.parse::<LinkType>().ok()?;
+    let network_type = args.string()?.parse::<NetworkType>().ok()?;
 
     let ifindex = {
         let link = isis.links.get_mut_by_name(&name)?;
 
         if op.is_set() {
-            link.config.link_type = Some(link_type);
+            link.config.network_type = Some(network_type);
         } else {
-            link.config.link_type = None;
+            link.config.network_type = None;
         }
         link.ifindex
     };
@@ -886,7 +886,7 @@ struct LinkInfo {
     name: String,
     ifindex: u32,
     is_up: bool,
-    link_type: String,
+    network_type: String,
     level: String,
     dis: String,
     adjacency: String,
@@ -906,13 +906,13 @@ fn summary_level(link: &IsisLink) -> Level {
 }
 
 // DIS column. Loopback gets N/A regardless of the configured
-// link-type because the kernel device can't carry an adjacency.
+// network-type because the kernel device can't carry an adjacency.
 // Non-LAN circuits also show N/A — DIS election only runs on LAN.
 fn dis_column(link: &IsisLink, level: Level) -> &'static str {
     if link.flags.is_loopback() {
         return "N/A";
     }
-    if link.config.link_type() != LinkType::Lan {
+    if link.config.network_type() != NetworkType::Lan {
         return "N/A";
     }
     match link.state.dis_status.get(&level) {
@@ -943,7 +943,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
                     name: link.state.name.clone(),
                     ifindex: link.ifindex,
                     is_up: link.state.is_up(),
-                    link_type: link.config.link_type().to_string(),
+                    network_type: link.config.network_type().to_string(),
                     level: link.state.level.to_string(),
                     dis: dis_column(link, level).to_string(),
                     adjacency: adjacency_column(link, level),
@@ -971,7 +971,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
             link.state.name,
             circ_id,
             link_state,
-            link.config.link_type().to_string(),
+            link.config.network_type().to_string(),
             link.state.level.to_string(),
             dis_column(link, level),
             adjacency_column(link, level),
@@ -988,7 +988,7 @@ struct InterfaceDetailJson {
     active: bool,
     circuit_id: String,
     #[serde(rename = "type")]
-    link_type: String,
+    network_type: String,
     level: String,
     snpa: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1100,7 +1100,7 @@ pub fn show_detail(
                     },
                     active: true,
                     circuit_id: format!("0x{:02X}", link.ifindex),
-                    link_type: format!("{}", link.config.link_type()),
+                    network_type: format!("{}", link.config.network_type()),
                     level: format!("{}", link.state.level()),
                     snpa: link.state.mac.map(|mac| mac.to_string()),
                     level_1_info: None,
@@ -1140,7 +1140,7 @@ pub fn show_detail(
                 writeln!(
                     buf,
                     "  Type: {}, Level: {}, SNPA: {}",
-                    link.config.link_type(),
+                    link.config.network_type(),
                     link.state.level(),
                     link.state.mac.unwrap_or(MacAddr::from([0, 0, 0, 0, 0, 0])),
                 )?;
