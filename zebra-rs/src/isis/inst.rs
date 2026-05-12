@@ -2805,6 +2805,42 @@ fn apply_routing_updates(
 /// that SPF + `mt2_reach_map_v6` for the IPv6 RIB instead of the
 /// legacy result. RFC 5120 §3.4 strict-MT semantics — peers that
 /// didn't advertise MT 2 don't appear in the IPv6 forwarding table.
+/// TI-LFA SR-MPLS repair-path computation. Stub today — confirms the
+/// call site is wired between primary SPF and FIB install. The real
+/// per-edge SPF + P/Q identification + label assembly lands in
+/// subsequent commits and populates `SpfNexthop.backup` on each
+/// primary nhop where a TI-LFA repair exists.
+fn ti_lfa_compute_mpls(
+    top: &mut IsisTop,
+    _level: Level,
+    _graph: &spf::Graph,
+    _source: usize,
+    _routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
+) {
+    if top.config.ti_lfa_enabled && top.config.sr_mpls_enabled {
+        // Per-edge post-convergence SPF + label-stack assembly fills
+        // in `_routes[*].nhops[*].backup` here in a follow-up commit.
+    }
+}
+
+/// TI-LFA SRv6 repair-path computation. Stub today — gated on
+/// ti_lfa_enabled + sr_srv6_enabled. Mirrors the MPLS variant; will
+/// populate `SpfNexthopV6.backup` with End/End.X segment lists once
+/// the assembly lands.
+fn ti_lfa_compute_srv6(
+    top: &mut IsisTop,
+    _level: Level,
+    _graph: &spf::Graph,
+    _source: usize,
+    _routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
+) {
+    if top.config.ti_lfa_enabled && top.config.sr_srv6_enabled {
+        // Per-edge post-convergence SPF + End/End.X segment list
+        // assembly fills in `_routes[*].nhops[*].backup` here in a
+        // follow-up commit.
+    }
+}
+
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     *top.spf_timer.get_mut(&level) = None;
 
@@ -2817,7 +2853,8 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         // Full-path mode so the legacy v6 builder can apply RFC 1195
         // §5 strict NLPID gating across every transit node.
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
-        let rib = build_rib_from_spf(top, level, source, &spf_result);
+        let mut rib = build_rib_from_spf(top, level, source, &spf_result);
+        ti_lfa_compute_mpls(top, level, &graph, source, &mut rib);
 
         let mt2_enabled =
             top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
@@ -2829,7 +2866,8 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
             *top.mt2_graph.get_mut(&level) = Some(mt2_graph.clone());
             if let Some(mt2_src) = mt2_source {
                 let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
-                let rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
+                let mut rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
+                ti_lfa_compute_srv6(top, level, &mt2_graph, mt2_src, &mut rib_v6);
                 *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
                 rib_v6
             } else {
@@ -2841,7 +2879,9 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
             // graph + reach_map_v6 for IPv6.
             *top.mt2_graph.get_mut(&level) = None;
             *top.mt2_spf_result.get_mut(&level) = None;
-            build_rib_from_spf_v6(top, level, source, &spf_result, false)
+            let mut rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result, false);
+            ti_lfa_compute_srv6(top, level, &graph, source, &mut rib_v6);
+            rib_v6
         };
 
         *top.spf_result.get_mut(&level) = Some(spf_result);
