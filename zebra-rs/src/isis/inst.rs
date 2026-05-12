@@ -1673,20 +1673,52 @@ pub fn graph(
     }
 
     // Now process the nodes without holding an immutable borrow on LSDB
-    for (neighbor_id, is_originated, lsp) in nodes_to_process {
-        let node_id = top.lsp_map.get_mut(&level).get(&neighbor_id);
+    for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
+        let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
 
         // SPF source must be our router LSP, never our pseudonode
         // LSP (we may originate one if we're DIS for a LAN, but
         // that vertex is transit-only).
-        if is_originated && !lsp.lsp_id.is_pseudo() {
+        if *is_originated && !lsp.lsp_id.is_pseudo() {
             source_node = Some(node_id);
-            collect_adjacency_sids(&lsp, &mut adjacency_sids);
+            collect_adjacency_sids(lsp, &mut adjacency_sids);
         }
 
         // Create graph vertex
-        let vertex = create_graph_vertex(top, level, node_id, &neighbor_id, &lsp);
+        let vertex = create_graph_vertex(top, level, node_id, neighbor_id, lsp);
         graph.insert(node_id, vertex);
+    }
+
+    // Process links.
+    for (neighbor_id, _is_originated, lsp) in nodes_to_process.iter() {
+        let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
+
+        for tlv in &lsp.tlvs {
+            if let IsisTlv::ExtIsReach(ext_reach) = tlv {
+                for entry in &ext_reach.entries {
+                    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
+
+                    if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
+                        continue;
+                    }
+                    let to_id = top
+                        .lsp_map
+                        .get_mut(&level)
+                        .get(&neighbor_lsp_id.neighbor_id());
+
+                    graph.get_mut(&node_id).unwrap().olinks.push(spf::Link::new(
+                        node_id,
+                        to_id,
+                        entry.metric,
+                    ));
+                    graph.get_mut(&to_id).unwrap().ilinks.push(spf::Link::new(
+                        node_id,
+                        to_id,
+                        entry.metric,
+                    ));
+                }
+            }
+        }
     }
 
     (graph, source_node, adjacency_sids)
@@ -1723,7 +1755,7 @@ fn create_graph_vertex(
             .unwrap_or_else(|| sys_id.to_string())
     };
 
-    let mut vertex = spf::Vertex {
+    spf::Vertex {
         id: node_id,
         name: vertex_name,
         sys_id: sys_id.to_string(),
@@ -1733,67 +1765,7 @@ fn create_graph_vertex(
             spf::VertexType::Node
         },
         ..Default::default()
-    };
-
-    // Process outgoing links
-    process_outgoing_links(top, level, node_id, lsp, &mut vertex.olinks);
-
-    vertex
-}
-
-/// Process outgoing links from Extended IS Reachability TLVs.
-///
-/// Emits one edge per TLV 22 entry, no flattening: a router LSP
-/// targeting a pseudonode LAN produces R→PN with cost = the
-/// router's interface metric, and the pseudonode's own LSP
-/// produces PN→R back-edges (cost = the metric advertised in the
-/// PN LSP, typically 0). TI-LFA can therefore see and surface
-/// the LAN identity instead of router-to-router shortcuts.
-fn process_outgoing_links(
-    top: &mut IsisTop,
-    level: Level,
-    from_id: usize,
-    lsp: &IsisLsp,
-    links: &mut Vec<spf::Link>,
-) {
-    for tlv in &lsp.tlvs {
-        if let IsisTlv::ExtIsReach(ext_reach) = tlv {
-            for entry in &ext_reach.entries {
-                process_neighbor_link(top, level, from_id, entry, links);
-            }
-        }
     }
-}
-
-/// Process a single neighbor link entry — emit one edge to the
-/// neighbor (router or pseudonode), no flattening.
-fn process_neighbor_link(
-    top: &mut IsisTop,
-    level: Level,
-    from_id: usize,
-    entry: &IsisTlvExtIsReachEntry,
-    links: &mut Vec<spf::Link>,
-) {
-    let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
-
-    // Drop the edge if the target LSP isn't in our LSDB. The
-    // matching Vertex would never be constructed, so an edge to
-    // it would land on a vertex id whose graph entry is missing —
-    // SPF tolerates this (silent skip) but it pollutes lsp_map.
-    if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
-        return;
-    }
-
-    let to_id = top
-        .lsp_map
-        .get_mut(&level)
-        .get(&neighbor_lsp_id.neighbor_id());
-
-    links.push(spf::Link {
-        from: from_id,
-        to: to_id,
-        cost: entry.metric,
-    });
 }
 
 /// Collect adjacency SIDs from our originated LSP
