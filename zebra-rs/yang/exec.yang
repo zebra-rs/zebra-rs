@@ -231,8 +231,13 @@ module exec {
       leaf graph {
         type empty;
       }
-      leaf spf {
-        type empty;
+      container spf {
+        ext:help "IS-IS SPF";
+        presence "IS-IS SPF";
+        leaf detail {
+          ext:help "IS-IS SPF detail (per-destination paths, TI-LFA repair info)";
+          type empty;
+        }
       }
       leaf topology {
         ext:help "IS-IS SPF tree (per-AFI today; per-MT once multi-topology lands)";
