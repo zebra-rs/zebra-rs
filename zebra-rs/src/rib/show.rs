@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     config::Args,
-    rib::{Label, Nexthop, nexthop::NexthopUni},
+    rib::{Label, Nexthop, nexthop::NexthopMember, nexthop::NexthopUni},
 };
 
 use super::{Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show};
@@ -88,6 +88,13 @@ pub struct NexthopJson {
     pub weight: Option<u8>,
     pub metric: Option<u32>,
     pub mpls_labels: Vec<Value>,
+    /// True when this nexthop is a backup entry inside a
+    /// `Nexthop::List`: anything in the list beyond the first
+    /// member (the primary at the lowest metric) is a TI-LFA-style
+    /// repair path. Omitted from JSON when false so non-FRR routes
+    /// keep their pre-flag schema.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub backup: bool,
 }
 
 #[derive(Serialize)]
@@ -108,6 +115,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                 weight: None,
                 metric: None,
                 mpls_labels: vec![],
+                backup: false,
             }]
         }
         Nexthop::Uni(uni) => {
@@ -139,6 +147,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                         }),
                     })
                     .collect(),
+                backup: false,
             }]
         }
         Nexthop::Multi(multi) => multi
@@ -162,28 +171,39 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
                         }),
                     })
                     .collect(),
+                backup: false,
             })
             .collect(),
         Nexthop::List(pro) => pro
-            .iter_unis()
-            .map(|uni| NexthopJson {
-                address: Some(uni.addr.to_string()),
-                interface: rib.link_name(uni.ifindex().unwrap_or(0)),
-                weight: Some(uni.weight),
-                metric: Some(uni.metric),
-                mpls_labels: uni
-                    .mpls
-                    .iter()
-                    .map(|label| match label {
-                        Label::Implicit(l) => serde_json::json!({
-                            "label": l,
-                            "label_type": "implicit"
-                        }),
-                        Label::Explicit(l) => serde_json::json!({
-                            "label": l
-                        }),
-                    })
-                    .collect(),
+            .nexthops
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, member)| {
+                let is_backup = idx > 0;
+                let unis: Vec<&NexthopUni> = match member {
+                    NexthopMember::Uni(u) => vec![u],
+                    NexthopMember::Multi(m) => m.nexthops.iter().collect(),
+                };
+                unis.into_iter().map(move |uni| NexthopJson {
+                    address: Some(uni.addr.to_string()),
+                    interface: rib.link_name(uni.ifindex().unwrap_or(0)),
+                    weight: Some(uni.weight),
+                    metric: Some(uni.metric),
+                    mpls_labels: uni
+                        .mpls
+                        .iter()
+                        .map(|label| match label {
+                            Label::Implicit(l) => serde_json::json!({
+                                "label": l,
+                                "label_type": "implicit"
+                            }),
+                            Label::Explicit(l) => serde_json::json!({
+                                "label": l
+                            }),
+                        })
+                        .collect(),
+                    backup: is_backup,
+                })
             })
             .collect(),
     };
@@ -221,6 +241,7 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
                 weight: None,
                 metric: None,
                 mpls_labels: vec![],
+                backup: false,
             }]
         }
         Nexthop::Uni(uni) => {
@@ -252,6 +273,7 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
                         }),
                     })
                     .collect(),
+                backup: false,
             }]
         }
         Nexthop::Multi(multi) => multi
@@ -275,28 +297,39 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
                         }),
                     })
                     .collect(),
+                backup: false,
             })
             .collect(),
         Nexthop::List(pro) => pro
-            .iter_unis()
-            .map(|uni| NexthopJson {
-                address: Some(uni.addr.to_string()),
-                interface: rib.link_name(uni.ifindex().unwrap_or(0)),
-                weight: Some(uni.weight),
-                metric: Some(uni.metric),
-                mpls_labels: uni
-                    .mpls
-                    .iter()
-                    .map(|label| match label {
-                        Label::Implicit(l) => serde_json::json!({
-                            "label": l,
-                            "label_type": "implicit"
-                        }),
-                        Label::Explicit(l) => serde_json::json!({
-                            "label": l
-                        }),
-                    })
-                    .collect(),
+            .nexthops
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, member)| {
+                let is_backup = idx > 0;
+                let unis: Vec<&NexthopUni> = match member {
+                    NexthopMember::Uni(u) => vec![u],
+                    NexthopMember::Multi(m) => m.nexthops.iter().collect(),
+                };
+                unis.into_iter().map(move |uni| NexthopJson {
+                    address: Some(uni.addr.to_string()),
+                    interface: rib.link_name(uni.ifindex().unwrap_or(0)),
+                    weight: Some(uni.weight),
+                    metric: Some(uni.metric),
+                    mpls_labels: uni
+                        .mpls
+                        .iter()
+                        .map(|label| match label {
+                            Label::Implicit(l) => serde_json::json!({
+                                "label": l,
+                                "label_type": "implicit"
+                            }),
+                            Label::Explicit(l) => serde_json::json!({
+                                "label": l
+                            }),
+                        })
+                        .collect(),
+                    backup: is_backup,
+                })
             })
             .collect(),
     };
@@ -441,20 +474,47 @@ pub fn rib_entry_show(
                 }
             }
             Nexthop::List(pro) => {
-                for (i, uni) in pro.iter_unis().enumerate() {
-                    if i != 0 {
-                        buf.push_str(&" ".repeat(offset));
+                // Walk members so we can distinguish primaries (first
+                // member, idx == 0) from TI-LFA backups (idx > 0).
+                let mut row = 0;
+                for (member_idx, member) in pro.nexthops.iter().enumerate() {
+                    let is_backup = member_idx > 0;
+                    let unis: Vec<&NexthopUni> = match member {
+                        NexthopMember::Uni(u) => vec![u],
+                        NexthopMember::Multi(m) => m.nexthops.iter().collect(),
+                    };
+                    for uni in unis {
+                        if row != 0 {
+                            buf.push_str(&" ".repeat(offset));
+                        }
+                        row += 1;
+                        write!(
+                            buf,
+                            " {} {}, {}, metric {}",
+                            via_word(uni),
+                            via_addr(uni),
+                            rib.link_name(uni.ifindex().unwrap_or(0)),
+                            uni.metric,
+                        )
+                        .unwrap();
+                        if !uni.mpls.is_empty() {
+                            write!(buf, ", label").unwrap();
+                            for mpls in uni.mpls.iter() {
+                                match mpls {
+                                    Label::Implicit(label) => {
+                                        write!(buf, " {} implicit-null", label).unwrap();
+                                    }
+                                    Label::Explicit(label) => {
+                                        write!(buf, " {}", label).unwrap();
+                                    }
+                                }
+                            }
+                        }
+                        if is_backup {
+                            write!(buf, ", backup").unwrap();
+                        }
+                        writeln!(buf, ", {}", uptime).unwrap();
                     }
-                    writeln!(
-                        buf,
-                        " {} {}, {}, metric {}, {}",
-                        via_word(uni),
-                        via_addr(uni),
-                        rib.link_name(uni.ifindex().unwrap_or(0)),
-                        uni.metric,
-                        uptime,
-                    )
-                    .unwrap();
                 }
             }
         }
@@ -587,20 +647,47 @@ pub fn rib_entry_show_v6(
                 }
             }
             Nexthop::List(pro) => {
-                for (i, uni) in pro.iter_unis().enumerate() {
-                    if i != 0 {
-                        buf.push_str(&" ".repeat(offset));
+                // Walk members so we can distinguish primaries (first
+                // member, idx == 0) from TI-LFA backups (idx > 0).
+                let mut row = 0;
+                for (member_idx, member) in pro.nexthops.iter().enumerate() {
+                    let is_backup = member_idx > 0;
+                    let unis: Vec<&NexthopUni> = match member {
+                        NexthopMember::Uni(u) => vec![u],
+                        NexthopMember::Multi(m) => m.nexthops.iter().collect(),
+                    };
+                    for uni in unis {
+                        if row != 0 {
+                            buf.push_str(&" ".repeat(offset));
+                        }
+                        row += 1;
+                        write!(
+                            buf,
+                            " {} {}, {}, metric {}",
+                            via_word(uni),
+                            via_addr(uni),
+                            rib.link_name(uni.ifindex().unwrap_or(0)),
+                            uni.metric,
+                        )
+                        .unwrap();
+                        if !uni.mpls.is_empty() {
+                            write!(buf, ", label").unwrap();
+                            for mpls in uni.mpls.iter() {
+                                match mpls {
+                                    Label::Implicit(label) => {
+                                        write!(buf, " {} implicit-null", label).unwrap();
+                                    }
+                                    Label::Explicit(label) => {
+                                        write!(buf, " {}", label).unwrap();
+                                    }
+                                }
+                            }
+                        }
+                        if is_backup {
+                            write!(buf, ", backup").unwrap();
+                        }
+                        writeln!(buf, ", {}", uptime).unwrap();
                     }
-                    writeln!(
-                        buf,
-                        " {} {}, {}, metric {}, {}",
-                        via_word(uni),
-                        via_addr(uni),
-                        rib.link_name(uni.ifindex().unwrap_or(0)),
-                        uni.metric,
-                        uptime,
-                    )
-                    .unwrap();
                 }
             }
         }
@@ -1314,5 +1401,42 @@ mod tests {
             assert!(line.contains("LOC_N1"));
             assert!(line.contains("dynamic"));
         }
+    }
+
+    #[test]
+    fn nexthop_json_omits_backup_when_false() {
+        // Default (primary) entries shouldn't carry a `backup` key —
+        // keeps the schema unchanged for non-FRR routes.
+        let nh = NexthopJson {
+            address: Some("10.0.0.1".to_string()),
+            interface: "eth0".to_string(),
+            weight: Some(1),
+            metric: Some(20),
+            mpls_labels: vec![],
+            backup: false,
+        };
+        let json = serde_json::to_string(&nh).unwrap();
+        assert!(
+            !json.contains("backup"),
+            "primary nhop should not emit backup field: {json}"
+        );
+    }
+
+    #[test]
+    fn nexthop_json_emits_backup_when_true() {
+        // TI-LFA repair entries inside Nexthop::List carry backup=true.
+        let nh = NexthopJson {
+            address: Some("10.0.0.5".to_string()),
+            interface: "eth1".to_string(),
+            weight: Some(1),
+            metric: Some(21),
+            mpls_labels: vec![],
+            backup: true,
+        };
+        let json = serde_json::to_string(&nh).unwrap();
+        assert!(
+            json.contains("\"backup\":true"),
+            "expected backup flag: {json}"
+        );
     }
 }
