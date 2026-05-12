@@ -2805,39 +2805,120 @@ fn apply_routing_updates(
 /// that SPF + `mt2_reach_map_v6` for the IPv6 RIB instead of the
 /// legacy result. RFC 5120 §3.4 strict-MT semantics — peers that
 /// didn't advertise MT 2 don't appear in the IPv6 forwarding table.
-/// TI-LFA SR-MPLS repair-path computation. Stub today — confirms the
-/// call site is wired between primary SPF and FIB install. The real
-/// per-edge SPF + P/Q identification + label assembly lands in
-/// subsequent commits and populates `SpfNexthop.backup` on each
-/// primary nhop where a TI-LFA repair exists.
+/// Post-convergence SPF result for one protected outgoing edge from
+/// `source`. Populated by `link_protection_spf`; consumed by the P/Q
+/// identification step that lands next. The `allow(dead_code)` is
+/// temporary — every field gets read once Step 4b lands.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct ProtectedEdgeSpf {
+    /// Vertex id on the far side of the protected link.
+    nbr_vertex: usize,
+    /// Cost of the protected edge in the primary graph. The future
+    /// P-space computation uses this to bound the reverse SPF.
+    edge_cost: u32,
+    /// Per-destination post-convergence paths. Only destinations that
+    /// had at least one primary path through `nbr_vertex` appear here;
+    /// destinations the modified graph can't reach are skipped.
+    repairs: BTreeMap<usize, spf::Path>,
+}
+
+/// For each outgoing edge from `source`, clone the graph, remove that
+/// edge, and re-run SPF. The returned vector has one entry per
+/// outgoing edge; each entry lists destinations whose primary path
+/// crossed the protected link plus the post-convergence path the
+/// modified graph produces for them.
+///
+/// Link protection only (RFC 9490 §3.2). Node protection (excluding
+/// the neighbor vertex entirely via `spf_calc`'s `x` parameter) is a
+/// follow-up — adding it later is a parameter flip on this function.
+fn link_protection_spf(
+    graph: &spf::Graph,
+    source: usize,
+    primary: &BTreeMap<usize, spf::Path>,
+) -> Vec<ProtectedEdgeSpf> {
+    let Some(source_vertex) = graph.get(&source) else {
+        return vec![];
+    };
+    let olinks = source_vertex.olinks.clone();
+    olinks
+        .iter()
+        .enumerate()
+        .map(|(edge_idx, edge)| {
+            // Clone the graph and snip exactly this one olink from
+            // source. The reverse direction (nbr -> source) is left
+            // in place because SPF only relaxes outgoing edges — for
+            // forward SPF from source the reverse link is invisible.
+            let mut modified = graph.clone();
+            if let Some(src) = modified.get_mut(&source) {
+                src.olinks.remove(edge_idx);
+            }
+            let post = spf::spf(&modified, source, &spf::SpfOpt::full_path());
+
+            let mut repairs = BTreeMap::new();
+            for (dest, primary_path) in primary {
+                if *dest == source {
+                    continue;
+                }
+                // Did any primary path to D go through the protected
+                // neighbor as its first hop? .paths[i][0] is the
+                // first hop, .paths[i][last] is the destination.
+                let affected = primary_path
+                    .paths
+                    .iter()
+                    .any(|p| p.first() == Some(&edge.to));
+                if !affected {
+                    continue;
+                }
+                if let Some(post_path) = post.get(dest)
+                    && !post_path.paths.is_empty()
+                {
+                    repairs.insert(*dest, post_path.clone());
+                }
+            }
+
+            ProtectedEdgeSpf {
+                nbr_vertex: edge.to,
+                edge_cost: edge.cost,
+                repairs,
+            }
+        })
+        .collect()
+}
+
+/// TI-LFA SR-MPLS repair-path computation. Step 4a wires the per-edge
+/// link-protection loop; subsequent commits will identify P / Q and
+/// build the SR-MPLS label stack from the post-convergence paths.
+/// Today the computed map is dropped — `SpfNexthop.backup` stays None
+/// everywhere so the RIB output matches the pre-TI-LFA install.
 fn ti_lfa_compute_mpls(
     top: &mut IsisTop,
     _level: Level,
-    _graph: &spf::Graph,
-    _source: usize,
+    graph: &spf::Graph,
+    source: usize,
+    primary: &BTreeMap<usize, spf::Path>,
     _routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
 ) {
     if top.config.ti_lfa_enabled && top.config.sr_mpls_enabled {
-        // Per-edge post-convergence SPF + label-stack assembly fills
-        // in `_routes[*].nhops[*].backup` here in a follow-up commit.
+        let _protected = link_protection_spf(graph, source, primary);
+        // P/Q identification + label-stack assembly land here.
     }
 }
 
-/// TI-LFA SRv6 repair-path computation. Stub today — gated on
-/// ti_lfa_enabled + sr_srv6_enabled. Mirrors the MPLS variant; will
-/// populate `SpfNexthopV6.backup` with End/End.X segment lists once
-/// the assembly lands.
+/// TI-LFA SRv6 repair-path computation. Mirrors the MPLS variant;
+/// segment-list assembly (End / End.X) lands in a follow-up commit.
 fn ti_lfa_compute_srv6(
     top: &mut IsisTop,
     _level: Level,
-    _graph: &spf::Graph,
-    _source: usize,
+    graph: &spf::Graph,
+    source: usize,
+    primary: &BTreeMap<usize, spf::Path>,
     _routes: &mut PrefixMap<Ipv6Net, SpfRouteV6>,
 ) {
     if top.config.ti_lfa_enabled && top.config.sr_srv6_enabled {
-        // Per-edge post-convergence SPF + End/End.X segment list
-        // assembly fills in `_routes[*].nhops[*].backup` here in a
-        // follow-up commit.
+        let _protected = link_protection_spf(graph, source, primary);
+        // P/Q identification + End/End.X segment-list assembly land
+        // here.
     }
 }
 
@@ -2854,7 +2935,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         // §5 strict NLPID gating across every transit node.
         let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
         let mut rib = build_rib_from_spf(top, level, source, &spf_result);
-        ti_lfa_compute_mpls(top, level, &graph, source, &mut rib);
+        ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
 
         let mt2_enabled =
             top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
@@ -2867,7 +2948,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
             if let Some(mt2_src) = mt2_source {
                 let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
                 let mut rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
-                ti_lfa_compute_srv6(top, level, &mt2_graph, mt2_src, &mut rib_v6);
+                ti_lfa_compute_srv6(top, level, &mt2_graph, mt2_src, &mt2_spf, &mut rib_v6);
                 *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
                 rib_v6
             } else {
@@ -2880,7 +2961,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
             *top.mt2_graph.get_mut(&level) = None;
             *top.mt2_spf_result.get_mut(&level) = None;
             let mut rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result, false);
-            ti_lfa_compute_srv6(top, level, &graph, source, &mut rib_v6);
+            ti_lfa_compute_srv6(top, level, &graph, source, &spf_result, &mut rib_v6);
             rib_v6
         };
 
@@ -3185,5 +3266,88 @@ mod tests {
         assert_eq!(b.segs, vec![end_sid, endx_sid]);
         assert_eq!(b.encap_type, Some(EncapType::HEncap));
         assert!(b.mpls.is_empty());
+    }
+
+    // Small TI-LFA topology for the link-protection loop. Four
+    // vertices, costs chosen so the primary S->D path goes via A
+    // (cost 2) and removing S->A forces the post-conv path via B
+    // (cost 3). A itself becomes unreachable when S->A is cut.
+    //
+    //        1            1
+    //   S---------A--------+
+    //   |                  |
+    //   |2                 |
+    //   |        1         v
+    //   B------------------D
+    //
+    fn build_link_protection_fixture() -> (spf::Graph, BTreeMap<usize, spf::Path>) {
+        use crate::spf::{Link, Vertex};
+        let mut graph = spf::Graph::new();
+        for (id, name) in [(0, "S"), (1, "A"), (2, "B"), (3, "D")] {
+            graph.insert(id, Vertex::new_node(name, id));
+        }
+        let edges = [
+            (0, 1, 1),
+            (0, 2, 2),
+            (1, 3, 1),
+            (2, 3, 1),
+            // reverse edges so SPF from D could also be done
+            (1, 0, 1),
+            (2, 0, 2),
+            (3, 1, 1),
+            (3, 2, 1),
+        ];
+        for (from, to, cost) in edges {
+            graph
+                .get_mut(&from)
+                .unwrap()
+                .olinks
+                .push(Link::new(from, to, cost));
+        }
+        let primary = spf::spf(&graph, 0, &spf::SpfOpt::full_path());
+        (graph, primary)
+    }
+
+    #[test]
+    fn link_protection_spf_finds_post_conv_for_affected_destinations() {
+        let (graph, primary) = build_link_protection_fixture();
+        // Primary D goes via A (cost 2).
+        assert_eq!(primary[&3].cost, 2);
+        assert_eq!(primary[&3].paths, vec![vec![1, 3]]);
+
+        let protected = link_protection_spf(&graph, 0, &primary);
+        // S has two olinks: S->A (idx 0) and S->B (idx 1).
+        assert_eq!(protected.len(), 2);
+
+        // Protecting S->A: D and A are both affected (D's primary went
+        // through A; A is itself reached directly via the protected
+        // edge). Post-convergence both reroute through B.
+        let pe_a = protected.iter().find(|p| p.nbr_vertex == 1).unwrap();
+        assert_eq!(pe_a.edge_cost, 1);
+        // D's post-conv path: S -> B -> D (cost 3).
+        let d_repair = pe_a.repairs.get(&3).expect("D should have a repair");
+        assert_eq!(d_repair.cost, 3);
+        assert_eq!(d_repair.paths, vec![vec![2, 3]]);
+        // A's post-conv path: S -> B -> D -> A (cost 4) — the link is
+        // out, but the node is reachable via the back side of the
+        // fixture's ring.
+        let a_repair = pe_a.repairs.get(&1).expect("A should have a repair");
+        assert_eq!(a_repair.cost, 4);
+        assert_eq!(a_repair.paths, vec![vec![2, 3, 1]]);
+
+        // Protecting S->B: only B itself is affected (it's the
+        // direct neighbor on the protected edge); D's primary goes
+        // via A so it's untouched.
+        let pe_b = protected.iter().find(|p| p.nbr_vertex == 2).unwrap();
+        assert!(!pe_b.repairs.contains_key(&3), "D should be unaffected");
+        let b_repair = pe_b.repairs.get(&2).expect("B should have a repair");
+        assert_eq!(b_repair.cost, 3);
+        assert_eq!(b_repair.paths, vec![vec![1, 3, 2]]);
+    }
+
+    #[test]
+    fn link_protection_spf_returns_empty_when_source_missing() {
+        let (graph, primary) = build_link_protection_fixture();
+        assert!(link_protection_spf(&graph, 99, &primary).is_empty());
     }
 }
