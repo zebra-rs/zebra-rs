@@ -1762,11 +1762,15 @@ fn collect_adjacency_sids(lsp: &IsisLsp, sids: &mut BTreeMap<u32, IsisSysId>) {
         if let IsisTlv::ExtIsReach(ext_reach) = tlv {
             for entry in &ext_reach.entries {
                 for sub in &entry.subs {
-                    // TODO: Also handle P2P adjacency SIDs when implemented
                     if let neigh::IsisSubTlv::LanAdjSid(adj_sid) = sub
                         && let SidLabelValue::Label(label) = adj_sid.sid
                     {
                         sids.insert(label, adj_sid.system_id);
+                    }
+                    if let neigh::IsisSubTlv::AdjSid(adj_sid) = sub
+                        && let SidLabelValue::Label(label) = adj_sid.sid
+                    {
+                        sids.insert(label, entry.neighbor_id.sys_id());
                     }
                 }
             }
@@ -2440,8 +2444,8 @@ fn build_adjacency_ilm(
             }
         }
 
-        // Adjacency labels start from 24000, so calculate index.
-        let adj_index = if label >= 24000 { label - 24000 + 1 } else { 1 };
+        // TODO: Need to check local-block in RIB configuration.
+        let adj_index = if label >= 15000 { label - 15000 } else { 0 };
         let spf_ilm = SpfIlm {
             nhops,
             ilm_type: IlmType::Adjacency(adj_index),
@@ -3369,53 +3373,60 @@ fn ti_lfa_compute_srv6(
     }
 }
 
+//
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
+    // Turn off SPF calculation timer.
     *top.spf_timer.get_mut(&level) = None;
 
     // Legacy graph + SPF — drives IPv4 RIB and IPv6 in non-MT mode.
     let (graph, source_node, adjacency_sids) = graph(top, level);
     *top.graph.get_mut(&level) = Some(graph.clone());
+
+    // Source node check and early return.
+    let Some(source) = source_node else {
+        return;
+    };
+
+    // Build Adjacency ILM from
     let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);
 
-    if let Some(source) = source_node {
-        // Full-path mode so the legacy v6 builder can apply RFC 1195
-        // §5 strict NLPID gating across every transit node.
-        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
-        let mut rib = build_rib_from_spf(top, level, source, &spf_result);
-        ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
+    // Full-path mode so the legacy v6 builder can apply RFC 1195
+    // §5 strict NLPID gating across every transit node.
+    let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
+    let mut rib = build_rib_from_spf(top, level, source, &spf_result);
+    ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
 
-        let mt2_enabled =
-            top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
+    let mt2_enabled =
+        top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
 
-        let rib_v6 = if mt2_enabled {
-            // Separate MT 2 graph + SPF, fed into the v6 RIB build via
-            // mt2_reach_map_v6 (TLV 237 entries).
-            let (mt2_graph, mt2_source, _) = graph_mt2(top, level);
-            *top.mt2_graph.get_mut(&level) = Some(mt2_graph.clone());
-            if let Some(mt2_src) = mt2_source {
-                let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
-                let mut rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
-                ti_lfa_compute_srv6(top, level, &mt2_graph, mt2_src, &mt2_spf, &mut rib_v6);
-                *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
-                rib_v6
-            } else {
-                *top.mt2_spf_result.get_mut(&level) = None;
-                PrefixMap::new()
-            }
-        } else {
-            // No MT 2: clear any stale MT 2 caches and use the legacy
-            // graph + reach_map_v6 for IPv6.
-            *top.mt2_graph.get_mut(&level) = None;
-            *top.mt2_spf_result.get_mut(&level) = None;
-            let mut rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result, false);
-            ti_lfa_compute_srv6(top, level, &graph, source, &spf_result, &mut rib_v6);
+    let rib_v6 = if mt2_enabled {
+        // Separate MT 2 graph + SPF, fed into the v6 RIB build via
+        // mt2_reach_map_v6 (TLV 237 entries).
+        let (mt2_graph, mt2_source, _) = graph_mt2(top, level);
+        *top.mt2_graph.get_mut(&level) = Some(mt2_graph.clone());
+        if let Some(mt2_src) = mt2_source {
+            let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
+            let mut rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, true);
+            ti_lfa_compute_srv6(top, level, &mt2_graph, mt2_src, &mt2_spf, &mut rib_v6);
+            *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
             rib_v6
-        };
+        } else {
+            *top.mt2_spf_result.get_mut(&level) = None;
+            PrefixMap::new()
+        }
+    } else {
+        // No MT 2: clear any stale MT 2 caches and use the legacy
+        // graph + reach_map_v6 for IPv6.
+        *top.mt2_graph.get_mut(&level) = None;
+        *top.mt2_spf_result.get_mut(&level) = None;
+        let mut rib_v6 = build_rib_from_spf_v6(top, level, source, &spf_result, false);
+        ti_lfa_compute_srv6(top, level, &graph, source, &spf_result, &mut rib_v6);
+        rib_v6
+    };
 
-        *top.spf_result.get_mut(&level) = Some(spf_result);
-        mpls_route(&rib, &mut ilm);
-        apply_routing_updates(top, level, rib, rib_v6, ilm);
-    }
+    *top.spf_result.get_mut(&level) = Some(spf_result);
+    mpls_route(&rib, &mut ilm);
+    apply_routing_updates(top, level, rib, rib_v6, ilm);
 }
 
 pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, SpfIlm>) {
