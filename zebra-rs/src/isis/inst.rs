@@ -2908,53 +2908,39 @@ fn link_protection_spf(
     source: usize,
     primary: &BTreeMap<usize, spf::Path>,
 ) -> Vec<ProtectedEdgeSpf> {
-    let Some(source_vertex) = graph.get(&source) else {
-        return vec![];
-    };
-    let olinks = source_vertex.olinks.clone();
-    olinks
-        .iter()
-        .enumerate()
-        .map(|(edge_idx, edge)| {
-            // Clone the graph and snip exactly this one olink from
-            // source. The reverse direction (nbr -> source) is left
-            // in place because SPF only relaxes outgoing edges — for
-            // forward SPF from source the reverse link is invisible.
-            let mut modified = graph.clone();
-            if let Some(src) = modified.get_mut(&source) {
-                src.olinks.remove(edge_idx);
-            }
-            let post = spf::spf(&modified, source, &spf::SpfOpt::full_path());
+    // let Some(source_vertex) = graph.get(&source) else {
+    //     return vec![];
+    // };
 
-            let mut repairs = BTreeMap::new();
-            for (dest, primary_path) in primary {
-                if *dest == source {
-                    continue;
-                }
-                // Did any primary path to D go through the protected
-                // neighbor as its first hop? .paths[i][0] is the
-                // first hop, .paths[i][last] is the destination.
-                let affected = primary_path
-                    .paths
-                    .iter()
-                    .any(|p| p.first() == Some(&edge.to));
-                if !affected {
-                    continue;
-                }
-                if let Some(post_path) = post.get(dest)
-                    && !post_path.paths.is_empty()
-                {
-                    repairs.insert(*dest, post_path.clone());
-                }
-            }
+    for (d, path) in primary.iter() {
+        print!("{}: {:?}", d, path.paths);
+        // Source is skipped.
+        if *d == source {
+            println!(" => Source is skipped");
+            continue;
+        }
+        // ECMP is skipped.
+        if path.paths.len() > 1 {
+            println!(" => ECMP is skipped");
+            continue;
+        }
 
-            ProtectedEdgeSpf {
-                nbr_vertex: edge.to,
-                edge_cost: edge.cost,
-                repairs,
-            }
-        })
-        .collect()
+        // X
+        let first = &path.paths[0];
+        if first.is_empty() {
+            continue;
+        }
+        let x = first[0];
+
+        let repair_path = spf::tilfa(graph, source, *d, &[x]);
+        if !repair_path.is_empty() {
+            println!(" => {:?}", &repair_path[0]);
+        } else {
+            println!(" => no repair path");
+        }
+    }
+
+    vec![]
 }
 
 /// Output of `resolve_repairs_mpls` — for one (protected neighbor,
@@ -3225,9 +3211,9 @@ fn ti_lfa_compute_mpls(
     primary: &BTreeMap<usize, spf::Path>,
     routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
 ) {
-    if !(top.config.ti_lfa_enabled && top.config.sr_mpls_enabled) {
-        return;
-    }
+    // if !(top.config.ti_lfa_enabled && top.config.sr_mpls_enabled) {
+    //     return;
+    // }
     let protected = link_protection_spf(graph, source, primary);
     let repairs = resolve_repairs_mpls(top, level, graph, source, &protected);
     if !repairs.is_empty() {
