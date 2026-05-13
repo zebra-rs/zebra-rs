@@ -926,7 +926,10 @@ mod tests {
             let name = vertex_name(&graph, *n);
             p_vertices.insert(name);
         }
-        println!("P space: {:?}", p_vertices);
+        assert_eq!(
+            p_vertices,
+            BTreeSet::from(["N3".into(), "N2".into(), "R1".into()])
+        );
 
         let q = q_space_vertices(&graph, d, x);
         let mut q_vertices = BTreeSet::<String>::new();
@@ -934,7 +937,7 @@ mod tests {
             let name = vertex_name(&graph, *n);
             q_vertices.insert(name);
         }
-        println!("Q space: {:?}", q_vertices);
+        assert_eq!(q_vertices, BTreeSet::from([]));
 
         let pc = pc_paths(&graph, s, d, x);
         let pc = pc.first().unwrap();
@@ -943,9 +946,7 @@ mod tests {
             let name = vertex_name(&graph, *n);
             pc_vertices.push(name);
         }
-        println!("PCPath: {:?}", pc_vertices);
-
-        let mut repair_lists = vec![];
+        assert_eq!(pc_vertices, vec!["N2", "R1", "R2"]);
 
         let mut pc = pc_paths(&graph, s, d, x);
         for path in &mut pc {
@@ -957,16 +958,17 @@ mod tests {
             // make_repair_list folds each pseudonode into the `via`
             // field of the surrounding adjacency.
             let pc_inter = intersect(path, &p, &q);
-            println!("PC inter: {:?}", pc_inter);
 
             // Convert PC intersects into repair list.
             let repair_list = make_repair_list(&pc_inter, s, d, &graph);
 
-            repair_lists.push(repair_list);
-        }
-        println!("repair_path: {:?}", repair_lists);
+            assert_eq!(repair_list.len(), 1);
 
-        /////
+            let first_segment = repair_list.first().unwrap();
+            let first_disp = seg_disp(&graph, first_segment);
+            assert_eq!(first_disp, "NodeSid(R1)");
+        }
+
         // *  First, P(S, N1) is computed and results in [N3, N2, R1].
         let s = 0;
         let d = 7;
