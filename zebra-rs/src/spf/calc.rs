@@ -363,75 +363,107 @@ pub enum SrSegment {
     AdjSid(usize, usize, Option<usize>),
 }
 
-/// Walk the PCPath/intersect sequence and emit an SR repair list.
+/// Walk the PC-path intersect sequence and emit an SR repair list
+/// per RFC 9855 §6.
 ///
-/// IS-IS LAN pseudonodes are skipped over for emission purposes —
-/// they own no Node-SID and the adjacency they represent is
-/// captured by the surrounding routers' AdjSid `via` field. The
-/// most recently traversed pseudonode is held in `pending_via`
-/// and consumed by the next AdjSid emission.
+/// The PC path is monotonic in P/Q membership: a (possibly empty)
+/// P-space prefix, then a middle that is neither P nor Q, then a
+/// (possibly empty) Q-space suffix. The repair list collapses the
+/// P prefix to one NodeSid (the deepest P-node) and walks the
+/// middle with AdjSids until Q is reached, after which the Q-node's
+/// natural forwarding carries the packet to D.
+///
+/// IS-IS LAN pseudonodes own no Node-SID; they are folded into the
+/// `via` of the surrounding adjacency. The most recently traversed
+/// pseudonode is cached in `pending_via` and consumed (and reset)
+/// by the next AdjSid emission.
 pub fn make_repair_list(
     pc_inter: &[Intersect],
     s: usize,
     d: usize,
     graph: &Graph,
 ) -> Vec<SrSegment> {
-    let mut sr_segments = Vec::new();
+    enum State {
+        LookingForFirst,
+        InP,
+        Walking,
+        InQ,
+    }
 
-    let mut prev_id: Option<usize> = None;
-    let mut p_mode = false;
-    let mut q_mode = false;
-    // Most recent pseudonode traversed since the last router.
-    // Consumed (and reset) by the next AdjSid emission.
+    let mut sr_segments = Vec::new();
+    let mut state = State::LookingForFirst;
+    let mut prev: Option<usize> = None;
+    let mut deepest_p: Option<usize> = None;
     let mut pending_via: Option<usize> = None;
-    let mut first_router = true;
 
     for inter in pc_inter {
-        // Pseudonodes contribute no segment of their own; they
-        // become the `via` of the adjacency between the surrounding
-        // routers. q_mode is intentionally not updated here: a PN
-        // can land in q_space incidentally (e.g. PN_R3_D's reverse
-        // path is just [PN_R3_D]), but the Q-node concept only
-        // applies to real routers.
         if graph.get(&inter.id).is_some_and(|v| v.is_pseudo_node()) {
             pending_via = Some(inter.id);
             continue;
         }
 
-        if first_router {
-            if inter.p {
-                p_mode = true;
-            } else {
-                sr_segments.push(SrSegment::AdjSid(s, inter.id, pending_via));
-                pending_via = None;
-            }
-            first_router = false;
-        } else if p_mode {
-            if !inter.p {
-                if let Some(prev) = prev_id {
-                    sr_segments.push(SrSegment::NodeSid(prev));
-                }
-                if !q_mode {
-                    sr_segments.push(SrSegment::AdjSid(prev_id.unwrap(), inter.id, pending_via));
+        match state {
+            State::LookingForFirst => {
+                if inter.p {
+                    deepest_p = Some(inter.id);
+                    state = State::InP;
+                } else {
+                    sr_segments.push(SrSegment::AdjSid(s, inter.id, pending_via));
                     pending_via = None;
+                    state = if inter.q { State::InQ } else { State::Walking };
                 }
-                p_mode = false;
             }
-        } else if let Some(prev) = prev_id
-            && !q_mode
-        {
-            sr_segments.push(SrSegment::AdjSid(prev, inter.id, pending_via));
-            pending_via = None;
+            State::InP => {
+                if inter.p {
+                    deepest_p = Some(inter.id);
+                } else {
+                    if let Some(p) = deepest_p {
+                        sr_segments.push(SrSegment::NodeSid(p));
+                    }
+                    if inter.q {
+                        state = State::InQ;
+                    } else {
+                        let from = deepest_p.unwrap_or(s);
+                        sr_segments.push(SrSegment::AdjSid(from, inter.id, pending_via));
+                        pending_via = None;
+                        state = State::Walking;
+                    }
+                }
+            }
+            State::Walking => {
+                let from = prev.unwrap_or(s);
+                sr_segments.push(SrSegment::AdjSid(from, inter.id, pending_via));
+                pending_via = None;
+                if inter.q {
+                    state = State::InQ;
+                }
+            }
+            State::InQ => {
+                // Q-space reached; the remaining hops are taken by
+                // the Q-node's natural forwarding (X-free by
+                // construction). No more segments to emit.
+            }
         }
 
-        if inter.q {
-            q_mode = true;
-        }
-        prev_id = Some(inter.id);
+        prev = Some(inter.id);
     }
 
-    if !q_mode && let Some(prev) = prev_id {
-        sr_segments.push(SrSegment::AdjSid(prev, d, pending_via));
+    // Close out the repair list when the loop ends mid-flight.
+    match state {
+        State::InP => {
+            // Whole PC path stayed in P-space — a single NodeSid is
+            // enough; the deepest P-node naturally reaches D.
+            if let Some(p) = deepest_p {
+                sr_segments.push(SrSegment::NodeSid(p));
+            }
+        }
+        State::Walking => {
+            // Ran out of vertices without entering Q-space; emit
+            // one final AdjSid into D.
+            let from = prev.unwrap_or(s);
+            sr_segments.push(SrSegment::AdjSid(from, d, pending_via));
+        }
+        State::LookingForFirst | State::InQ => {}
     }
 
     sr_segments
@@ -882,7 +914,59 @@ mod tests {
         let vertex_name =
             |graph: &Graph, id: usize| graph.get(&id).map(|n| &n.name).unwrap().clone();
 
-        // TI-LFA draft
+        // D=R2 test for first NodeSID.
+        let s = 0;
+        let d = 5;
+        let x: &[usize] = &[1];
+
+        // P space.
+        let p = p_space_vertices(&graph, s, x);
+        let mut p_vertices = BTreeSet::<String>::new();
+        for n in p.iter() {
+            let name = vertex_name(&graph, *n);
+            p_vertices.insert(name);
+        }
+        println!("P space: {:?}", p_vertices);
+
+        let q = q_space_vertices(&graph, d, x);
+        let mut q_vertices = BTreeSet::<String>::new();
+        for n in q.iter() {
+            let name = vertex_name(&graph, *n);
+            q_vertices.insert(name);
+        }
+        println!("Q space: {:?}", q_vertices);
+
+        let pc = pc_paths(&graph, s, d, x);
+        let pc = pc.first().unwrap();
+        let mut pc_vertices = Vec::<String>::new();
+        for n in pc.iter() {
+            let name = vertex_name(&graph, *n);
+            pc_vertices.push(name);
+        }
+        println!("PCPath: {:?}", pc_vertices);
+
+        let mut repair_lists = vec![];
+
+        let mut pc = pc_paths(&graph, s, d, x);
+        for path in &mut pc {
+            // Remove D — make_repair_list adds it back via the trailing
+            // AdjSid(prev, d) emission.
+            path.pop();
+
+            // Intersect over the full PCPath including pseudonodes.
+            // make_repair_list folds each pseudonode into the `via`
+            // field of the surrounding adjacency.
+            let pc_inter = intersect(path, &p, &q);
+            println!("PC inter: {:?}", pc_inter);
+
+            // Convert PC intersects into repair list.
+            let repair_list = make_repair_list(&pc_inter, s, d, &graph);
+
+            repair_lists.push(repair_list);
+        }
+        println!("repair_path: {:?}", repair_lists);
+
+        /////
         // *  First, P(S, N1) is computed and results in [N3, N2, R1].
         let s = 0;
         let d = 7;
