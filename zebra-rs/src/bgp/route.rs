@@ -562,6 +562,30 @@ pub fn route_apply_policy_in(
     })
 }
 
+/// Inbound policy entry point for an EVPN route. Mirrors
+/// `route_apply_policy_in` but skips the per-direction prefix-set
+/// (no IPv4 prefix on EVPN NLRIs) and dispatches to
+/// `policy_list_apply_evpn`. When no input policy-list is bound
+/// to the peer the route passes through unmodified.
+pub fn route_apply_policy_in_evpn(
+    peer: &mut Peer,
+    route: &EvpnRoute,
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
+    let config = peer.policy_list.get(&InOut::Input);
+    if config.name.is_some() {
+        let Some(policy_list) = &config.policy_list else {
+            return None;
+        };
+        return policy_list_apply_evpn(policy_list, route, bgp_attr, weight, peer.router_id);
+    }
+    Some(PolicyDecision {
+        attr: bgp_attr,
+        weight,
+    })
+}
+
 pub fn route_apply_policy_out(
     peer: &mut Peer,
     nlri: &Ipv4Nlri,
@@ -1607,6 +1631,32 @@ fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
     None
 }
 
+/// Map a parsed `EvpnRoute` to the policy-side `EvpnRouteType`
+/// discriminator. Only Type-2 (MAC-IP) and Type-3 (Inclusive
+/// Multicast) parse into `EvpnRoute` today; Type-1/4/5 NLRIs are
+/// either dropped at parse or never reach this evaluator, so they
+/// are not represented here.
+fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
+    use crate::policy::EvpnRouteType;
+    match route {
+        EvpnRoute::Mac(_) => EvpnRouteType::MacIp,
+        EvpnRoute::Multicast(_) => EvpnRouteType::Multicast,
+    }
+}
+
+/// Derive the VNI carried by an EVPN route. For Type-2 (MAC-IP)
+/// the VNI lives directly in the NLRI's MPLS-label1 field
+/// (`EvpnMac.vni`). For Type-3 (Inclusive Multicast) the NLRI
+/// carries no VNI, so we fall back to the Route Target extended
+/// community per RFC 8365 §5.1.2.4 via `extract_vni_from_attr`.
+/// Returns `None` when neither source yields a non-zero VNI.
+fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
+    match route {
+        EvpnRoute::Mac(m) => (m.vni != 0).then_some(m.vni),
+        EvpnRoute::Multicast(_) => extract_vni_from_attr(attr),
+    }
+}
+
 /// Extract flags (sticky, gateway, router) from extended communities
 fn extract_flags_from_attr(attr: &BgpAttr) -> u8 {
     let mut flags = 0u8;
@@ -1863,10 +1913,21 @@ pub fn route_evpn_update(
         rib.esi = Some(m.esi);
     }
 
-    {
+    // Apply input policy *after* the route is registered in
+    // Adj-RIB-In (raw, pre-policy view) but *before* it enters
+    // Loc-RIB / best-path. On deny, treat the receive as an
+    // implicit withdrawal so any stale path is also pulled.
+    let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         peer.adj_in.add_evpn(rd, prefix.clone(), rib.clone());
-    }
+        route_apply_policy_in_evpn(peer, route, attr.clone(), rib.weight)
+    };
+    let Some(decision) = decision else {
+        route_evpn_withdraw(ident, route, bgp, peers);
+        return;
+    };
+    rib.attr = bgp.attr_store.intern(decision.attr);
+    rib.weight = decision.weight;
 
     let _ = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
 
@@ -2712,6 +2773,176 @@ fn entry_matches(
     }
     if let Some(want) = entry.match_origin {
         let Some(have) = bgp_attr.origin else {
+            return false;
+        };
+        if have != want {
+            return false;
+        }
+    }
+    true
+}
+
+/// EVPN counterpart of `policy_list_apply`. Same Permit/Deny/Next
+/// state machine and same `set` clauses; the matcher swaps to
+/// `entry_matches_evpn`, which skips IPv4-prefix-only conditions
+/// (`prefix_set`, `match_next_hop`) and adds the EVPN-specific
+/// `match_evpn_route_type` and `match_evpn_vni` checks.
+pub fn policy_list_apply_evpn(
+    policy_list: &PolicyList,
+    route: &EvpnRoute,
+    bgp_attr: BgpAttr,
+    weight: u32,
+    local_addr: Ipv4Addr,
+) -> Option<PolicyDecision> {
+    use crate::policy::{PolicyAction, SetNextHop};
+    let mut decision = PolicyDecision {
+        attr: bgp_attr,
+        weight,
+    };
+    for (_, entry) in policy_list.entry.iter() {
+        if !entry_matches_evpn(entry, route, &decision.attr, decision.weight) {
+            continue;
+        }
+        match entry.action {
+            PolicyAction::Deny => return None,
+            PolicyAction::Permit | PolicyAction::Next => {
+                if let Some(action) = &entry.local_pref {
+                    let current = decision
+                        .attr
+                        .local_pref
+                        .as_ref()
+                        .map(|l| l.local_pref)
+                        .unwrap_or(0);
+                    decision.attr.local_pref = Some(LocalPref::new(action.apply(current)));
+                }
+                if let Some(action) = &entry.med {
+                    let current = decision.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+                    decision.attr.med = Some(Med {
+                        med: action.apply(current),
+                    });
+                }
+                if let Some(w) = entry.weight {
+                    decision.weight = w;
+                }
+                if let Some(cfg) = &entry.set_community {
+                    apply_set_community(&mut decision.attr, cfg);
+                }
+                if let Some(prepend) = &entry.set_as_path_prepend {
+                    apply_set_as_path_prepend(&mut decision.attr, prepend);
+                }
+                // `set next-hop` writes BgpAttr.nexthop (IPv4-only).
+                // For EVPN the real nexthop travels in MP_REACH_NLRI,
+                // so the mutation has no visible effect on the wire
+                // today; we still honor it for parity with IPv4.
+                if let Some(nh) = &entry.set_next_hop {
+                    match nh {
+                        SetNextHop::Address(IpAddr::V4(addr)) => {
+                            decision.attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+                        }
+                        SetNextHop::Address(IpAddr::V6(_)) => {}
+                        SetNextHop::SelfAddr => {
+                            decision.attr.nexthop = Some(BgpNexthop::Ipv4(local_addr));
+                        }
+                    }
+                }
+                if let Some(origin) = entry.set_origin {
+                    decision.attr.origin = Some(origin);
+                }
+                if entry.action == PolicyAction::Permit {
+                    return Some(decision);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// EVPN match evaluator. Same shape as `entry_matches` minus the
+/// IPv4-specific clauses: `prefix_set` (no IP prefix on EVPN
+/// NLRIs) and `match_next_hop` (BgpAttr.nexthop is IPv4-only and
+/// is not the EVPN nexthop). Common BGP attribute matches
+/// (community/ext-community/large-community/as-path-set,
+/// med/as-path-len/local-pref/weight/origin) carry over verbatim.
+/// EVPN-specific clauses (`match_evpn_route_type`, `match_evpn_vni`)
+/// pull from the route discriminator and the per-type VNI source.
+fn entry_matches_evpn(
+    entry: &crate::policy::PolicyEntry,
+    route: &EvpnRoute,
+    bgp_attr: &BgpAttr,
+    weight: u32,
+) -> bool {
+    if let Some(community_set) = &entry.community_set
+        && !community_set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(set) = &entry.ext_community_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(set) = &entry.large_community_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(as_path_set) = &entry.as_path_set
+        && !as_path_set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(med_match) = &entry.match_med {
+        let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+        if !med_match.matches(med) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_as_path_len {
+        let len = bgp_attr.aspath.as_ref().map(|p| p.length()).unwrap_or(0);
+        if !m.matches(len) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_as_path_len_uniq {
+        let uniq = bgp_attr
+            .aspath
+            .as_ref()
+            .map(|p| p.unique_length())
+            .unwrap_or(0);
+        if !m.matches(uniq) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_local_pref {
+        let lp = bgp_attr
+            .local_pref
+            .as_ref()
+            .map(|l| l.local_pref)
+            .unwrap_or(0);
+        if !m.matches(lp) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_weight
+        && !m.matches(weight)
+    {
+        return false;
+    }
+    if let Some(want) = entry.match_origin {
+        let Some(have) = bgp_attr.origin else {
+            return false;
+        };
+        if have != want {
+            return false;
+        }
+    }
+    if let Some(want) = entry.match_evpn_route_type
+        && evpn_route_type_of(route) != want
+    {
+        return false;
+    }
+    if let Some(want) = entry.match_evpn_vni {
+        let Some(have) = evpn_vni_of(route, bgp_attr) else {
             return false;
         };
         if have != want {
@@ -3885,6 +4116,124 @@ mod policy_apply_tests {
         let mut attr_regex = attr_with("1", None, None);
         attr_regex.lcom = Some(LargeCommunity::from_str("65001:9:9").unwrap());
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr_regex).is_some());
+    }
+
+    fn evpn_mac(vni: u32) -> EvpnRoute {
+        EvpnRoute::Mac(EvpnMac {
+            id: 0,
+            rd: RouteDistinguisher::new(RouteDistinguisherType::IP),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0x02, 0, 0, 0, 0, 1],
+            vni,
+        })
+    }
+
+    fn evpn_multicast() -> EvpnRoute {
+        EvpnRoute::Multicast(EvpnMulticast {
+            id: 0,
+            rd: RouteDistinguisher::new(RouteDistinguisherType::IP),
+            ether_tag: 0,
+            addr: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        })
+    }
+
+    /// `attr_with(...)` augmented with a Route Target extended
+    /// community carrying the supplied VNI. Mirrors how an EVPN
+    /// Type-3 peer advertises VNI per RFC 8365 §5.1.2.4.
+    fn attr_with_rt_vni(asn: u32, vni: u32) -> BgpAttr {
+        let mut attr = attr_with("1", None, None);
+        attr.ecom = Some(ExtCommunity(vec![evpn_route_target(asn, vni)]));
+        attr
+    }
+
+    fn evpn_apply(list: &PolicyList, route: &EvpnRoute, attr: BgpAttr) -> Option<BgpAttr> {
+        super::policy_list_apply_evpn(list, route, attr, 0, Ipv4Addr::UNSPECIFIED).map(|d| d.attr)
+    }
+
+    #[test]
+    fn match_evpn_route_type_macip_matches_mac() {
+        use crate::policy::EvpnRouteType;
+        let mut list = PolicyList::default();
+        list.entry(10).match_evpn_route_type = Some(EvpnRouteType::MacIp);
+
+        assert!(evpn_apply(&list, &evpn_mac(100), attr_with("1", None, None)).is_some());
+        assert!(evpn_apply(&list, &evpn_multicast(), attr_with("1", None, None)).is_none());
+    }
+
+    #[test]
+    fn match_evpn_route_type_multicast_matches_multicast() {
+        use crate::policy::EvpnRouteType;
+        let mut list = PolicyList::default();
+        list.entry(10).match_evpn_route_type = Some(EvpnRouteType::Multicast);
+
+        assert!(evpn_apply(&list, &evpn_multicast(), attr_with("1", None, None)).is_some());
+        assert!(evpn_apply(&list, &evpn_mac(100), attr_with("1", None, None)).is_none());
+    }
+
+    #[test]
+    fn match_evpn_route_type_unmatched_yields_default_deny() {
+        use crate::policy::EvpnRouteType;
+        // Looking for Ead — the parser never produces this variant
+        // today, so no `EvpnRoute` will satisfy it. Default-deny
+        // applies when the only entry fails to match.
+        let mut list = PolicyList::default();
+        list.entry(10).match_evpn_route_type = Some(EvpnRouteType::Ead);
+
+        assert!(evpn_apply(&list, &evpn_mac(100), attr_with("1", None, None)).is_none());
+        assert!(evpn_apply(&list, &evpn_multicast(), attr_with("1", None, None)).is_none());
+    }
+
+    #[test]
+    fn match_evpn_vni_type2_uses_nlri_vni() {
+        let mut list = PolicyList::default();
+        list.entry(10).match_evpn_vni = Some(100);
+
+        // Type-2 carries VNI in the NLRI; the RT-EC is irrelevant.
+        assert!(evpn_apply(&list, &evpn_mac(100), attr_with("1", None, None)).is_some());
+        assert!(evpn_apply(&list, &evpn_mac(200), attr_with("1", None, None)).is_none());
+        // VNI=0 means "absent" per evpn_vni_of — should not match.
+        assert!(evpn_apply(&list, &evpn_mac(0), attr_with("1", None, None)).is_none());
+    }
+
+    #[test]
+    fn match_evpn_vni_type3_uses_rt_ec_vni() {
+        let mut list = PolicyList::default();
+        list.entry(10).match_evpn_vni = Some(550);
+
+        // Type-3 has no NLRI VNI; VNI comes from the RT extended
+        // community per RFC 8365 §5.1.2.4.
+        let attr_match = attr_with_rt_vni(65501, 550);
+        let attr_miss = attr_with_rt_vni(65501, 551);
+        let attr_no_rt = attr_with("1", None, None);
+
+        assert!(evpn_apply(&list, &evpn_multicast(), attr_match).is_some());
+        assert!(evpn_apply(&list, &evpn_multicast(), attr_miss).is_none());
+        assert!(
+            evpn_apply(&list, &evpn_multicast(), attr_no_rt).is_none(),
+            "absent RT-EC yields no VNI, so the match fails"
+        );
+    }
+
+    #[test]
+    fn match_evpn_route_type_and_vni_compose() {
+        use crate::policy::EvpnRouteType;
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.match_evpn_route_type = Some(EvpnRouteType::MacIp);
+        entry.match_evpn_vni = Some(100);
+
+        // Both conditions must hold (AND-semantics, same as the
+        // rest of `entry_matches_evpn`).
+        assert!(evpn_apply(&list, &evpn_mac(100), attr_with("1", None, None)).is_some());
+        assert!(
+            evpn_apply(&list, &evpn_mac(200), attr_with("1", None, None)).is_none(),
+            "route-type matches but VNI differs"
+        );
+        assert!(
+            evpn_apply(&list, &evpn_multicast(), attr_with_rt_vni(65501, 100)).is_none(),
+            "VNI matches but route-type differs"
+        );
     }
 }
 
