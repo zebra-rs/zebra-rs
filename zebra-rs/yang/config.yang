@@ -1047,6 +1047,48 @@ module config {
               enum incomplete;
             }
           }
+          container "evpn" {
+            description
+              "Match EVPN route attributes. `route-type` selects
+               one of the BGP-EVPN NLRI route types (RFC 7432
+               §7.1–7.5; RFC 9136 for Type-5); `vni` matches a
+               specific VXLAN Network Identifier carried in the
+               route (encapsulation extended community or
+               Type-2/Type-3 MPLS label field).";
+            leaf "route-type" {
+              type enumeration {
+                enum ead {
+                  description
+                    "EAD (Type-1) route";
+                }
+                enum macip {
+                  description
+                    "MAC-IP (Type-2) route";
+                }
+                enum multicast {
+                  description
+                    "Multicast (Type-3) route";
+                }
+                enum es {
+                  description
+                    "Ethernet Segment (Type-4) route";
+                }
+                enum prefix {
+                  description
+                    "Prefix (Type-5) route";
+                }
+              }
+              description
+                "Match EVPN route type.";
+            }
+            leaf "vni" {
+              type uint32 {
+                range "1..16777215";
+              }
+              description
+                "Match EVPN VNI ID.";
+            }
+          }
         }
         container "set" {
           ext:sort "3";
