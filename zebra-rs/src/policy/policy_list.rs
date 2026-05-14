@@ -59,6 +59,29 @@ fn parse_origin(s: &str) -> Result<Origin> {
     }
 }
 
+/// BGP-EVPN NLRI route type discriminator for `match evpn
+/// route-type ...`. Variant names follow RFC 7432 §7.1–7.4 and
+/// RFC 9136 (Type-5). The strum tags match the YANG enum names
+/// so the same string round-trips through config.
+#[derive(EnumString, Display, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvpnRouteType {
+    #[strum(serialize = "ead")]
+    Ead,
+    #[strum(serialize = "es")]
+    EthernetSegment,
+    #[strum(serialize = "macip")]
+    MacIp,
+    #[strum(serialize = "multicast")]
+    Multicast,
+    #[strum(serialize = "prefix")]
+    Prefix,
+}
+
+fn parse_evpn_route_type(s: &str) -> Result<EvpnRouteType> {
+    s.parse::<EvpnRouteType>()
+        .map_err(|_| anyhow::anyhow!("invalid evpn route-type: {}", s))
+}
+
 /// Set-action config for `set as-path-prepend ASN repeat NUM`.
 /// At apply time the same ASN is prepended `repeat` times onto
 /// AS_PATH — equivalent to IOS-XR's `prepend as-path NUM repeats N`.
@@ -212,6 +235,8 @@ pub struct PolicyEntry {
     pub match_local_pref: Option<NumericMatch>,
     pub match_weight: Option<NumericMatch>,
     pub match_origin: Option<Origin>,
+    pub match_evpn_route_type: Option<EvpnRouteType>,
+    pub match_evpn_vni: Option<u32>,
     // Set.
     pub local_pref: Option<NumericSet>,
     pub med: Option<NumericSet>,
@@ -787,6 +812,33 @@ impl ConfigBuilder {
                 entry.match_origin = None;
                 Ok(())
             })
+            .path("/entry/match/evpn/route-type")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                let s = args.string().context(ARG_ERR)?;
+                entry.match_evpn_route_type = Some(parse_evpn_route_type(&s).context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_evpn_route_type = None;
+                Ok(())
+            })
+            .path("/entry/match/evpn/vni")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_evpn_vni = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_evpn_vni = None;
+                Ok(())
+            })
             // `set local-preference {set|add|sub} NUM` — presence
             // container with mandatory choice; `set` overwrites,
             // `add`/`sub` mutate the route's current value with
@@ -1181,6 +1233,12 @@ pub fn show(policy: &Policy, _args: Args, _json: bool) -> Result<String, Error> 
             if let Some(origin) = &entry.match_origin {
                 let _ = writeln!(buf, "  match: origin {:?}", origin);
             }
+            if let Some(rt) = &entry.match_evpn_route_type {
+                let _ = writeln!(buf, "  match: evpn route-type {}", rt);
+            }
+            if let Some(vni) = &entry.match_evpn_vni {
+                let _ = writeln!(buf, "  match: evpn vni {}", vni);
+            }
             if let Some(s) = &entry.local_pref {
                 let _ = writeln!(buf, "  set: local-preference {} {}", s.op_str(), s.value());
             }
@@ -1260,5 +1318,26 @@ mod tests {
         // Note: Default deny behavior is implicit - if no entry matches,
         // the policy should deny by default (this would be implemented
         // in the actual policy evaluation logic)
+    }
+
+    #[test]
+    fn parse_evpn_route_type_round_trips() {
+        let cases = [
+            ("ead", EvpnRouteType::Ead),
+            ("es", EvpnRouteType::EthernetSegment),
+            ("macip", EvpnRouteType::MacIp),
+            ("multicast", EvpnRouteType::Multicast),
+            ("prefix", EvpnRouteType::Prefix),
+        ];
+        for (s, want) in cases {
+            assert_eq!(parse_evpn_route_type(s).unwrap(), want);
+            assert_eq!(want.to_string(), s);
+        }
+    }
+
+    #[test]
+    fn parse_evpn_route_type_rejects_unknown() {
+        assert!(parse_evpn_route_type("type1").is_err());
+        assert!(parse_evpn_route_type("").is_err());
     }
 }
