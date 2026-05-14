@@ -260,4 +260,22 @@ impl AdjRib<Out> {
             None => self.v4.0.contains_key(prefix),
         }
     }
+
+    pub fn add_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: EvpnPrefix,
+        route: BgpRib,
+    ) -> Option<BgpRib> {
+        self.evpn.entry(rd).or_default().add(prefix, route)
+    }
+
+    pub fn remove_evpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: &EvpnPrefix,
+        id: u32,
+    ) -> Option<BgpRib> {
+        self.evpn.entry(rd).or_default().remove(prefix, id)
+    }
 }

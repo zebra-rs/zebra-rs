@@ -1210,6 +1210,11 @@ pub fn route_withdraw_evpn_to_peers(
                 peer.cache_evpn.remove(&attr);
             }
         }
+        // Drop the Adj-RIB-Out entry so soft-out's baseline reflects
+        // reality — without this a follow-up policy change would
+        // think the route is still advertised and emit a redundant
+        // withdraw.
+        peer.adj_out.remove_evpn(rd, &prefix, 0);
         route_withdraw_evpn(peer, route);
     }
 }
@@ -1282,6 +1287,12 @@ pub fn route_advertise_evpn_to_peers(
         };
 
         let attr = bgp.attr_store.intern(decision.attr);
+        // Record what we advertised so a later policy change can
+        // diff the Adj-RIB-Out against the Loc-RIB and withdraw
+        // anything that the new policy now denies.
+        let mut adj = new_best.clone();
+        adj.attr = attr.clone();
+        peer.adj_out.add_evpn(rd, prefix.clone(), adj);
         peer.send_evpn(route, attr, true);
     }
 }
@@ -1315,11 +1326,11 @@ fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: 
 // (when a previously-advertised prefix newly fails policy or filtering).
 // Caller is responsible for ensuring the peer is established.
 //
-// Phase 2 covers IPv4 unicast and IPv4 MPLS-VPN. EVPN soft-out is left
-// for a follow-up — it would mirror this with `route_update_evpn` /
-// `route_apply_policy_evpn_out` over `bgp.local_rib.evpn[rd]`.
+// Covers IPv4 unicast, IPv4 MPLS-VPN, and EVPN. Soft-in (replay of
+// stored Adj-RIB-In through the new inbound policy) remains a
+// separate path — see `route_soft_in_peer`.
 pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
-    let (do_v4, vpn_rds) = {
+    let (do_v4, vpn_rds, evpn_rds) = {
         let Some(peer) = peers.get_by_idx(peer_idx) else {
             return;
         };
@@ -1328,12 +1339,24 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
         }
         let do_v4 = peer.is_afi_safi(Afi::Ip, Safi::Unicast);
         let do_vpn = peer.is_afi_safi(Afi::Ip, Safi::MplsVpn);
-        let rds: Vec<RouteDistinguisher> = if do_vpn {
+        let do_evpn = peer.is_afi_safi(Afi::L2vpn, Safi::Evpn);
+        let v4vpn_rds: Vec<RouteDistinguisher> = if do_vpn {
             bgp.local_rib.v4vpn.keys().copied().collect()
         } else {
             Vec::new()
         };
-        (do_v4, rds)
+        // Union the Loc-RIB RD set with the peer's Adj-RIB-Out RD
+        // set so a policy change that purges every Loc-RIB entry
+        // under an RD still drives a withdraw for whatever the peer
+        // currently has under that RD.
+        let evpn_rds: Vec<RouteDistinguisher> = if do_evpn {
+            let mut s: BTreeSet<RouteDistinguisher> = bgp.local_rib.evpn.keys().copied().collect();
+            s.extend(peer.adj_out.evpn.keys().copied());
+            s.into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        (do_v4, v4vpn_rds, evpn_rds)
     };
 
     if do_v4 {
@@ -1341,6 +1364,9 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
     }
     for rd in vpn_rds {
         route_soft_out_peer_table(peer_idx, Some(rd), bgp, peers);
+    }
+    for rd in evpn_rds {
+        route_soft_out_peer_table_evpn(peer_idx, rd, bgp, peers);
     }
 }
 
@@ -1451,6 +1477,94 @@ fn route_soft_out_peer_table(
         // withdraw still happen.
         peer.adj_out.remove(rd, prefix, 0);
         route_withdraw_ipv4(peer, rd, prefix, 0);
+    }
+}
+
+/// Soft-reconfiguration outbound for one EVPN Route Distinguisher.
+/// Mirrors `route_soft_out_peer_table` for IPv4/VPN: walk the
+/// per-RD Loc-RIB EVPN table through `route_update_evpn` +
+/// `route_apply_policy_out_evpn`, re-emit anything the (possibly
+/// new) policy still permits, and withdraw entries that the peer
+/// previously had in its Adj-RIB-Out but that now fall out.
+///
+/// Without this path, a `match evpn …` policy change only affects
+/// *new* routes — previously-advertised routes remain in the peer's
+/// table until the peer drops the session or the originating
+/// speaker withdraws the route. Operator-triggered soft-out (or a
+/// peer-initiated Route Refresh) flows through here.
+fn route_soft_out_peer_table_evpn(
+    peer_idx: usize,
+    rd: RouteDistinguisher,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    // Snapshot Loc-RIB selected EVPN routes for this RD so iteration
+    // outlives later mutable borrows of `bgp` (attr_store.intern,
+    // send paths).
+    let selected: Vec<(EvpnPrefix, BgpRib)> = bgp
+        .local_rib
+        .evpn
+        .get(&rd)
+        .map(|t| {
+            t.selected
+                .iter()
+                .map(|(p, r)| (p.clone(), r.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // What's currently in this peer's Adj-RIB-Out for the RD —
+    // anything in here but missing from the post-policy newly-
+    // advertised set needs a withdraw.
+    let was_advertised: BTreeSet<EvpnPrefix> = {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        peer.adj_out
+            .evpn
+            .get(&rd)
+            .map(|t| t.0.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+
+    let mut newly_advertised: BTreeSet<EvpnPrefix> = BTreeSet::new();
+
+    for (prefix, rib) in &selected {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
+
+        let Some((route, attr)) = route_update_evpn(peer, &rd, prefix, rib, bgp, add_path) else {
+            continue;
+        };
+        let Some(decision) = route_apply_policy_out_evpn(peer, &route, attr, rib.weight) else {
+            continue;
+        };
+        let attr = bgp.attr_store.intern(decision.attr);
+        let mut adj = rib.clone();
+        adj.attr = attr.clone();
+        peer.adj_out.add_evpn(rd, prefix.clone(), adj);
+        peer.send_evpn(route, attr, true);
+        newly_advertised.insert(prefix.clone());
+    }
+
+    let to_withdraw: Vec<EvpnPrefix> = was_advertised
+        .difference(&newly_advertised)
+        .cloned()
+        .collect();
+    for prefix in to_withdraw {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        let route = evpn_route_from_prefix(&rd, &prefix, 0);
+        // Drop any queued advertise so flush_evpn doesn't ship a
+        // stale add after the withdraw; mirrors the same cache
+        // drain in route_withdraw_evpn_to_peers.
+        if let Some(attr) = peer.cache_evpn_rev.remove(&route)
+            && let Some(set) = peer.cache_evpn.get_mut(&attr)
+        {
+            set.remove(&route);
+            if set.is_empty() {
+                peer.cache_evpn.remove(&attr);
+            }
+        }
+        peer.adj_out.remove_evpn(rd, &prefix, 0);
+        route_withdraw_evpn(peer, route);
     }
 }
 
@@ -3259,6 +3373,12 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
         let attr = bgp.attr_store.intern(decision.attr);
+        // Record in Adj-RIB-Out so a subsequent soft-out can detect
+        // which routes were synced and withdraw any that fail the
+        // new policy.
+        let mut adj = rib.clone();
+        adj.attr = attr.clone();
+        peer.adj_out.add_evpn(rd, prefix, adj);
         // `false`: don't arm the per-peer advertise timer — we flush
         // synchronously at end-of-sync so the new peer sees one
         // batched MP_REACH (or several, one per attribute group)
