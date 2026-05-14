@@ -494,6 +494,15 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegmen
     // PCPaths.
     let mut repair_lists = vec![];
     for path in &mut pc_paths {
+        // MEMO: Preparation for recording the first hop.
+        // Remember first nexthop.
+        // if path.is_empty() {
+        //     continue;
+        // }
+        // First hop.
+        // let nhop = &path[0];
+        // println!("repair nexthop {}", nhop);
+
         // Remove D — make_repair_list adds it back via the trailing
         // AdjSid(prev, d) emission.
         path.pop();
