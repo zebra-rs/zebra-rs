@@ -586,6 +586,30 @@ pub fn route_apply_policy_in_evpn(
     })
 }
 
+/// Outbound policy entry point for an EVPN route. Mirrors
+/// `route_apply_policy_out` but skips the per-direction prefix-set
+/// (no IPv4 prefix on EVPN NLRIs) and dispatches to
+/// `policy_list_apply_evpn`. Default-permit when no output
+/// policy-list is bound, same as the IPv4 outbound path.
+pub fn route_apply_policy_out_evpn(
+    peer: &mut Peer,
+    route: &EvpnRoute,
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
+    let config = peer.policy_list.get(&InOut::Output);
+    if config.name.is_some() {
+        let Some(policy_list) = &config.policy_list else {
+            return None;
+        };
+        return policy_list_apply_evpn(policy_list, route, bgp_attr, weight, peer.router_id);
+    }
+    Some(PolicyDecision {
+        attr: bgp_attr,
+        weight,
+    })
+}
+
 pub fn route_apply_policy_out(
     peer: &mut Peer,
     nlri: &Ipv4Nlri,
@@ -1252,7 +1276,12 @@ pub fn route_advertise_evpn_to_peers(
             continue;
         };
 
-        let attr = bgp.attr_store.intern(attr);
+        let Some(decision) = route_apply_policy_out_evpn(peer, &route, attr, new_best.weight)
+        else {
+            continue;
+        };
+
+        let attr = bgp.attr_store.intern(decision.attr);
         peer.send_evpn(route, attr, true);
     }
 }
@@ -3226,7 +3255,10 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
         let Some((route, attr)) = route_update_evpn(peer, &rd, &prefix, &rib, bgp, add_path) else {
             continue;
         };
-        let attr = bgp.attr_store.intern(attr);
+        let Some(decision) = route_apply_policy_out_evpn(peer, &route, attr, rib.weight) else {
+            continue;
+        };
+        let attr = bgp.attr_store.intern(decision.attr);
         // `false`: don't arm the per-peer advertise timer — we flush
         // synchronously at end-of-sync so the new peer sees one
         // batched MP_REACH (or several, one per attribute group)
