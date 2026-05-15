@@ -623,7 +623,15 @@ pub enum ConfigFormat {
 }
 
 pub fn config_format_type(config_str: &str) -> ConfigFormat {
-    let first_line = config_str.lines().next().unwrap_or("").trim();
+    // Use the first *meaningful* line for format sniffing. Skip
+    // blank lines and `#`-prefixed comments so leading whitespace
+    // or commentary in a file or `-c` payload doesn't fall through
+    // to the YAML default.
+    let first_line = config_str
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .unwrap_or("");
     if first_line.starts_with('{') {
         ConfigFormat::Json
     } else if first_line.ends_with('{') {
