@@ -23,8 +23,11 @@ enum Commands {
         #[arg(short, long, default_value = "127.0.0.1")]
         host: String,
 
-        #[arg(short, long, help = "Base URL of the server", default_value = "")]
+        #[arg(short, long, help = "Config filename", default_value = "")]
         filename: String,
+
+        #[arg(short, long, help = "Command line strings")]
+        command: Option<String>,
     },
     #[command(disable_help_flag = true)]
     Clear {
@@ -73,8 +76,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Apply { host, filename }) => {
-            apply::apply(host, filename).await?;
+        Some(Commands::Apply {
+            host,
+            filename,
+            command,
+        }) => {
+            apply::apply(host, filename, command.as_ref()).await?;
         }
         Some(Commands::Clear { host, command }) => {
             clear::clear(host, command).await?;
