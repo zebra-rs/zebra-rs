@@ -429,16 +429,25 @@ impl ConfigManager {
                 }
                 let entry = entry.unwrap();
 
-                let cmds = match config_format_type(&req.config) {
+                let format_type = config_format_type(&req.config);
+                let cmds = match format_type {
                     ConfigFormat::Cli => load_config_file(req.config.clone()),
                     ConfigFormat::Json => json_read(entry, req.config.as_str()),
                     ConfigFormat::Yaml => {
                         let config = yaml_parse(req.config.as_str());
                         json_read(entry, config.as_str())
                     }
+                    ConfigFormat::SetDelete => req
+                        .config
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(str::to_string)
+                        .collect(),
                 };
 
-                self.store.candidate_clear();
+                if format_type != ConfigFormat::SetDelete {
+                    self.store.candidate_clear();
+                }
                 for cmd in cmds.iter() {
                     let (code, _output, _paths) = self.execute(mode, cmd);
                     if code != ExecCode::Show {
@@ -605,11 +614,12 @@ fn collect_dynamics(entry: &Entry, set: &mut HashSet<String>) {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ConfigFormat {
     Cli,
     Json,
     Yaml,
+    SetDelete,
 }
 
 pub fn config_format_type(config_str: &str) -> ConfigFormat {
@@ -618,6 +628,8 @@ pub fn config_format_type(config_str: &str) -> ConfigFormat {
         ConfigFormat::Json
     } else if first_line.ends_with('{') {
         ConfigFormat::Cli
+    } else if first_line.starts_with("set ") || first_line.starts_with("delete ") {
+        ConfigFormat::SetDelete
     } else {
         ConfigFormat::Yaml
     }
