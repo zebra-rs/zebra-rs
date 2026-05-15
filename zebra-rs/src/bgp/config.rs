@@ -980,6 +980,12 @@ impl Bgp {
         self.callback_peer("/update-source", config_transport_local_address);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
+        // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same
+        // backing field (`peer.config.transport.md5_password`) and
+        // same `setsockopt(TCP_MD5SIG)` site as the structured
+        // `/tcp-md5/password` path above; either CLI form is accepted,
+        // both lower onto the same runtime state.
+        self.callback_peer("/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);
         self.callback_peer(
             "/tcp-ao/include-tcp-options",

@@ -44,6 +44,10 @@ module config {
     prefix zbt;
   }
 
+  import zebra-bgp-password {
+    prefix zbp;
+  }
+
   import zebra-bgp-soft-reconfiguration {
     prefix zbsr;
   }
