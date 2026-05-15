@@ -357,7 +357,9 @@ submodule ietf-bgp-common {
          prefixes that are attached to these community-types.";
     }
     leaf description {
-      type string;
+      type string {
+        pattern '.*';
+      }
       description
         "An optional textual description (intended primarily for use
          with a peer or group";
