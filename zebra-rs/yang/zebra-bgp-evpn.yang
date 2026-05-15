@@ -35,7 +35,7 @@ module zebra-bgp-evpn {
 
        router bgp {
          neighbor 10.0.0.1 {
-           peer-as 65001;
+           remote-as 65001;
            afi-safi {
              name evpn;
              enabled true;

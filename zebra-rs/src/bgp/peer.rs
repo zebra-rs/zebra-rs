@@ -303,7 +303,7 @@ pub struct Peer {
     pub local_identifier: Option<Ipv4Addr>,
     pub remote_id: Ipv4Addr,
     pub local_as: u32,
-    pub peer_as: u32,
+    pub remote_as: u32,
     /// Local BGP speaker's hostname snapshot used to populate the FQDN
     /// capability in OPEN. Set at peer creation from `Bgp::hostname()`
     /// and refreshed by the global hostname callback so that re-opened
@@ -363,7 +363,7 @@ impl Peer {
         ident: usize,
         local_as: u32,
         router_id: Ipv4Addr,
-        peer_as: u32,
+        remote_as: u32,
         address: IpAddr,
         local_hostname: Option<String>,
         tx: mpsc::Sender<Message>,
@@ -372,7 +372,7 @@ impl Peer {
             ident,
             router_id,
             local_as,
-            peer_as,
+            remote_as,
             local_hostname,
             address,
             active: false,
@@ -439,7 +439,7 @@ impl Peer {
     }
 
     pub fn start(&mut self) {
-        if self.peer_as != 0 && !self.address.is_unspecified() && !self.active {
+        if self.remote_as != 0 && !self.address.is_unspecified() && !self.active {
             timer::update_timers(self);
             self.active = true;
         }
@@ -632,7 +632,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     let asn = open_asn(&packet);
 
     // Compare with configured asn.
-    if peer.peer_as != asn {
+    if peer.remote_as != asn {
         peer_send_notification(
             peer,
             NotifyCode::OpenMsgError,
@@ -646,7 +646,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         // Send notification.
         return State::Idle;
     }
-    if packet.asn as u32 != peer.peer_as {
+    if packet.asn as u32 != peer.remote_as {
         // Send notification.
         return State::Idle;
     }

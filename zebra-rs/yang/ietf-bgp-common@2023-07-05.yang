@@ -251,7 +251,7 @@ submodule ietf-bgp-common {
   grouping neighbor-group-config {
     description
       "Neighbor level configuration items.";
-    leaf peer-as {
+    leaf remote-as {
       type inet:as-number;
       description
         "AS number of the peer.";

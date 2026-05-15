@@ -146,14 +146,14 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
     Some(())
 }
 
-fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         if let Some(addr) = args.v4addr() {
             let addr = IpAddr::V4(addr);
             let asn: u32 = args.u32()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
-                peer.peer_as = asn;
-                peer.peer_type = if peer.peer_as == bgp.asn {
+                peer.remote_as = asn;
+                peer.peer_type = if peer.remote_as == bgp.asn {
                     PeerType::IBGP
                 } else {
                     PeerType::EBGP
@@ -164,8 +164,8 @@ fn config_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             let addr = IpAddr::V6(addr);
             let asn: u32 = args.u32()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
-                peer.peer_as = asn;
-                peer.peer_type = if peer.peer_as == bgp.asn {
+                peer.remote_as = asn;
+                peer.peer_type = if peer.remote_as == bgp.asn {
                     PeerType::IBGP
                 } else {
                     PeerType::EBGP
@@ -955,7 +955,7 @@ impl Bgp {
         self.callback_add("/router/bgp/global/identifier", config_global_identifier);
         self.callback_add("/router/bgp/global/hostname", config_global_hostname);
         self.callback_peer("", config_peer);
-        self.callback_peer("/peer-as", config_peer_as);
+        self.callback_peer("/remote-as", config_remote_as);
         // Per-peer reference to a `neighbor-group`. Storage only —
         // resolution lands in the follow-up that adds field-level
         // override semantics.
@@ -966,8 +966,8 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group,
         );
         self.callback_add(
-            "/router/bgp/neighbor-groups/neighbor-group/peer-as",
-            super::neighbor_group::config_neighbor_group_peer_as,
+            "/router/bgp/neighbor-groups/neighbor-group/remote-as",
+            super::neighbor_group::config_neighbor_group_remote_as,
         );
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);

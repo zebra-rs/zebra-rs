@@ -1443,11 +1443,11 @@ fn write_spf_brief(isis: &Isis, buf: &mut String) {
     // IPv6 RIB when MT 2 is off. Print L1 then L2.
     if let Some(spf) = isis.spf_result.get(&Level::L1) {
         let _ = writeln!(buf, "L1 SPF (single-topology / MT 0)");
-        spf::disp_out(buf, spf, false);
+        spf::disp_out(buf, spf, true);
     }
     if let Some(spf) = isis.spf_result.get(&Level::L2) {
         let _ = writeln!(buf, "L2 SPF (single-topology / MT 0)");
-        spf::disp_out(buf, spf, false);
+        spf::disp_out(buf, spf, true);
     }
 
     // MT 2 SPF — only computed when local config has MT 2 in
@@ -1456,11 +1456,11 @@ fn write_spf_brief(isis: &Isis, buf: &mut String) {
     // operators can compare metrics across topologies.
     if let Some(spf) = isis.mt2_spf_result.get(&Level::L1) {
         let _ = writeln!(buf, "L1 SPF (MT 2 / IPv6 unicast)");
-        spf::disp_out(buf, spf, false);
+        spf::disp_out(buf, spf, true);
     }
     if let Some(spf) = isis.mt2_spf_result.get(&Level::L2) {
         let _ = writeln!(buf, "L2 SPF (MT 2 / IPv6 unicast)");
-        spf::disp_out(buf, spf, false);
+        spf::disp_out(buf, spf, true);
     }
 }
 

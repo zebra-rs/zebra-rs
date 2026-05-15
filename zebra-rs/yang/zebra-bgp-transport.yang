@@ -40,7 +40,7 @@ module zebra-bgp-transport {
 
        router bgp {
          neighbor 10.0.0.5 {
-           peer-as 65501;
+           remote-as 65501;
            update-source 10.0.0.1;
          }
        }

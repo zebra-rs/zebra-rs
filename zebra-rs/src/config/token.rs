@@ -99,7 +99,7 @@ router {
         }
         neighbors {
             neighbor 10.0.0.1 {
-                peer-as 100;
+                remote-as 100;
             }
         }
     }
