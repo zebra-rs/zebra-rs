@@ -117,7 +117,7 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
         "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} {}",
         peer.address.to_string(),
         "4",
-        peer.peer_as,
+        peer.remote_as,
         msg_rcvd,
         msg_sent,
         "0", // TblVer — not tracked today
@@ -1028,7 +1028,7 @@ fn show_bgp_summary(
 
             peers.push(BgpPeerSummaryJson {
                 neighbor: peer.address.to_string(),
-                remote_as: peer.peer_as,
+                remote_as: peer.remote_as,
                 msg_rcvd,
                 msg_sent,
                 up_down: uptime(&peer.instant),
@@ -1218,7 +1218,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
 
     let mut n = Neighbor {
         address: peer.address,
-        remote_as: peer.peer_as,
+        remote_as: peer.remote_as,
         local_as: peer.local_as,
         peer_type: peer.peer_type.to_str(),
         local_router_id: peer.router_id,

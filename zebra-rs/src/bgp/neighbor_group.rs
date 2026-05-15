@@ -1,7 +1,7 @@
 //! IOS-XR-style BGP `neighbor-group` (zebra-bgp-neighbor-group.yang).
 //!
 //! Phase 1 (this commit): schema + storage only. Each
-//! `set router bgp neighbor-groups neighbor-group <name> peer-as <asn>`
+//! `set router bgp neighbor-groups neighbor-group <name> remote-as <asn>`
 //! lands here; each `set router bgp neighbor <addr> neighbor-group <g>`
 //! records the per-peer reference. The runtime does NOT yet resolve
 //! field-level inheritance — peers continue to use values set
@@ -21,7 +21,7 @@ use crate::config::{Args, ConfigOp};
 
 #[derive(Debug, Default, Clone)]
 pub struct NeighborGroup {
-    pub peer_as: Option<u32>,
+    pub remote_as: Option<u32>,
 }
 
 /// `set router bgp neighbor-groups neighbor-group <name>` — list-key
@@ -40,16 +40,16 @@ pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
-/// `set router bgp neighbor-groups neighbor-group <name> peer-as <asn>`.
-pub fn config_neighbor_group_peer_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp neighbor-groups neighbor-group <name> remote-as <asn>`.
+pub fn config_neighbor_group_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let group = bgp.neighbor_groups.entry(name).or_default();
     match op {
         ConfigOp::Set => {
-            group.peer_as = Some(args.u32()?);
+            group.remote_as = Some(args.u32()?);
         }
         ConfigOp::Delete => {
-            group.peer_as = None;
+            group.remote_as = None;
         }
         _ => {}
     }

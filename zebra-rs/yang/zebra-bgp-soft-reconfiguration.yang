@@ -34,7 +34,7 @@ module zebra-bgp-soft-reconfiguration {
 
        router bgp {
          neighbor 10.0.0.5 {
-           peer-as 65501;
+           remote-as 65501;
            soft-reconfiguration {
              inbound true;
            }

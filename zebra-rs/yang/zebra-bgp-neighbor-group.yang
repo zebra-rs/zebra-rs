@@ -37,7 +37,7 @@ module zebra-bgp-neighbor-group {
      'these N peers share these few attributes' case ergonomic,
      not to mirror every leaf of `neighbor-group-config`.
 
-     This first cut exposes only `peer-as`. The runtime currently
+     This first cut exposes only `remote-as`. The runtime currently
      stores the group definition and per-neighbor reference but
      does NOT yet resolve inheritance — that lands in a follow-up.
      Field-level override semantics: any field set explicitly on
@@ -49,7 +49,7 @@ module zebra-bgp-neighbor-group {
        router bgp {
          neighbor-groups {
            neighbor-group RR-CLIENTS {
-             peer-as 65000;
+             remote-as 65000;
            }
          }
          neighbor 10.0.0.1 {
@@ -80,11 +80,11 @@ module zebra-bgp-neighbor-group {
           description
             "Name of the neighbor-group.";
         }
-        leaf peer-as {
+        leaf remote-as {
           type inet:as-number;
           description
             "AS number inherited by neighbors that reference this
-             group. A `peer-as` set on the neighbor itself wins.";
+             group. A `remote-as` set on the neighbor itself wins.";
         }
       }
     }
