@@ -9,7 +9,7 @@ use serde::Serialize;
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{Peer, PeerCounter, PeerParam, State};
-use crate::bgp::{AdjRibTable, BgpRibType, RibDirection};
+use crate::bgp::{AdjRibEvpnTable, AdjRibTable, BgpRibType, RibDirection};
 use crate::config::Args;
 
 /// Human-readable label for an (AFI, SAFI) pair, used as the "<label>
@@ -608,6 +608,111 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
         }
     }
     Ok(buf)
+}
+
+/// Render a per-peer EVPN Adj-RIB (In or Out) using the same per-prefix
+/// layout as `show_bgp_evpn`. JSON output is not yet defined for EVPN
+/// (parallel to `show_bgp_evpn`), so we return an empty array.
+fn show_adj_rib_routes_evpn<D: RibDirection>(
+    routes: &BTreeMap<RouteDistinguisher, AdjRibEvpnTable<D>>,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(String::from("[]"));
+    }
+
+    let mut buf = String::new();
+
+    writeln!(
+        buf,
+        "EVPN type-1 prefix: [1]:[EthTag]:[ESI]:[IPlen]:[VTEP-IP]:[Frag-id]"
+    )?;
+    writeln!(
+        buf,
+        "EVPN type-2 prefix: [2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]"
+    )?;
+    writeln!(buf, "EVPN type-3 prefix: [3]:[EthTag]:[IPlen]:[OrigIP]")?;
+    writeln!(buf, "EVPN type-4 prefix: [4]:[ESI]:[IPlen]:[OrigIP]")?;
+    writeln!(buf, "EVPN type-5 prefix: [5]:[EthTag]:[IPlen]:[IP]")?;
+    writeln!(buf)?;
+
+    writeln!(
+        buf,
+        "   Network          Next Hop            Metric LocPrf Weight Path"
+    )?;
+
+    for (rd, table) in routes.iter() {
+        if table.0.is_empty() {
+            continue;
+        }
+        writeln!(buf, "Route Distinguisher: {}", rd)?;
+
+        for (prefix, ribs) in table.0.iter() {
+            for rib in ribs.iter() {
+                let valid = "*";
+                let best = if rib.best_path { ">" } else { " " };
+                writeln!(buf, " {valid}{best}  {prefix}")?;
+
+                let nexthop = show_nexthop(&rib.attr);
+                let med = show_med(&rib.attr);
+                let local_pref = show_local_pref(&rib.attr);
+                let weight = rib.weight;
+                let mut aspath = show_aspath(&rib.attr);
+                if !aspath.is_empty() {
+                    aspath.push(' ');
+                }
+                let origin = show_origin(&rib.attr);
+                writeln!(
+                    buf,
+                    "                    {:20} {:>7} {:>6} {:>6} {}{}",
+                    nexthop, med, local_pref, weight, aspath, origin
+                )?;
+
+                let ecom = show_evpn_ecom(&rib.attr);
+                if !ecom.is_empty() {
+                    writeln!(buf, "                    {}", ecom)?;
+                }
+            }
+        }
+    }
+
+    Ok(buf)
+}
+
+fn show_bgp_advertised_evpn(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    show_adj_rib_routes_evpn(&peer.adj_out.evpn, json)
+}
+
+fn show_bgp_received_evpn(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    show_adj_rib_routes_evpn(&peer.adj_in.evpn, json)
 }
 
 fn show_bgp_advertised_vpnv4(
@@ -2030,10 +2135,18 @@ impl Bgp {
             "/show/ip/bgp/neighbors/advertised-routes/vpnv4",
             show_bgp_advertised_vpnv4,
         );
+        self.show_add(
+            "/show/ip/bgp/neighbors/advertised-routes/evpn",
+            show_bgp_advertised_evpn,
+        );
         self.show_add("/show/ip/bgp/neighbors/received-routes", show_bgp_received);
         self.show_add(
             "/show/ip/bgp/neighbors/received-routes/vpnv4",
             show_bgp_received_vpnv4,
+        );
+        self.show_add(
+            "/show/ip/bgp/neighbors/received-routes/evpn",
+            show_bgp_received_evpn,
         );
         self.show_add("/show/ip/bgp/neighbors/rtcv4", show_bgp_rtcv4);
         self.show_add("/show/ip/bgp/evpn", show_bgp_evpn);

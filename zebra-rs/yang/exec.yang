@@ -150,10 +150,18 @@ module exec {
             leaf vpnv4 {
               type empty;
             }
+            leaf evpn {
+              ext:help "EVPN Adj-RIB-Out";
+              type empty;
+            }
           }
           container received-routes {
             presence "";
             leaf vpnv4 {
+              type empty;
+            }
+            leaf evpn {
+              ext:help "EVPN Adj-RIB-In";
               type empty;
             }
           }
