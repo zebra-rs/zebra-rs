@@ -122,11 +122,9 @@ module exec {
             type inet:ipv4-address;
           }
         }
-        container l2vpn {
-          presence "BGP L2VPN RIB";
-          leaf evpn {
-            type empty;
-          }
+        leaf evpn {
+          ext:help "BGP EVPN RIB";
+          type empty;
         }
         leaf summary {
           ext:help "BGP summary information";

@@ -1787,7 +1787,7 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
         .join(" ")
 }
 
-fn show_bgp_l2vpn_evpn(
+fn show_bgp_evpn(
     bgp: &Bgp,
     _args: Args,
     json: bool,
@@ -2019,7 +2019,7 @@ impl Bgp {
             show_bgp_received_vpnv4,
         );
         self.show_add("/show/ip/bgp/neighbors/rtcv4", show_bgp_rtcv4);
-        self.show_add("/show/ip/bgp/l2vpn/evpn", show_bgp_l2vpn_evpn);
+        self.show_add("/show/ip/bgp/evpn", show_bgp_evpn);
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
