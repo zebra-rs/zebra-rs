@@ -139,4 +139,9 @@ impl Timer {
             (self.duration - elapsed).as_secs()
         }
     }
+
+    /// Get the timer's full duration in seconds (the value it was set to)
+    pub fn duration_sec(&self) -> u64 {
+        self.duration.as_secs()
+    }
 }
