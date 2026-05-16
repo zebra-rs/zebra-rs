@@ -1060,7 +1060,17 @@ impl Rib {
         self.show_add("/show/l2/neighbor", l2_neighbor_show);
         self.show_add("/show/segment-routing/srv6/sid", sid_show);
         self.show_add("/show/vrf", vrf_show);
+        self.show_add("/show/hostname", hostname_show);
     }
+}
+
+pub fn hostname_show(_rib: &Rib, _args: Args, _json: bool) -> String {
+    hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_else(|| "unknown\n".to_string())
 }
 
 pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
