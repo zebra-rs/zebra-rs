@@ -43,6 +43,11 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/help"), help);
     mode.install_func(String::from("/exit"), exit);
     mode.install_func(String::from("/show"), show);
+    // Same operator command as exec mode. Without this, `show version`
+    // in configure mode falls through to the RedirectShow path, where
+    // no protocol-show handler claims it and the output is silently
+    // empty.
+    mode.install_func(String::from("/show/version"), show_version);
     mode.install_func(String::from("/candidate"), candidate);
     mode.install_func(String::from("/running"), running);
     mode.install_func(String::from("/json"), json);
