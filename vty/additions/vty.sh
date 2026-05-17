@@ -315,6 +315,44 @@ _cli_refresh ()
   _cli_prompt_setup
 }
 
+enable ()
+{
+  if [[ ${CLI_MODE} != "exec" ]]; then
+    echo "% 'enable' is only available in exec mode."
+    return 1
+  fi
+  local pw
+  if [[ -t 0 ]]; then
+    stty -echo
+    read -r -p "Password: " pw
+    stty echo
+    echo
+  else
+    # Non-interactive: read a single password line from stdin.
+    IFS= read -r pw
+  fi
+  CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
+  local rc=$?
+  pw=""
+  unset pw
+  if [[ ${rc} -eq 0 ]]; then
+    CLI_PRIVILEGE=15
+    _cli_prompt_setup
+  fi
+  return ${rc}
+}
+
+disable ()
+{
+  ${cli_command} -d -m ${CLI_MODE}
+  local rc=$?
+  if [[ ${rc} -eq 0 ]]; then
+    CLI_PRIVILEGE=1
+    _cli_prompt_setup
+  fi
+  return ${rc}
+}
+
 if [[ $interactive ]]; then
   _cli_pager_setup
   _cli_bind_key
@@ -327,6 +365,12 @@ else
   CLI_PAGER="cat"
 fi
 _cli_register_first_level_command
+# If the daemon registers 'enable'/'disable' as first-level commands,
+# strip the aliases so our functions above take precedence — they need
+# to read the password locally with stty -echo, not pass it through the
+# normal Exec RPC.
+unalias enable 2>/dev/null || true
+unalias disable 2>/dev/null || true
 
 # Local variables:
 # mode: shell-script

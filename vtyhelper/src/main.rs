@@ -5,7 +5,10 @@ use tokio::io::{self, AsyncWriteExt};
 use tokio_stream::StreamExt;
 use vty::exec_client::ExecClient;
 use vty::show_client::ShowClient;
-use vty::{CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, LogoutRequest, ShowRequest};
+use vty::{
+    CommandPath, DisableRequest, EnableRequest, ExecCode, ExecReply, ExecRequest, ExecType,
+    LogoutRequest, ShowRequest,
+};
 
 mod endpoint;
 
@@ -43,6 +46,20 @@ struct Cli {
         help = "Logout: tear down the server-side session (invoked from vty bash EXIT trap)"
     )]
     logout: bool,
+
+    #[arg(
+        short = 'e',
+        long,
+        help = "Enable: prompt-less PAM authentication; password is read from CLI_ENABLE_PASSWORD"
+    )]
+    enable: bool,
+
+    #[arg(
+        short = 'd',
+        long,
+        help = "Disable: drop the session back to View role"
+    )]
+    disable: bool,
 
     #[arg(
         short,
@@ -207,6 +224,80 @@ async fn logout(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// Promote the session to Admin via the server's Enable RPC.
+///
+/// Reads the password from `CLI_ENABLE_PASSWORD` (set by the vty bash
+/// `enable` function which uses `read -s` to capture it without echo).
+/// Prints a one-line result and exits 0 on success, 1 on auth failure,
+/// or non-zero on other errors (transport, rate-limit, etc.).
+async fn enable(cli: Cli) -> i32 {
+    let password = env::var("CLI_ENABLE_PASSWORD").unwrap_or_default();
+    // Wipe the env var immediately so the password doesn't linger in our
+    // own process environment beyond the RPC call.
+    // SAFETY: single-threaded at this point; tokio runtime not yet handling
+    // concurrent env access for vtyhelper.
+    unsafe {
+        env::remove_var("CLI_ENABLE_PASSWORD");
+    }
+
+    let channel = match endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("% enable: connect failed: {e}");
+            return 2;
+        }
+    };
+    let mut client = ExecClient::new(channel);
+    match client
+        .enable(tonic::Request::new(EnableRequest { password }))
+        .await
+    {
+        Ok(reply) => {
+            let r = reply.into_inner();
+            if r.ok {
+                println!("% Enabled (admin role active for {} seconds)", r.ttl_secs);
+                0
+            } else {
+                println!("% Enable failed: {}", r.message);
+                1
+            }
+        }
+        Err(status) => {
+            // permission_denied = wrong password; everything else is a
+            // system/rate-limit problem worth distinguishing in scripts.
+            let code = if status.code() == tonic::Code::PermissionDenied {
+                1
+            } else {
+                2
+            };
+            println!("% Enable failed: {}", status.message());
+            code
+        }
+    }
+}
+
+/// Drop the session back to View. Idempotent; the daemon doesn't error.
+async fn disable(cli: Cli) -> i32 {
+    let channel = match endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("% disable: connect failed: {e}");
+            return 2;
+        }
+    };
+    let mut client = ExecClient::new(channel);
+    match client.disable(tonic::Request::new(DisableRequest {})).await {
+        Ok(_) => {
+            println!("% Disabled");
+            0
+        }
+        Err(status) => {
+            println!("% Disable failed: {}", status.message());
+            2
+        }
+    }
+}
+
 async fn run(cli: Cli) -> Result<()> {
     if cli.logout {
         logout(cli).await?;
@@ -226,6 +317,16 @@ async fn main() -> Result<()> {
     if let Ok(val) = env::var("CLI_SERVER_URL") {
         cli.base = val;
     }
+
+    // Enable/Disable need to control their own exit codes for the shell
+    // wrapper to react (e.g. flip CLI_PRIVILEGE on success).
+    if cli.enable {
+        std::process::exit(enable(cli).await);
+    }
+    if cli.disable {
+        std::process::exit(disable(cli).await);
+    }
+
     let logout_mode = cli.logout;
     if let Err(_err) = run(cli).await {
         // Logout runs from the bash EXIT trap; staying silent on failure

@@ -13,6 +13,7 @@ pub use serve::Cli;
 pub use serve::VtyAddr;
 pub use serve::serve;
 
+mod enable_rate;
 mod session;
 
 mod configs;
