@@ -344,6 +344,11 @@ Each phase is intended to ship as an independent PR.
 | D12 | The daemon and its clients must share a PID namespace. `peer_pid == 0` from SO_PEERCRED is rejected as cross-PID-ns access. |
 | D13 | TACACS+ integration is authentication-only via `pam_tacplus`. No login/command accounting, no per-command authorization. |
 | D14 | vtypam communicates result via exit code only. priv-lvl and TACACS+ AV-pairs are not propagated to the daemon. |
+| D15 | vtypam is installed with file capabilities `cap_dac_read_search,cap_audit_write=ep`, not setuid root. setuid root is documented as a fallback for environments where file caps are stripped by packaging. |
+| D16 | The daemon does **not** install `/etc/pam.d/zebra-rs`. A `zebra-rs.example` sample (minimal `pam_unix` stack) is shipped and the admin copies it into place, optionally rewriting it as `@include common-auth` on Debian/Ubuntu. |
+| D17 | enable failure rate-limit lives in the daemon (per-uid counter, 5 failures within 30 s triggers a 30 s lockout, in-memory only). `pam_faillock` is documented as an optional stronger layer that admins can stack in the PAM service file. |
+| D18 | RBAC is 3-tier: `View`, `Operator`, `Admin`. Maps cleanly onto Cisco priv-lvl ranges 0-1 / 2-14 / 15. YANG-configurable roles are explicitly out of scope. |
+| D19 | Default idle session TTL is **600 s** with a 60 s sweep interval (Cisco IOS `exec-timeout 10 0` convention). Configurable later if a deployment needs it. |
 
 ## Deferred work
 
@@ -372,11 +377,6 @@ the relevant phase begins:
 
 | # | Question | Phase |
 |---|---|---|
-| Q4 | vtypam capability model: setuid root vs `cap_dac_read_search,cap_audit_write=ep` | 4 |
-| Q5 | Default `/etc/pam.d/zebra-rs` content: explicit modules, `@include common-auth`, or admin-supplied | 4 |
-| Q6 | enable rate-limit: daemon-internal counter, `pam_faillock`, or both | 4 |
-| Q7 | RBAC granularity: 2-tier (view/admin), 3-tier (view/operator/admin), or YANG-configurable | 4 |
-| Q10 | Default idle session TTL value | 2 |
 | Q12a | vtyhelper streaming model: per-command subcommands vs unified streaming dispatch | 7 |
 | Q12b | `monitor terminal` output format: human-readable, JSON, or both | 7 |
 | Q12c | `monitor terminal` max concurrent subscribers | 7 |
