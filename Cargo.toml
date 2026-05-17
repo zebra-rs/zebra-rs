@@ -4,6 +4,7 @@ members = [
   "zebra-rs",
   "vtyctl",
   "vtyhelper",
+  "vtypam",
   "crates/bgp-packet",
   "crates/bgp-macros",
   "crates/packet-utils",

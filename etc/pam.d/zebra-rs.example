@@ -1,0 +1,67 @@
+# PAM service file for the zebra-rs VTY 'enable' command.
+#
+# *** DO NOT install this file as-is. ***
+#
+# Copy this file to /etc/pam.d/zebra-rs and adjust to match your
+# distribution's PAM conventions. The daemon (via the `vtypam` helper)
+# starts a PAM transaction with the service name "zebra-rs" and runs
+# the `auth` and `account` phases. No session or password phases are
+# used today.
+#
+# ------------------------------------------------------------
+# Option A — Distribution-stacked configuration (recommended)
+# ------------------------------------------------------------
+# On Debian / Ubuntu, inherit the system-wide auth stack so PAM
+# extensions configured for sudo/login (faillock, MFA, etc.) apply
+# automatically here too:
+#
+#   auth      include   common-auth
+#   account   include   common-account
+#
+# On RHEL / CentOS / Fedora, the equivalent is:
+#
+#   auth      include   password-auth
+#   account   include   password-auth
+#
+# ------------------------------------------------------------
+# Option B — Explicit minimal stack (this file's default)
+# ------------------------------------------------------------
+# Authenticates against local /etc/shadow only. Suitable for
+# appliances that do not use distro common-* stacks.
+
+auth      required  pam_unix.so
+account   required  pam_unix.so
+
+# ------------------------------------------------------------
+# Optional — Brute-force lockout via pam_faillock
+# ------------------------------------------------------------
+# Layer this in front of pam_unix to lock an account after a burst
+# of failed attempts. Tune `deny=` and `unlock_time=` to taste:
+#
+#   auth      required  pam_faillock.so preauth silent deny=5 unlock_time=900
+#   auth      required  pam_unix.so
+#   auth      [default=die]  pam_faillock.so authfail deny=5 unlock_time=900
+#   account   required  pam_faillock.so
+#   account   required  pam_unix.so
+#
+# The daemon also enforces an in-memory per-uid rate limit (5 failed
+# `enable` attempts in 30 seconds trigger a 30-second lockout) that is
+# independent of the PAM stack. pam_faillock complements it with
+# system-wide, persistent lockouts.
+#
+# ------------------------------------------------------------
+# Optional — TACACS+ via pam_tacplus
+# ------------------------------------------------------------
+# Try TACACS+ first, fall back to local pam_unix on TACACS+ failure
+# (server down, network partition, etc.). Configure the server list
+# and shared secret in /etc/tacplus_servers.
+#
+#   auth      [success=done default=ignore] pam_tacplus.so encrypt login=pap
+#   auth      required  pam_unix.so
+#   account   [success=done default=ignore] pam_tacplus.so
+#   account   required  pam_unix.so
+#
+# zebra-rs uses TACACS+ for authentication only. It does NOT consume
+# the priv-lvl attribute from TACACS+ responses; role assignment is
+# decided locally via `enable` + service-accounts. See
+# book/src/ch-06-01-session-design.md (D13, D14).
