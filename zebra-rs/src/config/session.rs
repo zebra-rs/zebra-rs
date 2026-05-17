@@ -168,6 +168,11 @@ impl SessionTable {
         }
     }
 
+    /// Remove a session by key. Returns true if an entry was present.
+    pub fn remove(&self, key: &SessionKey) -> bool {
+        self.sessions.remove(key).is_some()
+    }
+
     /// Number of active sessions.
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -203,6 +208,85 @@ pub struct GcStats {
     pub removed_idle: usize,
     pub removed_gone: usize,
     pub remaining: usize,
+}
+
+/// Wrapper around the `pidfd_open(2)` syscall (Linux 5.3+). Returns a
+/// non-blocking pidfd that becomes readable when the target process exits.
+#[cfg(target_os = "linux")]
+mod pidfd {
+    use std::io;
+    use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+
+    pub fn open(pid: i32) -> io::Result<OwnedFd> {
+        // PIDFD_NONBLOCK aligns with O_NONBLOCK on Linux. We want
+        // non-blocking semantics so tokio AsyncFd readiness is reliable.
+        let flags: libc::c_int = libc::O_NONBLOCK;
+        // SAFETY: pidfd_open is a single syscall taking (pid, flags) and
+        // returning an int fd or -1 with errno set.
+        let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, flags) };
+        if ret < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: ret is a valid fd owned by us until close.
+            Ok(unsafe { OwnedFd::from_raw_fd(ret as RawFd) })
+        }
+    }
+}
+
+/// Per-session watcher: opens a pidfd for the parent bash and removes the
+/// session from the table the moment bash exits (even via `kill -9`).
+///
+/// Intended to be `tokio::spawn`'d once per new session created by
+/// [`SessionTable::resolve`]. If pidfd open fails (bash already dead, or the
+/// kernel is < 5.3), the session is removed immediately and the task exits.
+#[cfg(target_os = "linux")]
+pub async fn watch_bash_death(table: Arc<SessionTable>, key: SessionKey, bash_pid: u32) {
+    use tokio::io::Interest;
+    use tokio::io::unix::AsyncFd;
+
+    let fd = match pidfd::open(bash_pid as i32) {
+        Ok(fd) => fd,
+        Err(e) => {
+            tracing::warn!(
+                uid = key.0,
+                bash_pid,
+                error = %e,
+                "pidfd_open failed; dropping session immediately",
+            );
+            table.remove(&key);
+            return;
+        }
+    };
+
+    let async_fd = match AsyncFd::with_interest(fd, Interest::READABLE) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(
+                uid = key.0,
+                bash_pid,
+                error = %e,
+                "AsyncFd registration failed; relying on GC for cleanup",
+            );
+            return;
+        }
+    };
+
+    match async_fd.readable().await {
+        Ok(_guard) => {
+            if table.remove(&key) {
+                tracing::info!(uid = key.0, bash_pid, "vty session removed (bash exited)");
+            } else {
+                tracing::debug!(
+                    uid = key.0,
+                    bash_pid,
+                    "pidfd fired but session already gone (GC race)",
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(uid = key.0, bash_pid, error = %e, "pidfd readable() failed");
+        }
+    }
 }
 
 /// Background sweep task. Runs `gc_once` every `interval`, logging activity.
@@ -520,5 +604,62 @@ mod tests {
         assert_eq!(stats.removed_idle, 1);
         assert_eq!(stats.removed_gone, 0);
         assert_eq!(stats.remaining, 0);
+    }
+
+    #[test]
+    fn remove_returns_true_when_session_present() {
+        let table = SessionTable::new();
+        table.insert_for_test((1000, 1000), Instant::now());
+        assert!(table.remove(&(1000, 1000)));
+        assert_eq!(table.len(), 0);
+        assert!(!table.remove(&(1000, 1000)));
+    }
+
+    #[tokio::test]
+    async fn watcher_removes_session_when_bash_dies() {
+        // Spawn a real child that will live long enough for us to register a
+        // pidfd watcher, then kill it and verify the session is removed.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn /bin/sleep");
+        let bash_pid = child.id();
+        let key = (1000u32, bash_pid);
+
+        let table = SessionTable::new();
+        table.insert_for_test(key, Instant::now());
+
+        let watcher_table = table.clone();
+        let watcher = tokio::spawn(async move {
+            super::watch_bash_death(watcher_table, key, bash_pid).await;
+        });
+
+        // Brief pause so the watcher gets a chance to register the pidfd
+        // before the child exits — otherwise we'd be racing the kernel.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        child.kill().expect("kill child");
+        let _ = child.wait();
+
+        // Watcher should finish within a couple of seconds; allow generous
+        // headroom on slow CI runners.
+        tokio::time::timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher timed out")
+            .expect("watcher panicked");
+
+        assert!(table.get(&key).is_none(), "session was not removed");
+    }
+
+    #[tokio::test]
+    async fn watcher_drops_session_immediately_if_pidfd_open_fails() {
+        // PID 0 is invalid for pidfd_open and triggers the open-failure
+        // branch, which should remove the session and return.
+        let key = (1000u32, 0u32);
+        let table = SessionTable::new();
+        table.insert_for_test(key, Instant::now());
+
+        super::watch_bash_death(table.clone(), key, 0).await;
+
+        assert!(table.get(&key).is_none());
     }
 }
