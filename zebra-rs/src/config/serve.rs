@@ -364,10 +364,10 @@ impl VtyAddr {
 
 /// Per-RPC interceptor that surfaces peer identity from SO_PEERCRED.
 ///
-/// Behaviour for PR3 is **log-only**: every UDS request gets a tracing event
-/// with uid/pid, and an optional `ZEBRA_VTY_ALLOW_UIDS` allow-list produces
-/// warnings for non-matching peers but does not actually reject them. PR4
-/// will turn the warning into a `Status::permission_denied`.
+/// Logs uid/gid/pid for every UDS request. When the optional
+/// `ZEBRA_VTY_ALLOW_UIDS` env var is set (comma-separated UID list), peers
+/// outside the list are rejected with `Status::permission_denied`. When the
+/// env var is unset, every peer is allowed (logged only).
 #[derive(Clone)]
 struct VtyPeerInterceptor {
     allow_uids: Option<Arc<HashSet<u32>>>,
@@ -403,12 +403,10 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
             let pid = cred.pid().unwrap_or(-1);
             match &self.allow_uids {
                 Some(allowed) if !allowed.contains(&uid) => {
-                    tracing::warn!(
-                        uid,
-                        gid,
-                        pid,
-                        "vty rpc from peer not in ZEBRA_VTY_ALLOW_UIDS (would deny)"
-                    );
+                    tracing::warn!(uid, gid, pid, "vty rpc denied: uid not in allow-list");
+                    return Err(tonic::Status::permission_denied(format!(
+                        "uid {uid} is not permitted to use the VTY"
+                    )));
                 }
                 _ => tracing::info!(uid, gid, pid, "vty rpc"),
             }

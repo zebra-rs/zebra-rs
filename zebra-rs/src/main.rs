@@ -65,8 +65,8 @@ struct Arg {
 
     #[arg(
         long,
-        help = "VTY gRPC listen address. Forms: tcp:HOST:PORT or unix:NAME (Linux only)",
-        default_value = "tcp:0.0.0.0:2666"
+        help = "VTY gRPC listen address. Forms: unix:NAME (Linux abstract socket) or tcp:HOST:PORT",
+        default_value = "unix:zebra-rs/vty"
     )]
     vty_socket: String,
 }

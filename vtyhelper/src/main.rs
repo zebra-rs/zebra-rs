@@ -40,8 +40,9 @@ struct Cli {
     #[arg(
         short,
         long,
-        help = "Base URL of the server",
-        default_value = "http://127.0.0.1"
+        help = "Server endpoint URI (unix:NAME, tcp://host:port, http://host:port). \
+                Bare host like 'http://127.0.0.1' is combined with --port for backward compat.",
+        default_value = "unix:zebra-rs/vty"
     )]
     base: String,
 
