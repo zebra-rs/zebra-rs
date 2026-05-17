@@ -16,12 +16,26 @@ install:
 	cp target/release/zebra ${HOME}/.zebra/bin
 	cp target/release/vtyhelper ${HOME}/.zebra/bin
 	cp target/release/vtyctl ${HOME}/.zebra/bin
+ifneq ("$(wildcard target/release/vtypam)","")
+	cp target/release/vtypam ${HOME}/.zebra/bin
+	@echo '[vtypam installed to $${HOME}/.zebra/bin/vtypam — grant caps with: sudo setcap cap_dac_read_search,cap_audit_write=ep $${HOME}/.zebra/bin/vtypam]'
+endif
 ifneq ("$(wildcard vty/vty)","")
 	cp vty/vty ${HOME}/.zebra/bin
 endif
 	cp zebra/yang/* ${HOME}/.zebra/yang
 	touch ${HOME}/.zebra/zebra.conf
 	@echo '[Please add $${HOME}/.zebra/bin to your PATH]'
+
+# System-wide installation of vtypam to /usr/sbin with file caps.
+# Use this on production hosts; the per-user `install` target above
+# is for dev convenience and cannot set caps.
+.PHONY: install-vtypam
+install-vtypam:
+	sudo install -m 0755 -o root -g root target/release/vtypam /usr/sbin/vtypam
+	sudo setcap cap_dac_read_search,cap_audit_write=ep /usr/sbin/vtypam
+	@echo '[vtypam installed to /usr/sbin/vtypam with file caps]'
+	@echo '[Copy etc/pam.d/zebra-rs.example to /etc/pam.d/zebra-rs and adjust for your distro]'
 
 doc:
 	rustdoc

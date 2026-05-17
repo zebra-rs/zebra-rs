@@ -1,0 +1,12 @@
+[package]
+name = "vtypam"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"
