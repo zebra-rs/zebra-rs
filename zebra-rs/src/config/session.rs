@@ -11,10 +11,19 @@
 //! merely observes and records sessions.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use dashmap::DashMap;
+
+/// Default idle TTL for VTY sessions. Mirrors the typical Cisco IOS
+/// `exec-timeout 10 0` default.
+#[cfg(target_os = "linux")]
+pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(600);
+
+/// Default interval between GC sweeps.
+#[cfg(target_os = "linux")]
+pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Composite session identifier: `(peer_uid, parent_pid)`.
 pub type SessionKey = (u32, u32);
@@ -130,7 +139,36 @@ impl SessionTable {
         Ok((key, true))
     }
 
-    /// Number of active sessions. Used by tests and (eventually) metrics.
+    /// Sweep stale sessions in a single pass.
+    ///
+    /// A session is dropped if either:
+    /// - its `last_active` is older than `idle_ttl`, or
+    /// - `/proc/{bash_pid}` no longer exists (parent shell has died).
+    ///
+    /// Returns counts useful for logging/metrics.
+    pub fn gc_once<P: ProcStatusReader>(&self, reader: &P, idle_ttl: Duration) -> GcStats {
+        let now = Instant::now();
+        let mut removed_idle = 0usize;
+        let mut removed_gone = 0usize;
+        self.sessions.retain(|_key, session| {
+            if now.saturating_duration_since(session.last_active) > idle_ttl {
+                removed_idle += 1;
+                return false;
+            }
+            if !reader.process_exists(session.bash_pid as i32) {
+                removed_gone += 1;
+                return false;
+            }
+            true
+        });
+        GcStats {
+            removed_idle,
+            removed_gone,
+            remaining: self.sessions.len(),
+        }
+    }
+
+    /// Number of active sessions.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.sessions.len()
@@ -142,13 +180,67 @@ impl SessionTable {
     pub fn get(&self, key: &SessionKey) -> Option<Session> {
         self.sessions.get(key).map(|s| s.clone())
     }
+
+    /// Test-only constructor for sessions with a controllable `last_active`
+    /// timestamp.
+    #[cfg(test)]
+    pub fn insert_for_test(&self, key: SessionKey, last_active: Instant) {
+        self.sessions.insert(
+            key,
+            Session {
+                uid: key.0,
+                bash_pid: key.1,
+                created: last_active,
+                last_active,
+            },
+        );
+    }
 }
 
-/// Indirection over `/proc/{pid}/status` reads so unit tests can stub them
+/// Counts emitted by [`SessionTable::gc_once`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcStats {
+    pub removed_idle: usize,
+    pub removed_gone: usize,
+    pub remaining: usize,
+}
+
+/// Background sweep task. Runs `gc_once` every `interval`, logging activity.
+///
+/// Intended to be `tokio::spawn`'d from `serve()` and to live for the
+/// daemon's lifetime.
+#[cfg(target_os = "linux")]
+pub async fn run_gc<P>(table: Arc<SessionTable>, reader: P, interval: Duration, idle_ttl: Duration)
+where
+    P: ProcStatusReader + Send + Sync + 'static,
+{
+    let mut ticker = tokio::time::interval(interval);
+    // Skip the immediate first tick; the table is empty at startup anyway.
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let stats = table.gc_once(&reader, idle_ttl);
+        if stats.removed_idle > 0 || stats.removed_gone > 0 {
+            tracing::info!(
+                removed_idle = stats.removed_idle,
+                removed_gone = stats.removed_gone,
+                remaining = stats.remaining,
+                "vty session GC",
+            );
+        } else {
+            tracing::debug!(remaining = stats.remaining, "vty session GC (no-op)");
+        }
+    }
+}
+
+/// Indirection over `/proc/{pid}/...` reads so unit tests can stub them
 /// without spawning real processes.
 pub trait ProcStatusReader {
     fn read_ppid(&self, pid: i32) -> Result<i32, std::io::Error>;
     fn read_ruid(&self, pid: i32) -> Result<u32, std::io::Error>;
+    /// Lightweight check whether `/proc/{pid}` is still present. Used by
+    /// the GC sweep to drop sessions whose parent shell has died.
+    fn process_exists(&self, pid: i32) -> bool;
 }
 
 #[cfg(target_os = "linux")]
@@ -172,6 +264,10 @@ impl ProcStatusReader for ProcfsReader {
             .status()
             .map_err(|e| std::io::Error::other(format!("read /proc/{pid}/status: {e}")))?;
         Ok(status.ruid)
+    }
+
+    fn process_exists(&self, pid: i32) -> bool {
+        procfs::process::Process::new(pid).is_ok()
     }
 }
 
@@ -225,6 +321,9 @@ mod tests {
                 .get(&pid)
                 .copied()
                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        fn process_exists(&self, pid: i32) -> bool {
+            !self.missing.lock().unwrap().contains(&pid)
         }
     }
 
@@ -340,5 +439,86 @@ mod tests {
         let (key, is_new) = table.resolve(&reader, 1000, 1236).unwrap();
         assert_eq!(key, (1000, 1000));
         assert!(!is_new);
+    }
+
+    #[test]
+    fn gc_removes_idle_sessions() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        // Live bash pid 1000 — should not be removed for "gone".
+        reader.set_ppid(1000, 100);
+
+        let now = Instant::now();
+        let old = now - Duration::from_secs(900);
+        let fresh = now - Duration::from_secs(60);
+        table.insert_for_test((1000, 1000), old);
+        table.insert_for_test((2000, 2000), fresh);
+        // The fresh session's bash also exists.
+        reader.set_ppid(2000, 200);
+
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(stats.removed_idle, 1);
+        assert_eq!(stats.removed_gone, 0);
+        assert_eq!(stats.remaining, 1);
+        assert!(table.get(&(1000, 1000)).is_none());
+        assert!(table.get(&(2000, 2000)).is_some());
+    }
+
+    #[test]
+    fn gc_removes_sessions_whose_bash_died() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+
+        let now = Instant::now();
+        table.insert_for_test((1000, 1000), now);
+        table.insert_for_test((2000, 2000), now);
+        // 1000 is alive, 2000 is gone.
+        reader.set_ppid(1000, 100);
+        reader.set_missing(2000);
+
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(stats.removed_idle, 0);
+        assert_eq!(stats.removed_gone, 1);
+        assert_eq!(stats.remaining, 1);
+        assert!(table.get(&(1000, 1000)).is_some());
+        assert!(table.get(&(2000, 2000)).is_none());
+    }
+
+    #[test]
+    fn gc_is_noop_when_everything_is_fresh_and_alive() {
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        let now = Instant::now();
+        table.insert_for_test((1000, 1000), now);
+        table.insert_for_test((2000, 2000), now);
+        reader.set_ppid(1000, 100);
+        reader.set_ppid(2000, 200);
+
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(
+            stats,
+            GcStats {
+                removed_idle: 0,
+                removed_gone: 0,
+                remaining: 2
+            }
+        );
+    }
+
+    #[test]
+    fn gc_idle_takes_priority_over_gone() {
+        // A session that is BOTH idle and whose bash has died counts as
+        // removed_idle (the idle check runs first). This keeps the stats
+        // attributable to a single primary cause.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        let now = Instant::now();
+        table.insert_for_test((1000, 1000), now - Duration::from_secs(900));
+        reader.set_missing(1000);
+
+        let stats = table.gc_once(&reader, Duration::from_secs(600));
+        assert_eq!(stats.removed_idle, 1);
+        assert_eq!(stats.removed_gone, 0);
+        assert_eq!(stats.remaining, 0);
     }
 }
