@@ -13,6 +13,8 @@ pub use serve::Cli;
 pub use serve::VtyAddr;
 pub use serve::serve;
 
+mod session;
+
 mod configs;
 pub use configs::Args;
 pub use configs::Config;
