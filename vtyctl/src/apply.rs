@@ -15,7 +15,7 @@ fn print_help() {
     eprintln!("vtyctl apply must specify -f or --filename.");
 }
 
-pub async fn apply(host: &String, filename: &String, command: Option<&String>) -> Result<()> {
+pub async fn apply(host: &str, filename: &str, command: Option<&String>) -> Result<()> {
     let mut vec = Vec::new();
     if let Some(cmd) = command {
         // The shell hands us the two-character literal `\n` (not a
