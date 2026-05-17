@@ -5,7 +5,7 @@ use tokio::io::{self, AsyncWriteExt};
 use tokio_stream::StreamExt;
 use vty::exec_client::ExecClient;
 use vty::show_client::ShowClient;
-use vty::{CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, ShowRequest};
+use vty::{CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, LogoutRequest, ShowRequest};
 
 mod endpoint;
 
@@ -36,6 +36,13 @@ struct Cli {
 
     #[arg(short, long, help = "Show output in JSON format")]
     json: bool,
+
+    #[arg(
+        short,
+        long,
+        help = "Logout: tear down the server-side session (invoked from vty bash EXIT trap)"
+    )]
+    logout: bool,
 
     #[arg(
         short,
@@ -190,8 +197,20 @@ async fn exec(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// Tear down the server-side session. Invoked from the vty bash `EXIT`
+/// trap, so this path is silent on success and on failure — the user's
+/// shell is already exiting and any stdout would be jarring.
+async fn logout(cli: Cli) -> Result<()> {
+    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let mut client = ExecClient::new(channel);
+    let _ = client.logout(tonic::Request::new(LogoutRequest {})).await?;
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<()> {
-    if cli.show {
+    if cli.logout {
+        logout(cli).await?;
+    } else if cli.show {
         show(cli, None, Vec::new()).await?;
     } else if cli.completion || cli.trailing || cli.first {
         completion(cli).await?;
@@ -207,8 +226,13 @@ async fn main() -> Result<()> {
     if let Ok(val) = env::var("CLI_SERVER_URL") {
         cli.base = val;
     }
+    let logout_mode = cli.logout;
     if let Err(_err) = run(cli).await {
-        println!("dummy\ncommands\n\n");
+        // Logout runs from the bash EXIT trap; staying silent on failure
+        // keeps a tidy shell-exit experience even if the daemon is gone.
+        if !logout_mode {
+            println!("dummy\ncommands\n\n");
+        }
     }
     Ok(())
 }

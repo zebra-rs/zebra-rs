@@ -319,6 +319,10 @@ if [[ $interactive ]]; then
   _cli_pager_setup
   _cli_bind_key
   _cli_prompt_setup
+  # Tell the daemon to drop our session as soon as the shell exits.
+  # The kernel pidfd watcher also catches this case; the explicit
+  # logout RPC just shaves a moment off the cleanup for clean exits.
+  trap '${cli_command} -l >/dev/null 2>&1 || true' EXIT
 else
   CLI_PAGER="cat"
 fi

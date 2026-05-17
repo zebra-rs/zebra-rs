@@ -7,6 +7,17 @@ package vty;
 // The Command execution.
 service Exec {
   rpc DoExec(ExecRequest) returns (ExecReply) {}
+  // Released by the vty bash EXIT trap. Drops the caller's session
+  // from the server-side SessionTable so the slot is reclaimed
+  // immediately on a clean shell exit (in parallel with the kernel
+  // pidfd watcher that handles abnormal exits).
+  rpc Logout(LogoutRequest) returns (LogoutReply) {}
+}
+
+message LogoutRequest {}
+
+message LogoutReply {
+  bool ok = 1;
 }
 
 // Command message type.

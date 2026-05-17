@@ -28,6 +28,17 @@ pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 /// Composite session identifier: `(peer_uid, parent_pid)`.
 pub type SessionKey = (u32, u32);
 
+/// Per-request session context attached to `tonic::Request` extensions by
+/// `VtyPeerInterceptor` after a successful resolve. Handlers can read it to
+/// act on the caller's session (e.g. the Logout handler removes the entry).
+///
+/// Wrapped in a newtype so the extension lookup is unambiguous — bare
+/// tuples would collide with anything else stored as `(u32, u32)`.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionContext {
+    pub key: SessionKey,
+}
+
 /// Minimal session record. Phase 1 keeps only what is needed to track
 /// connections; enable/RBAC fields are added in Phase 4. Fields are written
 /// on session create/refresh but not yet consumed outside tests.

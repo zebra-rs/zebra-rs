@@ -10,8 +10,8 @@ use tonic::transport::Server;
 use crate::config::api::DeployRequest;
 #[cfg(target_os = "linux")]
 use crate::config::session::{
-    DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ProcfsReader, SessionError, SessionTable, run_gc,
-    watch_bash_death,
+    DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ProcfsReader, SessionContext, SessionError,
+    SessionTable, run_gc, watch_bash_death,
 };
 
 use super::api::{
@@ -24,11 +24,13 @@ use super::vty::exec_server::{Exec, ExecServer};
 use super::vty::show_server::{Show, ShowServer};
 use super::vty::{
     ApplyReply, ApplyRequest, ClearReply, ClearRequest, CommandPath, ExecCode, ExecReply,
-    ExecRequest, ExecType, ShowReply, ShowRequest, YangMatch,
+    ExecRequest, ExecType, LogoutReply, LogoutRequest, ShowReply, ShowRequest, YangMatch,
 };
 #[derive(Debug)]
 struct ExecService {
     pub tx: mpsc::Sender<Message>,
+    #[cfg(target_os = "linux")]
+    pub sessions: Arc<SessionTable>,
 }
 
 impl ExecService {
@@ -114,6 +116,20 @@ impl Exec for ExecService {
             }
             _ => self.reply(ExecCode::Success, String::from("Success\n")),
         }
+    }
+
+    async fn logout(
+        &self,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] request: tonic::Request<
+            LogoutRequest,
+        >,
+    ) -> Result<Response<LogoutReply>, tonic::Status> {
+        #[cfg(target_os = "linux")]
+        if let Some(ctx) = request.extensions().get::<SessionContext>() {
+            let removed = self.sessions.remove(&ctx.key);
+            tracing::info!(uid = ctx.key.0, bash_pid = ctx.key.1, removed, "vty logout",);
+        }
+        Ok(Response::new(LogoutReply { ok: true }))
     }
 }
 
@@ -408,7 +424,10 @@ impl VtyPeerInterceptor {
 }
 
 impl tonic::service::Interceptor for VtyPeerInterceptor {
-    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+    fn call(
+        &mut self,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))] mut req: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
         #[cfg(target_os = "linux")]
         if let Some(info) = req
             .extensions()
@@ -429,6 +448,9 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 
             match self.sessions.resolve(&ProcfsReader, uid, pid) {
                 Ok(((skey_uid, bash_pid), is_new)) => {
+                    req.extensions_mut().insert(SessionContext {
+                        key: (skey_uid, bash_pid),
+                    });
                     if is_new {
                         tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc (new session)");
                         let table = self.sessions.clone();
@@ -470,13 +492,17 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 }
 
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
-    let exec_service = ExecService { tx: cli.tx.clone() };
+    #[cfg(target_os = "linux")]
+    let sessions = SessionTable::new();
+
+    let exec_service = ExecService {
+        tx: cli.tx.clone(),
+        #[cfg(target_os = "linux")]
+        sessions: sessions.clone(),
+    };
     let show_service = ShowService { tx: cli.tx.clone() };
     let apply_service = ApplyService { tx: cli.tx.clone() };
     let clear_service = ClearService { tx: cli.tx.clone() };
-
-    #[cfg(target_os = "linux")]
-    let sessions = SessionTable::new();
 
     let interceptor = VtyPeerInterceptor::from_env(
         #[cfg(target_os = "linux")]
