@@ -30,6 +30,7 @@
 ## Management Interface
 
 - [VTY Access and Authentication](ch-06-00-vty-access.md)
+  - [Session Management Design](ch-06-01-session-design.md)
 
 ## Logging and Monitoring
 
