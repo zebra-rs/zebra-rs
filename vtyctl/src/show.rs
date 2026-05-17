@@ -18,11 +18,15 @@ pub async fn show(host: &str, command: &str, json: bool) -> Result<()> {
     }
 
     // Phase 1: Call Exec::do_exec to get paths
-    let exec_client = ExecClient::connect(format!("http://{}:{}", host, 2666)).await;
-    let Ok(mut exec_client) = exec_client else {
-        eprintln!("Can't connect to {}", host);
-        exit(3);
+    let uri = crate::endpoint::host_uri(host);
+    let channel = match crate::endpoint::connect(&uri).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Can't connect to {uri}: {e}");
+            exit(3);
+        }
     };
+    let mut exec_client = ExecClient::new(channel.clone());
 
     let exec_request = ExecRequest {
         r#type: ExecType::Exec as i32,
@@ -37,11 +41,7 @@ pub async fn show(host: &str, command: &str, json: bool) -> Result<()> {
     let reply = exec_reply.into_inner();
 
     // Phase 2: Use the paths from exec_reply in ShowRequest
-    let show_client = ShowClient::connect(format!("http://{}:{}", host, 2666)).await;
-    let Ok(mut show_client) = show_client else {
-        eprintln!("Can't connect to {} for show service", host);
-        exit(3);
-    };
+    let mut show_client = ShowClient::new(channel);
 
     let request = ShowRequest {
         line: command.to_string(),

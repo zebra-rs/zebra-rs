@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -321,28 +323,155 @@ impl Apply for ApplyService {
     }
 }
 
-pub fn serve(cli: Cli) {
+/// VTY gRPC listen endpoint.
+///
+/// `AbstractUds` uses a Linux abstract Unix socket whose name is scoped by the
+/// process network namespace, which is the isolation primitive we rely on for
+/// per-netns zebra-rs deployments.
+#[derive(Debug, Clone)]
+pub enum VtyAddr {
+    Tcp(SocketAddr),
+    #[cfg(target_os = "linux")]
+    AbstractUds(String),
+}
+
+impl VtyAddr {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        if let Some(rest) = s.strip_prefix("tcp:") {
+            let addr: SocketAddr = rest
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid tcp address {rest:?}: {e}"))?;
+            return Ok(Self::Tcp(addr));
+        }
+        if let Some(rest) = s.strip_prefix("unix:") {
+            #[cfg(target_os = "linux")]
+            {
+                let name = rest.trim_start_matches('@').to_string();
+                if name.is_empty() {
+                    anyhow::bail!("unix name must be non-empty");
+                }
+                return Ok(Self::AbstractUds(name));
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = rest;
+                anyhow::bail!("unix sockets are only supported on Linux");
+            }
+        }
+        anyhow::bail!("--vty-socket must start with 'tcp:' or 'unix:'");
+    }
+}
+
+/// Per-RPC interceptor that surfaces peer identity from SO_PEERCRED.
+///
+/// Logs uid/gid/pid for every UDS request. When the optional
+/// `ZEBRA_VTY_ALLOW_UIDS` env var is set (comma-separated UID list), peers
+/// outside the list are rejected with `Status::permission_denied`. When the
+/// env var is unset, every peer is allowed (logged only).
+#[derive(Clone)]
+struct VtyPeerInterceptor {
+    allow_uids: Option<Arc<HashSet<u32>>>,
+}
+
+impl VtyPeerInterceptor {
+    fn from_env() -> Self {
+        let allow_uids = std::env::var("ZEBRA_VTY_ALLOW_UIDS").ok().and_then(|raw| {
+            let set: HashSet<u32> = raw
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u32>().ok())
+                .collect();
+            if set.is_empty() {
+                None
+            } else {
+                Some(Arc::new(set))
+            }
+        });
+        Self { allow_uids }
+    }
+}
+
+impl tonic::service::Interceptor for VtyPeerInterceptor {
+    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        #[cfg(target_os = "linux")]
+        if let Some(info) = req
+            .extensions()
+            .get::<tonic::transport::server::UdsConnectInfo>()
+            && let Some(cred) = &info.peer_cred
+        {
+            let uid = cred.uid();
+            let gid = cred.gid();
+            let pid = cred.pid().unwrap_or(-1);
+            match &self.allow_uids {
+                Some(allowed) if !allowed.contains(&uid) => {
+                    tracing::warn!(uid, gid, pid, "vty rpc denied: uid not in allow-list");
+                    return Err(tonic::Status::permission_denied(format!(
+                        "uid {uid} is not permitted to use the VTY"
+                    )));
+                }
+                _ => tracing::info!(uid, gid, pid, "vty rpc"),
+            }
+        }
+        Ok(req)
+    }
+}
+
+pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     let exec_service = ExecService { tx: cli.tx.clone() };
-    let exec_server = ExecServer::new(exec_service);
-
     let show_service = ShowService { tx: cli.tx.clone() };
-    let show_server = ShowServer::new(show_service);
-
     let apply_service = ApplyService { tx: cli.tx.clone() };
-    let apply_server = ApplyServer::new(apply_service);
-
     let clear_service = ClearService { tx: cli.tx.clone() };
-    let clear_server = ClearServer::new(clear_service);
 
-    let addr = "0.0.0.0:2666".parse().unwrap();
+    let interceptor = VtyPeerInterceptor::from_env();
+    if let Some(set) = &interceptor.allow_uids {
+        tracing::info!(uids = ?set, "VTY peer UID allow-list active (log-only)");
+    }
 
-    tokio::spawn(async move {
-        Server::builder()
-            .add_service(exec_server)
-            .add_service(show_server)
-            .add_service(apply_server)
-            .add_service(clear_server)
-            .serve(addr)
-            .await
-    });
+    let builder = Server::builder()
+        .add_service(ExecServer::with_interceptor(
+            exec_service,
+            interceptor.clone(),
+        ))
+        .add_service(ShowServer::with_interceptor(
+            show_service,
+            interceptor.clone(),
+        ))
+        .add_service(ApplyServer::with_interceptor(
+            apply_service,
+            interceptor.clone(),
+        ))
+        .add_service(ClearServer::with_interceptor(clear_service, interceptor));
+
+    match addr {
+        VtyAddr::Tcp(addr) => {
+            tracing::info!("VTY gRPC listening on tcp://{addr}");
+            tokio::spawn(async move { builder.serve(addr).await });
+        }
+        #[cfg(target_os = "linux")]
+        VtyAddr::AbstractUds(name) => {
+            let incoming = bind_abstract_uds(&name)?;
+            tracing::info!("VTY gRPC listening on abstract UDS @{name}");
+            tokio::spawn(async move { builder.serve_with_incoming(incoming).await });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixListenerStream> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::SocketAddr as StdSockAddr;
+    use std::os::unix::net::UnixListener as StdUnixListener;
+    use tokio::net::UnixListener;
+    use tokio_stream::wrappers::UnixListenerStream;
+
+    let addr = StdSockAddr::from_abstract_name(name.as_bytes())
+        .map_err(|e| anyhow::anyhow!("from_abstract_name: {e}"))?;
+    let std_listener =
+        StdUnixListener::bind_addr(&addr).map_err(|e| anyhow::anyhow!("bind_addr: {e}"))?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| anyhow::anyhow!("set_nonblocking: {e}"))?;
+    let listener =
+        UnixListener::from_std(std_listener).map_err(|e| anyhow::anyhow!("from_std: {e}"))?;
+    Ok(UnixListenerStream::new(listener))
 }

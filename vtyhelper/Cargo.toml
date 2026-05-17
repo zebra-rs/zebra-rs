@@ -11,6 +11,8 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
+tower = { version = "0.5", default-features = false, features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [build-dependencies]
 tonic-prost-build.workspace = true

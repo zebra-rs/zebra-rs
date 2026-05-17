@@ -20,10 +20,15 @@ impl ZebraClient {
 
     /// Execute a show command and return the result as JSON
     pub async fn show_command(&self, command: &str, json: bool) -> Result<String> {
-        let endpoint = format!("{}:{}", self.base_url, self.port);
+        let endpoint = if self.base_url.starts_with("unix:") || self.base_url.contains("://") {
+            self.base_url.clone()
+        } else {
+            format!("http://{}:{}", self.base_url, self.port)
+        };
         debug!("Connecting to zebra-rs at {}", endpoint);
 
-        let mut client = ShowClient::connect(endpoint).await?;
+        let channel = crate::endpoint::connect(&endpoint).await?;
+        let mut client = ShowClient::new(channel);
 
         let mut paths = Vec::new();
         let cmds: Vec<&str> = command.split_whitespace().collect();

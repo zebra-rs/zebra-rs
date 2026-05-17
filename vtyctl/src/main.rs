@@ -6,6 +6,7 @@ pub mod vty {
 }
 pub mod apply;
 pub mod clear;
+pub mod endpoint;
 pub mod mcp;
 pub mod show;
 
@@ -20,7 +21,7 @@ struct Cli {
 enum Commands {
     #[command(disable_help_flag = true)]
     Apply {
-        #[arg(short, long, default_value = "127.0.0.1")]
+        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
         host: String,
 
         #[arg(short, long, help = "Config filename", default_value = "")]
@@ -31,7 +32,7 @@ enum Commands {
     },
     #[command(disable_help_flag = true)]
     Clear {
-        #[arg(short, long, default_value = "127.0.0.1")]
+        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
         host: String,
 
         #[arg(help = "Clear command to execute")]
@@ -39,7 +40,7 @@ enum Commands {
     },
     #[command(disable_help_flag = true)]
     Show {
-        #[arg(short, long, default_value = "127.0.0.1")]
+        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
         host: String,
 
         #[arg(short, long, help = "Output in JSON format")]
@@ -50,10 +51,15 @@ enum Commands {
     },
     /// Start MCP (Model Context Protocol) server for AI assistant integration
     Mcp {
-        #[arg(short = 'H', long, default_value = "127.0.0.1")]
+        #[arg(short = 'H', long, default_value = "unix:zebra-rs/vty")]
         host: String,
 
-        #[arg(short, long, help = "gRPC server port", default_value = "2666")]
+        #[arg(
+            short,
+            long,
+            help = "gRPC server port (TCP only)",
+            default_value = "2666"
+        )]
         port: u32,
 
         #[arg(short, long, help = "Enable debug logging")]

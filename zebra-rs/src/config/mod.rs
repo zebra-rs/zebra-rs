@@ -10,6 +10,7 @@ pub use manager::event_loop;
 
 mod serve;
 pub use serve::Cli;
+pub use serve::VtyAddr;
 pub use serve::serve;
 
 mod configs;

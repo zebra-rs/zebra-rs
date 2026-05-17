@@ -62,6 +62,13 @@ struct Arg {
         help = "Write PID to this file on startup; in --daemon mode replaces /var/run/zebra-rs.pid"
     )]
     pid_file: Option<String>,
+
+    #[arg(
+        long,
+        help = "VTY gRPC listen address. Forms: unix:NAME (Linux abstract socket) or tcp:HOST:PORT",
+        default_value = "unix:zebra-rs/vty"
+    )]
+    vty_socket: String,
 }
 
 // 1. Option Yang path
@@ -164,7 +171,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::new(config.tx.clone());
 
-    config::serve(cli);
+    let vty_addr = config::VtyAddr::parse(&arg.vty_socket)?;
+    config::serve(cli, vty_addr)?;
 
     policy::serve(policy);
 
