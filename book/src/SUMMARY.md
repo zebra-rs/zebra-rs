@@ -27,6 +27,10 @@
   - [Match](ch-05-02-policy-match.md)
   - [Set](ch-05-03-policy-set.md)
 
+## Management Interface
+
+- [VTY Access and Authentication](ch-06-00-vty-access.md)
+
 ## Logging and Monitoring
 
 - [Logging Configuration](ch-03-00-logging-overview.md)
