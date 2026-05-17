@@ -11,6 +11,7 @@ use crate::config::api::DeployRequest;
 #[cfg(target_os = "linux")]
 use crate::config::session::{
     DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ProcfsReader, SessionError, SessionTable, run_gc,
+    watch_bash_death,
 };
 
 use super::api::{
@@ -430,6 +431,10 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                 Ok(((skey_uid, bash_pid), is_new)) => {
                     if is_new {
                         tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc (new session)");
+                        let table = self.sessions.clone();
+                        tokio::spawn(async move {
+                            watch_bash_death(table, (skey_uid, bash_pid), bash_pid).await;
+                        });
                     } else {
                         tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc");
                     }
