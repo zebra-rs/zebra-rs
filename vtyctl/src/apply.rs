@@ -54,11 +54,15 @@ pub async fn apply(host: &String, filename: &String, command: Option<&String>) -
         exit(1);
     }
 
-    let client = ApplyClient::connect(format!("http://{}:{}", host, 2666)).await;
-    let Ok(mut client) = client else {
-        eprintln!("Can't connect to {}", host);
-        exit(3);
+    let uri = crate::endpoint::host_uri(host);
+    let channel = match crate::endpoint::connect(&uri).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Can't connect to {uri}: {e}");
+            exit(3);
+        }
     };
+    let mut client = ApplyClient::new(channel);
 
     let requests = tokio_stream::iter(vec);
 

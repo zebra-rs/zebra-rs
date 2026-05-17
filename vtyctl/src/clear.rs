@@ -18,11 +18,15 @@ pub async fn clear(host: &str, command: &str) -> Result<()> {
     }
 
     // Phase 1: Call Exec::do_exec to get paths
-    let exec_client = ExecClient::connect(format!("http://{}:{}", host, 2666)).await;
-    let Ok(mut exec_client) = exec_client else {
-        eprintln!("Can't connect to {}", host);
-        exit(3);
+    let uri = crate::endpoint::host_uri(host);
+    let channel = match crate::endpoint::connect(&uri).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Can't connect to {uri}: {e}");
+            exit(3);
+        }
     };
+    let mut exec_client = ExecClient::new(channel.clone());
 
     let exec_request = ExecRequest {
         r#type: ExecType::Exec as i32,
@@ -37,11 +41,7 @@ pub async fn clear(host: &str, command: &str) -> Result<()> {
     let reply = exec_reply.into_inner();
 
     // Phase 2: Use the paths from exec_reply in ClearRequest
-    let clear_client = ClearClient::connect(format!("http://{}:{}", host, 2666)).await;
-    let Ok(mut clear_client) = clear_client else {
-        eprintln!("Can't connect to {} for clear service", host);
-        exit(3);
-    };
+    let mut clear_client = ClearClient::new(channel);
 
     let request = ClearRequest {
         line: command.to_string(),

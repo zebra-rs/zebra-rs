@@ -6,6 +6,7 @@ pub mod vty {
 }
 pub mod apply;
 pub mod clear;
+pub mod endpoint;
 pub mod mcp;
 pub mod show;
 

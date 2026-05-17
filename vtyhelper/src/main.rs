@@ -7,6 +7,8 @@ use vty::exec_client::ExecClient;
 use vty::show_client::ShowClient;
 use vty::{CommandPath, ExecCode, ExecReply, ExecRequest, ExecType, ShowRequest};
 
+mod endpoint;
+
 pub mod vty {
     tonic::include_proto!("vty");
 }
@@ -53,6 +55,24 @@ fn privilege_get() -> u32 {
     }
 }
 
+/// Build the endpoint URI from the parsed CLI.
+///
+/// `--base` may already be a full URI (`unix-abstract:…`, `tcp://host:port`,
+/// `http://host:port`) — in which case `--port` is ignored. Otherwise the
+/// legacy `{base}:{port}` concatenation is used, matching the historical
+/// `http://127.0.0.1` + `2666` defaults.
+fn endpoint_uri(base: &str, port: u32) -> String {
+    if base.starts_with("unix-abstract:")
+        || base.starts_with("tcp://")
+        || base.starts_with("http://") && base.matches(':').count() >= 2
+        || base.starts_with("https://") && base.matches(':').count() >= 2
+    {
+        base.to_string()
+    } else {
+        format!("{base}:{port}")
+    }
+}
+
 fn output(reply: ExecReply) {
     if reply.code == ExecCode::Show as i32 {
         println!("Show");
@@ -89,7 +109,8 @@ fn exec_request(exec_type: i32, mode: &String, commands: &Vec<String>) -> ExecRe
 
 async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()> {
     let port = port.unwrap_or(cli.port);
-    let mut client = ShowClient::connect(format!("{}:{}", cli.base, port)).await?;
+    let channel = endpoint::connect(&endpoint_uri(&cli.base, port)).await?;
+    let mut client = ShowClient::new(channel);
 
     let commands = commands_trim_run(&cli.commands);
     let request = tonic::Request::new(ShowRequest {
@@ -112,7 +133,8 @@ async fn show(cli: Cli, port: Option<u32>, paths: Vec<CommandPath>) -> Result<()
 }
 
 async fn completion(cli: Cli) -> Result<()> {
-    let mut client = ExecClient::connect(format!("{}:{}", cli.base, cli.port)).await?;
+    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let mut client = ExecClient::new(channel);
 
     let exec_type: i32 = if cli.completion {
         ExecType::Complete as i32
@@ -132,7 +154,8 @@ async fn completion(cli: Cli) -> Result<()> {
 }
 
 async fn redirect(cli: Cli, port: u32) -> Result<()> {
-    let mut client = ExecClient::connect(format!("{}:{}", cli.base, port)).await?;
+    let channel = endpoint::connect(&endpoint_uri(&cli.base, port)).await?;
+    let mut client = ExecClient::new(channel);
 
     let commands = commands_trim_run(&cli.commands);
     let request = tonic::Request::new(exec_request(ExecType::Exec as i32, &cli.mode, &commands));
@@ -144,7 +167,8 @@ async fn redirect(cli: Cli, port: u32) -> Result<()> {
 }
 
 async fn exec(cli: Cli) -> Result<()> {
-    let mut client = ExecClient::connect(format!("{}:{}", cli.base, cli.port)).await?;
+    let channel = endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await?;
+    let mut client = ExecClient::new(channel);
 
     let request = tonic::Request::new(exec_request(
         ExecType::Exec as i32,
