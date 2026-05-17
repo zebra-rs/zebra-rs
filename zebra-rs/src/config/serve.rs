@@ -9,7 +9,9 @@ use tonic::transport::Server;
 
 use crate::config::api::DeployRequest;
 #[cfg(target_os = "linux")]
-use crate::config::session::{ProcfsReader, SessionError, SessionTable};
+use crate::config::session::{
+    DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ProcfsReader, SessionError, SessionTable, run_gc,
+};
 
 use super::api::{
     ClearTxRequest, CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest,
@@ -384,7 +386,7 @@ struct VtyPeerInterceptor {
 }
 
 impl VtyPeerInterceptor {
-    fn from_env() -> Self {
+    fn from_env(#[cfg(target_os = "linux")] sessions: Arc<SessionTable>) -> Self {
         let allow_uids = std::env::var("ZEBRA_VTY_ALLOW_UIDS").ok().and_then(|raw| {
             let set: HashSet<u32> = raw
                 .split(',')
@@ -399,7 +401,7 @@ impl VtyPeerInterceptor {
         Self {
             allow_uids,
             #[cfg(target_os = "linux")]
-            sessions: SessionTable::new(),
+            sessions,
         }
     }
 }
@@ -468,9 +470,34 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     let apply_service = ApplyService { tx: cli.tx.clone() };
     let clear_service = ClearService { tx: cli.tx.clone() };
 
-    let interceptor = VtyPeerInterceptor::from_env();
+    #[cfg(target_os = "linux")]
+    let sessions = SessionTable::new();
+
+    let interceptor = VtyPeerInterceptor::from_env(
+        #[cfg(target_os = "linux")]
+        sessions.clone(),
+    );
     if let Some(set) = &interceptor.allow_uids {
         tracing::info!(uids = ?set, "VTY peer UID allow-list active (log-only)");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let gc_table = sessions.clone();
+        tokio::spawn(async move {
+            run_gc(
+                gc_table,
+                ProcfsReader,
+                DEFAULT_GC_INTERVAL,
+                DEFAULT_IDLE_TTL,
+            )
+            .await
+        });
+        tracing::info!(
+            interval_secs = DEFAULT_GC_INTERVAL.as_secs(),
+            idle_ttl_secs = DEFAULT_IDLE_TTL.as_secs(),
+            "VTY session GC sweep started",
+        );
     }
 
     let builder = Server::builder()
