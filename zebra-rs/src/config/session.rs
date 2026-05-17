@@ -28,6 +28,24 @@ pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 /// Composite session identifier: `(peer_uid, parent_pid)`.
 pub type SessionKey = (u32, u32);
 
+/// VTY authorization role. See decision D18.
+///
+/// - `View`: read-only access (default for new sessions).
+/// - `Operator`: intermediate (clear, restart, ping/traceroute, etc.).
+/// - `Admin`: full configuration access; required for configure/commit.
+///
+/// Sessions start at `View`. The `enable` command (Phase 4-c) authenticates
+/// the operator via PAM and promotes them to `Admin` for a bounded window
+/// (see [`Session::enable_expires`] / [`Session::enable_hard_deadline`]).
+/// Service accounts (Phase 4-d) start at `Admin` permanently.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    View,
+    Operator,
+    Admin,
+}
+
 /// Per-request session context attached to `tonic::Request` extensions by
 /// `VtyPeerInterceptor` after a successful resolve. Handlers can read it to
 /// act on the caller's session (e.g. the Logout handler removes the entry).
@@ -39,9 +57,13 @@ pub struct SessionContext {
     pub key: SessionKey,
 }
 
-/// Minimal session record. Phase 1 keeps only what is needed to track
-/// connections; enable/RBAC fields are added in Phase 4. Fields are written
-/// on session create/refresh but not yet consumed outside tests.
+/// Session record.
+///
+/// Phase 1 added the identity and timing fields. Phase 4-a adds the RBAC
+/// (`role`) and enable-state (`enabled`, `enable_expires`,
+/// `enable_hard_deadline`) fields. Phase 4-c (Enable/Disable RPC) wires the
+/// consumption logic; until then these fields are populated with default
+/// values but never read outside tests.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -49,6 +71,17 @@ pub struct Session {
     pub bash_pid: u32,
     pub created: Instant,
     pub last_active: Instant,
+    /// Current authorization role. Defaults to `View`.
+    pub role: Role,
+    /// Whether the session has authenticated via `enable`. When `true`,
+    /// both `enable_expires` and `enable_hard_deadline` are `Some`.
+    pub enabled: bool,
+    /// Sliding deadline (refreshed on each authorized RPC). Phase 4-c will
+    /// drop back to disabled when `now >= enable_expires`.
+    pub enable_expires: Option<Instant>,
+    /// Absolute deadline from the original `enable`. Not extended by
+    /// activity (see D2).
+    pub enable_hard_deadline: Option<Instant>,
 }
 
 impl Session {
@@ -59,6 +92,10 @@ impl Session {
             bash_pid,
             created: now,
             last_active: now,
+            role: Role::View,
+            enabled: false,
+            enable_expires: None,
+            enable_hard_deadline: None,
         }
     }
 }
@@ -208,6 +245,10 @@ impl SessionTable {
                 bash_pid: key.1,
                 created: last_active,
                 last_active,
+                role: Role::View,
+                enabled: false,
+                enable_expires: None,
+                enable_hard_deadline: None,
             },
         );
     }
