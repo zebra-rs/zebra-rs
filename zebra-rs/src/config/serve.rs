@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -361,24 +362,86 @@ impl VtyAddr {
     }
 }
 
+/// Per-RPC interceptor that surfaces peer identity from SO_PEERCRED.
+///
+/// Behaviour for PR3 is **log-only**: every UDS request gets a tracing event
+/// with uid/pid, and an optional `ZEBRA_VTY_ALLOW_UIDS` allow-list produces
+/// warnings for non-matching peers but does not actually reject them. PR4
+/// will turn the warning into a `Status::permission_denied`.
+#[derive(Clone)]
+struct VtyPeerInterceptor {
+    allow_uids: Option<Arc<HashSet<u32>>>,
+}
+
+impl VtyPeerInterceptor {
+    fn from_env() -> Self {
+        let allow_uids = std::env::var("ZEBRA_VTY_ALLOW_UIDS").ok().and_then(|raw| {
+            let set: HashSet<u32> = raw
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u32>().ok())
+                .collect();
+            if set.is_empty() {
+                None
+            } else {
+                Some(Arc::new(set))
+            }
+        });
+        Self { allow_uids }
+    }
+}
+
+impl tonic::service::Interceptor for VtyPeerInterceptor {
+    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        #[cfg(target_os = "linux")]
+        if let Some(info) = req
+            .extensions()
+            .get::<tonic::transport::server::UdsConnectInfo>()
+            && let Some(cred) = &info.peer_cred
+        {
+            let uid = cred.uid();
+            let gid = cred.gid();
+            let pid = cred.pid().unwrap_or(-1);
+            match &self.allow_uids {
+                Some(allowed) if !allowed.contains(&uid) => {
+                    tracing::warn!(
+                        uid,
+                        gid,
+                        pid,
+                        "vty rpc from peer not in ZEBRA_VTY_ALLOW_UIDS (would deny)"
+                    );
+                }
+                _ => tracing::info!(uid, gid, pid, "vty rpc"),
+            }
+        }
+        Ok(req)
+    }
+}
+
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     let exec_service = ExecService { tx: cli.tx.clone() };
-    let exec_server = ExecServer::new(exec_service);
-
     let show_service = ShowService { tx: cli.tx.clone() };
-    let show_server = ShowServer::new(show_service);
-
     let apply_service = ApplyService { tx: cli.tx.clone() };
-    let apply_server = ApplyServer::new(apply_service);
-
     let clear_service = ClearService { tx: cli.tx.clone() };
-    let clear_server = ClearServer::new(clear_service);
+
+    let interceptor = VtyPeerInterceptor::from_env();
+    if let Some(set) = &interceptor.allow_uids {
+        tracing::info!(uids = ?set, "VTY peer UID allow-list active (log-only)");
+    }
 
     let builder = Server::builder()
-        .add_service(exec_server)
-        .add_service(show_server)
-        .add_service(apply_server)
-        .add_service(clear_server);
+        .add_service(ExecServer::with_interceptor(
+            exec_service,
+            interceptor.clone(),
+        ))
+        .add_service(ShowServer::with_interceptor(
+            show_service,
+            interceptor.clone(),
+        ))
+        .add_service(ApplyServer::with_interceptor(
+            apply_service,
+            interceptor.clone(),
+        ))
+        .add_service(ClearServer::with_interceptor(clear_service, interceptor));
 
     match addr {
         VtyAddr::Tcp(addr) => {
