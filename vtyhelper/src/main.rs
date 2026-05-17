@@ -57,12 +57,12 @@ fn privilege_get() -> u32 {
 
 /// Build the endpoint URI from the parsed CLI.
 ///
-/// `--base` may already be a full URI (`unix-abstract:…`, `tcp://host:port`,
+/// `--base` may already be a full URI (`unix:…`, `tcp://host:port`,
 /// `http://host:port`) — in which case `--port` is ignored. Otherwise the
 /// legacy `{base}:{port}` concatenation is used, matching the historical
 /// `http://127.0.0.1` + `2666` defaults.
 fn endpoint_uri(base: &str, port: u32) -> String {
-    if base.starts_with("unix-abstract:")
+    if base.starts_with("unix:")
         || base.starts_with("tcp://")
         || base.starts_with("http://") && base.matches(':').count() >= 2
         || base.starts_with("https://") && base.matches(':').count() >= 2

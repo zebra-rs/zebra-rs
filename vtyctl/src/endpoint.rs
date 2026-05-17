@@ -5,9 +5,9 @@ use tonic::transport::{Channel, Endpoint};
 ///
 /// Accepts:
 /// - bare hostname/IP (`127.0.0.1`) — becomes `http://127.0.0.1:2666`
-/// - `unix-abstract:NAME`, `tcp://…`, `http://…`, `https://…` — used as-is
+/// - `unix:NAME`, `tcp://…`, `http://…`, `https://…` — used as-is
 pub fn host_uri(host: &str) -> String {
-    if host.starts_with("unix-abstract:") || host.contains("://") {
+    if host.starts_with("unix:") || host.contains("://") {
         host.to_string()
     } else {
         format!("http://{host}:2666")
@@ -19,10 +19,10 @@ pub fn host_uri(host: &str) -> String {
 /// Supported URI forms:
 /// - `http://host:port` / `https://host:port` — TCP via tonic Endpoint
 /// - `tcp://host:port` — alias for `http://host:port`
-/// - `unix-abstract:NAME` — Linux abstract Unix socket (e.g. `unix-abstract:zebra-rs/vty`)
+/// - `unix:NAME` — Linux abstract Unix socket (e.g. `unix:zebra-rs/vty`)
 pub async fn connect(uri: &str) -> Result<Channel> {
     #[cfg(target_os = "linux")]
-    if let Some(name) = uri.strip_prefix("unix-abstract:") {
+    if let Some(name) = uri.strip_prefix("unix:") {
         return connect_abstract(name).await;
     }
     let normalized = if let Some(rest) = uri.strip_prefix("tcp://") {
@@ -47,7 +47,7 @@ async fn connect_abstract(name: &str) -> Result<Channel> {
 
     let name = name.trim_start_matches('@').to_string();
     if name.is_empty() {
-        return Err(anyhow!("unix-abstract name must be non-empty"));
+        return Err(anyhow!("unix name must be non-empty"));
     }
     let name_for_err = name.clone();
     // The endpoint URI is a placeholder; the connector ignores it and dials
@@ -65,5 +65,5 @@ async fn connect_abstract(name: &str) -> Result<Channel> {
             }
         }))
         .await
-        .map_err(|e| anyhow!("connect unix-abstract:{name_for_err}: {e}"))
+        .map_err(|e| anyhow!("connect unix:{name_for_err}: {e}"))
 }

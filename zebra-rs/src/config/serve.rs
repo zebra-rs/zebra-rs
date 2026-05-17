@@ -342,22 +342,22 @@ impl VtyAddr {
                 .map_err(|e| anyhow::anyhow!("invalid tcp address {rest:?}: {e}"))?;
             return Ok(Self::Tcp(addr));
         }
-        if let Some(rest) = s.strip_prefix("unix-abstract:") {
+        if let Some(rest) = s.strip_prefix("unix:") {
             #[cfg(target_os = "linux")]
             {
                 let name = rest.trim_start_matches('@').to_string();
                 if name.is_empty() {
-                    anyhow::bail!("unix-abstract name must be non-empty");
+                    anyhow::bail!("unix name must be non-empty");
                 }
                 return Ok(Self::AbstractUds(name));
             }
             #[cfg(not(target_os = "linux"))]
             {
                 let _ = rest;
-                anyhow::bail!("unix-abstract sockets are only supported on Linux");
+                anyhow::bail!("unix sockets are only supported on Linux");
             }
         }
-        anyhow::bail!("--vty-socket must start with 'tcp:' or 'unix-abstract:'");
+        anyhow::bail!("--vty-socket must start with 'tcp:' or 'unix:'");
     }
 }
 
