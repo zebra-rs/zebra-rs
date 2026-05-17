@@ -8,6 +8,8 @@ use tonic::Response;
 use tonic::transport::Server;
 
 use crate::config::api::DeployRequest;
+#[cfg(target_os = "linux")]
+use crate::config::session::{ProcfsReader, SessionError, SessionTable};
 
 use super::api::{
     ClearTxRequest, CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest,
@@ -362,15 +364,23 @@ impl VtyAddr {
     }
 }
 
-/// Per-RPC interceptor that surfaces peer identity from SO_PEERCRED.
+/// Per-RPC interceptor that surfaces peer identity from SO_PEERCRED and
+/// resolves the caller's VTY session.
 ///
-/// Logs uid/gid/pid for every UDS request. When the optional
-/// `ZEBRA_VTY_ALLOW_UIDS` env var is set (comma-separated UID list), peers
-/// outside the list are rejected with `Status::permission_denied`. When the
-/// env var is unset, every peer is allowed (logged only).
+/// For each UDS request the interceptor:
+///   1. Pulls uid/pid from SO_PEERCRED.
+///   2. Enforces the optional `ZEBRA_VTY_ALLOW_UIDS` env allow-list.
+///   3. Resolves a `(uid, bash_pid)` session key via `/proc` and records or
+///      refreshes the entry in [`SessionTable`].
+///
+/// The session table is populated for observation only in Phase 1 — no RPC
+/// behavior depends on it yet. Subsequent phases (RBAC, enable, streaming)
+/// will read from it.
 #[derive(Clone)]
 struct VtyPeerInterceptor {
     allow_uids: Option<Arc<HashSet<u32>>>,
+    #[cfg(target_os = "linux")]
+    sessions: Arc<SessionTable>,
 }
 
 impl VtyPeerInterceptor {
@@ -386,7 +396,11 @@ impl VtyPeerInterceptor {
                 Some(Arc::new(set))
             }
         });
-        Self { allow_uids }
+        Self {
+            allow_uids,
+            #[cfg(target_os = "linux")]
+            sessions: SessionTable::new(),
+        }
     }
 }
 
@@ -401,14 +415,47 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
             let uid = cred.uid();
             let gid = cred.gid();
             let pid = cred.pid().unwrap_or(-1);
-            match &self.allow_uids {
-                Some(allowed) if !allowed.contains(&uid) => {
-                    tracing::warn!(uid, gid, pid, "vty rpc denied: uid not in allow-list");
-                    return Err(tonic::Status::permission_denied(format!(
-                        "uid {uid} is not permitted to use the VTY"
-                    )));
+            if let Some(allowed) = &self.allow_uids
+                && !allowed.contains(&uid)
+            {
+                tracing::warn!(uid, gid, pid, "vty rpc denied: uid not in allow-list");
+                return Err(tonic::Status::permission_denied(format!(
+                    "uid {uid} is not permitted to use the VTY"
+                )));
+            }
+
+            match self.sessions.resolve(&ProcfsReader, uid, pid) {
+                Ok(((skey_uid, bash_pid), is_new)) => {
+                    if is_new {
+                        tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc (new session)");
+                    } else {
+                        tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc");
+                    }
                 }
-                _ => tracing::info!(uid, gid, pid, "vty rpc"),
+                Err(SessionError::CrossPidNamespace) => {
+                    tracing::warn!(uid, gid, pid, "vty rpc denied: cross PID namespace");
+                    return Err(tonic::Status::failed_precondition(
+                        "client not visible in daemon's PID namespace",
+                    ));
+                }
+                Err(SessionError::OrphanClient) => {
+                    tracing::warn!(uid, gid, pid, "vty rpc denied: orphan client");
+                    return Err(tonic::Status::unauthenticated(
+                        "orphan client (no parent shell)",
+                    ));
+                }
+                Err(SessionError::ParentVanished) => {
+                    tracing::warn!(uid, gid, pid, "vty rpc denied: parent shell vanished");
+                    return Err(tonic::Status::unauthenticated("parent shell vanished"));
+                }
+                Err(SessionError::ParentUidMismatch) => {
+                    tracing::warn!(uid, gid, pid, "vty rpc denied: parent uid mismatch");
+                    return Err(tonic::Status::unauthenticated("parent uid mismatch"));
+                }
+                Err(SessionError::ProcReadFailure) => {
+                    tracing::warn!(uid, gid, pid, "vty rpc: /proc read failed");
+                    return Err(tonic::Status::internal("cannot read /proc"));
+                }
             }
         }
         Ok(req)
