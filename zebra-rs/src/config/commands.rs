@@ -33,6 +33,8 @@ pub fn exec_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/help"), help);
     mode.install_func(String::from("/show/version"), show_version);
     mode.install_func(String::from("/configure"), configure);
+    mode.install_func(String::from("/enable"), enable);
+    mode.install_func(String::from("/disable"), disable);
     mode.install_func(String::from("/cli/format/json"), cli_format_json);
     mode.install_func(String::from("/cli/format/terminal"), cli_format_terminal);
     mode
@@ -83,6 +85,31 @@ fn configure(_config: &ConfigManager) -> (ExecCode, String) {
     let cli_command = r#"SuccessExec
 CLI_MODE=configure;CLI_MODE_STR=Configure;CLI_PRIVILEGE=15;_cli_refresh"#;
     (ExecCode::Success, cli_command.to_string())
+}
+
+/// Fallback handler for `enable` typed via DoExec.
+///
+/// The vty shell intercepts `enable` with a bash function (vty/additions/vty.sh)
+/// so the password can be read locally with `stty -echo`. The Enable RPC then
+/// carries the password — DoExec is never used for the interactive path. This
+/// handler exists for the rare manual case of `vtyhelper -m exec enable` and
+/// returns a usage hint instead of silently doing nothing.
+fn enable(_config: &ConfigManager) -> (ExecCode, String) {
+    let msg = "% 'enable' must be typed inside the 'vty' shell so the password \
+               can be read without echo.\n\
+               % From outside the vty shell, use 'vtyhelper -e' with the \
+               CLI_ENABLE_PASSWORD env var set.\n";
+    (ExecCode::Show, msg.to_string())
+}
+
+/// Fallback handler for `disable`. See `enable` above; for `disable` the vty
+/// shell wraps `vtyhelper -d` so it can also flip the local CLI_PRIVILEGE for
+/// the prompt change. From scripts, run `vtyhelper -d` directly.
+fn disable(_config: &ConfigManager) -> (ExecCode, String) {
+    let msg = "% 'disable' is handled by the vty shell wrapper so the local \
+               CLI_PRIVILEGE can be reset for the prompt.\n\
+               % From scripts, use 'vtyhelper -d' directly.\n";
+    (ExecCode::Show, msg.to_string())
 }
 
 fn cli_format_json(_config: &ConfigManager) -> (ExecCode, String) {
