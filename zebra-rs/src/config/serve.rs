@@ -38,6 +38,21 @@ struct ExecService {
     pub enable_rate: Arc<EnableRateLimiter>,
 }
 
+/// Parse the `ZEBRA_VTY_SERVICE_ACCOUNTS` env var into a uid set (D21).
+///
+/// Format: comma-separated decimal uids, optional whitespace around each
+/// entry. Anything that doesn't parse as a `u32` is silently dropped so a
+/// typo in one entry doesn't take out the rest.
+#[cfg(target_os = "linux")]
+fn parse_service_accounts(raw: Option<&str>) -> std::collections::HashSet<u32> {
+    let Some(raw) = raw else {
+        return std::collections::HashSet::new();
+    };
+    raw.split(',')
+        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .collect()
+}
+
 /// Resolve the path to the `vtypam` helper.
 ///
 /// `ZEBRA_VTYPAM_BIN` env var wins for developer convenience; otherwise
@@ -195,10 +210,11 @@ impl Exec for ExecService {
             .ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
         let uid = key.0;
 
-        // Root is already Admin from session creation (D20). Acknowledge
-        // the enable RPC without spawning PAM so no password is prompted.
-        if uid == 0 {
-            tracing::info!(uid, "enable noop (root is implicit admin)");
+        // Root (D20) and configured service accounts (D21) are already
+        // Admin from session creation. Acknowledge the enable RPC without
+        // spawning PAM so no password is prompted.
+        if uid == 0 || self.sessions.is_service_account(uid) {
+            tracing::info!(uid, "enable noop (permanent admin)");
             return Ok(Response::new(EnableReply {
                 ok: true,
                 message: String::new(),
@@ -645,7 +661,17 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
-    let sessions = SessionTable::new();
+    let sessions = {
+        let service_accounts =
+            parse_service_accounts(std::env::var("ZEBRA_VTY_SERVICE_ACCOUNTS").ok().as_deref());
+        if !service_accounts.is_empty() {
+            tracing::info!(
+                uids = ?service_accounts,
+                "VTY service-account uids (permanent admin)",
+            );
+        }
+        SessionTable::with_service_accounts(service_accounts)
+    };
     #[cfg(target_os = "linux")]
     let enable_rate = EnableRateLimiter::new();
 
@@ -735,4 +761,34 @@ fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixL
     let listener =
         UnixListener::from_std(std_listener).map_err(|e| anyhow::anyhow!("from_std: {e}"))?;
     Ok(UnixListenerStream::new(listener))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::parse_service_accounts;
+
+    #[test]
+    fn parse_service_accounts_handles_csv_with_whitespace() {
+        let set = parse_service_accounts(Some(" 999, 1001 ,1003"));
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&999));
+        assert!(set.contains(&1001));
+        assert!(set.contains(&1003));
+    }
+
+    #[test]
+    fn parse_service_accounts_silently_drops_non_numeric_entries() {
+        // One bad entry should not take out the rest of the list.
+        let set = parse_service_accounts(Some("999,not-a-uid,1001"));
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&999));
+        assert!(set.contains(&1001));
+    }
+
+    #[test]
+    fn parse_service_accounts_unset_yields_empty() {
+        assert!(parse_service_accounts(None).is_empty());
+        assert!(parse_service_accounts(Some("")).is_empty());
+        assert!(parse_service_accounts(Some(",,,")).is_empty());
+    }
 }
