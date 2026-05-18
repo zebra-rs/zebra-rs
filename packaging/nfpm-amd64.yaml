@@ -31,6 +31,14 @@ contents:
     dst: /usr/bin/vtyhelper
   - src: ../target/release/vtyctl
     dst: /usr/bin/vtyctl
+  - src: ../target/release/vtypam
+    dst: /usr/sbin/vtypam
+    file_info:
+      mode: 0755
+  - src: ../etc/pam.d/zebra-rs.example
+    dst: /etc/pam.d/zebra-rs.example
+    file_info:
+      mode: 0644
   - src: ../zebra-rs/yang
     dst: /etc/zebra-rs/yang
   - src: ./modules-load.d/zebra-rs.conf

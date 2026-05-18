@@ -197,8 +197,16 @@ impl SessionTable {
         }
 
         let username = reader.resolve_username(peer_uid);
-        self.sessions
-            .insert(key, Session::new(peer_uid, ppid_u32, username));
+        let mut session = Session::new(peer_uid, ppid_u32, username);
+        // Root is implicitly Admin: it owns the system and has no
+        // meaningful PAM identity to authenticate against. See D20.
+        if peer_uid == 0 {
+            session.role = Role::Admin;
+            session.enabled = true;
+            // Deadlines stay None — root is permanent admin, not a
+            // time-bounded promotion.
+        }
+        self.sessions.insert(key, session);
         Ok((key, true))
     }
 
@@ -614,6 +622,27 @@ mod tests {
         let sess = table.get(&key).unwrap();
         assert_eq!(sess.uid, 1000);
         assert_eq!(sess.bash_pid, 1000);
+        // Non-root sessions start as View, not enabled.
+        assert_eq!(sess.role, Role::View);
+        assert!(!sess.enabled);
+    }
+
+    #[test]
+    fn root_session_starts_as_permanent_admin() {
+        // D20: uid=0 is implicit Admin from session creation, with
+        // no deadlines.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 999);
+        reader.set_ruid(999, 0);
+        let (key, is_new) = table.resolve(&reader, 0, 1234).unwrap();
+        assert_eq!(key, (0, 999));
+        assert!(is_new);
+        let sess = table.get(&key).unwrap();
+        assert_eq!(sess.role, Role::Admin);
+        assert!(sess.enabled);
+        assert!(sess.enable_expires.is_none());
+        assert!(sess.enable_hard_deadline.is_none());
     }
 
     #[test]
