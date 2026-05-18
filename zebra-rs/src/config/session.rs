@@ -59,16 +59,18 @@ pub struct SessionContext {
 
 /// Session record.
 ///
-/// Phase 1 added the identity and timing fields. Phase 4-a adds the RBAC
-/// (`role`) and enable-state (`enabled`, `enable_expires`,
-/// `enable_hard_deadline`) fields. Phase 4-c (Enable/Disable RPC) wires the
-/// consumption logic; until then these fields are populated with default
-/// values but never read outside tests.
+/// Phase 1 added the identity and timing fields. Phase 4-a added the RBAC
+/// (`role`) and enable-state fields. Phase 4-c adds `username` (resolved
+/// once at session creation) and wires the consumption logic.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Session {
     pub uid: u32,
     pub bash_pid: u32,
+    /// Resolved via `getpwuid_r` at session creation. `None` only when the
+    /// lookup failed (uid not in passwd db); in that case enable cannot
+    /// run and admin operations fail closed.
+    pub username: Option<String>,
     pub created: Instant,
     pub last_active: Instant,
     /// Current authorization role. Defaults to `View`.
@@ -76,20 +78,31 @@ pub struct Session {
     /// Whether the session has authenticated via `enable`. When `true`,
     /// both `enable_expires` and `enable_hard_deadline` are `Some`.
     pub enabled: bool,
-    /// Sliding deadline (refreshed on each authorized RPC). Phase 4-c will
-    /// drop back to disabled when `now >= enable_expires`.
+    /// Sliding deadline (refreshed on each authorized RPC). The session
+    /// drops back to disabled when `now >= enable_expires`.
     pub enable_expires: Option<Instant>,
     /// Absolute deadline from the original `enable`. Not extended by
     /// activity (see D2).
     pub enable_hard_deadline: Option<Instant>,
 }
 
+/// Default sliding idle TTL for the admin role granted by `enable`.
+/// 15 minutes per D2.
+#[cfg(target_os = "linux")]
+pub const ENABLE_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Default hard cap on the admin role from the original `enable`.
+/// 4 hours per D2.
+#[cfg(target_os = "linux")]
+pub const ENABLE_HARD_CAP: Duration = Duration::from_secs(4 * 60 * 60);
+
 impl Session {
-    fn new(uid: u32, bash_pid: u32) -> Self {
+    fn new(uid: u32, bash_pid: u32, username: Option<String>) -> Self {
         let now = Instant::now();
         Self {
             uid,
             bash_pid,
+            username,
             created: now,
             last_active: now,
             role: Role::View,
@@ -183,8 +196,50 @@ impl SessionTable {
             return Err(SessionError::ParentUidMismatch);
         }
 
-        self.sessions.insert(key, Session::new(peer_uid, ppid_u32));
+        let username = reader.resolve_username(peer_uid);
+        self.sessions
+            .insert(key, Session::new(peer_uid, ppid_u32, username));
         Ok((key, true))
+    }
+
+    /// Promote a session to Admin after a successful `enable`.
+    ///
+    /// Sets `role = Admin`, `enabled = true`, and the two deadlines.
+    /// Returns true if the session existed (i.e. the promotion landed).
+    pub fn promote_to_admin(
+        &self,
+        key: &SessionKey,
+        idle_ttl: Duration,
+        hard_cap: Duration,
+    ) -> bool {
+        let now = Instant::now();
+        if let Some(mut s) = self.sessions.get_mut(key) {
+            s.role = Role::Admin;
+            s.enabled = true;
+            s.enable_expires = Some(now + idle_ttl);
+            s.enable_hard_deadline = Some(now + hard_cap);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop a session back to the View role. Idempotent.
+    pub fn disable(&self, key: &SessionKey) -> bool {
+        if let Some(mut s) = self.sessions.get_mut(key) {
+            s.role = Role::View;
+            s.enabled = false;
+            s.enable_expires = None;
+            s.enable_hard_deadline = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Read the username cached on the session, if present.
+    pub fn username(&self, key: &SessionKey) -> Option<String> {
+        self.sessions.get(key).and_then(|s| s.username.clone())
     }
 
     /// Sweep stale sessions in a single pass.
@@ -243,6 +298,7 @@ impl SessionTable {
             Session {
                 uid: key.0,
                 bash_pid: key.1,
+                username: None,
                 created: last_active,
                 last_active,
                 role: Role::View,
@@ -369,14 +425,17 @@ where
     }
 }
 
-/// Indirection over `/proc/{pid}/...` reads so unit tests can stub them
-/// without spawning real processes.
+/// Indirection over `/proc/{pid}/...` and `getpwuid_r` so unit tests can
+/// stub them without spawning real processes or relying on local passwd.
 pub trait ProcStatusReader {
     fn read_ppid(&self, pid: i32) -> Result<i32, std::io::Error>;
     fn read_ruid(&self, pid: i32) -> Result<u32, std::io::Error>;
     /// Lightweight check whether `/proc/{pid}` is still present. Used by
     /// the GC sweep to drop sessions whose parent shell has died.
     fn process_exists(&self, pid: i32) -> bool;
+    /// Resolve uid -> username via the system passwd database. `None` when
+    /// the uid has no passwd entry.
+    fn resolve_username(&self, uid: u32) -> Option<String>;
 }
 
 #[cfg(target_os = "linux")]
@@ -404,6 +463,36 @@ impl ProcStatusReader for ProcfsReader {
 
     fn process_exists(&self, pid: i32) -> bool {
         procfs::process::Process::new(pid).is_ok()
+    }
+
+    fn resolve_username(&self, uid: u32) -> Option<String> {
+        use std::ffi::CStr;
+        use std::mem::MaybeUninit;
+
+        // 1 KiB covers practical passwd entries. If a name+gecos field is
+        // huge, getpwuid_r returns ERANGE and we treat the lookup as a miss.
+        let mut buf = vec![0u8; 1024];
+        let mut pwd: MaybeUninit<libc::passwd> = MaybeUninit::uninit();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: We pass our own pwd storage and a writable buf; libc fills
+        // both and sets `result` to either &pwd or NULL.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: getpwuid_r succeeded and result == &pwd; pw_name points
+        // into `buf` which we still own.
+        let pwd = unsafe { pwd.assume_init() };
+        let name = unsafe { CStr::from_ptr(pwd.pw_name) };
+        name.to_str().ok().map(String::from)
     }
 }
 
@@ -460,6 +549,11 @@ mod tests {
         }
         fn process_exists(&self, pid: i32) -> bool {
             !self.missing.lock().unwrap().contains(&pid)
+        }
+        fn resolve_username(&self, uid: u32) -> Option<String> {
+            // Tests don't care about the real passwd db; synthesize a
+            // deterministic name so they can verify the field is populated.
+            Some(format!("u{uid}"))
         }
     }
 

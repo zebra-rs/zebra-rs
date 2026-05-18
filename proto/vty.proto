@@ -12,11 +12,39 @@ service Exec {
   // immediately on a clean shell exit (in parallel with the kernel
   // pidfd watcher that handles abnormal exits).
   rpc Logout(LogoutRequest) returns (LogoutReply) {}
+  // Promote the caller's session to Admin after PAM authenticates
+  // the supplied password. On success the session holds the Admin
+  // role until either ttl_secs idle (refreshed on each authorized
+  // RPC) or a 4 h hard cap elapses, whichever comes first.
+  rpc Enable(EnableRequest) returns (EnableReply) {}
+  // Drop the caller's session back to View. Idempotent.
+  rpc Disable(DisableRequest) returns (DisableReply) {}
 }
 
 message LogoutRequest {}
 
 message LogoutReply {
+  bool ok = 1;
+}
+
+message EnableRequest {
+  // Password for the peer uid's local account, verified by the
+  // 'zebra-rs' PAM service via the vtypam helper.
+  string password = 1;
+}
+
+message EnableReply {
+  bool ok = 1;
+  // Human-readable detail (auth failure reason, lockout message).
+  string message = 2;
+  // Sliding idle TTL in seconds. Refreshed on each authorized RPC
+  // up to a separate absolute hard cap.
+  uint32 ttl_secs = 3;
+}
+
+message DisableRequest {}
+
+message DisableReply {
   bool ok = 1;
 }
 

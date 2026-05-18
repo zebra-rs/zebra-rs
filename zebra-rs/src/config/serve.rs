@@ -9,9 +9,11 @@ use tonic::transport::Server;
 
 use crate::config::api::DeployRequest;
 #[cfg(target_os = "linux")]
+use crate::config::enable_rate::EnableRateLimiter;
+#[cfg(target_os = "linux")]
 use crate::config::session::{
-    DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ProcfsReader, SessionContext, SessionError,
-    SessionTable, run_gc, watch_bash_death,
+    DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP, ENABLE_IDLE_TTL, ProcfsReader,
+    SessionContext, SessionError, SessionTable, run_gc, watch_bash_death,
 };
 
 use super::api::{
@@ -23,14 +25,53 @@ use super::vty::clear_server::{Clear, ClearServer};
 use super::vty::exec_server::{Exec, ExecServer};
 use super::vty::show_server::{Show, ShowServer};
 use super::vty::{
-    ApplyReply, ApplyRequest, ClearReply, ClearRequest, CommandPath, ExecCode, ExecReply,
-    ExecRequest, ExecType, LogoutReply, LogoutRequest, ShowReply, ShowRequest, YangMatch,
+    ApplyReply, ApplyRequest, ClearReply, ClearRequest, CommandPath, DisableReply, DisableRequest,
+    EnableReply, EnableRequest, ExecCode, ExecReply, ExecRequest, ExecType, LogoutReply,
+    LogoutRequest, ShowReply, ShowRequest, YangMatch,
 };
 #[derive(Debug)]
 struct ExecService {
     pub tx: mpsc::Sender<Message>,
     #[cfg(target_os = "linux")]
     pub sessions: Arc<SessionTable>,
+    #[cfg(target_os = "linux")]
+    pub enable_rate: Arc<EnableRateLimiter>,
+}
+
+/// Resolve the path to the `vtypam` helper.
+///
+/// `ZEBRA_VTYPAM_BIN` env var wins for developer convenience; otherwise
+/// falls back to the distribution install path `/usr/sbin/vtypam` (D6/D15).
+#[cfg(target_os = "linux")]
+fn vtypam_path() -> std::path::PathBuf {
+    std::env::var_os("ZEBRA_VTYPAM_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/sbin/vtypam"))
+}
+
+/// Spawn vtypam, feed it the password on stdin, and return its exit code.
+///
+/// See `vtypam/src/main.rs` for the exit-code contract (0/1/2/3).
+#[cfg(target_os = "linux")]
+async fn spawn_vtypam(username: &str, password: &str) -> std::io::Result<i32> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
+
+    let mut child = Command::new(vtypam_path())
+        .arg(username)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(password.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        // Closing stdin signals EOF so vtypam stops waiting for input.
+        drop(stdin);
+    }
+    let status = child.wait().await?;
+    Ok(status.code().unwrap_or(3))
 }
 
 impl ExecService {
@@ -130,6 +171,106 @@ impl Exec for ExecService {
             tracing::info!(uid = ctx.key.0, bash_pid = ctx.key.1, removed, "vty logout",);
         }
         Ok(Response::new(LogoutReply { ok: true }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn enable(
+        &self,
+        _request: tonic::Request<EnableRequest>,
+    ) -> Result<Response<EnableReply>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "enable requires Linux PAM (vtypam helper)",
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn enable(
+        &self,
+        request: tonic::Request<EnableRequest>,
+    ) -> Result<Response<EnableReply>, tonic::Status> {
+        let key = request
+            .extensions()
+            .get::<SessionContext>()
+            .map(|c| c.key)
+            .ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
+        let uid = key.0;
+
+        if let Err(remaining) = self.enable_rate.check(uid) {
+            tracing::warn!(
+                uid,
+                remaining_secs = remaining.as_secs(),
+                "enable rate limited"
+            );
+            return Err(tonic::Status::resource_exhausted(format!(
+                "rate limited; retry in {}s",
+                remaining.as_secs().max(1)
+            )));
+        }
+
+        let username = self.sessions.username(&key).ok_or_else(|| {
+            tracing::warn!(uid, "enable refused: uid not in passwd db");
+            tonic::Status::permission_denied("uid has no system account")
+        })?;
+
+        let password = request.into_inner().password;
+        let exit = match spawn_vtypam(&username, &password).await {
+            Ok(code) => code,
+            Err(e) => {
+                tracing::error!(uid, error = %e, "vtypam spawn failed");
+                return Err(tonic::Status::internal("authentication helper unavailable"));
+            }
+        };
+
+        match exit {
+            0 => {
+                self.enable_rate.record_success(uid);
+                let promoted =
+                    self.sessions
+                        .promote_to_admin(&key, ENABLE_IDLE_TTL, ENABLE_HARD_CAP);
+                if !promoted {
+                    return Err(tonic::Status::unauthenticated("session vanished"));
+                }
+                tracing::info!(uid, user = %username, "enable success");
+                Ok(Response::new(EnableReply {
+                    ok: true,
+                    message: String::new(),
+                    ttl_secs: ENABLE_IDLE_TTL.as_secs() as u32,
+                }))
+            }
+            1 => {
+                let locked = self.enable_rate.record_failure(uid);
+                tracing::warn!(uid, user = %username, locked, "enable auth failed");
+                Err(tonic::Status::permission_denied("authentication failed"))
+            }
+            2 => {
+                self.enable_rate.record_failure(uid);
+                tracing::warn!(uid, user = %username, "enable refused: account not permitted");
+                Err(tonic::Status::permission_denied("account not permitted"))
+            }
+            _ => {
+                tracing::error!(uid, user = %username, exit, "vtypam system error");
+                Err(tonic::Status::internal("authentication system error"))
+            }
+        }
+    }
+
+    async fn disable(
+        &self,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] request: tonic::Request<
+            DisableRequest,
+        >,
+    ) -> Result<Response<DisableReply>, tonic::Status> {
+        #[cfg(target_os = "linux")]
+        if let Some(ctx) = request.extensions().get::<SessionContext>() {
+            let cleared = self.sessions.disable(&ctx.key);
+            tracing::info!(
+                uid = ctx.key.0,
+                bash_pid = ctx.key.1,
+                cleared,
+                "vty disable",
+            );
+        }
+        Ok(Response::new(DisableReply { ok: true }))
     }
 }
 
@@ -494,11 +635,15 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let sessions = SessionTable::new();
+    #[cfg(target_os = "linux")]
+    let enable_rate = EnableRateLimiter::new();
 
     let exec_service = ExecService {
         tx: cli.tx.clone(),
         #[cfg(target_os = "linux")]
         sessions: sessions.clone(),
+        #[cfg(target_os = "linux")]
+        enable_rate: enable_rate.clone(),
     };
     let show_service = ShowService { tx: cli.tx.clone() };
     let apply_service = ApplyService { tx: cli.tx.clone() };
