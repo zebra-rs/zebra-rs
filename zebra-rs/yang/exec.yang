@@ -46,6 +46,38 @@ module exec {
       ext:help "Show version";
       type empty;
     }
+    container candidate-config {
+      ext:help "Show the candidate configuration (uncommitted edits)";
+      presence "Show candidate config";
+      leaf formal {
+        ext:help "Set-style flat statement listing";
+        type empty;
+      }
+      leaf json {
+        ext:help "Pretty-printed JSON";
+        type empty;
+      }
+      leaf yaml {
+        ext:help "YAML";
+        type empty;
+      }
+    }
+    container running-config {
+      ext:help "Show the running (committed) configuration";
+      presence "Show running config";
+      leaf formal {
+        ext:help "Set-style flat statement listing";
+        type empty;
+      }
+      leaf json {
+        ext:help "Pretty-printed JSON";
+        type empty;
+      }
+      leaf yaml {
+        ext:help "YAML";
+        type empty;
+      }
+    }
     container mpls {
       leaf ilm {
         type empty;

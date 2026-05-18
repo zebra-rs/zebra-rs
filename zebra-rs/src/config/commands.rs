@@ -32,6 +32,7 @@ pub fn exec_mode_create(entry: Rc<Entry>) -> Mode {
     let mut mode = Mode::new(entry);
     mode.install_func(String::from("/help"), help);
     mode.install_func(String::from("/show/version"), show_version);
+    install_show_config_handlers(&mut mode);
     mode.install_func(String::from("/configure"), configure);
     mode.install_func(String::from("/enable"), enable);
     mode.install_func(String::from("/disable"), disable);
@@ -50,18 +51,39 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     // no protocol-show handler claims it and the output is silently
     // empty.
     mode.install_func(String::from("/show/version"), show_version);
-    mode.install_func(String::from("/candidate"), candidate);
+    install_show_config_handlers(&mut mode);
     mode.install_func(String::from("/running"), running);
-    mode.install_func(String::from("/json"), json);
-    mode.install_func(String::from("/yaml"), yaml);
     mode.install_func(String::from("/commit"), commit);
     mode.install_func(String::from("/discard"), discard);
-    mode.install_func(String::from("/list"), list);
-    mode.install_func(String::from("/diff"), diff);
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
     mode.install_func(String::from("/clear/isis/spf"), clear_isis_spf);
     mode
+}
+
+/// Register the `show candidate-config { formal | json | yaml }` and
+/// `show running-config { formal | json | yaml }` handlers. The same set is
+/// installed in both exec and configure mode so the commands work
+/// identically from either prompt.
+fn install_show_config_handlers(mode: &mut Mode) {
+    mode.install_func(
+        String::from("/show/candidate-config/formal"),
+        show_candidate_formal,
+    );
+    mode.install_func(
+        String::from("/show/candidate-config/json"),
+        show_candidate_json,
+    );
+    mode.install_func(
+        String::from("/show/candidate-config/yaml"),
+        show_candidate_yaml,
+    );
+    mode.install_func(
+        String::from("/show/running-config/formal"),
+        show_running_formal,
+    );
+    mode.install_func(String::from("/show/running-config/json"), show_running_json);
+    mode.install_func(String::from("/show/running-config/yaml"), show_running_yaml);
 }
 
 fn help(_config: &ConfigManager) -> (ExecCode, String) {
@@ -154,39 +176,62 @@ fn show(config: &ConfigManager) -> (ExecCode, String) {
     }
 }
 
-fn candidate(config: &ConfigManager) -> (ExecCode, String) {
-    let mut output = String::new();
-    config.store.candidate.borrow().format(&mut output);
-    (ExecCode::Show, output)
-}
-
 fn running(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();
     config.store.running.borrow().format(&mut output);
     (ExecCode::Show, output)
 }
 
-fn json(config: &ConfigManager) -> (ExecCode, String) {
+// === show {candidate,running}-config { formal | json | yaml } ===
+
+fn show_candidate_formal(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    config.store.candidate.borrow().list(&mut output);
+    (ExecCode::Show, output)
+}
+
+fn show_candidate_json(config: &ConfigManager) -> (ExecCode, String) {
     let mut compact = String::new();
     config.store.candidate.borrow().json(&mut compact);
-    // Round-trip through serde to indent. The internal json() emitter
-    // produces compact JSON; for human display we want pretty-printed
-    // output with 2-space indent. `preserve_order` is enabled at the
-    // workspace level so key order survives the round-trip.
-    let pretty = serde_json::from_str::<serde_json::Value>(&compact)
+    (ExecCode::Show, prettify_json(compact))
+}
+
+fn show_candidate_yaml(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    config.store.candidate.borrow().yaml(&mut output);
+    (ExecCode::Show, output)
+}
+
+fn show_running_formal(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    config.store.running.borrow().list(&mut output);
+    (ExecCode::Show, output)
+}
+
+fn show_running_json(config: &ConfigManager) -> (ExecCode, String) {
+    let mut compact = String::new();
+    config.store.running.borrow().json(&mut compact);
+    (ExecCode::Show, prettify_json(compact))
+}
+
+fn show_running_yaml(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    config.store.running.borrow().yaml(&mut output);
+    (ExecCode::Show, output)
+}
+
+/// Indent a compact JSON string for human display. `preserve_order` is
+/// enabled at the workspace level so key order survives the round-trip.
+/// Falls back to the compact form on parse/serialize failure (empty
+/// config, etc.).
+fn prettify_json(compact: String) -> String {
+    serde_json::from_str::<serde_json::Value>(&compact)
         .and_then(|v| serde_json::to_string_pretty(&v))
         .map(|mut s| {
             s.push('\n');
             s
         })
-        .unwrap_or(compact);
-    (ExecCode::Show, pretty)
-}
-
-fn yaml(config: &ConfigManager) -> (ExecCode, String) {
-    let mut output = String::new();
-    config.store.candidate.borrow().yaml(&mut output);
-    (ExecCode::Show, output)
+        .unwrap_or(compact)
 }
 
 fn commit(config: &ConfigManager) -> (ExecCode, String) {
@@ -195,13 +240,6 @@ fn commit(config: &ConfigManager) -> (ExecCode, String) {
         Ok(_) => (ExecCode::Show, String::from("")),
         Err(err) => (ExecCode::Show, err.to_string()),
     }
-}
-
-fn diff(config: &ConfigManager) -> (ExecCode, String) {
-    let mut output = String::new();
-    let _diff = config.diff_config(&mut output);
-    // config.store.candidate.borrow().list(&mut output);
-    (ExecCode::Show, output)
 }
 
 fn discard(config: &ConfigManager) -> (ExecCode, String) {
@@ -217,12 +255,6 @@ fn load(config: &ConfigManager) -> (ExecCode, String) {
 fn save(config: &ConfigManager) -> (ExecCode, String) {
     config.save_config();
     (ExecCode::Show, String::from(""))
-}
-
-fn list(config: &ConfigManager) -> (ExecCode, String) {
-    let mut output = String::new();
-    config.store.candidate.borrow().list(&mut output);
-    (ExecCode::Show, output)
 }
 
 fn clear_isis_spf(_config: &ConfigManager) -> (ExecCode, String) {
