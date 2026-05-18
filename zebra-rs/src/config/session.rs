@@ -10,6 +10,7 @@
 //! No proto changes, no behavioral changes for existing RPCs — the table
 //! merely observes and records sessions.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -142,14 +143,34 @@ pub enum SessionError {
 #[derive(Debug, Default)]
 pub struct SessionTable {
     sessions: DashMap<SessionKey, Session>,
+    /// uids that are permanently Admin without enable. Read-only after
+    /// construction (env var is fixed at daemon startup; see D21).
+    service_accounts: HashSet<u32>,
 }
 
 #[cfg(target_os = "linux")]
 impl SessionTable {
+    #[cfg(test)]
     pub fn new() -> Arc<Self> {
+        Self::with_service_accounts(HashSet::new())
+    }
+
+    /// Construct a SessionTable with a fixed set of permanent-admin uids.
+    /// uid 0 is always implicitly Admin via [D20]; passing it here is
+    /// allowed but redundant.
+    pub fn with_service_accounts(service_accounts: HashSet<u32>) -> Arc<Self> {
         Arc::new(Self {
             sessions: DashMap::new(),
+            service_accounts,
         })
+    }
+
+    /// Whether the given uid is permanently Admin via the service-account
+    /// allow-list. Used by the Enable handler to short-circuit PAM (a
+    /// service account that mistakenly runs `enable` gets fast success
+    /// instead of a baffling PAM failure).
+    pub fn is_service_account(&self, uid: u32) -> bool {
+        self.service_accounts.contains(&uid)
     }
 
     /// Resolve the session for an incoming RPC.
@@ -198,13 +219,12 @@ impl SessionTable {
 
         let username = reader.resolve_username(peer_uid);
         let mut session = Session::new(peer_uid, ppid_u32, username);
-        // Root is implicitly Admin: it owns the system and has no
-        // meaningful PAM identity to authenticate against. See D20.
-        if peer_uid == 0 {
+        // Permanent-admin uids: root (D20) and any uid in the
+        // service-account allow-list (D21). Both bypass enable and have
+        // no deadlines.
+        if peer_uid == 0 || self.service_accounts.contains(&peer_uid) {
             session.role = Role::Admin;
             session.enabled = true;
-            // Deadlines stay None — root is permanent admin, not a
-            // time-bounded promotion.
         }
         self.sessions.insert(key, session);
         Ok((key, true))
@@ -625,6 +645,47 @@ mod tests {
         // Non-root sessions start as View, not enabled.
         assert_eq!(sess.role, Role::View);
         assert!(!sess.enabled);
+    }
+
+    #[test]
+    fn service_account_session_starts_as_permanent_admin() {
+        // D21: any uid listed in service_accounts is implicit Admin from
+        // session creation, with no deadlines (same shape as root).
+        let mut accounts = HashSet::new();
+        accounts.insert(999);
+        let table = SessionTable::with_service_accounts(accounts);
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 2000);
+        reader.set_ruid(2000, 999);
+
+        let (key, is_new) = table.resolve(&reader, 999, 1234).unwrap();
+        assert_eq!(key, (999, 2000));
+        assert!(is_new);
+        let sess = table.get(&key).unwrap();
+        assert_eq!(sess.role, Role::Admin);
+        assert!(sess.enabled);
+        assert!(sess.enable_expires.is_none());
+        assert!(sess.enable_hard_deadline.is_none());
+
+        // Non-service-account uid on the same table stays View.
+        reader.set_ppid(1235, 3000);
+        reader.set_ruid(3000, 1000);
+        let (other, _) = table.resolve(&reader, 1000, 1235).unwrap();
+        let other_sess = table.get(&other).unwrap();
+        assert_eq!(other_sess.role, Role::View);
+        assert!(!other_sess.enabled);
+    }
+
+    #[test]
+    fn is_service_account_reports_membership() {
+        let mut accounts = HashSet::new();
+        accounts.insert(999);
+        accounts.insert(1001);
+        let table = SessionTable::with_service_accounts(accounts);
+        assert!(table.is_service_account(999));
+        assert!(table.is_service_account(1001));
+        assert!(!table.is_service_account(1000));
+        assert!(!table.is_service_account(0));
     }
 
     #[test]

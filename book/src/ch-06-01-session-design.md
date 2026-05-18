@@ -244,19 +244,21 @@ The Session struct carries a `role` field (`View`, `Operator`,
   without invoking PAM.
 - **Interactive**: type `enable`, authenticate via PAM, hold Admin
   for the TTL.
-- **Service account** (for automation): a uid listed in YANG
-  `vty.service-accounts` is permanently Admin without enable:
+- **Service account** (for automation): a uid listed in the env
+  var `ZEBRA_VTY_SERVICE_ACCOUNTS` (CSV of decimal uids) is
+  permanently Admin without enable. Typically set in the
+  daemon's systemd unit:
 
-  ```yaml
-  vty:
-    service-accounts:
-      - uid: 999
-        role: admin
-        description: "Ansible automation account"
+  ```ini
+  # /etc/systemd/system/zebra-rs.service.d/service-accounts.conf
+  [Service]
+  Environment=ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001
   ```
 
   Service accounts bypass PAM (no password to ship in scripts) and
-  are identified by uid alone via SO_PEERCRED.
+  are identified by uid alone via SO_PEERCRED. The env var is read
+  once at daemon startup (D21); changes require restart. Future
+  YANG-driven runtime mutability is the deferred Phase 4-d-ii.
 
 `vtyctl` invocations are short-lived; their sessions exist for one
 or two RPCs and then idle out. Because session state is per-bash_pid
@@ -353,6 +355,7 @@ Each phase is intended to ship as an independent PR.
 | D18 | RBAC is 3-tier: `View`, `Operator`, `Admin`. Maps cleanly onto Cisco priv-lvl ranges 0-1 / 2-14 / 15. YANG-configurable roles are explicitly out of scope. |
 | D19 | Default idle session TTL is **600 s** with a 60 s sweep interval (Cisco IOS `exec-timeout 10 0` convention). Configurable later if a deployment needs it. |
 | D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. Service-account configuration (Phase 4-d) does not need to list uid 0. Reason: root already owns the host and `pam_unix` against the daemon's own owning account is awkward UX. |
+| D21 | **Service-accounts via env var** for Phase 4-d initial implementation. `ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001,...` (CSV of decimal uids) names uids that are permanent Admin from session creation, with the same shape as root (no deadlines, enable short-circuits to success). State is fixed at daemon startup; runtime changes require a restart. Full YANG integration is deferred to a follow-up (Phase 4-d-ii) if a deployment demands runtime mutability. |
 
 ## Deferred work
 

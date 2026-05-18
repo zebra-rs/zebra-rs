@@ -190,6 +190,38 @@ each call is just logged. The allow-list applies only to Unix-socket
 connections; TCP connections carry no peer-cred and are not subject
 to the check.
 
+### `ZEBRA_VTY_SERVICE_ACCOUNTS` — permanent-admin uids
+
+Sessions for uids listed here start with the `Admin` role from
+session creation and do not require an interactive `enable`. Use
+this for automation accounts (Ansible, cron jobs, monitoring) that
+cannot meaningfully type a password.
+
+```bash
+# uid 999 and 1001 are permanent admins; no PAM auth required for them.
+ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001 zebra-rs
+```
+
+The typical deployment sets this in a systemd drop-in:
+
+```ini
+# /etc/systemd/system/zebra-rs.service.d/service-accounts.conf
+[Service]
+Environment=ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001
+```
+
+Notes:
+
+- The value is read once at daemon startup; runtime changes require
+  a `systemctl restart zebra-rs`.
+- Root (uid 0) is always implicit admin and does not need to be
+  listed.
+- If a service-account uid happens to type `enable`, the daemon
+  returns success without invoking PAM (no password prompt).
+- A service-account session can still call `disable` to drop to
+  View for that session only; reconnecting yields a fresh Admin
+  session.
+
 ## Migration from earlier versions
 
 The default transport changed from `tcp:0.0.0.0:2666` to
