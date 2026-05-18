@@ -343,9 +343,10 @@ enable ()
 }
 
 # `configure` with auto-elevate (D24): when the caller is not already
-# admin (root / service-account / prior `enable`), prompt for the root
-# password and run an su-style PAM authentication against the root
-# account before entering configure mode.
+# admin (root / service-account / prior `enable`), prompt for a
+# password and run a PAM authentication against the caller's own
+# account (sudo-style) before entering configure mode. The same
+# password that works for `enable` works here.
 configure ()
 {
   if [[ ${CLI_MODE} != "exec" ]]; then
@@ -375,7 +376,7 @@ configure ()
       else
         IFS= read -r pw
       fi
-      CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e --auth-user root -m ${CLI_MODE}
+      CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e -m ${CLI_MODE}
       local rc=$?
       pw=""
       unset pw
