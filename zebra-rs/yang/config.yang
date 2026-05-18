@@ -60,6 +60,10 @@ module config {
     prefix static;
   }
 
+  import vty {
+    prefix vty;
+  }
+
   typedef vrf-route-target {
     type string {
       pattern
@@ -213,6 +217,11 @@ module config {
           type string;
         }
       }
+    }
+
+    container vty {
+      ext:help "VTY (CLI) configuration";
+      uses "vty:vty";
     }
 
     container router {

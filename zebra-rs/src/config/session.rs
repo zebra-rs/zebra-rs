@@ -11,7 +11,7 @@
 //! merely observes and records sessions.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -159,34 +159,47 @@ pub enum SessionError {
 #[derive(Debug, Default)]
 pub struct SessionTable {
     sessions: DashMap<SessionKey, Session>,
-    /// uids that are permanently Admin without enable. Read-only after
-    /// construction (env var is fixed at daemon startup; see D21).
-    service_accounts: HashSet<u32>,
+    /// uids that are permanently Admin via the `ZEBRA_VTY_SERVICE_ACCOUNTS`
+    /// env var (D21). Fixed at daemon startup; immutable thereafter.
+    env_service_accounts: HashSet<u32>,
+    /// uids that are permanently Admin via the YANG config (D25). Mutable
+    /// at runtime — `commit_config` updates this set when the operator
+    /// adds or removes `vty service-account uid N`.
+    yang_service_accounts: Arc<RwLock<HashSet<u32>>>,
 }
 
 #[cfg(target_os = "linux")]
 impl SessionTable {
     #[cfg(test)]
     pub fn new() -> Arc<Self> {
-        Self::with_service_accounts(HashSet::new())
+        Self::with_service_accounts(HashSet::new(), Arc::new(RwLock::new(HashSet::new())))
     }
 
-    /// Construct a SessionTable with a fixed set of permanent-admin uids.
-    /// uid 0 is always implicitly Admin via [D20]; passing it here is
-    /// allowed but redundant.
-    pub fn with_service_accounts(service_accounts: HashSet<u32>) -> Arc<Self> {
+    /// Construct a SessionTable with the two service-account sources
+    /// (env-driven and YANG-driven). uid 0 is always implicitly Admin via
+    /// [D20]; passing it in either set is allowed but redundant.
+    pub fn with_service_accounts(
+        env_service_accounts: HashSet<u32>,
+        yang_service_accounts: Arc<RwLock<HashSet<u32>>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             sessions: DashMap::new(),
-            service_accounts,
+            env_service_accounts,
+            yang_service_accounts,
         })
     }
 
-    /// Whether the given uid is permanently Admin via the service-account
-    /// allow-list. Used by the Enable handler to short-circuit PAM (a
-    /// service account that mistakenly runs `enable` gets fast success
-    /// instead of a baffling PAM failure).
+    /// Whether the given uid is permanently Admin via either of the
+    /// service-account sources (env var or YANG). Used by the Enable
+    /// handler to short-circuit PAM (a service account that mistakenly
+    /// runs `enable` gets fast success instead of a baffling PAM failure).
     pub fn is_service_account(&self, uid: u32) -> bool {
-        self.service_accounts.contains(&uid)
+        self.env_service_accounts.contains(&uid)
+            || self
+                .yang_service_accounts
+                .read()
+                .map(|s| s.contains(&uid))
+                .unwrap_or(false)
     }
 
     /// Resolve the session for an incoming RPC.
@@ -236,9 +249,10 @@ impl SessionTable {
         let username = reader.resolve_username(peer_uid);
         let mut session = Session::new(peer_uid, ppid_u32, username);
         // Permanent-admin uids: root (D20) and any uid in the
-        // service-account allow-list (D21). Both bypass enable and have
-        // no deadlines.
-        if peer_uid == 0 || self.service_accounts.contains(&peer_uid) {
+        // service-account allow-list (D21/D25). Both bypass enable and
+        // have no deadlines. The yang set is consulted via the same
+        // is_service_account helper used by the Enable handler.
+        if peer_uid == 0 || self.is_service_account(peer_uid) {
             session.role = Role::Admin;
             session.enabled = true;
         }
@@ -710,7 +724,8 @@ mod tests {
         // session creation, with no deadlines (same shape as root).
         let mut accounts = HashSet::new();
         accounts.insert(999);
-        let table = SessionTable::with_service_accounts(accounts);
+        let table =
+            SessionTable::with_service_accounts(accounts, Arc::new(RwLock::new(HashSet::new())));
         let reader = StubReader::default();
         reader.set_ppid(1234, 2000);
         reader.set_ruid(2000, 999);
@@ -813,7 +828,8 @@ mod tests {
         // should succeed without touching the (None) deadline fields.
         let mut accounts = HashSet::new();
         accounts.insert(999);
-        let table = SessionTable::with_service_accounts(accounts);
+        let table =
+            SessionTable::with_service_accounts(accounts, Arc::new(RwLock::new(HashSet::new())));
         let reader = StubReader::default();
         reader.set_ppid(1234, 2000);
         reader.set_ruid(2000, 999);
@@ -830,11 +846,55 @@ mod tests {
         let mut accounts = HashSet::new();
         accounts.insert(999);
         accounts.insert(1001);
-        let table = SessionTable::with_service_accounts(accounts);
+        let table =
+            SessionTable::with_service_accounts(accounts, Arc::new(RwLock::new(HashSet::new())));
         assert!(table.is_service_account(999));
         assert!(table.is_service_account(1001));
         assert!(!table.is_service_account(1000));
         assert!(!table.is_service_account(0));
+    }
+
+    #[test]
+    fn yang_service_accounts_union_with_env() {
+        // Env contributes 999. YANG arc is mutated externally to add 1001.
+        // is_service_account reports the union.
+        let mut env_accounts = HashSet::new();
+        env_accounts.insert(999);
+        let yang = Arc::new(RwLock::new(HashSet::new()));
+        let table = SessionTable::with_service_accounts(env_accounts, yang.clone());
+
+        assert!(table.is_service_account(999));
+        assert!(!table.is_service_account(1001));
+
+        // Simulate ConfigManager committing `set vty service-account uid 1001`.
+        yang.write().unwrap().insert(1001);
+
+        assert!(table.is_service_account(999));
+        assert!(table.is_service_account(1001));
+        assert!(!table.is_service_account(2000));
+
+        // Simulate a delete commit.
+        yang.write().unwrap().remove(&1001);
+        assert!(table.is_service_account(999));
+        assert!(!table.is_service_account(1001));
+    }
+
+    #[test]
+    fn yang_service_account_session_starts_as_permanent_admin() {
+        // Mirror of the env-set test, but the uid lives in the YANG arc.
+        let yang = Arc::new(RwLock::new(HashSet::new()));
+        yang.write().unwrap().insert(1001);
+        let table = SessionTable::with_service_accounts(HashSet::new(), yang);
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 4000);
+        reader.set_ruid(4000, 1001);
+
+        let (key, is_new) = table.resolve(&reader, 1001, 1234).unwrap();
+        assert!(is_new);
+        let sess = table.get(&key).unwrap();
+        assert_eq!(sess.role, Role::Admin);
+        assert!(sess.enabled);
+        assert!(sess.enable_expires.is_none());
     }
 
     #[test]

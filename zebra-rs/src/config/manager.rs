@@ -64,6 +64,11 @@ pub struct ConfigManager {
     pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     pub rib_tx: UnboundedSender<crate::rib::Message>,
+    /// Runtime-mutable YANG-defined service-accounts (D25). Updated by
+    /// `commit_config` when `vty service-account uid N` changes; read by
+    /// `SessionTable::is_service_account` at session creation.
+    #[cfg(target_os = "linux")]
+    pub yang_service_accounts: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
 }
 
 impl ConfigManager {
@@ -71,6 +76,9 @@ impl ConfigManager {
         mut system_path: PathBuf,
         yang_path: String,
         rib_tx: UnboundedSender<crate::rib::Message>,
+        #[cfg(target_os = "linux")] yang_service_accounts: std::sync::Arc<
+            std::sync::RwLock<std::collections::HashSet<u32>>,
+        >,
     ) -> anyhow::Result<Self> {
         system_path.pop();
         system_path.push("zebra.conf");
@@ -89,6 +97,8 @@ impl ConfigManager {
             cm_clients: RefCell::new(HashMap::new()),
             show_clients: RefCell::new(HashMap::new()),
             rib_tx,
+            #[cfg(target_os = "linux")]
+            yang_service_accounts,
         };
         cm.init()?;
 
@@ -199,6 +209,12 @@ impl ConfigManager {
             // Handle logging configuration changes
             if op == ConfigOp::Set && line.starts_with("logging output") {
                 self.handle_logging_config(&line);
+            }
+            // Handle vty service-account changes (D25). Inline because
+            // it mutates daemon-internal state shared with serve.rs.
+            #[cfg(target_os = "linux")]
+            if line.starts_with("vty service-account") {
+                self.handle_vty_service_account(&op, &line);
             }
         }
         for line in diff.lines() {
@@ -529,6 +545,36 @@ impl ConfigManager {
         }
     }
 
+    /// Apply a `vty service-account uid N` change to the in-memory
+    /// service-account allow-list (D25).
+    ///
+    /// Tolerates both CLI forms the YANG renderer might emit:
+    /// - `vty service-account 999` (key-only)
+    /// - `vty service-account uid 999` (key-explicit)
+    /// - `vty service-account 999 description "foo"` (with leaves;
+    ///   the uid is still extracted)
+    #[cfg(target_os = "linux")]
+    fn handle_vty_service_account(&self, op: &ConfigOp, line: &str) {
+        let Some(uid) = parse_service_account_uid(line) else {
+            return;
+        };
+        let Ok(mut set) = self.yang_service_accounts.write() else {
+            tracing::error!(
+                "yang_service_accounts RwLock poisoned; \
+                 cannot apply vty service-account update"
+            );
+            return;
+        };
+        let verb = match op {
+            ConfigOp::Set => set.insert(uid).then_some("added"),
+            ConfigOp::Delete => set.remove(&uid).then_some("removed"),
+            _ => None,
+        };
+        if let Some(verb) = verb {
+            tracing::info!(uid, verb, "vty service-account change (yang)");
+        }
+    }
+
     fn handle_logging_config(&self, line: &str) {
         // Parse logging output configuration: "logging output stdout|syslog|file"
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -620,6 +666,69 @@ pub enum ConfigFormat {
     Json,
     Yaml,
     SetDelete,
+}
+
+/// Extract the uid from a `vty service-account ...` CLI line.
+///
+/// The YANG renderer may emit either the key-only form
+/// `vty service-account 999`, the key-explicit form
+/// `vty service-account uid 999`, or one with trailing leaves
+/// (`vty service-account 999 description "foo"`). Returns `Some(uid)`
+/// for any of these; `None` if the line isn't a vty-service-account
+/// statement or the uid isn't numeric.
+#[cfg(target_os = "linux")]
+fn parse_service_account_uid(line: &str) -> Option<u32> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "vty" {
+        return None;
+    }
+    if parts.next()? != "service-account" {
+        return None;
+    }
+    let next = parts.next()?;
+    let uid_str = if next == "uid" { parts.next()? } else { next };
+    uid_str.parse::<u32>().ok()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod manager_tests {
+    use super::parse_service_account_uid;
+
+    #[test]
+    fn parses_key_only_form() {
+        assert_eq!(
+            parse_service_account_uid("vty service-account 999"),
+            Some(999)
+        );
+    }
+
+    #[test]
+    fn parses_key_explicit_form() {
+        assert_eq!(
+            parse_service_account_uid("vty service-account uid 1001"),
+            Some(1001)
+        );
+    }
+
+    #[test]
+    fn parses_with_trailing_leaves() {
+        assert_eq!(
+            parse_service_account_uid("vty service-account 999 description \"ansible\""),
+            Some(999)
+        );
+        assert_eq!(
+            parse_service_account_uid("vty service-account uid 1001 description test"),
+            Some(1001)
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_lines() {
+        assert!(parse_service_account_uid("logging output stdout").is_none());
+        assert!(parse_service_account_uid("vty other 1").is_none());
+        assert!(parse_service_account_uid("vty service-account abc").is_none());
+        assert!(parse_service_account_uid("").is_none());
+    }
 }
 
 pub fn config_format_type(config_str: &str) -> ConfigFormat {

@@ -527,13 +527,25 @@ impl Clear for ClearService {
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
     pub _show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
+    /// Runtime-mutable set of YANG-defined service-account uids. Shared
+    /// with `ConfigManager`, which updates it on commit of
+    /// `vty service-account uid N` changes (D25).
+    #[cfg(target_os = "linux")]
+    pub yang_service_accounts: Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
 }
 
 impl Cli {
-    pub fn new(config_tx: Sender<Message>) -> Self {
+    pub fn new(
+        config_tx: Sender<Message>,
+        #[cfg(target_os = "linux")] yang_service_accounts: Arc<
+            std::sync::RwLock<std::collections::HashSet<u32>>,
+        >,
+    ) -> Self {
         Self {
             tx: config_tx,
             _show_clients: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            yang_service_accounts,
         }
     }
 
@@ -741,15 +753,15 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let sessions = {
-        let service_accounts =
+        let env_accounts =
             parse_service_accounts(std::env::var("ZEBRA_VTY_SERVICE_ACCOUNTS").ok().as_deref());
-        if !service_accounts.is_empty() {
+        if !env_accounts.is_empty() {
             tracing::info!(
-                uids = ?service_accounts,
-                "VTY service-account uids (permanent admin)",
+                uids = ?env_accounts,
+                "VTY service-account uids from env (permanent admin)",
             );
         }
-        SessionTable::with_service_accounts(service_accounts)
+        SessionTable::with_service_accounts(env_accounts, cli.yang_service_accounts.clone())
     };
     #[cfg(target_os = "linux")]
     let enable_rate = EnableRateLimiter::new();

@@ -161,7 +161,22 @@ async fn main() -> anyhow::Result<()> {
     let bgp = Bgp::new(rib.tx.clone(), policy.tx.clone());
     rib.subscribe(bgp.redist.tx.clone(), "bgp".to_string());
 
-    let config = ConfigManager::new(system_path(&arg), yang_path, rib.tx.clone())?;
+    // Runtime-mutable YANG-defined service-accounts (D25). Shared
+    // between ConfigManager (writes on commit) and SessionTable (reads
+    // at session creation). Empty at startup; populated by the config
+    // file load that runs inside ConfigManager.
+    #[cfg(target_os = "linux")]
+    let yang_service_accounts: std::sync::Arc<
+        std::sync::RwLock<std::collections::HashSet<u32>>,
+    > = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+
+    let config = ConfigManager::new(
+        system_path(&arg),
+        yang_path,
+        rib.tx.clone(),
+        #[cfg(target_os = "linux")]
+        yang_service_accounts.clone(),
+    )?;
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());
@@ -169,7 +184,11 @@ async fn main() -> anyhow::Result<()> {
     config.subscribe_show("bgp", bgp.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
-    let cli = Cli::new(config.tx.clone());
+    let cli = Cli::new(
+        config.tx.clone(),
+        #[cfg(target_os = "linux")]
+        yang_service_accounts,
+    );
 
     let vty_addr = config::VtyAddr::parse(&arg.vty_socket)?;
     config::serve(cli, vty_addr)?;

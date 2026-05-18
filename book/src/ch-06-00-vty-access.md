@@ -278,6 +278,31 @@ Notes:
   View for that session only; reconnecting yields a fresh Admin
   session.
 
+### YANG configuration (runtime-mutable)
+
+Service-accounts can also be defined via YANG, in which case they
+are mutable at runtime and persist across daemon restarts (via the
+config file):
+
+```
+host# configure
+host(configure)# set vty service-account 999 description "Ansible automation"
+host(configure)# set vty service-account 1001
+host(configure)# commit
+```
+
+YANG-defined accounts are the **union** with the env-var set;
+either source grants Admin. `delete vty service-account 999`
+removes the uid from the YANG set immediately on commit (existing
+sessions for that uid keep their Admin role until reconnect — the
+gate is applied at session creation, not on each RPC).
+
+In practice, pick **one** mechanism per deployment:
+- env var (via systemd Environment=) when admin lifecycle is
+  managed by the host (provisioning tools, package configs)
+- YANG when admin lifecycle should be managed via the CLI itself
+  (live operator changes, no daemon restart)
+
 ## Migration from earlier versions
 
 The default transport changed from `tcp:0.0.0.0:2666` to
