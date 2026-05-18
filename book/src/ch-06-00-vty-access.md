@@ -218,6 +218,29 @@ Read-only commands (`vtyctl show`, `vty` show) and Tab/`?`
 completion are not gated — a non-admin user can still see what
 commands exist.
 
+#### `configure` auto-elevate
+
+When a non-admin user types `configure` in the vty shell, the
+shell automatically prompts for a password and authenticates
+against the **root** account (su-style):
+
+```text
+host> configure
+Password: ********
+host(configure)#
+```
+
+Admin sessions (root, service-accounts, users within a current
+`enable` TTL) bypass the prompt entirely — the optimistic first
+attempt succeeds and configure mode is entered immediately. The
+prompt only appears for users who would otherwise be denied.
+
+This is separate from the `enable` command, which authenticates
+against the caller's own account (sudo-style). Use `enable` when
+the operator wants to hold the Admin role across multiple
+commands; use the implicit `configure` prompt for a one-shot
+elevation tied to a configure session.
+
 Configure-mode locking (single-writer mutex) is intentionally not
 yet implemented; multiple admins can simultaneously enter
 configure mode and pile up candidate edits. This will land with
