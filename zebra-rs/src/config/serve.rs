@@ -289,13 +289,23 @@ impl Exec for ExecService {
             )));
         }
 
-        let username = self.sessions.username(&key).ok_or_else(|| {
-            tracing::warn!(uid, "enable refused: uid not in passwd db");
-            tonic::Status::permission_denied("uid has no system account")
-        })?;
+        let inner = request.into_inner();
+        let password = inner.password;
+        // su-style: when the client passes auth_user explicitly, PAM
+        // authenticates against that account name instead of the caller's
+        // own. The vty `configure` auto-elevate flow uses this with
+        // auth_user="root". When auth_user is empty, fall back to the
+        // session's resolved username (the standard `enable` flow).
+        let target_user = if !inner.auth_user.is_empty() {
+            inner.auth_user.clone()
+        } else {
+            self.sessions.username(&key).ok_or_else(|| {
+                tracing::warn!(uid, "enable refused: uid not in passwd db");
+                tonic::Status::permission_denied("uid has no system account")
+            })?
+        };
 
-        let password = request.into_inner().password;
-        let exit = match spawn_vtypam(&username, &password).await {
+        let exit = match spawn_vtypam(&target_user, &password).await {
             Ok(code) => code,
             Err(e) => {
                 tracing::error!(uid, error = %e, "vtypam spawn failed");
@@ -312,7 +322,7 @@ impl Exec for ExecService {
                 if !promoted {
                     return Err(tonic::Status::unauthenticated("session vanished"));
                 }
-                tracing::info!(uid, user = %username, "enable success");
+                tracing::info!(uid, auth_user = %target_user, "enable success");
                 Ok(Response::new(EnableReply {
                     ok: true,
                     message: String::new(),
@@ -321,16 +331,20 @@ impl Exec for ExecService {
             }
             1 => {
                 let locked = self.enable_rate.record_failure(uid);
-                tracing::warn!(uid, user = %username, locked, "enable auth failed");
+                tracing::warn!(uid, auth_user = %target_user, locked, "enable auth failed");
                 Err(tonic::Status::permission_denied("authentication failed"))
             }
             2 => {
                 self.enable_rate.record_failure(uid);
-                tracing::warn!(uid, user = %username, "enable refused: account not permitted");
+                tracing::warn!(
+                    uid,
+                    auth_user = %target_user,
+                    "enable refused: account not permitted"
+                );
                 Err(tonic::Status::permission_denied("account not permitted"))
             }
             _ => {
-                tracing::error!(uid, user = %username, exit, "vtypam system error");
+                tracing::error!(uid, auth_user = %target_user, exit, "vtypam system error");
                 Err(tonic::Status::internal("authentication system error"))
             }
         }

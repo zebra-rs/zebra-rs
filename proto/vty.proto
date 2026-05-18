@@ -28,9 +28,15 @@ message LogoutReply {
 }
 
 message EnableRequest {
-  // Password for the peer uid's local account, verified by the
-  // 'zebra-rs' PAM service via the vtypam helper.
+  // Password verified by the 'zebra-rs' PAM service via the vtypam
+  // helper.
   string password = 1;
+  // Optional. When non-empty, PAM authenticates against this
+  // account name instead of the caller's own (su-style). Used by
+  // the vty `configure` auto-elevate flow which authenticates
+  // against root regardless of who the caller is. Empty string
+  // falls back to the session's resolved username.
+  string auth_user = 2;
 }
 
 message EnableReply {

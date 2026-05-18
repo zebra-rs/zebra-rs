@@ -62,6 +62,15 @@ struct Cli {
     disable: bool,
 
     #[arg(
+        long,
+        help = "Override the PAM account name authenticated against. \
+                Defaults to the calling uid's own username (sudo-style). \
+                Set to 'root' for su-style elevation via the configure \
+                auto-elevate flow."
+    )]
+    auth_user: Option<String>,
+
+    #[arg(
         short,
         long,
         help = "Server endpoint URI (unix:NAME, tcp://host:port, http://host:port). \
@@ -248,10 +257,11 @@ async fn enable(cli: Cli) -> i32 {
         }
     };
     let mut client = ExecClient::new(channel);
-    match client
-        .enable(tonic::Request::new(EnableRequest { password }))
-        .await
-    {
+    let req = EnableRequest {
+        password,
+        auth_user: cli.auth_user.clone().unwrap_or_default(),
+    };
+    match client.enable(tonic::Request::new(req)).await {
         Ok(reply) => {
             let r = reply.into_inner();
             if r.ok {

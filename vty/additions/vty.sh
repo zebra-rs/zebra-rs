@@ -342,6 +342,52 @@ enable ()
   return ${rc}
 }
 
+# `configure` with auto-elevate (D24): when the caller is not already
+# admin (root / service-account / prior `enable`), prompt for the root
+# password and run an su-style PAM authentication against the root
+# account before entering configure mode.
+configure ()
+{
+  if [[ ${CLI_MODE} != "exec" ]]; then
+    echo "% 'configure' is only available in exec mode."
+    return 1
+  fi
+
+  # Optimistic first attempt — admin sessions succeed immediately
+  # without any prompt.
+  local out first_line
+  out=$(${cli_command} -m exec configure 2>&1)
+  first_line=$(echo "$out" | head -n 1)
+  if [[ "${first_line}" != "SuccessExec" ]]; then
+    # Permission denied (or other error). Prompt for the root
+    # password and elevate via PAM.
+    local pw
+    if [[ -t 0 ]]; then
+      stty -echo
+      read -r -p "Password: " pw
+      stty echo
+      echo
+    else
+      IFS= read -r pw
+    fi
+    CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e --auth-user root -m ${CLI_MODE}
+    local rc=$?
+    pw=""
+    unset pw
+    if [[ ${rc} -ne 0 ]]; then
+      echo "% Configuration access denied"
+      return 1
+    fi
+  fi
+
+  # Either the optimistic attempt succeeded or we just elevated.
+  # Run the command for real via the standard exec path so the
+  # daemon's SuccessExec script flips CLI_MODE etc.
+  _cli_exec configure
+  CLI_PRIVILEGE=15
+  _cli_prompt_setup
+}
+
 disable ()
 {
   ${cli_command} -d -m ${CLI_MODE}
@@ -365,12 +411,14 @@ else
   CLI_PAGER="cat"
 fi
 _cli_register_first_level_command
-# If the daemon registers 'enable'/'disable' as first-level commands,
-# strip the aliases so our functions above take precedence — they need
-# to read the password locally with stty -echo, not pass it through the
-# normal Exec RPC.
+# If the daemon registers 'enable'/'disable'/'configure' as
+# first-level commands, strip the aliases so our shell functions
+# above take precedence — they need to read the password locally
+# with stty -echo and/or run an auto-elevate flow that the plain
+# _cli_exec path cannot handle.
 unalias enable 2>/dev/null || true
 unalias disable 2>/dev/null || true
+unalias configure 2>/dev/null || true
 
 # Local variables:
 # mode: shell-script
