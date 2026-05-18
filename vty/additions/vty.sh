@@ -58,7 +58,10 @@ _cli_prompt_setup ()
     CLI_MODE_CHAR="#"
   fi
 
-  export PS1="$(hostname)${CLI_MODE_PROMPT}${CLI_MODE_CHAR}"
+  # Mode tag (e.g. "(config)") follows the mode character so the user
+  # sees `host#(config)` in configure mode and a plain `host>` /
+  # `host#` in exec mode (where CLI_MODE_PROMPT is empty).
+  export PS1="$(hostname)${CLI_MODE_CHAR}${CLI_MODE_PROMPT}"
 }
 
 _cli_pager_setup ()
