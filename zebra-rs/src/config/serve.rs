@@ -170,6 +170,34 @@ impl Exec for ExecService {
         &self,
         request: tonic::Request<ExecRequest>,
     ) -> Result<Response<ExecReply>, tonic::Status> {
+        // Configure-mode gate (D23). Apply only to ExecType::Exec — tab
+        // completion paths remain free so non-admin users can still see
+        // what commands exist.
+        //
+        // Two conditions trigger the gate:
+        //   (a) mode != "exec"
+        //       Any request claiming to be in configure (or any other
+        //       privileged) mode requires admin. This is the strict
+        //       check that prevents a client from setting mode=configure
+        //       directly to bypass the entry gate.
+        //   (b) mode == "exec" && first_word == "configure"
+        //       Block the mode-entry command itself so vty users get an
+        //       immediate "admin required" instead of a successful mode
+        //       flip followed by every command failing.
+        //
+        // The configure-mode lock is intentionally deferred (see D11);
+        // multiple admins can still enter configure simultaneously.
+        #[cfg(target_os = "linux")]
+        if request.get_ref().r#type == ExecType::Exec as i32 {
+            let req = request.get_ref();
+            let mode = req.mode.as_str();
+            let first_word = req.line.split_whitespace().next().unwrap_or("");
+            let needs_admin = mode != "exec" || first_word == "configure";
+            if needs_admin {
+                enforce_admin(&self.sessions, &request)?;
+            }
+        }
+
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {

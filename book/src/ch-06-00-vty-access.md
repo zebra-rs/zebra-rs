@@ -199,6 +199,8 @@ role and will fail with `PermissionDenied` otherwise:
 |---|---|
 | `vtyctl apply` (push config) | Apply RPC |
 | `vtyctl clear` (operational reset) | Clear RPC |
+| Entering `configure` mode | DoExec RPC (mode=exec, line=`configure`) |
+| Any command inside configure mode | DoExec RPC (mode=configure) |
 
 Three ways to acquire Admin:
 
@@ -212,12 +214,14 @@ Three ways to acquire Admin:
   `ZEBRA_VTY_SERVICE_ACCOUNTS` (see below) — permanent Admin from
   session creation.
 
-Read-only commands (`vtyctl show`, `vty` show) and command
-completion are not gated.
+Read-only commands (`vtyctl show`, `vty` show) and Tab/`?`
+completion are not gated — a non-admin user can still see what
+commands exist.
 
-The mode-entry `configure` command and the configure-mode `commit`
-command are also not gated yet — that will land alongside Phase 5
-(configure-mode lock).
+Configure-mode locking (single-writer mutex) is intentionally not
+yet implemented; multiple admins can simultaneously enter
+configure mode and pile up candidate edits. This will land with
+the deferred Phase 5 work.
 
 ### `ZEBRA_VTY_SERVICE_ACCOUNTS` — permanent-admin uids
 
