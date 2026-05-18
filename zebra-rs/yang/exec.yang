@@ -22,6 +22,12 @@ module exec {
     type empty;
   }
 
+  // Temporarily disabled: the authorization framework (role tiers,
+  // task groups, enable/disable semantics) is still being designed.
+  // The vty shell's enable()/disable() bash functions remain functional
+  // because they go through the dedicated Enable/Disable RPCs, not
+  // DoExec. Re-enable these leaves once the model is settled.
+  /*
   leaf enable {
     ext:help "Promote this session to the admin role (PAM auth)";
     type empty;
@@ -31,6 +37,7 @@ module exec {
     ext:help "Drop this session back to the view role";
     type empty;
   }
+  */
 
   container show {
     ext:help "Show command";

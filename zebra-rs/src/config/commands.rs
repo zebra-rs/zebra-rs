@@ -81,7 +81,8 @@ fn show_ip_route_prefix(_config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, String::from("show ip route prefix"))
 }
 
-const CLI_CONFIGURE_MODE_PROMPT: &str = "(config)";
+// const CLI_CONFIGURE_MODE_PROMPT: &str = "(config)";
+const CLI_CONFIGURE_MODE_PROMPT: &str = ""; // Keep backward compatibility for now.
 
 fn configure(_config: &ConfigManager) -> (ExecCode, String) {
     let cli_command = format!(
