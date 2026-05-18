@@ -353,36 +353,42 @@ configure ()
     return 1
   fi
 
-  # Optimistic first attempt — admin sessions succeed immediately
-  # without any prompt.
-  local out first_line
-  out=$(${cli_command} -m exec configure 2>&1)
-  first_line=$(echo "$out" | head -n 1)
-  if [[ "${first_line}" != "SuccessExec" ]]; then
-    # Permission denied (or other error). Prompt for the root
-    # password and elevate via PAM.
-    local pw
-    if [[ -t 0 ]]; then
-      stty -echo
-      read -r -p "Password: " pw
-      stty echo
-      echo
-    else
-      IFS= read -r pw
-    fi
-    CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e --auth-user root -m ${CLI_MODE}
-    local rc=$?
-    pw=""
-    unset pw
-    if [[ ${rc} -ne 0 ]]; then
-      echo "% Configuration access denied"
-      return 1
+  # Fast path: if the caller already enabled (CLI_PRIVILEGE >= 15),
+  # skip the auto-elevate probe entirely. enable() sets
+  # CLI_PRIVILEGE=15 on success, so this avoids re-prompting an
+  # already-authenticated operator under any circumstance.
+  if (( CLI_PRIVILEGE < 15 )); then
+    # Optimistic first attempt — root / service-account sessions
+    # succeed immediately without any prompt.
+    local out first_line
+    out=$(${cli_command} -m exec configure 2>&1)
+    first_line=$(echo "$out" | head -n 1)
+    if [[ "${first_line}" != "SuccessExec" ]]; then
+      # Permission denied (or other error). Prompt for the root
+      # password and elevate via PAM.
+      local pw
+      if [[ -t 0 ]]; then
+        stty -echo
+        read -r -p "Password: " pw
+        stty echo
+        echo
+      else
+        IFS= read -r pw
+      fi
+      CLI_ENABLE_PASSWORD="${pw}" ${cli_command} -e --auth-user root -m ${CLI_MODE}
+      local rc=$?
+      pw=""
+      unset pw
+      if [[ ${rc} -ne 0 ]]; then
+        echo "% Configuration access denied"
+        return 1
+      fi
     fi
   fi
 
-  # Either the optimistic attempt succeeded or we just elevated.
-  # Run the command for real via the standard exec path so the
-  # daemon's SuccessExec script flips CLI_MODE etc.
+  # Either we were already admin, the optimistic attempt succeeded,
+  # or we just elevated. Run the command for real via the standard
+  # exec path so the daemon's SuccessExec script flips CLI_MODE etc.
   _cli_exec configure
   CLI_PRIVILEGE=15
   _cli_prompt_setup
