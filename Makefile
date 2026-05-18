@@ -61,7 +61,8 @@ run:
 	@sudo rm -f /tmp/ipc/pair/config-ng_bgpd
 	@RUSTFLAGS="--cfg tokio_unstable" cargo build --bin zebra-rs --release
 	@sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' target/release/zebra-rs
-	@ZEBRA_VTY_SERVICE_ACCOUNTS=1000 target/release/zebra-rs
+	@ZEBRA_VTY_SERVICE_ACCOUNTS=$(id -u) target/release/zebra-rs
+	#@target/release/zebra-rs
 	#target/release/zebra-rs --no-nhid
 	#target/release/zebra-rs --log-format elasticsearch
 	#target/release/zebra-rs --log-output file
@@ -70,6 +71,7 @@ clean:
 	cargo cache --remove-dir all
 	rm -rf target
 	rm -f Cargo.lock
+	make -C vty clean
 
 perf:
 	sudo perf record -g --call-graph dwarf ./target/release/zebra-rs
