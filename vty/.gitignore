@@ -1,1 +1,6 @@
 build/
+# Generated at build time by `xxd -i vty.sh` (see patches/0001-vty-hooks.patch);
+# not source. Keeping it under additions/ caused stale-blob bugs because the
+# Makefile copies additions/* into build/ and the `vty.c: vty.sh` rule then
+# saw matching mtimes and skipped regeneration.
+additions/vty.c
