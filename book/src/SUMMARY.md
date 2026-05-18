@@ -1,6 +1,6 @@
-# The Zebra Routing Software
+# zebra-rs Routing Software
 
-[The Zebra Routing Software](ch-00-00-introduction.md)
+[zebra-rs Routing Software](ch-00-00-introduction.md)
 - [Separation of Reachability Information and Forwarding Decision](ch-00-01-reachability-information.md)
 - [Router ID Selection](ch-00-02-router-id.md)
 
