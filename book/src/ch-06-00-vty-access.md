@@ -222,7 +222,8 @@ commands exist.
 
 When a non-admin user types `configure` in the vty shell, the
 shell automatically prompts for a password and authenticates
-against the **root** account (su-style):
+against the **caller's own account** (sudo-style — same as
+`enable`):
 
 ```text
 host> configure
@@ -235,11 +236,11 @@ Admin sessions (root, service-accounts, users within a current
 attempt succeeds and configure mode is entered immediately. The
 prompt only appears for users who would otherwise be denied.
 
-This is separate from the `enable` command, which authenticates
-against the caller's own account (sudo-style). Use `enable` when
-the operator wants to hold the Admin role across multiple
-commands; use the implicit `configure` prompt for a one-shot
-elevation tied to a configure session.
+The same password that authenticates `enable` works here.
+`configure` is the convenience flow that combines `enable` + mode
+entry in one step for one-shot configuration sessions; `enable`
+is the standalone command for operators who want to hold the
+Admin role across multiple commands without re-authenticating.
 
 Configure-mode locking (single-writer mutex) is intentionally not
 yet implemented; multiple admins can simultaneously enter
