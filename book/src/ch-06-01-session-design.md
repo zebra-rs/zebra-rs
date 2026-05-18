@@ -237,8 +237,11 @@ daemon restart.
 ## RBAC
 
 The Session struct carries a `role` field (`View`, `Operator`,
-`Admin`). Two ways to acquire `Admin`:
+`Admin`). Three ways to acquire `Admin`:
 
+- **Root (uid=0)**: implicit Admin from session creation, no enable
+  required (D20). The `enable` RPC short-circuits to success
+  without invoking PAM.
 - **Interactive**: type `enable`, authenticate via PAM, hold Admin
   for the TTL.
 - **Service account** (for automation): a uid listed in YANG
@@ -349,6 +352,7 @@ Each phase is intended to ship as an independent PR.
 | D17 | enable failure rate-limit lives in the daemon (per-uid counter, 5 failures within 30 s triggers a 30 s lockout, in-memory only). `pam_faillock` is documented as an optional stronger layer that admins can stack in the PAM service file. |
 | D18 | RBAC is 3-tier: `View`, `Operator`, `Admin`. Maps cleanly onto Cisco priv-lvl ranges 0-1 / 2-14 / 15. YANG-configurable roles are explicitly out of scope. |
 | D19 | Default idle session TTL is **600 s** with a 60 s sweep interval (Cisco IOS `exec-timeout 10 0` convention). Configurable later if a deployment needs it. |
+| D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. Service-account configuration (Phase 4-d) does not need to list uid 0. Reason: root already owns the host and `pam_unix` against the daemon's own owning account is awkward UX. |
 
 ## Deferred work
 

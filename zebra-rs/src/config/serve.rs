@@ -195,6 +195,17 @@ impl Exec for ExecService {
             .ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
         let uid = key.0;
 
+        // Root is already Admin from session creation (D20). Acknowledge
+        // the enable RPC without spawning PAM so no password is prompted.
+        if uid == 0 {
+            tracing::info!(uid, "enable noop (root is implicit admin)");
+            return Ok(Response::new(EnableReply {
+                ok: true,
+                message: String::new(),
+                ttl_secs: 0,
+            }));
+        }
+
         if let Err(remaining) = self.enable_rate.check(uid) {
             tracing::warn!(
                 uid,
