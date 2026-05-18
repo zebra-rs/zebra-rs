@@ -31,6 +31,7 @@
 
 - [VTY Access and Authentication](ch-06-00-vty-access.md)
   - [Session Management Design](ch-06-01-session-design.md)
+  - [Show Config Commands](ch-06-02-show-config-commands.md)
 
 ## Logging and Monitoring
 

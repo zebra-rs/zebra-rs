@@ -54,33 +54,14 @@ module configure {
     type empty;
   }
 
-  leaf running {
-    ext:help "Show running system configuration";
-    type empty;
-  }
-
-  leaf candidate {
-    ext:help "Show candidate system configuration";
-    type empty;
-  }
-
-  leaf json {
-    ext:help "Show running configuration in JSON format";
-    type empty;
-  }
-
-  leaf yaml {
-    ext:help "Show running configuration in YAML format";
-    type empty;
-  }
+  // `running`, `candidate`, `json`, `yaml`, `diff`, `list` were removed
+  // in favor of the unified `show candidate-config { formal | json |
+  // yaml }` and `show running-config { formal | json | yaml }` trees
+  // defined under the `show` container in exec.yang (and grafted into
+  // configure mode). See book/src/ch-06-02-show-config-commands.md.
 
   leaf commit {
     ext:help "Commit candidate config to running config";
-    type empty;
-  }
-
-  leaf diff {
-    ext:help "Diff between candidate config and running config";
     type empty;
   }
 
@@ -96,11 +77,6 @@ module configure {
 
   leaf save {
     ext:help "Save config from file";
-    type empty;
-  }
-
-  leaf list {
-    ext:help "List config from file";
     type empty;
   }
 
