@@ -190,6 +190,35 @@ each call is just logged. The allow-list applies only to Unix-socket
 connections; TCP connections carry no peer-cred and are not subject
 to the check.
 
+### Admin-required RPCs
+
+The following RPCs require the caller's session to hold the Admin
+role and will fail with `PermissionDenied` otherwise:
+
+| Action | Path |
+|---|---|
+| `vtyctl apply` (push config) | Apply RPC |
+| `vtyctl clear` (operational reset) | Clear RPC |
+
+Three ways to acquire Admin:
+
+- **Root (uid 0)**: implicit Admin from session creation — no
+  `enable` needed.
+- **Interactive**: run `enable` in the vty shell, type your
+  password (PAM auth via `vtypam`). The Admin role is held for 15
+  minutes idle (sliding — refreshed on each authorized RPC) with a
+  4-hour absolute cap.
+- **Service account**: list your uid in
+  `ZEBRA_VTY_SERVICE_ACCOUNTS` (see below) — permanent Admin from
+  session creation.
+
+Read-only commands (`vtyctl show`, `vty` show) and command
+completion are not gated.
+
+The mode-entry `configure` command and the configure-mode `commit`
+command are also not gated yet — that will land alongside Phase 5
+(configure-mode lock).
+
 ### `ZEBRA_VTY_SERVICE_ACCOUNTS` — permanent-admin uids
 
 Sessions for uids listed here start with the `Admin` role from
