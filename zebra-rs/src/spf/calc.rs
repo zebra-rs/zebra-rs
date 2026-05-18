@@ -486,14 +486,34 @@ pub fn repair_list_print(graph: &Graph, repair_list: &Vec<SrSegment>) {
     }
 }
 
-pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegment>> {
+#[derive(Debug)]
+pub struct RepairPath {
+    /// Immediate nexthop node id on the post-convergence path —
+    /// what the FIB needs to look up the local egress (ifindex /
+    /// next-hop address) for the repair route.
+    pub nhop: usize,
+    /// Repair path segments (Node-SID / Adj-SID sequence) applied
+    /// on top of the immediate nexthop.
+    pub segs: Vec<SrSegment>,
+}
+
+pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> {
     let p_vertices = p_space_vertices(graph, s, x);
     let q_vertices = q_space_vertices(graph, d, x);
     let mut pc_paths = pc_paths(graph, s, d, x);
 
     // PCPaths.
-    let mut repair_lists = vec![];
+    let mut repair_paths = vec![];
+
+    // PC Paths could be ECMP.
     for path in &mut pc_paths {
+        // Skip empty PC Paths.
+        if path.is_empty() {
+            continue;
+        }
+        // First hop as RepairPath's nhop.
+        let nhop = path[0];
+
         // Remove D — make_repair_list adds it back via the trailing
         // AdjSid(prev, d) emission.
         path.pop();
@@ -504,11 +524,21 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<SrSegmen
         let pc_inter = intersect(path, &p_vertices, &q_vertices);
 
         // Convert PC intersects into repair list.
-        let repair_list = make_repair_list(&pc_inter, s, d, graph);
+        let segs = make_repair_list(&pc_inter, s, d, graph);
 
-        repair_lists.push(repair_list);
+        // `segs` may legitimately be empty — the "trivial repair"
+        // case where D is a direct neighbor of S in the modified
+        // graph (PC path was just `[D]`, becomes `[]` after the
+        // `path.pop()` above), or S and D share a LAN with no
+        // router between them. The post-conv first-hop's natural
+        // forwarding reaches D with no SR steering, so install
+        // proceeds with `nhop` and an empty label stack — see
+        // `RepairCandidate.labels` doc in isis/inst.rs.
+        let repair_path = RepairPath { nhop, segs };
+
+        repair_paths.push(repair_path);
     }
-    repair_lists
+    repair_paths
 }
 
 pub fn disp(spf: &BTreeMap<usize, Path>, full_path: bool) {
@@ -1093,12 +1123,16 @@ mod tests {
 
         let repair_paths = tilfa(&graph, s, d, x);
         assert_eq!(repair_paths.len(), 1);
-        let repair_list = repair_paths.first().unwrap();
+        let repair = repair_paths.first().unwrap();
 
-        assert_eq!(repair_list.len(), 3);
-        let first_segment = repair_list.first().unwrap();
-        let second_segment = repair_list.get(1).unwrap();
-        let third_segment = repair_list.get(2).unwrap();
+        // Immediate nexthop on the post-convergence path is N2 (id 2):
+        // S→N2 replaces the failed S→N1 first hop.
+        assert_eq!(repair.nhop, 2, "expected first-hop = N2 (id 2)");
+
+        assert_eq!(repair.segs.len(), 3);
+        let first_segment = repair.segs.first().unwrap();
+        let second_segment = repair.segs.get(1).unwrap();
+        let third_segment = repair.segs.get(2).unwrap();
 
         let first_disp = seg_disp(&graph, first_segment);
         assert_eq!(first_disp, "NodeSid(R1)");
@@ -1125,17 +1159,51 @@ mod tests {
 
         let repair_paths = tilfa(&graph, s, d, x);
         assert_eq!(repair_paths.len(), 1);
-        let repair_list = repair_paths.first().unwrap();
+        let repair = repair_paths.first().unwrap();
 
-        assert_eq!(repair_list.len(), 3);
-        assert_eq!(seg_disp(&graph, &repair_list[0]), "NodeSid(R1)");
+        // In the all-LAN topology the first vertex on the PC path is
+        // the pseudonode PN_S_N2 (id 9); leading-pseudonode skipping
+        // is the IS-IS caller's job (see `find_local_nhop_v4`).
+        assert_eq!(repair.nhop, 9, "expected first-hop = PN_S_N2 (id 9)");
+
+        assert_eq!(repair.segs.len(), 3);
+        assert_eq!(seg_disp(&graph, &repair.segs[0]), "NodeSid(R1)");
         assert_eq!(
-            seg_disp(&graph, &repair_list[1]),
+            seg_disp(&graph, &repair.segs[1]),
             "AdjSid(R1, R2, via PN_R1_R2)"
         );
         assert_eq!(
-            seg_disp(&graph, &repair_list[2]),
+            seg_disp(&graph, &repair.segs[2]),
             "AdjSid(R2, R3, via PN_R2_R3)"
+        );
+    }
+
+    /// Trivial-repair case: D is a direct neighbor of S in the
+    /// modified graph, so the PC path is `[D]` only. After
+    /// `path.pop()` the input to `intersect` / `make_repair_list`
+    /// is empty, yielding an empty segment list. `tilfa()` must
+    /// still emit one `RepairPath` carrying `nhop = D` so the FIB
+    /// can install the trivial backup (forward to nhop, no SR
+    /// push).
+    ///
+    /// Scenario: S→N2 is a direct link cost 1; excluding N1 doesn't
+    /// touch it, so PC(S, N2, x=[N1]) = [[N2]].
+    #[test]
+    fn tilfa_direct_neighbor_yields_trivial_repair() {
+        let graph = tilfa_graph();
+        let s = 0;
+        let d = 2; // N2
+        let x: &[usize] = &[1]; // exclude N1 — irrelevant to S→N2
+
+        let repair_paths = tilfa(&graph, s, d, x);
+        assert_eq!(repair_paths.len(), 1);
+        let repair = repair_paths.first().unwrap();
+
+        assert_eq!(repair.nhop, 2, "expected first-hop = N2 (id 2)");
+        assert!(
+            repair.segs.is_empty(),
+            "expected trivial repair (no SR segments), got {:?}",
+            repair.segs
         );
     }
 }
