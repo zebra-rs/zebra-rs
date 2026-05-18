@@ -2936,9 +2936,9 @@ fn link_protection_spf(
         }
         let x = first[0];
 
-        let repair_path = spf::tilfa(graph, source, *d, &[x]);
-        if !repair_path.is_empty() {
-            println!(" => {:?}", &repair_path[0]);
+        let repair_paths = spf::tilfa(graph, source, *d, &[x]);
+        if let Some(repair) = repair_paths.first() {
+            println!(" => nhop={} segs={:?}", repair.nhop, repair.segs);
         } else {
             println!(" => no repair path");
         }
@@ -3179,10 +3179,15 @@ fn resolve_repairs_mpls(
             let Some(path_vec) = post_path.paths.first() else {
                 continue;
             };
-            let mut repair_lists = spf::tilfa(&modified, source, *dest, &[]);
-            let Some(segments) = repair_lists.first_mut().map(std::mem::take) else {
+            let mut repair_paths = spf::tilfa(&modified, source, *dest, &[]);
+            let Some(repair) = repair_paths.first_mut() else {
                 continue;
             };
+            // Take ownership of the segment list out of `RepairPath`
+            // — leaves the `nhop` field intact for callers that want
+            // the first-hop id; `Vec::default()` is the empty
+            // segment list, which is a valid trivial repair.
+            let segments = std::mem::take(&mut repair.segs);
             let Some(labels) = repair_segments_to_mpls_labels(top, level, &segments) else {
                 continue;
             };
@@ -3373,7 +3378,7 @@ fn ti_lfa_compute_srv6(
     }
 }
 
-//
+// XXX
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // Turn off SPF calculation timer.
     *top.spf_timer.get_mut(&level) = None;
