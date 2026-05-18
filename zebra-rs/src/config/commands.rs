@@ -160,9 +160,20 @@ fn running(config: &ConfigManager) -> (ExecCode, String) {
 }
 
 fn json(config: &ConfigManager) -> (ExecCode, String) {
-    let mut output = String::new();
-    config.store.candidate.borrow().json(&mut output);
-    (ExecCode::Show, output)
+    let mut compact = String::new();
+    config.store.candidate.borrow().json(&mut compact);
+    // Round-trip through serde to indent. The internal json() emitter
+    // produces compact JSON; for human display we want pretty-printed
+    // output with 2-space indent. `preserve_order` is enabled at the
+    // workspace level so key order survives the round-trip.
+    let pretty = serde_json::from_str::<serde_json::Value>(&compact)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .map(|mut s| {
+            s.push('\n');
+            s
+        })
+        .unwrap_or(compact);
+    (ExecCode::Show, pretty)
 }
 
 fn yaml(config: &ConfigManager) -> (ExecCode, String) {
