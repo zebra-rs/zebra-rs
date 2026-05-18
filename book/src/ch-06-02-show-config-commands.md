@@ -88,11 +88,10 @@ under the top level of `configure` mode (not under `show`):
 | `discard` | Revert candidate back to running (drops uncommitted edits) |
 | `load` | Re-load the on-disk config file into the candidate, then commit |
 | `save` | Write the running config to the on-disk file |
-| `running` | Legacy shortcut: equivalent to `show running-config formal` for the structured display |
 
 ## Reorganization notes (history)
 
-Earlier versions exposed the candidate-config viewers as top-level
+Earlier versions exposed the config viewers as top-level
 configure-mode commands without the `show` prefix:
 
 | Old | New |
@@ -100,10 +99,11 @@ configure-mode commands without the `show` prefix:
 | `list` | `show candidate-config formal` |
 | `json` | `show candidate-config json` |
 | `yaml` | `show candidate-config yaml` |
+| `running` | `show running-config formal` |
 | `candidate` | (removed — was effectively a duplicate of `list`) |
 | `diff` | (removed — was running ↔ candidate textual diff) |
 
-The reorganization gives the running config a symmetric set of
-viewers (`show running-config { formal | json | yaml }`), so an
-operator can always say "show me the X view of the Y config" without
-remembering which forms exist for which view.
+The reorganization gives candidate and running configs a symmetric
+set of viewers (`show {candidate,running}-config { formal | json |
+yaml }`), so an operator can always say "show me the X view of the
+Y config" without remembering which forms exist for which view.

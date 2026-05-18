@@ -52,7 +52,6 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     // empty.
     mode.install_func(String::from("/show/version"), show_version);
     install_show_config_handlers(&mut mode);
-    mode.install_func(String::from("/running"), running);
     mode.install_func(String::from("/commit"), commit);
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/load"), load);
@@ -174,12 +173,6 @@ fn show(config: &ConfigManager) -> (ExecCode, String) {
     } else {
         (ExecCode::Show, candidate)
     }
-}
-
-fn running(config: &ConfigManager) -> (ExecCode, String) {
-    let mut output = String::new();
-    config.store.running.borrow().format(&mut output);
-    (ExecCode::Show, output)
 }
 
 // === show {candidate,running}-config { formal | json | yaml } ===
