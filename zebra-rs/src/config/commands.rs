@@ -92,8 +92,11 @@ fn install_show_config_handlers(mode: &mut Mode) {
 }
 
 fn help(_config: &ConfigManager) -> (ExecCode, String) {
-    let output = r#"This is help for openconfigd's `cli' command help.
-cli is based on bash so you can use any shell command in it.
+    let output = r#"This is help for zebra-rs's `vty' shell.
+vty is based on GNU bash 5.2 so you can use any shell command in it,
+including redirection (>, >>, <) and pipes (|) to chain commands or
+save output to files (e.g. `show running-config | grep bgp',
+`show version > /tmp/ver.txt').
 "#;
     (ExecCode::Show, output.to_string())
 }
