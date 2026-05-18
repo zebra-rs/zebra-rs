@@ -850,15 +850,31 @@ fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixL
     use tokio::net::UnixListener;
     use tokio_stream::wrappers::UnixListenerStream;
 
-    let addr = StdSockAddr::from_abstract_name(name.as_bytes())
-        .map_err(|e| anyhow::anyhow!("from_abstract_name: {e}"))?;
-    let std_listener =
-        StdUnixListener::bind_addr(&addr).map_err(|e| anyhow::anyhow!("bind_addr: {e}"))?;
+    let addr = StdSockAddr::from_abstract_name(name.as_bytes()).map_err(|e| {
+        anyhow::anyhow!("invalid abstract socket name '@{name}' (contains NUL?): {e}")
+    })?;
+
+    let std_listener = StdUnixListener::bind_addr(&addr).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+            "abstract VTY socket '@{name}' is already in use.\n\
+             Another zebra-rs daemon is likely running in this network namespace.\n\
+             Check with:    ss -xal | grep '@{name}'\n\
+             Then either stop the running daemon (e.g. 'systemctl stop zebra-rs')\n\
+             or start this one in a different netns ('ip netns exec ...').",
+        ),
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "permission denied binding abstract VTY socket '@{name}'.\n\
+             Abstract Unix sockets are scoped by the network namespace; check\n\
+             that the daemon has access to it (CAP_NET_ADMIN in the current ns).",
+        ),
+        _ => anyhow::anyhow!("failed to bind abstract VTY socket '@{name}': {e}"),
+    })?;
+
     std_listener
         .set_nonblocking(true)
-        .map_err(|e| anyhow::anyhow!("set_nonblocking: {e}"))?;
-    let listener =
-        UnixListener::from_std(std_listener).map_err(|e| anyhow::anyhow!("from_std: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("set_nonblocking on abstract VTY socket '@{name}': {e}"))?;
+    let listener = UnixListener::from_std(std_listener)
+        .map_err(|e| anyhow::anyhow!("register abstract VTY socket '@{name}' with tokio: {e}"))?;
     Ok(UnixListenerStream::new(listener))
 }
 

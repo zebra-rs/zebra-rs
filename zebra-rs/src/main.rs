@@ -144,7 +144,17 @@ fn write_pid_file(path: &str) -> anyhow::Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
+    if let Err(e) = run().await {
+        // Use anyhow's alternate-format Display to print the message
+        // and its cause chain without the (rarely actionable) stack
+        // backtrace that the default `Debug` representation includes.
+        eprintln!("zebra-rs: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     let arg = Arg::parse();
 
     let yang_path = yang_path(&arg);
