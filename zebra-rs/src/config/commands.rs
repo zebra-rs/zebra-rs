@@ -81,10 +81,16 @@ fn show_ip_route_prefix(_config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, String::from("show ip route prefix"))
 }
 
+const CLI_CONFIGURE_MODE_PROMPT: &str = "(config)";
+
 fn configure(_config: &ConfigManager) -> (ExecCode, String) {
-    let cli_command = r#"SuccessExec
-CLI_MODE=configure;CLI_MODE_STR=Configure;CLI_PRIVILEGE=15;_cli_refresh"#;
-    (ExecCode::Success, cli_command.to_string())
+    let cli_command = format!(
+        "SuccessExec\n\
+         CLI_MODE=configure;CLI_MODE_STR=Configure;\
+         CLI_MODE_PROMPT='{CLI_CONFIGURE_MODE_PROMPT}';\
+         CLI_PRIVILEGE=15;_cli_refresh"
+    );
+    (ExecCode::Success, cli_command)
 }
 
 /// Fallback handler for `enable` typed via DoExec.
@@ -126,7 +132,7 @@ CLI_FORMAT=terminal;_cli_refresh"#;
 
 fn exit(_config: &ConfigManager) -> (ExecCode, String) {
     let cli_command = r#"SuccessExec
-CLI_MODE=exec;CLI_PRIVILEGE=1;_cli_refresh"#;
+CLI_MODE=exec;CLI_MODE_PROMPT='';CLI_PRIVILEGE=1;_cli_refresh"#;
     (ExecCode::Success, cli_command.to_string())
 }
 
