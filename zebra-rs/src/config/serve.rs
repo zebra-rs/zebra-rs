@@ -12,8 +12,8 @@ use crate::config::api::DeployRequest;
 use crate::config::enable_rate::EnableRateLimiter;
 #[cfg(target_os = "linux")]
 use crate::config::session::{
-    DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP, ENABLE_IDLE_TTL, ProcfsReader,
-    SessionContext, SessionError, SessionTable, run_gc, watch_bash_death,
+    AuthzError, DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP, ENABLE_IDLE_TTL,
+    ProcfsReader, SessionContext, SessionError, SessionTable, run_gc, watch_bash_death,
 };
 
 use super::api::{
@@ -36,6 +36,33 @@ struct ExecService {
     pub sessions: Arc<SessionTable>,
     #[cfg(target_os = "linux")]
     pub enable_rate: Arc<EnableRateLimiter>,
+}
+
+/// Authorize an Admin-required RPC. Returns Ok on success, or an
+/// already-formed `Status` describing why the caller is not allowed.
+///
+/// Wraps [`SessionTable::require_admin`] with the tonic-side mapping so
+/// every gated handler does the same boilerplate.
+#[cfg(target_os = "linux")]
+fn enforce_admin<T>(
+    sessions: &SessionTable,
+    request: &tonic::Request<T>,
+) -> Result<(), tonic::Status> {
+    let key = request
+        .extensions()
+        .get::<SessionContext>()
+        .map(|c| c.key)
+        .ok_or_else(|| tonic::Status::unauthenticated("no session"))?;
+    match sessions.require_admin(&key) {
+        Ok(()) => Ok(()),
+        Err(AuthzError::NoSession) => Err(tonic::Status::unauthenticated("no session")),
+        Err(AuthzError::NotAdmin) => Err(tonic::Status::permission_denied(
+            "admin role required; run 'enable' first",
+        )),
+        Err(AuthzError::EnableExpired) => Err(tonic::Status::permission_denied(
+            "enable session expired; run 'enable' again",
+        )),
+    }
 }
 
 /// Parse the `ZEBRA_VTY_SERVICE_ACCOUNTS` env var into a uid set (D21).
@@ -143,6 +170,34 @@ impl Exec for ExecService {
         &self,
         request: tonic::Request<ExecRequest>,
     ) -> Result<Response<ExecReply>, tonic::Status> {
+        // Configure-mode gate (D23). Apply only to ExecType::Exec — tab
+        // completion paths remain free so non-admin users can still see
+        // what commands exist.
+        //
+        // Two conditions trigger the gate:
+        //   (a) mode != "exec"
+        //       Any request claiming to be in configure (or any other
+        //       privileged) mode requires admin. This is the strict
+        //       check that prevents a client from setting mode=configure
+        //       directly to bypass the entry gate.
+        //   (b) mode == "exec" && first_word == "configure"
+        //       Block the mode-entry command itself so vty users get an
+        //       immediate "admin required" instead of a successful mode
+        //       flip followed by every command failing.
+        //
+        // The configure-mode lock is intentionally deferred (see D11);
+        // multiple admins can still enter configure simultaneously.
+        #[cfg(target_os = "linux")]
+        if request.get_ref().r#type == ExecType::Exec as i32 {
+            let req = request.get_ref();
+            let mode = req.mode.as_str();
+            let first_word = req.line.split_whitespace().next().unwrap_or("");
+            let needs_admin = mode != "exec" || first_word == "configure";
+            if needs_admin {
+                enforce_admin(&self.sessions, &request)?;
+            }
+        }
+
         let request = request.get_ref();
         match request.r#type {
             x if x == ExecType::Exec as i32 => {
@@ -424,6 +479,8 @@ impl Show for ShowService {
 #[derive(Debug)]
 struct ClearService {
     pub tx: mpsc::Sender<Message>,
+    #[cfg(target_os = "linux")]
+    pub sessions: Arc<SessionTable>,
 }
 
 #[tonic::async_trait]
@@ -432,6 +489,9 @@ impl Clear for ClearService {
         &self,
         request: tonic::Request<ClearRequest>,
     ) -> std::result::Result<Response<ClearReply>, tonic::Status> {
+        #[cfg(target_os = "linux")]
+        enforce_admin(&self.sessions, &request)?;
+
         let request = request.get_ref();
 
         let (tx, rx) = oneshot::channel();
@@ -471,6 +531,8 @@ impl Cli {
 
 struct ApplyService {
     pub tx: mpsc::Sender<Message>,
+    #[cfg(target_os = "linux")]
+    pub sessions: Arc<SessionTable>,
 }
 
 #[tonic::async_trait]
@@ -479,6 +541,9 @@ impl Apply for ApplyService {
         &self,
         request: tonic::Request<tonic::Streaming<ApplyRequest>>,
     ) -> Result<tonic::Response<ApplyReply>, tonic::Status> {
+        #[cfg(target_os = "linux")]
+        enforce_admin(&self.sessions, &request)?;
+
         let mut stream = request.into_inner();
 
         // Process the stream of requests
@@ -683,8 +748,16 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         enable_rate: enable_rate.clone(),
     };
     let show_service = ShowService { tx: cli.tx.clone() };
-    let apply_service = ApplyService { tx: cli.tx.clone() };
-    let clear_service = ClearService { tx: cli.tx.clone() };
+    let apply_service = ApplyService {
+        tx: cli.tx.clone(),
+        #[cfg(target_os = "linux")]
+        sessions: sessions.clone(),
+    };
+    let clear_service = ClearService {
+        tx: cli.tx.clone(),
+        #[cfg(target_os = "linux")]
+        sessions: sessions.clone(),
+    };
 
     let interceptor = VtyPeerInterceptor::from_env(
         #[cfg(target_os = "linux")]

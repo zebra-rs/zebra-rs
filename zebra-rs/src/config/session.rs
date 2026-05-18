@@ -114,6 +114,22 @@ impl Session {
     }
 }
 
+/// Errors returned by [`SessionTable::require_admin`].
+///
+/// Mapped to `tonic::Status` codes by the handler. Kept separate from
+/// `Status` so the session module stays testable without pulling tonic in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthzError {
+    /// No session is associated with the request (no SessionContext, or
+    /// the entry was GC'd between the interceptor and the handler).
+    NoSession,
+    /// Caller has not run `enable` and is not a permanent admin.
+    NotAdmin,
+    /// Caller's enable session has expired (idle TTL or hard cap). The
+    /// session has been downgraded back to View as a side effect.
+    EnableExpired,
+}
+
 /// Errors returned by the session resolver.
 ///
 /// Variants are mapped to `tonic::Status` codes by the caller. Keeping the
@@ -268,6 +284,47 @@ impl SessionTable {
     /// Read the username cached on the session, if present.
     pub fn username(&self, key: &SessionKey) -> Option<String> {
         self.sessions.get(key).and_then(|s| s.username.clone())
+    }
+
+    /// Authorize an Admin-required RPC for the given session.
+    ///
+    /// On success, also extends the sliding idle TTL by `ENABLE_IDLE_TTL`
+    /// (D2). For permanent admins (root, service-accounts) deadlines stay
+    /// `None` and are not touched. Time-bounded admins whose `expires` or
+    /// `hard_deadline` have passed are downgraded to View as a side effect
+    /// and `EnableExpired` is returned.
+    pub fn require_admin(&self, key: &SessionKey) -> Result<(), AuthzError> {
+        let mut s = self.sessions.get_mut(key).ok_or(AuthzError::NoSession)?;
+        if !s.enabled {
+            return Err(AuthzError::NotAdmin);
+        }
+        let now = Instant::now();
+        match (s.enable_expires, s.enable_hard_deadline) {
+            (Some(expires), Some(hard)) => {
+                if now >= expires || now >= hard {
+                    s.role = Role::View;
+                    s.enabled = false;
+                    s.enable_expires = None;
+                    s.enable_hard_deadline = None;
+                    return Err(AuthzError::EnableExpired);
+                }
+                // Slide the idle deadline forward; the hard cap is fixed.
+                s.enable_expires = Some(now + ENABLE_IDLE_TTL);
+            }
+            (None, None) => {
+                // Permanent admin (root or service-account). No deadlines.
+            }
+            _ => {
+                // Defensive: invariant says either both are Some or both
+                // None. Treat partial as expired to fail closed.
+                s.role = Role::View;
+                s.enabled = false;
+                s.enable_expires = None;
+                s.enable_hard_deadline = None;
+                return Err(AuthzError::EnableExpired);
+            }
+        }
+        Ok(())
     }
 
     /// Sweep stale sessions in a single pass.
@@ -674,6 +731,98 @@ mod tests {
         let other_sess = table.get(&other).unwrap();
         assert_eq!(other_sess.role, Role::View);
         assert!(!other_sess.enabled);
+    }
+
+    #[test]
+    fn require_admin_rejects_unknown_session() {
+        let table = SessionTable::new();
+        assert_eq!(
+            table.require_admin(&(1000, 999)).unwrap_err(),
+            AuthzError::NoSession
+        );
+    }
+
+    #[test]
+    fn require_admin_rejects_view_session() {
+        let table = SessionTable::new();
+        table.insert_for_test((1000, 999), Instant::now());
+        assert_eq!(
+            table.require_admin(&(1000, 999)).unwrap_err(),
+            AuthzError::NotAdmin
+        );
+    }
+
+    #[test]
+    fn require_admin_succeeds_for_enabled_session_and_extends_ttl() {
+        let table = SessionTable::new();
+        table.insert_for_test((1000, 999), Instant::now());
+        // Time-bounded promotion (typical enable result).
+        table.promote_to_admin(
+            &(1000, 999),
+            Duration::from_secs(10),
+            Duration::from_secs(60),
+        );
+        let before = table.get(&(1000, 999)).unwrap().enable_expires.unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(table.require_admin(&(1000, 999)).is_ok());
+        let after = table.get(&(1000, 999)).unwrap().enable_expires.unwrap();
+        assert!(after > before, "sliding TTL should extend on success");
+    }
+
+    #[test]
+    fn require_admin_downgrades_after_idle_expiry() {
+        let table = SessionTable::new();
+        table.insert_for_test((1000, 999), Instant::now());
+        // 1-ms idle TTL, generous hard cap.
+        table.promote_to_admin(
+            &(1000, 999),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            table.require_admin(&(1000, 999)).unwrap_err(),
+            AuthzError::EnableExpired
+        );
+        let s = table.get(&(1000, 999)).unwrap();
+        assert!(!s.enabled, "should have been downgraded");
+        assert_eq!(s.role, Role::View);
+        assert!(s.enable_expires.is_none());
+    }
+
+    #[test]
+    fn require_admin_downgrades_after_hard_cap() {
+        let table = SessionTable::new();
+        table.insert_for_test((1000, 999), Instant::now());
+        // Long idle TTL but 1-ms hard cap so the cap fires first.
+        table.promote_to_admin(
+            &(1000, 999),
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            table.require_admin(&(1000, 999)).unwrap_err(),
+            AuthzError::EnableExpired
+        );
+    }
+
+    #[test]
+    fn require_admin_is_noop_for_permanent_admin() {
+        // Root and service-account sessions have no deadlines; require_admin
+        // should succeed without touching the (None) deadline fields.
+        let mut accounts = HashSet::new();
+        accounts.insert(999);
+        let table = SessionTable::with_service_accounts(accounts);
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 2000);
+        reader.set_ruid(2000, 999);
+        table.resolve(&reader, 999, 1234).unwrap();
+        assert!(table.require_admin(&(999, 2000)).is_ok());
+        let s = table.get(&(999, 2000)).unwrap();
+        assert!(s.enabled);
+        assert!(s.enable_expires.is_none());
+        assert!(s.enable_hard_deadline.is_none());
     }
 
     #[test]

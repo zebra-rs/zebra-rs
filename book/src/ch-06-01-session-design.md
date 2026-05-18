@@ -356,6 +356,8 @@ Each phase is intended to ship as an independent PR.
 | D19 | Default idle session TTL is **600 s** with a 60 s sweep interval (Cisco IOS `exec-timeout 10 0` convention). Configurable later if a deployment needs it. |
 | D20 | **Root (uid=0) is implicitly Admin.** New sessions for uid=0 are created with `role=Admin` / `enabled=true` / no deadlines; the `enable` RPC short-circuits to success without spawning vtypam. Service-account configuration (Phase 4-d) does not need to list uid 0. Reason: root already owns the host and `pam_unix` against the daemon's own owning account is awkward UX. |
 | D21 | **Service-accounts via env var** for Phase 4-d initial implementation. `ZEBRA_VTY_SERVICE_ACCOUNTS=999,1001,...` (CSV of decimal uids) names uids that are permanent Admin from session creation, with the same shape as root (no deadlines, enable short-circuits to success). State is fixed at daemon startup; runtime changes require a restart. Full YANG integration is deferred to a follow-up (Phase 4-d-ii) if a deployment demands runtime mutability. |
+| D22 | **Initial admin gates: Apply and Clear RPCs.** `SessionTable::require_admin` checks `enabled`, enforces sliding TTL + hard cap (with auto-downgrade on expiry), and slides the idle deadline on each authorized call. |
+| D23 | **Configure-mode admin gate** on `DoExec`. For `ExecType::Exec` only (completion paths remain free): admin is required when `mode != "exec"` (catches a client that sets `mode=configure` directly) and when `mode == "exec" && first_word == "configure"` (UX courtesy — block at entry so the prompt doesn't flip uselessly). Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred). |
 
 ## Deferred work
 
