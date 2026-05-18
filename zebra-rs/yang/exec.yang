@@ -22,6 +22,16 @@ module exec {
     type empty;
   }
 
+  leaf enable {
+    ext:help "Promote this session to the admin role (PAM auth)";
+    type empty;
+  }
+
+  leaf disable {
+    ext:help "Drop this session back to the view role";
+    type empty;
+  }
+
   container show {
     ext:help "Show command";
     presence "Show command";
