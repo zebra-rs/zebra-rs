@@ -60,11 +60,16 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode
 }
 
-/// Register the `show candidate-config { formal | json | yaml }` and
-/// `show running-config { formal | json | yaml }` handlers. The same set is
-/// installed in both exec and configure mode so the commands work
+/// Register the `show candidate-config [ formal | json | yaml ]` and
+/// `show running-config [ formal | json | yaml ]` handlers. The same set
+/// is installed in both exec and configure mode so the commands work
 /// identically from either prompt.
+///
+/// The bare form (no trailing keyword) renders the configuration in
+/// CLI / Cisco-style indented block format. The three keyword
+/// variants select alternate serializations.
 fn install_show_config_handlers(mode: &mut Mode) {
+    mode.install_func(String::from("/show/candidate-config"), show_candidate_cli);
     mode.install_func(
         String::from("/show/candidate-config/formal"),
         show_candidate_formal,
@@ -77,6 +82,7 @@ fn install_show_config_handlers(mode: &mut Mode) {
         String::from("/show/candidate-config/yaml"),
         show_candidate_yaml,
     );
+    mode.install_func(String::from("/show/running-config"), show_running_cli);
     mode.install_func(
         String::from("/show/running-config/formal"),
         show_running_formal,
@@ -175,7 +181,23 @@ fn show(config: &ConfigManager) -> (ExecCode, String) {
     }
 }
 
-// === show {candidate,running}-config { formal | json | yaml } ===
+// === show {candidate,running}-config [ formal | json | yaml ] ===
+//
+// `Config::format()` renders the CLI / Cisco-style indented block view;
+// `Config::list()` renders the flat set-statement form ("formal");
+// `Config::json()` / `Config::yaml()` are the serialized equivalents.
+
+fn show_candidate_cli(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    config.store.candidate.borrow().format(&mut output);
+    (ExecCode::Show, output)
+}
+
+fn show_running_cli(config: &ConfigManager) -> (ExecCode, String) {
+    let mut output = String::new();
+    config.store.running.borrow().format(&mut output);
+    (ExecCode::Show, output)
+}
 
 fn show_candidate_formal(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();

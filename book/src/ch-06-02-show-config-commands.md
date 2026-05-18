@@ -11,23 +11,48 @@ This chapter covers the commands that display either view.
 
 ## Quick reference
 
-All six display commands work identically from both `exec` mode and
+All eight display commands work identically from both `exec` mode and
 `configure` mode.
 
 | Command | Output |
 |---|---|
-| `show candidate-config formal` | Set-style flat statement listing of the **candidate** |
+| `show candidate-config` | **CLI** (Cisco-style indented block) view of the candidate |
+| `show candidate-config formal` | Set-style flat statement listing of the candidate |
 | `show candidate-config json` | Pretty-printed JSON of the candidate |
 | `show candidate-config yaml` | YAML of the candidate |
-| `show running-config formal` | Set-style flat statement listing of the **running** config |
+| `show running-config` | **CLI** view of the running config |
+| `show running-config formal` | Set-style flat statement listing of the running config |
 | `show running-config json` | Pretty-printed JSON of the running config |
 | `show running-config yaml` | YAML of the running config |
 
-The `formal` keyword names the canonical set/delete form — the same
-format `load` and `save` consume. The `json` and `yaml` keywords are
-the equivalent serializations of the same configuration tree.
+The bare form (no trailing keyword) renders the **CLI** view — the
+indented block format familiar from Cisco IOS, suitable for reading
+on a terminal. The `formal` keyword names the canonical set/delete
+form, the same format `load` and `save` consume. The `json` and
+`yaml` keywords are the equivalent serializations of the same
+configuration tree.
 
 ## Output formats
+
+### CLI (default, no trailing keyword)
+
+Cisco-style indented block view. Easy to read on a terminal; the
+default when you don't specify a serialization.
+
+```
+host(config)# show candidate-config
+system {
+    hostname r1
+}
+router {
+    bgp 65000 {
+        router-id 10.0.0.1
+        neighbor 10.0.0.2 {
+            peer-as 65001
+        }
+    }
+}
+```
 
 ### `formal`
 
