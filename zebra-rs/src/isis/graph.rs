@@ -29,6 +29,10 @@ impl ReachMap {
     ) -> Option<Vec<IsisTlvExtIpReachEntry>> {
         self.map.insert(key, value)
     }
+
+    pub fn remove(&mut self, key: &IsisSysId) -> Option<Vec<IsisTlvExtIpReachEntry>> {
+        self.map.remove(key)
+    }
 }
 
 #[derive(Default)]
