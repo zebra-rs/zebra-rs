@@ -1,9 +1,11 @@
-// The client-subscription API (subscribe / unsubscribe / ClientReq)
-// is only exercised by tests until PR 5b wires BGP through it; the
-// timer / session machinery similarly waits for PR 6+ production
-// callers. One module-wide allow is cleaner than peppering
-// individual files — the lint returns naturally as the protocol
-// integrations land.
+// Several surfaces remain unexercised by production until later
+// PRs: the admin-shutdown FSM events (`AdminDown` / `AdminUp` —
+// pending a "shutdown" config callback path), `TimerCmd::ResetDetect`
+// (currently subsumed by `Update`), the `Stats` counters and
+// `local_addr` (pending show-command wiring), and a handful of
+// SessionTable helpers used only by tests. One module-wide allow is
+// cleaner than peppering individual files; the lint returns
+// naturally as those production callers land.
 #![allow(dead_code)]
 
 pub mod config;

@@ -1,7 +1,9 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bgp_packet::*;
 
+use crate::bfd::inst::ClientReq;
+use crate::bfd::session::{SessionKey, SessionParams};
 use crate::bgp::InOut;
 use crate::config::{Args, ConfigOp};
 use crate::policy;
@@ -336,15 +338,72 @@ fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 }
 
 /// `set router bgp neighbor X bfd enable true|false` — flips the
-/// BFD attachment for this neighbor. PR 5b stores the bit on
-/// `peer.config.bfd.enable`; the subscribe/unsubscribe call to BFD
-/// lands in PR 5c once `Bgp` carries a `bfd_client_tx` handle.
+/// BFD attachment for this neighbor. PR 5b stored the bit on
+/// `peer.config.bfd.enable`; PR 5d wires the same flip into a
+/// `ClientReq::Subscribe` / `Unsubscribe` against the BFD instance
+/// (when `bgp.bfd_client_tx` is populated — see PR 5c).
 fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let enable = args.boolean()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.bfd.enable = op.is_set() && enable;
+    let new_enable = op.is_set() && enable;
+    // Stash data we need from the peer, then drop the borrow so we
+    // can touch other Bgp fields without fighting the borrow checker.
+    let local = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.bfd.enable = new_enable;
+        peer.config
+            .transport
+            .update_source
+            .unwrap_or_else(|| unspecified_for(&addr))
+    };
+    let Some(client_tx) = bgp.bfd_client_tx.as_ref() else {
+        if new_enable {
+            tracing::debug!(
+                peer = %addr,
+                "bgp: bfd enable=true but bfd_client_tx is None (BFD not yet spawned)",
+            );
+        }
+        return Some(());
+    };
+    let key = SessionKey {
+        local,
+        remote: addr,
+        ifindex: 0,
+        multihop: false,
+    };
+    let req = if new_enable {
+        // PR 5d uses SessionParams::default() for every neighbor — the
+        // peer's `bfd profile` reference is stored but not yet read.
+        // Profile resolution against `/bfd/profile/<name>` is a
+        // follow-up that needs cross-task config access (BGP would
+        // need a snapshot of BFD's BfdConfig, or BFD has to resolve
+        // profiles internally on Subscribe).
+        ClientReq::Subscribe {
+            client: "bgp".to_string(),
+            key,
+            params: SessionParams::default(),
+            notifier: bgp.bfd_event_tx.clone(),
+        }
+    } else {
+        ClientReq::Unsubscribe {
+            client: "bgp".to_string(),
+            key,
+        }
+    };
+    let _ = client_tx.send(req);
     Some(())
+}
+
+/// Pick an unspecified local address whose family matches `remote`.
+/// Used when the peer has no `update-source` set — BFD's SessionKey
+/// just needs *something* in the `local` slot to demux against, and
+/// 0.0.0.0 / :: are unambiguous within a single (local, remote, ifindex)
+/// tuple.
+fn unspecified_for(remote: &IpAddr) -> IpAddr {
+    match remote {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
 }
 
 /// `set router bgp neighbor X bfd profile NAME` — selects the BFD
@@ -1099,5 +1158,100 @@ impl Bgp {
         // Stored-mode soft-in: retain pre-policy Adj-RIB-In so `clear soft in`
         // can replay locally without sending a Route Refresh.
         self.callback_peer("/soft-reconfiguration/inbound", config_soft_reconfig_in);
+    }
+}
+
+#[cfg(test)]
+mod bfd_wiring_tests {
+    use std::collections::VecDeque;
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    fn arg_words(parts: &[&str]) -> Args {
+        Args(
+            parts
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<VecDeque<_>>(),
+        )
+    }
+
+    /// Construct a Bgp with mock channels and an optional BFD
+    /// client_tx. Returned alongside the BFD ClientReq receiver so
+    /// the caller can assert what was sent.
+    fn fresh_bgp_with_bfd() -> (Bgp, mpsc::UnboundedReceiver<ClientReq>) {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
+        let bgp = Bgp::new(rib_tx, policy_tx, Some(bfd_client_tx));
+        (bgp, bfd_client_rx)
+    }
+
+    /// `bfd enable true` on a known neighbor sends a
+    /// `ClientReq::Subscribe` carrying the matching SessionKey.
+    #[tokio::test]
+    async fn enable_sends_subscribe() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        // Add the peer first (the callback only fires for known peers).
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        // Now flip BFD on.
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.2", "true"]), ConfigOp::Set).unwrap();
+
+        let req = bfd_rx.try_recv().expect("BGP must send a ClientReq");
+        match req {
+            ClientReq::Subscribe { client, key, .. } => {
+                assert_eq!(client, "bgp");
+                assert_eq!(
+                    key.remote,
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                    "remote address mirrors the configured neighbor",
+                );
+                assert!(!key.multihop, "single-hop only in PR 5d");
+                assert_eq!(key.ifindex, 0);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// Flipping `bfd enable` back to false (or deleting it) sends an
+    /// `Unsubscribe` for the same key.
+    #[tokio::test]
+    async fn disable_sends_unsubscribe() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.3"]), ConfigOp::Set).unwrap();
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.3", "true"]), ConfigOp::Set).unwrap();
+        let _ = bfd_rx.try_recv().expect("subscribe arrived first");
+
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.3", "true"]), ConfigOp::Delete)
+            .unwrap();
+        let req = bfd_rx.try_recv().expect("unsubscribe must follow");
+        match req {
+            ClientReq::Unsubscribe { client, key } => {
+                assert_eq!(client, "bgp");
+                assert_eq!(key.remote, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+            }
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+    }
+
+    /// If `bfd_client_tx` is None (BFD not spawned at BGP start time)
+    /// the callback is a no-op — peer config still flips, but no
+    /// ClientReq goes out.
+    #[tokio::test]
+    async fn enable_without_bfd_handle_is_noop() {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        let mut bgp = Bgp::new(rib_tx, policy_tx, None);
+        config_peer(&mut bgp, arg_words(&["10.0.0.4"]), ConfigOp::Set).unwrap();
+        // No bfd handle to assert against; the call must not panic.
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.4", "true"]), ConfigOp::Set).unwrap();
+
+        let peer = bgp
+            .peers
+            .get(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)))
+            .unwrap();
+        assert!(peer.config.bfd.enable, "config bit still flips");
     }
 }

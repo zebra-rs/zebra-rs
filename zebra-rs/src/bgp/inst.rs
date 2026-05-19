@@ -170,13 +170,22 @@ pub struct Bgp {
     pub policy_tx: UnboundedSender<policy::Message>,
     pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
     /// Handle into the BFD instance's client-request channel — used
-    /// by the per-neighbor `bfd { enable }` path (PR 5d) to submit
+    /// by the per-neighbor `bfd { enable }` path to submit
     /// `ClientReq::Subscribe` / `Unsubscribe`. `None` means BFD has
     /// not (yet) been configured: BGP silently skips its BFD attach
     /// logic in that case. Captured at spawn time from
     /// `ConfigManager::bfd_client_tx`; not refreshed if BFD respawns
-    /// later (PR 5d adds a refresh path if needed).
+    /// later (late-binding work is a follow-up).
     pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    /// Sender half of the per-instance `BfdEvent` channel. Cloned and
+    /// handed to BFD as the `notifier` on every `Subscribe`, so all
+    /// state-change events for BGP-attached BFD sessions land on the
+    /// matching `bfd_event_rx` below.
+    pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
+    /// Receive half drained by the BGP event loop in
+    /// [`Self::event_loop`]. PR 5d logs the events; PR 5e replaces
+    /// the log with neighbor teardown on `BfdEvent::Down`.
+    pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
     // BgpAttr shared storage.
     pub attr_store: BgpAttrStore,
 }
@@ -202,6 +211,7 @@ impl Bgp {
         let _ = policy_tx.send(msg);
 
         let (tx, rx) = mpsc::channel(8192);
+        let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
@@ -232,6 +242,8 @@ impl Bgp {
             policy_tx,
             policy_rx: policy_chan.rx,
             bfd_client_tx,
+            bfd_event_tx,
+            bfd_event_rx,
             attr_store: BgpAttrStore::new(),
         };
         bgp.callback_build();
@@ -678,8 +690,27 @@ impl Bgp {
                 Some(msg) = self.policy_rx.recv() => {
                     self.process_policy_msg(msg).await;
                 }
+                Some(event) = self.bfd_event_rx.recv() => {
+                    self.process_bfd_event(event);
+                }
             }
         }
+    }
+
+    /// Handle a [`crate::bfd::inst::BfdEvent`] forwarded by the BFD
+    /// instance. PR 5d logs the transition at info level so operators
+    /// can observe BFD activity; PR 5e replaces the log with the
+    /// actual neighbor-teardown call once the BGP-side FSM hook is
+    /// identified.
+    pub fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
+        let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
+        tracing::info!(
+            ?key,
+            from = %change.from,
+            to = %change.to,
+            diag = %change.diag,
+            "bgp: bfd session state change",
+        );
     }
 }
 
