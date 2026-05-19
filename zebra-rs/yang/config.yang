@@ -606,6 +606,33 @@ module config {
               type uint32;
             }
           }
+
+          container bfd {
+            ext:help "BFD attachment for this IS-IS interface";
+            description
+              "Per-interface BFD attachment for IS-IS. When `enable`
+               is true the IS-IS adjacency FSM subscribes a BFD
+               session at the moment it reaches Up; a subsequent
+               BFD Down event drives the adjacency back to Down
+               per RFC 5882 §5. Storage-only in PR 6; PR 7 wires
+               the runtime subscribe / teardown calls.";
+
+            leaf enable {
+              type boolean;
+              default false;
+              description
+                "Activates the BFD session for adjacencies on this
+                 interface. Disabling (or removing the `bfd` block)
+                 detaches the session.";
+            }
+
+            leaf profile {
+              type string;
+              description
+                "Name of a `/bfd/profile` entry whose parameters
+                 apply to BFD sessions formed on this interface.";
+            }
+          }
         }
         container tracing {
           leaf all {

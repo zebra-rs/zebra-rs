@@ -143,6 +143,14 @@ impl Isis {
             "/router/isis/interface/ipv4/enable",
             link::config_ipv4_enable,
         );
+        // Per-interface BFD attachment (PR 6 — storage only; the
+        // adjacency-FSM subscribe and BfdEvent::Down teardown paths
+        // land in PR 7).
+        self.callback_add("/router/isis/interface/bfd/enable", link::config_bfd_enable);
+        self.callback_add(
+            "/router/isis/interface/bfd/profile",
+            link::config_bfd_profile,
+        );
         self.callback_add(
             "/router/isis/interface/ipv4/prefix-sid/index",
             link::config_ipv4_prefix_sid_index,
