@@ -2508,6 +2508,59 @@ fn first_router_hop_id(lsp_map: &LspMap, path: &[usize]) -> Option<usize> {
     (idx < path.len()).then_some(path[idx])
 }
 
+/// Translate a graph-level `spf::RepairPath` into the FIB-ready
+/// `RepairPathMpls`: resolve the SR segment list to an absolute MPLS
+/// label stack and pin the post-conv first-hop's local egress
+/// (ifindex from `first_hop_link_id`; addr from the link's neighbor
+/// table). Returns `None` when any segment fails to resolve or when
+/// the first-hop has no usable IPv4 address — partial stacks are
+/// refused because a divergent label path would silently misroute.
+///
+/// LAN trivial-repair (empty label stack, first_hop is a pseudonode)
+/// is skipped: picking an arbitrary LAN member for an un-steered
+/// repair can loop, and the per-path "real router after the PN" is
+/// not carried on `RepairPath` today. SR-steered LAN repairs are
+/// fine — the labels drive forwarding independent of which LAN
+/// member receives the packet first.
+fn build_repair_path_mpls(
+    top: &IsisTop,
+    level: Level,
+    rp: &spf::RepairPath,
+) -> Option<RepairPathMpls> {
+    let labels = repair_segments_to_mpls_labels(top, level, &rp.segs)?;
+
+    let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
+    let link = top.links.get(&ifindex)?;
+    let lsp_map = top.lsp_map.get(&level);
+
+    let addr = if lsp_map.is_pseudo(rp.first_hop) {
+        if labels.is_empty() {
+            return None;
+        }
+        link.state
+            .nbrs
+            .get(&level)
+            .values()
+            .find_map(|nbr| nbr.addr4.keys().next().copied())?
+    } else {
+        let sys_id = lsp_map.resolve(rp.first_hop)?;
+        link.state
+            .nbrs
+            .get(&level)
+            .get(sys_id)?
+            .addr4
+            .keys()
+            .next()
+            .copied()?
+    };
+
+    Some(RepairPathMpls {
+        ifindex,
+        addr,
+        labels,
+    })
+}
+
 /// Build RIB from SPF calculation results
 fn build_rib_from_spf(
     top: &mut IsisTop,
@@ -2586,10 +2639,20 @@ fn build_rib_from_spf(
             }
         }
 
-        // TI-LFA backup path.
-        if let Some(repair_path) = tilfa_result.get(node) {
-            // Found TI-LFA backup path.
-            println!("repair_path:{:?}", repair_path);
+        // TI-LFA backup path. tilfa_repair_path() only emits entries
+        // for single-primary-first-hop destinations today (ECMP at
+        // the primary level is skipped), so spf_nhops shares a single
+        // protected first-hop — stamping the same backup on every
+        // entry is correct by construction. When primary-ECMP-aware
+        // TI-LFA lands, match each entry in the Vec to its specific
+        // protected primary by first-hop vertex.
+        if let Some(repair_paths) = tilfa_result.get(node)
+            && let Some(repair) = repair_paths.first()
+            && let Some(backup) = build_repair_path_mpls(top, level, repair)
+        {
+            for nhop in spf_nhops.values_mut() {
+                nhop.backup = Some(backup.clone());
+            }
         }
 
         // Process reachability entries for this node.
