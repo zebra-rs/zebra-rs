@@ -494,17 +494,56 @@ impl Isis {
             return;
         }
         let mut top = self.top();
-        // lsp_generate returns None when origination is suppressed
-        // (seq-wrap freeze active). Skip emit + insert in that case
-        // — the freeze timer will trigger a fresh origination later.
-        let Some(mut lsp) = lsp_generate(&mut top, level, seq_floor) else {
+        // lsp_generate returns an empty Vec when origination is
+        // suppressed (seq-wrap freeze active). It otherwise returns
+        // one IsisLsp per fragment of the self-originated set
+        // (fragment 0 always present plus N higher-numbered fragments
+        // when distributable TLVs exceed lsp_mtu_size).
+        let fragments = lsp_generate(&mut top, level, seq_floor);
+        if fragments.is_empty() {
             return;
-        };
-        let buf = lsp_emit(&mut lsp, level);
-        let lsp_id = lsp.lsp_id;
-        insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
+        }
 
-        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        // Highest fragment id produced this round; trailing fragments
+        // beyond this need to be purged from the LSDB so peers flush
+        // stale state (a fragment that becomes empty after a topology
+        // shrink stays in the LSDB until we emit a RemainingLifetime=0
+        // version of it).
+        let max_frag = fragments
+            .iter()
+            .map(|l| l.lsp_id.fragment_id())
+            .max()
+            .unwrap_or(0);
+
+        for mut frag in fragments {
+            let buf = lsp_emit(&mut frag, level);
+            let lsp_id = frag.lsp_id;
+            insert_self_originate(&mut top, level, frag, Some(buf.to_vec()));
+            top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        }
+
+        // Tail-purge: any self-originated fragment with a fragment_id
+        // above what we just produced is orphaned — its TLVs migrated
+        // into a lower fragment on this build (or the originator's
+        // total TLV footprint shrank). Send a Purge for each so the
+        // network flushes them; the standard purge path emits a
+        // RemainingLifetime=0 LSP at a bumped seq.
+        let self_sys = self.config.net.sys_id();
+        let orphans: Vec<IsisLspId> = self
+            .lsdb
+            .get(&level)
+            .iter()
+            .filter(|(id, lsa)| {
+                lsa.originated
+                    && id.sys_id() == self_sys
+                    && !id.is_pseudo()
+                    && id.fragment_id() > max_frag
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for lsp_id in orphans {
+            let _ = self.tx.send(Message::LspPurge(level, lsp_id));
+        }
     }
 
     /// Throttle-aware front door for self-LSP origination. Multiple
