@@ -366,17 +366,21 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     // get their own seq from the LSDB at emit time.
     let frag0_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
-    // ISO 10589 §7.3.16.4: when the previous origination's seq hit
-    // 0xFFFFFFFF we sent a purge and armed a freeze. Until that
-    // expires we must not emit a fresh self-LSP — origination is
-    // suppressed entirely (Cisco-style pragmatic interpretation of
-    // "IS-IS process disabled").
-    if top.lsp_seq_wrap_wait.get(&level).is_some() {
+    // ISO 10589 §7.3.16.4: when fragment 0's previous origination's
+    // seq hit 0xFFFFFFFF we sent a purge and armed a freeze. While
+    // that freeze is active we must not emit any of the LSP set —
+    // receivers treat a router whose fragment 0 is absent as missing
+    // its node-wide attributes (hostname, capability, OL bit) and
+    // drop it from SPF, so refreshing higher fragments while frag 0
+    // is in zero-age limbo would just churn the network. Higher
+    // fragments' freezes are scoped to that one fragment and handled
+    // post-pack below.
+    if top.lsp_seq_wrap_wait.get(&level).contains_key(&0) {
         isis_event_trace!(
             top.tracing,
             LspOriginate,
             &level,
-            "[LspOriginate] suppressed — seq-wrap freeze in effect"
+            "[LspOriginate] suppressed — fragment 0 seq-wrap freeze in effect"
         );
         return Vec::new();
     }
@@ -413,34 +417,25 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         frag0_seq
     );
 
-    // ISO 10589 §7.3.16.4: sequence-number wrap-up.
+    // ISO 10589 §7.3.16.4: sequence-number wrap-up for fragment 0.
     //
     // Emit one final LSP at seq = 0xFFFFFFFF with RemainingLifetime
     // = 0 (the purge), then freeze origination for
     // `lsp_hold_time + ZeroAgeLifetime` so any surviving copy in any
     // peer's LSDB has fully aged out. When the freeze clears, the
     // LSDB entry is dropped and the next origination computes
-    // seq = 1 from scratch. Wrap check is fragment-0 only here; per-
-    // fragment wrap (and the per-fragment freeze table that needs)
-    // is the follow-up after the packer lands.
+    // seq = 1 from scratch. Fragment 0's freeze is special — its
+    // absence makes the whole node unusable for SPF — so it short-
+    // circuits the entire origination. Higher fragments wrap
+    // independently and only suppress their own re-emission.
     if frag0_seq == u32::MAX {
         isis_event_trace!(
             top.tracing,
             LspOriginate,
             &level,
-            "[LspSeqWrap] hit u32::MAX — purging and freezing origination"
+            "[LspSeqWrap] fragment 0 hit u32::MAX — purging and freezing origination"
         );
-        let _ = top.tx.send(Message::LspPurge(level, frag0_id));
-
-        let wait_secs = top.config.hold_time().saturating_add(ZERO_AGE_LIFETIME);
-        let tx = top.tx.clone();
-        let timer = Timer::once(wait_secs as u64, move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::LspSeqWrapClear(level));
-            }
-        });
-        *top.lsp_seq_wrap_wait.get_mut(&level) = Some(timer);
+        arm_seq_wrap_freeze(top, level, frag0_id);
         return Vec::new();
     }
 
@@ -1038,23 +1033,78 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     );
 
     // Resolve seq numbers per fragment. Fragment 0 uses the seq we
-    // computed above (with seq_floor); higher fragments derive their
-    // seq from the LSDB (existing+1 or 1). Per-fragment seq-wrap
-    // detection is intentionally deferred — Phase 4 generalises the
-    // wrap freeze table from per-level to per-(level, fragment_id).
-    for frag in fragments.iter_mut() {
-        if frag.lsp_id.fragment_id() == 0 {
+    // computed above (with seq_floor + wrap detection already
+    // applied). Higher fragments derive their seq from the LSDB
+    // (existing+1 or 1) and run wrap detection independently — if a
+    // fragment's seq would hit u32::MAX we purge that fragment,
+    // arm its own freeze timer, and drop it from the emit set. The
+    // rest of the LSP set continues to refresh normally.
+    let mut emit_set: Vec<IsisLsp> = Vec::with_capacity(fragments.len());
+    for mut frag in fragments.drain(..) {
+        let frag_id = frag.lsp_id.fragment_id();
+        if frag_id == 0 {
             frag.seq_number = frag0_seq;
-        } else {
-            let existing = top
-                .lsdb
-                .get(&level)
-                .get(&frag.lsp_id)
-                .map(|x| x.lsp.seq_number);
-            frag.seq_number = existing.map(|e| e.saturating_add(1)).unwrap_or(0x0001);
+            emit_set.push(frag);
+            continue;
         }
+
+        // Per-fragment freeze suppresses this fragment's re-emission
+        // until its `MaxAge + safety` timer fires; other fragments
+        // continue refreshing.
+        if top.lsp_seq_wrap_wait.get(&level).contains_key(&frag_id) {
+            isis_event_trace!(
+                top.tracing,
+                LspOriginate,
+                &level,
+                "[LspOriginate] fragment {} suppressed — seq-wrap freeze in effect",
+                frag_id
+            );
+            continue;
+        }
+
+        let existing = top
+            .lsdb
+            .get(&level)
+            .get(&frag.lsp_id)
+            .map(|x| x.lsp.seq_number);
+        let seq = existing.map(|e| e.saturating_add(1)).unwrap_or(0x0001);
+        if seq == u32::MAX {
+            isis_event_trace!(
+                top.tracing,
+                LspOriginate,
+                &level,
+                "[LspSeqWrap] fragment {} hit u32::MAX — purging and freezing this fragment",
+                frag_id
+            );
+            arm_seq_wrap_freeze(top, level, frag.lsp_id);
+            continue;
+        }
+        frag.seq_number = seq;
+        emit_set.push(frag);
     }
-    fragments
+    emit_set
+}
+
+/// Schedule the seq-wrap purge + freeze timer for one specific
+/// fragment. Sends `Message::LspPurge` so the standard purge path
+/// emits a `RemainingLifetime = 0` LSP at the wrapping seq, then
+/// installs a `MaxAge + ZeroAgeLifetime` timer that fires
+/// `Message::LspSeqWrapClear(level, frag_id)`; the clear handler
+/// drops the LSDB entry and re-triggers origination, allowing the
+/// next emit to compute seq = 1 from scratch.
+fn arm_seq_wrap_freeze(top: &mut IsisTop, level: Level, lsp_id: IsisLspId) {
+    let _ = top.tx.send(Message::LspPurge(level, lsp_id));
+
+    let wait_secs = top.config.hold_time().saturating_add(ZERO_AGE_LIFETIME);
+    let frag_id = lsp_id.fragment_id();
+    let tx = top.tx.clone();
+    let timer = Timer::once(wait_secs as u64, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::LspSeqWrapClear(level, frag_id));
+        }
+    });
+    top.lsp_seq_wrap_wait.get_mut(&level).insert(frag_id, timer);
 }
 
 pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {

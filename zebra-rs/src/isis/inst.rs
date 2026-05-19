@@ -135,15 +135,25 @@ pub struct Isis {
     /// reservations don't leak across prefix swaps.
     pub elib: super::srv6::ElibPool,
 
-    /// Per-level seq-number-wrap wait. Armed when `lsp_generate`
-    /// would have emitted a self-LSP with seq == 0xFFFFFFFF: we
-    /// instead push a purge (RemainingLifetime = 0) and freeze
-    /// self-LSP origination until this timer fires, then re-originate
-    /// with seq = 1. Wait length = `config.hold_time() + 60s` —
-    /// long enough that any peer's surviving copy of our old LSP has
-    /// aged out so they accept the seq = 1 origination as newer.
+    /// Per-fragment seq-number-wrap wait. Keyed by fragment id
+    /// (LSPID byte 7). Armed when a fragment's next emission would
+    /// hit seq == 0xFFFFFFFF: we push a purge (RemainingLifetime = 0)
+    /// for that specific fragment and freeze its re-emission until
+    /// the timer fires, then re-originate with seq = 1.
+    ///
+    /// Wait length = `config.hold_time() + 60s` — long enough that
+    /// any peer's surviving copy of our old fragment has fully aged
+    /// out so they accept the seq = 1 origination as newer.
+    ///
+    /// Fragment 0's freeze blocks the entire LSP set from emitting,
+    /// since receivers treat a router without fragment 0 as missing
+    /// its node-wide attributes (hostname, capability, OL bit) and
+    /// drop it from SPF. Higher fragments' freezes only suppress
+    /// that specific fragment's re-emission; the rest of the set
+    /// continues to refresh normally.
+    ///
     /// See ISO 10589 §7.3.16.4.
-    pub lsp_seq_wrap_wait: Levels<Option<Timer>>,
+    pub lsp_seq_wrap_wait: Levels<BTreeMap<u8, Timer>>,
 
     /// SRLG-update return channel from the RIB. Carries the full
     /// SRLG table snapshot on subscribe and after every commit that
@@ -210,10 +220,10 @@ pub struct IsisTop<'a> {
     /// names through this map when emitting TLVs 138 / 139.
     pub srlg_groups: &'a BTreeMap<String, SrlgGroup>,
 
-    /// Seq-wrap wait timer (see `Isis::lsp_seq_wrap_wait`). Threaded
-    /// through so `lsp_generate` can short-circuit and arm the timer
-    /// without round-tripping through the event loop.
-    pub lsp_seq_wrap_wait: &'a mut Levels<Option<Timer>>,
+    /// Seq-wrap wait timers (see `Isis::lsp_seq_wrap_wait`). Threaded
+    /// through so `lsp_generate` can short-circuit per fragment and
+    /// arm the timer without round-tripping through the event loop.
+    pub lsp_seq_wrap_wait: &'a mut Levels<BTreeMap<u8, Timer>>,
 }
 
 impl Isis {
@@ -300,7 +310,7 @@ impl Isis {
             sr_locator: None,
             sr_end_sid: None,
             elib: super::srv6::ElibPool::new(),
-            lsp_seq_wrap_wait: Levels::<Option<Timer>>::default(),
+            lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
             srlg_rx,
             srlg_groups: BTreeMap::new(),
             bfd_client_tx,
@@ -509,8 +519,8 @@ impl Isis {
                     *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
                 }
             }
-            Message::LspSeqWrapClear(level) => {
-                self.process_lsp_seq_wrap_clear(level);
+            Message::LspSeqWrapClear(level, frag_id) => {
+                self.process_lsp_seq_wrap_clear(level, frag_id);
             }
             Message::BfdSubscribe(key) => {
                 self.process_bfd_subscribe(key);
@@ -682,20 +692,22 @@ impl Isis {
         // lsp_flood(&mut top, level, &lsp_id);
     }
 
-    /// ISO 10589 §7.3.16.4 wait expired: drop the per-level freeze,
-    /// drop the purged self-LSP record from the local LSDB so the
-    /// next `lsp_generate` sees no existing entry and computes
-    /// seq = 1, then kick LSP origination.
-    fn process_lsp_seq_wrap_clear(&mut self, level: Level) {
+    /// ISO 10589 §7.3.16.4 wait expired for one specific fragment:
+    /// drop the per-fragment freeze entry, drop that fragment's
+    /// purged self-LSP record from the local LSDB so the next
+    /// `lsp_generate` sees no existing entry and computes seq = 1
+    /// for it, then kick LSP origination.
+    fn process_lsp_seq_wrap_clear(&mut self, level: Level, frag_id: u8) {
         isis_event_trace!(
             self.tracing,
             LspOriginate,
             &level,
-            "[LspSeqWrap] MaxAge wait expired — clearing freeze and re-originating from seq 1"
+            "[LspSeqWrap] fragment {} MaxAge wait expired — clearing freeze and re-originating from seq 1",
+            frag_id
         );
-        *self.lsp_seq_wrap_wait.get_mut(&level) = None;
+        self.lsp_seq_wrap_wait.get_mut(&level).remove(&frag_id);
 
-        let lsp_id = IsisLspId::new(self.config.net.sys_id(), 0, 0);
+        let lsp_id = IsisLspId::new(self.config.net.sys_id(), 0, frag_id);
         self.lsdb.get_mut(&level).remove(&lsp_id);
 
         let _ = self.tx.send(Message::LspOriginate(level, None));
@@ -1164,10 +1176,11 @@ pub enum Message {
     SpfCalc(Level),
     AdjacencyUp(Level, u32),
     /// MaxAge wait expired after a seq-number-wrap purge (ISO 10589
-    /// §7.3.16.4). Clears the per-level freeze and re-originates the
-    /// self LSP, which will compute seq = 1 (no existing entry in
-    /// LSDB once the purge has been removed).
-    LspSeqWrapClear(Level),
+    /// §7.3.16.4). Clears the per-fragment freeze entry for
+    /// `(level, fragment_id)` and re-originates the self LSP set,
+    /// which will compute seq = 1 for the freshly-unfrozen fragment
+    /// (no existing entry in LSDB once the purge has been removed).
+    LspSeqWrapClear(Level, u8),
     /// An adjacency on a `bfd { enable true }` interface reached
     /// Up. The IS-IS event loop forwards this as a
     /// `ClientReq::Subscribe` against the BFD instance — see
@@ -1219,8 +1232,8 @@ impl Display for Message {
             Message::BfdUnsubscribe(key) => {
                 write!(f, "[Message::BfdUnsubscribe({:?})]", key.remote)
             }
-            Message::LspSeqWrapClear(level) => {
-                write!(f, "[Message::LspSeqWrapClear({})]", level)
+            Message::LspSeqWrapClear(level, frag_id) => {
+                write!(f, "[Message::LspSeqWrapClear({}, frag={})]", level, frag_id)
             }
         }
     }
