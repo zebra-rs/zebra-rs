@@ -8,7 +8,8 @@ use isis_packet::{IsisLspId, IsisNeighborId, IsisSysId, IsisTlv, SidLabelValue};
 use crate::rib;
 use crate::spf;
 
-use super::inst::{IsisTop, LspMap};
+use super::graph::LspMap;
+use super::inst::IsisTop;
 use super::level::Level;
 use super::link::Afi;
 
