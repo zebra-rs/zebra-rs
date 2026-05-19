@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use bytes::BytesMut;
@@ -29,6 +30,36 @@ const LSP_PDU_OVERHEAD: usize = 27;
 /// list overflows this boundary into multiple TLV instances of
 /// the same type before the packer ever sees them.
 const TLV_WIRE_MAX: usize = 257;
+
+/// Stable identity for a single-entry distributable TLV instance.
+/// Lets the packer place this TLV in the same fragment it lived in
+/// last time we originated — so adding or removing a neighbor only
+/// shifts that one TLV instead of reshuffling the whole set.
+///
+/// Multi-entry TLVs (TLV 135 / 236 / 237 / 222 with more than one
+/// entry per instance) are not keyed in this first cut; the
+/// splitter shards them and each shard's identity depends on entry
+/// ordering, so per-entry stability needs a different model. Those
+/// TLVs go through the greedy fall-back path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TlvKey {
+    /// TLV 22 instance with exactly one neighbor entry. Our LSP
+    /// builder emits one such instance per local adjacency, so the
+    /// key uniquely identifies a per-adjacency TLV.
+    ExtIsReach(IsisNeighborId),
+}
+
+/// Return the stable key for a TLV instance, if one is defined.
+/// Used both for "where did this TLV go last time?" lookups and
+/// for "record where this TLV ended up this time" writes.
+pub(super) fn key_for_tlv(tlv: &IsisTlv) -> Option<TlvKey> {
+    match tlv {
+        IsisTlv::ExtIsReach(t) if t.entries.len() == 1 => {
+            Some(TlvKey::ExtIsReach(t.entries[0].neighbor_id))
+        }
+        _ => None,
+    }
+}
 
 use super::config::{IsisConfig, MtId};
 use super::ifsm::has_level;
@@ -236,6 +267,7 @@ fn pack_into_fragments(
     types: IsisLspTypes,
     hold_time: u16,
     lsp_mtu_size: u16,
+    memory: Option<&BTreeMap<TlvKey, u8>>,
 ) -> Vec<IsisLsp> {
     let mtu = lsp_mtu_size as usize;
     let budget = mtu.saturating_sub(LSP_PDU_OVERHEAD);
@@ -258,30 +290,79 @@ fn pack_into_fragments(
     });
     frag_bytes.push(anchor_bytes);
 
+    // Pre-open any non-zero fragments that the memory expects to
+    // exist, so a hint pointing at frag 5 finds a slot even if
+    // earlier-in-iteration TLVs haven't filled up frags 1..4 yet.
+    // Empty fragments at the tail are valid wire output — receivers
+    // accept them — and the tail-purge logic in
+    // `process_lsp_originate` retires any that go unused.
+    if let Some(m) = memory
+        && let Some(&max_hint) = m.values().max()
+        && max_hint > 0
+    {
+        for i in 1..=max_hint as usize {
+            if i >= frags.len() {
+                let frag_id = i as u8;
+                frags.push(IsisLsp {
+                    hold_time,
+                    lsp_id: IsisLspId::from_neighbor_id(base, frag_id),
+                    types,
+                    tlvs: Vec::new(),
+                    ..Default::default()
+                });
+                frag_bytes.push(0);
+            }
+        }
+    }
+
     for tlv in distributable {
         let n = tlv.wire_len();
-        let target = (0..frags.len()).find(|&i| frag_bytes[i] + n <= budget);
-        if let Some(i) = target {
-            frags[i].tlvs.push(tlv);
-            frag_bytes[i] += n;
-        } else {
-            if frags.len() >= 256 {
-                tracing::warn!(
-                    "[LspPack] LSPDBOverflow: cannot fit TLV (wire_len={}) in any of 256 fragments; dropping",
-                    n
-                );
-                break;
+
+        // Honor the placement memory first: if this TLV has a stable
+        // key and the remembered fragment still has room, slot it
+        // there. Falls through to greedy when the hint is stale (no
+        // remembered fragment, fragment gone, or doesn't fit).
+        let hint = memory
+            .and_then(|m| key_for_tlv(&tlv).and_then(|k| m.get(&k)))
+            .copied();
+        let target = hint
+            .filter(|&h| (h as usize) < frags.len() && frag_bytes[h as usize] + n <= budget)
+            .map(|h| h as usize)
+            .or_else(|| (0..frags.len()).find(|&i| frag_bytes[i] + n <= budget));
+
+        match target {
+            Some(i) => {
+                frags[i].tlvs.push(tlv);
+                frag_bytes[i] += n;
             }
-            let frag_id = frags.len() as u8;
-            frags.push(IsisLsp {
-                hold_time,
-                lsp_id: IsisLspId::from_neighbor_id(base, frag_id),
-                types,
-                tlvs: vec![tlv],
-                ..Default::default()
-            });
-            frag_bytes.push(n);
+            None => {
+                if frags.len() >= 256 {
+                    tracing::warn!(
+                        "[LspPack] LSPDBOverflow: cannot fit TLV (wire_len={}) in any of 256 fragments; dropping",
+                        n
+                    );
+                    break;
+                }
+                let frag_id = frags.len() as u8;
+                frags.push(IsisLsp {
+                    hold_time,
+                    lsp_id: IsisLspId::from_neighbor_id(base, frag_id),
+                    types,
+                    tlvs: vec![tlv],
+                    ..Default::default()
+                });
+                frag_bytes.push(n);
+            }
         }
+    }
+
+    // Drop trailing empty fragments — these are pre-opened slots
+    // for hints that turned out to be stale (or never reached).
+    // Keeping them would emit empty LSPs and trigger tail-purge
+    // unnecessarily on the very next origination.
+    while frags.len() > 1 && frag_bytes.last() == Some(&0) {
+        frags.pop();
+        frag_bytes.pop();
     }
 
     frags
@@ -333,6 +414,10 @@ pub fn dis_generate(
         split_distributable_at_255(IsisTlv::ExtIsReach(is_reach))
     };
 
+    // Pseudonode LSPs don't use placement memory today — see
+    // `Isis::lsp_placement_memory`. The LAN's neighbor list rarely
+    // churns once DIS election settles, so the cost-benefit of a
+    // per-pseudonode memory map isn't there yet.
     let mut fragments = pack_into_fragments(
         Vec::new(),
         distributable,
@@ -340,6 +425,7 @@ pub fn dis_generate(
         types,
         top.config.hold_time(),
         top.config.lsp_mtu_size(),
+        None,
     );
 
     // Resolve seq numbers per fragment. Fragment 0 honors `base`
@@ -1044,6 +1130,10 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         .collect();
 
     // Bin-pack into fragments under the configured originatingLSPBufferSize.
+    // Pass the stable-placement memory so per-adjacency TLV 22
+    // instances land in the same fragment they previously occupied
+    // (when they still fit), avoiding cascade reshuffles when one
+    // adjacency joins or leaves.
     let mut fragments = pack_into_fragments(
         anchors,
         distributable,
@@ -1051,6 +1141,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         types,
         top.config.hold_time(),
         top.config.lsp_mtu_size(),
+        Some(top.lsp_placement_memory.get(&level)),
     );
 
     // Resolve seq numbers per fragment. Fragment 0 uses the seq we
@@ -1103,6 +1194,27 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         frag.seq_number = seq;
         emit_set.push(frag);
     }
+
+    // Refresh the stable-placement memory from this emission's
+    // actual placements. Built from scratch — only TLVs that
+    // survived (frag 0 always; higher fragments unless frozen)
+    // are recorded, so memory entries for dropped TLVs naturally
+    // age out. Frozen-fragment placements are intentionally
+    // forgotten — next emit will re-place those TLVs greedy.
+    let new_memory = {
+        let mut m: BTreeMap<TlvKey, u8> = BTreeMap::new();
+        for frag in &emit_set {
+            let frag_id = frag.lsp_id.fragment_id();
+            for tlv in &frag.tlvs {
+                if let Some(key) = key_for_tlv(tlv) {
+                    m.insert(key, frag_id);
+                }
+            }
+        }
+        m
+    };
+    *top.lsp_placement_memory.get_mut(&level) = new_memory;
+
     emit_set
 }
 
@@ -1395,6 +1507,7 @@ mod tests {
             IsisLspTypes::from(2),
             1200,
             1492,
+            None,
         );
         assert_eq!(frags.len(), 1, "everything fits in one fragment under 1492");
         let f0 = &frags[0];
@@ -1434,6 +1547,7 @@ mod tests {
             IsisLspTypes::from(2),
             1200,
             mtu,
+            None,
         );
         assert!(frags.len() >= 2, "expected packer to open fragment 1");
         assert_eq!(frags[0].lsp_id.fragment_id(), 0);
@@ -1447,5 +1561,110 @@ mod tests {
             .iter()
             .any(|t| matches!(t, IsisTlv::AreaAddr(_)));
         assert!(!anchor_in_one, "anchors must not leak into fragment 1");
+    }
+
+    fn ext_is_reach_for(b: u8) -> IsisTlv {
+        IsisTlv::ExtIsReach(IsisTlvExtIsReach {
+            entries: vec![IsisTlvExtIsReachEntry {
+                neighbor_id: IsisNeighborId::from_sys_id(
+                    &IsisSysId {
+                        id: [0, 0, 0, 0, 0, b],
+                    },
+                    0,
+                ),
+                metric: 10,
+                subs: vec![],
+            }],
+        })
+    }
+
+    fn frag_id_for(frags: &[IsisLsp], key: TlvKey) -> Option<u8> {
+        for f in frags {
+            for tlv in &f.tlvs {
+                if key_for_tlv(tlv) == Some(key) {
+                    return Some(f.lsp_id.fragment_id());
+                }
+            }
+        }
+        None
+    }
+
+    /// Greedy first-fit reshuffles when a TLV is removed mid-set:
+    /// downstream TLVs slide forward into the gap. With placement
+    /// memory the survivors stay in their previous fragment. Build
+    /// 5 ExtIsReach TLVs under a tight mtu so they span 2 fragments,
+    /// remember the placement, then re-pack with one removed and
+    /// verify nobody else moved.
+    #[test]
+    fn placement_memory_preserves_survivors_after_removal() {
+        let area = IsisTlv::AreaAddr(IsisTlvAreaAddr {
+            area_addr: vec![0x49, 0x00, 0x01],
+        });
+        let tlvs: Vec<IsisTlv> = (1..=5).map(ext_is_reach_for).collect();
+        let base = IsisNeighborId::from_sys_id(&IsisSysId::default(), 0);
+
+        // Tight mtu — anchors (3-byte area + 2-byte header) + 3 of
+        // these single-entry TLV 22 instances fit; the 4th spills.
+        // Each TLV 22 instance is ~16 bytes wire (2 header + 11
+        // entry + 1 sublen + 0 subs = 14, near the lower bound).
+        let mtu = (LSP_PDU_OVERHEAD + 5 + 3 * 18) as u16;
+
+        let frags = pack_into_fragments(
+            vec![area.clone()],
+            tlvs.clone(),
+            base,
+            IsisLspTypes::from(2),
+            1200,
+            mtu,
+            None,
+        );
+        assert!(
+            frags.len() >= 2,
+            "tight mtu should force at least 2 fragments"
+        );
+
+        // Snapshot every TLV's fragment id.
+        let mut memory: BTreeMap<TlvKey, u8> = BTreeMap::new();
+        let mut original: BTreeMap<TlvKey, u8> = BTreeMap::new();
+        for f in &frags {
+            for tlv in &f.tlvs {
+                if let Some(key) = key_for_tlv(tlv) {
+                    memory.insert(key, f.lsp_id.fragment_id());
+                    original.insert(key, f.lsp_id.fragment_id());
+                }
+            }
+        }
+
+        // Drop the third TLV (the one most likely to be at the
+        // boundary between fragments under tight budget) and re-pack
+        // with the memory in hand.
+        let mut tlvs_after = tlvs.clone();
+        let dropped_key = key_for_tlv(&tlvs[2]).expect("third TLV has a stable key");
+        tlvs_after.remove(2);
+        let frags_after = pack_into_fragments(
+            vec![area],
+            tlvs_after,
+            base,
+            IsisLspTypes::from(2),
+            1200,
+            mtu,
+            Some(&memory),
+        );
+
+        // Every survivor must be in the fragment it occupied before.
+        for (key, &was) in &original {
+            if *key == dropped_key {
+                continue;
+            }
+            let now = frag_id_for(&frags_after, *key);
+            assert_eq!(
+                now,
+                Some(was),
+                "TLV {:?} moved: was frag {} now frag {:?}",
+                key,
+                was,
+                now
+            );
+        }
     }
 }

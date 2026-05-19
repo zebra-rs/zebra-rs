@@ -33,7 +33,7 @@ use super::ifsm::{csnp_timer, has_level};
 use super::link::{Afis, IsisLinks, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::lsp::{
-    dis_generate, lsp_emit, lsp_generate, resolve_dis_ifindex, target_block_name,
+    TlvKey, dis_generate, lsp_emit, lsp_generate, resolve_dis_ifindex, target_block_name,
     target_locator_name,
 };
 use super::nfsm::nbr_hold_timer_expire;
@@ -155,6 +155,27 @@ pub struct Isis {
     /// See ISO 10589 §7.3.16.4.
     pub lsp_seq_wrap_wait: Levels<BTreeMap<u8, Timer>>,
 
+    /// Memoised TLV-to-fragment placement for the router's self-LSP
+    /// set, keyed by stable per-TLV identity (e.g. TLV 22 keyed by
+    /// neighbor id). The packer consults this before greedy bin-
+    /// packing so a previously-placed TLV ends up in the same
+    /// fragment it lived in last origination, as long as it still
+    /// fits. Without this, adding or removing one TLV can cascade-
+    /// shift every TLV after it across fragment boundaries, causing
+    /// every fragment's seq + checksum to churn and the whole set
+    /// to re-flood.
+    ///
+    /// The memory is rebuilt from scratch after every successful
+    /// origination — only TLVs in the emitted fragments get
+    /// recorded, so stale entries (TLVs that disappeared from the
+    /// origination) naturally fall out.
+    ///
+    /// Only the router LSP path stabilises today. Pseudonode LSPs
+    /// (`dis_generate`) use the greedy packer directly; their
+    /// neighbor list is comparatively static so reshuffle pressure
+    /// is low.
+    pub lsp_placement_memory: Levels<BTreeMap<TlvKey, u8>>,
+
     /// SRLG-update return channel from the RIB. Carries the full
     /// SRLG table snapshot on subscribe and after every commit that
     /// changes any group.
@@ -224,6 +245,10 @@ pub struct IsisTop<'a> {
     /// through so `lsp_generate` can short-circuit per fragment and
     /// arm the timer without round-tripping through the event loop.
     pub lsp_seq_wrap_wait: &'a mut Levels<BTreeMap<u8, Timer>>,
+
+    /// Stable-placement memory for the self-LSP packer; see
+    /// `Isis::lsp_placement_memory`.
+    pub lsp_placement_memory: &'a mut Levels<BTreeMap<TlvKey, u8>>,
 }
 
 impl Isis {
@@ -311,6 +336,7 @@ impl Isis {
             sr_end_sid: None,
             elib: super::srv6::ElibPool::new(),
             lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
+            lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
             srlg_rx,
             srlg_groups: BTreeMap::new(),
             bfd_client_tx,
@@ -970,6 +996,7 @@ impl Isis {
             sr_end_sid: &self.sr_end_sid,
             srlg_groups: &self.srlg_groups,
             lsp_seq_wrap_wait: &mut self.lsp_seq_wrap_wait,
+            lsp_placement_memory: &mut self.lsp_placement_memory,
         }
     }
 
