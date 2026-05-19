@@ -519,6 +519,8 @@ pub enum IsisTlv {
     Padding(IsisTlvPadding),
     #[nom(Selector = "IsisTlvType::LspEntries")]
     LspEntries(IsisTlvLspEntries),
+    #[nom(Selector = "IsisTlvType::LspBufferSize")]
+    LspBufferSize(IsisTlvLspBufferSize),
     #[nom(Selector = "IsisTlvType::ExtIsReach")]
     ExtIsReach(IsisTlvExtIsReach),
     #[nom(Selector = "IsisTlvType::MtIsReach")]
@@ -565,6 +567,7 @@ impl IsisTlv {
             IsNeighbor(v) => v.tlv_emit(buf),
             Padding(v) => v.tlv_emit(buf),
             LspEntries(v) => v.tlv_emit(buf),
+            LspBufferSize(v) => v.tlv_emit(buf),
             ExtIsReach(v) => v.tlv_emit(buf),
             MtIsReach(v) => v.tlv_emit(buf),
             Srv6(v) => v.tlv_emit(buf),
@@ -809,6 +812,37 @@ impl TlvEmitter for IsisTlvIpv4IfAddr {
 impl From<IsisTlvIpv4IfAddr> for IsisTlv {
     fn from(tlv: IsisTlvIpv4IfAddr) -> Self {
         IsisTlv::Ipv4IfAddr(tlv)
+    }
+}
+
+/// TLV 14 — Originating LSP Buffer Size (RFC 1195 / ISO 10589).
+///
+/// Advertises the originator's `originatingLSPBufferSize` so receivers
+/// know the maximum PDU length to accept on the link. Two-byte
+/// big-endian value; default 1492. Lives in fragment 0 of the
+/// originator's LSP set per the convention used by Cisco/Juniper/FRR.
+#[derive(Debug, Default, NomBE, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IsisTlvLspBufferSize {
+    pub size: u16,
+}
+
+impl TlvEmitter for IsisTlvLspBufferSize {
+    fn typ(&self) -> u8 {
+        IsisTlvType::LspBufferSize.into()
+    }
+
+    fn len(&self) -> u8 {
+        2
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.size);
+    }
+}
+
+impl From<IsisTlvLspBufferSize> for IsisTlv {
+    fn from(tlv: IsisTlvLspBufferSize) -> Self {
+        IsisTlv::LspBufferSize(tlv)
     }
 }
 
@@ -1143,6 +1177,30 @@ pub fn parse(input: &[u8]) -> IsisIResult<&[u8], IsisPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round-trip a TLV 14 LSP Buffer Size: emit through tlv_emit,
+    /// then re-parse via parse_tlvs and recover the original size.
+    /// Frags emitted by the send-side packer (Phase 3) will rely on
+    /// the type+length header being exactly 4 bytes (2 header + 2
+    /// value) so reach packing math stays predictable.
+    #[test]
+    fn lsp_buffer_size_round_trip() {
+        let original = IsisTlvLspBufferSize { size: 1492 };
+        let mut buf = BytesMut::new();
+        original.tlv_emit(&mut buf);
+        // type (1) + length (1) + value (2) = 4 bytes on the wire.
+        assert_eq!(buf.len(), 4);
+        assert_eq!(buf[0], u8::from(IsisTlvType::LspBufferSize));
+        assert_eq!(buf[1], 2);
+
+        let (rest, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+        assert!(rest.is_empty(), "parser consumes the whole buffer");
+        assert_eq!(tlvs.len(), 1);
+        match &tlvs[0] {
+            IsisTlv::LspBufferSize(v) => assert_eq!(v.size, 1492),
+            other => panic!("expected LspBufferSize, got {:?}", other),
+        }
+    }
 
     #[test]
     fn hostname_len_truncates_at_255() {

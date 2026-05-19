@@ -6,8 +6,8 @@ use crate::{
     IsLevel, IsisCsnp, IsisHello, IsisLsp, IsisLspEntry, IsisLspId, IsisNeighborId, IsisP2pHello,
     IsisPacket, IsisPdu, IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvHostname,
     IsisTlvIpv4IfAddr, IsisTlvIpv6GlobalIfAddr, IsisTlvIpv6IfAddr, IsisTlvIpv6TeRouterId,
-    IsisTlvIsNeighbor, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding, IsisTlvProtoSupported,
-    IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
+    IsisTlvIsNeighbor, IsisTlvLspBufferSize, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding,
+    IsisTlvProtoSupported, IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
 };
 
 impl Display for IsisPacket {
@@ -181,6 +181,7 @@ impl Display for IsisTlv {
             IsNeighbor(v) => write!(f, "{}", v),
             Padding(v) => write!(f, "{}", v),
             LspEntries(v) => write!(f, "{}", v),
+            LspBufferSize(v) => write!(f, "{}", v),
             ExtIsReach(v) => write!(f, "{}", v),
             MtIsReach(v) => write!(f, "{}", v),
             Srv6(v) => write!(f, "{}", v),
@@ -362,6 +363,12 @@ impl Display for IsisTlvHostname {
 impl Display for IsisTlvTeRouterId {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "  TE Router ID: {}", self.router_id)
+    }
+}
+
+impl Display for IsisTlvLspBufferSize {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  LSP Buffer Size: {}", self.size)
     }
 }
 

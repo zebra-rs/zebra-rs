@@ -12,6 +12,7 @@ pub enum IsisTlvType {
     IsNeighbor = 6,
     Padding = 8,
     LspEntries = 9,
+    LspBufferSize = 14,
     ExtIsReach = 22,
     MtIsReach = 222,
     Srv6 = 27,
@@ -49,6 +50,7 @@ impl IsisTlvType {
                 | IsNeighbor
                 | Padding
                 | LspEntries
+                | LspBufferSize
                 | ExtIsReach
                 | MtIsReach
                 | Srv6
@@ -78,6 +80,7 @@ impl From<IsisTlvType> for u8 {
             IsNeighbor => 6,
             Padding => 8,
             LspEntries => 9,
+            LspBufferSize => 14,
             ExtIsReach => 22,
             MtIsReach => 222,
             Srv6 => 27,
@@ -108,6 +111,7 @@ impl From<u8> for IsisTlvType {
             6 => IsNeighbor,
             8 => Padding,
             9 => LspEntries,
+            14 => LspBufferSize,
             22 => ExtIsReach,
             222 => MtIsReach,
             27 => Srv6,

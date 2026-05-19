@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, Values};
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::Ipv6Addr;
 use std::time::{Duration, Instant};
 
 use isis_packet::*;
@@ -9,9 +10,12 @@ use crate::isis_database_trace;
 use crate::context::Timer;
 use crate::isis::{
     Message,
-    srmpls::{LabelBlock, LabelConfig},
+    srmpls::{IsisLabelMap, LabelBlock, LabelConfig},
 };
 
+use super::config::MtId;
+use super::graph::{ReachMap, ReachMapV6};
+use super::hostname::Hostname;
 use super::inst::MsgSender;
 use super::link::LinkTop;
 use super::{
@@ -100,62 +104,6 @@ fn hold_timer(tx: &MsgSender, level: Level, key: IsisLspId, hold_time: u16) -> T
     lsdb_timer(tx, level, key, hold_time, ev)
 }
 
-fn update_pseudo() {
-    // TODO.
-}
-
-#[derive(Default)]
-pub struct LspView<'a> {
-    pub cap: Option<&'a IsisTlvRouterCap>,
-    pub hostname: Option<&'a IsisTlvHostname>,
-    pub ip_reach: Option<&'a IsisTlvExtIpReach>,
-    pub ipv6_reach: Option<&'a IsisTlvIpv6Reach>,
-    /// MT capability TLV (229) — lists the MT IDs the originator
-    /// participates in. Used to populate `mt_membership`.
-    pub multi_topology: Option<&'a IsisTlvMultiTopology>,
-    /// MT IPv6 Reach TLVs (237). One per MT id the originator
-    /// emitted; vec because in principle a peer could advertise more
-    /// than one (multicast variants etc.). PR 4 only consumes mt=2.
-    pub mt_ipv6_reach: Vec<&'a IsisTlvMtIpv6Reach>,
-    /// SRv6 locator TLV — carries the originator's locator(s) and
-    /// the End SID sub-TLV inside each one. Used to populate
-    /// `srv6_end_map` for TI-LFA SRv6 repair-path assembly.
-    pub srv6: Option<&'a IsisTlvSrv6>,
-}
-
-pub fn lsp_view<'a>(lsp: &'a IsisLsp) -> LspView<'a> {
-    let mut view = LspView::default();
-    for tlv in &lsp.tlvs {
-        match &tlv {
-            IsisTlv::RouterCap(cap) => {
-                view.cap = Some(cap);
-            }
-            IsisTlv::Hostname(hostname) => {
-                view.hostname = Some(hostname);
-            }
-            IsisTlv::ExtIpReach(ip_reach) => {
-                view.ip_reach = Some(ip_reach);
-            }
-            IsisTlv::Ipv6Reach(ipv6_reach) => {
-                view.ipv6_reach = Some(ipv6_reach);
-            }
-            IsisTlv::MultiTopology(mt) => {
-                view.multi_topology = Some(mt);
-            }
-            IsisTlv::MtIpv6Reach(mt_v6) => {
-                view.mt_ipv6_reach.push(mt_v6);
-            }
-            IsisTlv::Srv6(srv6) => {
-                view.srv6 = Some(srv6);
-            }
-            _ => {
-                //
-            }
-        }
-    }
-    view
-}
-
 pub fn lsp_cap_view<'a>(tlv: &'a IsisTlvRouterCap) -> LspCapView<'a> {
     let mut view = LspCapView::default();
     for sub in &tlv.subs {
@@ -192,114 +140,190 @@ pub struct LspCapView<'a> {
     pub srv6: Option<&'a IsisSubSrv6>,
 }
 
-fn update_lsp(top: &mut LinkTop, level: Level, key: IsisLspId, lsp: &IsisLsp) {
-    if let Some(prev) = top.lsdb.get(&level).get(&key)
-        && prev.lsp.tlvs == lsp.tlvs
-    {
+/// References to every per-sys-id map that depends on TLV content
+/// inside a peer's LSP. Bundled here so `rebuild_sys_state` can be
+/// called from both the receive path (`LinkTop`) and the hold-expire
+/// path (`IsisTop`) without a 7-positional-arg signature.
+pub(super) struct SysStateRefs<'a> {
+    pub hostname: &'a mut Hostname,
+    pub label_map: &'a mut IsisLabelMap,
+    pub reach_v4: &'a mut ReachMap,
+    pub reach_v6: &'a mut ReachMapV6,
+    pub mt_membership: &'a mut BTreeMap<IsisSysId, BTreeSet<MtId>>,
+    pub mt2_reach_v6: &'a mut ReachMapV6,
+    pub srv6_end_map: &'a mut BTreeMap<IsisSysId, Ipv6Addr>,
+}
+
+/// Recompute the per-sys-id consumer maps from the union of every
+/// fragment currently in the LSDB for `sys_id` at this level.
+///
+/// IS-IS lets a router originate up to 256 LSP fragments per node
+/// identity (LSP Number = 0..=255 in the LSPID). Fragment 0 is the
+/// anchor for scalar/per-node TLVs (hostname, Router Capability,
+/// MT capability); fragments 1..=255 may carry additional
+/// distributable TLVs (TLV 135 / 236 / MT-IPv6 reach, SRv6 locators).
+/// A single-LSP "overwrite the map on each receive" strategy
+/// corrupts state the moment a peer fragments — the second fragment
+/// lacking hostname or MT capability would clobber what fragment 0
+/// installed, and reach maps would lose entries from prior fragments.
+/// This rebuild scans every fragment from `sys_id` and applies the
+/// per-TLV rule:
+///
+///   - hostname, SR capability, MT capability → fragment 0 only.
+///     Missing fragment 0 (or fragment 0 lacking the TLV) clears
+///     the corresponding scalar map entry.
+///   - TLV 135 (ExtIpReach), TLV 236 (Ipv6Reach), TLV 237
+///     (MtIpv6Reach mt=2) → union across all fragments.
+///   - SRv6 End SID → first encountered across all fragments.
+///
+/// Skipped when `sys_id` is the local origin: self-originated maps
+/// are managed by `lsp_generate` with the `originate=true` flag on
+/// the hostname entry, and we don't want a peer-state rebuild to
+/// trample it.
+pub(super) fn rebuild_sys_state(
+    lsdb_level: &Lsdb,
+    self_sys_id: &IsisSysId,
+    sys_id: &IsisSysId,
+    s: SysStateRefs<'_>,
+) {
+    if sys_id == self_sys_id {
         return;
     }
 
-    let lsp = lsp_view(lsp);
+    // Pull non-pseudonode fragments for this sys_id, sorted by
+    // fragment number so the "first SRv6 End SID wins" rule has
+    // deterministic ordering.
+    let mut frags: Vec<&IsisLsp> = lsdb_level
+        .iter()
+        .filter(|(id, _)| id.sys_id() == *sys_id && !id.is_pseudo())
+        .map(|(_, lsa)| &lsa.lsp)
+        .collect();
+    frags.sort_by_key(|l| l.lsp_id.fragment_id());
 
-    // Update hostname.
-    if let Some(tlv) = lsp.hostname {
-        top.hostname
-            .get_mut(&level)
-            .insert(key.sys_id(), tlv.hostname.clone());
+    if frags.is_empty() {
+        s.hostname.remove(sys_id);
+        s.label_map.remove(sys_id);
+        s.reach_v4.remove(sys_id);
+        s.reach_v6.remove(sys_id);
+        s.mt_membership.remove(sys_id);
+        s.mt2_reach_v6.remove(sys_id);
+        s.srv6_end_map.remove(sys_id);
+        return;
     }
 
-    if let Some(tlv) = lsp.cap {
-        let cap_view = lsp_cap_view(tlv);
+    let frag0 = frags.iter().find(|f| f.lsp_id.fragment_id() == 0).copied();
 
-        if let Some(cap) = cap_view.cap {
-            // Register global block.
-            if let SidLabelTlv::Label(start) = cap.sid_label {
-                // println!("Global block start: {}, end: {}", start, start + cap.range);
-                let mut label_config = LabelConfig {
-                    global: LabelBlock::new(start, cap.range),
-                    local: None,
-                };
-                if let Some(lb) = cap_view.lb
-                    && let SidLabelTlv::Label(start) = lb.sid_label
-                {
-                    label_config.local = Some(LabelBlock::new(start, lb.range));
-                }
-                top.label_map
-                    .get_mut(&level)
-                    .insert(key.sys_id(), label_config);
+    // --- Scalar (fragment 0 only) -----------------------------------
+    // Hostname.
+    let frag0_hostname = frag0.and_then(|f| {
+        f.tlvs.iter().find_map(|t| match t {
+            IsisTlv::Hostname(h) => Some(h),
+            _ => None,
+        })
+    });
+    if let Some(h) = frag0_hostname {
+        s.hostname.insert(*sys_id, h.hostname.clone());
+    } else {
+        s.hostname.remove(sys_id);
+    }
+
+    // SR capability → label_map.
+    let frag0_cap = frag0.and_then(|f| {
+        f.tlvs.iter().find_map(|t| match t {
+            IsisTlv::RouterCap(c) => Some(c),
+            _ => None,
+        })
+    });
+    let mut label_inserted = false;
+    if let Some(cap_tlv) = frag0_cap {
+        let cap_view = lsp_cap_view(cap_tlv);
+        if let Some(cap) = cap_view.cap
+            && let SidLabelTlv::Label(start) = cap.sid_label
+        {
+            let mut label_config = LabelConfig {
+                global: LabelBlock::new(start, cap.range),
+                local: None,
+            };
+            if let Some(lb) = cap_view.lb
+                && let SidLabelTlv::Label(local_start) = lb.sid_label
+            {
+                label_config.local = Some(LabelBlock::new(local_start, lb.range));
             }
-        }
-    } else {
-        // No cap.
-    }
-
-    if let Some(tlv) = lsp.ip_reach {
-        top.reach_map
-            .get_mut(&level)
-            .get_mut(&Afi::Ip)
-            .insert(key.sys_id(), tlv.entries.clone());
-    }
-
-    if let Some(tlv) = lsp.ipv6_reach {
-        top.reach_map_v6
-            .get_mut(&level)
-            .insert(key.sys_id(), tlv.entries.clone());
-    }
-
-    // MT capability — record which MT IDs the peer participates in.
-    // Empty set = absent / single-topology peer (preserves the
-    // "no key" sentinel that future graph builders use).
-    if let Some(mt_tlv) = lsp.multi_topology {
-        let mut ids = std::collections::BTreeSet::new();
-        for entry in &mt_tlv.entries {
-            if let Some(id) = mt_id_from_wire(entry.id()) {
-                ids.insert(id);
-            }
-        }
-        if !ids.is_empty() {
-            top.mt_membership.get_mut(&level).insert(key.sys_id(), ids);
-        } else {
-            top.mt_membership.get_mut(&level).remove(&key.sys_id());
-        }
-    } else {
-        top.mt_membership.get_mut(&level).remove(&key.sys_id());
-    }
-
-    // MT 2 IPv6 Reach (TLV 237 mt=2). Stored separately from
-    // reach_map_v6 so a future per-MT v6 RIB build can pull the
-    // MT 2 view in isolation without absorbing legacy TLV 236.
-    let mut mt2_v6_entries: Vec<isis_packet::IsisTlvIpv6ReachEntry> = Vec::new();
-    for tlv in &lsp.mt_ipv6_reach {
-        if tlv.mt.id() == 2 {
-            mt2_v6_entries.extend(tlv.entries.iter().cloned());
+            s.label_map.insert(*sys_id, label_config);
+            label_inserted = true;
         }
     }
-    if !mt2_v6_entries.is_empty() {
-        top.mt2_reach_map_v6
-            .get_mut(&level)
-            .insert(key.sys_id(), mt2_v6_entries);
-    } else {
-        top.mt2_reach_map_v6.get_mut(&level).remove(&key.sys_id());
+    if !label_inserted {
+        s.label_map.remove(sys_id);
     }
 
-    // SRv6 End SID — first one across all locators wins. Empty /
-    // absent TLV removes any stale entry for this peer so the map
-    // stays in sync with the LSDB.
-    let mut end_sid = None;
-    if let Some(srv6_tlv) = lsp.srv6 {
-        'outer: for locator in &srv6_tlv.locators {
-            for sub in &locator.subs {
-                if let prefix::IsisSubTlv::Srv6EndSid(es) = sub {
-                    end_sid = Some(es.sid);
-                    break 'outer;
+    // MT capability.
+    let mut mt_set: BTreeSet<MtId> = BTreeSet::new();
+    if let Some(f0) = frag0 {
+        for tlv in &f0.tlvs {
+            if let IsisTlv::MultiTopology(mt_tlv) = tlv {
+                for entry in &mt_tlv.entries {
+                    if let Some(id) = mt_id_from_wire(entry.id()) {
+                        mt_set.insert(id);
+                    }
                 }
             }
         }
+    }
+    if mt_set.is_empty() {
+        s.mt_membership.remove(sys_id);
+    } else {
+        s.mt_membership.insert(*sys_id, mt_set);
+    }
+
+    // --- Distributable (union across fragments) ---------------------
+    let mut v4_entries: Vec<IsisTlvExtIpReachEntry> = Vec::new();
+    let mut v6_entries: Vec<IsisTlvIpv6ReachEntry> = Vec::new();
+    let mut mt2_v6_entries: Vec<IsisTlvIpv6ReachEntry> = Vec::new();
+    let mut end_sid: Option<Ipv6Addr> = None;
+
+    for f in &frags {
+        for tlv in &f.tlvs {
+            match tlv {
+                IsisTlv::ExtIpReach(t) => v4_entries.extend(t.entries.iter().cloned()),
+                IsisTlv::Ipv6Reach(t) => v6_entries.extend(t.entries.iter().cloned()),
+                IsisTlv::MtIpv6Reach(t) if t.mt.id() == 2 => {
+                    mt2_v6_entries.extend(t.entries.iter().cloned());
+                }
+                IsisTlv::Srv6(t) if end_sid.is_none() => {
+                    'outer: for locator in &t.locators {
+                        for sub in &locator.subs {
+                            if let prefix::IsisSubTlv::Srv6EndSid(es) = sub {
+                                end_sid = Some(es.sid);
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if v4_entries.is_empty() {
+        s.reach_v4.remove(sys_id);
+    } else {
+        s.reach_v4.insert(*sys_id, v4_entries);
+    }
+    if v6_entries.is_empty() {
+        s.reach_v6.remove(sys_id);
+    } else {
+        s.reach_v6.insert(*sys_id, v6_entries);
+    }
+    if mt2_v6_entries.is_empty() {
+        s.mt2_reach_v6.remove(sys_id);
+    } else {
+        s.mt2_reach_v6.insert(*sys_id, mt2_v6_entries);
     }
     if let Some(sid) = end_sid {
-        top.srv6_end_map.get_mut(&level).insert(key.sys_id(), sid);
+        s.srv6_end_map.insert(*sys_id, sid);
     } else {
-        top.srv6_end_map.get_mut(&level).remove(&key.sys_id());
+        s.srv6_end_map.remove(sys_id);
     }
 }
 
@@ -327,7 +351,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     // existing entry. RFC 4444 §3.1: storm-protect by ignoring new
     // versions that arrive within the arrival window after the last
     // accepted version of the same LSP.
-    if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id) {
+    let tlvs_changed = if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id) {
         if lsp.seq_number <= lsa.lsp.seq_number {
             isis_database_trace!(
                 top.tracing,
@@ -349,14 +373,10 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
             );
             return None;
         }
-    }
-
-    if key.is_pseudo() {
-        update_pseudo();
+        lsa.lsp.tlvs != lsp.tlvs
     } else {
-        update_lsp(top, level, key, &lsp);
-    }
-    spf_schedule(top, level);
+        true
+    };
 
     let hold_time = lsp.hold_time;
     let mut lsa = Lsa::new(lsp);
@@ -365,7 +385,34 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
     lsa.last_received = Some(Instant::now());
 
-    top.lsdb.get_mut(&level).map.insert(key, lsa)
+    let prev = top.lsdb.get_mut(&level).map.insert(key, lsa);
+
+    // Pseudonode LSPs are consumed only by the SPF graph builder
+    // (see `graph::graph` / `graph::graph_mt2`); they don't carry
+    // hostname / cap / reach TLVs that feed the per-sys-id maps,
+    // so skip the rebuild on those keys.
+    if !key.is_pseudo() && tlvs_changed {
+        let self_sys_id = top.up_config.net.sys_id();
+        let sys_id = key.sys_id();
+        rebuild_sys_state(
+            top.lsdb.get(&level),
+            &self_sys_id,
+            &sys_id,
+            SysStateRefs {
+                hostname: top.hostname.get_mut(&level),
+                label_map: top.label_map.get_mut(&level),
+                reach_v4: top.reach_map.get_mut(&level).get_mut(&Afi::Ip),
+                reach_v6: top.reach_map_v6.get_mut(&level),
+                mt_membership: top.mt_membership.get_mut(&level),
+                mt2_reach_v6: top.mt2_reach_map_v6.get_mut(&level),
+                srv6_end_map: top.srv6_end_map.get_mut(&level),
+            },
+        );
+    }
+
+    spf_schedule(top, level);
+
+    prev
 }
 
 pub fn insert_self_originate(
@@ -415,11 +462,36 @@ pub fn insert_self_originate(
 }
 
 pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
-    if let Some(lsa) = top.lsdb.get_mut(&level).remove(&key)
-        && let Some(_tlv) = lsa.lsp.hostname_tlv()
-    {
-        top.hostname.get_mut(&level).remove(&key.sys_id());
+    if top.lsdb.get_mut(&level).remove(&key).is_none() {
+        return;
     }
+
+    // Pseudonode LSP removals don't touch the per-sys-id maps; they
+    // disappear from the SPF graph naturally on the next graph build.
+    if key.is_pseudo() {
+        return;
+    }
+
+    // Refresh the per-sys-id maps from whatever fragments remain.
+    // When the removed entry was fragment 0 this clears scalar
+    // attributes (hostname, SR cap, MT capability); when it was a
+    // higher fragment the union'd reach maps shrink accordingly.
+    let self_sys_id = top.config.net.sys_id();
+    let sys_id = key.sys_id();
+    rebuild_sys_state(
+        top.lsdb.get(&level),
+        &self_sys_id,
+        &sys_id,
+        SysStateRefs {
+            hostname: top.hostname.get_mut(&level),
+            label_map: top.label_map.get_mut(&level),
+            reach_v4: top.reach_map.get_mut(&level).get_mut(&Afi::Ip),
+            reach_v6: top.reach_map_v6.get_mut(&level),
+            mt_membership: top.mt_membership.get_mut(&level),
+            mt2_reach_v6: top.mt2_reach_map_v6.get_mut(&level),
+            srv6_end_map: top.srv6_end_map.get_mut(&level),
+        },
+    );
 }
 
 fn lsp_clone_with_seqno_inc(lsp: &IsisLsp) -> IsisLsp {
@@ -436,5 +508,201 @@ pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
         let lsp_id = lsp.lsp_id;
         insert_self_originate(top, level, lsp, Some(buf.to_vec()));
         lsp_flood(top, level, &lsp_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use ipnet::Ipv4Net;
+    use isis_packet::prefix::Ipv4ControlInfo;
+
+    use super::*;
+
+    fn sys(b: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, b],
+        }
+    }
+
+    fn frag(sys_id: IsisSysId, frag_id: u8) -> IsisLsp {
+        IsisLsp {
+            lsp_id: IsisLspId::new(sys_id, 0, frag_id),
+            ..Default::default()
+        }
+    }
+
+    fn v4_entry(octet: u8) -> IsisTlvExtIpReachEntry {
+        let prefix = Ipv4Net::new(Ipv4Addr::new(10, 0, 0, octet), 32).unwrap();
+        let flags = Ipv4ControlInfo::new()
+            .with_prefixlen(32)
+            .with_sub_tlv(false)
+            .with_distribution(false);
+        IsisTlvExtIpReachEntry {
+            metric: 10,
+            flags,
+            prefix,
+            subs: vec![],
+        }
+    }
+
+    /// Two fragments from one peer: fragment 0 carries the scalar
+    /// Hostname plus one IPv4 reach; fragment 1 carries a second
+    /// IPv4 reach. The rebuild must keep both reach entries (union)
+    /// and install the hostname. Then dropping fragment 0 must
+    /// clear the hostname and leave only fragment 1's entry.
+    #[test]
+    fn rebuild_unions_distributable_and_anchors_scalars() {
+        let mut lsdb = Lsdb::default();
+        let peer = sys(1);
+
+        let mut f0 = frag(peer, 0);
+        f0.tlvs.push(
+            IsisTlvHostname {
+                hostname: "peer".to_string(),
+            }
+            .into(),
+        );
+        f0.tlvs.push(
+            IsisTlvExtIpReach {
+                entries: vec![v4_entry(1)],
+            }
+            .into(),
+        );
+
+        let mut f1 = frag(peer, 1);
+        f1.tlvs.push(
+            IsisTlvExtIpReach {
+                entries: vec![v4_entry(2)],
+            }
+            .into(),
+        );
+
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
+        lsdb.map.insert(f1.lsp_id, Lsa::new(f1));
+
+        let mut hostname = Hostname::default();
+        let mut label_map = IsisLabelMap::default();
+        let mut reach_v4 = ReachMap::default();
+        let mut reach_v6 = ReachMapV6::default();
+        let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
+        let mut mt2_reach_v6 = ReachMapV6::default();
+        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF), // self sys-id distinct from the peer
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+            },
+        );
+
+        assert_eq!(
+            hostname.get(&peer).map(|(h, _)| h.as_str()),
+            Some("peer"),
+            "fragment 0's hostname must be installed"
+        );
+        let v4 = reach_v4.get(&peer).expect("v4 reach must exist");
+        assert_eq!(v4.len(), 2, "reach is union of both fragments");
+        let octets: Vec<u8> = v4.iter().map(|e| e.prefix.addr().octets()[3]).collect();
+        assert!(octets.contains(&1) && octets.contains(&2));
+
+        // Drop fragment 0 and rebuild again.
+        lsdb.map.remove(&IsisLspId::new(peer, 0, 0));
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+            },
+        );
+        assert!(
+            hostname.get(&peer).is_none(),
+            "hostname must clear when fragment 0 leaves the LSDB"
+        );
+        let v4 = reach_v4.get(&peer).expect("v4 reach still has fragment 1");
+        assert_eq!(v4.len(), 1);
+        assert_eq!(v4[0].prefix.addr().octets()[3], 2);
+
+        // Drop fragment 1 too; the peer should disappear entirely.
+        lsdb.map.remove(&IsisLspId::new(peer, 0, 1));
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+            },
+        );
+        assert!(reach_v4.get(&peer).is_none());
+        assert!(hostname.get(&peer).is_none());
+    }
+
+    /// The self sys-id is exempt from the rebuild because the
+    /// origination path manages those maps directly (with the
+    /// `originate=true` flag on the hostname entry). A receive-time
+    /// rebuild that walked self fragments would clobber that flag.
+    #[test]
+    fn rebuild_skips_self_sys_id() {
+        let mut lsdb = Lsdb::default();
+        let me = sys(7);
+        let mut f0 = frag(me, 0);
+        f0.tlvs.push(
+            IsisTlvHostname {
+                hostname: "spoof".to_string(),
+            }
+            .into(),
+        );
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
+
+        let mut hostname = Hostname::default();
+        hostname.insert_originate(me, "real".to_string());
+
+        let mut label_map = IsisLabelMap::default();
+        let mut reach_v4 = ReachMap::default();
+        let mut reach_v6 = ReachMapV6::default();
+        let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
+        let mut mt2_reach_v6 = ReachMapV6::default();
+        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+
+        rebuild_sys_state(
+            &lsdb,
+            &me,
+            &me,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+            },
+        );
+
+        let (host, originate) = hostname.get(&me).expect("self entry must survive");
+        assert_eq!(host, "real");
+        assert!(originate, "originate flag must not be cleared by rebuild");
     }
 }
