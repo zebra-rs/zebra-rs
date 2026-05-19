@@ -292,70 +292,91 @@ pub fn dis_generate(
     level: Level,
     ifindex: u32,
     base: Option<u32>,
-) -> Option<IsisLsp> {
+) -> Vec<IsisLsp> {
     let neighbor_id = if let Some(link) = top.links.get(&ifindex)
         && let Some((adj, _)) = link.state.adj.get(&level)
     {
         *adj
     } else {
-        return None;
+        return Vec::new();
     };
 
-    let lsp_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
-
-    // Determine sequence number based on base parameter and existing LSDB
-    let seq_number = if let Some(base_seq) = base {
-        // When base is provided, compare with existing LSDB sequence number
-        let lsdb_seq = top.lsdb.get(&level).get(&lsp_id).map(|x| x.lsp.seq_number);
-
-        match lsdb_seq {
-            None => base_seq + 1, // No existing LSP, use base + 1
-            Some(existing_seq) if base_seq >= existing_seq => base_seq + 1, // Base is larger or equal, use base + 1
-            Some(existing_seq) => existing_seq + 1, // Existing is larger, use existing + 1
-        }
-    } else {
-        // No base provided, use existing sequence number + 1 or start at 1
-        top.lsdb
-            .get(&level)
-            .get(&lsp_id)
-            .map(|x| x.lsp.seq_number + 1)
-            .unwrap_or(0x0001)
-    };
+    let frag0_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
     let types = IsisLspTypes::from(level.digit());
-    let mut lsp = IsisLsp {
-        hold_time: top.config.hold_time(),
-        lsp_id,
-        seq_number,
-        types,
-        ..Default::default()
-    };
 
+    // Build the single TLV 22 listing the DIS itself plus every Up
+    // neighbor on this LAN, then defer to the same splitter/packer
+    // used by router LSPs. Pseudonode LSPs carry no anchor TLVs
+    // (no hostname / cap / OL bit lives here — those belong to the
+    // DIS's own router LSP).
     let mut is_reach = IsisTlvExtIsReach::default();
-    let entry = IsisTlvExtIsReachEntry {
+    is_reach.entries.push(IsisTlvExtIsReachEntry {
         neighbor_id: IsisNeighborId::from_sys_id(&top.config.net.sys_id(), 0),
         metric: 0,
         subs: vec![],
-    };
-    is_reach.entries.push(entry);
-
+    });
     if let Some(link) = top.links.get(&ifindex) {
         for (sys_id, nbr) in link.state.nbrs.get(&level).iter() {
             if nbr.state == NfsmState::Up {
-                let neighbor_id = IsisNeighborId::from_sys_id(sys_id, 0);
-                let entry = IsisTlvExtIsReachEntry {
-                    neighbor_id,
+                is_reach.entries.push(IsisTlvExtIsReachEntry {
+                    neighbor_id: IsisNeighborId::from_sys_id(sys_id, 0),
                     metric: 0,
                     subs: vec![],
-                };
-                is_reach.entries.push(entry);
+                });
             }
         }
     }
-    if !is_reach.entries.is_empty() {
-        lsp.tlvs.push(IsisTlv::ExtIsReach(is_reach));
+
+    let distributable: Vec<IsisTlv> = if is_reach.entries.is_empty() {
+        Vec::new()
+    } else {
+        split_distributable_at_255(IsisTlv::ExtIsReach(is_reach))
+    };
+
+    let mut fragments = pack_into_fragments(
+        Vec::new(),
+        distributable,
+        neighbor_id,
+        types,
+        top.config.hold_time(),
+        top.config.lsp_mtu_size(),
+    );
+
+    // Resolve seq numbers per fragment. Fragment 0 honors `base`
+    // (the seq we saw a peer reflect at us, ISO 10589 §7.3.16.4) in
+    // addition to the existing LSDB seq. Higher fragments derive
+    // from their own LSDB entries with saturating_add. Per-fragment
+    // seq-wrap detection mirrors the router-LSP behaviour: only
+    // fragment 0's wrap freezes origination of the whole pseudonode
+    // LSP set (a receiver with frag 0 missing can't enumerate the
+    // LAN's members at all), so for higher fragments we fall back
+    // to the simple existing+1 rule without arming a freeze. A
+    // dedicated per-fragment pseudonode freeze would mirror the
+    // router-LSP path; deferred until the wrap actually fires here.
+    for frag in fragments.iter_mut() {
+        if frag.lsp_id.fragment_id() == 0 {
+            let existing = top
+                .lsdb
+                .get(&level)
+                .get(&frag0_id)
+                .map(|x| x.lsp.seq_number);
+            frag.seq_number = match (existing, base) {
+                (Some(e), Some(b)) => e.max(b).saturating_add(1),
+                (Some(e), None) => e.saturating_add(1),
+                (None, Some(b)) => b.saturating_add(1),
+                (None, None) => 0x0001,
+            };
+        } else {
+            let existing = top
+                .lsdb
+                .get(&level)
+                .get(&frag.lsp_id)
+                .map(|x| x.lsp.seq_number);
+            frag.seq_number = existing.map(|e| e.saturating_add(1)).unwrap_or(0x0001);
+        }
     }
 
-    Some(lsp)
+    fragments
 }
 
 pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> Vec<IsisLsp> {
