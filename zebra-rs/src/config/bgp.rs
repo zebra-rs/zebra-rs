@@ -4,7 +4,17 @@ use crate::rib;
 use super::ConfigManager;
 
 pub fn spawn_bgp(config: &ConfigManager) {
-    let bgp = inst::Bgp::new(config.rib_tx.clone(), config.policy_tx.clone());
+    // Capture BFD's client handle (if BFD is already spawned) so per-
+    // neighbor `bfd { enable }` can later submit Subscribe / Unsubscribe.
+    // If `bfd { ... }` is configured *after* `router bgp`, BGP's handle
+    // stays None and the BFD attach is a no-op — PR 5d adds a refresh
+    // path for that ordering.
+    let bfd_client_tx = config.bfd_client_tx.borrow().clone();
+    let bgp = inst::Bgp::new(
+        config.rib_tx.clone(),
+        config.policy_tx.clone(),
+        bfd_client_tx,
+    );
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe_show("bgp", bgp.show.tx.clone());
     let task = inst::serve(bgp);
