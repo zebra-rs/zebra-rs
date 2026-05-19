@@ -285,29 +285,163 @@ fn show_isis_route_detail(
     write_show_isis_route_text_detail(isis)
 }
 
-/// `show isis fast-reroute summary` (PR A stub; renderer lands in PR D).
+/// Per-level TI-LFA protection tallies. Counts are per-route, not
+/// per-nexthop: a route is "Protected" when at least one of its
+/// SpfNexthop entries has a `backup` stamped. Within Protected,
+/// trivial / 1-segment / N-segment classify the FIRST stamped
+/// backup's label-stack length (subsequent backups on the same
+/// route currently match by construction — tilfa_repair_path emits
+/// one repair per dest today).
+#[derive(Default, Debug, PartialEq, Eq)]
+struct FrrSummary {
+    total: usize,
+    protected: usize,
+    unprotected: usize,
+    trivial: usize,
+    one_segment: usize,
+    multi_segment: usize,
+}
+
+/// Tally TI-LFA protection state across the IPv4 RIB at one level.
+fn summarize_frr_v4(isis: &Isis, level: &Level) -> FrrSummary {
+    let mut s = FrrSummary::default();
+    for (_, route) in isis.rib.get(level).iter() {
+        s.total += 1;
+        let first_backup = route.nhops.values().find_map(|n| n.backup.as_ref());
+        match first_backup {
+            None => s.unprotected += 1,
+            Some(b) => {
+                s.protected += 1;
+                match b.labels.len() {
+                    0 => s.trivial += 1,
+                    1 => s.one_segment += 1,
+                    _ => s.multi_segment += 1,
+                }
+            }
+        }
+    }
+    s
+}
+
+/// IPv6 sibling — label-stack length test is replaced by SRv6
+/// `segs` length since that's the SR steering dimension in the SRv6
+/// dataplane.
+fn summarize_frr_v6(isis: &Isis, level: &Level) -> FrrSummary {
+    let mut s = FrrSummary::default();
+    for (_, route) in isis.rib_v6.get(level).iter() {
+        s.total += 1;
+        let first_backup = route.nhops.values().find_map(|n| n.backup.as_ref());
+        match first_backup {
+            None => s.unprotected += 1,
+            Some(b) => {
+                s.protected += 1;
+                match b.segs.len() {
+                    0 => s.trivial += 1,
+                    1 => s.one_segment += 1,
+                    _ => s.multi_segment += 1,
+                }
+            }
+        }
+    }
+    s
+}
+
+fn write_frr_summary_block(buf: &mut String, label: &str, s: &FrrSummary) -> std::fmt::Result {
+    writeln!(buf, "    {}", label)?;
+    writeln!(buf, "      Total prefixes:   {:>6}", s.total)?;
+    writeln!(buf, "      Protected:        {:>6}", s.protected)?;
+    if s.protected > 0 {
+        writeln!(buf, "        Trivial repair: {:>6}", s.trivial)?;
+        writeln!(buf, "        1-segment SR:   {:>6}", s.one_segment)?;
+        writeln!(buf, "        N-segment SR:   {:>6}", s.multi_segment)?;
+    }
+    writeln!(buf, "      Unprotected:      {:>6}", s.unprotected)?;
+    Ok(())
+}
+
+/// `show isis fast-reroute summary` — per-area, per-level tallies of
+/// TI-LFA protection state. Reports IPv4 and IPv6 separately so the
+/// numbers stay legible when one AF has SR enabled and the other
+/// doesn't.
 fn show_isis_fast_reroute_summary(
-    _isis: &Isis,
+    isis: &Isis,
     _args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    Ok("[fast-reroute summary pending — PR D]\n".to_string())
+    let mut buf = String::new();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+    let mut wrote_any = false;
+    for level in &[Level::L1, Level::L2] {
+        let v4 = summarize_frr_v4(isis, level);
+        let v6 = summarize_frr_v6(isis, level);
+        if v4.total == 0 && v6.total == 0 {
+            continue;
+        }
+        wrote_any = true;
+        let level_long = match level {
+            Level::L1 => "Level-1",
+            Level::L2 => "Level-2",
+        };
+        writeln!(buf)?;
+        writeln!(buf, "  {}:", level_long)?;
+        if v4.total > 0 {
+            write_frr_summary_block(&mut buf, "IPv4:", &v4)?;
+        }
+        if v6.total > 0 {
+            write_frr_summary_block(&mut buf, "IPv6:", &v6)?;
+        }
+    }
+    if !wrote_any {
+        writeln!(buf, "  (no IS-IS RIB entries yet)")?;
+    }
+    Ok(buf)
 }
 
-/// `show isis fast-reroute prefix A.B.C.D/N detail` (PR A stub;
-/// renderer lands in PR D). Validates the prefix arg now so the
-/// dispatch is honest about input parsing.
+/// `show isis fast-reroute prefix A.B.C.D/N detail` — per-prefix
+/// view focused on the TI-LFA repair info for one prefix. Tries v4
+/// across both levels first; v6 not supported via this command path
+/// today (prefix arg is constrained to inet:ipv4-prefix in the
+/// grammar — IPv6 fast-reroute is reachable via `show isis route
+/// detail`).
 fn show_isis_fast_reroute_prefix_detail(
-    _isis: &Isis,
+    isis: &Isis,
     mut args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let Some(prefix) = args.v4net() else {
         return Ok("% Invalid IPv4 prefix\n".to_string());
     };
-    Ok(format!(
-        "[fast-reroute detail for {prefix} pending — PR D]\n"
-    ))
+
+    let mut buf = String::new();
+    let mut found = false;
+    for level in &[Level::L1, Level::L2] {
+        let Some(route) = isis.rib.get(level).get(&prefix) else {
+            continue;
+        };
+        found = true;
+        let level_short = match level {
+            Level::L1 => "L1",
+            Level::L2 => "L2",
+        };
+        writeln!(buf, "{} {} [metric {}]", level_short, prefix, route.metric)?;
+
+        // Surface protection state up-front so an operator scanning
+        // the output knows whether a backup is even present.
+        let any_backup = route.nhops.values().any(|n| n.backup.is_some());
+        if any_backup {
+            writeln!(buf, "  Protected by TI-LFA")?;
+        } else {
+            writeln!(buf, "  Unprotected (no TI-LFA backup stamped)")?;
+        }
+
+        for (addr, nhop) in route.nhops.iter() {
+            write_isis_nhop_v4_detail(&mut buf, isis, level, route, addr, nhop)?;
+        }
+    }
+    if !found {
+        return Ok(format!("% No route for {prefix} in IS-IS RIB\n"));
+    }
+    Ok(buf)
 }
 
 fn show_isis_route(
@@ -1947,5 +2081,53 @@ mod tests {
             fmt_isis_srv6_segs(&[one, two]),
             "{ fcbb:bb00:1::, fcbb:bb00:2:: }"
         );
+    }
+
+    #[test]
+    fn frr_summary_default_is_all_zero() {
+        // An empty RIB / fresh summary tallies to zeros across the
+        // board — the formatter relies on this to suppress the
+        // sub-counts when nothing is protected.
+        let s = FrrSummary::default();
+        assert_eq!(s.total, 0);
+        assert_eq!(s.protected, 0);
+        assert_eq!(s.unprotected, 0);
+        assert_eq!(s.trivial, 0);
+        assert_eq!(s.one_segment, 0);
+        assert_eq!(s.multi_segment, 0);
+    }
+
+    #[test]
+    fn write_frr_summary_block_includes_subcounts_only_when_protected() {
+        // All-unprotected: no Trivial/1-segment/N-segment lines —
+        // those rows are noise when nobody's protected.
+        let unprotected = FrrSummary {
+            total: 3,
+            unprotected: 3,
+            ..Default::default()
+        };
+        let mut buf = String::new();
+        write_frr_summary_block(&mut buf, "IPv4:", &unprotected).unwrap();
+        assert!(buf.contains("Total prefixes:"));
+        assert!(buf.contains("Protected:"));
+        assert!(buf.contains("Unprotected:"));
+        assert!(!buf.contains("Trivial repair"));
+        assert!(!buf.contains("1-segment"));
+        assert!(!buf.contains("N-segment"));
+
+        // With protection, the sub-count rows appear.
+        let protected = FrrSummary {
+            total: 10,
+            protected: 7,
+            unprotected: 3,
+            trivial: 2,
+            one_segment: 3,
+            multi_segment: 2,
+        };
+        let mut buf2 = String::new();
+        write_frr_summary_block(&mut buf2, "IPv4:", &protected).unwrap();
+        assert!(buf2.contains("Trivial repair"));
+        assert!(buf2.contains("1-segment SR"));
+        assert!(buf2.contains("N-segment SR"));
     }
 }
