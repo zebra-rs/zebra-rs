@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::isis_info;
 use crate::rib::MacAddr;
 
-use super::inst::{Packet, PacketMessage};
+use super::lsp::{Packet, PacketMessage};
 use super::socket::link_addr;
 use super::{Level, Message};
 
