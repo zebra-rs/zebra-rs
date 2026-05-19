@@ -108,12 +108,35 @@ pub struct Link {
     pub from: usize,
     pub to: usize,
     pub cost: u32,
+    /// Opaque first-hop identifier propagated through `Path::first_hop_links`.
+    /// For IS-IS graph edges originated by the local router this is the
+    /// local ifindex of the physical interface that produced the
+    /// ExtIsReach entry, so the rib-builder can install the exact link
+    /// SPF chose. For edges from other routers' LSPs the value is 0 —
+    /// the SPF relaxation propagates the field unchanged but only the
+    /// first-hop slot is meaningful at install time.
+    pub link_id: u32,
 }
 
 impl Link {
     #[allow(dead_code)]
     pub fn new(from: usize, to: usize, cost: u32) -> Self {
-        Self { from, to, cost }
+        Self {
+            from,
+            to,
+            cost,
+            link_id: 0,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_id(from: usize, to: usize, cost: u32, link_id: u32) -> Self {
+        Self {
+            from,
+            to,
+            cost,
+            link_id,
+        }
     }
 
     pub fn id(&self, direct: &SpfDirect) -> usize {
@@ -150,6 +173,14 @@ pub struct Path {
     pub cost: u32,
     pub paths: Vec<Vec<usize>>,
     pub nexthops: HashSet<Vec<usize>>,
+    /// Set of (first_hop_vertex_id, link_id) pairs that reach this
+    /// vertex. Independent of `full_path` mode — populated by relaxation
+    /// from `Link::link_id` when a path is established from the SPF
+    /// root, and propagated unchanged on deeper relaxations. The
+    /// IS-IS rib-builder consumes this to resolve which exact local
+    /// interface SPF chose (vs. iterating every `top.links` entry and
+    /// installing all interfaces with the destination as a neighbor).
+    pub first_hop_links: HashSet<(usize, u32)>,
     pub registered: bool,
 }
 
@@ -160,6 +191,7 @@ impl Path {
             cost: 0,
             paths: Vec::new(),
             nexthops: HashSet::new(),
+            first_hop_links: HashSet::new(),
             registered: false,
         }
     }
@@ -220,6 +252,9 @@ pub fn spf_calc(
             if c.cost == 0 || c.cost > v.cost + link.cost {
                 c.cost = v.cost.saturating_add(link.cost);
                 c.paths.clear();
+                // Strictly better path replaces everything; old
+                // first-hop set was from a worse-cost relaxation.
+                c.first_hop_links.clear();
             }
 
             if v.id == root {
@@ -230,6 +265,11 @@ pub fn spf_calc(
                 } else {
                     c.nexthops.insert(path);
                 }
+                // c is a direct neighbour of root — this relaxation
+                // is itself the first hop. Record it with the link's
+                // identifier so the rib-builder can resolve back to
+                // a specific local interface.
+                c.first_hop_links.insert((c.id, link.link_id));
             } else if opt.full_path {
                 for path in &v.paths {
                     if opt.path_max.is_none_or(|max| c.paths.len() < max) {
@@ -238,6 +278,8 @@ pub fn spf_calc(
                         c.paths.push(newpath);
                     }
                 }
+                // Deeper hop — propagate v's first-hop set unchanged.
+                c.first_hop_links.extend(v.first_hop_links.iter().copied());
             } else {
                 for nhop in &v.nexthops {
                     if opt.path_max.is_none_or(|max| c.paths.len() < max) {
@@ -248,6 +290,7 @@ pub fn spf_calc(
                         c.nexthops.insert(newnhop);
                     }
                 }
+                c.first_hop_links.extend(v.first_hop_links.iter().copied());
             }
 
             if !c.registered {
@@ -260,6 +303,7 @@ pub fn spf_calc(
                     } else {
                         v.nexthops = c.nexthops.clone();
                     }
+                    v.first_hop_links = c.first_hop_links.clone();
                 }
             } else {
                 bt.remove(&(ocost, c.id));
@@ -1204,6 +1248,104 @@ mod tests {
             repair.segs.is_empty(),
             "expected trivial repair (no SR segments), got {:?}",
             repair.segs
+        );
+    }
+
+    /// Case P1 (symmetric parallel links, equal metric): SPF must
+    /// propagate every parallel link's `link_id` into the destination's
+    /// `first_hop_links` so the rib-builder can install ECMP across
+    /// all of them.
+    #[test]
+    fn first_hop_links_captures_parallel_equal_metric() {
+        let mut graph = BTreeMap::new();
+        graph.insert(0, Vertex::new_node("S", 0));
+        graph.insert(1, Vertex::new_node("A", 1));
+
+        // Two parallel S→A links, equal cost, distinct link_ids.
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(Link::with_id(0, 1, 5, 10));
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(Link::with_id(0, 1, 5, 11));
+
+        let tree = spf(&graph, 0, &SpfOpt::full_path());
+        let a = tree.get(&1).expect("A reachable");
+        assert_eq!(a.cost, 5);
+
+        let got: BTreeSet<(usize, u32)> = a.first_hop_links.iter().copied().collect();
+        assert_eq!(
+            got,
+            BTreeSet::from([(1, 10), (1, 11)]),
+            "both parallel link_ids must reach A's first_hop_links"
+        );
+    }
+
+    /// Case P2 (asymmetric parallel links): SPF picks the cheaper
+    /// link and discards the expensive one; only the chosen link_id
+    /// must appear in `first_hop_links`.
+    #[test]
+    fn first_hop_links_picks_cheaper_of_asymmetric_parallels() {
+        let mut graph = BTreeMap::new();
+        graph.insert(0, Vertex::new_node("S", 0));
+        graph.insert(1, Vertex::new_node("A", 1));
+
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(Link::with_id(0, 1, 1, 10)); // cheap
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(Link::with_id(0, 1, 1000, 11)); // expensive
+
+        let tree = spf(&graph, 0, &SpfOpt::full_path());
+        let a = tree.get(&1).expect("A reachable");
+        assert_eq!(a.cost, 1, "SPF picks metric-1 link");
+
+        let got: BTreeSet<(usize, u32)> = a.first_hop_links.iter().copied().collect();
+        assert_eq!(
+            got,
+            BTreeSet::from([(1, 10)]),
+            "only the cheap link_id must survive; expensive parallel must be discarded"
+        );
+    }
+
+    /// Deeper-hop propagation: a destination reached via an intermediate
+    /// inherits the intermediate's `first_hop_links` set unchanged.
+    #[test]
+    fn first_hop_links_propagates_through_intermediates() {
+        let mut graph = BTreeMap::new();
+        graph.insert(0, Vertex::new_node("S", 0));
+        graph.insert(1, Vertex::new_node("A", 1));
+        graph.insert(2, Vertex::new_node("B", 2));
+
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(Link::with_id(0, 1, 1, 10));
+        graph
+            .get_mut(&1)
+            .unwrap()
+            .olinks
+            .push(Link::with_id(1, 2, 1, 99)); // link_id on non-root edge is irrelevant
+
+        let tree = spf(&graph, 0, &SpfOpt::full_path());
+        let b = tree.get(&2).expect("B reachable");
+        assert_eq!(b.cost, 2);
+        // B's first-hop is A (vertex 1), via link_id 10 — the root edge.
+        let got: BTreeSet<(usize, u32)> = b.first_hop_links.iter().copied().collect();
+        assert_eq!(
+            got,
+            BTreeSet::from([(1, 10)]),
+            "B must inherit A's first_hop_links (root→A link_id), not the A→B link's id"
         );
     }
 }
