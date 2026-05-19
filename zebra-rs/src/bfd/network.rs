@@ -1,18 +1,31 @@
-use std::io::{ErrorKind, IoSliceMut};
+use std::io::{ErrorKind, IoSlice, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use nix::sys::socket::{self, ControlMessageOwned, SockaddrIn};
 use socket2::Socket;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::inst::Message;
 
 /// GTSM expected TTL for single-hop BFD (RFC 5881 §5).
 const GTSM_TTL: u8 = 255;
+
+/// Egress request consumed by [`write_packet`]. The event loop pushes
+/// these whenever a [`super::timer::TimerEvent::TxTick`] fires (or in
+/// future PRs, when a poll-sequence packet must be sent off-schedule).
+#[derive(Debug)]
+pub struct WriteRequest {
+    pub packet: bfd_packet::ControlPacket,
+    pub dst: SocketAddrV4,
+    /// Optional egress ifindex (sent via `IP_PKTINFO`). `None` lets
+    /// the kernel route normally.
+    pub ifindex: Option<u32>,
+}
 
 /// Async receive loop. Pulls one BFD control packet at a time off
 /// `sock`, runs structural validation via
@@ -91,6 +104,48 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
     }
 }
 
+/// Async send loop. Drains [`WriteRequest`] from `rx`, encodes the
+/// control packet, and dispatches it via `sendmsg`. The outgoing TTL
+/// is fixed to 255 by the socket option configured in
+/// [`super::socket::bfd_socket_ipv4`]. When `WriteRequest::ifindex`
+/// is `Some`, an `IP_PKTINFO` ancillary message pins egress to that
+/// interface; otherwise the kernel routes normally.
+pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<WriteRequest>) {
+    while let Some(req) = rx.recv().await {
+        let mut buf = BytesMut::new();
+        req.packet.emit(&mut buf);
+        let iov = [IoSlice::new(&buf)];
+        let sockaddr: SockaddrIn = req.dst.into();
+
+        let pktinfo = req.ifindex.map(|ifindex| libc::in_pktinfo {
+            ipi_ifindex: ifindex as i32,
+            ipi_spec_dst: libc::in_addr { s_addr: 0 },
+            ipi_addr: libc::in_addr { s_addr: 0 },
+        });
+        let cmsg_storage;
+        let cmsgs: &[socket::ControlMessage<'_>] = if let Some(ref pi) = pktinfo {
+            cmsg_storage = [socket::ControlMessage::Ipv4PacketInfo(pi)];
+            &cmsg_storage
+        } else {
+            &[]
+        };
+
+        let _ = sock
+            .async_io(Interest::WRITABLE, |sock| {
+                socket::sendmsg(
+                    sock.as_raw_fd(),
+                    &iov,
+                    cmsgs,
+                    socket::MsgFlags::empty(),
+                    Some(&sockaddr),
+                )
+                .map_err(std::io::Error::from)?;
+                Ok(())
+            })
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bfd_packet::{ControlPacket, State};
@@ -146,7 +201,10 @@ mod tests {
 
         let Message::Recv {
             packet: rx_packet, ..
-        } = got;
+        } = got
+        else {
+            panic!("expected Recv, got {got:?}");
+        };
         assert_eq!(rx_packet, packet);
 
         read_handle.abort();

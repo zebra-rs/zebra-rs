@@ -8,11 +8,6 @@
 //! side effects: updating its own state, resetting the detection
 //! timer, notifying clients, and so on.
 
-// PR 3a stages the full Event surface (`DetectExpired`, `AdminDown`,
-// `AdminUp`); the production wiring that constructs the non-`Rx`
-// variants arrives in PR 3b (timer expiry) and PR 4 (admin shutdown).
-#![allow(dead_code)]
-
 use bfd_packet::{Diag, State};
 
 /// External events that can drive a state change.
