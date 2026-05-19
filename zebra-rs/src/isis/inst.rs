@@ -2500,7 +2500,7 @@ fn build_rib_from_spf(
     level: Level,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
-    tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
+    _tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) -> PrefixMap<Ipv4Net, SpfRoute> {
     let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
@@ -3049,6 +3049,7 @@ fn link_protection_spf(
 /// Output of `resolve_repairs_mpls` — for one (protected neighbor,
 /// destination) pair, the local egress and the pre-resolved MPLS
 /// label stack that `spf::tilfa()` + label lookup produced.
+#[allow(dead_code)]
 #[derive(Debug)]
 struct RepairCandidate {
     /// Egress ifindex of the local link to the post-conv first-hop.
@@ -3089,6 +3090,7 @@ fn find_local_nhop_v6(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u3
 /// skip in `build_rib_from_spf` so a LAN repair lands on the actual
 /// router behind the DIS pseudonode rather than the pseudonode
 /// itself.
+#[allow(dead_code)]
 fn find_local_nhop_v4(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u32, Ipv4Addr)> {
     let mut idx = 0;
     while idx < path.len() && top.lsp_map.get(&level).is_pseudo(path[idx]) {
@@ -3110,11 +3112,13 @@ fn find_local_nhop_v4(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u3
 /// the originator's SR block when the SID is Index-encoded.
 /// `block_kind` picks the global SRGB (prefix-SIDs) or the local
 /// SRLB (adjacency-SIDs).
+#[allow(dead_code)]
 enum SrBlockKind {
     Global,
     Local,
 }
 
+#[allow(dead_code)]
 fn resolve_sid_to_label(
     top: &IsisTop,
     level: Level,
@@ -3138,6 +3142,7 @@ fn resolve_sid_to_label(
 /// Walks the vertex's IPv4 reach entries (typically the loopback)
 /// for the first prefix-SID sub-TLV, then resolves Index against the
 /// originator's SRGB.
+#[allow(dead_code)]
 fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Option<u32> {
     let sys_id = *top.lsp_map.get(&level).resolve(vertex)?;
     let entries = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id)?;
@@ -3161,6 +3166,7 @@ fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Opti
 /// adjacencies the neighbor_id is `(to_sys, 0)` and any AdjSid
 /// sub-TLV under it qualifies. Index-encoded SIDs resolve against
 /// the originator's SRLB.
+#[allow(dead_code)]
 fn adj_sid_label_for_link(
     top: &IsisTop,
     level: Level,
@@ -3228,6 +3234,7 @@ fn adj_sid_label_for_link(
 /// — we refuse to install a partial stack since the resulting label
 /// path would diverge from the post-convergence path the algorithm
 /// computed.
+#[allow(dead_code)]
 fn repair_segments_to_mpls_labels(
     top: &IsisTop,
     level: Level,
@@ -3258,6 +3265,7 @@ fn repair_segments_to_mpls_labels(
 /// segments to MPLS labels and pair them with the local egress.
 /// Pure link protection: pass the edge-removed graph with `x = []`
 /// (no node exclusion).
+#[allow(dead_code)]
 fn resolve_repairs_mpls(
     top: &IsisTop,
     level: Level,
@@ -3313,6 +3321,7 @@ fn resolve_repairs_mpls(
 /// produces a (protected nbr sys_id, dest vertex) -> RepairCandidate
 /// map; this step writes `SpfNexthop.backup` on every primary nhop
 /// whose key matches.
+#[allow(dead_code)]
 fn ti_lfa_compute_mpls(
     top: &mut IsisTop,
     level: Level,
@@ -3335,6 +3344,7 @@ fn ti_lfa_compute_mpls(
 /// nhop's `backup` field. The label stack — including the
 /// NodeSID(P) + AdjSid(P->Q) ... AdjSid(...) sequence produced by
 /// `make_repair_list` — was already assembled in resolve.
+#[allow(dead_code)]
 fn apply_repairs_mpls(
     routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
     repairs: &BTreeMap<(IsisSysId, usize), RepairCandidate>,
@@ -3542,7 +3552,7 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     let tilfa_result = tilfa_repair_path(&graph, source, &spf_result);
 
     // Build RIB.
-    let mut rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
+    let rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
 
     // ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
 
