@@ -49,6 +49,7 @@ ospf-packet = { path = "../crates/ospf-packet" }
 ospf-macros = { path = "../crates/ospf-macros" }
 isis-packet = { path = "../crates/isis-packet" }
 isis-macros = { path = "../crates/isis-macros" }
+bfd-packet = { path = "../crates/bfd-packet" }
 bitfield-struct = "0.13"
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }

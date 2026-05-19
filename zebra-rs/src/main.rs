@@ -9,6 +9,7 @@ mod rib;
 use rib::{LogFormatType, LogOutputType, Rib, logging_config_from_args, tracing_set};
 mod policy;
 use policy::Policy;
+mod bfd;
 mod context;
 mod fib;
 mod isis;
