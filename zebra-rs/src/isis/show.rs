@@ -1791,12 +1791,7 @@ fn show_isis_spf(
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    if json {
-        return Ok(spf_json(isis, /* detail = */ false));
-    }
-    let mut buf = String::new();
-    write_spf_brief(isis, &mut buf);
-    Ok(buf)
+    render_spf(isis, /* detail = */ false, json)
 }
 
 fn show_isis_spf_detail(
@@ -1804,21 +1799,211 @@ fn show_isis_spf_detail(
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    render_spf(isis, /* detail = */ true, json)
+}
+
+fn render_spf(
+    isis: &Isis,
+    detail: bool,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let topos = spf_topologies(isis);
+
     if json {
-        return Ok(spf_json(isis, /* detail = */ true));
+        let view = SpfResultJson {
+            ti_lfa_enabled: isis.config.ti_lfa_enabled,
+            sr_mpls_enabled: isis.config.sr_mpls_enabled,
+            sr_srv6_enabled: isis.config.sr_srv6_enabled,
+            detail,
+            topologies: topos
+                .iter()
+                .filter_map(|(name, graph, spf)| {
+                    let g = graph.as_ref()?;
+                    let s = spf.as_ref()?;
+                    Some((name.to_string(), spf_topology_json(g, s, detail)))
+                })
+                .collect(),
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
     }
+
     let mut buf = String::new();
     write_spf_status_banner(isis, &mut buf);
-    write_spf_brief(isis, &mut buf);
-    // Per-destination repair-path detail is rendered here once
-    // SpfNexthop.backup lands (Step 2 of the TI-LFA branch plan).
-    // The CLI surface and JSON shape are locked now so downstream
-    // tooling can wire against the path/keys without churn.
-    let _ = writeln!(
-        buf,
-        "(per-destination TI-LFA repair-path detail not yet implemented)"
-    );
+
+    let mut wrote_any = false;
+    for (name, graph, spf) in &topos {
+        let (Some(graph), Some(spf)) = (graph.as_ref(), spf.as_ref()) else {
+            continue;
+        };
+        if spf.is_empty() {
+            continue;
+        }
+        wrote_any = true;
+        writeln!(buf, "\n{} SPF results:", name)?;
+        for (dest, path) in spf.iter() {
+            let dest_name = vertex_name(graph, *dest);
+            writeln!(
+                buf,
+                "  Destination {} (vertex {}), cost {}",
+                dest_name, dest, path.cost,
+            )?;
+            if path.first_hop_links.is_empty() {
+                writeln!(buf, "    (no first-hop — self or unreachable)")?;
+            } else {
+                let mut hops: Vec<(usize, u32)> = path.first_hop_links.iter().copied().collect();
+                hops.sort();
+                for (i, (fh_vertex, link_id)) in hops.iter().enumerate() {
+                    let fh_name = vertex_name(graph, *fh_vertex);
+                    writeln!(
+                        buf,
+                        "    [{}] first-hop {} (vertex {}, link_id {})",
+                        i, fh_name, fh_vertex, link_id,
+                    )?;
+                }
+            }
+            if detail {
+                if path.paths.is_empty() {
+                    writeln!(buf, "    paths: (none)")?;
+                } else {
+                    writeln!(buf, "    paths:")?;
+                    for (i, p) in path.paths.iter().enumerate() {
+                        writeln!(buf, "      [{}] {}", i, format_vertex_path(graph, p))?;
+                    }
+                }
+            }
+        }
+    }
+    if !wrote_any {
+        writeln!(buf, "(no SPF results)")?;
+    }
     Ok(buf)
+}
+
+/// Ordered list of (display name, graph, spf result) per topology
+/// rendered by `show isis spf` — legacy single-topology (drives IPv4
+/// RIB always, plus IPv6 when MT 2 is off) then MT 2 (IPv6 unicast).
+fn spf_topologies(
+    isis: &Isis,
+) -> Vec<(
+    &'static str,
+    &Option<spf::Graph>,
+    &Option<BTreeMap<usize, spf::Path>>,
+)> {
+    vec![
+        (
+            "L1 (single-topology / MT 0)",
+            isis.graph.get(&Level::L1),
+            isis.spf_result.get(&Level::L1),
+        ),
+        (
+            "L2 (single-topology / MT 0)",
+            isis.graph.get(&Level::L2),
+            isis.spf_result.get(&Level::L2),
+        ),
+        (
+            "L1 (MT 2 / IPv6 unicast)",
+            isis.mt2_graph.get(&Level::L1),
+            isis.mt2_spf_result.get(&Level::L1),
+        ),
+        (
+            "L2 (MT 2 / IPv6 unicast)",
+            isis.mt2_graph.get(&Level::L2),
+            isis.mt2_spf_result.get(&Level::L2),
+        ),
+    ]
+}
+
+fn format_vertex_path(graph: &spf::Graph, path: &[usize]) -> String {
+    if path.is_empty() {
+        return "(empty)".to_string();
+    }
+    path.iter()
+        .map(|v| vertex_name(graph, *v))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+fn spf_topology_json(
+    graph: &spf::Graph,
+    spf: &BTreeMap<usize, spf::Path>,
+    detail: bool,
+) -> SpfTopologyJson {
+    let destinations = spf
+        .iter()
+        .map(|(dest, path)| {
+            let mut hops: Vec<(usize, u32)> = path.first_hop_links.iter().copied().collect();
+            hops.sort();
+            SpfDestinationJson {
+                vertex_id: *dest,
+                name: vertex_name(graph, *dest),
+                cost: path.cost,
+                first_hops: hops
+                    .into_iter()
+                    .map(|(v, link_id)| SpfFirstHopJson {
+                        vertex_id: v,
+                        name: vertex_name(graph, v),
+                        link_id,
+                    })
+                    .collect(),
+                paths: if detail {
+                    Some(
+                        path.paths
+                            .iter()
+                            .map(|p| {
+                                p.iter()
+                                    .map(|v| SpfPathVertexJson {
+                                        vertex_id: *v,
+                                        name: vertex_name(graph, *v),
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                },
+            }
+        })
+        .collect();
+    SpfTopologyJson { destinations }
+}
+
+#[derive(Serialize)]
+struct SpfResultJson {
+    ti_lfa_enabled: bool,
+    sr_mpls_enabled: bool,
+    sr_srv6_enabled: bool,
+    detail: bool,
+    topologies: BTreeMap<String, SpfTopologyJson>,
+}
+
+#[derive(Serialize)]
+struct SpfTopologyJson {
+    destinations: Vec<SpfDestinationJson>,
+}
+
+#[derive(Serialize)]
+struct SpfDestinationJson {
+    vertex_id: usize,
+    name: String,
+    cost: u32,
+    first_hops: Vec<SpfFirstHopJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paths: Option<Vec<Vec<SpfPathVertexJson>>>,
+}
+
+#[derive(Serialize)]
+struct SpfFirstHopJson {
+    vertex_id: usize,
+    name: String,
+    link_id: u32,
+}
+
+#[derive(Serialize)]
+struct SpfPathVertexJson {
+    vertex_id: usize,
+    name: String,
 }
 
 // ---- show isis repair-list / repair-list detail ----------------------
@@ -2176,80 +2361,6 @@ fn write_spf_status_banner(isis: &Isis, buf: &mut String) {
         if sr_mpls { "on" } else { "off" },
         if sr_srv6 { "on" } else { "off" },
     );
-}
-
-fn write_spf_brief(isis: &Isis, buf: &mut String) {
-    // Legacy single-topology SPF — drives IPv4 RIB always, plus
-    // IPv6 RIB when MT 2 is off. Print L1 then L2.
-    if let Some(spf) = isis.spf_result.get(&Level::L1) {
-        let _ = writeln!(buf, "L1 SPF (single-topology / MT 0)");
-        spf::disp_out(buf, spf, true);
-    }
-    if let Some(spf) = isis.spf_result.get(&Level::L2) {
-        let _ = writeln!(buf, "L2 SPF (single-topology / MT 0)");
-        spf::disp_out(buf, spf, true);
-    }
-
-    // MT 2 SPF — only computed when local config has MT 2 in
-    // mt_topologies. We print the raw tree from mt2_spf_result here
-    // regardless of whether the legacy SPF is also present so
-    // operators can compare metrics across topologies.
-    if let Some(spf) = isis.mt2_spf_result.get(&Level::L1) {
-        let _ = writeln!(buf, "L1 SPF (MT 2 / IPv6 unicast)");
-        spf::disp_out(buf, spf, true);
-    }
-    if let Some(spf) = isis.mt2_spf_result.get(&Level::L2) {
-        let _ = writeln!(buf, "L2 SPF (MT 2 / IPv6 unicast)");
-        spf::disp_out(buf, spf, true);
-    }
-}
-
-fn spf_json(isis: &Isis, detail: bool) -> String {
-    // Minimal JSON skeleton — keys are stable now so downstream
-    // tooling can lock against them. `levels[*].vertices` and
-    // `levels[*].destinations` fill in once the SPF result and the
-    // per-destination repair view are serialized; for now the
-    // counts give operators something to assert against.
-    let view = SpfShowJson {
-        ti_lfa_enabled: isis.config.ti_lfa_enabled,
-        sr_mpls_enabled: isis.config.sr_mpls_enabled,
-        sr_srv6_enabled: isis.config.sr_srv6_enabled,
-        detail,
-        levels: [
-            ("L1-single", isis.spf_result.get(&Level::L1)),
-            ("L2-single", isis.spf_result.get(&Level::L2)),
-            ("L1-mt2", isis.mt2_spf_result.get(&Level::L1)),
-            ("L2-mt2", isis.mt2_spf_result.get(&Level::L2)),
-        ]
-        .into_iter()
-        .filter_map(|(name, spf)| {
-            spf.as_ref().map(|s| {
-                (
-                    name.to_string(),
-                    SpfLevelJson {
-                        vertex_count: s.len(),
-                    },
-                )
-            })
-        })
-        .collect(),
-    };
-    serde_json::to_string_pretty(&view)
-        .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize SPF view: {}\"}}", e))
-}
-
-#[derive(Serialize)]
-struct SpfShowJson {
-    ti_lfa_enabled: bool,
-    sr_mpls_enabled: bool,
-    sr_srv6_enabled: bool,
-    detail: bool,
-    levels: std::collections::BTreeMap<String, SpfLevelJson>,
-}
-
-#[derive(Serialize)]
-struct SpfLevelJson {
-    vertex_count: usize,
 }
 
 #[cfg(test)]
