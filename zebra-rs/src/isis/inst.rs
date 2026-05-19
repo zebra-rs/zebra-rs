@@ -2462,6 +2462,7 @@ fn build_rib_from_spf(
     level: Level,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
+    tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) -> PrefixMap<Ipv4Net, SpfRoute> {
     let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
@@ -2492,9 +2493,12 @@ fn build_rib_from_spf(
         // on the actual nexthop *router* before looking up neighbours.
         let mut spf_nhops = BTreeMap::new();
         for p in &nhops.paths {
+            // This could be source node's nexthop.
             if p.is_empty() {
-                continue; // self
+                continue;
             }
+
+            // Pseudo node needs to be skipped.
             let mut nhop_idx = 0;
             while nhop_idx < p.len() && top.lsp_map.get(&level).is_pseudo(p[nhop_idx]) {
                 nhop_idx += 1;
@@ -2502,15 +2506,22 @@ fn build_rib_from_spf(
             if nhop_idx >= p.len() {
                 continue;
             }
-            if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) {
-                // Find nhop from links
+
+            //
+            // println!("nhop idx:{}", p[nhop_idx]);
+            if let Some(nhop_sys_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) {
+                // println!(" -> id:{}", nhop_sys_id);
+
+                // TODO: Find nhop from links. This could be optimized. When we
+                // have multiple link to the same node, is below code
+                // sufficient?
                 for (ifindex, link) in top.links.iter() {
-                    if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
+                    if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_sys_id) {
                         for (addr, _) in nbr.addr4.iter() {
                             let nhop = SpfNexthop {
                                 ifindex: *ifindex,
                                 adjacency: p[nhop_idx] == *node,
-                                sys_id: Some(*nhop_id),
+                                sys_id: Some(*nhop_sys_id),
                                 backup: None,
                             };
                             spf_nhops.insert(*addr, nhop);
@@ -2938,7 +2949,7 @@ fn link_protection_spf(
 
         let repair_paths = spf::tilfa(graph, source, *d, &[x]);
         if let Some(repair) = repair_paths.first() {
-            println!(" => nhop={} segs={:?}", repair.nhop, repair.segs);
+            println!(" => nhop[{}] {:?}", repair.nhop, repair.segs);
         } else {
             println!(" => no repair path");
         }
@@ -3378,7 +3389,45 @@ fn ti_lfa_compute_srv6(
     }
 }
 
-// XXX
+fn tilfa_repair_path(
+    graph: &spf::Graph,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> BTreeMap<usize, Vec<spf::RepairPath>> {
+    let mut tilfa_result = BTreeMap::new();
+
+    for (d, path) in spf_result.iter() {
+        print!("{}: {:?}", d, path.paths);
+        // Source is skipped.
+        if *d == source {
+            println!(" => Source is skipped");
+            continue;
+        }
+        // ECMP is skipped.
+        if path.paths.len() > 1 {
+            println!(" => ECMP is skipped");
+            continue;
+        }
+
+        // X
+        let first = &path.paths[0];
+        if first.is_empty() {
+            continue;
+        }
+        let x = first[0];
+
+        let repair_paths = spf::tilfa(graph, source, *d, &[x]);
+        if let Some(repair) = repair_paths.first() {
+            println!(" => [{}] {:?}", repair.nhop, repair.segs);
+        } else {
+            println!(" => no repair path");
+        }
+        tilfa_result.insert(*d, repair_paths);
+    }
+    tilfa_result
+}
+
+//
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // Turn off SPF calculation timer.
     *top.spf_timer.get_mut(&level) = None;
@@ -3398,8 +3447,14 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // Full-path mode so the legacy v6 builder can apply RFC 1195
     // §5 strict NLPID gating across every transit node.
     let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
-    let mut rib = build_rib_from_spf(top, level, source, &spf_result);
-    ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
+
+    // TI-LFA repair path.
+    let tilfa_result = tilfa_repair_path(&graph, source, &spf_result);
+
+    // Build RIB.
+    let mut rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
+
+    // ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
 
     let mt2_enabled =
         top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
