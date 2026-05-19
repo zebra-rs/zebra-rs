@@ -750,6 +750,147 @@ module config {
       }
     }
 
+    container bfd {
+      ext:help "Bidirectional Forwarding Detection (RFC 5880)";
+      presence "Enable BFD";
+
+      list profile {
+        ext:help "Named bundle of BFD session parameters";
+        key "name";
+        leaf name {
+          type string;
+        }
+        leaf detect-multiplier {
+          type uint8 {
+            range "1..255";
+          }
+          default 3;
+          description
+            "Detect multiplier (RFC 5880 §6.8.1). The peer's
+             transmission interval is multiplied by this value to
+             compute the local detection time.";
+        }
+        leaf transmit-interval {
+          type uint32 {
+            range "10..4294967";
+          }
+          units "milliseconds";
+          default 300;
+          description
+            "Desired minimum interval at which this system would
+             like to transmit control packets (RFC 5880 §6.8.7).";
+        }
+        leaf receive-interval {
+          type uint32 {
+            range "10..4294967";
+          }
+          units "milliseconds";
+          default 300;
+          description
+            "Minimum interval at which this system is willing to
+             receive control packets (RFC 5880 §6.8.7).";
+        }
+        leaf passive-mode {
+          type boolean;
+          default false;
+          description
+            "When true, the session waits for the peer to send the
+             first control packet before responding (FRR-style;
+             RFC 5880 §6.1 active vs. passive role).";
+        }
+        leaf shutdown {
+          type boolean;
+          default false;
+          description
+            "Administrative shutdown — the session stays AdminDown
+             until this is cleared.";
+        }
+        leaf minimum-ttl {
+          type uint8 {
+            range "1..254";
+          }
+          default 254;
+          description
+            "Multihop only: minimum TTL accepted on incoming control
+             packets (RFC 5883). Ignored on single-hop sessions
+             where GTSM requires TTL=255 unconditionally.";
+        }
+      }
+
+      list peer {
+        ext:help "BFD peer (one session per peer)";
+        // Phase-1 scope: a single (remote-address, multihop) tuple
+        // uniquely identifies a peer. Local-address / interface
+        // selection are stored as ordinary leaves and applied as
+        // matching constraints at session creation. PR 7 broadens
+        // the key once multihop with overlapping remote addresses
+        // is in scope.
+        key "remote-address";
+        leaf remote-address {
+          type inet:ip-address;
+        }
+        leaf multihop {
+          type boolean;
+          default false;
+          description
+            "When true, this peer is reached over multiple hops
+             (UDP/4784, RFC 5883). Defaults to single-hop
+             (UDP/3784, RFC 5881).";
+        }
+        leaf local-address {
+          type inet:ip-address;
+          description
+            "Source address used when sending to this peer. If
+             unset, the kernel selects an address.";
+        }
+        leaf interface {
+          ext:dynamic "rib:interface";
+          type string;
+          description
+            "Egress interface, mandatory for IPv6 link-local
+             peers, optional otherwise.";
+        }
+        leaf profile {
+          type string;
+          description
+            "Name of a [/bfd/profile] entry whose parameters apply
+             to this peer. Peer-level leaves below override the
+             profile setting on a per-leaf basis.";
+        }
+        // Peer-level overrides. Each unset leaf falls back to the
+        // referenced profile (if any), otherwise to the profile
+        // default.
+        leaf detect-multiplier {
+          type uint8 {
+            range "1..255";
+          }
+        }
+        leaf transmit-interval {
+          type uint32 {
+            range "10..4294967";
+          }
+          units "milliseconds";
+        }
+        leaf receive-interval {
+          type uint32 {
+            range "10..4294967";
+          }
+          units "milliseconds";
+        }
+        leaf passive-mode {
+          type boolean;
+        }
+        leaf shutdown {
+          type boolean;
+        }
+        leaf minimum-ttl {
+          type uint8 {
+            range "1..254";
+          }
+        }
+      }
+    }
+
     container segment-routing {
       ext:help "Segment Routing global configuration";
       description

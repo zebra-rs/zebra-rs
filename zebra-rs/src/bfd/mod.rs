@@ -7,6 +7,7 @@
 // returns naturally as PR 4 wires the production callers.
 #![allow(dead_code)]
 
+pub mod config;
 pub mod fsm;
 pub mod inst;
 pub mod network;
