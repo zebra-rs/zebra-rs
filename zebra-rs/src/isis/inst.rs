@@ -3164,15 +3164,12 @@ fn tilfa_repair_path(
     let mut tilfa_result = BTreeMap::new();
 
     for (d, path) in spf_result.iter() {
-        print!("{}: {:?}", d, path.paths);
         // Source is skipped.
         if *d == source {
-            println!(" => Source is skipped");
             continue;
         }
         // ECMP is skipped.
         if path.paths.len() > 1 {
-            println!(" => ECMP is skipped");
             continue;
         }
 
@@ -3184,11 +3181,6 @@ fn tilfa_repair_path(
         let x = first[0];
 
         let repair_paths = spf::tilfa(graph, source, *d, &[x]);
-        if let Some(repair) = repair_paths.first() {
-            println!(" => [{}] {:?}", repair.first_hop, repair.segs);
-        } else {
-            println!(" => no repair path");
-        }
         if !repair_paths.is_empty() {
             tilfa_result.insert(*d, repair_paths);
         }
