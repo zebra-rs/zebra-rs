@@ -5,7 +5,6 @@ mod version;
 use config::{Cli, ConfigManager};
 use std::path::PathBuf;
 mod bgp;
-use bgp::Bgp;
 mod rib;
 use rib::{LogFormatType, LogOutputType, Rib, logging_config_from_args, tracing_set};
 mod policy;
@@ -164,12 +163,9 @@ async fn run() -> anyhow::Result<()> {
     }
     let yang_path = yang_path.unwrap();
 
-    let mut rib = Rib::new(arg.no_nhid, arg.enable_addr_recovery)?;
+    let rib = Rib::new(arg.no_nhid, arg.enable_addr_recovery)?;
 
     let policy = Policy::new();
-
-    let bgp = Bgp::new(rib.tx.clone(), policy.tx.clone());
-    rib.subscribe(bgp.redist.tx.clone(), "bgp".to_string());
 
     // Runtime-mutable YANG-defined service-accounts (D25). Shared
     // between ConfigManager (writes on commit) and SessionTable (reads
@@ -184,14 +180,13 @@ async fn run() -> anyhow::Result<()> {
         system_path(&arg),
         yang_path,
         rib.tx.clone(),
+        policy.tx.clone(),
         #[cfg(target_os = "linux")]
         yang_service_accounts.clone(),
     )?;
     config.subscribe("rib", rib.cm.tx.clone());
-    config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());
     config.subscribe_show("rib", rib.show.tx.clone());
-    config.subscribe_show("bgp", bgp.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
     let cli = Cli::new(
@@ -204,8 +199,6 @@ async fn run() -> anyhow::Result<()> {
     config::serve(cli, vty_addr)?;
 
     policy::serve(policy);
-
-    bgp::serve(bgp);
 
     rib::serve(rib);
     // rib::nanomsg::serve();

@@ -14,7 +14,7 @@ use crate::rib::{
 };
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::context::Timer;
+use crate::context::{Task, Timer};
 use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
@@ -793,10 +793,10 @@ impl Isis {
     }
 }
 
-pub fn serve(mut isis: Isis) {
-    tokio::spawn(async move {
+pub fn serve(mut isis: Isis) -> Task<()> {
+    Task::spawn(async move {
         isis.event_loop().await;
-    });
+    })
 }
 
 pub enum Message {

@@ -1,13 +1,14 @@
 use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxResponse};
 
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
+use super::bgp::{despawn_bgp, spawn_bgp};
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
 use super::configs::{carbon_copy, delete, set};
 use super::files::load_config_file;
-use super::isis::spawn_isis;
+use super::isis::{despawn_isis, spawn_isis};
 use super::json::json_read;
-use super::ospf::spawn_ospf;
+use super::ospf::{despawn_ospf, spawn_ospf};
 use super::parse::State;
 use super::parse::parse;
 use super::paths::{path_try_trim, paths_str};
@@ -16,6 +17,7 @@ use super::vty::CommandPath;
 use super::yaml::yaml_parse;
 use super::{ApplyCode, Completion, Config, ConfigRequest, DisplayRequest, ExecCode};
 
+use crate::context::Task;
 use libyang::{Entry, YangStore, to_entry};
 use similar::TextDiff;
 use std::cell::RefCell;
@@ -64,6 +66,8 @@ pub struct ConfigManager {
     pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     pub rib_tx: UnboundedSender<crate::rib::Message>,
+    pub policy_tx: UnboundedSender<crate::policy::Message>,
+    pub protocol_tasks: RefCell<HashMap<String, Task<()>>>,
     /// Runtime-mutable YANG-defined service-accounts (D25). Updated by
     /// `commit_config` when `vty service-account uid N` changes; read by
     /// `SessionTable::is_service_account` at session creation.
@@ -76,6 +80,7 @@ impl ConfigManager {
         mut system_path: PathBuf,
         yang_path: String,
         rib_tx: UnboundedSender<crate::rib::Message>,
+        policy_tx: UnboundedSender<crate::policy::Message>,
         #[cfg(target_os = "linux")] yang_service_accounts: std::sync::Arc<
             std::sync::RwLock<std::collections::HashSet<u32>>,
         >,
@@ -97,6 +102,8 @@ impl ConfigManager {
             cm_clients: RefCell::new(HashMap::new()),
             show_clients: RefCell::new(HashMap::new()),
             rib_tx,
+            policy_tx,
+            protocol_tasks: RefCell::new(HashMap::new()),
             #[cfg(target_os = "linux")]
             yang_service_accounts,
         };
@@ -176,6 +183,7 @@ impl ConfigManager {
 
         let mut ospf = false;
         let mut isis = false;
+        let mut bgp = false;
         for (proto, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
@@ -184,6 +192,9 @@ impl ConfigManager {
             }
             if proto == "isis" {
                 isis = true;
+            }
+            if proto == "bgp" {
+                bgp = true;
             }
         }
         for line in diff.lines() {
@@ -205,6 +216,10 @@ impl ConfigManager {
             if !isis && op == ConfigOp::Set && line.starts_with("router isis") {
                 isis = true;
                 spawn_isis(self);
+            }
+            if !bgp && op == ConfigOp::Set && line.starts_with("router bgp") {
+                bgp = true;
+                spawn_bgp(self);
             }
             // Handle logging configuration changes
             if op == ConfigOp::Set && line.starts_with("logging output") {
@@ -240,6 +255,26 @@ impl ConfigManager {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
                 .unwrap();
         }
+
+        // Tear down protocol tasks whose `router <proto>` config has
+        // disappeared from the candidate. Top-level config lines have
+        // no leading whitespace, so a starts_with prefix scan is
+        // sufficient. `protocol_tasks` gates the check so we don't
+        // try to despawn a proto that was never running.
+        let proto_in_candidate = |proto: &str| {
+            let needle = format!("router {}", proto);
+            candidate.lines().any(|l| l.starts_with(&needle))
+        };
+        if self.protocol_tasks.borrow().contains_key("bgp") && !proto_in_candidate("bgp") {
+            despawn_bgp(self);
+        }
+        if self.protocol_tasks.borrow().contains_key("ospf") && !proto_in_candidate("ospf") {
+            despawn_ospf(self);
+        }
+        if self.protocol_tasks.borrow().contains_key("isis") && !proto_in_candidate("isis") {
+            despawn_isis(self);
+        }
+
         self.store.commit();
         Ok(())
     }
