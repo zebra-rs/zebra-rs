@@ -988,6 +988,7 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     };
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
+    *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
     mpls_route(&rib, &mut ilm);
     apply_routing_updates(top, level, rib, rib_v6, ilm);
 }

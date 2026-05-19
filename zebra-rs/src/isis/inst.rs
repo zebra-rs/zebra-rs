@@ -102,6 +102,7 @@ pub struct Isis {
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
+    pub tilfa_result: Levels<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>,
 
     /// MT 2 (IPv6 unicast) graph and SPF result. Computed alongside
     /// the legacy graph when `mt_enabled` and MT 2 is in
@@ -226,6 +227,7 @@ pub struct IsisTop<'a> {
     pub spf_throttle: &'a mut Levels<Throttle>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
+    pub tilfa_result: &'a mut Levels<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>,
     pub mt2_graph: &'a mut Levels<Option<spf::Graph>>,
     pub mt2_spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
 
@@ -326,6 +328,7 @@ impl Isis {
             local_pool: None,
             graph: Levels::<Option<spf::Graph>>::default(),
             spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
+            tilfa_result: Levels::<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>::default(),
             mt2_graph: Levels::<Option<spf::Graph>>::default(),
             mt2_spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
             sr_rx,
@@ -1006,6 +1009,7 @@ impl Isis {
             spf_throttle: &mut self.spf_throttle,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
+            tilfa_result: &mut self.tilfa_result,
             mt2_graph: &mut self.mt2_graph,
             mt2_spf_result: &mut self.mt2_spf_result,
             sr_block: &self.sr_block,

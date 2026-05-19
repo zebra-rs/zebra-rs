@@ -55,6 +55,7 @@ impl Isis {
             show_isis_repair_list_detail,
         );
         self.show_add("/show/isis/topology", show_isis_topology);
+        self.show_add("/show/isis/ti-lfa", show_isis_tilfa);
     }
 }
 
@@ -2010,6 +2011,158 @@ fn show_isis_repair_list_detail(
         }
     }
     Ok(buf)
+}
+
+fn show_isis_tilfa(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let view = TilfaResultJson {
+            levels: [
+                (
+                    "L1",
+                    isis.graph.get(&Level::L1),
+                    isis.tilfa_result.get(&Level::L1),
+                ),
+                (
+                    "L2",
+                    isis.graph.get(&Level::L2),
+                    isis.tilfa_result.get(&Level::L2),
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(name, graph, tilfa)| {
+                let g = graph.as_ref()?;
+                let t = tilfa.as_ref()?;
+                Some((name.to_string(), tilfa_level_json(g, t)))
+            })
+            .collect(),
+        };
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
+    let mut buf = String::new();
+    write_spf_status_banner(isis, &mut buf);
+
+    let mut wrote_any = false;
+    for level in &[Level::L1, Level::L2] {
+        let (Some(graph), Some(tilfa)) = (
+            isis.graph.get(level).as_ref(),
+            isis.tilfa_result.get(level).as_ref(),
+        ) else {
+            continue;
+        };
+        if tilfa.is_empty() {
+            continue;
+        }
+        wrote_any = true;
+        writeln!(buf, "\n{} TI-LFA repair paths:", level)?;
+        for (dest, repairs) in tilfa.iter() {
+            let dest_name = vertex_name(graph, *dest);
+            writeln!(buf, "  Destination {} (vertex {})", dest_name, dest)?;
+            for (i, rp) in repairs.iter().enumerate() {
+                let fh_name = vertex_name(graph, rp.first_hop);
+                writeln!(
+                    buf,
+                    "    [{}] first-hop {} (vertex {}, link_id {})",
+                    i, fh_name, rp.first_hop, rp.first_hop_link_id,
+                )?;
+                if rp.segs.is_empty() {
+                    writeln!(buf, "        segments: (none — direct repair)")?;
+                } else {
+                    writeln!(buf, "        segments:")?;
+                    for seg in &rp.segs {
+                        writeln!(buf, "          {}", format_sr_segment(graph, seg))?;
+                    }
+                }
+            }
+        }
+    }
+    if !wrote_any {
+        writeln!(buf, "(no TI-LFA repair paths computed)")?;
+    }
+    Ok(buf)
+}
+
+fn vertex_name(graph: &spf::Graph, id: usize) -> String {
+    graph
+        .get(&id)
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| format!("v{id}"))
+}
+
+fn format_sr_segment(graph: &spf::Graph, seg: &spf::SrSegment) -> String {
+    match seg {
+        spf::SrSegment::NodeSid(v) => format!("NodeSid({})", vertex_name(graph, *v)),
+        spf::SrSegment::AdjSid(from, to, None) => {
+            format!(
+                "AdjSid({}, {})",
+                vertex_name(graph, *from),
+                vertex_name(graph, *to)
+            )
+        }
+        spf::SrSegment::AdjSid(from, to, Some(via)) => format!(
+            "AdjSid({}, {}, via {})",
+            vertex_name(graph, *from),
+            vertex_name(graph, *to),
+            vertex_name(graph, *via),
+        ),
+    }
+}
+
+fn tilfa_level_json(
+    graph: &spf::Graph,
+    tilfa: &BTreeMap<usize, Vec<spf::RepairPath>>,
+) -> TilfaLevelJson {
+    let destinations = tilfa
+        .iter()
+        .map(|(dest, repairs)| TilfaDestinationJson {
+            vertex_id: *dest,
+            name: vertex_name(graph, *dest),
+            repair_paths: repairs
+                .iter()
+                .map(|rp| TilfaRepairPathJson {
+                    first_hop_vertex_id: rp.first_hop,
+                    first_hop_name: vertex_name(graph, rp.first_hop),
+                    first_hop_link_id: rp.first_hop_link_id,
+                    segments: rp
+                        .segs
+                        .iter()
+                        .map(|s| format_sr_segment(graph, s))
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect();
+    TilfaLevelJson { destinations }
+}
+
+#[derive(Serialize)]
+struct TilfaResultJson {
+    levels: BTreeMap<String, TilfaLevelJson>,
+}
+
+#[derive(Serialize)]
+struct TilfaLevelJson {
+    destinations: Vec<TilfaDestinationJson>,
+}
+
+#[derive(Serialize)]
+struct TilfaDestinationJson {
+    vertex_id: usize,
+    name: String,
+    repair_paths: Vec<TilfaRepairPathJson>,
+}
+
+#[derive(Serialize)]
+struct TilfaRepairPathJson {
+    first_hop_vertex_id: usize,
+    first_hop_name: String,
+    first_hop_link_id: u32,
+    segments: Vec<String>,
 }
 
 fn write_spf_status_banner(isis: &Isis, buf: &mut String) {
