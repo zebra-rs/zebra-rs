@@ -12,6 +12,7 @@ members = [
   "crates/isis-macros",
   "crates/ospf-packet",
   "crates/ospf-macros",
+  "crates/bfd-packet",
   "crates/fixedbuf",
   "bdd",
 ]
