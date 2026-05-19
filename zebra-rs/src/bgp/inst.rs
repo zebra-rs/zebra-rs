@@ -169,6 +169,14 @@ pub struct Bgp {
     pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
     pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
+    /// Handle into the BFD instance's client-request channel — used
+    /// by the per-neighbor `bfd { enable }` path (PR 5d) to submit
+    /// `ClientReq::Subscribe` / `Unsubscribe`. `None` means BFD has
+    /// not (yet) been configured: BGP silently skips its BFD attach
+    /// logic in that case. Captured at spawn time from
+    /// `ConfigManager::bfd_client_tx`; not refreshed if BFD respawns
+    /// later (PR 5d adds a refresh path if needed).
+    pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
     // BgpAttr shared storage.
     pub attr_store: BgpAttrStore,
 }
@@ -177,6 +185,7 @@ impl Bgp {
     pub fn new(
         rib_tx: UnboundedSender<rib::Message>,
         policy_tx: UnboundedSender<policy::Message>,
+        bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
     ) -> Self {
         let chan = RibRxChannel::new();
         let msg = rib::Message::Subscribe {
@@ -222,6 +231,7 @@ impl Bgp {
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
+            bfd_client_tx,
             attr_store: BgpAttrStore::new(),
         };
         bgp.callback_build();

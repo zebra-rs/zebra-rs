@@ -68,6 +68,16 @@ pub struct ConfigManager {
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     pub rib_tx: UnboundedSender<crate::rib::Message>,
     pub policy_tx: UnboundedSender<crate::policy::Message>,
+    /// Sender side of the BFD client-request channel. Populated by
+    /// [`super::bfd::spawn_bfd`] when a `bfd { ... }` block first
+    /// appears in the candidate config; cleared by `despawn_bfd` when
+    /// the block is removed. Protocol modules (BGP / OSPF / IS-IS /
+    /// static) clone this at their own spawn time so they can later
+    /// submit `ClientReq::Subscribe` / `Unsubscribe` against the
+    /// running BFD instance. `None` indicates BFD has not (yet) been
+    /// configured — clients with a `None` handle silently skip their
+    /// BFD attach logic.
+    pub bfd_client_tx: RefCell<Option<UnboundedSender<crate::bfd::inst::ClientReq>>>,
     pub protocol_tasks: RefCell<HashMap<String, Task<()>>>,
     /// Runtime-mutable YANG-defined service-accounts (D25). Updated by
     /// `commit_config` when `vty service-account uid N` changes; read by
@@ -104,6 +114,7 @@ impl ConfigManager {
             show_clients: RefCell::new(HashMap::new()),
             rib_tx,
             policy_tx,
+            bfd_client_tx: RefCell::new(None),
             protocol_tasks: RefCell::new(HashMap::new()),
             #[cfg(target_os = "linux")]
             yang_service_accounts,
