@@ -63,6 +63,18 @@ impl Isis {
             "/router/isis/timers/min-lsp-arrival-time",
             config_min_lsp_arrival_time,
         );
+        self.callback_add(
+            "/router/isis/spf-interval/initial-wait",
+            config_spf_initial_wait,
+        );
+        self.callback_add(
+            "/router/isis/spf-interval/secondary-wait",
+            config_spf_secondary_wait,
+        );
+        self.callback_add(
+            "/router/isis/spf-interval/maximum-wait",
+            config_spf_maximum_wait,
+        );
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
         self.callback_add(
@@ -150,6 +162,9 @@ pub struct IsisConfig {
     pub refresh_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub min_lsp_arrival_time: Option<u32>,
+    pub spf_initial_wait: Option<u32>,
+    pub spf_secondary_wait: Option<u32>,
+    pub spf_maximum_wait: Option<u32>,
     pub te_router_id: Option<Ipv4Addr>,
     pub rib_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
@@ -209,6 +224,10 @@ impl IsisConfig {
     // RFC 4444 §3.1 storm-protection floor for accepting new LSP versions.
     // 100 ms matches IOS-XR's default.
     const DEFAULT_MIN_LSP_ARRIVAL_TIME_MS: u32 = 100;
+    // IOS-XR-style SPF exponential-backoff defaults (in milliseconds).
+    const DEFAULT_SPF_INITIAL_WAIT_MS: u32 = 50;
+    const DEFAULT_SPF_SECONDARY_WAIT_MS: u32 = 200;
+    const DEFAULT_SPF_MAXIMUM_WAIT_MS: u32 = 5000;
 
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
@@ -239,6 +258,21 @@ impl IsisConfig {
     pub fn min_lsp_arrival_time(&self) -> u32 {
         self.min_lsp_arrival_time
             .unwrap_or(Self::DEFAULT_MIN_LSP_ARRIVAL_TIME_MS)
+    }
+
+    pub fn spf_initial_wait(&self) -> u32 {
+        self.spf_initial_wait
+            .unwrap_or(Self::DEFAULT_SPF_INITIAL_WAIT_MS)
+    }
+
+    pub fn spf_secondary_wait(&self) -> u32 {
+        self.spf_secondary_wait
+            .unwrap_or(Self::DEFAULT_SPF_SECONDARY_WAIT_MS)
+    }
+
+    pub fn spf_maximum_wait(&self) -> u32 {
+        self.spf_maximum_wait
+            .unwrap_or(Self::DEFAULT_SPF_MAXIMUM_WAIT_MS)
     }
 
     /// True when either SR dataplane is enabled. Used to gate emission
@@ -339,6 +373,24 @@ fn config_min_lsp_arrival_time(isis: &mut Isis, mut args: Args, op: ConfigOp) ->
     } else {
         isis.config.min_lsp_arrival_time = None;
     }
+    Some(())
+}
+
+fn config_spf_initial_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ms = args.u32()?;
+    isis.config.spf_initial_wait = if op == ConfigOp::Set { Some(ms) } else { None };
+    Some(())
+}
+
+fn config_spf_secondary_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ms = args.u32()?;
+    isis.config.spf_secondary_wait = if op == ConfigOp::Set { Some(ms) } else { None };
+    Some(())
+}
+
+fn config_spf_maximum_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ms = args.u32()?;
+    isis.config.spf_maximum_wait = if op == ConfigOp::Set { Some(ms) } else { None };
     Some(())
 }
 

@@ -47,17 +47,21 @@ pub enum TimerType {
 }
 
 impl Timer {
-    pub fn new<F, Fut>(sec: u64, typ: TimerType, mut cb: F) -> Timer
+    pub fn new<F, Fut>(sec: u64, typ: TimerType, cb: F) -> Timer
     where
         F: FnMut() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send,
     {
         // Make it sure sec is not zero.
         let sec = if sec == 0 { 1 } else { sec };
+        Self::new_dur(Duration::new(sec, 0), typ, cb)
+    }
 
-        // println!("Timer create: duration {}", sec);
-        let duration = Duration::new(sec, 0);
-
+    pub fn new_dur<F, Fut>(duration: Duration, typ: TimerType, mut cb: F) -> Timer
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let last_reset = Arc::new(Mutex::new(Instant::now()));
 
@@ -107,6 +111,14 @@ impl Timer {
         Fut: Future<Output = ()> + Send,
     {
         Self::new(sec, TimerType::Once, cb)
+    }
+
+    pub fn once_ms<F, Fut>(ms: u64, cb: F) -> Timer
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
+        Self::new_dur(Duration::from_millis(ms.max(1)), TimerType::Once, cb)
     }
 
     pub fn repeat<F, Fut>(sec: u64, cb: F) -> Timer
