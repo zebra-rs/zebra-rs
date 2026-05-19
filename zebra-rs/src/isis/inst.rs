@@ -2557,6 +2557,7 @@ fn build_rib_from_spf(
             };
             let nhop_sys_id = *nhop_sys_id;
 
+            // p[0] could be pseudonode.
             for (_, link_id) in nhops.first_hop_links.iter().filter(|(v, _)| *v == p[0]) {
                 if *link_id == 0 {
                     continue;
