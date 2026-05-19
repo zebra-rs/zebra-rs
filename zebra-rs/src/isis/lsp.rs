@@ -5,9 +5,15 @@ use isis_packet::neigh::{self, IsisSubAdjSid};
 use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
 
+use crate::context::Timer;
 use crate::isis_event_trace;
 use crate::rib::util::IpNetExt;
 use crate::rib::{DEFAULT_BLOCK_NAME, LocatorBehavior, MacAddr};
+
+/// Per ISO 10589 §7.3.16.4, the additional grace beyond MaxAge a
+/// purged LSP needs before any surviving copy is fully evicted from
+/// every LSDB. Cisco treats this as a non-configurable constant.
+const ZERO_AGE_LIFETIME: u16 = 60;
 
 use super::config::{IsisConfig, MtId};
 use super::ifsm::has_level;
@@ -135,19 +141,39 @@ pub fn dis_generate(
     Some(lsp)
 }
 
-pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> IsisLsp {
+pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> Option<IsisLsp> {
     // LSP ID with no pseudo id and no fragmentation.
     let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
+
+    // ISO 10589 §7.3.16.4: when the previous origination's seq hit
+    // 0xFFFFFFFF we sent a purge and armed a freeze. Until that
+    // expires we must not emit a fresh self-LSP — origination is
+    // suppressed entirely (Cisco-style pragmatic interpretation of
+    // "IS-IS process disabled").
+    if top.lsp_seq_wrap_wait.get(&level).is_some() {
+        isis_event_trace!(
+            top.tracing,
+            LspOriginate,
+            &level,
+            "[LspOriginate] suppressed — seq-wrap freeze in effect"
+        );
+        return None;
+    }
 
     // ISO 10589 §7.3.16.4: when a peer floods our own LSP back at us
     // with `recv_seq > existing_seq`, we have to bump the next
     // emission past `recv_seq` so the network converges on our
     // authoritative copy. `seq_floor` carries that signal.
+    //
+    // `saturating_add` guards every arm — the wrap-detection branch
+    // below sees u32::MAX whether we got there from existing == MAX
+    // (post-purge LSDB entry) or from existing == MAX - 1 (first
+    // bump that trips the boundary).
     let existing = top.lsdb.get(&level).get(&lsp_id).map(|x| x.lsp.seq_number);
     let seq_number = match (existing, seq_floor) {
-        (Some(e), Some(f)) => e.max(f) + 1,
-        (Some(e), None) => e + 1,
-        (None, Some(f)) => f + 1,
+        (Some(e), Some(f)) => e.max(f).saturating_add(1),
+        (Some(e), None) => e.saturating_add(1),
+        (None, Some(f)) => f.saturating_add(1),
         (None, None) => 0x0001,
     };
 
@@ -160,19 +186,33 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         seq_number
     );
 
-    // ISO 10589 Section 7.3.16.4: Sequence number wrap-around handling.
-    // When sequence number reaches maximum (0xFFFFFFFF), we must purge the LSP
-    // and wait for it to age out before originating a new one with seq 1.
+    // ISO 10589 §7.3.16.4: sequence-number wrap-up.
+    //
+    // Emit one final LSP at seq = 0xFFFFFFFF with RemainingLifetime
+    // = 0 (the purge), then freeze origination for
+    // `lsp_hold_time + ZeroAgeLifetime` so any surviving copy in any
+    // peer's LSDB has fully aged out. When the freeze clears, the
+    // LSDB entry is dropped and the next origination computes
+    // seq = 1 from scratch.
     if seq_number == u32::MAX {
         isis_event_trace!(
             top.tracing,
             LspOriginate,
             &level,
-            "[LspOriginate] seq number reached maximum, purging LSP"
+            "[LspSeqWrap] hit u32::MAX — purging and freezing origination"
         );
-        // TODO: After age out, we need to originate a new one with seq 1.
         let _ = top.tx.send(Message::LspPurge(level, lsp_id));
-        return IsisLsp::default();
+
+        let wait_secs = top.config.hold_time().saturating_add(ZERO_AGE_LIFETIME);
+        let tx = top.tx.clone();
+        let timer = Timer::once(wait_secs as u64, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::LspSeqWrapClear(level));
+            }
+        });
+        *top.lsp_seq_wrap_wait.get_mut(&level) = Some(timer);
+        return None;
     }
 
     // Generate self originated LSP.
@@ -650,7 +690,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             lsp.tlvs.push(ipv6_reach.into());
         }
     }
-    lsp
+    Some(lsp)
 }
 
 pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
