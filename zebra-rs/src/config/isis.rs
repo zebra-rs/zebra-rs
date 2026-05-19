@@ -6,7 +6,13 @@ use super::ConfigManager;
 
 pub fn spawn_isis(config: &ConfigManager) {
     let ctx = Context::default();
-    let isis = inst::Isis::new(ctx, config.rib_tx.clone());
+    // Capture BFD's client handle (if BFD is already spawned) so per-
+    // interface `bfd { enable }` can later submit Subscribe /
+    // Unsubscribe. If `bfd { ... }` is configured *after* IS-IS, the
+    // handle stays None and the BFD attach is a no-op — late-binding
+    // refresh is a follow-up.
+    let bfd_client_tx = config.bfd_client_tx.borrow().clone();
+    let isis = inst::Isis::new(ctx, config.rib_tx.clone(), bfd_client_tx);
     config.subscribe("isis", isis.cm.tx.clone());
     config.subscribe_show("isis", isis.show.tx.clone());
     let task = inst::serve(isis);

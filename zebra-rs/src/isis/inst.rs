@@ -40,7 +40,9 @@ use super::nfsm::nbr_hold_timer_expire;
 use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, perform_spf_calculation};
 use super::srmpls::IsisLabelMap;
 use super::throttle::Throttle;
-use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_for_all_lsp};
+use super::{
+    Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, NfsmState, csnp_send, srm_set_for_all_lsp,
+};
 use super::{LabelPool, Level, Levels, process_packet};
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -153,6 +155,22 @@ pub struct Isis {
     /// `LinkConfig`); the value carries the 32-bit on-wire SRLG
     /// identifier that `lsp_generate` emits into sub-TLV 138 (RFC 5307).
     pub srlg_groups: BTreeMap<String, SrlgGroup>,
+
+    /// Handle into the BFD instance's client-request channel — used
+    /// by [`Self::process_bfd_subscribe`] / [`Self::process_bfd_unsubscribe`]
+    /// when an adjacency on a `bfd { enable true }` interface
+    /// reaches Up (or backslides). `None` means BFD has not (yet)
+    /// been configured. Captured at spawn time from
+    /// `ConfigManager::bfd_client_tx`; not refreshed if BFD respawns
+    /// later (late-binding refresh is a follow-up).
+    pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    /// Sender half of the per-instance `BfdEvent` channel, cloned and
+    /// handed to BFD as the `notifier` on every `Subscribe`.
+    pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
+    /// Receive half drained by the IS-IS event loop in
+    /// [`Self::event_loop`]. PR 7b logs the events; PR 7c replaces
+    /// the log with adjacency teardown on `BfdEvent::Down`.
+    pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
 }
 
 pub struct IsisTop<'a> {
@@ -199,7 +217,11 @@ pub struct IsisTop<'a> {
 }
 
 impl Isis {
-    pub fn new(_ctx: Context, rib_tx: UnboundedSender<rib::Message>) -> Self {
+    pub fn new(
+        _ctx: Context,
+        rib_tx: UnboundedSender<rib::Message>,
+        bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    ) -> Self {
         let chan = RibRxChannel::new();
         let msg = rib::Message::Subscribe {
             proto: "isis".into(),
@@ -231,6 +253,7 @@ impl Isis {
         });
 
         let (tx, rx) = mpsc::unbounded_channel();
+        let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         let mut isis = Self {
             tx,
             rx,
@@ -280,6 +303,9 @@ impl Isis {
             lsp_seq_wrap_wait: Levels::<Option<Timer>>::default(),
             srlg_rx,
             srlg_groups: BTreeMap::new(),
+            bfd_client_tx,
+            bfd_event_tx,
+            bfd_event_rx,
         };
         isis.callback_build();
         isis.show_build();
@@ -486,7 +512,45 @@ impl Isis {
             Message::LspSeqWrapClear(level) => {
                 self.process_lsp_seq_wrap_clear(level);
             }
+            Message::BfdSubscribe(key) => {
+                self.process_bfd_subscribe(key);
+            }
+            Message::BfdUnsubscribe(key) => {
+                self.process_bfd_unsubscribe(key);
+            }
         }
+    }
+
+    /// Forward a `Subscribe` to the BFD instance with `"isis"` as the
+    /// ClientId. No-op when BFD is not configured.
+    fn process_bfd_subscribe(&self, key: crate::bfd::session::SessionKey) {
+        let Some(tx) = self.bfd_client_tx.as_ref() else {
+            tracing::debug!(?key, "isis: bfd not configured; skipping subscribe");
+            return;
+        };
+        let _ = tx.send(crate::bfd::inst::ClientReq::Subscribe {
+            client: "isis".to_string(),
+            key,
+            // PR 7b uses default params for every IS-IS adjacency.
+            // Profile resolution against `/bfd/profile/<name>` (the
+            // per-interface `bfd { profile NAME }` reference stored
+            // in PR 6) is a follow-up that needs cross-task config
+            // access.
+            params: crate::bfd::session::SessionParams::default(),
+            notifier: self.bfd_event_tx.clone(),
+        });
+    }
+
+    /// Forward an `Unsubscribe` to the BFD instance. No-op when BFD
+    /// is not configured.
+    fn process_bfd_unsubscribe(&self, key: crate::bfd::session::SessionKey) {
+        let Some(tx) = self.bfd_client_tx.as_ref() else {
+            return;
+        };
+        let _ = tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+            client: "isis".to_string(),
+            key,
+        });
     }
 
     fn process_lsp_originate(&mut self, level: Level, seq_floor: Option<u32>) {
@@ -752,8 +816,78 @@ impl Isis {
                 Some(msg) = self.srlg_rx.recv() => {
                     self.process_srlg_rx(msg);
                 }
+                Some(event) = self.bfd_event_rx.recv() => {
+                    self.process_bfd_event(event);
+                }
             }
         }
+    }
+
+    /// Handle a [`crate::bfd::inst::BfdEvent`] forwarded by the BFD
+    /// instance. RFC 5882 §5: a BFD signal of session Down is
+    /// treated as a path-failure indication for the IS-IS
+    /// adjacency — we drive the same cleanup path as a hold-timer
+    /// expiry (`nbr_hold_timer_expire`), which drops the neighbor
+    /// entry, re-originates the local LSP, and kicks SPF.
+    ///
+    /// Synthetic Down→Down events (emitted by `Bfd::subscribe` so a
+    /// new subscriber can act on the current state immediately) are
+    /// ignored — they carry no real transition.
+    pub fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
+        let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
+        tracing::info!(
+            ?key,
+            from = %change.from,
+            to = %change.to,
+            diag = %change.diag,
+            "isis: bfd session state change",
+        );
+
+        if change.from == change.to {
+            return;
+        }
+        if change.to != bfd_packet::State::Down {
+            return;
+        }
+
+        // SessionKey carries (local, remote, ifindex). Find the matching
+        // (level, sys_id) by scanning the link's neighbor table on both
+        // levels for an entry whose `addr4` contains `remote`.
+        let std::net::IpAddr::V4(remote_v4) = key.remote else {
+            // IPv6 sessions arrive in a later PR.
+            return;
+        };
+        let ifindex = key.ifindex;
+
+        let target = self.links.get(&ifindex).and_then(|link| {
+            for level in [Level::L1, Level::L2] {
+                if let Some((sys_id, _)) = link.state.nbrs.get(&level).iter().find(|(_, nbr)| {
+                    nbr.state == NfsmState::Up && nbr.addr4.contains_key(&remote_v4)
+                }) {
+                    return Some((level, *sys_id));
+                }
+            }
+            None
+        });
+
+        let Some((level, sys_id)) = target else {
+            tracing::debug!(
+                ?key,
+                "isis: bfd-down for unknown / non-Up neighbor; ignoring"
+            );
+            return;
+        };
+        let Some(mut link) = self.link_top(ifindex) else {
+            return;
+        };
+        tracing::warn!(
+            peer = %remote_v4,
+            ifindex,
+            ?level,
+            diag = %change.diag,
+            "isis: tearing down adjacency on bfd-down (RFC 5882 §5)",
+        );
+        nbr_hold_timer_expire(&mut link, level, sys_id);
     }
     pub fn top(&mut self) -> IsisTop<'_> {
         IsisTop {
@@ -1034,6 +1168,16 @@ pub enum Message {
     /// self LSP, which will compute seq = 1 (no existing entry in
     /// LSDB once the purge has been removed).
     LspSeqWrapClear(Level),
+    /// An adjacency on a `bfd { enable true }` interface reached
+    /// Up. The IS-IS event loop forwards this as a
+    /// `ClientReq::Subscribe` against the BFD instance — see
+    /// [`Isis::process_bfd_subscribe`].
+    BfdSubscribe(crate::bfd::session::SessionKey),
+    /// An adjacency on a previously-subscribed interface backslid
+    /// from Up (Hello timer expiry, peer signaling Down, etc.) or
+    /// the interface had `bfd { enable }` removed; release the BFD
+    /// session by sending `ClientReq::Unsubscribe`.
+    BfdUnsubscribe(crate::bfd::session::SessionKey),
 }
 
 impl Display for Message {
@@ -1069,9 +1213,154 @@ impl Display for Message {
             Message::AdjacencyUp(level, ifindex) => {
                 write!(f, "[Message::AdjacencyUp({}:{})]", level, ifindex)
             }
+            Message::BfdSubscribe(key) => {
+                write!(f, "[Message::BfdSubscribe({:?})]", key.remote)
+            }
+            Message::BfdUnsubscribe(key) => {
+                write!(f, "[Message::BfdUnsubscribe({:?})]", key.remote)
+            }
             Message::LspSeqWrapClear(level) => {
                 write!(f, "[Message::LspSeqWrapClear({})]", level)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod bfd_wiring_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::bfd::inst::ClientReq;
+    use crate::bfd::session::SessionKey;
+    use crate::context::Context;
+
+    fn loopback_key() -> SessionKey {
+        SessionKey {
+            local: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            remote: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            ifindex: 0,
+            multihop: false,
+        }
+    }
+
+    fn fresh_isis_with_bfd() -> (Isis, mpsc::UnboundedReceiver<ClientReq>) {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel::<crate::rib::Message>();
+        let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
+        let isis = Isis::new(Context::default(), rib_tx, Some(bfd_client_tx));
+        (isis, bfd_client_rx)
+    }
+
+    /// `process_bfd_subscribe` forwards a Subscribe with the right
+    /// ClientId, key, and bfd_event_tx clone as the notifier.
+    #[tokio::test]
+    async fn subscribe_forwards_to_bfd() {
+        let (isis, mut bfd_rx) = fresh_isis_with_bfd();
+        let key = loopback_key();
+        isis.process_bfd_subscribe(key);
+
+        let req = bfd_rx.try_recv().expect("Subscribe must reach BFD");
+        match req {
+            ClientReq::Subscribe { client, key: k, .. } => {
+                assert_eq!(client, "isis");
+                assert_eq!(k, key);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// `process_bfd_unsubscribe` forwards the matching Unsubscribe.
+    #[tokio::test]
+    async fn unsubscribe_forwards_to_bfd() {
+        let (isis, mut bfd_rx) = fresh_isis_with_bfd();
+        let key = loopback_key();
+        isis.process_bfd_unsubscribe(key);
+
+        let req = bfd_rx.try_recv().expect("Unsubscribe must reach BFD");
+        match req {
+            ClientReq::Unsubscribe { client, key: k } => {
+                assert_eq!(client, "isis");
+                assert_eq!(k, key);
+            }
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+    }
+
+    /// When IS-IS was spawned before BFD, `bfd_client_tx` is None;
+    /// both handlers must no-op cleanly without panicking.
+    #[tokio::test]
+    async fn no_bfd_handle_is_noop() {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel::<crate::rib::Message>();
+        let isis = Isis::new(Context::default(), rib_tx, None);
+        let key = loopback_key();
+        isis.process_bfd_subscribe(key);
+        isis.process_bfd_unsubscribe(key);
+        // Reaching this line without panic is the assertion.
+    }
+
+    // ----------------------------------------------------------------
+    // PR 7c: process_bfd_event teardown behaviour
+    // ----------------------------------------------------------------
+
+    use crate::bfd::inst::BfdEvent;
+    use crate::bfd::session::StateChange;
+    use bfd_packet::{Diag, State};
+
+    fn make_event(remote: Ipv4Addr, from: State, to: State) -> BfdEvent {
+        BfdEvent::StateChange {
+            key: SessionKey {
+                local: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                remote: IpAddr::V4(remote),
+                ifindex: 0,
+                multihop: false,
+            },
+            change: StateChange {
+                from,
+                to,
+                diag: Diag::None,
+            },
+        }
+    }
+
+    /// Synthetic Down→Down events emitted by `Bfd::subscribe` (so a
+    /// new subscriber can act on the current state immediately) must
+    /// NOT trigger teardown.
+    #[tokio::test]
+    async fn synthetic_down_to_down_is_ignored() {
+        let (mut isis, _bfd_rx) = fresh_isis_with_bfd();
+        // No links / nbrs configured; the assertion is that this
+        // call completes without panic or side effects.
+        isis.process_bfd_event(make_event(
+            Ipv4Addr::new(10, 0, 0, 99),
+            State::Down,
+            State::Down,
+        ));
+    }
+
+    /// BFD coming Up is informational — IS-IS doesn't tear down on
+    /// it.
+    #[tokio::test]
+    async fn bfd_up_is_ignored() {
+        let (mut isis, _bfd_rx) = fresh_isis_with_bfd();
+        isis.process_bfd_event(make_event(
+            Ipv4Addr::new(10, 0, 0, 99),
+            State::Init,
+            State::Up,
+        ));
+    }
+
+    /// A Down event for a peer with no matching link / nbr (raced
+    /// against neighbor cleanup) is logged but otherwise ignored —
+    /// no panic, no crash.
+    #[tokio::test]
+    async fn bfd_down_for_unknown_peer_is_noop() {
+        let (mut isis, _bfd_rx) = fresh_isis_with_bfd();
+        isis.process_bfd_event(make_event(
+            Ipv4Addr::new(10, 99, 99, 99),
+            State::Up,
+            State::Down,
+        ));
     }
 }

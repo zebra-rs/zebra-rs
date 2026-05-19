@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::Error;
 use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
+use crate::bfd::session::SessionKey;
 use crate::fmt::DisplayOpt;
 use crate::isis::link::DisStatus;
 use crate::isis::lsp::csnp_generate;
@@ -15,6 +16,37 @@ use crate::isis::rib::spf_schedule;
 use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::isis_pdu_trace;
 use crate::rib::MacAddr;
+
+/// Dispatch a BFD `Subscribe` or `Unsubscribe` based on an NFSM
+/// transition, called once per Hello *after* the mutable `nbr`
+/// borrow has been released. `peer_v4` is the snapshot taken before
+/// the nbr-mutating block so we don't need to reach back into
+/// `link.state.nbrs` while `link.state.v4addr` is also borrowed.
+fn bfd_nfsm_dispatch(
+    link: &super::link::LinkTop<'_>,
+    peer_v4: Option<Ipv4Addr>,
+    was_up: bool,
+    state: NfsmState,
+) {
+    if !link.config.bfd.enable {
+        return;
+    }
+    let (Some(remote), Some(local)) = (peer_v4, link.state.v4addr.first().map(|p| p.addr())) else {
+        return;
+    };
+    let key = SessionKey {
+        local: IpAddr::V4(local),
+        remote: IpAddr::V4(remote),
+        ifindex: link.ifindex,
+        multihop: false,
+    };
+    let is_up = state == NfsmState::Up;
+    if !was_up && is_up {
+        let _ = link.tx.send(Message::BfdSubscribe(key));
+    } else if was_up && !is_up {
+        let _ = link.tx.send(Message::BfdUnsubscribe(key));
+    }
+}
 
 use super::flood;
 use super::ifsm::has_level;
@@ -227,6 +259,13 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // Start state transition.
     let mut state = nbr.state;
     let was_up = state == NfsmState::Up;
+    // Snapshot the peer's IPv4 address while we still hold an
+    // unambiguous reborrow of `nbr`. RFC 5882 §5 needs this to
+    // dispatch a BFD subscribe / unsubscribe at the post-FSM
+    // transition point below — by that time nbr is no longer in
+    // scope and we can no longer reach back into `link.state.nbrs`
+    // while link.state.v4addr is also borrowed.
+    let bfd_peer_v4: Option<Ipv4Addr> = nbr.addr4.keys().next().copied();
 
     if state == NfsmState::Down {
         // 8.4.2.5.1
@@ -310,6 +349,10 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         let _ = link.tx.send(Message::LspOriginate(level, None));
         spf_schedule(link, level);
     }
+
+    // RFC 5882 §5 BFD attachment, post-FSM. nbr has been dropped so
+    // we can read link.state.v4addr / link.config.bfd freely.
+    bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
 }
 
 #[isis_pdu_handler(Hello, Recv)]
@@ -384,6 +427,8 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // Start state transition.
         let mut state = nbr.state;
         let was_up = state == NfsmState::Up;
+        // Snapshot before any mut-nbr work; see LAN handler comment.
+        let bfd_peer_v4: Option<Ipv4Addr> = nbr.addr4.keys().next().copied();
 
         // When it is three way handshake.
         if state == NfsmState::Down {
@@ -442,6 +487,11 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             let _ = link.tx.send(Message::LspOriginate(level, None));
             spf_schedule(link, level);
         }
+        // RFC 5882 §5 BFD attachment, post-FSM. Same rationale as
+        // the LAN handler — defer until after the `nbr` mutable
+        // borrow is gone so we can read link.state / link.config
+        // freely.
+        bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
     }
 }
 

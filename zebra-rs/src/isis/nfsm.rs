@@ -68,6 +68,10 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
 
     let was_up = nbr.state == NfsmState::Up;
     let ifindex = nbr.ifindex;
+    // Snapshot the peer's IPv4 so we can send a BFD Unsubscribe
+    // after dropping the nbr borrow. nbr's addr4 is about to be
+    // wiped along with the entire entry below.
+    let bfd_peer_v4 = nbr.addr4.keys().next().copied();
 
     // Originate Hello and LSP.
     if is_p2p {
@@ -110,6 +114,24 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
     if was_up {
         let counter = link.state.nbrs_up.get_mut(&level);
         *counter = counter.saturating_sub(1);
+    }
+
+    // RFC 5882 §5: if the timed-out adjacency was Up and had BFD
+    // attached, release the BFD session. Idempotent with the
+    // packet.rs regression path that may already have sent the
+    // Unsubscribe.
+    if was_up
+        && link.config.bfd.enable
+        && let Some(remote) = bfd_peer_v4
+        && let Some(local) = link.state.v4addr.first().map(|p| p.addr())
+    {
+        let key = crate::bfd::session::SessionKey {
+            local: std::net::IpAddr::V4(local),
+            remote: std::net::IpAddr::V4(remote),
+            ifindex: link.ifindex,
+            multihop: false,
+        };
+        let _ = link.tx.send(Message::BfdUnsubscribe(key));
     }
 
     spf_schedule(link, level);
