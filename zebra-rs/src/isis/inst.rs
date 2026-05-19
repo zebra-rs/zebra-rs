@@ -37,7 +37,7 @@ use super::lsp::{
     target_locator_name,
 };
 use super::nfsm::nbr_hold_timer_expire;
-use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, perform_spf_calculation};
+use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, SpfThrottle, perform_spf_calculation};
 use super::srmpls::IsisLabelMap;
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_for_all_lsp};
 use super::{LabelPool, Level, Levels, process_packet};
@@ -87,6 +87,7 @@ pub struct Isis {
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
+    pub spf_throttle: Levels<SpfThrottle>,
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
@@ -143,6 +144,7 @@ pub struct IsisTop<'a> {
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
+    pub spf_throttle: &'a mut Levels<SpfThrottle>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
     pub mt2_graph: &'a mut Levels<Option<spf::Graph>>,
@@ -200,6 +202,7 @@ impl Isis {
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf_timer: Levels::<Option<Timer>>::default(),
+            spf_throttle: Levels::<SpfThrottle>::default(),
             // Adjacency-SID label pool is owned by the SR-MPLS feature.
             // Stays None until `segment-routing mpls` is configured —
             // otherwise we'd allocate labels for every hello and emit
@@ -598,6 +601,7 @@ impl Isis {
             rib_tx: &self.rib_tx,
             hostname: &mut self.hostname,
             spf_timer: &mut self.spf_timer,
+            spf_throttle: &mut self.spf_throttle,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
             mt2_graph: &mut self.mt2_graph,
@@ -629,6 +633,7 @@ impl Isis {
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
             spf_timer: &mut self.spf_timer,
+            spf_throttle: &mut self.spf_throttle,
             rib_tx: &self.rib_tx,
             sr_locator: &self.sr_locator,
             watched_locator: &self.watched_locator,

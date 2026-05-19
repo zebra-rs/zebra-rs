@@ -19,7 +19,7 @@ use super::{
     inst::IsisTop,
     link::Afi,
     lsp::{lsp_emit, lsp_flood},
-    rib::spf_schedule,
+    rib::{spf_schedule, spf_schedule_top},
 };
 
 #[derive(Default)]
@@ -409,12 +409,8 @@ pub fn insert_self_originate(
     // would not refresh the graph until some peer LSP arrives.
     // After a link bounce the graph could stay stale — z1's TLV
     // pointing at z1.NN-00 sees the PN LSP missing from the LSDB
-    // at SPF time and drops the edge. Inlined here because IsisTop
-    // and LinkTop both expose spf_timer/tx but spf_schedule's
-    // signature is over LinkTop.
-    if top.spf_timer.get(&level).is_none() {
-        *top.spf_timer.get_mut(&level) = Some(crate::isis::rib::spf_timer(top.tx, level));
-    }
+    // at SPF time and drops the edge.
+    spf_schedule_top(top, level);
     prev
 }
 

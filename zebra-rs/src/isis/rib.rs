@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::Instant;
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::*;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::config::IsisConfig;
+use super::level::Levels;
 use crate::context::Timer;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibType};
@@ -27,9 +30,21 @@ use super::tilfa::{
     first_router_hop_id, tilfa_repair_path,
 };
 
-pub fn spf_timer(tx: &UnboundedSender<Message>, level: Level) -> Timer {
+/// Per-level state for the SPF exponential-backoff throttle.
+///
+/// `current_wait_ms` is the wait that will be used the NEXT time
+/// `spf_schedule` arms a timer during an ongoing burst. After a quiet
+/// period it gets reset to `initial-wait`; otherwise each scheduling
+/// event doubles it (capped at `maximum-wait`).
+#[derive(Default, Debug)]
+pub struct SpfThrottle {
+    pub current_wait_ms: u32,
+    pub last_run_at: Option<Instant>,
+}
+
+fn spf_timer_ms(tx: &UnboundedSender<Message>, level: Level, ms: u64) -> Timer {
     let tx = tx.clone();
-    Timer::once(1, move || {
+    Timer::once_ms(ms, move || {
         let tx = tx.clone();
         async move {
             let msg = Message::SpfCalc(level);
@@ -38,10 +53,67 @@ pub fn spf_timer(tx: &UnboundedSender<Message>, level: Level) -> Timer {
     })
 }
 
-pub fn spf_schedule(top: &mut LinkTop, level: Level) {
-    if top.spf_timer.get(&level).is_none() {
-        *top.spf_timer.get_mut(&level) = Some(spf_timer(top.tx, level));
+/// Arm the SPF timer for `level` if not already armed, honouring the
+/// IOS-XR-style exponential-backoff algorithm:
+///
+///   - First event after a quiet period > 2 × maximum-wait: use
+///     initial-wait.
+///   - Subsequent events during the burst: use the planned next wait
+///     (initial → secondary → secondary × 2 → ... capped at maximum).
+///
+/// The actual SPF run on timer expiry stamps `last_run_at` (see
+/// `perform_spf_calculation`) so future scheduling events can tell
+/// whether we're still in a burst.
+fn spf_schedule_inner(
+    spf_timer: &mut Levels<Option<Timer>>,
+    spf_throttle: &mut Levels<SpfThrottle>,
+    tx: &UnboundedSender<Message>,
+    config: &IsisConfig,
+    level: Level,
+) {
+    if spf_timer.get(&level).is_some() {
+        return;
     }
+
+    let initial = config.spf_initial_wait();
+    let secondary = config.spf_secondary_wait();
+    let maximum = config.spf_maximum_wait();
+
+    let throttle = spf_throttle.get_mut(&level);
+    let now = Instant::now();
+    let quiet_threshold = std::time::Duration::from_millis(2u64 * maximum as u64);
+    let in_burst = throttle
+        .last_run_at
+        .is_some_and(|t| now.duration_since(t) < quiet_threshold);
+
+    let wait_ms = if in_burst {
+        throttle.current_wait_ms
+    } else {
+        initial
+    };
+
+    // Plan the NEXT wait used if another event arrives during the burst.
+    throttle.current_wait_ms = if wait_ms == initial {
+        secondary.min(maximum)
+    } else {
+        (wait_ms.saturating_mul(2)).min(maximum)
+    };
+
+    *spf_timer.get_mut(&level) = Some(spf_timer_ms(tx, level, wait_ms as u64));
+}
+
+pub fn spf_schedule(top: &mut LinkTop, level: Level) {
+    spf_schedule_inner(
+        top.spf_timer,
+        top.spf_throttle,
+        top.tx,
+        top.up_config,
+        level,
+    );
+}
+
+pub fn spf_schedule_top(top: &mut IsisTop, level: Level) {
+    spf_schedule_inner(top.spf_timer, top.spf_throttle, top.tx, top.config, level);
 }
 
 #[derive(Debug, PartialEq)]
@@ -904,6 +976,9 @@ fn apply_routing_updates(
 pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // Turn off SPF calculation timer.
     *top.spf_timer.get_mut(&level) = None;
+    // Stamp completion time so spf_schedule can tell whether the next
+    // scheduling event lands inside or outside the burst window.
+    top.spf_throttle.get_mut(&level).last_run_at = Some(Instant::now());
 
     // Legacy graph + SPF — drives IPv4 RIB and IPv6 in non-MT mode.
     let (graph, source_node, adjacency_sids) = graph(top, level);

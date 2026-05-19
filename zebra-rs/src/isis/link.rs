@@ -134,6 +134,7 @@ pub struct LinkTop<'a> {
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub srv6_end_map: &'a mut Levels<std::collections::BTreeMap<IsisSysId, std::net::Ipv6Addr>>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
+    pub spf_throttle: &'a mut Levels<super::rib::SpfThrottle>,
 
     /// SR state needed for End.X (adjacency) SID allocation. Threaded
     /// through so packet handlers can carve a function from the ELIB
