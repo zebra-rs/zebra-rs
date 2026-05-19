@@ -519,6 +519,88 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         ext_is_reach.entries.push(is_reach);
 
         lsp.tlvs.push(ext_is_reach.into());
+
+        // Shared Risk Link Group TLVs (138 / 139) — per-adjacency,
+        // RFC 5307 (v4) / RFC 6119 (v6). Resolve the link's SRLG
+        // names against the cached global table; names that don't
+        // (yet) resolve to a value are skipped silently — that's the
+        // staging-before-commit case the docs in /srlg/group call
+        // out. Empty value list = no TLV.
+        if !link.config.srlg_groups.is_empty() {
+            let values: Vec<u32> = link
+                .config
+                .srlg_groups
+                .iter()
+                .filter_map(|name| top.srlg_groups.get(name).map(|g| g.value))
+                .collect();
+            if !values.is_empty() {
+                // Local v4 address: first interface address on the
+                // link. Remote v4 address: first known neighbor v4
+                // (best-effort — for LAN there's no single "remote"
+                // endpoint, so any peer address suffices as the
+                // disambiguator together with the neighbor sys-id +
+                // psn carried in the TLV).
+                let local_v4 = link
+                    .state
+                    .v4addr
+                    .first()
+                    .map(|p| p.addr())
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED);
+                let remote_v4 = link
+                    .state
+                    .nbrs
+                    .get(&level)
+                    .values()
+                    .flat_map(|nbr| nbr.addr4.keys().copied())
+                    .next()
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED);
+                // T-bit (numbered link) when we have a real local
+                // address. Unnumbered case (T=0, Link Local/Remote
+                // IDs in the addr fields) is not modelled here — we
+                // don't track per-link 32-bit IDs separately.
+                let flags = if local_v4.is_unspecified() {
+                    0
+                } else {
+                    SRLG_FLAG_T
+                };
+                for chunk in values.chunks(IsisTlvSrlg::MAX_VALUES_PER_TLV) {
+                    let tlv = IsisTlvSrlg {
+                        neighbor: *adj,
+                        flags,
+                        local_addr: local_v4,
+                        remote_addr: remote_v4,
+                        values: chunk.to_vec(),
+                    };
+                    lsp.tlvs.push(IsisTlv::Srlg(tlv));
+                }
+
+                // IPv6 SRLG TLV 139 — only when the link has both a
+                // global IPv6 address and an IPv6-capable adjacency
+                // (peer v6 address known). Skipped on v4-only links
+                // even if the v4 TLV above was emitted; the two TLVs
+                // are independent per RFC 6119.
+                let local_v6 = link.state.v6addr.first().map(|p| p.addr());
+                let remote_v6 = link
+                    .state
+                    .nbrs
+                    .get(&level)
+                    .values()
+                    .flat_map(|nbr| nbr.addr6.keys().copied())
+                    .next();
+                if let (Some(local_v6), Some(remote_v6)) = (local_v6, remote_v6) {
+                    for chunk in values.chunks(IsisTlvIpv6Srlg::MAX_VALUES_PER_TLV) {
+                        let tlv = IsisTlvIpv6Srlg {
+                            neighbor: *adj,
+                            flags: 0,
+                            local_addr: local_v6,
+                            remote_addr: remote_v6,
+                            values: chunk.to_vec(),
+                        };
+                        lsp.tlvs.push(IsisTlv::Ipv6Srlg(tlv));
+                    }
+                }
+            }
+        }
     }
 
     // MT IS Reach (TLV 222) for MT 2 — RFC 5120 §7.2. Mirrors the

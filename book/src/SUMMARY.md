@@ -17,6 +17,7 @@
   - [Session Authentication (TCP MD5 / TCP-AO)](ch-02-02-tcp-authentication.md)
 - [IS-IS](ch-07-00-isis.md)
   - [Timer Configuration](ch-07-01-isis-timers.md)
+  - [Shared Risk Link Group (SRLG)](ch-07-02-isis-srlg.md)
 
 ## SRv6
 

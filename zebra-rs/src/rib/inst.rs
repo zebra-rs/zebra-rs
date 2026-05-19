@@ -4,8 +4,8 @@ use super::link::{LinkConfig, link_config_exec};
 use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
-    NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vrf, VrfBuilder,
-    VrfIdAllocator, Vxlan, VxlanBuilder, VxlanConfig,
+    NexthopUni, RibSrRx, RibSrlgRx, RibType, Sid, SidBehavior, SrlgGroup, SrlgGroupBuilder,
+    StaticConfig, V4, V6, Vrf, VrfBuilder, VrfIdAllocator, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -112,6 +112,26 @@ pub enum Message {
     SrLocatorUnwatch {
         proto: String,
         name: String,
+    },
+    /// Replace the global SRLG table with `groups`. Sent by
+    /// `SrlgGroupBuilder::commit` at the end of any commit cycle that
+    /// touched a /srlg/group entry; the RIB stores it and broadcasts a
+    /// `RibSrlgRx::Table` snapshot to every subscriber. Carries the
+    /// full table, not a delta — SRLG subscribers always replace their
+    /// local cache wholesale.
+    SrlgUpdate {
+        groups: BTreeMap<String, SrlgGroup>,
+    },
+    /// One-time per-protocol registration of the SRLG return channel.
+    /// On registration the RIB pushes the current
+    /// `RibSrlgRx::Table(srlg_groups)` so the subscriber starts with
+    /// the present state, not "next change wins". `#[allow(dead_code)]`
+    /// until the IS-IS subscriber lands (next task) — mirrors the
+    /// pattern used for `SrSubscribe`.
+    #[allow(dead_code)]
+    SrlgSubscribe {
+        proto: String,
+        tx: UnboundedSender<RibSrlgRx>,
     },
     /// Register an allocated SRv6 SID. Owners (IS-IS, OSPF, BGP) push
     /// one of these whenever they carve a function out of a locator;
@@ -296,11 +316,16 @@ pub struct Rib {
     pub vrf_config: VrfBuilder,
     pub block_config: BlockBuilder,
     pub locator_config: LocatorBuilder,
+    pub srlg_config: SrlgGroupBuilder,
     /// Applied snapshots, populated by Block/Locator Add/Del messages.
     /// Other modules read these by name to resolve their `mpls/block` or
     /// `srv6/locator` reference.
     pub blocks: BTreeMap<String, Block>,
     pub locators: BTreeMap<String, Locator>,
+    /// Applied SRLG group table. Replaced wholesale on each
+    /// `Message::SrlgUpdate`; subscribers receive the same map via
+    /// `RibSrlgRx::Table`.
+    pub srlg_groups: BTreeMap<String, SrlgGroup>,
     /// Allocated SRv6 SIDs across all owners. Keyed by SID address so
     /// inserts collide naturally on duplicate allocations; the show
     /// callback iterates this in address order.
@@ -312,6 +337,10 @@ pub struct Rib {
     /// updates to that block.
     pub block_watch: BTreeMap<String, BTreeSet<String>>,
     pub locator_watch: BTreeMap<String, BTreeSet<String>>,
+    /// SRLG-update return channels keyed by protocol name. Each
+    /// subscriber receives the full table on every change — no
+    /// per-name watch table because the contract is full-snapshot push.
+    pub srlg_clients: BTreeMap<String, UnboundedSender<RibSrlgRx>>,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 
@@ -388,6 +417,7 @@ impl Rib {
             vrf_config: VrfBuilder::new(),
             block_config: BlockBuilder::new(),
             locator_config: LocatorBuilder::new(),
+            srlg_config: SrlgGroupBuilder::new(),
             blocks: {
                 // Seed the canonical default block at startup so protocols can
                 // subscribe to "default" without anyone having configured one.
@@ -396,10 +426,12 @@ impl Rib {
                 m
             },
             locators: BTreeMap::new(),
+            srlg_groups: BTreeMap::new(),
             sids: BTreeMap::new(),
             sr_clients: BTreeMap::new(),
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
+            srlg_clients: BTreeMap::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             rib_sync_timer: None,
@@ -459,6 +491,20 @@ impl Rib {
                     locator: locator.clone(),
                 });
             }
+        }
+    }
+
+    /// Push the current SRLG table to every subscriber. Unlike the SR
+    /// block/locator notifiers there's no per-name watch set — every
+    /// subscriber receives the full snapshot on every change, per the
+    /// SRLG broadcast contract.
+    fn notify_srlg_subscribers(&self) {
+        if self.srlg_clients.is_empty() {
+            return;
+        }
+        let snapshot = self.srlg_groups.clone();
+        for tx in self.srlg_clients.values() {
+            let _ = tx.send(RibSrlgRx::Table(snapshot.clone()));
         }
     }
 
@@ -867,6 +913,7 @@ impl Rib {
         for watchers in self.locator_watch.values_mut() {
             watchers.remove(&proto);
         }
+        self.srlg_clients.remove(&proto);
     }
 
     async fn process_msg(&mut self, msg: Message) {
@@ -1095,6 +1142,17 @@ impl Rib {
                     }
                 }
             }
+            Message::SrlgUpdate { groups } => {
+                self.srlg_groups = groups;
+                self.notify_srlg_subscribers();
+            }
+            Message::SrlgSubscribe { proto, tx } => {
+                // Send the current snapshot immediately so a late
+                // subscriber doesn't have to wait for the next commit
+                // to learn what's there today.
+                let _ = tx.send(RibSrlgRx::Table(self.srlg_groups.clone()));
+                self.srlg_clients.insert(proto, tx);
+            }
             Message::SidAdd { sid } => {
                 self.sid_install(sid).await;
             }
@@ -1304,6 +1362,8 @@ impl Rib {
                     let _ = self.block_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/segment-routing/locator") {
                     let _ = self.locator_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/srlg/group") {
+                    let _ = self.srlg_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -1316,6 +1376,7 @@ impl Rib {
                 self.mpls_config.commit(self.tx.clone());
                 self.block_config.commit(self.tx.clone());
                 self.locator_config.commit(self.tx.clone());
+                self.srlg_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.link_comps()).unwrap();

@@ -9,8 +9,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::isis_event_trace;
 use crate::rib::{
-    Block, Locator, LocatorBehavior, RibSrRx, Sid, SidAllocationType, SidBehavior, SidContext,
-    SidOwner,
+    Block, Locator, LocatorBehavior, RibSrRx, RibSrlgRx, Sid, SidAllocationType, SidBehavior,
+    SidContext, SidOwner, SrlgGroup,
 };
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -142,6 +142,17 @@ pub struct Isis {
     /// aged out so they accept the seq = 1 origination as newer.
     /// See ISO 10589 §7.3.16.4.
     pub lsp_seq_wrap_wait: Levels<Option<Timer>>,
+
+    /// SRLG-update return channel from the RIB. Carries the full
+    /// SRLG table snapshot on subscribe and after every commit that
+    /// changes any group.
+    pub srlg_rx: UnboundedReceiver<RibSrlgRx>,
+
+    /// Cached SRLG table — last snapshot received via `srlg_rx`. Keyed
+    /// by group name (matches the per-link `srlg_groups` entries in
+    /// `LinkConfig`); the value carries the 32-bit on-wire SRLG
+    /// identifier that `lsp_generate` emits into sub-TLV 138 (RFC 5307).
+    pub srlg_groups: BTreeMap<String, SrlgGroup>,
 }
 
 pub struct IsisTop<'a> {
@@ -176,6 +187,11 @@ pub struct IsisTop<'a> {
     pub sr_locator: &'a Option<Locator>,
     pub sr_end_sid: &'a Option<std::net::Ipv6Addr>,
 
+    /// Read-only access to the cached SRLG table (see
+    /// `Isis::srlg_groups`). lsp_generate resolves per-link SRLG group
+    /// names through this map when emitting TLVs 138 / 139.
+    pub srlg_groups: &'a BTreeMap<String, SrlgGroup>,
+
     /// Seq-wrap wait timer (see `Isis::lsp_seq_wrap_wait`). Threaded
     /// through so `lsp_generate` can short-circuit and arm the timer
     /// without round-tripping through the event loop.
@@ -198,6 +214,20 @@ impl Isis {
         let _ = rib_tx.send(rib::Message::SrSubscribe {
             proto: "isis".into(),
             tx: sr_tx,
+        });
+
+        // SRLG config subscription. Single-channel, full-table push:
+        // every commit that touches a /srlg/group entry sends a
+        // `RibSrlgRx::Table` with the entire current SRLG namespace,
+        // and the RIB also pushes the current snapshot immediately on
+        // registration so we start with present state, not "next change
+        // wins". No per-name watch table — the SRLG namespace is small
+        // enough that broadcasting the whole map is cheaper than
+        // tracking interest sets.
+        let (srlg_tx, srlg_rx) = mpsc::unbounded_channel::<RibSrlgRx>();
+        let _ = rib_tx.send(rib::Message::SrlgSubscribe {
+            proto: "isis".into(),
+            tx: srlg_tx,
         });
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -248,6 +278,8 @@ impl Isis {
             sr_end_sid: None,
             elib: super::srv6::ElibPool::new(),
             lsp_seq_wrap_wait: Levels::<Option<Timer>>::default(),
+            srlg_rx,
+            srlg_groups: BTreeMap::new(),
         };
         isis.callback_build();
         isis.show_build();
@@ -678,6 +710,9 @@ impl Isis {
                 Some(msg) = self.sr_rx.recv() => {
                     self.process_sr_rx(msg);
                 }
+                Some(msg) = self.srlg_rx.recv() => {
+                    self.process_srlg_rx(msg);
+                }
             }
         }
     }
@@ -709,6 +744,7 @@ impl Isis {
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
+            srlg_groups: &self.srlg_groups,
             lsp_seq_wrap_wait: &mut self.lsp_seq_wrap_wait,
         }
     }
@@ -863,6 +899,24 @@ impl Isis {
             let _ = self.rib_tx.send(rib::Message::SidAdd { sid });
             self.sr_end_sid = Some(addr);
         }
+    }
+
+    /// Apply a full-snapshot SRLG update from the RIB. Replaces the
+    /// cached table wholesale (matching the broadcast contract on the
+    /// RIB side) and re-originates both LSP levels so the next emission
+    /// reflects the new name→value mapping; the LSP-content hash short-
+    /// circuits if nothing actually changed for our self-LSP.
+    fn process_srlg_rx(&mut self, msg: RibSrlgRx) {
+        match msg {
+            RibSrlgRx::Table(groups) => {
+                if self.srlg_groups == groups {
+                    return;
+                }
+                self.srlg_groups = groups;
+            }
+        }
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
 
     /// Apply a single update from the RIB SR subscription channel. We only
