@@ -838,16 +838,36 @@ pub fn config_network_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     let name = args.string()?;
     let network_type = args.string()?.parse::<NetworkType>().ok()?;
 
-    let ifindex = {
+    let (ifindex, type_changed) = {
         let link = isis.links.get_mut_by_name(&name)?;
+        let old_type = link.config.network_type();
 
         if op.is_set() {
             link.config.network_type = Some(network_type);
         } else {
             link.config.network_type = None;
         }
-        link.ifindex
+        let new_type = link.config.network_type();
+        (link.ifindex, old_type != new_type)
     };
+
+    // A network-type change makes any existing adjacency stale.
+    // ExtIsReach uses a different shape per type — P2P emits
+    // (peer_sys_id, 0); LAN emits the pseudonode's (DIS_sys_id,
+    // pseudo_id) — so the cached `link.state.adj` from the old type
+    // would be wrong under the new one. dis_selection's branch at
+    // ifsm.rs:507 only installs the LAN PN id when `adj.is_none()`,
+    // so a stale P2P adj indefinitely blocks the LAN transition and
+    // our LSP keeps advertising the P2P-style ExtIsReach. Bounce
+    // the link via link_state_down + link_state_up — drops nbrs,
+    // clears adj / dis_status / nbrs_up, re-originates LSP, and
+    // schedules SPF for both levels. Adjacencies rebuild through
+    // the normal hello / NFSM path under the new type.
+    if type_changed {
+        isis.link_state_down(ifindex);
+        isis.link_state_up(ifindex);
+        return Some(());
+    }
 
     if let Some(mut top) = isis.link_top(ifindex) {
         ifsm::hello_originate(&mut top, Level::L1);

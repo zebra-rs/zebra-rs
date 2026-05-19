@@ -7,7 +7,7 @@ use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::fmt::DisplayOpt;
-use crate::isis::inst::csnp_generate;
+use crate::isis::inst::{csnp_generate, spf_schedule};
 use crate::isis::link::DisStatus;
 use crate::isis::neigh::Neighbor;
 use crate::isis::nfsm::nfsm_hold_timer;
@@ -225,6 +225,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // Start state transition.
     let mut state = nbr.state;
+    let was_up = state == NfsmState::Up;
 
     if state == NfsmState::Down {
         // 8.4.2.5.1
@@ -295,7 +296,19 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // tracing::info!("NFSM {} => {}", nbr.state, state);
     }
 
-    nbr.state = state
+    nbr.state = state;
+
+    // Up→{Init,Down} regressed by the peer (TLV 6 no longer reports
+    // our MAC). Without these triggers we keep the dead adjacency in
+    // our LSP's ExtIsReach and the RIB keeps routing through it until
+    // the hold timer expires. `dis_selection` only re-originates the
+    // LSP when the DIS itself changes, so for a non-DIS neighbor
+    // going down there is no other path that wakes LSP/SPF until
+    // hold-time (typically ~30s).
+    if was_up && state != NfsmState::Up {
+        let _ = link.tx.send(Message::LspOriginate(level, None));
+        spf_schedule(link, level);
+    }
 }
 
 #[isis_pdu_handler(Hello, Recv)]
@@ -369,6 +382,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // Start state transition.
         let mut state = nbr.state;
+        let was_up = state == NfsmState::Up;
 
         // When it is three way handshake.
         if state == NfsmState::Down {
@@ -392,12 +406,41 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             let _ = link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
         }
 
+        // RFC 5303 §6.1: peer's P2P-3way TLV no longer reports our
+        // sys-id as their neighbor — they've torn down the adjacency
+        // from their side. Mirror the regression locally so we stop
+        // advertising the edge before our hold timer fires (~30s).
+        // Keeps nbr entry alive so the Init→Up path can resume if the
+        // peer comes back (labels and End.X SID stay allocated).
+        if state == NfsmState::Up && !has_my_sys_id {
+            state = NfsmState::Init;
+            if link.tracing.fsm.nfsm.enabled {
+                tracing::info!(
+                    "[NBR] {} Up -> Init (peer no longer reports our sys-id)",
+                    nbr.sys_id
+                );
+            }
+            *link.state.adj.get_mut(&level) = None;
+            link.lsdb.get_mut(&level).adj_clear(nbr.ifindex);
+            let counter = link.state.nbrs_up.get_mut(&level);
+            *counter = counter.saturating_sub(1);
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        }
+
         // When neighbor state has been changed.
         if nbr.state != state {
             // tracing::info!("NFSM {}:{} => {}", nbr.sys_id, nbr.state, state);
         }
 
-        nbr.state = state
+        nbr.state = state;
+
+        // Same fast-converge as the LAN soft-down path: re-originate
+        // our own LSP so the now-down ExtIsReach entry is dropped
+        // before hold-time, and schedule SPF for the route table.
+        if was_up && state != NfsmState::Up {
+            let _ = link.tx.send(Message::LspOriginate(level, None));
+            spf_schedule(link, level);
+        }
     }
 }
 
