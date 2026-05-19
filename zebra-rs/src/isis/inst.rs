@@ -2699,21 +2699,14 @@ fn build_rib_from_spf(
             }
         }
 
-        // TI-LFA backup path. tilfa_repair_path() only emits entries
-        // for single-primary-first-hop destinations today (ECMP at
-        // the primary level is skipped), so spf_nhops shares a single
-        // protected first-hop — stamping the same backup on every
-        // entry is correct by construction. When primary-ECMP-aware
-        // TI-LFA lands, match each entry in the Vec to its specific
-        // protected primary by first-hop vertex.
-        if let Some(repair_paths) = tilfa_result.get(node)
-            && let Some(repair) = repair_paths.first()
-            && let Some(backup) = build_repair_path_mpls(top, level, repair)
-        {
-            for nhop in spf_nhops.values_mut() {
-                nhop.backup = Some(backup.clone());
-            }
-        }
+        // TI-LFA backup stamping is deferred to a second pass after
+        // the per-destination loop completes — see the post-loop
+        // block below. Per-destination stamping was racy with the
+        // equal-metric merge: a prefix advertised by multiple
+        // destinations would end up with primary nexthops from all
+        // of them but a backup attached to only one, and that
+        // backup is useless for the multi-primary case (the remaining
+        // ECMP legs already provide protection).
 
         // Process reachability entries for this node.
         if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(sys_id) {
@@ -2760,16 +2753,10 @@ fn build_rib_from_spf(
                         // collapsed parallel first-hops into spf_nhops
                         // for a single destination.
                         //
-                        // Three known limitations, all benign today
-                        // because the TI-LFA install path is not yet
-                        // wired. Revisit with that work:
-                        //   - nhops insert is keyed by peer IP. When
-                        //     anycast siblings share the same first-hop
-                        //     neighbor, the second insert overwrites.
-                        //     ifindex / sys_id match in both, so plain
-                        //     forwarding is unaffected — only the
-                        //     per-destination SpfNexthop.backup gets
-                        //     clobbered.
+                        // Two known limitations, both about RIB-level
+                        // metadata; the backup-clobber concern that
+                        // used to live here is gone now that backup
+                        // stamping is deferred to the post-loop pass.
                         //   - sid / prefix_sid first-wins. Index-encoded
                         //     SIDs are resolved against the advertising
                         //     router's SRGB (see line ~2595), so when
@@ -2778,10 +2765,14 @@ fn build_rib_from_spf(
                         //     silently dropped. Per RFC 8667 §4 anycast
                         //     SR groups should share an Index, but
                         //     SRGBs aren't required to match.
-                        //   - dest_vertex stays at the first node; the
-                        //     TI-LFA repair-candidate lookup keyed by
-                        //     dest_vertex won't match sibling anycast
-                        //     destinations.
+                        //   - dest_vertex stays at the first node. The
+                        //     post-loop backup pass uses dest_vertex to
+                        //     look up tilfa_result, so anycast siblings
+                        //     get the first-advertising destination's
+                        //     repair (if any). Acceptable today because
+                        //     anycast routes typically come out as
+                        //     multi-primary at the prefix level anyway,
+                        //     and that case skips backup entirely.
                         for (addr, nhop) in route.nhops {
                             curr.nhops.insert(addr, nhop);
                         }
@@ -2798,6 +2789,42 @@ fn build_rib_from_spf(
                     rib.insert(entry.prefix.trunc(), route);
                 }
             }
+        }
+    }
+
+    // Second pass: TI-LFA backup stamping.
+    //
+    // Defer until the equal-metric merge has stabilized. A prefix
+    // with multiple primary nexthops (ECMP at the RIB level)
+    // shouldn't carry a backup — the remaining ECMP legs already
+    // provide protection, and a metric-offset backup at one leg's
+    // repair address just wastes a FIB entry without adding value
+    // (the typical backup steers around the same link the surviving
+    // ECMP leg already avoids).
+    //
+    // For single-primary routes we look up the repair by
+    // `dest_vertex`. tilfa_repair_path already skips destinations
+    // with SPF-level ECMP, so the lookup either returns a repair
+    // built against a single protected first-hop (the only valid
+    // case for stamping) or nothing.
+    for (_, route) in rib.iter_mut() {
+        if route.nhops.len() != 1 {
+            continue;
+        }
+        let Some(dest) = route.dest_vertex else {
+            continue;
+        };
+        let Some(repair_paths) = tilfa_result.get(&dest) else {
+            continue;
+        };
+        let Some(repair) = repair_paths.first() else {
+            continue;
+        };
+        let Some(backup) = build_repair_path_mpls(top, level, repair) else {
+            continue;
+        };
+        if let Some(nhop) = route.nhops.values_mut().next() {
+            nhop.backup = Some(backup);
         }
     }
 
@@ -2923,17 +2950,10 @@ fn build_rib_from_spf_v6(
             continue;
         }
 
-        // TI-LFA SRv6 backup. Same per-nexthop stamping pattern as
-        // the IPv4 builder — see `build_rib_from_spf`'s TI-LFA hook
-        // for the rationale on single-primary stamping.
-        if let Some(repair_paths) = tilfa_result.get(node)
-            && let Some(repair) = repair_paths.first()
-            && let Some(backup) = build_repair_path_srv6(top, level, repair)
-        {
-            for nhop in spf_nhops.values_mut() {
-                nhop.backup = Some(backup.clone());
-            }
-        }
+        // TI-LFA SRv6 backup stamping is deferred to a second pass
+        // after the per-destination loop — see the post-loop block
+        // below, and `build_rib_from_spf`'s sibling comment for the
+        // rationale.
 
         let reach = if mt2_mode {
             top.mt2_reach_map_v6.get(&level).get(&dest_sys_id)
@@ -2962,6 +2982,30 @@ fn build_rib_from_spf_v6(
                     rib.insert(entry.prefix.trunc(), route);
                 }
             }
+        }
+    }
+
+    // Second pass: TI-LFA SRv6 backup stamping. Mirror of the v4
+    // post-loop pass — skip ECMP-at-prefix routes, stamp the
+    // dest_vertex's repair on single-primary routes.
+    for (_, route) in rib.iter_mut() {
+        if route.nhops.len() != 1 {
+            continue;
+        }
+        let Some(dest) = route.dest_vertex else {
+            continue;
+        };
+        let Some(repair_paths) = tilfa_result.get(&dest) else {
+            continue;
+        };
+        let Some(repair) = repair_paths.first() else {
+            continue;
+        };
+        let Some(backup) = build_repair_path_srv6(top, level, repair) else {
+            continue;
+        };
+        if let Some(nhop) = route.nhops.values_mut().next() {
+            nhop.backup = Some(backup);
         }
     }
 
