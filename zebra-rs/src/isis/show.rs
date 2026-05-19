@@ -24,6 +24,15 @@ impl Isis {
         self.show_add("/show/isis", show_isis);
         self.show_add("/show/isis/summary", show_isis_summary);
         self.show_add("/show/isis/route", show_isis_route);
+        self.show_add("/show/isis/route/detail", show_isis_route_detail);
+        self.show_add(
+            "/show/isis/fast-reroute/summary",
+            show_isis_fast_reroute_summary,
+        );
+        self.show_add(
+            "/show/isis/fast-reroute/prefix/detail",
+            show_isis_fast_reroute_prefix_detail,
+        );
         self.show_add("/show/isis/interface", link::show);
         self.show_add("/show/isis/interface/detail", link::show_detail);
         self.show_add("/show/isis/dis/statistics", link::show_dis_statistics);
@@ -258,6 +267,47 @@ struct NexthopJson {
 struct RoutesJson {
     level_1: Vec<RouteJson>,
     level_2: Vec<RouteJson>,
+}
+
+/// `show isis route detail` (PR A: dispatch surface only). The TI-LFA
+/// backup / SR-MPLS / SRv6 detail renderer lands in PR C; for now we
+/// surface a header so the wired path is visible.
+fn show_isis_route_detail(
+    isis: &Isis,
+    args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let body = show_isis_route(isis, args, json)?;
+    if json {
+        Ok(body)
+    } else {
+        Ok(format!("[detail format pending — PR C]\n{body}"))
+    }
+}
+
+/// `show isis fast-reroute summary` (PR A stub; renderer lands in PR D).
+fn show_isis_fast_reroute_summary(
+    _isis: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    Ok("[fast-reroute summary pending — PR D]\n".to_string())
+}
+
+/// `show isis fast-reroute prefix A.B.C.D/N detail` (PR A stub;
+/// renderer lands in PR D). Validates the prefix arg now so the
+/// dispatch is honest about input parsing.
+fn show_isis_fast_reroute_prefix_detail(
+    _isis: &Isis,
+    mut args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(prefix) = args.v4net() else {
+        return Ok("% Invalid IPv4 prefix\n".to_string());
+    };
+    Ok(format!(
+        "[fast-reroute detail for {prefix} pending — PR D]\n"
+    ))
 }
 
 fn show_isis_route(

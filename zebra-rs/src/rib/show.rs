@@ -721,6 +721,70 @@ pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
     }
 }
 
+/// `show ip route detail` (PR A: dispatch surface only). The detail
+/// renderer lands in PR B; for now we surface a header so the wired
+/// path is visible, then fall through to the one-line layout.
+pub fn rib_show_detail(rib: &Rib, args: Args, json: bool) -> String {
+    let body = rib_show(rib, args, json);
+    if json {
+        body
+    } else {
+        format!("[detail format pending — PR B]\n{body}")
+    }
+}
+
+/// `show ip route prefix A.B.C.D/N` — single-prefix filter, one-line
+/// layout. Falls back to "% No route" when the prefix isn't in the
+/// table or the argument fails to parse.
+pub fn rib_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
+    let Some(prefix) = args.v4net() else {
+        return "% Invalid IPv4 prefix\n".to_string();
+    };
+    rib_show_one(rib, &prefix, json, false)
+}
+
+/// `show ip route prefix A.B.C.D/N detail` — single-prefix filter,
+/// detail layout. Detail renderer lands in PR B; falls back to
+/// one-line with a pending-detail header.
+pub fn rib_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
+    let Some(prefix) = args.v4net() else {
+        return "% Invalid IPv4 prefix\n".to_string();
+    };
+    rib_show_one(rib, &prefix, json, true)
+}
+
+/// Shared helper for the two `prefix`-keyed handlers. `detail`
+/// currently only flips the header — PR B replaces the body with
+/// the IOS-XR-style routing-descriptor-block renderer.
+fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String {
+    let Some(entries) = rib.table.get(prefix) else {
+        return if json {
+            "{\"routes\": []}\n".to_string()
+        } else {
+            format!("% No route for {prefix}\n")
+        };
+    };
+
+    if json {
+        let routes: Vec<RouteEntry> = entries
+            .iter()
+            .map(|e| rib_entry_to_json(rib, prefix, e))
+            .collect();
+        return serde_json::to_string_pretty(&RouteTable { routes })
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
+    }
+
+    let mut buf = String::new();
+    if detail {
+        buf.push_str("[detail format pending — PR B]\n");
+    }
+    buf.push_str(SHOW_IPV4_HEADER);
+    for entry in entries.iter() {
+        let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
+    }
+    buf
+}
+
 pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut routes = Vec::new();
@@ -750,6 +814,66 @@ pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
         }
         buf
     }
+}
+
+/// `show ipv6 route detail` (PR A: dispatch surface only).
+pub fn rib6_show_detail(rib: &Rib, args: Args, json: bool) -> String {
+    let body = rib6_show(rib, args, json);
+    if json {
+        body
+    } else {
+        format!("[detail format pending — PR B]\n{body}")
+    }
+}
+
+/// `show ipv6 route prefix X::Y/N` — single-prefix, one-line layout.
+pub fn rib6_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
+    let Some(prefix) = args.v6net() else {
+        return "% Invalid IPv6 prefix\n".to_string();
+    };
+    rib6_show_one(rib, &prefix, json, false)
+}
+
+/// `show ipv6 route prefix X::Y/N detail` — single-prefix, detail
+/// layout (renderer pending PR B).
+pub fn rib6_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
+    let Some(prefix) = args.v6net() else {
+        return "% Invalid IPv6 prefix\n".to_string();
+    };
+    rib6_show_one(rib, &prefix, json, true)
+}
+
+fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> String {
+    let Some(entries) = rib.table_v6.get(prefix) else {
+        return if json {
+            "{\"routes\": []}\n".to_string()
+        } else {
+            format!("% No route for {prefix}\n")
+        };
+    };
+
+    if json {
+        let routes: Vec<RouteEntry> = entries
+            .iter()
+            .map(|e| rib_entry_to_json_v6(rib, prefix, e))
+            .collect();
+        return serde_json::to_string_pretty(&RouteTable { routes })
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
+    }
+
+    let mut buf = String::new();
+    if detail {
+        buf.push_str("[detail format pending — PR B]\n");
+    }
+    buf.push_str(SHOW_IPV6_HEADER);
+    for entry in entries.iter() {
+        let _ = write!(
+            buf,
+            "{}",
+            rib_entry_show_v6(rib, prefix, entry, json).unwrap()
+        );
+    }
+    buf
 }
 
 // JSON structures for MPLS ILM display
@@ -1053,7 +1177,13 @@ impl Rib {
     pub fn show_build(&mut self) {
         self.show_add("/show/interface", link_show);
         self.show_add("/show/ip/route", rib_show);
+        self.show_add("/show/ip/route/detail", rib_show_detail);
+        self.show_add("/show/ip/route/prefix", rib_show_prefix);
+        self.show_add("/show/ip/route/prefix/detail", rib_show_prefix_detail);
         self.show_add("/show/ipv6/route", rib6_show);
+        self.show_add("/show/ipv6/route/detail", rib6_show_detail);
+        self.show_add("/show/ipv6/route/prefix", rib6_show_prefix);
+        self.show_add("/show/ipv6/route/prefix/detail", rib6_show_prefix_detail);
         self.show_add("/show/nexthop", nexthop_show);
         self.show_add("/show/mpls/ilm", ilm_show);
         self.show_add("/show/l2/mac/table", mac_show);

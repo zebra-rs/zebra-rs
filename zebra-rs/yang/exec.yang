@@ -153,10 +153,25 @@ module exec {
     }
     container ip {
       ext:help "Show IP commands";
-      leaf route {
-        ext:help "IP route prefix";
-        // type inet:ipv4-prefix;
-        type empty;
+      container route {
+        ext:help "IPv4 routing table";
+        presence "Show IPv4 routes";
+        leaf detail {
+          ext:help "Show all routes in detail format (IOS-XR style)";
+          type empty;
+        }
+        list prefix {
+          ext:help "Filter to a specific IPv4 prefix";
+          ext:presence "Show one IPv4 prefix";
+          key value;
+          leaf value {
+            type inet:ipv4-prefix;
+          }
+          leaf detail {
+            ext:help "Show this prefix in detail format";
+            type empty;
+          }
+        }
       }
       container bgp {
         ext:help "BGP commands";
@@ -263,9 +278,33 @@ module exec {
         ext:help "IS-IS summary";
         type empty;
       }
-      leaf route {
+      container route {
         ext:help "IS-IS route";
-        type empty;
+        presence "Show IS-IS routes";
+        leaf detail {
+          ext:help "Show IS-IS routes in detail format (TI-LFA, SR-MPLS, SRv6)";
+          type empty;
+        }
+      }
+      container fast-reroute {
+        ext:help "IS-IS Fast ReRoute (TI-LFA) information";
+        presence "Show TI-LFA information";
+        leaf summary {
+          ext:help "Per-level counters: protected / unprotected prefixes";
+          type empty;
+        }
+        list prefix {
+          ext:help "Per-prefix TI-LFA repair detail";
+          ext:presence "Show TI-LFA repair detail for one prefix";
+          key value;
+          leaf value {
+            type inet:ipv4-prefix;
+          }
+          leaf detail {
+            ext:help "Detail format (P/Q nodes, segment list, backup-src)";
+            type empty;
+          }
+        }
       }
       container interface {
         ext:help "IS-IS interface";
@@ -329,14 +368,25 @@ module exec {
     }
     container ipv6 {
       ext:help "Show IPv6 commands";
-      leaf route {
-        ext:help "IPv6 address";
-        // type inet:ipv6-address;
-        type empty;
-      }
-      leaf prefix {
-        ext:help "IPv6 prefix";
-        type inet:ipv6-prefix;
+      container route {
+        ext:help "IPv6 routing table";
+        presence "Show IPv6 routes";
+        leaf detail {
+          ext:help "Show all routes in detail format (IOS-XR style)";
+          type empty;
+        }
+        list prefix {
+          ext:help "Filter to a specific IPv6 prefix";
+          ext:presence "Show one IPv6 prefix";
+          key value;
+          leaf value {
+            type inet:ipv6-prefix;
+          }
+          leaf detail {
+            ext:help "Show this prefix in detail format";
+            type empty;
+          }
+        }
       }
     }
     container "policy" {
