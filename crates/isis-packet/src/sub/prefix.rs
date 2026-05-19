@@ -254,7 +254,13 @@ impl TlvEmitter for IsisTlvExtIpReach {
     }
 
     fn len(&self) -> u8 {
-        self.entries.iter().map(|entry| entry.len()).sum()
+        // See note on `IsisTlvExtIsReach::len`: saturate so the
+        // packer can measure oversized instances via wire_len in
+        // debug builds before sharding them.
+        self.entries
+            .iter()
+            .map(|entry| entry.len())
+            .fold(0u8, u8::saturating_add)
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -294,8 +300,13 @@ impl TlvEmitter for IsisTlvMtIpReach {
     }
 
     fn len(&self) -> u8 {
-        let len: u8 = self.entries.iter().map(|entry| entry.len()).sum();
-        len + 2
+        // See note on `IsisTlvExtIsReach::len`.
+        let entries_len = self
+            .entries
+            .iter()
+            .map(|entry| entry.len())
+            .fold(0u8, u8::saturating_add);
+        entries_len.saturating_add(2)
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -372,7 +383,11 @@ impl TlvEmitter for IsisTlvIpv6Reach {
     }
 
     fn len(&self) -> u8 {
-        self.entries.iter().map(|entry| entry.len()).sum()
+        // See note on `IsisTlvExtIsReach::len`.
+        self.entries
+            .iter()
+            .map(|entry| entry.len())
+            .fold(0u8, u8::saturating_add)
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -470,8 +485,13 @@ impl TlvEmitter for IsisTlvMtIpv6Reach {
     }
 
     fn len(&self) -> u8 {
-        let len: u8 = self.entries.iter().map(|entry| entry.len()).sum();
-        len + 2
+        // See note on `IsisTlvExtIsReach::len`.
+        let entries_len = self
+            .entries
+            .iter()
+            .map(|entry| entry.len())
+            .fold(0u8, u8::saturating_add);
+        entries_len.saturating_add(2)
     }
 
     fn emit(&self, buf: &mut BytesMut) {

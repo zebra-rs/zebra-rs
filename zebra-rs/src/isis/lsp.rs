@@ -15,6 +15,21 @@ use crate::rib::{DEFAULT_BLOCK_NAME, LocatorBehavior, MacAddr};
 /// every LSDB. Cisco treats this as a non-configurable constant.
 const ZERO_AGE_LIFETIME: u16 = 60;
 
+/// LSP PDU fixed-header overhead on the wire: the outer
+/// `IsisPacket` header (8 bytes) plus the `IsisLsp` body's fixed
+/// fields (pdu_len + hold_time + lsp_id + seq_number + checksum +
+/// types = 19 bytes). Matches ISO 10589 length_indicator(L1Lsp) =
+/// 27. The bin-packer subtracts this from the configured
+/// originatingLSPBufferSize to get the per-fragment TLV byte budget.
+const LSP_PDU_OVERHEAD: usize = 27;
+
+/// Maximum TLV on-wire size (2-byte TL header + 255-byte value).
+/// The 8-bit Length field silently wraps for larger TLVs, so the
+/// per-instance splitter shards distributable TLVs whose entry
+/// list overflows this boundary into multiple TLV instances of
+/// the same type before the packer ever sees them.
+const TLV_WIRE_MAX: usize = 257;
+
 use super::config::{IsisConfig, MtId};
 use super::ifsm::has_level;
 use super::inst::{IsisTop, Message};
@@ -68,6 +83,208 @@ pub fn resolve_dis_ifindex(
             Some((adj, _)) if *adj == neighbor_id => Some(*idx),
             _ => None,
         })
+}
+
+/// Split a TLV 135 (Extended IP Reachability) whose serialized
+/// value would overflow the 8-bit Length field into multiple TLV
+/// instances of type 135, each ≤ 255 value-bytes. Entries are
+/// distributed left-to-right; placement is stable per entry order.
+fn split_ext_ip_reach(t: IsisTlvExtIpReach) -> Vec<IsisTlv> {
+    let mut out: Vec<IsisTlv> = Vec::new();
+    let mut current = IsisTlvExtIpReach::default();
+    for entry in t.entries.into_iter() {
+        current.entries.push(entry);
+        let probe: IsisTlv = current.clone().into();
+        if probe.wire_len() > TLV_WIRE_MAX {
+            let latest = current.entries.pop().expect("just pushed");
+            if !current.entries.is_empty() {
+                out.push(current.into());
+            }
+            current = IsisTlvExtIpReach::default();
+            current.entries.push(latest);
+        }
+    }
+    if !current.entries.is_empty() {
+        out.push(current.into());
+    }
+    out
+}
+
+/// Same split as `split_ext_ip_reach` but for TLV 236 (IPv6
+/// Reachability).
+fn split_ipv6_reach(t: IsisTlvIpv6Reach) -> Vec<IsisTlv> {
+    let mut out: Vec<IsisTlv> = Vec::new();
+    let mut current = IsisTlvIpv6Reach::default();
+    for entry in t.entries.into_iter() {
+        current.entries.push(entry);
+        let probe: IsisTlv = current.clone().into();
+        if probe.wire_len() > TLV_WIRE_MAX {
+            let latest = current.entries.pop().expect("just pushed");
+            if !current.entries.is_empty() {
+                out.push(current.into());
+            }
+            current = IsisTlvIpv6Reach::default();
+            current.entries.push(latest);
+        }
+    }
+    if !current.entries.is_empty() {
+        out.push(current.into());
+    }
+    out
+}
+
+/// Same split as above, for TLV 222 (MT IS Reachability). The 2-byte
+/// MT ID prefix is preserved on every output instance.
+fn split_mt_is_reach(t: IsisTlvMtIsReach) -> Vec<IsisTlv> {
+    let mt = t.mt;
+    let mut out: Vec<IsisTlv> = Vec::new();
+    let mut current = IsisTlvMtIsReach {
+        mt,
+        entries: Vec::new(),
+    };
+    for entry in t.entries.into_iter() {
+        current.entries.push(entry);
+        let probe: IsisTlv = current.clone().into();
+        if probe.wire_len() > TLV_WIRE_MAX {
+            let latest = current.entries.pop().expect("just pushed");
+            if !current.entries.is_empty() {
+                out.push(current.into());
+            }
+            current = IsisTlvMtIsReach {
+                mt,
+                entries: Vec::new(),
+            };
+            current.entries.push(latest);
+        }
+    }
+    if !current.entries.is_empty() {
+        out.push(current.into());
+    }
+    out
+}
+
+/// Same split, for TLV 237 (MT IPv6 Reachability).
+fn split_mt_ipv6_reach(t: IsisTlvMtIpv6Reach) -> Vec<IsisTlv> {
+    let mt = t.mt;
+    let mut out: Vec<IsisTlv> = Vec::new();
+    let mut current = IsisTlvMtIpv6Reach {
+        mt,
+        entries: Vec::new(),
+    };
+    for entry in t.entries.into_iter() {
+        current.entries.push(entry);
+        let probe: IsisTlv = current.clone().into();
+        if probe.wire_len() > TLV_WIRE_MAX {
+            let latest = current.entries.pop().expect("just pushed");
+            if !current.entries.is_empty() {
+                out.push(current.into());
+            }
+            current = IsisTlvMtIpv6Reach {
+                mt,
+                entries: Vec::new(),
+            };
+            current.entries.push(latest);
+        }
+    }
+    if !current.entries.is_empty() {
+        out.push(current.into());
+    }
+    out
+}
+
+/// Shard any distributable TLV whose on-wire size exceeds the
+/// 257-byte TLV-instance ceiling into multiple instances of the
+/// same TLV type. TLVs already within budget pass through
+/// unchanged. Variants without an entry-list (e.g. `IsisTlv::Srv6`
+/// carrying a single locator) cannot be split below the TLV level
+/// without changing protocol semantics and so pass through; the
+/// caller must keep those locator sub-TLVs small enough on its own.
+fn split_distributable_at_255(tlv: IsisTlv) -> Vec<IsisTlv> {
+    if tlv.wire_len() <= TLV_WIRE_MAX {
+        return vec![tlv];
+    }
+    match tlv {
+        IsisTlv::ExtIpReach(t) => split_ext_ip_reach(t),
+        IsisTlv::Ipv6Reach(t) => split_ipv6_reach(t),
+        IsisTlv::MtIsReach(t) => split_mt_is_reach(t),
+        IsisTlv::MtIpv6Reach(t) => split_mt_ipv6_reach(t),
+        other => vec![other],
+    }
+}
+
+/// Greedy first-fit bin-packing of a self-originated TLV set into
+/// LSP fragments. Fragment 0 always exists and carries the anchor
+/// TLVs (area address, hostname, capability, etc. — TLVs that the
+/// IS-IS spec permits in fragment 0 only). Distributable TLVs
+/// (reach entries, SRv6 locators, ...) flow into the lowest-numbered
+/// fragment that has room; a new fragment opens when no existing
+/// one can hold the next TLV.
+///
+/// Each fragment's `seq_number` is left at 0 on return; the caller
+/// resolves seq per fragment ID against the LSDB (with the per-frag
+/// wrap-detection rules) before emit. Likewise the caller stamps
+/// OL/ATT bits on `types`; today those bits ride identically on
+/// every fragment because we don't expose them yet.
+///
+/// LSPDBOverflow (RFC 5311 territory — > 256 fragments) is logged
+/// and the trailing TLVs are dropped. Phase 5 / RFC 5311 will
+/// extend the namespace via virtual sys-IDs.
+fn pack_into_fragments(
+    anchors: Vec<IsisTlv>,
+    distributable: Vec<IsisTlv>,
+    base: IsisNeighborId,
+    types: IsisLspTypes,
+    hold_time: u16,
+    lsp_mtu_size: u16,
+) -> Vec<IsisLsp> {
+    let mtu = lsp_mtu_size as usize;
+    let budget = mtu.saturating_sub(LSP_PDU_OVERHEAD);
+
+    let mut frags: Vec<IsisLsp> = Vec::new();
+    let mut frag_bytes: Vec<usize> = Vec::new();
+
+    // Fragment 0 starts with the anchor TLVs. If they alone exceed
+    // the budget the originator is misconfigured (lsp-mtu-size too
+    // small to even carry the per-node attributes); proceed anyway
+    // and let the wire emit silently truncate — operators will see
+    // it immediately in `show isis database`.
+    let anchor_bytes: usize = anchors.iter().map(|t| t.wire_len()).sum();
+    frags.push(IsisLsp {
+        hold_time,
+        lsp_id: IsisLspId::from_neighbor_id(base, 0),
+        types,
+        tlvs: anchors,
+        ..Default::default()
+    });
+    frag_bytes.push(anchor_bytes);
+
+    for tlv in distributable {
+        let n = tlv.wire_len();
+        let target = (0..frags.len()).find(|&i| frag_bytes[i] + n <= budget);
+        if let Some(i) = target {
+            frags[i].tlvs.push(tlv);
+            frag_bytes[i] += n;
+        } else {
+            if frags.len() >= 256 {
+                tracing::warn!(
+                    "[LspPack] LSPDBOverflow: cannot fit TLV (wire_len={}) in any of 256 fragments; dropping",
+                    n
+                );
+                break;
+            }
+            let frag_id = frags.len() as u8;
+            frags.push(IsisLsp {
+                hold_time,
+                lsp_id: IsisLspId::from_neighbor_id(base, frag_id),
+                types,
+                tlvs: vec![tlv],
+                ..Default::default()
+            });
+            frag_bytes.push(n);
+        }
+    }
+
+    frags
 }
 
 pub fn dis_generate(
@@ -141,9 +358,13 @@ pub fn dis_generate(
     Some(lsp)
 }
 
-pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> Option<IsisLsp> {
-    // LSP ID with no pseudo id and no fragmentation.
-    let lsp_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
+pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> Vec<IsisLsp> {
+    // Fragment 0 is the anchor for the originator's per-node attributes
+    // (hostname, area, capability, OL/ATT) and the only LSP whose seq is
+    // gated by `seq_floor` and the seq-wrap-up freeze. Higher fragments
+    // exist only when distributable TLVs spill past `lsp_mtu_size` and
+    // get their own seq from the LSDB at emit time.
+    let frag0_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
     // ISO 10589 §7.3.16.4: when the previous origination's seq hit
     // 0xFFFFFFFF we sent a purge and armed a freeze. Until that
@@ -157,33 +378,39 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             &level,
             "[LspOriginate] suppressed — seq-wrap freeze in effect"
         );
-        return None;
+        return Vec::new();
     }
 
     // ISO 10589 §7.3.16.4: when a peer floods our own LSP back at us
     // with `recv_seq > existing_seq`, we have to bump the next
     // emission past `recv_seq` so the network converges on our
-    // authoritative copy. `seq_floor` carries that signal.
+    // authoritative copy. `seq_floor` carries that signal. Applied
+    // only to fragment 0 here — the only LSP whose ID the trigger
+    // path currently observes. Per-fragment floor handling is a
+    // follow-up alongside per-fragment seq-wrap.
     //
     // `saturating_add` guards every arm — the wrap-detection branch
     // below sees u32::MAX whether we got there from existing == MAX
     // (post-purge LSDB entry) or from existing == MAX - 1 (first
     // bump that trips the boundary).
-    let existing = top.lsdb.get(&level).get(&lsp_id).map(|x| x.lsp.seq_number);
-    let seq_number = match (existing, seq_floor) {
+    let frag0_existing = top
+        .lsdb
+        .get(&level)
+        .get(&frag0_id)
+        .map(|x| x.lsp.seq_number);
+    let frag0_seq = match (frag0_existing, seq_floor) {
         (Some(e), Some(f)) => e.max(f).saturating_add(1),
         (Some(e), None) => e.saturating_add(1),
         (None, Some(f)) => f.saturating_add(1),
         (None, None) => 0x0001,
     };
 
-    // Logging.
     isis_event_trace!(
         top.tracing,
         LspOriginate,
         &level,
         "[LspOriginate] Seq:0x{:08x} Self Originate",
-        seq_number
+        frag0_seq
     );
 
     // ISO 10589 §7.3.16.4: sequence-number wrap-up.
@@ -193,15 +420,17 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     // `lsp_hold_time + ZeroAgeLifetime` so any surviving copy in any
     // peer's LSDB has fully aged out. When the freeze clears, the
     // LSDB entry is dropped and the next origination computes
-    // seq = 1 from scratch.
-    if seq_number == u32::MAX {
+    // seq = 1 from scratch. Wrap check is fragment-0 only here; per-
+    // fragment wrap (and the per-fragment freeze table that needs)
+    // is the follow-up after the packer lands.
+    if frag0_seq == u32::MAX {
         isis_event_trace!(
             top.tracing,
             LspOriginate,
             &level,
             "[LspSeqWrap] hit u32::MAX — purging and freezing origination"
         );
-        let _ = top.tx.send(Message::LspPurge(level, lsp_id));
+        let _ = top.tx.send(Message::LspPurge(level, frag0_id));
 
         let wait_secs = top.config.hold_time().saturating_add(ZERO_AGE_LIFETIME);
         let tx = top.tx.clone();
@@ -212,22 +441,24 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             }
         });
         *top.lsp_seq_wrap_wait.get_mut(&level) = Some(timer);
-        return None;
+        return Vec::new();
     }
 
-    // Generate self originated LSP.
+    // From here on, TLVs are collected into two buckets:
+    //   - `anchors` — frag-0-only attributes (area, hostname, proto
+    //     supported, lsp-buffer-size, capability, MT capability,
+    //     TE router-id);
+    //   - `distributable` — TLVs that may be spread across frags 0..N
+    //     (SRv6 locators, IS-Reach, MT IS-Reach, IP-Reach, IPv6-Reach,
+    //     MT IPv6-Reach).
+    // The packer then bin-packs them into fragments under `lsp_mtu_size`.
     let types = IsisLspTypes::from(level.digit());
-    let mut lsp = IsisLsp {
-        hold_time: top.config.hold_time(),
-        lsp_id,
-        seq_number,
-        types,
-        ..Default::default()
-    };
+    let mut anchors: Vec<IsisTlv> = Vec::new();
+    let mut distributable: Vec<IsisTlv> = Vec::new();
 
     // Area address.
     let area_addr = top.config.net.area_id.clone();
-    lsp.tlvs.push(IsisTlvAreaAddr { area_addr }.into());
+    anchors.push(IsisTlvAreaAddr { area_addr }.into());
 
     // Supported protocol.
     let mut nlpids = vec![];
@@ -238,14 +469,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         nlpids.push(IsisProto::Ipv6.into());
     }
     if !nlpids.is_empty() {
-        lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
+        anchors.push(IsisTlvProtoSupported { nlpids }.into());
     }
 
     // Originating LSP Buffer Size (TLV 14, RFC 1195). Advertises the
     // PDU size we accept on this link; peers cap their own fragments
     // against this value when sending to us. Frag-0 only — receivers
     // ignore TLV 14 outside fragment 0.
-    lsp.tlvs.push(
+    anchors.push(
         IsisTlvLspBufferSize {
             size: top.config.lsp_mtu_size(),
         }
@@ -260,7 +491,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         top.hostname
             .get_mut(&level)
             .insert_originate(top.config.net.sys_id(), hostname.clone());
-        lsp.tlvs.push(IsisTlvHostname { hostname }.into());
+        anchors.push(IsisTlvHostname { hostname }.into());
     } else {
         top.hostname
             .get_mut(&level)
@@ -341,7 +572,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             }
         }
 
-        lsp.tlvs.push(cap.into());
+        anchors.push(cap.into());
     }
 
     // SRv6 endpoint behavior + SID Structure SubSub TLV (RFC 9352 §9,
@@ -415,7 +646,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             flags: Default::default(),
             locators: vec![sub_locator],
         };
-        lsp.tlvs.push(IsisTlv::Srv6(srv6_tlv));
+        distributable.push(IsisTlv::Srv6(srv6_tlv));
     }
 
     // Multi-Topology TLV (229) — RFC 5120 §7.1. Lists the MT IDs
@@ -431,7 +662,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             .map(|id| MultiTopologyId::from(id.wire_id()))
             .collect();
         let mt_tlv = IsisTlvMultiTopology { entries };
-        lsp.tlvs.push(mt_tlv.into());
+        anchors.push(mt_tlv.into());
     }
 
     // TE Router ID. Prefer configured value, fall back to RIB-derived.
@@ -439,7 +670,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         && let Some(router_id) = top.config.te_router_id.or(top.config.rib_router_id)
     {
         let te_router_id = IsisTlvTeRouterId { router_id };
-        lsp.tlvs.push(te_router_id.into());
+        anchors.push(te_router_id.into());
     }
 
     // IS Reachability.
@@ -518,14 +749,15 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
 
         ext_is_reach.entries.push(is_reach);
 
-        lsp.tlvs.push(ext_is_reach.into());
+        distributable.push(ext_is_reach.into());
 
         // Shared Risk Link Group TLVs (138 / 139) — per-adjacency,
         // RFC 5307 (v4) / RFC 6119 (v6). Resolve the link's SRLG
         // names against the cached global table; names that don't
         // (yet) resolve to a value are skipped silently — that's the
         // staging-before-commit case the docs in /srlg/group call
-        // out. Empty value list = no TLV.
+        // out. Empty value list = no TLV. SRLG TLVs are distributable
+        // so the packer may pack them across fragments.
         if !link.config.srlg_groups.is_empty() {
             let values: Vec<u32> = link
                 .config
@@ -571,7 +803,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                         remote_addr: remote_v4,
                         values: chunk.to_vec(),
                     };
-                    lsp.tlvs.push(IsisTlv::Srlg(tlv));
+                    distributable.push(IsisTlv::Srlg(tlv));
                 }
 
                 // IPv6 SRLG TLV 139 — only when the link has both a
@@ -596,7 +828,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                             remote_addr: remote_v6,
                             values: chunk.to_vec(),
                         };
-                        lsp.tlvs.push(IsisTlv::Ipv6Srlg(tlv));
+                        distributable.push(IsisTlv::Ipv6Srlg(tlv));
                     }
                 }
             }
@@ -665,7 +897,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 mt: mt2_id,
                 entries: mt2_entries,
             };
-            lsp.tlvs.push(mt_is_reach.into());
+            distributable.push(mt_is_reach.into());
         }
     }
 
@@ -720,7 +952,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         });
     }
     if !ext_ip_reach.entries.is_empty() {
-        lsp.tlvs.push(ext_ip_reach.into());
+        distributable.push(ext_ip_reach.into());
     }
 
     // IPv6 Reachability.
@@ -778,12 +1010,51 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 mt: MultiTopologyId::from(MtId::Ipv6Unicast.wire_id()),
                 entries: ipv6_reach.entries,
             };
-            lsp.tlvs.push(mt_ipv6_reach.into());
+            distributable.push(mt_ipv6_reach.into());
         } else {
-            lsp.tlvs.push(ipv6_reach.into());
+            distributable.push(ipv6_reach.into());
         }
     }
-    Some(lsp)
+
+    // Shard any distributable TLV whose serialized value would
+    // overflow the 8-bit TLV length field (255 value-bytes ceiling)
+    // into multiple instances of the same TLV type. This is the only
+    // place where a single logical "TLV instance" from the collection
+    // phase becomes multiple wire TLV instances; the packer below
+    // treats each post-split instance as atomic.
+    let distributable: Vec<IsisTlv> = distributable
+        .into_iter()
+        .flat_map(split_distributable_at_255)
+        .collect();
+
+    // Bin-pack into fragments under the configured originatingLSPBufferSize.
+    let mut fragments = pack_into_fragments(
+        anchors,
+        distributable,
+        IsisNeighborId::from_sys_id(&top.config.net.sys_id(), 0),
+        types,
+        top.config.hold_time(),
+        top.config.lsp_mtu_size(),
+    );
+
+    // Resolve seq numbers per fragment. Fragment 0 uses the seq we
+    // computed above (with seq_floor); higher fragments derive their
+    // seq from the LSDB (existing+1 or 1). Per-fragment seq-wrap
+    // detection is intentionally deferred — Phase 4 generalises the
+    // wrap freeze table from per-level to per-(level, fragment_id).
+    for frag in fragments.iter_mut() {
+        if frag.lsp_id.fragment_id() == 0 {
+            frag.seq_number = frag0_seq;
+        } else {
+            let existing = top
+                .lsdb
+                .get(&level)
+                .get(&frag.lsp_id)
+                .map(|x| x.lsp.seq_number);
+            frag.seq_number = existing.map(|e| e.saturating_add(1)).unwrap_or(0x0001);
+        }
+    }
+    fragments
 }
 
 pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
@@ -978,5 +1249,132 @@ mod tests {
         let neighbor_id = IsisNeighborId::default();
         assert!(resolve_dis_ifindex(&links, Level::L1, neighbor_id).is_none());
         assert!(resolve_dis_ifindex(&links, Level::L2, neighbor_id).is_none());
+    }
+
+    fn v4_entry(octet: u8) -> IsisTlvExtIpReachEntry {
+        use std::net::Ipv4Addr;
+        let prefix = ipnet::Ipv4Net::new(Ipv4Addr::new(10, 0, 0, octet), 32).unwrap();
+        let flags = Ipv4ControlInfo::new()
+            .with_prefixlen(32)
+            .with_sub_tlv(false)
+            .with_distribution(false);
+        IsisTlvExtIpReachEntry {
+            metric: 10,
+            flags,
+            prefix,
+            subs: vec![],
+        }
+    }
+
+    /// The 8-bit TLV length silently wraps for any TLV whose value
+    /// exceeds 255 bytes, so the packer pre-shards entry-bearing
+    /// TLVs. Verify each shard fits within the 257-byte (TL header +
+    /// value) wire ceiling and the entry total is preserved.
+    #[test]
+    fn split_ext_ip_reach_shards_at_255_byte_value() {
+        let tlv = IsisTlvExtIpReach {
+            entries: (0..40).map(v4_entry).collect(),
+        };
+        let expected = tlv.entries.len();
+        let shards = split_ext_ip_reach(tlv);
+        assert!(
+            shards.len() >= 2,
+            "40 entries × ~9B exceed the 255-byte TLV value ceiling — expected ≥ 2 shards"
+        );
+        for shard in &shards {
+            assert!(
+                shard.wire_len() <= TLV_WIRE_MAX,
+                "shard wire_len {} exceeds {}",
+                shard.wire_len(),
+                TLV_WIRE_MAX
+            );
+        }
+        let total: usize = shards
+            .iter()
+            .map(|t| match t {
+                IsisTlv::ExtIpReach(r) => r.entries.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(total, expected, "no entries lost across the split");
+    }
+
+    /// Packer must keep anchor TLVs in fragment 0 even when an
+    /// already-placed distributable would have fit. Validates the
+    /// "fragment 0 is the scalar attribute anchor" rule that
+    /// receivers depend on (hostname / cap / OL only come from
+    /// frag 0).
+    #[test]
+    fn pack_keeps_anchors_in_fragment_zero() {
+        let area = IsisTlv::AreaAddr(IsisTlvAreaAddr {
+            area_addr: vec![0x49, 0x00, 0x01],
+        });
+        let hostname = IsisTlv::Hostname(IsisTlvHostname {
+            hostname: "r1".to_string(),
+        });
+        let reach = IsisTlv::ExtIpReach(IsisTlvExtIpReach {
+            entries: (0..5).map(v4_entry).collect(),
+        });
+
+        let base = IsisNeighborId::from_sys_id(&IsisSysId::default(), 0);
+        let frags = pack_into_fragments(
+            vec![area.clone(), hostname.clone()],
+            vec![reach.clone()],
+            base,
+            IsisLspTypes::from(2),
+            1200,
+            1492,
+        );
+        assert_eq!(frags.len(), 1, "everything fits in one fragment under 1492");
+        let f0 = &frags[0];
+        assert_eq!(f0.lsp_id.fragment_id(), 0);
+        assert!(f0.tlvs.iter().any(|t| matches!(t, IsisTlv::AreaAddr(_))));
+        assert!(f0.tlvs.iter().any(|t| matches!(t, IsisTlv::Hostname(_))));
+    }
+
+    /// With a tight buffer size, a single per-link TLV 22 plus a
+    /// chunky ExtIpReach forces a new fragment. Verify the packer
+    /// opens fragment 1, anchors stay in 0, and the seq is left at
+    /// 0 (caller fills it from the LSDB).
+    #[test]
+    fn pack_spills_into_fragment_one_when_budget_tight() {
+        let area = IsisTlv::AreaAddr(IsisTlvAreaAddr {
+            area_addr: vec![0x49, 0x00, 0x01],
+        });
+        // ~30 entries × ~9 bytes ≈ 270B value — already exceeds
+        // 255, so the splitter will produce two TLV 135 instances.
+        let big_reach = IsisTlv::ExtIpReach(IsisTlvExtIpReach {
+            entries: (0..30).map(v4_entry).collect(),
+        });
+        let distributable: Vec<IsisTlv> = split_distributable_at_255(big_reach);
+        assert!(
+            distributable.len() >= 2,
+            "expected splitter to produce ≥ 2 TLV instances"
+        );
+
+        let base = IsisNeighborId::from_sys_id(&IsisSysId::default(), 0);
+        // mtu = LSP_PDU_OVERHEAD + anchors + just enough for one
+        // distributable instance — second must spill.
+        let mtu = (LSP_PDU_OVERHEAD + 5 + 200) as u16; // anchors small, room for ~1 reach
+        let frags = pack_into_fragments(
+            vec![area],
+            distributable,
+            base,
+            IsisLspTypes::from(2),
+            1200,
+            mtu,
+        );
+        assert!(frags.len() >= 2, "expected packer to open fragment 1");
+        assert_eq!(frags[0].lsp_id.fragment_id(), 0);
+        assert_eq!(frags[1].lsp_id.fragment_id(), 1);
+        for f in &frags {
+            assert_eq!(f.seq_number, 0, "packer leaves seq=0 for caller to fill");
+        }
+        // Anchor lives only in fragment 0.
+        let anchor_in_one = frags[1]
+            .tlvs
+            .iter()
+            .any(|t| matches!(t, IsisTlv::AreaAddr(_)));
+        assert!(!anchor_in_one, "anchors must not leak into fragment 1");
     }
 }

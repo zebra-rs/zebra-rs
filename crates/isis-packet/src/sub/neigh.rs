@@ -42,7 +42,16 @@ impl TlvEmitter for IsisTlvExtIsReach {
     }
 
     fn len(&self) -> u8 {
-        self.entries.iter().map(|entry| entry.len()).sum()
+        // The packer pre-shards entry-bearing TLVs at the 255-byte
+        // value boundary, so a well-formed TLV here stays under
+        // u8::MAX. `saturating_add` is for the diagnostic path —
+        // measurement via `wire_len()` clones a not-yet-split TLV
+        // to probe its true size; raw `u8::add` would panic in debug
+        // mode before the splitter could correct it.
+        self.entries
+            .iter()
+            .map(|entry| entry.len())
+            .fold(0u8, u8::saturating_add)
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -76,8 +85,14 @@ impl TlvEmitter for IsisTlvMtIsReach {
     }
 
     fn len(&self) -> u8 {
-        let len: u8 = self.entries.iter().map(|entry| entry.len()).sum();
-        len + 2
+        // See note on `IsisTlvExtIsReach::len`: saturate to keep
+        // the packer's probe-via-wire_len path debug-safe.
+        let entries_len = self
+            .entries
+            .iter()
+            .map(|entry| entry.len())
+            .fold(0u8, u8::saturating_add);
+        entries_len.saturating_add(2)
     }
 
     fn emit(&self, buf: &mut BytesMut) {
