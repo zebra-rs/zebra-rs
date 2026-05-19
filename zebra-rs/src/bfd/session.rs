@@ -11,12 +11,6 @@
 //! expose a public `add_session` API or run a TX/detection timer —
 //! both arrive in PR 3b together with the outbound packet path.
 
-// Several RFC §6.8.1 fields (`local_disc`, `desired_min_tx_us`, …) and
-// the [`SessionParams`] constructor type are only read by code that
-// arrives in PR 3b (timer engine, outbound TX) and PR 4 (show). Keep
-// them defined at spec parity now; the production wiring follows.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::time::Instant;
@@ -40,12 +34,16 @@ pub struct SessionKey {
 /// Per-session timer / detection parameters as locally configured
 /// (i.e. before any peer negotiation). RFC 5880 §6.8.1 calls these
 /// `bfd.DesiredMinTxInterval`, `bfd.RequiredMinRxInterval`, and
-/// `bfd.DetectMult`.
+/// `bfd.DetectMult`. `dst_port` is the UDP destination used when
+/// transmitting — production callers pass
+/// [`super::socket::BFD_SINGLE_HOP_PORT`] (3784) for single-hop and
+/// 4784 for multihop (RFC 5883); tests pass the peer's ephemeral port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionParams {
     pub desired_min_tx_us: u32,
     pub required_min_rx_us: u32,
     pub detect_mult: u8,
+    pub dst_port: u16,
 }
 
 impl Default for SessionParams {
@@ -57,6 +55,7 @@ impl Default for SessionParams {
             desired_min_tx_us: 1_000_000,
             required_min_rx_us: 1_000_000,
             detect_mult: 3,
+            dst_port: super::socket::BFD_SINGLE_HOP_PORT,
         }
     }
 }
@@ -93,6 +92,9 @@ pub struct Session {
     pub desired_min_tx_us: u32,
     pub required_min_rx_us: u32,
     pub detect_mult: u8,
+
+    /// UDP destination port to send to (3784 single-hop, 4784 multi-hop).
+    pub dst_port: u16,
 
     /// Reported by the peer in the most recent control packet.
     pub remote_min_tx_us: u32,
@@ -133,6 +135,7 @@ impl Session {
             desired_min_tx_us: params.desired_min_tx_us,
             required_min_rx_us: params.required_min_rx_us,
             detect_mult: params.detect_mult,
+            dst_port: params.dst_port,
             remote_min_tx_us: 0,
             remote_min_rx_us: 0,
             remote_detect_mult: 0,
@@ -190,6 +193,48 @@ impl Session {
         self.handle_event(Event::Rx {
             remote_state: packet.state,
         })
+    }
+
+    /// The actual outgoing transmission interval (microseconds) per
+    /// RFC 5880 §6.8.7: the maximum of what we'd like to send and
+    /// what the peer can receive. If the peer reports
+    /// `Required Min RX Interval = 0` we suspend periodic transmission
+    /// — represented here by returning 0.
+    pub fn tx_interval_us(&self) -> u32 {
+        if self.remote_min_rx_us == 0 {
+            return 0;
+        }
+        self.desired_min_tx_us.max(self.remote_min_rx_us)
+    }
+
+    /// Detection time (microseconds) per RFC 5880 §6.8.4: the peer's
+    /// detect multiplier times the larger of our required-receive and
+    /// the peer's desired-transmit. Zero when no valid packet has
+    /// been received yet (so the detection timer is not yet armed).
+    pub fn detection_time_us(&self) -> u32 {
+        if self.remote_detect_mult == 0 {
+            return 0;
+        }
+        let base = self.required_min_rx_us.max(self.remote_min_tx_us);
+        u32::from(self.remote_detect_mult).saturating_mul(base)
+    }
+
+    /// Build an outgoing BFD control packet that reflects the
+    /// session's current state. The Length field and `auth_present`
+    /// flag are populated by the encoder.
+    pub fn build_packet(&self) -> ControlPacket {
+        ControlPacket {
+            diag: self.local_diag,
+            state: self.local_state,
+            detect_mult: self.detect_mult,
+            my_disc: self.local_disc,
+            your_disc: self.remote_disc,
+            desired_min_tx_interval: self.desired_min_tx_us,
+            required_min_rx_interval: self.required_min_rx_us,
+            required_min_echo_rx_interval: 0,
+            demand: self.demand,
+            ..ControlPacket::default()
+        }
     }
 }
 
