@@ -39,8 +39,83 @@ use crate::rib::inst::IlmEntry;
 use crate::rib::route::{DEBUG_ADDR, DEBUG_EVPN};
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
-    Vxlan, link,
+    Vxlan, link, nexthop::NexthopMember,
 };
+
+/// Compact one-line dump of a `Nexthop` for diagnostic logging.
+/// Surfaces the fields that matter when the kernel rejects an
+/// install — `gid` (so we can spot `Nhid(0)` mistakes), per-leg
+/// address + resolved ifindex, MPLS label stack, and per-leg
+/// weight on Multi.
+fn fmt_nexthop_for_trace(nh: &Nexthop) -> String {
+    fn fmt_uni(u: &NexthopUni) -> String {
+        format!(
+            "{{addr={} ifindex={:?} gid={} metric={} mpls={:?} weight={}}}",
+            u.addr,
+            u.ifindex(),
+            u.gid,
+            u.metric,
+            u.mpls,
+            u.weight,
+        )
+    }
+    fn fmt_multi(m: &NexthopMulti) -> String {
+        let legs: Vec<String> = m.nexthops.iter().map(fmt_uni).collect();
+        format!(
+            "Multi{{gid={} metric={} legs=[{}]}}",
+            m.gid,
+            m.metric,
+            legs.join(", ")
+        )
+    }
+    match nh {
+        Nexthop::Uni(u) => format!("Uni{}", fmt_uni(u)),
+        Nexthop::Multi(m) => fmt_multi(m),
+        Nexthop::List(l) => {
+            let members: Vec<String> = l
+                .nexthops
+                .iter()
+                .enumerate()
+                .map(|(i, m)| match m {
+                    NexthopMember::Uni(u) => format!("#{i}=Uni{}", fmt_uni(u)),
+                    NexthopMember::Multi(mm) => format!("#{i}={}", fmt_multi(mm)),
+                })
+                .collect();
+            format!("List[{}]", members.join(", "))
+        }
+        Nexthop::Link(ifindex) => format!("Link(ifindex={ifindex})"),
+    }
+}
+
+/// Compact one-line dump of a kernel-side `Group` (the
+/// nexthop-table object referenced by `Nhid`). Surfaces the gid,
+/// for a Uni leg the (addr, ifindex), for a Multi the member-id
+/// list — enough to correlate an `RTM_NEWNEXTHOP` ENODEV with the
+/// stale link that produced it.
+fn fmt_group_for_trace(group: &Group) -> String {
+    match group {
+        Group::Uni(u) => format!(
+            "Group::Uni{{gid={} addr={} ifindex={:?} valid={} installed={}}}",
+            u.gid(),
+            u.addr,
+            u.ifindex(),
+            u.is_valid(),
+            u.is_installed(),
+        ),
+        Group::Multi(m) => {
+            let members: Vec<String> = m
+                .valid
+                .iter()
+                .map(|(id, w)| format!("({id}, w={w})"))
+                .collect();
+            format!(
+                "Group::Multi{{gid={} members=[{}]}}",
+                m.gid(),
+                members.join(", ")
+            )
+        }
+    }
+}
 
 // Flip to true to re-enable IPv6 FIB install diagnostic prints.
 const DEBUG_V6: bool = false;
@@ -298,10 +373,23 @@ impl FibHandle {
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
+        // Pre-send dump — `tracing::debug!` so production stays
+        // quiet; enable via `RUST_LOG=zebra_rs::fib=debug` when
+        // chasing an install failure.
+        tracing::debug!(
+            "RTM_NEWROUTE v4 {prefix} use_nhid={} nh={}",
+            self.use_nhid,
+            fmt_nexthop_for_trace(nexthop),
+        );
+
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                tracing::info!("NewRoute error: {prefix} {e}");
+                tracing::info!(
+                    "NewRoute error: {prefix} {e} use_nhid={} nh={}",
+                    self.use_nhid,
+                    fmt_nexthop_for_trace(nexthop),
+                );
             }
         }
     }
@@ -501,6 +589,19 @@ impl FibHandle {
         }
 
         if self.use_nhid {
+            // Pre-send sanity check — mirror of route_ipv4_add_uni.
+            let gid_for_check = match &nexthop {
+                Nexthop::Uni(u) => Some(u.gid),
+                Nexthop::Multi(m) => Some(m.gid),
+                _ => None,
+            };
+            if let Some(0) = gid_for_check {
+                tracing::warn!(
+                    "RTM_NEWROUTE v6 skipped for {prefix}: nexthop gid is 0 (would Nhid(0) -> ENODEV); nh={}",
+                    fmt_nexthop_for_trace(nexthop),
+                );
+                return;
+            }
             if let Nexthop::Uni(uni) = &nexthop {
                 if DEBUG_V6 {
                     tracing::info!(
@@ -602,12 +703,23 @@ impl FibHandle {
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
+        // Pre-send dump — `tracing::debug!` so production stays
+        // quiet; enable via `RUST_LOG=zebra_rs::fib=debug` when
+        // chasing an install failure.
+        tracing::debug!(
+            "RTM_NEWROUTE v6 {prefix} use_nhid={} nh={}",
+            self.use_nhid,
+            fmt_nexthop_for_trace(nexthop),
+        );
+
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload
-                && DEBUG_ADDR
-            {
-                tracing::info!("NewRoute IPv6 error: {prefix} {e}");
+            if let NetlinkPayload::Error(e) = msg.payload {
+                tracing::info!(
+                    "NewRoute IPv6 error: {prefix} {e} use_nhid={} nh={}",
+                    self.use_nhid,
+                    fmt_nexthop_for_trace(nexthop),
+                );
             }
         }
     }
@@ -921,11 +1033,17 @@ impl FibHandle {
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewNexthop(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
+        let group_summary = fmt_group_for_trace(nexthop);
+        tracing::debug!("RTM_NEWNEXTHOP {}", group_summary);
+
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             match msg.payload {
                 NetlinkPayload::Error(e) => {
-                    tracing::info!("NewNexthop error: {e} gid: {gid} refcnt: {refcnt}");
+                    tracing::info!(
+                        "NewNexthop error: {e} gid: {gid} refcnt: {refcnt} {}",
+                        group_summary,
+                    );
                 }
                 NetlinkPayload::Done(m) => {
                     tracing::info!("NewNexthop done {m:?}");
