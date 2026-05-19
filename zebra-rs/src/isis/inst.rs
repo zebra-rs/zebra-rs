@@ -736,14 +736,53 @@ impl Isis {
             return;
         };
 
-        let Some(mut lsp) = dis_generate(&mut top, level, ifindex, base) else {
+        // dis_generate returns the per-fragment Vec for this
+        // pseudonode (fragment 0 always present; higher fragments
+        // when the LAN's neighbor list spills past lsp_mtu_size).
+        // Empty Vec = the link no longer holds the DIS adjacency or
+        // (future) a freeze is in effect.
+        let fragments = dis_generate(&mut top, level, ifindex, base);
+        if fragments.is_empty() {
             return;
-        };
-        let lsp_id = lsp.lsp_id;
-        let buf = lsp_emit(&mut lsp, level);
-        insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
+        }
 
-        top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        let max_frag = fragments
+            .iter()
+            .map(|l| l.lsp_id.fragment_id())
+            .max()
+            .unwrap_or(0);
+
+        for mut frag in fragments {
+            let buf = lsp_emit(&mut frag, level);
+            let lsp_id = frag.lsp_id;
+            insert_self_originate(&mut top, level, frag, Some(buf.to_vec()));
+            top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+        }
+
+        // Tail-purge: prior pseudonode fragments above `max_frag`
+        // for this specific (sys_id, pseudo_id) are orphaned and
+        // must be retired so peers flush them. Same shape as the
+        // router-LSP tail-purge in `process_lsp_originate`, but
+        // keyed on the pseudonode's neighbor id rather than our
+        // own sys-id.
+        let self_sys = self.config.net.sys_id();
+        let pseudo_id = neighbor_id.pseudo_id();
+        let orphans: Vec<IsisLspId> = self
+            .lsdb
+            .get(&level)
+            .iter()
+            .filter(|(id, lsa)| {
+                lsa.originated
+                    && id.sys_id() == self_sys
+                    && id.pseudo_id() == pseudo_id
+                    && id.is_pseudo()
+                    && id.fragment_id() > max_frag
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for lsp_id in orphans {
+            let _ = self.tx.send(Message::LspPurge(level, lsp_id));
+        }
     }
 
     fn process_ifsm(&mut self, ev: IfsmEvent, ifindex: u32, level: Option<Level>) {
