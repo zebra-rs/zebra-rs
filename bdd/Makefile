@@ -28,6 +28,10 @@ isis_srv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_srv6"
 
+isis_fragmentation:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_fragmentation"
+
 bgp_evpn_capability:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_evpn_capability"
@@ -59,4 +63,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 bgp_evpn_capability bgp_route_map_match bgp_policy_dynamic_update generate open docs FORCE
+.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 isis_fragmentation bgp_evpn_capability bgp_route_map_match bgp_policy_dynamic_update generate open docs FORCE

@@ -1,0 +1,73 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:0:ffff::1/128
+- if-name: vz1ns
+  ipv6:
+    address: 2001:db8:1::1/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    is-type: level-2-only
+    hostname: z1
+    # Force fragmentation: 400-byte cap on each LSP PDU, then push
+    # well past one fragment's worth of TLV 236 reachability via 40
+    # /64 networks. Each entry costs 14 wire bytes (RFC 5308: 4
+    # metric + 1 flags + 1 prefix-len + 8 bytes of /64 prefix), so
+    # 40 entries → ~560 wire bytes of TLV 236 value, exceeding the
+    # single-TLV 255-byte ceiling. The splitter shards into multiple
+    # TLV 236 instances; the packer spreads them across fragments
+    # until each fits within lsp-mtu-size − 27 bytes of PDU overhead.
+    lsp-mtu-size: 400
+    afi-safi:
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:cafe:00::/64
+      - prefix: 2001:db8:cafe:01::/64
+      - prefix: 2001:db8:cafe:02::/64
+      - prefix: 2001:db8:cafe:03::/64
+      - prefix: 2001:db8:cafe:04::/64
+      - prefix: 2001:db8:cafe:05::/64
+      - prefix: 2001:db8:cafe:06::/64
+      - prefix: 2001:db8:cafe:07::/64
+      - prefix: 2001:db8:cafe:08::/64
+      - prefix: 2001:db8:cafe:09::/64
+      - prefix: 2001:db8:cafe:0a::/64
+      - prefix: 2001:db8:cafe:0b::/64
+      - prefix: 2001:db8:cafe:0c::/64
+      - prefix: 2001:db8:cafe:0d::/64
+      - prefix: 2001:db8:cafe:0e::/64
+      - prefix: 2001:db8:cafe:0f::/64
+      - prefix: 2001:db8:cafe:10::/64
+      - prefix: 2001:db8:cafe:11::/64
+      - prefix: 2001:db8:cafe:12::/64
+      - prefix: 2001:db8:cafe:13::/64
+      - prefix: 2001:db8:cafe:14::/64
+      - prefix: 2001:db8:cafe:15::/64
+      - prefix: 2001:db8:cafe:16::/64
+      - prefix: 2001:db8:cafe:17::/64
+      - prefix: 2001:db8:cafe:18::/64
+      - prefix: 2001:db8:cafe:19::/64
+      - prefix: 2001:db8:cafe:1a::/64
+      - prefix: 2001:db8:cafe:1b::/64
+      - prefix: 2001:db8:cafe:1c::/64
+      - prefix: 2001:db8:cafe:1d::/64
+      - prefix: 2001:db8:cafe:1e::/64
+      - prefix: 2001:db8:cafe:1f::/64
+      - prefix: 2001:db8:cafe:20::/64
+      - prefix: 2001:db8:cafe:21::/64
+      - prefix: 2001:db8:cafe:22::/64
+      - prefix: 2001:db8:cafe:23::/64
+      - prefix: 2001:db8:cafe:24::/64
+      - prefix: 2001:db8:cafe:25::/64
+      - prefix: 2001:db8:cafe:26::/64
+      - prefix: 2001:db8:cafe:27::/64
+    interface:
+    - if-name: lo
+      circuit-type: level-2-only
+      ipv6:
+        enable: true
+    - if-name: vz1ns
+      circuit-type: level-2-only
+      ipv6:
+        enable: true
