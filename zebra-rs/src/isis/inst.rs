@@ -122,6 +122,16 @@ pub struct Isis {
     /// Reset whenever the watched locator changes so stale function
     /// reservations don't leak across prefix swaps.
     pub elib: super::srv6::ElibPool,
+
+    /// Per-level seq-number-wrap wait. Armed when `lsp_generate`
+    /// would have emitted a self-LSP with seq == 0xFFFFFFFF: we
+    /// instead push a purge (RemainingLifetime = 0) and freeze
+    /// self-LSP origination until this timer fires, then re-originate
+    /// with seq = 1. Wait length = `config.hold_time() + 60s` —
+    /// long enough that any peer's surviving copy of our old LSP has
+    /// aged out so they accept the seq = 1 origination as newer.
+    /// See ISO 10589 §7.3.16.4.
+    pub lsp_seq_wrap_wait: Levels<Option<Timer>>,
 }
 
 pub struct IsisTop<'a> {
@@ -154,6 +164,11 @@ pub struct IsisTop<'a> {
     pub sr_block: &'a Option<Block>,
     pub sr_locator: &'a Option<Locator>,
     pub sr_end_sid: &'a Option<std::net::Ipv6Addr>,
+
+    /// Seq-wrap wait timer (see `Isis::lsp_seq_wrap_wait`). Threaded
+    /// through so `lsp_generate` can short-circuit and arm the timer
+    /// without round-tripping through the event loop.
+    pub lsp_seq_wrap_wait: &'a mut Levels<Option<Timer>>,
 }
 
 impl Isis {
@@ -217,6 +232,7 @@ impl Isis {
             sr_locator: None,
             sr_end_sid: None,
             elib: super::srv6::ElibPool::new(),
+            lsp_seq_wrap_wait: Levels::<Option<Timer>>::default(),
         };
         isis.callback_build();
         isis.show_build();
@@ -411,6 +427,9 @@ impl Isis {
                     *link.timer.csnp.get_mut(&level) = Some(csnp_timer(&link, level));
                 }
             }
+            Message::LspSeqWrapClear(level) => {
+                self.process_lsp_seq_wrap_clear(level);
+            }
         }
     }
 
@@ -419,22 +438,28 @@ impl Isis {
             return;
         }
         let mut top = self.top();
-        let mut lsp = lsp_generate(&mut top, level, seq_floor);
-        // tracing::info!("[LSP:Gen] {}", lsp.lsp_id);
+        // lsp_generate returns None when origination is suppressed
+        // (seq-wrap freeze active). Skip emit + insert in that case
+        // — the freeze timer will trigger a fresh origination later.
+        let Some(mut lsp) = lsp_generate(&mut top, level, seq_floor) else {
+            return;
+        };
         let buf = lsp_emit(&mut lsp, level);
         let lsp_id = lsp.lsp_id;
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
-        // lsp_flood(&mut top, level, &lsp_id);
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
         let mut top = self.top();
 
-        // Get current LSP if it exists
+        // Get current LSP if it exists. `saturating_add` so the
+        // seq-number-wrap purge path (existing = u32::MAX - 1) emits
+        // a final LSP at u32::MAX without panicking; the freeze
+        // installed by lsp_generate then prevents a follow-on bump.
         let seq_number = if let Some(existing) = top.lsdb.get(&level).get(&lsp_id) {
-            existing.lsp.seq_number + 1
+            existing.lsp.seq_number.saturating_add(1)
         } else {
             isis_event_trace!(
                 self.tracing,
@@ -461,6 +486,25 @@ impl Isis {
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
         // lsp_flood(&mut top, level, &lsp_id);
+    }
+
+    /// ISO 10589 §7.3.16.4 wait expired: drop the per-level freeze,
+    /// drop the purged self-LSP record from the local LSDB so the
+    /// next `lsp_generate` sees no existing entry and computes
+    /// seq = 1, then kick LSP origination.
+    fn process_lsp_seq_wrap_clear(&mut self, level: Level) {
+        isis_event_trace!(
+            self.tracing,
+            LspOriginate,
+            &level,
+            "[LspSeqWrap] MaxAge wait expired — clearing freeze and re-originating from seq 1"
+        );
+        *self.lsp_seq_wrap_wait.get_mut(&level) = None;
+
+        let lsp_id = IsisLspId::new(self.config.net.sys_id(), 0, 0);
+        self.lsdb.get_mut(&level).remove(&lsp_id);
+
+        let _ = self.tx.send(Message::LspOriginate(level, None));
     }
 
     fn process_dis_originate(
@@ -605,6 +649,7 @@ impl Isis {
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
+            lsp_seq_wrap_wait: &mut self.lsp_seq_wrap_wait,
         }
     }
 
@@ -824,6 +869,11 @@ pub enum Message {
     DisOriginate(Level, IsisNeighborId, Option<u32>),
     SpfCalc(Level),
     AdjacencyUp(Level, u32),
+    /// MaxAge wait expired after a seq-number-wrap purge (ISO 10589
+    /// §7.3.16.4). Clears the per-level freeze and re-originates the
+    /// self LSP, which will compute seq = 1 (no existing entry in
+    /// LSDB once the purge has been removed).
+    LspSeqWrapClear(Level),
 }
 
 impl Display for Message {
@@ -857,6 +907,9 @@ impl Display for Message {
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
             Message::AdjacencyUp(level, ifindex) => {
                 write!(f, "[Message::AdjacencyUp({}:{})]", level, ifindex)
+            }
+            Message::LspSeqWrapClear(level) => {
+                write!(f, "[Message::LspSeqWrapClear({})]", level)
             }
         }
     }
