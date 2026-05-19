@@ -6,12 +6,13 @@ use isis_packet::{IsisProto, IsisSysId, IsisTlv, Nsap};
 use prefix_trie::PrefixMap;
 use serde::Serialize;
 
-use super::inst::{SpfRoute, SpfRouteV6};
+use super::inst::{RepairPathMpls, RepairPathSrv6, SpfNexthop, SpfNexthopV6, SpfRoute, SpfRouteV6};
 use super::{Isis, inst::ShowCallback};
 
 use crate::config::Args;
 use crate::isis::link::Afi;
 use crate::isis::{Level, hostname, link, neigh};
+use crate::rib;
 // use spf_rs as spf;
 use crate::spf;
 
@@ -269,20 +270,19 @@ struct RoutesJson {
     level_2: Vec<RouteJson>,
 }
 
-/// `show isis route detail` (PR A: dispatch surface only). The TI-LFA
-/// backup / SR-MPLS / SRv6 detail renderer lands in PR C; for now we
-/// surface a header so the wired path is visible.
+/// `show isis route detail` — per-prefix RIB view that surfaces
+/// TI-LFA backup paths and SR-MPLS / SRv6 segment information that
+/// the one-line `show isis route` view doesn't have room for.
+/// JSON path falls through to the one-line JSON for now.
 fn show_isis_route_detail(
     isis: &Isis,
     args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    let body = show_isis_route(isis, args, json)?;
     if json {
-        Ok(body)
-    } else {
-        Ok(format!("[detail format pending — PR C]\n{body}"))
+        return show_isis_route(isis, args, json);
     }
+    write_show_isis_route_text_detail(isis)
 }
 
 /// `show isis fast-reroute summary` (PR A stub; renderer lands in PR D).
@@ -893,6 +893,271 @@ fn write_spf_tree(
     }
 
     Ok(())
+}
+
+/// Extract the numeric value of an `rib::Label` regardless of
+/// implicit-null vs explicit. Useful for "first label in the repair
+/// stack" lookups where the distinction doesn't matter.
+fn label_value(l: &rib::Label) -> u32 {
+    match l {
+        rib::Label::Implicit(n) | rib::Label::Explicit(n) => *n,
+    }
+}
+
+/// Resolve an MPLS label to a symbolic node name, when the label is
+/// a prefix-SID (Node-SID) inside some peer's SRGB. Returns `None`
+/// for labels outside any peer's SRGB — typically Adj-SIDs (which
+/// fall in the SRLB or local label range), or labels owned by a peer
+/// we don't yet know about.
+///
+/// Fallback chain (per design decision): hostname → sys-id string.
+/// Router-id mapping is a follow-up (would require an LSDB walk for
+/// the TE-router-id sub-TLV).
+fn label_to_node_symbol(isis: &Isis, level: &Level, label: u32) -> Option<String> {
+    for (sys_id, cfg) in isis.label_map.get(level).iter() {
+        if label >= cfg.global.start && label < cfg.global.end {
+            return Some(hostname_for(isis, level, sys_id));
+        }
+    }
+    None
+}
+
+/// SRGB base label for a peer's prefix-SIDs. `None` when the peer
+/// has not yet advertised an SR Capability.
+fn srgb_base_for(isis: &Isis, level: &Level, sys_id: &IsisSysId) -> Option<u32> {
+    isis.label_map
+        .get(level)
+        .get(sys_id)
+        .map(|c| c.global.start)
+}
+
+/// Render the MPLS label stack of a backup path in `{ L1 L2 L3 }`
+/// notation (push order, matching the RIB-side `Labels imposed`
+/// format). Empty stack means trivial repair — caller renders a
+/// separate `(trivial repair)` line.
+fn fmt_isis_label_stack(labels: &[rib::Label]) -> String {
+    let parts: Vec<String> = labels.iter().map(|l| label_value(l).to_string()).collect();
+    format!("{{ {} }}", parts.join(" "))
+}
+
+/// Render an SRv6 segment list in `{ addr, addr }` notation.
+fn fmt_isis_srv6_segs(segs: &[std::net::Ipv6Addr]) -> String {
+    let parts: Vec<String> = segs.iter().map(|a| a.to_string()).collect();
+    format!("{{ {} }}", parts.join(", "))
+}
+
+/// Emit one nhop block for the IPv4 detail view. Walks the primary
+/// (addr + iface + neighbor hostname + SRGB), the route's
+/// prefix-SID if present, and the backup path when stamped.
+fn write_isis_nhop_v4_detail(
+    buf: &mut String,
+    isis: &Isis,
+    level: &Level,
+    route: &SpfRoute,
+    addr: &std::net::Ipv4Addr,
+    nhop: &SpfNexthop,
+) -> std::fmt::Result {
+    let nbr_hostname = nhop
+        .sys_id
+        .map(|s| hostname_for(isis, level, &s))
+        .unwrap_or_else(|| "-".into());
+    write!(
+        buf,
+        "  via {}, {}, {}",
+        addr,
+        isis.ifname(nhop.ifindex),
+        nbr_hostname
+    )?;
+    if let Some(srgb) = nhop.sys_id.and_then(|s| srgb_base_for(isis, level, &s)) {
+        write!(buf, ", SRGB Base: {}", srgb)?;
+    }
+    writeln!(buf)?;
+
+    if let Some(sid) = route.sid {
+        let tag = if nhop.adjacency { " (impl-null)" } else { "" };
+        writeln!(buf, "    Prefix-SID: {}{}", sid, tag)?;
+    }
+
+    if let Some(backup) = &nhop.backup {
+        write_isis_backup_v4_detail(buf, isis, level, backup)?;
+    }
+    Ok(())
+}
+
+/// Emit the `Backup path:` stanza for a stamped MPLS repair.
+fn write_isis_backup_v4_detail(
+    buf: &mut String,
+    isis: &Isis,
+    level: &Level,
+    backup: &RepairPathMpls,
+) -> std::fmt::Result {
+    // Repair-nbr hostname comes from the first label's SRGB owner
+    // when the label resolves; otherwise the per-link nbr name is
+    // not directly known from RepairPathMpls (the local egress
+    // ifindex is, but not the peer's sys-id). Best-effort lookup.
+    let first_label = backup.labels.first().map(label_value);
+    let p_node = first_label.and_then(|n| label_to_node_symbol(isis, level, n));
+    let nbr_label = p_node.clone().unwrap_or_else(|| "-".into());
+
+    writeln!(
+        buf,
+        "    Backup path: TI-LFA, via {}, {} {}",
+        backup.addr,
+        isis.ifname(backup.ifindex),
+        nbr_label,
+    )?;
+    if backup.labels.is_empty() {
+        writeln!(buf, "      (trivial repair, no SR segments)")?;
+    } else {
+        writeln!(
+            buf,
+            "      Labels imposed {}",
+            fmt_isis_label_stack(&backup.labels)
+        )?;
+        if let (Some(label), Some(name)) = (first_label, p_node) {
+            writeln!(buf, "      P node: {}, Label: {}", name, label)?;
+        } else if let Some(label) = first_label {
+            writeln!(buf, "      P node: label {}", label)?;
+        }
+    }
+    Ok(())
+}
+
+/// IPv6 sibling — same shape but SRH segments instead of MPLS
+/// labels.
+fn write_isis_nhop_v6_detail(
+    buf: &mut String,
+    isis: &Isis,
+    level: &Level,
+    _route: &SpfRouteV6,
+    addr: &std::net::Ipv6Addr,
+    nhop: &SpfNexthopV6,
+) -> std::fmt::Result {
+    let nbr_hostname = nhop
+        .sys_id
+        .map(|s| hostname_for(isis, level, &s))
+        .unwrap_or_else(|| "-".into());
+    writeln!(
+        buf,
+        "  via {}, {}, {}",
+        addr,
+        isis.ifname(nhop.ifindex),
+        nbr_hostname
+    )?;
+
+    if let Some(backup) = &nhop.backup {
+        write_isis_backup_v6_detail(buf, isis, level, backup)?;
+    }
+    Ok(())
+}
+
+fn write_isis_backup_v6_detail(
+    buf: &mut String,
+    _isis: &Isis,
+    _level: &Level,
+    backup: &RepairPathSrv6,
+) -> std::fmt::Result {
+    writeln!(
+        buf,
+        "    Backup path: TI-LFA, via {}, {}",
+        backup.addr,
+        _isis.ifname(backup.ifindex),
+    )?;
+    if backup.segs.is_empty() {
+        writeln!(buf, "      (trivial repair, no SR segments)")?;
+    } else {
+        writeln!(
+            buf,
+            "      SID list {}, Encap: {:?}",
+            fmt_isis_srv6_segs(&backup.segs),
+            backup.encap,
+        )?;
+    }
+    Ok(())
+}
+
+/// `show isis route detail` per-level IPv4 RIB renderer. Replaces
+/// the columnar `write_rib_v4` layout with per-prefix blocks that
+/// surface TI-LFA backup paths.
+fn write_rib_v4_detail(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
+    let level_short = match level {
+        Level::L1 => "L1",
+        Level::L2 => "L2",
+    };
+
+    let mut entries: Vec<_> = isis.rib.get(level).iter().collect();
+    entries.sort_by_key(|(p, _)| **p);
+
+    for (prefix, route) in entries {
+        writeln!(buf, "{} {} [metric {}]", level_short, prefix, route.metric)?;
+        if route.nhops.is_empty() {
+            writeln!(buf, "  (directly connected / no nexthop)")?;
+            continue;
+        }
+        for (addr, nhop) in route.nhops.iter() {
+            write_isis_nhop_v4_detail(buf, isis, level, route, addr, nhop)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_rib_v6_detail(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
+    let level_short = match level {
+        Level::L1 => "L1",
+        Level::L2 => "L2",
+    };
+
+    let mut entries: Vec<_> = isis.rib_v6.get(level).iter().collect();
+    entries.sort_by_key(|(p, _)| **p);
+
+    for (prefix, route) in entries {
+        writeln!(buf, "{} {} [metric {}]", level_short, prefix, route.metric)?;
+        if route.nhops.is_empty() {
+            writeln!(buf, "  (directly connected / no nexthop)")?;
+            continue;
+        }
+        for (addr, nhop) in route.nhops.iter() {
+            write_isis_nhop_v6_detail(buf, isis, level, route, addr, nhop)?;
+        }
+    }
+    Ok(())
+}
+
+/// Top-level orchestrator for `show isis route detail`. Mirrors
+/// `write_show_isis_route_text` (per-area, per-level) but skips the
+/// SPF-tree section since the detail view is RIB-centric.
+fn write_show_isis_route_text_detail(isis: &Isis) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+
+    let mut wrote_any = false;
+    for level in &[Level::L1, Level::L2] {
+        let v4_empty = isis.rib.get(level).iter().next().is_none();
+        let v6_empty = isis.rib_v6.get(level).iter().next().is_none();
+        if v4_empty && v6_empty {
+            continue;
+        }
+        wrote_any = true;
+        let level_short = match level {
+            Level::L1 => "L1",
+            Level::L2 => "L2",
+        };
+
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS {} IPv4 routing table:", level_short)?;
+        writeln!(buf)?;
+        write_rib_v4_detail(&mut buf, isis, level)?;
+
+        writeln!(buf)?;
+        writeln!(buf, "IS-IS {} IPv6 routing table:", level_short)?;
+        writeln!(buf)?;
+        write_rib_v6_detail(&mut buf, isis, level)?;
+    }
+
+    if !wrote_any {
+        writeln!(buf, "(no IS-IS RIB entries yet)")?;
+    }
+    Ok(buf)
 }
 
 fn write_rib_v4(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
@@ -1643,6 +1908,44 @@ mod tests {
         assert_eq!(
             label_value_str(&crate::rib::Label::Explicit(16002)),
             "16002"
+        );
+    }
+
+    #[test]
+    fn label_value_extracts_numeric_value_regardless_of_kind() {
+        // For label-to-symbol lookups, implicit-null vs explicit
+        // doesn't matter — only the underlying number.
+        assert_eq!(label_value(&crate::rib::Label::Implicit(3)), 3);
+        assert_eq!(label_value(&crate::rib::Label::Explicit(16005)), 16005);
+    }
+
+    #[test]
+    fn fmt_isis_label_stack_renders_braced_push_order() {
+        // Single label still braced.
+        assert_eq!(
+            fmt_isis_label_stack(&[crate::rib::Label::Explicit(17003)]),
+            "{ 17003 }"
+        );
+        // Multi: push order (top-of-stack first); matches the RIB-
+        // side `Labels imposed` format and IOS-XR convention.
+        assert_eq!(
+            fmt_isis_label_stack(&[
+                crate::rib::Label::Explicit(17010),
+                crate::rib::Label::Explicit(24001),
+                crate::rib::Label::Explicit(17003),
+            ]),
+            "{ 17010 24001 17003 }"
+        );
+    }
+
+    #[test]
+    fn fmt_isis_srv6_segs_renders_braced_comma_separated() {
+        let one: std::net::Ipv6Addr = "fcbb:bb00:1::".parse().unwrap();
+        assert_eq!(fmt_isis_srv6_segs(&[one]), "{ fcbb:bb00:1:: }");
+        let two: std::net::Ipv6Addr = "fcbb:bb00:2::".parse().unwrap();
+        assert_eq!(
+            fmt_isis_srv6_segs(&[one, two]),
+            "{ fcbb:bb00:1::, fcbb:bb00:2:: }"
         );
     }
 }
