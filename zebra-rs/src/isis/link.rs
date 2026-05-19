@@ -210,6 +210,21 @@ pub struct LinkConfig {
     /// to the link's `metric` leaf above. PR 2 reads this when
     /// emitting MT IS Reach (TLV 222) entries.
     pub mt_metrics: BTreeMap<MtId, u32>,
+
+    /// Per-interface BFD attachment recorded from
+    /// `/router/isis/interface/<name>/bfd/{enable,profile}`. Storage
+    /// in PR 6; the adjacency FSM subscribe path (on Up) and the
+    /// BfdEvent::Down → adjacency teardown path arrive in PR 7.
+    pub bfd: LinkBfdConfig,
+}
+
+/// IS-IS-side mirror of the YANG `bfd { enable, profile }` container.
+/// Empty defaults match the YANG schema; PR 7 reads this when the
+/// adjacency FSM reaches Up to decide whether to subscribe.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct LinkBfdConfig {
+    pub enable: bool,
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, EnumString, Display)]
@@ -658,6 +673,30 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option
     let msg = Message::Ifsm(IfsmEvent::DisSelection, link.ifindex, None);
     let _ = isis.tx.send(msg);
 
+    Some(())
+}
+
+/// `set router isis interface X bfd enable true|false` — flips the
+/// per-interface BFD attachment recorded on the IS-IS link. PR 6
+/// is storage-only; PR 7 wires the runtime subscribe path (on
+/// adjacency FSM Up) and the teardown path (on BfdEvent::Down).
+pub fn config_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let enable = args.boolean()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.bfd.enable = op.is_set() && enable;
+    Some(())
+}
+
+/// `set router isis interface X bfd profile NAME` — records the
+/// BFD profile to apply when this interface's adjacencies form a
+/// BFD session. Stored verbatim; resolution against
+/// `/bfd/profile/<name>` is the runtime subscribe path's job.
+pub fn config_bfd_profile(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let profile = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.bfd.profile = op.is_set().then_some(profile);
     Some(())
 }
 
@@ -1553,4 +1592,40 @@ pub fn show_dis_history(
     }
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod bfd_config_tests {
+    use super::*;
+
+    /// LinkBfdConfig default mirrors the YANG defaults
+    /// (`enable=false`, no profile).
+    #[test]
+    fn default_bfd_is_disabled() {
+        let bfd = LinkBfdConfig::default();
+        assert!(!bfd.enable);
+        assert!(bfd.profile.is_none());
+
+        // Lives on LinkConfig with the same default.
+        let lc = LinkConfig::default();
+        assert_eq!(lc.bfd, bfd);
+    }
+
+    /// Round-trip: setting enable + profile mirrors the CLI flow
+    /// (`bfd enable true; bfd profile FAST`) producing the state
+    /// the PR 7 adjacency-FSM subscribe path will read.
+    #[test]
+    fn enable_and_profile_round_trip() {
+        let mut lc = LinkConfig::default();
+        lc.bfd.enable = true;
+        lc.bfd.profile = Some("FAST".to_string());
+
+        assert_eq!(
+            lc.bfd,
+            LinkBfdConfig {
+                enable: true,
+                profile: Some("FAST".to_string()),
+            },
+        );
+    }
 }
