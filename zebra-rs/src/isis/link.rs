@@ -19,8 +19,9 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlagsExt, MacAddr};
 
 use super::config::{IsisConfig, MtId};
+use super::graph::{ReachMap, ReachMapV6};
 use super::ifsm::{self, has_level};
-use super::inst::{PacketMessage, ReachMap, ReachMapV6};
+use super::inst::PacketMessage;
 use super::neigh::Neighbor;
 use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
