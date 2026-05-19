@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
+use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::{IsLevel, Nsap};
 use strum_macros::{Display, EnumString};
 
@@ -67,6 +68,7 @@ impl Isis {
         );
         self.callback_add("/router/isis/fast-reroute/ti-lfa", config_ti_lfa);
         self.callback_add("/router/isis/multi-topology", config_mt);
+        self.callback_add("/router/isis/afi-safi/network", config_network);
         self.callback_add(
             "/router/isis/interface/multi-topology/metric",
             link::config_mt_metric,
@@ -164,6 +166,16 @@ pub struct IsisConfig {
     /// future MTs (multicast variants, geo-redundancy, ...) doesn't
     /// reshape the runtime checks that read it.
     pub mt_topologies: BTreeSet<MtId>,
+
+    /// Operator-configured IPv4 prefixes to advertise unconditionally
+    /// in every self-originated LSP, BGP-style. Populated from
+    /// `/router/isis/afi-safi[name=ipv4]/network`. Emitted as TLV 135
+    /// entries with metric 0 (receivers add their own IS-reach metric).
+    pub networks_v4: BTreeSet<Ipv4Net>,
+
+    /// IPv6 sibling of `networks_v4`. Emitted as TLV 236 in legacy
+    /// mode, TLV 237 when MT 2 is enabled — see `lsp_generate`.
+    pub networks_v6: BTreeSet<Ipv6Net>,
 }
 
 impl IsisConfig {
@@ -363,6 +375,42 @@ fn config_mt(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
         isis.config.mt_enabled = false;
         isis.config.mt_topologies.clear();
     }
+    Some(())
+}
+
+/// `/router/isis/afi-safi[name=ipv4|ipv6]/network[prefix=...]`.
+///
+/// Mirrors BGP's `network` statement: configured prefixes are
+/// advertised in every self-originated LSP independently of any
+/// interface address. Family validation happens here (v4 prefix under
+/// afi-safi=ipv4, v6 under ipv6); a mismatch returns None so libyang
+/// surfaces it as a commit failure.
+fn config_network(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi = args.string()?;
+    match afi.as_str() {
+        "ipv4" => {
+            let network = args.v4net()?;
+            if op.is_set() {
+                isis.config.networks_v4.insert(network);
+            } else {
+                isis.config.networks_v4.remove(&network);
+            }
+        }
+        "ipv6" => {
+            let network = args.v6net()?;
+            if op.is_set() {
+                isis.config.networks_v6.insert(network);
+            } else {
+                isis.config.networks_v6.remove(&network);
+            }
+        }
+        _ => return None,
+    }
+    // Re-originate both levels so the change reaches peers without
+    // waiting for the refresh timer. `process_lsp_originate` filters
+    // out the level that doesn't apply on single-level instances.
+    let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
+    let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     Some(())
 }
 
