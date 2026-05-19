@@ -193,8 +193,8 @@ pub struct LinkConfig {
     pub metric: Option<u32>,
 
     pub priority: Option<u8>,
-    pub hold_time: Option<u16>,
     pub hello_interval: Option<u16>,
+    pub hello_multiplier: Option<u16>,
     pub hello_padding: Option<HelloPaddingPolicy>,
     pub holddown_count: Option<u32>,
 
@@ -229,8 +229,11 @@ impl NetworkType {
 
 impl LinkConfig {
     const DEFAULT_PRIORITY: u8 = 64;
-    const DEFAULT_HOLD_TIME: u16 = 30;
     const DEFAULT_HELLO_INTERVAL: u16 = 3;
+    // Higher than IOS-XR's default of 3 because zebra-rs's default
+    // hello interval (3s) is shorter than IOS-XR's (10s); 3 × 10 = 30s
+    // preserves the prior absolute hold-time default.
+    const DEFAULT_HELLO_MULTIPLIER: u16 = 10;
     const DEFAULT_METRIC: u32 = 10;
     const DEFAULT_HOLDDOWN_COUNT: u32 = 10;
     const DEFAULT_PSNP_INTERVAL: u32 = 2;
@@ -252,12 +255,19 @@ impl LinkConfig {
         self.priority.unwrap_or(Self::DEFAULT_PRIORITY)
     }
 
-    pub fn hold_time(&self) -> u16 {
-        self.hold_time.unwrap_or(Self::DEFAULT_HOLD_TIME)
-    }
-
     pub fn hello_interval(&self) -> u64 {
         self.hello_interval.unwrap_or(Self::DEFAULT_HELLO_INTERVAL) as u64
+    }
+
+    pub fn hello_multiplier(&self) -> u16 {
+        self.hello_multiplier
+            .unwrap_or(Self::DEFAULT_HELLO_MULTIPLIER)
+    }
+
+    pub fn hold_time(&self) -> u16 {
+        let interval = self.hello_interval() as u32;
+        let mult = self.hello_multiplier() as u32;
+        interval.saturating_mul(mult).min(u16::MAX as u32) as u16
     }
 
     pub fn hello_padding(&self) -> HelloPaddingPolicy {
@@ -889,17 +899,89 @@ pub fn config_hello_padding(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Op
         link.config.hello_padding = None;
     }
 
-    // Update Hello.
-    if link.state.hello.l1.is_some() {
-        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L1));
-        let _ = isis.tx.send(msg);
-    }
-    if link.state.hello.l2.is_some() {
-        let msg = Message::Ifsm(IfsmEvent::HelloOriginate, link.ifindex, Some(Level::L2));
-        let _ = isis.tx.send(msg);
+    hello_reoriginate(link, &isis.tx);
+    Some(())
+}
+
+pub fn config_hello_interval(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let interval = args.u16()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if op.is_set() {
+        link.config.hello_interval = Some(interval);
+    } else {
+        link.config.hello_interval = None;
     }
 
+    hello_reoriginate(link, &isis.tx);
     Some(())
+}
+
+pub fn config_hello_multiplier(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let multiplier = args.u16()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if op.is_set() {
+        link.config.hello_multiplier = Some(multiplier);
+    } else {
+        link.config.hello_multiplier = None;
+    }
+
+    hello_reoriginate(link, &isis.tx);
+    Some(())
+}
+
+// CSNP / PSNP interval changes take effect on the next timer cycle.
+// CSNP runs only on the DIS; PSNP runs only while ack-pending LSPs exist;
+// recreating those timers on the fly would mean cancelling whatever's
+// currently armed, with little benefit over waiting one cycle.
+pub fn config_csnp_interval(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let interval = args.u16()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if op.is_set() {
+        link.config.csnp_interval = Some(interval as u32);
+    } else {
+        link.config.csnp_interval = None;
+    }
+    Some(())
+}
+
+pub fn config_psnp_interval(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let interval = args.u16()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if op.is_set() {
+        link.config.psnp_interval = Some(interval as u32);
+    } else {
+        link.config.psnp_interval = None;
+    }
+    Some(())
+}
+
+// Push hello config changes live by re-originating on each active level.
+// hello_originate both emits a hello PDU (so the new hold_time field hits
+// the wire) and re-arms the periodic timer (so the new hello_interval
+// takes effect without waiting for adjacency reset).
+fn hello_reoriginate(link: &IsisLink, tx: &UnboundedSender<Message>) {
+    if link.state.hello.l1.is_some() {
+        let _ = tx.send(Message::Ifsm(
+            IfsmEvent::HelloOriginate,
+            link.ifindex,
+            Some(Level::L1),
+        ));
+    }
+    if link.state.hello.l2.is_some() {
+        let _ = tx.send(Message::Ifsm(
+            IfsmEvent::HelloOriginate,
+            link.ifindex,
+            Some(Level::L2),
+        ));
+    }
 }
 
 #[derive(Serialize)]
