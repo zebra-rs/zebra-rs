@@ -482,6 +482,27 @@ module config {
           }
         }
 
+        container lsp-gen-interval {
+          leaf initial-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+          }
+          leaf secondary-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+          }
+          leaf maximum-wait {
+            type uint32 {
+              range "1..120000";
+            }
+            units "milliseconds";
+          }
+        }
+
         list interface {
           // Last item in "router isis" node.
           ext:sort "-10";

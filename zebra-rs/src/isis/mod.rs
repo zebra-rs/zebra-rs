@@ -54,3 +54,5 @@ pub mod tilfa;
 pub mod graph;
 
 pub mod rib;
+
+pub mod throttle;

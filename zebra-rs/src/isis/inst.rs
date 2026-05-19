@@ -37,8 +37,9 @@ use super::lsp::{
     target_locator_name,
 };
 use super::nfsm::nbr_hold_timer_expire;
-use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, SpfThrottle, perform_spf_calculation};
+use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, perform_spf_calculation};
 use super::srmpls::IsisLabelMap;
+use super::throttle::Throttle;
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_for_all_lsp};
 use super::{LabelPool, Level, Levels, process_packet};
 
@@ -87,7 +88,15 @@ pub struct Isis {
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
-    pub spf_throttle: Levels<SpfThrottle>,
+    pub spf_throttle: Levels<Throttle>,
+    /// LSP-gen coalescing slot. None means no run is currently pending;
+    /// Some(Timer) means a LspGenFire is armed and additional
+    /// LspOriginate events will fold into the same run.
+    pub lsp_gen_timer: Levels<Option<Timer>>,
+    pub lsp_gen_throttle: Levels<Throttle>,
+    /// Accumulated seq-number floor across coalesced LspOriginate
+    /// events. Reset to None after the throttled run consumes it.
+    pub lsp_gen_pending_floor: Levels<Option<u32>>,
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
@@ -154,7 +163,7 @@ pub struct IsisTop<'a> {
     pub rib_tx: &'a UnboundedSender<rib::Message>,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
-    pub spf_throttle: &'a mut Levels<SpfThrottle>,
+    pub spf_throttle: &'a mut Levels<Throttle>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
     pub mt2_graph: &'a mut Levels<Option<spf::Graph>>,
@@ -217,7 +226,10 @@ impl Isis {
             ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
             hostname: Levels::<Hostname>::default(),
             spf_timer: Levels::<Option<Timer>>::default(),
-            spf_throttle: Levels::<SpfThrottle>::default(),
+            spf_throttle: Levels::<Throttle>::default(),
+            lsp_gen_timer: Levels::<Option<Timer>>::default(),
+            lsp_gen_throttle: Levels::<Throttle>::default(),
+            lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
             // Adjacency-SID label pool is owned by the SR-MPLS feature.
             // Stays None until `segment-routing mpls` is configured —
             // otherwise we'd allocate labels for every hello and emit
@@ -396,7 +408,16 @@ impl Isis {
                 let _ = process_packet(&mut top, packet, ifindex, mac);
             }
             Message::LspOriginate(level, floor) => {
+                self.schedule_lsp_originate(level, floor);
+            }
+            Message::LspGenFire(level) => {
+                // Pull the accumulated floor for the burst, run the
+                // origination, then stamp throttle completion and clear
+                // the timer slot so the next event can re-arm.
+                let floor = self.lsp_gen_pending_floor.get_mut(&level).take();
                 self.process_lsp_originate(level, floor);
+                self.lsp_gen_throttle.get_mut(&level).mark_run();
+                *self.lsp_gen_timer.get_mut(&level) = None;
             }
             Message::LspPurge(level, lsp_id) => {
                 self.process_lsp_purge(level, lsp_id);
@@ -411,7 +432,7 @@ impl Isis {
                 self.process_lsdb(ev, level, key);
             }
             Message::AdjacencyUp(level, ifindex) => {
-                self.process_lsp_originate(level, None);
+                self.schedule_lsp_originate(level, None);
 
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
@@ -452,6 +473,41 @@ impl Isis {
         insert_self_originate(&mut top, level, lsp, Some(buf.to_vec()));
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+    }
+
+    /// Throttle-aware front door for self-LSP origination. Multiple
+    /// triggers (config edits, AdjacencyUp, peer-flooded-our-LSP-back)
+    /// arriving within the lsp-gen-interval window coalesce into a
+    /// single `process_lsp_originate` run. The seq-number floor is
+    /// folded across the burst as `max(existing, new)` so the
+    /// resulting LSP bumps past the highest seq any peer demanded.
+    fn schedule_lsp_originate(&mut self, level: Level, seq_floor: Option<u32>) {
+        // Fold this event's seq_floor into the burst-wide accumulator.
+        let pending = self.lsp_gen_pending_floor.get_mut(&level);
+        *pending = match (*pending, seq_floor) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+
+        // Already armed — the in-flight run will consume the accumulator.
+        if self.lsp_gen_timer.get(&level).is_some() {
+            return;
+        }
+
+        let wait_ms = self.lsp_gen_throttle.get_mut(&level).schedule(
+            self.config.lsp_gen_initial_wait(),
+            self.config.lsp_gen_secondary_wait(),
+            self.config.lsp_gen_maximum_wait(),
+        );
+
+        let tx = self.tx.clone();
+        *self.lsp_gen_timer.get_mut(&level) = Some(Timer::once_ms(wait_ms as u64, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::LspGenFire(level));
+            }
+        }));
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -864,6 +920,12 @@ pub enum Message {
     /// existing+1" — config edits, RIB router-id changes, link-state
     /// reactions all pass None.
     LspOriginate(Level, Option<u32>),
+    /// LSP generation throttle timer fired for `level`. Carries the
+    /// accumulated seq-number floor across all coalesced LspOriginate
+    /// events during the burst (max of all `floor` values seen).
+    /// Handler runs `process_lsp_originate(level, floor)`, stamps the
+    /// throttle, and clears the timer slot.
+    LspGenFire(Level),
     LspPurge(Level, IsisLspId),
     /// Re-originate the pseudonode LSP whose owner is the given
     /// `IsisNeighborId` (sys_id + pseudo_id). The handler resolves
@@ -903,6 +965,7 @@ impl Display for Message {
             Message::LspOriginate(level, floor) => {
                 write!(f, "[Message::LspOriginate({}, floor={:?})]", level, floor)
             }
+            Message::LspGenFire(level) => write!(f, "[Message::LspGenFire({})]", level),
             Message::LspPurge(level, lsp_id) => {
                 write!(f, "[Message::LspPurge({}, {})]", level, lsp_id)
             }
