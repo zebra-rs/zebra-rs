@@ -2514,7 +2514,7 @@ fn build_rib_from_spf(
     level: Level,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
-    _tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
+    tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) -> PrefixMap<Ipv4Net, SpfRoute> {
     let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
@@ -2586,6 +2586,12 @@ fn build_rib_from_spf(
             }
         }
 
+        // TI-LFA backup path.
+        if let Some(repair_path) = tilfa_result.get(node) {
+            // Found TI-LFA backup path.
+            println!("repair_path:{:?}", repair_path);
+        }
+
         // Process reachability entries for this node.
         if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(sys_id) {
             for entry in entries.iter() {
@@ -2624,11 +2630,38 @@ fn build_rib_from_spf(
                         // New route has better metric, replace the existing one
                         *curr = route;
                     } else if curr.metric == route.metric {
-                        // Equal metric - merge nexthops for ECMP
+                        // Equal metric here means the same prefix is
+                        // advertised by multiple routers at equal total
+                        // cost — anycast / shared loopback. Distinct
+                        // from the intra-route ECMP above, which already
+                        // collapsed parallel first-hops into spf_nhops
+                        // for a single destination.
+                        //
+                        // Three known limitations, all benign today
+                        // because the TI-LFA install path is not yet
+                        // wired. Revisit with that work:
+                        //   - nhops insert is keyed by peer IP. When
+                        //     anycast siblings share the same first-hop
+                        //     neighbor, the second insert overwrites.
+                        //     ifindex / sys_id match in both, so plain
+                        //     forwarding is unaffected — only the
+                        //     per-destination SpfNexthop.backup gets
+                        //     clobbered.
+                        //   - sid / prefix_sid first-wins. Index-encoded
+                        //     SIDs are resolved against the advertising
+                        //     router's SRGB (see line ~2595), so when
+                        //     siblings' SRGBs disagree the resulting
+                        //     labels differ; subsequent labels are
+                        //     silently dropped. Per RFC 8667 §4 anycast
+                        //     SR groups should share an Index, but
+                        //     SRGBs aren't required to match.
+                        //   - dest_vertex stays at the first node; the
+                        //     TI-LFA repair-candidate lookup keyed by
+                        //     dest_vertex won't match sibling anycast
+                        //     destinations.
                         for (addr, nhop) in route.nhops {
                             curr.nhops.insert(addr, nhop);
                         }
-                        // Update SID if current doesn't have one but new route does
                         if curr.sid.is_none() && route.sid.is_some() {
                             curr.sid = route.sid;
                         }
@@ -3037,7 +3070,7 @@ fn link_protection_spf(
 
         let repair_paths = spf::tilfa(graph, source, *d, &[x]);
         if let Some(repair) = repair_paths.first() {
-            println!(" => nhop[{}] {:?}", repair.nhop, repair.segs);
+            println!(" => nhop[{}] {:?}", repair.first_hop, repair.segs);
         } else {
             println!(" => no repair path");
         }
@@ -3518,11 +3551,13 @@ fn tilfa_repair_path(
 
         let repair_paths = spf::tilfa(graph, source, *d, &[x]);
         if let Some(repair) = repair_paths.first() {
-            println!(" => [{}] {:?}", repair.nhop, repair.segs);
+            println!(" => [{}] {:?}", repair.first_hop, repair.segs);
         } else {
             println!(" => no repair path");
         }
-        tilfa_result.insert(*d, repair_paths);
+        if !repair_paths.is_empty() {
+            tilfa_result.insert(*d, repair_paths);
+        }
     }
     tilfa_result
 }
