@@ -1,0 +1,110 @@
+module zebra-bgp-bfd {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-bfd";
+  prefix "zbb";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-neighbor BFD attachment for BGP. Adds a flat
+     `bfd` container under each BGP neighbor:
+
+       router bgp {
+         neighbor 10.0.0.5 {
+           remote-as 65501;
+           bfd {
+             enable true;
+             profile FAST;
+           }
+         }
+       }
+
+     PR 5b stores the per-neighbor BFD configuration on
+     `peer.config.bfd` (see `bgp::peer::PeerBfdConfig`). PR 5c wires
+     these leaves to the BFD client subscription API — when
+     `enable` flips to true, the BGP code path subscribes the
+     neighbor to BFD via the channel exposed by
+     `bfd::inst::Bfd::client_req_tx`; a transition to Down then
+     terminates the BGP session.";
+
+  revision 2026-05-19 {
+    description "Initial revision (PR 5b — storage only).";
+    reference
+      "FRR `neighbor X bfd` / `neighbor X bfd profile P`.
+       Cisco IOS-XR `neighbor X bfd fast-detect`.
+       RFC 5880, RFC 9314.";
+  }
+
+  grouping bgp-neighbor-bfd-extension {
+    description
+      "FRR-style flat `bfd { ... }` block on a BGP neighbor.";
+
+    container bfd {
+      ext:help "BFD attachment for this neighbor";
+      description
+        "When `enable` is true, BGP attaches a BFD session to this
+         neighbor. The optional `profile` selects a named bundle of
+         session parameters defined under `/bfd/profile`; without a
+         profile, BFD's own defaults are used.";
+
+      leaf enable {
+        type boolean;
+        default false;
+        description
+          "Activates the BFD session for this neighbor. Disabling
+           (or removing the `bfd` block entirely) detaches the
+           session.";
+      }
+
+      leaf profile {
+        type string;
+        description
+          "Name of a `/bfd/profile` entry whose parameters apply
+           to this neighbor's BFD session. Leafref validation will
+           be added once libyang exposes cross-tree leafref
+           resolution.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach the flat bfd block to BGP neighbors in the
+       candidate-set subtree.";
+    uses bgp-neighbor-bfd-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X bfd ...` is path-valid.";
+    uses bgp-neighbor-bfd-extension;
+  }
+}

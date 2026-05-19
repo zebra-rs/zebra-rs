@@ -152,6 +152,17 @@ pub struct PeerTransportConfig {
     pub resolved_ao_key: Option<super::auth::ResolvedAoKey>,
 }
 
+/// Per-neighbor BFD attachment recorded from
+/// `set router bgp neighbor <addr> bfd { enable | profile }`
+/// (zebra-bgp-bfd.yang). PR 5b stores the configuration here; PR 5c
+/// wires `enable` flips to subscribe / unsubscribe calls on the BFD
+/// instance via `bfd::inst::Bfd::client_req_tx`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PeerBfdConfig {
+    pub enable: bool,
+    pub profile: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
@@ -176,6 +187,9 @@ pub struct PeerConfig {
     /// runtime stores the reference but does not yet resolve
     /// inheritance — that's a follow-up.
     pub neighbor_group: Option<String>,
+    /// BFD attachment for this neighbor. Inert in PR 5b — the
+    /// `bfd.client_req_tx` plumbing arrives in PR 5c.
+    pub bfd: PeerBfdConfig,
 }
 
 impl Default for PeerConfig {
@@ -193,6 +207,7 @@ impl Default for PeerConfig {
             timer: Default::default(),
             sub: Default::default(),
             neighbor_group: None,
+            bfd: PeerBfdConfig::default(),
         }
     }
 }
@@ -1256,4 +1271,40 @@ pub fn clear_bgp_action(
         targets.len(),
         op
     ))
+}
+
+#[cfg(test)]
+mod bfd_config_tests {
+    use super::*;
+
+    /// PeerBfdConfig default mirrors the YANG defaults
+    /// (`enable=false`, no profile).
+    #[test]
+    fn default_bfd_is_disabled() {
+        let bfd = PeerBfdConfig::default();
+        assert!(!bfd.enable);
+        assert!(bfd.profile.is_none());
+
+        // Lives on PeerConfig with the same default.
+        let pc = PeerConfig::default();
+        assert_eq!(pc.bfd, bfd);
+    }
+
+    /// Round-trip: setting enable + profile mirrors the CLI flow
+    /// (`bfd enable true; bfd profile FAST`) producing the recorded
+    /// state the PR-5c subscribe path will read.
+    #[test]
+    fn enable_and_profile_round_trip() {
+        let mut pc = PeerConfig::default();
+        pc.bfd.enable = true;
+        pc.bfd.profile = Some("FAST".to_string());
+
+        assert_eq!(
+            pc.bfd,
+            PeerBfdConfig {
+                enable: true,
+                profile: Some("FAST".to_string()),
+            },
+        );
+    }
 }
