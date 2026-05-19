@@ -695,6 +695,316 @@ pub fn rib_entry_show_v6(
     Ok(buf)
 }
 
+/// Render an MPLS label stack in IOS-XR's `{ L1 L2 L3 }` notation.
+/// The stack is written in push order (top of stack first), matching
+/// the order our `Vec<Label>` already carries (see
+/// `repair_segments_to_mpls_labels`). Implicit-null gets its
+/// conventional suffix; otherwise it's a bare number.
+fn fmt_label_stack(labels: &[Label]) -> String {
+    let parts: Vec<String> = labels
+        .iter()
+        .map(|l| match l {
+            Label::Implicit(n) => format!("{n} (implicit-null)"),
+            Label::Explicit(n) => n.to_string(),
+        })
+        .collect();
+    format!("{{ {} }}", parts.join(" "))
+}
+
+/// Render an SRv6 segment list in `{ addr, addr }` notation. Always
+/// braced for parity with the MPLS form even when there's only one
+/// segment.
+fn fmt_srv6_segs(segs: &[std::net::Ipv6Addr]) -> String {
+    let parts: Vec<String> = segs.iter().map(|a| a.to_string()).collect();
+    format!("{{ {} }}", parts.join(", "))
+}
+
+/// Protection role for a `Nexthop::List` member at position `idx`.
+/// Index 0 is the primary (lowest metric); anything beyond is a
+/// TI-LFA-style repair stamped by `make_rib_entry` via the metric-
+/// offset convention. Plain `Nexthop::Uni` / `Multi` callers always
+/// pass index 0.
+fn fmt_protection_role(idx: usize) -> &'static str {
+    if idx == 0 {
+        "Protected"
+    } else {
+        "Backup (TI-LFA)"
+    }
+}
+
+/// Long-form protocol name for the `Known via "..."` line. IOS-XR
+/// uses lowercase tokens here (`"isis 111"` etc.); we drop the
+/// instance suffix since zebra-rs doesn't model multiple instances
+/// per protocol today.
+fn protocol_long_name(t: super::types::RibType) -> &'static str {
+    use super::types::RibType;
+    match t {
+        RibType::Kernel => "kernel",
+        RibType::Connected => "connected",
+        RibType::Static => "static",
+        RibType::Ospf => "ospf",
+        RibType::Isis => "isis",
+        RibType::Bgp => "bgp",
+        RibType::Dhcp => "dhcp",
+        RibType::Other(_) => "unknown",
+    }
+}
+
+/// Long-form subtype tag for the `type ...` suffix on the
+/// `Known via` line. Returns `None` for the default subtype (no
+/// suffix); otherwise an IOS-XR-style descriptor.
+fn subtype_long_name(s: &super::types::RibSubType) -> Option<&'static str> {
+    use super::types::RibSubType;
+    match s {
+        RibSubType::Default => None,
+        RibSubType::OspfIa => Some("inter-area"),
+        RibSubType::OspfNssa1 => Some("NSSA external type 1"),
+        RibSubType::OspfNssa2 => Some("NSSA external type 2"),
+        RibSubType::OspfExternal1 => Some("external type 1"),
+        RibSubType::OspfExternal2 => Some("external type 2"),
+        RibSubType::IsisLevel1 => Some("level-1"),
+        RibSubType::IsisLevel2 => Some("level-2"),
+        RibSubType::IsisIntraArea => Some("intra-area"),
+        RibSubType::Other(_) => None,
+    }
+}
+
+/// True when any nexthop in `e` carries an MPLS label stack — used
+/// to add the `labeled SR` tag to the `Known via` line.
+fn entry_has_mpls(e: &RibEntry) -> bool {
+    fn uni_has(u: &NexthopUni) -> bool {
+        !u.mpls.is_empty()
+    }
+    match &e.nexthop {
+        Nexthop::Uni(u) => uni_has(u),
+        Nexthop::Multi(m) => m.nexthops.iter().any(uni_has),
+        Nexthop::List(l) => l.nexthops.iter().any(|m| match m {
+            NexthopMember::Uni(u) => uni_has(u),
+            NexthopMember::Multi(mm) => mm.nexthops.iter().any(uni_has),
+        }),
+        Nexthop::Link(_) => false,
+    }
+}
+
+/// True when any nexthop in `e` carries an SRv6 segment list — used
+/// to add the `SRv6` tag to the `Known via` line in the v6 view.
+fn entry_has_srv6(e: &RibEntry) -> bool {
+    fn uni_has(u: &NexthopUni) -> bool {
+        !u.segs.is_empty()
+    }
+    match &e.nexthop {
+        Nexthop::Uni(u) => uni_has(u),
+        Nexthop::Multi(m) => m.nexthops.iter().any(uni_has),
+        Nexthop::List(l) => l.nexthops.iter().any(|m| match m {
+            NexthopMember::Uni(u) => uni_has(u),
+            NexthopMember::Multi(mm) => mm.nexthops.iter().any(uni_has),
+        }),
+        Nexthop::Link(_) => false,
+    }
+}
+
+/// Emit one `Routing Descriptor Block` for an IPv4 nexthop. The
+/// `role` field gates the `Repair Node(s)` line — backups print the
+/// first MPLS label (the NodeSID of the post-conv P-node); symbolic
+/// resolution to hostname/sys-id is the IS-IS-view's job (PR C).
+fn write_descriptor_block_v4(buf: &mut String, rib: &Rib, uni: &NexthopUni, role: &str) {
+    let iface = rib.link_name(uni.ifindex().unwrap_or(0));
+    let _ = writeln!(buf, "    {}, via {}, {}", uni.addr, iface, role);
+    let _ = writeln!(
+        buf,
+        "      Route metric is {}, weight {}",
+        uni.metric, uni.weight
+    );
+    if !uni.mpls.is_empty() {
+        let _ = writeln!(buf, "      Labels imposed {}", fmt_label_stack(&uni.mpls));
+        if role.starts_with("Backup")
+            && let Some(first) = uni.mpls.first()
+        {
+            let label_n = match first {
+                Label::Implicit(n) | Label::Explicit(n) => n,
+            };
+            let _ = writeln!(buf, "      Repair Node(s): label {label_n}");
+        }
+    }
+}
+
+/// IPv6 sibling: same shape, but with SRv6 segment list + encap mode
+/// when present. MPLS labels can still appear on a v6 nexthop (e.g.
+/// 6PE) so we render them too.
+fn write_descriptor_block_v6(buf: &mut String, rib: &Rib, uni: &NexthopUni, role: &str) {
+    let iface = rib.link_name(uni.ifindex().unwrap_or(0));
+    let _ = writeln!(buf, "    {}, via {}, {}", uni.addr, iface, role);
+    let _ = writeln!(
+        buf,
+        "      Route metric is {}, weight {}",
+        uni.metric, uni.weight
+    );
+    if !uni.segs.is_empty() {
+        let _ = writeln!(buf, "      SID list {}", fmt_srv6_segs(&uni.segs));
+        if let Some(encap) = uni.encap_type {
+            let _ = writeln!(buf, "      Encap: {:?}", encap);
+        }
+        if role.starts_with("Backup")
+            && let Some(first) = uni.segs.first()
+        {
+            let _ = writeln!(buf, "      Repair Node(s): SID {first}");
+        }
+    }
+    if !uni.mpls.is_empty() {
+        let _ = writeln!(buf, "      Labels imposed {}", fmt_label_stack(&uni.mpls));
+        if role.starts_with("Backup")
+            && uni.segs.is_empty()
+            && let Some(first) = uni.mpls.first()
+        {
+            let label_n = match first {
+                Label::Implicit(n) | Label::Explicit(n) => n,
+            };
+            let _ = writeln!(buf, "      Repair Node(s): label {label_n}");
+        }
+    }
+}
+
+/// Walk a `Nexthop` and emit one descriptor block per leg. Handles
+/// the `List` case so backups get the right role tag.
+fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, nh: &Nexthop) {
+    match nh {
+        Nexthop::Link(ifindex) => {
+            let _ = writeln!(buf, "    directly attached via {}", rib.link_name(*ifindex));
+        }
+        Nexthop::Uni(uni) => write_descriptor_block_v4(buf, rib, uni, "Protected"),
+        Nexthop::Multi(multi) => {
+            for uni in multi.nexthops.iter() {
+                write_descriptor_block_v4(buf, rib, uni, "Protected");
+            }
+        }
+        Nexthop::List(list) => {
+            for (idx, member) in list.nexthops.iter().enumerate() {
+                let role = fmt_protection_role(idx);
+                match member {
+                    NexthopMember::Uni(u) => write_descriptor_block_v4(buf, rib, u, role),
+                    NexthopMember::Multi(m) => {
+                        for u in m.nexthops.iter() {
+                            write_descriptor_block_v4(buf, rib, u, role);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn write_nexthop_blocks_v6(buf: &mut String, rib: &Rib, nh: &Nexthop) {
+    match nh {
+        Nexthop::Link(ifindex) => {
+            let _ = writeln!(buf, "    directly attached via {}", rib.link_name(*ifindex));
+        }
+        Nexthop::Uni(uni) => write_descriptor_block_v6(buf, rib, uni, "Protected"),
+        Nexthop::Multi(multi) => {
+            for uni in multi.nexthops.iter() {
+                write_descriptor_block_v6(buf, rib, uni, "Protected");
+            }
+        }
+        Nexthop::List(list) => {
+            for (idx, member) in list.nexthops.iter().enumerate() {
+                let role = fmt_protection_role(idx);
+                match member {
+                    NexthopMember::Uni(u) => write_descriptor_block_v6(buf, rib, u, role),
+                    NexthopMember::Multi(m) => {
+                        for u in m.nexthops.iter() {
+                            write_descriptor_block_v6(buf, rib, u, role);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// IOS-XR-style detail block for one IPv4 RIB entry.
+///
+/// ```text
+/// Routing entry for 10.1.1.3/32
+///   Known via "isis", distance 115, metric 30, labeled SR, type level-2
+///   Last update 00:42:11 ago
+///   Routing Descriptor Blocks
+///     10.0.0.2, via enp0s7, Protected
+///       Route metric is 30, weight 0
+///       Labels imposed { 17003 }
+///     10.0.0.21, via enp0s8, Backup (TI-LFA)
+///       Route metric is 50, weight 0
+///       Labels imposed { 17010 24001 17003 }
+///       Repair Node(s): label 17010
+/// ```
+pub fn rib_entry_show_detail(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> String {
+    let mut buf = String::new();
+    let _ = writeln!(buf, "Routing entry for {prefix}");
+
+    let labeled_tag = if entry_has_mpls(e) {
+        ", labeled SR"
+    } else {
+        ""
+    };
+    let subtype_tag = subtype_long_name(&e.rsubtype)
+        .map(|s| format!(", type {s}"))
+        .unwrap_or_default();
+    let _ = writeln!(
+        buf,
+        "  Known via \"{}\", distance {}, metric {}{}{}",
+        protocol_long_name(e.rtype),
+        e.distance,
+        e.metric,
+        labeled_tag,
+        subtype_tag
+    );
+    let _ = writeln!(buf, "  Last update {} ago", format_uptime(e.time.elapsed()));
+
+    if e.is_connected() {
+        let _ = writeln!(buf, "  Directly connected via {}", rib.link_name(e.ifindex));
+        return buf;
+    }
+
+    let _ = writeln!(buf, "  Routing Descriptor Blocks");
+    write_nexthop_blocks_v4(&mut buf, rib, &e.nexthop);
+    buf
+}
+
+/// IPv6 sibling of `rib_entry_show_detail`. Adds the `SRv6` tag on
+/// the `Known via` line when any nexthop carries a segment list.
+pub fn rib_entry_show_v6_detail(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> String {
+    let mut buf = String::new();
+    let _ = writeln!(buf, "Routing entry for {prefix}");
+
+    let mut tags = String::new();
+    if entry_has_srv6(e) {
+        tags.push_str(", SRv6");
+    }
+    if entry_has_mpls(e) {
+        tags.push_str(", labeled SR");
+    }
+    let subtype_tag = subtype_long_name(&e.rsubtype)
+        .map(|s| format!(", type {s}"))
+        .unwrap_or_default();
+    let _ = writeln!(
+        buf,
+        "  Known via \"{}\", distance {}, metric {}{}{}",
+        protocol_long_name(e.rtype),
+        e.distance,
+        e.metric,
+        tags,
+        subtype_tag
+    );
+    let _ = writeln!(buf, "  Last update {} ago", format_uptime(e.time.elapsed()));
+
+    if e.is_connected() {
+        let _ = writeln!(buf, "  Directly connected via {}", rib.link_name(e.ifindex));
+        return buf;
+    }
+
+    let _ = writeln!(buf, "  Routing Descriptor Blocks");
+    write_nexthop_blocks_v6(&mut buf, rib, &e.nexthop);
+    buf
+}
+
 pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut routes = Vec::new();
@@ -721,21 +1031,25 @@ pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
     }
 }
 
-/// `show ip route detail` (PR A: dispatch surface only). The detail
-/// renderer lands in PR B; for now we surface a header so the wired
-/// path is visible, then fall through to the one-line layout.
+/// `show ip route detail` — IOS-XR-style routing-descriptor-block
+/// view across the whole IPv4 RIB. JSON path is unchanged from the
+/// one-line view (`backup` flag on `NexthopJson` already conveys
+/// primary/backup); text path emits one block per entry.
 pub fn rib_show_detail(rib: &Rib, args: Args, json: bool) -> String {
-    let body = rib_show(rib, args, json);
     if json {
-        body
-    } else {
-        format!("[detail format pending — PR B]\n{body}")
+        return rib_show(rib, args, json);
     }
+    let mut buf = String::new();
+    for (prefix, entries) in rib.table.iter() {
+        for entry in entries.iter() {
+            buf.push_str(&rib_entry_show_detail(rib, prefix, entry));
+        }
+    }
+    buf
 }
 
 /// `show ip route prefix A.B.C.D/N` — single-prefix filter, one-line
-/// layout. Falls back to "% No route" when the prefix isn't in the
-/// table or the argument fails to parse.
+/// layout.
 pub fn rib_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
     let Some(prefix) = args.v4net() else {
         return "% Invalid IPv4 prefix\n".to_string();
@@ -743,9 +1057,7 @@ pub fn rib_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
     rib_show_one(rib, &prefix, json, false)
 }
 
-/// `show ip route prefix A.B.C.D/N detail` — single-prefix filter,
-/// detail layout. Detail renderer lands in PR B; falls back to
-/// one-line with a pending-detail header.
+/// `show ip route prefix A.B.C.D/N detail` — single-prefix block.
 pub fn rib_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
     let Some(prefix) = args.v4net() else {
         return "% Invalid IPv4 prefix\n".to_string();
@@ -753,9 +1065,6 @@ pub fn rib_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
     rib_show_one(rib, &prefix, json, true)
 }
 
-/// Shared helper for the two `prefix`-keyed handlers. `detail`
-/// currently only flips the header — PR B replaces the body with
-/// the IOS-XR-style routing-descriptor-block renderer.
 fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String {
     let Some(entries) = rib.table.get(prefix) else {
         return if json {
@@ -776,11 +1085,14 @@ fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String
 
     let mut buf = String::new();
     if detail {
-        buf.push_str("[detail format pending — PR B]\n");
-    }
-    buf.push_str(SHOW_IPV4_HEADER);
-    for entry in entries.iter() {
-        let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
+        for entry in entries.iter() {
+            buf.push_str(&rib_entry_show_detail(rib, prefix, entry));
+        }
+    } else {
+        buf.push_str(SHOW_IPV4_HEADER);
+        for entry in entries.iter() {
+            let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
+        }
     }
     buf
 }
@@ -816,14 +1128,19 @@ pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
     }
 }
 
-/// `show ipv6 route detail` (PR A: dispatch surface only).
+/// `show ipv6 route detail` — IOS-XR-style block view across the
+/// whole IPv6 RIB.
 pub fn rib6_show_detail(rib: &Rib, args: Args, json: bool) -> String {
-    let body = rib6_show(rib, args, json);
     if json {
-        body
-    } else {
-        format!("[detail format pending — PR B]\n{body}")
+        return rib6_show(rib, args, json);
     }
+    let mut buf = String::new();
+    for (prefix, entries) in rib.table_v6.iter() {
+        for entry in entries.iter() {
+            buf.push_str(&rib_entry_show_v6_detail(rib, prefix, entry));
+        }
+    }
+    buf
 }
 
 /// `show ipv6 route prefix X::Y/N` — single-prefix, one-line layout.
@@ -834,8 +1151,7 @@ pub fn rib6_show_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
     rib6_show_one(rib, &prefix, json, false)
 }
 
-/// `show ipv6 route prefix X::Y/N detail` — single-prefix, detail
-/// layout (renderer pending PR B).
+/// `show ipv6 route prefix X::Y/N detail` — single-prefix block.
 pub fn rib6_show_prefix_detail(rib: &Rib, mut args: Args, json: bool) -> String {
     let Some(prefix) = args.v6net() else {
         return "% Invalid IPv6 prefix\n".to_string();
@@ -863,15 +1179,18 @@ fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> Strin
 
     let mut buf = String::new();
     if detail {
-        buf.push_str("[detail format pending — PR B]\n");
-    }
-    buf.push_str(SHOW_IPV6_HEADER);
-    for entry in entries.iter() {
-        let _ = write!(
-            buf,
-            "{}",
-            rib_entry_show_v6(rib, prefix, entry, json).unwrap()
-        );
+        for entry in entries.iter() {
+            buf.push_str(&rib_entry_show_v6_detail(rib, prefix, entry));
+        }
+    } else {
+        buf.push_str(SHOW_IPV6_HEADER);
+        for entry in entries.iter() {
+            let _ = write!(
+                buf,
+                "{}",
+                rib_entry_show_v6(rib, prefix, entry, json).unwrap()
+            );
+        }
     }
     buf
 }
@@ -1578,5 +1897,71 @@ mod tests {
             json.contains("\"backup\":true"),
             "expected backup flag: {json}"
         );
+    }
+
+    #[test]
+    fn fmt_label_stack_renders_braced_push_order() {
+        // Single label: still braced for parity with multi-label.
+        assert_eq!(fmt_label_stack(&[Label::Explicit(17003)]), "{ 17003 }");
+        // Multi-label: order preserved (push order, top of stack
+        // first — matches IOS-XR `labels imposed {L1 L2 L3}`).
+        assert_eq!(
+            fmt_label_stack(&[
+                Label::Explicit(17010),
+                Label::Explicit(24001),
+                Label::Explicit(17003),
+            ]),
+            "{ 17010 24001 17003 }"
+        );
+        // Implicit-null gets a parenthetical hint.
+        assert_eq!(
+            fmt_label_stack(&[Label::Implicit(3)]),
+            "{ 3 (implicit-null) }"
+        );
+    }
+
+    #[test]
+    fn fmt_srv6_segs_renders_braced_comma_separated() {
+        let one: Ipv6Addr = "fcbb:bb00:1::".parse().unwrap();
+        assert_eq!(fmt_srv6_segs(&[one]), "{ fcbb:bb00:1:: }");
+        let two: Ipv6Addr = "fcbb:bb00:2::".parse().unwrap();
+        assert_eq!(
+            fmt_srv6_segs(&[one, two]),
+            "{ fcbb:bb00:1::, fcbb:bb00:2:: }"
+        );
+    }
+
+    #[test]
+    fn fmt_protection_role_distinguishes_primary_and_backup() {
+        assert_eq!(fmt_protection_role(0), "Protected");
+        assert_eq!(fmt_protection_role(1), "Backup (TI-LFA)");
+        assert_eq!(fmt_protection_role(7), "Backup (TI-LFA)");
+    }
+
+    #[test]
+    fn protocol_long_name_covers_routing_daemons() {
+        use super::super::types::RibType;
+        assert_eq!(protocol_long_name(RibType::Isis), "isis");
+        assert_eq!(protocol_long_name(RibType::Bgp), "bgp");
+        assert_eq!(protocol_long_name(RibType::Ospf), "ospf");
+        assert_eq!(protocol_long_name(RibType::Connected), "connected");
+        assert_eq!(protocol_long_name(RibType::Static), "static");
+        assert_eq!(protocol_long_name(RibType::Other(42)), "unknown");
+    }
+
+    #[test]
+    fn subtype_long_name_renders_ios_xr_descriptors() {
+        use super::super::types::RibSubType;
+        assert_eq!(subtype_long_name(&RibSubType::IsisLevel1), Some("level-1"));
+        assert_eq!(subtype_long_name(&RibSubType::IsisLevel2), Some("level-2"));
+        assert_eq!(subtype_long_name(&RibSubType::OspfIa), Some("inter-area"));
+        assert_eq!(
+            subtype_long_name(&RibSubType::OspfNssa1),
+            Some("NSSA external type 1")
+        );
+        // Default + unrecognized: no suffix, so the `Known via` line
+        // omits the `type ...` trailer.
+        assert_eq!(subtype_long_name(&RibSubType::Default), None);
+        assert_eq!(subtype_long_name(&RibSubType::Other(99)), None);
     }
 }
