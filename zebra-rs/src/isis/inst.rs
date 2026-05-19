@@ -2746,33 +2746,42 @@ fn build_rib_from_spf(
                         // New route has better metric, replace the existing one
                         *curr = route;
                     } else if curr.metric == route.metric {
-                        // Equal metric here means the same prefix is
-                        // advertised by multiple routers at equal total
-                        // cost — anycast / shared loopback. Distinct
-                        // from the intra-route ECMP above, which already
-                        // collapsed parallel first-hops into spf_nhops
-                        // for a single destination.
+                        // Equal metric: the same prefix is advertised
+                        // by multiple destinations at equal SPF cost —
+                        // anycast / shared loopback / sibling routes.
+                        // Merging their primaries here makes this an
+                        // ECMP route at the RIB / prefix level —
+                        // distinct from intra-route ECMP within one
+                        // destination, which `spf_nhops` already
+                        // collapsed above.
                         //
-                        // Two known limitations, both about RIB-level
-                        // metadata; the backup-clobber concern that
-                        // used to live here is gone now that backup
-                        // stamping is deferred to the post-loop pass.
-                        //   - sid / prefix_sid first-wins. Index-encoded
-                        //     SIDs are resolved against the advertising
-                        //     router's SRGB (see line ~2595), so when
-                        //     siblings' SRGBs disagree the resulting
-                        //     labels differ; subsequent labels are
-                        //     silently dropped. Per RFC 8667 §4 anycast
-                        //     SR groups should share an Index, but
-                        //     SRGBs aren't required to match.
-                        //   - dest_vertex stays at the first node. The
-                        //     post-loop backup pass uses dest_vertex to
-                        //     look up tilfa_result, so anycast siblings
-                        //     get the first-advertising destination's
-                        //     repair (if any). Acceptable today because
-                        //     anycast routes typically come out as
-                        //     multi-primary at the prefix level anyway,
-                        //     and that case skips backup entirely.
+                        // The post-loop TI-LFA backup pass skips
+                        // routes with multi-primary nhops (the typical
+                        // anycast outcome), so a backup attached to
+                        // only one sibling can't leak into the merged
+                        // RIB entry the way it did before deferral.
+                        //
+                        // Remaining metadata-merge limitations:
+                        //   - sid / prefix_sid first-wins. Index-
+                        //     encoded SIDs resolve against the
+                        //     advertising router's SRGB (see line
+                        //     ~2595); siblings with divergent SRGBs
+                        //     end up with different absolute labels
+                        //     and the subsequent labels are silently
+                        //     dropped. RFC 8667 §4 recommends anycast
+                        //     SR groups share an Index, but SRGBs
+                        //     aren't required to match across
+                        //     siblings.
+                        //   - `dest_vertex` stays at the first-merged
+                        //     node. The post-loop backup pass uses it
+                        //     to look up the repair; this is only
+                        //     load-bearing when an RIB route ends up
+                        //     single-primary (siblings whose nhops
+                        //     collapsed to one peer address via a
+                        //     shared first-hop neighbor), in which
+                        //     case every collapsed sibling protects
+                        //     against the same primary so picking
+                        //     the first sibling's repair is fine.
                         for (addr, nhop) in route.nhops {
                             curr.nhops.insert(addr, nhop);
                         }
