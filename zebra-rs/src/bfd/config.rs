@@ -323,7 +323,6 @@ mod tests {
         Bfd::new_with(
             Context::default(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
-            None,
         )
         .expect("bind loopback")
     }
