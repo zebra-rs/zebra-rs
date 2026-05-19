@@ -560,6 +560,23 @@ pub enum IsisTlv {
 }
 
 impl IsisTlv {
+    /// On-wire byte cost of this TLV: 2 bytes of TL header plus the
+    /// serialized value. Used by the send-side fragmentation packer
+    /// to decide whether a TLV instance fits in the current
+    /// fragment's remaining budget.
+    ///
+    /// `TlvEmitter::len()` returns the same byte count as a `u8`,
+    /// which silently wraps for malformed TLVs whose value exceeds
+    /// 255 bytes. This helper emits into a scratch buffer and
+    /// reports the true length so the packer can detect oversize
+    /// instances and split them at the entry boundary before they
+    /// reach `tlv_emit`.
+    pub fn wire_len(&self) -> usize {
+        let mut buf = BytesMut::new();
+        self.emit(&mut buf);
+        buf.len()
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         use IsisTlv::*;
         match self {
@@ -1177,6 +1194,23 @@ pub fn parse(input: &[u8]) -> IsisIResult<&[u8], IsisPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sanity-check `IsisTlv::wire_len` for a small fixed-size TLV.
+    /// The packer relies on this returning a stable 4 bytes (2-byte
+    /// TL header + 2-byte value) for the buffer-size TLV so its
+    /// per-fragment budget accounting is correct.
+    #[test]
+    fn wire_len_counts_tl_header_plus_value() {
+        let tlv: IsisTlv = IsisTlvLspBufferSize { size: 1492 }.into();
+        assert_eq!(tlv.wire_len(), 4);
+
+        let host: IsisTlv = IsisTlvHostname {
+            hostname: "router-7".to_string(),
+        }
+        .into();
+        // 2 header + 8 chars of "router-7".
+        assert_eq!(host.wire_len(), 10);
+    }
 
     /// Round-trip a TLV 14 LSP Buffer Size: emit through tlv_emit,
     /// then re-parse via parse_tlvs and recover the original size.

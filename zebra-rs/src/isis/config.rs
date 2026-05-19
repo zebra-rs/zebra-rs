@@ -9,6 +9,7 @@ use strum_macros::{Display, EnumString};
 use crate::config::{Args, ConfigOp};
 
 use super::Isis;
+use super::ifsm::has_level;
 use super::inst::{Callback, Message};
 use super::link::Afis;
 use super::tracing::{PacketConfig, PacketDirection};
@@ -87,6 +88,7 @@ impl Isis {
             "/router/isis/lsp-gen-interval/maximum-wait",
             config_lsp_gen_maximum_wait,
         );
+        self.callback_add("/router/isis/lsp-mtu-size", config_lsp_mtu_size);
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
         self.callback_add(
@@ -188,6 +190,13 @@ pub struct IsisConfig {
     pub lsp_gen_initial_wait: Option<u32>,
     pub lsp_gen_secondary_wait: Option<u32>,
     pub lsp_gen_maximum_wait: Option<u32>,
+
+    /// Originating LSP Buffer Size (ISO 10589 §7.2.5.1
+    /// `originatingLSPBufferSize`, advertised in TLV 14 per RFC 1195).
+    /// Caps the byte length of every self-originated LSP PDU and
+    /// drives the send-side packer's fragment boundary. Default
+    /// 1492 — the universally-accepted IS-IS PDU size.
+    pub lsp_mtu_size: Option<u16>,
     pub te_router_id: Option<Ipv4Addr>,
     pub rib_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
@@ -257,6 +266,10 @@ impl IsisConfig {
     const DEFAULT_LSP_GEN_INITIAL_WAIT_MS: u32 = 50;
     const DEFAULT_LSP_GEN_SECONDARY_WAIT_MS: u32 = 5000;
     const DEFAULT_LSP_GEN_MAXIMUM_WAIT_MS: u32 = 5000;
+    /// ISO 10589 §7.2.5.1: the originatingLSPBufferSize every IS-IS
+    /// implementation is required to accept. Larger values are valid
+    /// on links where every peer agrees, but 1492 is the safe default.
+    pub const DEFAULT_LSP_MTU_SIZE: u16 = 1492;
 
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
@@ -317,6 +330,10 @@ impl IsisConfig {
     pub fn lsp_gen_maximum_wait(&self) -> u32 {
         self.lsp_gen_maximum_wait
             .unwrap_or(Self::DEFAULT_LSP_GEN_MAXIMUM_WAIT_MS)
+    }
+
+    pub fn lsp_mtu_size(&self) -> u16 {
+        self.lsp_mtu_size.unwrap_or(Self::DEFAULT_LSP_MTU_SIZE)
     }
 
     /// True when either SR dataplane is enabled. Used to gate emission
@@ -453,6 +470,27 @@ fn config_lsp_gen_secondary_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) 
 fn config_lsp_gen_maximum_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ms = args.u32()?;
     isis.config.lsp_gen_maximum_wait = if op == ConfigOp::Set { Some(ms) } else { None };
+    Some(())
+}
+
+fn config_lsp_mtu_size(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let size = args.u16()?;
+
+    if op == ConfigOp::Set {
+        isis.config.lsp_mtu_size = Some(size);
+    } else {
+        isis.config.lsp_mtu_size = None;
+    }
+
+    // Re-originate so the new buffer size lands in TLV 14 and (once
+    // the packer is wired up) so the new fragment boundary takes
+    // effect immediately rather than waiting for the next natural
+    // origination trigger.
+    for level in [Level::L1, Level::L2] {
+        if has_level(isis.config.is_type(), level) {
+            let _ = isis.tx.send(Message::LspOriginate(level, None));
+        }
+    }
     Some(())
 }
 

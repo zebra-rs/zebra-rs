@@ -507,6 +507,20 @@ module config {
           }
         }
 
+        leaf lsp-mtu-size {
+          type uint16 {
+            range "128..16384";
+          }
+          units "bytes";
+          description
+            "Originating LSP Buffer Size (ISO 10589 originatingLSPBufferSize,
+             advertised as TLV 14 per RFC 1195). Sets the maximum byte length
+             of a self-originated LSP PDU; the packer fragments TLVs into
+             multiple LSPs so each fragment stays at or below this value.
+             Default 1492 matches ISO 10589 and is the value every IS-IS
+             peer is required to accept.";
+        }
+
         list interface {
           // Last item in "router isis" node.
           ext:sort "-10";

@@ -241,6 +241,17 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         lsp.tlvs.push(IsisTlvProtoSupported { nlpids }.into());
     }
 
+    // Originating LSP Buffer Size (TLV 14, RFC 1195). Advertises the
+    // PDU size we accept on this link; peers cap their own fragments
+    // against this value when sending to us. Frag-0 only — receivers
+    // ignore TLV 14 outside fragment 0.
+    lsp.tlvs.push(
+        IsisTlvLspBufferSize {
+            size: top.config.lsp_mtu_size(),
+        }
+        .into(),
+    );
+
     // Hostname (RFC 5301). Configured value wins, then the OS hostname.
     // If neither is available, skip the TLV entirely and clear any
     // stale entry from the local hostname map so show output falls
