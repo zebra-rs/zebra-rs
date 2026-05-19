@@ -414,6 +414,27 @@ module config {
           }
         }
 
+        list afi-safi {
+          // Configured-network advertisement, BGP-style.
+          // Each `network` entry under afi-safi=ipv4|ipv6 is emitted in
+          // every self-originated LSP as an IP-reach TLV (135 / 236 /
+          // 237 depending on MT). Prefix family must match the
+          // afi-safi name; the callback rejects mismatches.
+          key "name";
+          leaf name {
+            type enumeration {
+              enum ipv4;
+              enum ipv6;
+            }
+          }
+          list network {
+            key "prefix";
+            leaf prefix {
+              type inet:ip-prefix;
+            }
+          }
+        }
+
         leaf te-router-id {
           type inet:ipv4-address;
         }
