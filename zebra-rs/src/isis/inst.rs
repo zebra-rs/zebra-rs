@@ -32,10 +32,13 @@ use crate::{
     context::Context,
     rib::RibRxChannel,
 };
-use isis_packet::srv6::EncapType;
 // use spf_rs as spf;
 use crate::context::Timer;
 use crate::spf;
+// EncapType is only used by `make_rib_entry_v6` test fixture below;
+// production code paths route through `tilfa::build_repair_path_srv6`.
+#[cfg(test)]
+use isis_packet::srv6::EncapType;
 
 use super::config::{IsisConfig, MtId};
 use super::flood;
@@ -44,6 +47,10 @@ use super::link::{Afis, IsisLinks, LinkTop};
 use super::lsdb::insert_self_originate;
 use super::nfsm::nbr_hold_timer_expire;
 use super::srmpls::{IsisLabelMap, LabelConfig};
+use super::tilfa::{
+    RepairPathMpls, RepairPathSrv6, build_repair_path_mpls, build_repair_path_srv6,
+    first_router_hop_id, tilfa_repair_path,
+};
 use super::{Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, csnp_send, srm_set_for_all_lsp};
 use super::{LabelPool, Level, Levels, NfsmState, process_packet};
 
@@ -2056,28 +2063,6 @@ pub struct SpfNexthopV6 {
     pub backup: Option<RepairPathSrv6>,
 }
 
-/// TI-LFA SR-MPLS repair path. Today's repair-path computation is not
-/// wired in yet — once `ti_lfa_compute` lands, `SpfNexthop.backup`
-/// will be populated with the egress info and the SR-MPLS label stack
-/// (typically `[prefix-SID(P), adj-SID(P→Q)]` for the 2-label case).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RepairPathMpls {
-    pub ifindex: u32,
-    pub addr: Ipv4Addr,
-    pub labels: Vec<rib::Label>,
-}
-
-/// TI-LFA SRv6 repair path. The segment list expresses the post-
-/// convergence path as IPv6 endpoint SIDs — typically
-/// `[End(P), End.X(P→Q)]` for the 2-segment case.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RepairPathSrv6 {
-    pub ifindex: u32,
-    pub addr: Ipv6Addr,
-    pub segs: Vec<Ipv6Addr>,
-    pub encap: EncapType,
-}
-
 /// Sort offset between the primary nhop's metric and its TI-LFA
 /// backup's metric inside a `NexthopList`. The value is RIB-internal
 /// and never reaches the wire — it only governs the metric-sort that
@@ -2491,134 +2476,6 @@ fn build_adjacency_ilm(
     }
 
     ilm
-}
-
-/// Vertex id of the first non-pseudonode hop on `path`, skipping any
-/// leading pseudonode hops. Returns `None` when the path is empty or
-/// consists entirely of pseudonodes — both cases mean there's no
-/// real router to install as the first-hop. RIB-builders use this to
-/// land on the actual nexthop router (whose adjacency carries the
-/// peer addresses) rather than on the LAN's transit-only PN vertex.
-fn first_router_hop_id(lsp_map: &LspMap, path: &[usize]) -> Option<usize> {
-    let mut idx = 0;
-    while idx < path.len() && lsp_map.is_pseudo(path[idx]) {
-        idx += 1;
-    }
-    (idx < path.len()).then_some(path[idx])
-}
-
-/// Translate a graph-level `spf::RepairPath` into the FIB-ready
-/// `RepairPathMpls`: resolve the SR segment list to an absolute MPLS
-/// label stack and pin the post-conv first-hop's local egress
-/// (ifindex from `first_hop_link_id`; addr from the link's neighbor
-/// table). Returns `None` when any segment fails to resolve or when
-/// the first-hop has no usable IPv4 address — partial stacks are
-/// refused because a divergent label path would silently misroute.
-///
-/// LAN trivial-repair (empty label stack, first_hop is a pseudonode)
-/// is skipped: picking an arbitrary LAN member for an un-steered
-/// repair can loop, and the per-path "real router after the PN" is
-/// not carried on `RepairPath` today. SR-steered LAN repairs are
-/// fine — the labels drive forwarding independent of which LAN
-/// member receives the packet first.
-fn build_repair_path_mpls(
-    top: &IsisTop,
-    level: Level,
-    rp: &spf::RepairPath,
-) -> Option<RepairPathMpls> {
-    let labels = repair_segments_to_mpls_labels(top, level, &rp.segs)?;
-
-    let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
-    let link = top.links.get(&ifindex)?;
-    let lsp_map = top.lsp_map.get(&level);
-
-    let addr = if lsp_map.is_pseudo(rp.first_hop) {
-        if labels.is_empty() {
-            return None;
-        }
-        link.state
-            .nbrs
-            .get(&level)
-            .values()
-            .find_map(|nbr| nbr.addr4.keys().next().copied())?
-    } else {
-        let sys_id = lsp_map.resolve(rp.first_hop)?;
-        link.state
-            .nbrs
-            .get(&level)
-            .get(sys_id)?
-            .addr4
-            .keys()
-            .next()
-            .copied()?
-    };
-
-    Some(RepairPathMpls {
-        ifindex,
-        addr,
-        labels,
-    })
-}
-
-/// SRv6 sibling of `build_repair_path_mpls`. Resolves the SR segment
-/// list to a list of End SIDs (from `top.srv6_end_map`) and pins the
-/// post-conv first-hop's IPv6 link-local egress. Encap defaults to
-/// `HEncap` (full SRH push); `HEncap.Red` is an opt-in per project
-/// default and would be selected at install time.
-///
-/// Only the empty and 1-segment-NodeSid cases are supported today —
-/// multi-segment SRv6 repairs need End.X (adjacency) SID resolution
-/// which isn't yet wired (no `srv6_endx_map` analogous to
-/// `srv6_end_map`). Multi-segment cases return `None` for now.
-///
-/// LAN trivial-repair (empty segs, first_hop is a pseudonode) is
-/// skipped for the same reason as in the MPLS sibling — `RepairPath`
-/// doesn't carry the specific post-PN router today.
-fn build_repair_path_srv6(
-    top: &IsisTop,
-    level: Level,
-    rp: &spf::RepairPath,
-) -> Option<RepairPathSrv6> {
-    let lsp_map = top.lsp_map.get(&level);
-    let segs: Vec<Ipv6Addr> = match rp.segs.as_slice() {
-        [] => vec![],
-        [spf::SrSegment::NodeSid(v)] => {
-            let sys_id = lsp_map.resolve(*v)?;
-            let end_sid = top.srv6_end_map.get(&level).get(sys_id).copied()?;
-            vec![end_sid]
-        }
-        _ => return None,
-    };
-
-    let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
-    let link = top.links.get(&ifindex)?;
-
-    let addr = if lsp_map.is_pseudo(rp.first_hop) {
-        if segs.is_empty() {
-            return None;
-        }
-        link.state
-            .nbrs
-            .get(&level)
-            .values()
-            .find_map(|nbr| nbr.addr6l.first().copied())?
-    } else {
-        let sys_id = lsp_map.resolve(rp.first_hop)?;
-        link.state
-            .nbrs
-            .get(&level)
-            .get(sys_id)?
-            .addr6l
-            .first()
-            .copied()?
-    };
-
-    Some(RepairPathSrv6 {
-        ifindex,
-        addr,
-        segs,
-        encap: EncapType::HEncap,
-    })
 }
 
 /// Build RIB from SPF calculation results
@@ -3067,178 +2924,6 @@ fn apply_routing_updates(
         diff_apply_v6(top.rib_tx.clone(), &diff);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
-}
-
-/// Resolve a peer-advertised SID to an absolute MPLS label, using
-/// the originator's SR block when the SID is Index-encoded.
-/// `block_kind` picks the global SRGB (prefix-SIDs) or the local
-/// SRLB (adjacency-SIDs).
-enum SrBlockKind {
-    Global,
-    Local,
-}
-
-fn resolve_sid_to_label(
-    top: &IsisTop,
-    level: Level,
-    originator: &IsisSysId,
-    sid: &SidLabelValue,
-    block_kind: SrBlockKind,
-) -> Option<u32> {
-    match sid {
-        SidLabelValue::Label(l) => Some(*l),
-        SidLabelValue::Index(idx) => {
-            let block = top.label_map.get(&level).get(originator)?;
-            match block_kind {
-                SrBlockKind::Global => Some(block.global.start + idx),
-                SrBlockKind::Local => Some(block.local.as_ref()?.start + idx),
-            }
-        }
-    }
-}
-
-/// Look up `vertex`'s prefix-SID (NodeSID) as an absolute MPLS label.
-/// Walks the vertex's IPv4 reach entries (typically the loopback)
-/// for the first prefix-SID sub-TLV, then resolves Index against the
-/// originator's SRGB.
-fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Option<u32> {
-    let sys_id = *top.lsp_map.get(&level).resolve(vertex)?;
-    let entries = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id)?;
-    for entry in entries.iter() {
-        let Some(prefix_sid) = entry.prefix_sid() else {
-            continue;
-        };
-        if let Some(label) =
-            resolve_sid_to_label(top, level, &sys_id, &prefix_sid.sid, SrBlockKind::Global)
-        {
-            return Some(label);
-        }
-    }
-    None
-}
-
-/// Look up the adjacency-SID `from` advertises for the link to `to`.
-/// For LAN adjacencies (`via_pseudonode = Some(pn)`) the IS Reach
-/// entry's neighbor_id matches the pseudonode and the LanAdjSid
-/// sub-TLV's `system_id` field identifies the LAN member. For P2P
-/// adjacencies the neighbor_id is `(to_sys, 0)` and any AdjSid
-/// sub-TLV under it qualifies. Index-encoded SIDs resolve against
-/// the originator's SRLB.
-fn adj_sid_label_for_link(
-    top: &IsisTop,
-    level: Level,
-    from_vertex: usize,
-    to_vertex: usize,
-    via_pseudonode: Option<usize>,
-) -> Option<u32> {
-    let from_sys = *top.lsp_map.get(&level).resolve(from_vertex)?;
-    let target_neighbor_id = if let Some(via_v) = via_pseudonode {
-        *top.lsp_map.get(&level).resolve_neighbor(via_v)?
-    } else {
-        let to_sys = *top.lsp_map.get(&level).resolve(to_vertex)?;
-        IsisNeighborId::from_sys_id(&to_sys, 0)
-    };
-
-    let lsp_key = IsisLspId::new(from_sys, 0, 0);
-    let lsa = top.lsdb.get(&level).get(&lsp_key)?;
-    for tlv in &lsa.lsp.tlvs {
-        let IsisTlv::ExtIsReach(reach) = tlv else {
-            continue;
-        };
-        for entry in &reach.entries {
-            if entry.neighbor_id != target_neighbor_id {
-                continue;
-            }
-            for sub in &entry.subs {
-                match sub {
-                    neigh::IsisSubTlv::AdjSid(adj) => {
-                        if let Some(l) = resolve_sid_to_label(
-                            top,
-                            level,
-                            &from_sys,
-                            &adj.sid,
-                            SrBlockKind::Local,
-                        ) {
-                            return Some(l);
-                        }
-                    }
-                    neigh::IsisSubTlv::LanAdjSid(lan_adj) => {
-                        let Some(to_sys) = top.lsp_map.get(&level).resolve(to_vertex) else {
-                            continue;
-                        };
-                        if &lan_adj.system_id == to_sys
-                            && let Some(l) = resolve_sid_to_label(
-                                top,
-                                level,
-                                &from_sys,
-                                &lan_adj.sid,
-                                SrBlockKind::Local,
-                            )
-                        {
-                            return Some(l);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Translate a TI-LFA repair list from `spf::tilfa()` into an
-/// MPLS label stack. Returns None when any segment fails to resolve
-/// — we refuse to install a partial stack since the resulting label
-/// path would diverge from the post-convergence path the algorithm
-/// computed.
-fn repair_segments_to_mpls_labels(
-    top: &IsisTop,
-    level: Level,
-    segments: &[spf::SrSegment],
-) -> Option<Vec<rib::Label>> {
-    let mut labels = Vec::with_capacity(segments.len());
-    for seg in segments {
-        let label = match seg {
-            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v)?,
-            spf::SrSegment::AdjSid(from, to, via) => {
-                adj_sid_label_for_link(top, level, *from, *to, *via)?
-            }
-        };
-        labels.push(rib::Label::Explicit(label));
-    }
-    Some(labels)
-}
-
-fn tilfa_repair_path(
-    graph: &spf::Graph,
-    source: usize,
-    spf_result: &BTreeMap<usize, spf::Path>,
-) -> BTreeMap<usize, Vec<spf::RepairPath>> {
-    let mut tilfa_result = BTreeMap::new();
-
-    for (d, path) in spf_result.iter() {
-        // Source is skipped.
-        if *d == source {
-            continue;
-        }
-        // ECMP is skipped.
-        if path.paths.len() > 1 {
-            continue;
-        }
-
-        // X
-        let first = &path.paths[0];
-        if first.is_empty() {
-            continue;
-        }
-        let x = first[0];
-
-        let repair_paths = spf::tilfa(graph, source, *d, &[x]);
-        if !repair_paths.is_empty() {
-            tilfa_result.insert(*d, repair_paths);
-        }
-    }
-    tilfa_result
 }
 
 /// Perform SPF calculation and update routing tables.

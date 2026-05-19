@@ -6,7 +6,8 @@ use isis_packet::{IsisProto, IsisSysId, IsisTlv, Nsap};
 use prefix_trie::PrefixMap;
 use serde::Serialize;
 
-use super::inst::{RepairPathMpls, RepairPathSrv6, SpfNexthop, SpfNexthopV6, SpfRoute, SpfRouteV6};
+use super::inst::{SpfNexthop, SpfNexthopV6, SpfRoute, SpfRouteV6};
+use super::tilfa::{RepairPathMpls, RepairPathSrv6};
 use super::{Isis, inst::ShowCallback};
 
 use crate::config::Args;
