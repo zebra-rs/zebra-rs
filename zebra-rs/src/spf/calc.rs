@@ -612,6 +612,7 @@ pub fn disp_out(buf: &mut String, spf: &BTreeMap<usize, Path>, full_path: bool) 
             for p in &path.paths {
                 let _ = writeln!(buf, "  metric {} path {:?}", path.cost, p);
             }
+            write_first_hop_links(buf, &path.first_hop_links);
         }
     } else {
         for (vertex, nhops) in spf {
@@ -619,8 +620,20 @@ pub fn disp_out(buf: &mut String, spf: &BTreeMap<usize, Path>, full_path: bool) 
             for p in &nhops.nexthops {
                 let _ = writeln!(buf, "  metric {} path {:?}", nhops.cost, p);
             }
+            write_first_hop_links(buf, &nhops.first_hop_links);
         }
     }
+}
+
+/// Render `first_hop_links` sorted by (vertex_id, link_id) so the
+/// output is stable across runs — `HashSet` iteration order isn't.
+fn write_first_hop_links(buf: &mut String, links: &HashSet<(usize, u32)>) {
+    if links.is_empty() {
+        return;
+    }
+    let mut sorted: Vec<(usize, u32)> = links.iter().copied().collect();
+    sorted.sort();
+    let _ = writeln!(buf, "  first_hop_links: {:?}", sorted);
 }
 
 #[cfg(test)]

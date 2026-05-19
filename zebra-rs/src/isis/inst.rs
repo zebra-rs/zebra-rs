@@ -2494,6 +2494,20 @@ fn build_adjacency_ilm(
     ilm
 }
 
+/// Index of the first non-pseudonode vertex on `path`, skipping any
+/// leading pseudonode hops. Returns `None` when the path is empty or
+/// consists entirely of pseudonodes — both cases mean there's no
+/// real router to install as the first-hop. RIB-builders use this to
+/// land on the actual nexthop router (whose adjacency carries the
+/// peer addresses) rather than on the LAN's transit-only PN vertex.
+fn first_router_hop_idx(lsp_map: &LspMap, path: &[usize]) -> Option<usize> {
+    let mut idx = 0;
+    while idx < path.len() && lsp_map.is_pseudo(path[idx]) {
+        idx += 1;
+    }
+    (idx < path.len()).then_some(idx)
+}
+
 /// Build RIB from SPF calculation results
 fn build_rib_from_spf(
     top: &mut IsisTop,
@@ -2540,17 +2554,9 @@ fn build_rib_from_spf(
         // asymmetric metrics and P2P+LAN mix).
         let mut spf_nhops = BTreeMap::new();
         for p in &nhops.paths {
-            if p.is_empty() {
+            let Some(nhop_idx) = first_router_hop_idx(top.lsp_map.get(&level), p) else {
                 continue;
-            }
-
-            let mut nhop_idx = 0;
-            while nhop_idx < p.len() && top.lsp_map.get(&level).is_pseudo(p[nhop_idx]) {
-                nhop_idx += 1;
-            }
-            if nhop_idx >= p.len() {
-                continue;
-            }
+            };
 
             let Some(nhop_sys_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) else {
                 continue;
@@ -2702,9 +2708,6 @@ fn build_rib_from_spf_v6(
         // strict-gate every transit node, not just the first hop.
         let mut spf_nhops = BTreeMap::new();
         'next_path: for p in &nhops.paths {
-            if p.is_empty() {
-                continue;
-            }
             // In legacy mode, every node on the path must advertise IPv6.
             // In MT 2 mode the graph itself is pre-filtered, so we skip.
             // Pseudonode hops bypass the IPv6 NLPID check — they don't
@@ -2726,13 +2729,9 @@ fn build_rib_from_spf_v6(
 
             // Skip leading pseudonode hops to land on the actual nexthop
             // router whose adjacency carries the link-local v6 address.
-            let mut nhop_idx = 0;
-            while nhop_idx < p.len() && top.lsp_map.get(&level).is_pseudo(p[nhop_idx]) {
-                nhop_idx += 1;
-            }
-            if nhop_idx >= p.len() {
+            let Some(nhop_idx) = first_router_hop_idx(top.lsp_map.get(&level), p) else {
                 continue;
-            }
+            };
             let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) else {
                 continue;
             };
