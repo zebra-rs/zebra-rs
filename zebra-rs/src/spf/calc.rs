@@ -535,7 +535,16 @@ pub struct RepairPath {
     /// Immediate nexthop node id on the post-convergence path —
     /// what the FIB needs to look up the local egress (ifindex /
     /// next-hop address) for the repair route.
-    pub nhop: usize,
+    pub first_hop: usize,
+    /// link_id of the SPF edge into `first_hop`, propagated from
+    /// `Link::link_id` on the modified-graph SPF. For IS-IS this
+    /// is the local ifindex of the physical interface that produced
+    /// the underlying ExtIsReach entry, letting the rib-builder
+    /// install the exact link the post-conv SPF chose without
+    /// re-deriving it. `0` when the chosen first-hop edge has no
+    /// link_id (remote-origin edges, test fixtures that use
+    /// `Link::new`).
+    pub first_hop_link_id: u32,
     /// Repair path segments (Node-SID / Adj-SID sequence) applied
     /// on top of the immediate nexthop.
     pub segs: Vec<SrSegment>,
@@ -544,7 +553,16 @@ pub struct RepairPath {
 pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> {
     let p_vertices = p_space_vertices(graph, s, x);
     let q_vertices = q_space_vertices(graph, d, x);
-    let mut pc_paths = pc_paths(graph, s, d, x);
+
+    // Run the modified SPF inline so we have access to D's
+    // `first_hop_links` alongside `paths`. Going through
+    // `pc_paths()` would discard that information.
+    let modified_spf = spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal);
+    let Some(d_path) = modified_spf.get(&d) else {
+        return vec![];
+    };
+    let first_hop_links = d_path.first_hop_links.clone();
+    let mut pc_paths = d_path.paths.clone();
 
     // PCPaths.
     let mut repair_paths = vec![];
@@ -557,6 +575,19 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> 
         }
         // First hop as RepairPath's nhop.
         let nhop = path[0];
+
+        // Look up the link_id chosen by the modified SPF for this
+        // first-hop. `first_hop_links` is a set of (vertex, link_id)
+        // pairs; for ECMP-via-parallel-links on the same first-hop
+        // there may be multiple entries — any of them is a valid
+        // post-conv egress so we take the first match. `0` if the
+        // edge carries no link_id (e.g., the test fixtures built
+        // with `Link::new`).
+        let first_hop_link_id = first_hop_links
+            .iter()
+            .find(|(v, _)| *v == nhop)
+            .map(|(_, lid)| *lid)
+            .unwrap_or(0);
 
         // Remove D — make_repair_list adds it back via the trailing
         // AdjSid(prev, d) emission.
@@ -578,7 +609,12 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> 
         // forwarding reaches D with no SR steering, so install
         // proceeds with `nhop` and an empty label stack — see
         // `RepairCandidate.labels` doc in isis/inst.rs.
-        let repair_path = RepairPath { nhop, segs };
+
+        let repair_path = RepairPath {
+            first_hop: nhop,
+            first_hop_link_id,
+            segs,
+        };
 
         repair_paths.push(repair_path);
     }
@@ -1184,7 +1220,7 @@ mod tests {
 
         // Immediate nexthop on the post-convergence path is N2 (id 2):
         // S→N2 replaces the failed S→N1 first hop.
-        assert_eq!(repair.nhop, 2, "expected first-hop = N2 (id 2)");
+        assert_eq!(repair.first_hop, 2, "expected first-hop = N2 (id 2)");
 
         assert_eq!(repair.segs.len(), 3);
         let first_segment = repair.segs.first().unwrap();
@@ -1221,7 +1257,7 @@ mod tests {
         // In the all-LAN topology the first vertex on the PC path is
         // the pseudonode PN_S_N2 (id 9); leading-pseudonode skipping
         // is the IS-IS caller's job (see `find_local_nhop_v4`).
-        assert_eq!(repair.nhop, 9, "expected first-hop = PN_S_N2 (id 9)");
+        assert_eq!(repair.first_hop, 9, "expected first-hop = PN_S_N2 (id 9)");
 
         assert_eq!(repair.segs.len(), 3);
         assert_eq!(seg_disp(&graph, &repair.segs[0]), "NodeSid(R1)");
@@ -1256,7 +1292,7 @@ mod tests {
         assert_eq!(repair_paths.len(), 1);
         let repair = repair_paths.first().unwrap();
 
-        assert_eq!(repair.nhop, 2, "expected first-hop = N2 (id 2)");
+        assert_eq!(repair.first_hop, 2, "expected first-hop = N2 (id 2)");
         assert!(
             repair.segs.is_empty(),
             "expected trivial repair (no SR segments), got {:?}",
@@ -1327,6 +1363,43 @@ mod tests {
             got,
             BTreeSet::from([(1, 10)]),
             "only the cheap link_id must survive; expensive parallel must be discarded"
+        );
+    }
+
+    /// `tilfa()` must propagate the chosen first-hop's `link_id`
+    /// from the modified SPF into `RepairPath.first_hop_link_id`,
+    /// so the rib-builder can install the exact local egress
+    /// without re-deriving it.
+    #[test]
+    fn tilfa_repair_path_carries_first_hop_link_id() {
+        let mut graph = BTreeMap::new();
+        graph.insert(0, Vertex::new_node("S", 0));
+        graph.insert(1, Vertex::new_node("D", 1));
+        graph.insert(2, Vertex::new_node("X", 2));
+
+        // S→D direct with a non-zero link_id (the value we expect
+        // to see surfaced on the repair path). S→X is the failed
+        // edge we exclude in tilfa; its link_id is irrelevant.
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(Link::with_id(0, 1, 1, 42));
+        graph
+            .get_mut(&1)
+            .unwrap()
+            .ilinks
+            .push(Link::with_id(0, 1, 1, 42));
+        graph.get_mut(&0).unwrap().olinks.push(Link::new(0, 2, 1));
+        graph.get_mut(&2).unwrap().ilinks.push(Link::new(0, 2, 1));
+
+        let repair_paths = tilfa(&graph, 0, 1, &[2]); // exclude X
+        assert_eq!(repair_paths.len(), 1);
+        let repair = &repair_paths[0];
+        assert_eq!(repair.first_hop, 1, "first_hop = D");
+        assert_eq!(
+            repair.first_hop_link_id, 42,
+            "first_hop_link_id must come from the chosen S→D edge"
         );
     }
 
