@@ -698,10 +698,17 @@ impl Bgp {
     }
 
     /// Handle a [`crate::bfd::inst::BfdEvent`] forwarded by the BFD
-    /// instance. PR 5d logs the transition at info level so operators
-    /// can observe BFD activity; PR 5e replaces the log with the
-    /// actual neighbor-teardown call once the BGP-side FSM hook is
-    /// identified.
+    /// instance. RFC 5882 §5 prescribes that a BFD signal of session
+    /// Down should be treated as a path-failure indication for the
+    /// IGP/BGP session — we react by sending `Event::Stop` to the
+    /// matching peer's FSM, which triggers the usual BGP teardown
+    /// path (NOTIFICATION + TCP close + transition to Idle).
+    ///
+    /// Synthetic Down→Down notifications (emitted by BFD when a new
+    /// subscriber attaches before any peer Rx has arrived) are
+    /// ignored — they carry no state-transition information and
+    /// would otherwise tear down a peer that hasn't yet had a chance
+    /// to establish.
     pub fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
         let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
         tracing::info!(
@@ -711,6 +718,31 @@ impl Bgp {
             diag = %change.diag,
             "bgp: bfd session state change",
         );
+
+        // Synthetic "current state" mirror from `Bfd::subscribe`
+        // — no transition has occurred.
+        if change.from == change.to {
+            return;
+        }
+
+        if change.to != bfd_packet::State::Down {
+            return;
+        }
+
+        // SessionKey.remote is the BGP neighbor address — direct
+        // lookup. A missing peer means the user removed the
+        // neighbor since BGP last subscribed; safe to ignore.
+        let Some(peer) = self.peers.get(&key.remote) else {
+            tracing::debug!(?key, "bgp: bfd-down for unknown peer; ignoring",);
+            return;
+        };
+        let peer_idx = peer.ident;
+        tracing::warn!(
+            peer = %key.remote,
+            diag = %change.diag,
+            "bgp: tearing down peer on bfd-down (RFC 5882 §5)",
+        );
+        let _ = self.tx.try_send(Message::Event(peer_idx, Event::Stop));
     }
 }
 

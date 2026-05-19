@@ -1254,4 +1254,100 @@ mod bfd_wiring_tests {
             .unwrap();
         assert!(peer.config.bfd.enable, "config bit still flips");
     }
+
+    // -----------------------------------------------------------------
+    // PR 5e: process_bfd_event teardown behaviour
+    // -----------------------------------------------------------------
+
+    use crate::bfd::inst::BfdEvent;
+    use crate::bfd::session::StateChange;
+    use crate::bgp::inst::Message;
+    use crate::bgp::peer::Event as PeerEvent;
+    use bfd_packet::{Diag, State};
+
+    fn make_state_change(from: State, to: State) -> StateChange {
+        StateChange {
+            from,
+            to,
+            diag: Diag::None,
+        }
+    }
+
+    fn make_event(remote: Ipv4Addr, from: State, to: State) -> BfdEvent {
+        BfdEvent::StateChange {
+            key: SessionKey {
+                local: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                remote: IpAddr::V4(remote),
+                ifindex: 0,
+                multihop: false,
+            },
+            change: make_state_change(from, to),
+        }
+    }
+
+    /// BFD going Up → Down for a known peer sends `Event::Stop` to
+    /// the matching peer FSM (RFC 5882 §5 path-failure response).
+    #[tokio::test]
+    async fn bfd_down_triggers_event_stop() {
+        let (mut bgp, _bfd_rx) = fresh_bgp_with_bfd();
+        let addr = Ipv4Addr::new(10, 0, 0, 5);
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+        let peer_idx = bgp.peers.get(&IpAddr::V4(addr)).unwrap().ident;
+
+        bgp.process_bfd_event(make_event(addr, State::Up, State::Down));
+
+        let msg = bgp.rx.try_recv().expect("Event::Stop must be queued");
+        match msg {
+            Message::Event(idx, ev) => {
+                assert_eq!(idx, peer_idx);
+                assert!(matches!(ev, PeerEvent::Stop));
+            }
+            other => panic!("expected Message::Event(_, Stop), got {other:?}"),
+        }
+    }
+
+    /// Synthetic Down→Down events emitted by `Bfd::subscribe` (so a
+    /// new subscriber can act on the current state immediately) must
+    /// NOT trigger teardown — there's no transition to react to.
+    #[tokio::test]
+    async fn synthetic_down_to_down_is_ignored() {
+        let (mut bgp, _bfd_rx) = fresh_bgp_with_bfd();
+        let addr = Ipv4Addr::new(10, 0, 0, 6);
+        config_peer(&mut bgp, arg_words(&["10.0.0.6"]), ConfigOp::Set).unwrap();
+
+        bgp.process_bfd_event(make_event(addr, State::Down, State::Down));
+        assert!(
+            bgp.rx.try_recv().is_err(),
+            "synthetic Down→Down must not enqueue any message",
+        );
+    }
+
+    /// BFD coming Up is informational — BGP doesn't need to do
+    /// anything in particular (its own FSM is already running).
+    #[tokio::test]
+    async fn bfd_up_does_not_tear_down() {
+        let (mut bgp, _bfd_rx) = fresh_bgp_with_bfd();
+        let addr = Ipv4Addr::new(10, 0, 0, 7);
+        config_peer(&mut bgp, arg_words(&["10.0.0.7"]), ConfigOp::Set).unwrap();
+
+        bgp.process_bfd_event(make_event(addr, State::Init, State::Up));
+        assert!(
+            bgp.rx.try_recv().is_err(),
+            "BFD Up must not enqueue any message",
+        );
+    }
+
+    /// A Down event for a peer that no longer exists (raced against
+    /// neighbor deletion) is logged but otherwise ignored — no
+    /// panic, no spurious Event::Stop.
+    #[tokio::test]
+    async fn bfd_down_for_unknown_peer_is_noop() {
+        let (mut bgp, _bfd_rx) = fresh_bgp_with_bfd();
+        bgp.process_bfd_event(make_event(
+            Ipv4Addr::new(10, 99, 99, 99),
+            State::Up,
+            State::Down,
+        ));
+        assert!(bgp.rx.try_recv().is_err());
+    }
 }
