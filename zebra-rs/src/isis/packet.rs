@@ -7,11 +7,11 @@ use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::fmt::DisplayOpt;
-use crate::isis::inst::spf_schedule;
 use crate::isis::link::DisStatus;
 use crate::isis::lsp::csnp_generate;
 use crate::isis::neigh::Neighbor;
 use crate::isis::nfsm::nfsm_hold_timer;
+use crate::isis::rib::spf_schedule;
 use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::isis_pdu_trace;
 use crate::rib::MacAddr;

@@ -15,9 +15,10 @@ use super::inst::MsgSender;
 use super::link::LinkTop;
 use super::{
     Level, LspFlood,
-    inst::{IsisTop, spf_schedule},
+    inst::IsisTop,
     link::Afi,
     lsp::{lsp_emit, lsp_flood},
+    rib::spf_schedule,
 };
 
 #[derive(Default)]
@@ -390,7 +391,7 @@ pub fn insert_self_originate(
     // and LinkTop both expose spf_timer/tx but spf_schedule's
     // signature is over LinkTop.
     if top.spf_timer.get(&level).is_none() {
-        *top.spf_timer.get_mut(&level) = Some(crate::isis::inst::spf_timer(top.tx, level));
+        *top.spf_timer.get_mut(&level) = Some(crate::isis::rib::spf_timer(top.tx, level));
     }
     prev
 }
