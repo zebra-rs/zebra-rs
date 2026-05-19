@@ -453,6 +453,12 @@ module config {
             }
             units "seconds";
           }
+          leaf min-lsp-arrival-time {
+            type uint32 {
+              range "1..600000";
+            }
+            units "milliseconds";
+          }
         }
 
         list interface {
