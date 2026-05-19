@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use isis_packet::neigh;
 use isis_packet::srv6::EncapType;
-use isis_packet::{IsisLspId, IsisNeighborId, IsisSysId, IsisTlv, SidLabelValue};
+use isis_packet::{IsisNeighborId, IsisSysId, IsisTlv, SidLabelValue};
 
 use crate::rib;
 use crate::spf;
@@ -233,46 +233,55 @@ fn adj_sid_label_for_link(
         IsisNeighborId::from_sys_id(&to_sys, 0)
     };
 
-    let lsp_key = IsisLspId::new(from_sys, 0, 0);
-    let lsa = top.lsdb.get(&level).get(&lsp_key)?;
-    for tlv in &lsa.lsp.tlvs {
-        let IsisTlv::ExtIsReach(reach) = tlv else {
+    // Walk every non-pseudonode fragment originated by `from_sys` at
+    // this level. With send-side LSP fragmentation a router spreads
+    // its TLV 22 (ExtIsReach) entries across fragments 0..N, so the
+    // adjacency carrying the adj-SID can live in any of them. Frag-0-
+    // only would miss SIDs for any adjacency whose IS-reach entry the
+    // packer placed in a higher fragment.
+    for (lsp_id, lsa) in top.lsdb.get(&level).iter() {
+        if lsp_id.sys_id() != from_sys || lsp_id.is_pseudo() {
             continue;
-        };
-        for entry in &reach.entries {
-            if entry.neighbor_id != target_neighbor_id {
+        }
+        for tlv in &lsa.lsp.tlvs {
+            let IsisTlv::ExtIsReach(reach) = tlv else {
                 continue;
-            }
-            for sub in &entry.subs {
-                match sub {
-                    neigh::IsisSubTlv::AdjSid(adj) => {
-                        if let Some(l) = resolve_sid_to_label(
-                            top,
-                            level,
-                            &from_sys,
-                            &adj.sid,
-                            SrBlockKind::Local,
-                        ) {
-                            return Some(l);
-                        }
-                    }
-                    neigh::IsisSubTlv::LanAdjSid(lan_adj) => {
-                        let Some(to_sys) = top.lsp_map.get(&level).resolve(to_vertex) else {
-                            continue;
-                        };
-                        if &lan_adj.system_id == to_sys
-                            && let Some(l) = resolve_sid_to_label(
+            };
+            for entry in &reach.entries {
+                if entry.neighbor_id != target_neighbor_id {
+                    continue;
+                }
+                for sub in &entry.subs {
+                    match sub {
+                        neigh::IsisSubTlv::AdjSid(adj) => {
+                            if let Some(l) = resolve_sid_to_label(
                                 top,
                                 level,
                                 &from_sys,
-                                &lan_adj.sid,
+                                &adj.sid,
                                 SrBlockKind::Local,
-                            )
-                        {
-                            return Some(l);
+                            ) {
+                                return Some(l);
+                            }
                         }
+                        neigh::IsisSubTlv::LanAdjSid(lan_adj) => {
+                            let Some(to_sys) = top.lsp_map.get(&level).resolve(to_vertex) else {
+                                continue;
+                            };
+                            if &lan_adj.system_id == to_sys
+                                && let Some(l) = resolve_sid_to_label(
+                                    top,
+                                    level,
+                                    &from_sys,
+                                    &lan_adj.sid,
+                                    SrBlockKind::Local,
+                                )
+                            {
+                                return Some(l);
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
