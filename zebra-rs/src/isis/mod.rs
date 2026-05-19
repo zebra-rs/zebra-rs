@@ -1,5 +1,8 @@
 pub mod inst;
-pub use inst::{Isis, Message, MsgSender, Packet, PacketMessage};
+pub use inst::{Isis, Message, MsgSender};
+
+pub mod lsp;
+pub use lsp::{Packet, PacketMessage};
 
 pub mod link;
 pub use link::LinkTop;

@@ -10,8 +10,8 @@ use crate::isis_pdu_trace;
 use crate::rib::MacAddr;
 use crate::rib::link_ext::LinkFlagsExt;
 
-use super::inst::{Packet, PacketMessage};
 use super::link::{Afis, HelloPaddingPolicy, LinkTop, NetworkType};
+use super::lsp::{Packet, PacketMessage};
 use super::neigh::Neighbor;
 use super::{Level, Message, NfsmState};
 

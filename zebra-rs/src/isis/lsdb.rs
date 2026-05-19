@@ -15,8 +15,9 @@ use super::inst::MsgSender;
 use super::link::LinkTop;
 use super::{
     Level, LspFlood,
-    inst::{IsisTop, lsp_emit, lsp_flood, spf_schedule},
+    inst::{IsisTop, spf_schedule},
     link::Afi,
+    lsp::{lsp_emit, lsp_flood},
 };
 
 #[derive(Default)]

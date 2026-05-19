@@ -7,8 +7,9 @@ use isis_macros::isis_pdu_handler;
 use isis_packet::*;
 
 use crate::fmt::DisplayOpt;
-use crate::isis::inst::{csnp_generate, spf_schedule};
+use crate::isis::inst::spf_schedule;
 use crate::isis::link::DisStatus;
+use crate::isis::lsp::csnp_generate;
 use crate::isis::neigh::Neighbor;
 use crate::isis::nfsm::nfsm_hold_timer;
 use crate::isis::{IfsmEvent, Message, NfsmState};
@@ -17,9 +18,9 @@ use crate::rib::MacAddr;
 
 use super::flood;
 use super::ifsm::has_level;
-use super::inst::{Packet, PacketMessage};
 use super::link::{LinkTop, NetworkType};
 use super::lsdb;
+use super::lsp::{Packet, PacketMessage};
 use super::{LabelPool, Level};
 
 #[derive(Debug)]
