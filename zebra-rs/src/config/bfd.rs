@@ -6,15 +6,13 @@ use super::ConfigManager;
 
 /// Spawn the BFD instance the first time `bfd` configuration appears.
 /// Mirrors [`super::ospf::spawn_ospf`] / [`super::isis::spawn_isis`] /
-/// [`super::bgp::spawn_bgp`].
-///
-/// The YANG schema and config-callback wiring land in PR 4; until
-/// then this function is reachable from manager.rs but never actually
-/// invoked at runtime (no YANG → no `bfd` config lines reach the
-/// candidate).
+/// [`super::bgp::spawn_bgp`]. Registers the per-instance config
+/// channel so committed `/bfd/*` leaves reach the callback
+/// dispatcher.
 pub fn spawn_bfd(config: &ConfigManager) {
     match inst::Bfd::new(Context::default()) {
         Ok(bfd) => {
+            config.subscribe("bfd", bfd.cm.tx.clone());
             let task = inst::serve(bfd);
             config
                 .protocol_tasks
