@@ -1,6 +1,7 @@
 use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxResponse};
 
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
+use super::bfd::{despawn_bfd, spawn_bfd};
 use super::bgp::{despawn_bgp, spawn_bgp};
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create};
@@ -184,6 +185,7 @@ impl ConfigManager {
         let mut ospf = false;
         let mut isis = false;
         let mut bgp = false;
+        let mut bfd = false;
         for (proto, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
                 .unwrap();
@@ -195,6 +197,9 @@ impl ConfigManager {
             }
             if proto == "bgp" {
                 bgp = true;
+            }
+            if proto == "bfd" {
+                bfd = true;
             }
         }
         for line in diff.lines() {
@@ -220,6 +225,10 @@ impl ConfigManager {
             if !bgp && op == ConfigOp::Set && line.starts_with("router bgp") {
                 bgp = true;
                 spawn_bgp(self);
+            }
+            if !bfd && op == ConfigOp::Set && line.starts_with("bfd") {
+                bfd = true;
+                spawn_bfd(self);
             }
             // Handle logging configuration changes
             if op == ConfigOp::Set && line.starts_with("logging output") {
@@ -273,6 +282,13 @@ impl ConfigManager {
         }
         if self.protocol_tasks.borrow().contains_key("isis") && !proto_in_candidate("isis") {
             despawn_isis(self);
+        }
+        // BFD's top-level keyword is `bfd` (FRR-style), not
+        // `router <proto>`, so it can't use `proto_in_candidate`.
+        if self.protocol_tasks.borrow().contains_key("bfd")
+            && !candidate.lines().any(|l| l.starts_with("bfd"))
+        {
+            despawn_bfd(self);
         }
 
         self.store.commit();
