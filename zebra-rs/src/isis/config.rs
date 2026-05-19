@@ -158,6 +158,7 @@ impl Isis {
             link::config_ipv4_prefix_sid_index,
         );
         self.callback_add("/router/isis/interface/metric", link::config_metric);
+        self.callback_add("/router/isis/interface/srlg", link::config_srlg);
         self.callback_add(
             "/router/isis/interface/ipv6/enable",
             link::config_ipv6_enable,

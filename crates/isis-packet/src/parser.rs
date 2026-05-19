@@ -14,9 +14,9 @@ use super::checksum_calc;
 use super::error::{IsisIResult, IsisParseError};
 use super::util::{ParseBe, TlvEmitter, u32_u8_3};
 use super::{
-    IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvMtIpReach, IsisTlvMtIpv6Reach,
-    IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRouterCap, IsisTlvSrv6, IsisTlvType, IsisType,
-    many0_complete,
+    IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvIpv6Srlg, IsisTlvMtIpReach,
+    IsisTlvMtIpv6Reach, IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRouterCap, IsisTlvSrlg,
+    IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
 };
 
 // IS-IS discriminator.
@@ -537,6 +537,10 @@ pub enum IsisTlv {
     ExtIpReach(IsisTlvExtIpReach),
     #[nom(Selector = "IsisTlvType::DynamicHostname")]
     Hostname(IsisTlvHostname),
+    #[nom(Selector = "IsisTlvType::Srlg")]
+    Srlg(IsisTlvSrlg),
+    #[nom(Selector = "IsisTlvType::Ipv6Srlg")]
+    Ipv6Srlg(IsisTlvIpv6Srlg),
     #[nom(Selector = "IsisTlvType::Ipv6TeRouterId")]
     Ipv6TeRouterId(IsisTlvIpv6TeRouterId),
     #[nom(Selector = "IsisTlvType::Ipv6IfAddr")]
@@ -593,6 +597,8 @@ impl IsisTlv {
             TeRouterId(v) => v.tlv_emit(buf),
             ExtIpReach(v) => v.tlv_emit(buf),
             Hostname(v) => v.tlv_emit(buf),
+            Srlg(v) => v.tlv_emit(buf),
+            Ipv6Srlg(v) => v.tlv_emit(buf),
             Ipv6TeRouterId(v) => v.tlv_emit(buf),
             Ipv6IfAddr(v) => v.tlv_emit(buf),
             Ipv6GlobalIfAddr(v) => v.tlv_emit(buf),

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::btree_map::{Iter, IterMut};
 use std::fmt::Write;
 use std::sync::Arc;
@@ -216,6 +217,16 @@ pub struct LinkConfig {
     /// in PR 6; the adjacency FSM subscribe path (on Up) and the
     /// BfdEvent::Down → adjacency teardown path arrive in PR 7.
     pub bfd: LinkBfdConfig,
+
+    /// SRLG group names this link belongs to (from the leaf-list at
+    /// /router/isis/interface/<name>/srlg). Each name references a
+    /// /srlg/group entry in the RIB-side global SRLG table; resolution
+    /// from name to the 32-bit on-wire value happens at LSP-build time
+    /// via `Isis::srlg_groups`. Held as a `BTreeSet` so the set is
+    /// deduplicated and iterated in deterministic order — important
+    /// because the order influences the byte layout of TLVs 138/139
+    /// (RFC 5307 / RFC 6119) and so the LSP-content signature.
+    pub srlg_groups: BTreeSet<String>,
 }
 
 /// IS-IS-side mirror of the YANG `bfd { enable, profile }` container.
@@ -796,6 +807,31 @@ pub fn config_mt_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option
     } else {
         link.config.mt_metrics.remove(&id);
     }
+    Some(())
+}
+
+// Per-link SRLG membership. The path arrives with two values from
+// libyang dispatch: outer interface key (`if-name`) and the leaf-list
+// value (SRLG group name). One call per value — when an operator sets
+// multiple names in a single commit, libyang fires this callback once
+// per name. Empty cache after delete (handled by the config layer's
+// leaf-list cascade) leaves the BTreeSet empty.
+pub fn config_srlg(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ifname = args.string()?;
+    let name = args.string()?;
+
+    let link = isis.links.get_mut_by_name(&ifname)?;
+    if op.is_set() {
+        link.config.srlg_groups.insert(name);
+    } else {
+        link.config.srlg_groups.remove(&name);
+    }
+    // Re-originate both levels so the SRLG sub-TLV changes propagate
+    // to peers without waiting for the refresh timer. The level guard
+    // inside `process_lsp_originate` skips the wrong level on
+    // single-level instances.
+    let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
+    let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     Some(())
 }
 

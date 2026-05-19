@@ -190,6 +190,8 @@ impl Display for IsisTlv {
             TeRouterId(v) => write!(f, "{}", v),
             ExtIpReach(v) => write!(f, "{}", v),
             Hostname(v) => write!(f, "{}", v),
+            Srlg(v) => write!(f, "{:?}", v),
+            Ipv6Srlg(v) => write!(f, "{:?}", v),
             Ipv6TeRouterId(v) => write!(f, "{}", v),
             Ipv6IfAddr(v) => write!(f, "{}", v),
             Ipv6GlobalIfAddr(v) => write!(f, "{}", v),

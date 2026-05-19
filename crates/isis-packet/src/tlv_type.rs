@@ -21,6 +21,10 @@ pub enum IsisTlvType {
     TeRouterId = 134,
     ExtIpReach = 135,
     DynamicHostname = 137,
+    /// IPv4 Shared Risk Link Group (RFC 5307).
+    Srlg = 138,
+    /// IPv6 Shared Risk Link Group (RFC 6119).
+    Ipv6Srlg = 139,
     Ipv6TeRouterId = 140,
     Ipv6IfAddr = 232,
     Ipv6GlobalIfAddr = 233,
@@ -59,6 +63,8 @@ impl IsisTlvType {
                 | TeRouterId
                 | ExtIpReach
                 | DynamicHostname
+                | Srlg
+                | Ipv6Srlg
                 | Ipv6TeRouterId
                 | Ipv6IfAddr
                 | Ipv6GlobalIfAddr
@@ -89,6 +95,8 @@ impl From<IsisTlvType> for u8 {
             TeRouterId => 134,
             ExtIpReach => 135,
             DynamicHostname => 137,
+            Srlg => 138,
+            Ipv6Srlg => 139,
             Ipv6TeRouterId => 140,
             Ipv6IfAddr => 232,
             Ipv6GlobalIfAddr => 233,
@@ -120,6 +128,8 @@ impl From<u8> for IsisTlvType {
             134 => TeRouterId,
             135 => ExtIpReach,
             137 => DynamicHostname,
+            138 => Srlg,
+            139 => Ipv6Srlg,
             140 => Ipv6TeRouterId,
             232 => Ipv6IfAddr,
             233 => Ipv6GlobalIfAddr,
