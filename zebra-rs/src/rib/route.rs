@@ -1001,11 +1001,27 @@ fn rib_resolve_nexthop(
         resolve_nexthop_multi(multi, nmap, set);
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
-        let mut _pro_valid = false;
-        for uni in pro.iter_unis_mut() {
-            let valid = resolve_nexthop_uni(uni, nmap, table);
-            if valid {
-                _pro_valid = true;
+        // Walk members explicitly (not via `iter_unis_mut`) so each
+        // `NexthopMember::Multi` gets a kernel-side group allocated
+        // via `resolve_nexthop_multi` — the iter-unis version
+        // flattens the structure and leaves the Multi wrapper's
+        // `gid` at 0, which makes the FIB install fail with ENODEV
+        // (Nhid(0)) at RTM_NEWROUTE time.
+        for member in pro.nexthops.iter_mut() {
+            match member {
+                NexthopMember::Uni(uni) => {
+                    let _ = resolve_nexthop_uni(uni, nmap, table);
+                }
+                NexthopMember::Multi(multi) => {
+                    let mut set = BTreeSet::<(usize, u8)>::new();
+                    for uni in multi.nexthops.iter_mut() {
+                        let valid = resolve_nexthop_uni(uni, nmap, table);
+                        if valid {
+                            set.insert((uni.gid, uni.weight));
+                        }
+                    }
+                    resolve_nexthop_multi(multi, nmap, set);
+                }
             }
         }
     }
@@ -1393,8 +1409,26 @@ fn rib_resolve_nexthop_v6(
         resolve_nexthop_multi(multi, nmap, set);
     }
     if let Nexthop::List(pro) = &mut entry.nexthop {
-        for uni in pro.iter_unis_mut() {
-            let _ = resolve_nexthop_uni_v6(uni, nmap, table);
+        // Mirror of the v4 fix: walk members explicitly so each
+        // `NexthopMember::Multi` gets a kernel-side group allocated
+        // (without this, the Multi wrapper's `gid` stays at 0 and
+        // the FIB install fails with ENODEV at Nhid(0)).
+        for member in pro.nexthops.iter_mut() {
+            match member {
+                NexthopMember::Uni(uni) => {
+                    let _ = resolve_nexthop_uni_v6(uni, nmap, table);
+                }
+                NexthopMember::Multi(multi) => {
+                    let mut set = BTreeSet::<(usize, u8)>::new();
+                    for uni in multi.nexthops.iter_mut() {
+                        let valid = resolve_nexthop_uni_v6(uni, nmap, table);
+                        if valid {
+                            set.insert((uni.gid, uni.weight));
+                        }
+                    }
+                    resolve_nexthop_multi(multi, nmap, set);
+                }
+            }
         }
     }
     // If one of nexthop is valid, the entry is valid.
@@ -1635,5 +1669,59 @@ mod tests {
             RecoveryDecision::Recover
         );
         assert_eq!(state.history.len(), 1);
+    }
+
+    /// Regression: `Nexthop::List { Multi(...), Uni(backup) }` must
+    /// allocate a kernel-side group for the nested Multi via
+    /// `resolve_nexthop_multi`. Before the fix, only the Multi's
+    /// leg Unis were resolved (via `iter_unis_mut`) and the Multi
+    /// wrapper's `gid` stayed at 0 — the FIB then installed a route
+    /// with `Nhid(0)` and the kernel returned ENODEV.
+    #[test]
+    fn list_with_nested_multi_resolves_multi_gid() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::NexthopUni;
+        use super::super::{Nexthop, NexthopList, NexthopMap, NexthopMember, NexthopMulti};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        let leg_a = NexthopUni::new("10.0.0.1".parse().unwrap(), 1011, vec![]);
+        let leg_b = NexthopUni::new("10.0.0.2".parse().unwrap(), 1011, vec![]);
+        let multi = NexthopMulti {
+            metric: 1011,
+            nexthops: vec![leg_a, leg_b],
+            ..Default::default()
+        };
+        let backup = NexthopUni::new("10.0.0.3".parse().unwrap(), 1012, vec![]);
+
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::List(NexthopList {
+            nexthops: vec![NexthopMember::Multi(multi), NexthopMember::Uni(backup)],
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap);
+
+        let Nexthop::List(pro) = &entry.nexthop else {
+            panic!("entry.nexthop should still be List");
+        };
+        let multi_member = pro
+            .nexthops
+            .iter()
+            .find_map(|m| match m {
+                NexthopMember::Multi(m) => Some(m),
+                _ => None,
+            })
+            .expect("multi member preserved");
+        assert!(
+            multi_member.gid != 0,
+            "nested Multi must get a kernel-side group allocated (gid != 0)"
+        );
+        for leg in &multi_member.nexthops {
+            assert!(leg.gid != 0, "each leg also gets a gid");
+        }
     }
 }
