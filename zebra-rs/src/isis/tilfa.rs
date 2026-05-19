@@ -334,12 +334,29 @@ pub(super) fn tilfa_repair_path(
             continue;
         }
 
-        // X
+        // X — the protected element. For a P2P first-hop this is the
+        // physical neighbor router. For a LAN first-hop the primary
+        // path is `[PN, N, ...]`; the pseudonode is just a modeling
+        // artifact for the LAN segment, and excluding it alone gives
+        // (LAN-)link-protection (N keeps every physical edge to R1/R2/
+        // etc., so P-space and Q-space collapse and the repair list
+        // ends up shorter than P2P's). Advance past the pseudonode to
+        // `first[1]` so LAN matches P2P's node-protection model, and
+        // so that a destination equal to the physical neighbor is
+        // skipped via the empty-modified-SPF path (same as P2P, where
+        // `d == x` makes `spf::tilfa` return `vec![]`).
         let first = &path.paths[0];
         if first.is_empty() {
             continue;
         }
-        let x = first[0];
+        let x = if graph.get(&first[0]).is_some_and(|v| v.is_pseudo_node()) {
+            // `[PN]` alone (destination is the pseudonode itself)
+            // shouldn't happen for a real destination, but fall back
+            // to the pseudonode so we don't index past the end.
+            first.get(1).copied().unwrap_or(first[0])
+        } else {
+            first[0]
+        };
 
         let repair_paths = spf::tilfa(graph, source, *d, &[x]);
         if !repair_paths.is_empty() {
