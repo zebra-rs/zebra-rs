@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -6,6 +6,8 @@ use isis_packet::{IsisProto, IsisSysId, IsisTlv, Nsap};
 use prefix_trie::PrefixMap;
 use serde::Serialize;
 
+use super::Hostname;
+use super::lsdb::Lsdb;
 use super::rib::{SpfNexthop, SpfNexthopV6, SpfRoute, SpfRouteV6};
 use super::tilfa::{RepairPathMpls, RepairPathSrv6};
 use super::{Isis, inst::ShowCallback};
@@ -71,10 +73,17 @@ fn show_isis_summary(
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
 
+    // LSP buffer size — the value we advertise in TLV 14 (RFC 1195)
+    // and the cap the send-side packer uses for each fragment. Shown
+    // unconditionally so operators can confirm the configured value
+    // matches what's on the wire without having to grep the database.
+    writeln!(buf, "LSP MTU: {} bytes", isis.config.lsp_mtu_size())?;
+
     // SRv6 Locator section. Only present when the operator has
     // configured a locator name under `segment-routing/srv6/locator`;
     // an unconfigured node has nothing useful to show here.
     if let Some(name) = isis.watched_locator.as_ref() {
+        writeln!(buf)?;
         writeln!(buf, "SRv6 Locator:")?;
         writeln!(
             buf,
@@ -1427,6 +1436,120 @@ fn write_rib_v6(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Resul
     Ok(())
 }
 
+/// One row of the fragment summary at the top of `show isis
+/// database`. Aggregates all LSDB entries that share a
+/// `(sys_id, pseudo_id)` origin into a per-set view so the operator
+/// can answer "is this peer fragmenting and how heavily" in one
+/// glance, without reading every per-LSP row.
+#[derive(Debug, PartialEq, Eq)]
+struct FragmentSetRow {
+    /// Display label for the origin — hostname when known plus the
+    /// pseudo-id byte, falling back to the bare system-id form when
+    /// no hostname has been learned.
+    label: String,
+    /// True for pseudonode LSPs (pseudo_id != 0), false for the
+    /// router-LSP set.
+    pseudo: bool,
+    /// Lowest and highest fragment numbers actually present in the
+    /// LSDB for this origin.
+    frag_low: u8,
+    frag_high: u8,
+    /// Distinct fragment count.
+    count: usize,
+    /// Sum of every fragment's `pdu_len` — close enough to
+    /// originatingLSPBufferSize × count to spot when an originator
+    /// is bumping against its own cap.
+    total_bytes: usize,
+    /// True when at least one fragment exists for this origin but
+    /// fragment 0 is missing — receivers treat the whole node as
+    /// missing its scalar attributes (hostname, capability, OL),
+    /// so this is a flag worth surfacing.
+    missing_zero: bool,
+}
+
+/// Build per-(sys_id, pseudo_id) summary rows for every fragmented
+/// origin in the LSDB. "Fragmented" here means either spanning more
+/// than one fragment OR missing fragment 0 — both are noteworthy
+/// states that single-fragment renderers won't surface on their own.
+fn fragment_sets(lsdb: &Lsdb, hostname_map: &Hostname) -> Vec<FragmentSetRow> {
+    let mut groups: BTreeMap<(IsisSysId, u8), (BTreeSet<u8>, usize)> = BTreeMap::new();
+    for (lsp_id, lsa) in lsdb.iter() {
+        let entry = groups
+            .entry((lsp_id.sys_id(), lsp_id.pseudo_id()))
+            .or_default();
+        entry.0.insert(lsp_id.fragment_id());
+        entry.1 += lsa.lsp.pdu_len as usize;
+    }
+
+    let mut rows = Vec::new();
+    for ((sys_id, pseudo_id), (frags, total_bytes)) in groups {
+        let missing_zero = !frags.contains(&0);
+        if frags.len() <= 1 && !missing_zero {
+            // A single fragment whose id is 0 is the well-behaved
+            // common case — the per-LSP detail rows below already
+            // cover it.
+            continue;
+        }
+        let hostname = hostname_map
+            .get(&sys_id)
+            .map(|(h, _)| h.clone())
+            .unwrap_or_else(|| sys_id.to_string());
+        let label = format!("{}.{:02x}", hostname, pseudo_id);
+        let frag_low = *frags.iter().next().expect("non-empty by construction");
+        let frag_high = *frags.iter().next_back().expect("non-empty by construction");
+        rows.push(FragmentSetRow {
+            label,
+            pseudo: pseudo_id != 0,
+            frag_low,
+            frag_high,
+            count: frags.len(),
+            total_bytes,
+            missing_zero,
+        });
+        // Drop the moved values explicitly so we don't accidentally
+        // reuse `sys_id` below.
+        let _ = (sys_id,);
+    }
+    rows
+}
+
+/// Render the fragment-summary block. Returns the empty string when
+/// there's nothing fragmented at this level, so the caller can drop
+/// the entire section silently for the common (single-fragment-per-
+/// system) case.
+fn render_fragment_summary(level: Level, lsdb: &Lsdb, hostname_map: &Hostname) -> String {
+    let rows = fragment_sets(lsdb, hostname_map);
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let _ = writeln!(out, "\n{} Fragment Summary:", level);
+    let _ = writeln!(
+        out,
+        "{:<25} {:<10} {:<10} {:>5}  {:>7}",
+        "Origin", "Kind", "Fragments", "Count", "Bytes"
+    );
+    for r in rows {
+        let kind = if r.pseudo { "pseudonode" } else { "router" };
+        let span = if r.frag_low == r.frag_high {
+            format!("{}", r.frag_low)
+        } else {
+            format!("{}..{}", r.frag_low, r.frag_high)
+        };
+        let warn = if r.missing_zero {
+            "  (frag 0 missing — node invisible to SPF)"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "{:<25} {:<10} {:<10} {:>5}  {:>7}{}",
+            r.label, kind, span, r.count, r.total_bytes, warn
+        );
+    }
+    out
+}
+
 // JSON structures for ISIS database
 #[derive(Serialize)]
 struct DatabaseJson {
@@ -1509,6 +1632,20 @@ fn show_isis_database(
     } else {
         // Text output (existing implementation)
         let mut buf = String::new();
+
+        // Per-origin fragment summary, shown before the detail rows
+        // so operators see at a glance which systems are fragmenting
+        // (and whether any of them are missing fragment 0). Suppressed
+        // entirely when no system in this level is fragmented.
+        let l1_summary =
+            render_fragment_summary(Level::L1, &isis.lsdb.l1, isis.hostname.get(&Level::L1));
+        let l2_summary =
+            render_fragment_summary(Level::L2, &isis.lsdb.l2, isis.hostname.get(&Level::L2));
+        buf.push_str(&l1_summary);
+        buf.push_str(&l2_summary);
+        if !l1_summary.is_empty() || !l2_summary.is_empty() {
+            buf.push('\n');
+        }
 
         for (lsp_id, lsa) in isis.lsdb.l1.iter() {
             let rem = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec());
@@ -2130,5 +2267,85 @@ mod tests {
         assert!(buf2.contains("Trivial repair"));
         assert!(buf2.contains("1-segment SR"));
         assert!(buf2.contains("N-segment SR"));
+    }
+
+    fn make_lsa(
+        sys: u8,
+        pseudo: u8,
+        frag: u8,
+        pdu_len: u16,
+    ) -> (isis_packet::IsisLspId, super::super::lsdb::Lsa) {
+        let sys_id = isis_packet::IsisSysId {
+            id: [0, 0, 0, 0, 0, sys],
+        };
+        let lsp_id = isis_packet::IsisLspId::new(sys_id, pseudo, frag);
+        let lsp = isis_packet::IsisLsp {
+            lsp_id,
+            pdu_len,
+            ..Default::default()
+        };
+        (lsp_id, super::super::lsdb::Lsa::new(lsp))
+    }
+
+    /// Three originators: one fragmented router LSP (frags 0..1),
+    /// one fragmented pseudonode (frags 0..2), one boring single-
+    /// fragment router. The summary should surface only the two
+    /// fragmented sets, with correct counts and byte totals.
+    #[test]
+    fn fragment_sets_picks_only_multi_fragment_origins() {
+        let mut lsdb = super::super::lsdb::Lsdb::default();
+        // Router-1: frags 0 and 1.
+        for (id, lsa) in [make_lsa(1, 0, 0, 400), make_lsa(1, 0, 1, 200)] {
+            lsdb.map.insert(id, lsa);
+        }
+        // Router-2: single fragment 0.
+        {
+            let (id, lsa) = make_lsa(2, 0, 0, 250);
+            lsdb.map.insert(id, lsa);
+        }
+        // Router-1's pseudonode on circuit 1: frags 0,1,2.
+        for (id, lsa) in [
+            make_lsa(1, 1, 0, 300),
+            make_lsa(1, 1, 1, 100),
+            make_lsa(1, 1, 2, 50),
+        ] {
+            lsdb.map.insert(id, lsa);
+        }
+
+        let hostnames = Hostname::default();
+        let rows = fragment_sets(&lsdb, &hostnames);
+        assert_eq!(rows.len(), 2, "only multi-fragment origins should appear");
+
+        let router = rows.iter().find(|r| !r.pseudo).expect("router row");
+        assert_eq!(router.count, 2);
+        assert_eq!(router.frag_low, 0);
+        assert_eq!(router.frag_high, 1);
+        assert_eq!(router.total_bytes, 600);
+        assert!(!router.missing_zero);
+
+        let pn = rows.iter().find(|r| r.pseudo).expect("pseudonode row");
+        assert_eq!(pn.count, 3);
+        assert_eq!(pn.frag_low, 0);
+        assert_eq!(pn.frag_high, 2);
+        assert_eq!(pn.total_bytes, 450);
+    }
+
+    /// A peer whose only fragment is N≥1 (frag 0 absent) is broken
+    /// for SPF — the summary must surface it even though there's
+    /// only one fragment, and flag the missing-zero state.
+    #[test]
+    fn fragment_sets_flags_missing_fragment_zero() {
+        let mut lsdb = super::super::lsdb::Lsdb::default();
+        // Single fragment with id 1, no fragment 0.
+        let (id, lsa) = make_lsa(7, 0, 1, 200);
+        lsdb.map.insert(id, lsa);
+
+        let hostnames = Hostname::default();
+        let rows = fragment_sets(&lsdb, &hostnames);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].missing_zero);
+        assert_eq!(rows[0].count, 1);
+        assert_eq!(rows[0].frag_low, 1);
+        assert_eq!(rows[0].frag_high, 1);
     }
 }

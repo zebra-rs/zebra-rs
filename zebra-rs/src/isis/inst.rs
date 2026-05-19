@@ -615,6 +615,23 @@ impl Isis {
             .max()
             .unwrap_or(0);
 
+        // Multi-fragment originations get a single trace line at the
+        // top of the burst — easier to follow than scanning N separate
+        // `[LspOriginate]` lines for a fragmented set. Logged only
+        // when there's actual fragmentation since the per-fragment
+        // detail is already covered by `lsp_generate`.
+        if fragments.len() > 1 {
+            let total_bytes: usize = fragments.iter().map(|l| l.pdu_len as usize).sum();
+            isis_event_trace!(
+                top.tracing,
+                LspOriginate,
+                &level,
+                "[LspFragPack] {} fragments emitted, {} bytes total",
+                fragments.len(),
+                total_bytes
+            );
+        }
+
         for mut frag in fragments {
             let buf = lsp_emit(&mut frag, level);
             let lsp_id = frag.lsp_id;
