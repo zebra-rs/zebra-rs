@@ -3,7 +3,7 @@ use num_enum::IntoPrimitive;
 use strum_macros::{Display, EnumString};
 
 use crate::context::Timer;
-use crate::isis::inst::spf_schedule;
+use crate::isis::rib::spf_schedule;
 
 use super::link::LinkTop;
 use super::{IfsmEvent, Level, Message};
