@@ -132,7 +132,6 @@ pub struct Bgp {
     pub show_cb: HashMap<String, ShowCallback>,
     pub rib_tx: UnboundedSender<rib::Message>,
     pub rib_rx: UnboundedReceiver<RibRx>,
-    pub redist: RibRxChannel,
     pub callbacks: HashMap<String, Callback>,
     pub pcallbacks: HashMap<String, PCallback>,
     /// BGP Local RIB (Loc-RIB) for best path selection
@@ -210,7 +209,6 @@ impl Bgp {
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            redist: RibRxChannel::new(),
             callbacks: HashMap::new(),
             pcallbacks: HashMap::new(),
             listen_task: None,
@@ -675,8 +673,8 @@ impl Bgp {
     }
 }
 
-pub fn serve(mut bgp: Bgp) {
-    tokio::spawn(async move {
+pub fn serve(mut bgp: Bgp) -> Task<()> {
+    Task::spawn(async move {
         bgp.event_loop().await;
-    });
+    })
 }

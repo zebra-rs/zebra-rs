@@ -179,6 +179,14 @@ pub enum Message {
         proto: String,
         tx: UnboundedSender<RibRx>,
     },
+    /// Tear down all RIB state owned by a protocol whose task is
+    /// being despawned (`no router bgp` / `no router isis` / `no
+    /// router ospf`). Withdraws every route / ILM whose `rtype`
+    /// matches, drops the redist sender, and clears SR watchers
+    /// registered under the proto name. Idempotent.
+    ProtoCleanup {
+        proto: String,
+    },
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -244,7 +252,7 @@ pub struct Rib {
     pub show_cb: HashMap<String, ShowCallback>,
     pub fib: FibChannel,
     pub fib_handle: FibHandle,
-    pub redists: Vec<UnboundedSender<RibRx>>,
+    pub redists: HashMap<String, UnboundedSender<RibRx>>,
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
     pub vxlan: BTreeMap<String, Vxlan>,
@@ -356,7 +364,7 @@ impl Rib {
             show_cb: HashMap::new(),
             fib,
             fib_handle,
-            redists: Vec::new(),
+            redists: HashMap::new(),
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
             vxlan: BTreeMap::new(),
@@ -759,7 +767,7 @@ impl Rib {
         }
     }
 
-    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, _proto: String) {
+    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, proto: String) {
         // Link dump.
         for (_, link) in self.links.iter() {
             let msg = RibRx::LinkAdd(link.clone());
@@ -802,12 +810,63 @@ impl Rib {
                 let _ = tx.send(RibRx::FdbAdd(entry));
             }
         }
-        self.redists.push(tx.clone());
+        self.redists.insert(proto, tx.clone());
         if !self.router_id.is_unspecified() {
             let msg = RibRx::RouterIdUpdate(self.router_id);
             tx.send(msg).unwrap();
         }
         tx.send(RibRx::EoR).unwrap();
+    }
+
+    async fn proto_cleanup(&mut self, proto: String) {
+        let rtype = match proto.as_str() {
+            "bgp" => RibType::Bgp,
+            "isis" => RibType::Isis,
+            "ospf" => RibType::Ospf,
+            _ => return,
+        };
+
+        let v4_prefixes: Vec<Ipv4Net> = self
+            .table
+            .iter()
+            .filter_map(|(prefix, entries)| {
+                entries.iter().any(|e| e.rtype == rtype).then_some(*prefix)
+            })
+            .collect();
+        for prefix in v4_prefixes {
+            self.ipv4_route_del(&prefix, RibEntry::new(rtype)).await;
+        }
+
+        let v6_prefixes: Vec<Ipv6Net> = self
+            .table_v6
+            .iter()
+            .filter_map(|(prefix, entries)| {
+                entries.iter().any(|e| e.rtype == rtype).then_some(*prefix)
+            })
+            .collect();
+        for prefix in v6_prefixes {
+            self.ipv6_route_del(&prefix, RibEntry::new(rtype)).await;
+        }
+
+        let labels: Vec<u32> = self
+            .ilm
+            .iter()
+            .filter_map(|(label, e)| (e.rtype == rtype).then_some(*label))
+            .collect();
+        for label in labels {
+            if let Some(ilm) = self.ilm.get(&label).cloned() {
+                self.ilm_del(label, ilm).await;
+            }
+        }
+
+        self.redists.remove(&proto);
+        self.sr_clients.remove(&proto);
+        for watchers in self.block_watch.values_mut() {
+            watchers.remove(&proto);
+        }
+        for watchers in self.locator_watch.values_mut() {
+            watchers.remove(&proto);
+        }
     }
 
     async fn process_msg(&mut self, msg: Message) {
@@ -1098,6 +1157,9 @@ impl Rib {
             }
             Message::Subscribe { tx, proto } => {
                 self.subscribe(tx, proto);
+            }
+            Message::ProtoCleanup { proto } => {
+                self.proto_cleanup(proto).await;
             }
             Message::MacAdd {
                 vni,

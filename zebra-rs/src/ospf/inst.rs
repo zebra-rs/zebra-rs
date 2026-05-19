@@ -22,7 +22,7 @@ use crate::rib::{self, Link, RibType};
 use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{Args, ConfigChannel, ConfigRequest, path_from_command},
-    context::Context,
+    context::{Context, Task},
     rib::RibRxChannel,
 };
 
@@ -1248,10 +1248,10 @@ impl Ospf {
     }
 }
 
-pub fn serve(mut ospf: Ospf) {
-    tokio::spawn(async move {
+pub fn serve(mut ospf: Ospf) -> Task<()> {
+    Task::spawn(async move {
         ospf.event_loop().await;
-    });
+    })
 }
 
 pub enum Message {

@@ -701,7 +701,7 @@ impl Rib {
 
             link_addr_del(link, addr.clone());
 
-            for tx in self.redists.iter() {
+            for tx in self.redists.values() {
                 let link = RibRx::AddrDel(addr.clone());
                 let _ = tx.send(link);
             }

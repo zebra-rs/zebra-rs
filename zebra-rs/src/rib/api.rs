@@ -78,57 +78,57 @@ pub enum RibRx {
 
 impl Rib {
     pub fn api_link_add(&self, link: &Link) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let link = RibRx::LinkAdd(link.clone());
             let _ = tx.send(link);
         }
     }
 
     pub fn api_link_up(&self, ifindex: u32) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let _ = tx.send(RibRx::LinkUp(ifindex));
         }
     }
 
     pub fn api_link_down(&self, ifindex: u32) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let _ = tx.send(RibRx::LinkDown(ifindex));
         }
     }
 
     pub fn api_addr_add(&self, addr: &LinkAddr) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let link = RibRx::AddrAdd(addr.clone());
             let _ = tx.send(link);
         }
     }
 
     pub fn api_router_id_update(&self, router_id: Ipv4Addr) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let _ = tx.send(RibRx::RouterIdUpdate(router_id));
         }
     }
 
     pub fn api_fdb_add(&self, entry: &FdbEntry) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let _ = tx.send(RibRx::FdbAdd(entry.clone()));
         }
     }
 
     pub fn api_fdb_del(&self, entry: &FdbEntry) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let _ = tx.send(RibRx::FdbDel(entry.clone()));
         }
     }
 
     pub fn api_vxlan_add(&self, vni: u32, vtep_local: IpAddr) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let _ = tx.send(RibRx::VxlanAdd { vni, vtep_local });
         }
     }
 
     pub fn api_vxlan_del(&self, vni: u32) {
-        for tx in self.redists.iter() {
+        for tx in self.redists.values() {
             let _ = tx.send(RibRx::VxlanDel { vni });
         }
     }
