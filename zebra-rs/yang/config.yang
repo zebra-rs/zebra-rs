@@ -426,6 +426,12 @@ module config {
           leaf hold_time {
             type uint16;
           }
+          leaf lsp-refresh-interval {
+            type uint16 {
+              range "1..65535";
+            }
+            units "seconds";
+          }
         }
 
         list interface {
@@ -464,6 +470,31 @@ module config {
                 enum disable;
               }
             }
+            leaf interval {
+              type uint16 {
+                range "1..65535";
+              }
+              units "seconds";
+            }
+            leaf multiplier {
+              type uint16 {
+                range "2..1000";
+              }
+            }
+          }
+
+          leaf csnp-interval {
+            type uint16 {
+              range "1..65535";
+            }
+            units "seconds";
+          }
+
+          leaf psnp-interval {
+            type uint16 {
+              range "1..65535";
+            }
+            units "seconds";
           }
 
           leaf metric {

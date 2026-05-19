@@ -54,6 +54,10 @@ impl Isis {
         self.callback_add("/router/isis/is-type", config_is_type);
         self.callback_add("/router/isis/hostname", config_hostname);
         self.callback_add("/router/isis/timers/hold-time", config_hold_time);
+        self.callback_add(
+            "/router/isis/timers/lsp-refresh-interval",
+            config_lsp_refresh_interval,
+        );
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
         self.callback_add(
@@ -84,6 +88,22 @@ impl Isis {
         self.callback_add(
             "/router/isis/interface/network-type",
             link::config_network_type,
+        );
+        self.callback_add(
+            "/router/isis/interface/hello/interval",
+            link::config_hello_interval,
+        );
+        self.callback_add(
+            "/router/isis/interface/hello/multiplier",
+            link::config_hello_multiplier,
+        );
+        self.callback_add(
+            "/router/isis/interface/csnp-interval",
+            link::config_csnp_interval,
+        );
+        self.callback_add(
+            "/router/isis/interface/psnp-interval",
+            link::config_psnp_interval,
         );
         self.callback_add(
             "/router/isis/interface/hello/padding",
@@ -271,6 +291,17 @@ fn config_hold_time(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()>
         isis.config.hold_time = Some(hold_time);
     } else {
         isis.config.hold_time = None;
+    }
+    Some(())
+}
+
+fn config_lsp_refresh_interval(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let refresh_time = args.u16()?;
+
+    if op == ConfigOp::Set {
+        isis.config.refresh_time = Some(refresh_time);
+    } else {
+        isis.config.refresh_time = None;
     }
     Some(())
 }
