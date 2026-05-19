@@ -1687,9 +1687,36 @@ pub fn graph(
         graph.insert(node_id, vertex);
     }
 
+    // Build a local-adjacency → ifindex map for this level. Each
+    // entry corresponds to one of our own ExtIsReach edges; the key
+    // is the IsisNeighborId carried in that edge's TLV. For P2P
+    // adjacencies the key is (peer_sys_id, 0); for LAN adjacencies
+    // it is the (DIS_sys_id, pseudo_id) of the LAN's pseudonode. The
+    // graph builder uses this to stamp link_id = ifindex onto edges
+    // emitted from our own router LSP, so the rib-builder can resolve
+    // back to a specific local interface instead of iterating every
+    // top.links entry.
+    //
+    // Case P4 (two NICs on the same LAN) collapses both interfaces to
+    // a single key here — only the last-inserted ifindex survives, and
+    // SPF installs one nexthop. Accepted per the design decision.
+    let mut local_adj_to_ifindex: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
+    for (ifindex, link) in top.links.iter() {
+        if let Some((adj, _)) = link.state.adj.get(&level) {
+            local_adj_to_ifindex.insert(*adj, *ifindex);
+        }
+    }
+
     // Process links.
-    for (neighbor_id, _is_originated, lsp) in nodes_to_process.iter() {
+    for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
         let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
+
+        // link_id is meaningful only for edges that came out of our
+        // own router LSP — that's the SPF's "first-hop" slot. Edges
+        // from other routers' LSPs (and from our own pseudonode LSP)
+        // carry link_id = 0; SPF propagates it untouched but the
+        // rib-builder only consumes first_hop_links anyway.
+        let own_router_lsp = *is_originated && !lsp.lsp_id.is_pseudo();
 
         for tlv in &lsp.tlvs {
             if let IsisTlv::ExtIsReach(ext_reach) = tlv {
@@ -1704,7 +1731,16 @@ pub fn graph(
                         .get_mut(&level)
                         .get(&neighbor_lsp_id.neighbor_id());
 
-                    let link = spf::Link::new(node_id, to_id, entry.metric);
+                    let link_id = if own_router_lsp {
+                        local_adj_to_ifindex
+                            .get(&entry.neighbor_id)
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    let link = spf::Link::with_id(node_id, to_id, entry.metric, link_id);
                     if let Some(from_id) = graph.get_mut(&node_id) {
                         from_id.olinks.push(link.clone());
                     }
@@ -1907,6 +1943,7 @@ fn process_outgoing_links_mt2(
                     from: from_id,
                     to: to_id,
                     cost: entry.metric,
+                    link_id: 0,
                 });
             }
         }
@@ -1967,6 +2004,7 @@ fn process_neighbor_link_mt2(
         from: from_id,
         to: to_id,
         cost: entry.metric,
+        link_id: 0,
     });
 }
 
@@ -2462,6 +2500,7 @@ fn build_rib_from_spf(
     level: Level,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
+    _tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) -> PrefixMap<Ipv4Net, SpfRoute> {
     let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
 
@@ -2485,16 +2524,26 @@ fn build_rib_from_spf(
 
         // Build nexthop map. SPF runs in full-path mode (see
         // perform_spf_calculation), so each `p` is the full path
-        // [first_hop, ..., destination]; we still index `p[0]` for the
-        // first-hop semantics the v4 path has always used. With
-        // pseudonodes now in the graph, p[0] can be a PN whose
-        // sys-id resolves to the DIS — skip leading PN hops to land
-        // on the actual nexthop *router* before looking up neighbours.
+        // [first_hop, ..., destination]. With pseudonodes in the graph,
+        // p[0] may be a PN whose sys-id resolves to the DIS — skip
+        // leading PN hops to land on the actual nexthop *router* before
+        // looking up neighbours.
+        //
+        // SPF stamps the chosen first-hop link's ifindex into
+        // `Path::first_hop_links` during relaxation (see spf::Link::link_id).
+        // For each path, we look up all (first_hop_vertex, link_id) entries
+        // that match p[0] — usually one, but parallel equal-cost links to
+        // the same neighbour (case P1) produce multiple, and parallel
+        // ECMP-via-different-neighbours produces one per path. This
+        // replaces the old "iterate every top.links entry and match by
+        // sys-id" loop, which silently misrouted in cases P2/P3 (parallel
+        // asymmetric metrics and P2P+LAN mix).
         let mut spf_nhops = BTreeMap::new();
         for p in &nhops.paths {
             if p.is_empty() {
-                continue; // self
+                continue;
             }
+
             let mut nhop_idx = 0;
             while nhop_idx < p.len() && top.lsp_map.get(&level).is_pseudo(p[nhop_idx]) {
                 nhop_idx += 1;
@@ -2502,20 +2551,30 @@ fn build_rib_from_spf(
             if nhop_idx >= p.len() {
                 continue;
             }
-            if let Some(nhop_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) {
-                // Find nhop from links
-                for (ifindex, link) in top.links.iter() {
-                    if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
-                        for (addr, _) in nbr.addr4.iter() {
-                            let nhop = SpfNexthop {
-                                ifindex: *ifindex,
-                                adjacency: p[nhop_idx] == *node,
-                                sys_id: Some(*nhop_id),
-                                backup: None,
-                            };
-                            spf_nhops.insert(*addr, nhop);
-                        }
-                    }
+
+            let Some(nhop_sys_id) = top.lsp_map.get(&level).resolve(p[nhop_idx]) else {
+                continue;
+            };
+            let nhop_sys_id = *nhop_sys_id;
+
+            for (_, link_id) in nhops.first_hop_links.iter().filter(|(v, _)| *v == p[0]) {
+                if *link_id == 0 {
+                    continue;
+                }
+                let Some(link) = top.links.get(link_id) else {
+                    continue;
+                };
+                let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
+                    continue;
+                };
+                for (addr, _) in nbr.addr4.iter() {
+                    let nhop = SpfNexthop {
+                        ifindex: *link_id,
+                        adjacency: p[nhop_idx] == *node,
+                        sys_id: Some(nhop_sys_id),
+                        backup: None,
+                    };
+                    spf_nhops.insert(*addr, nhop);
                 }
             }
         }
@@ -2678,17 +2737,26 @@ fn build_rib_from_spf_v6(
             };
             let nhop_sys_id = *nhop_id;
             let is_adjacency = p[nhop_idx] == *node;
-            for (ifindex, link) in top.links.iter() {
-                if let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) {
-                    for addr in nbr.addr6l.iter() {
-                        let nhop = SpfNexthopV6 {
-                            ifindex: *ifindex,
-                            adjacency: is_adjacency,
-                            sys_id: Some(nhop_sys_id),
-                            backup: None,
-                        };
-                        spf_nhops.insert(*addr, nhop);
-                    }
+            // Same first_hop_links-driven resolution as the IPv4 builder.
+            // See build_rib_from_spf for the design rationale.
+            for (_, link_id) in nhops.first_hop_links.iter().filter(|(v, _)| *v == p[0]) {
+                if *link_id == 0 {
+                    continue;
+                }
+                let Some(link) = top.links.get(link_id) else {
+                    continue;
+                };
+                let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
+                    continue;
+                };
+                for addr in nbr.addr6l.iter() {
+                    let nhop = SpfNexthopV6 {
+                        ifindex: *link_id,
+                        adjacency: is_adjacency,
+                        sys_id: Some(nhop_sys_id),
+                        backup: None,
+                    };
+                    spf_nhops.insert(*addr, nhop);
                 }
             }
         }
@@ -2813,15 +2881,44 @@ struct ProtectedEdgeSpf {
 /// `dst.ilinks` and the reverse edge from `dst.olinks` /
 /// `src.ilinks` so forward SPF (olinks) and reverse SPF (ilinks)
 /// both see the modified topology consistently.
-fn graph_minus_edge(graph: &spf::Graph, src: usize, dst: usize) -> spf::Graph {
+///
+/// When `failed_link_id` is `Some`, the forward direction is filtered
+/// precisely by `link_id` — only the failed parallel edge is removed,
+/// leaving any sibling parallels intact. This is the precision needed
+/// for parallel-link TI-LFA. The reverse direction always removes all
+/// parallels because reverse edges came from `dst`'s LSP and carry
+/// `link_id = 0` (we have no way to identify which of `dst`'s parallel
+/// reverse-direction entries corresponds to the failed link). This
+/// asymmetry can only shrink Q-space and reject a valid repair
+/// candidate; it cannot install a wrong nexthop. Proper fix requires
+/// RFC 4205 Link Local/Remote Identifier sub-TLVs.
+///
+/// When `failed_link_id` is `None`, the forward direction also removes
+/// all parallels — the conservative behavior matching the original
+/// implementation. TI-LFA callers today pass `None` because parallel-
+/// link selection has not yet been wired through the repair pipeline.
+fn graph_minus_edge(
+    graph: &spf::Graph,
+    src: usize,
+    dst: usize,
+    failed_link_id: Option<u32>,
+) -> spf::Graph {
     let mut modified = graph.clone();
     if let Some(s) = modified.get_mut(&src) {
-        s.olinks.retain(|l| l.to != dst);
+        if let Some(lid) = failed_link_id {
+            s.olinks.retain(|l| !(l.to == dst && l.link_id == lid));
+        } else {
+            s.olinks.retain(|l| l.to != dst);
+        }
         s.ilinks.retain(|l| l.from != dst);
     }
     if let Some(d) = modified.get_mut(&dst) {
+        if let Some(lid) = failed_link_id {
+            d.ilinks.retain(|l| !(l.from == src && l.link_id == lid));
+        } else {
+            d.ilinks.retain(|l| l.from != src);
+        }
         d.olinks.retain(|l| l.to != src);
-        d.ilinks.retain(|l| l.from != src);
     }
     modified
 }
@@ -2869,7 +2966,9 @@ fn identify_pq_nodes(
     post_conv_path: &[usize],
 ) -> Option<PQNodes> {
     let v1 = *post_conv_path.first()?;
-    let modified = graph_minus_edge(graph, source, nbr_vertex);
+    // Parallel-link selection is not yet wired through the repair
+    // pipeline; pass None to remove all parallels (conservative).
+    let modified = graph_minus_edge(graph, source, nbr_vertex, None);
     let ep = spf::spf(&modified, v1, &spf::SpfOpt::full_path());
     let q = spf::spf_reverse(&modified, dest, &spf::SpfOpt::full_path());
 
@@ -2938,7 +3037,7 @@ fn link_protection_spf(
 
         let repair_paths = spf::tilfa(graph, source, *d, &[x]);
         if let Some(repair) = repair_paths.first() {
-            println!(" => nhop={} segs={:?}", repair.nhop, repair.segs);
+            println!(" => nhop[{}] {:?}", repair.nhop, repair.segs);
         } else {
             println!(" => no repair path");
         }
@@ -2950,6 +3049,7 @@ fn link_protection_spf(
 /// Output of `resolve_repairs_mpls` — for one (protected neighbor,
 /// destination) pair, the local egress and the pre-resolved MPLS
 /// label stack that `spf::tilfa()` + label lookup produced.
+#[allow(dead_code)]
 #[derive(Debug)]
 struct RepairCandidate {
     /// Egress ifindex of the local link to the post-conv first-hop.
@@ -2990,6 +3090,7 @@ fn find_local_nhop_v6(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u3
 /// skip in `build_rib_from_spf` so a LAN repair lands on the actual
 /// router behind the DIS pseudonode rather than the pseudonode
 /// itself.
+#[allow(dead_code)]
 fn find_local_nhop_v4(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u32, Ipv4Addr)> {
     let mut idx = 0;
     while idx < path.len() && top.lsp_map.get(&level).is_pseudo(path[idx]) {
@@ -3011,11 +3112,13 @@ fn find_local_nhop_v4(top: &IsisTop, level: Level, path: &[usize]) -> Option<(u3
 /// the originator's SR block when the SID is Index-encoded.
 /// `block_kind` picks the global SRGB (prefix-SIDs) or the local
 /// SRLB (adjacency-SIDs).
+#[allow(dead_code)]
 enum SrBlockKind {
     Global,
     Local,
 }
 
+#[allow(dead_code)]
 fn resolve_sid_to_label(
     top: &IsisTop,
     level: Level,
@@ -3039,6 +3142,7 @@ fn resolve_sid_to_label(
 /// Walks the vertex's IPv4 reach entries (typically the loopback)
 /// for the first prefix-SID sub-TLV, then resolves Index against the
 /// originator's SRGB.
+#[allow(dead_code)]
 fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Option<u32> {
     let sys_id = *top.lsp_map.get(&level).resolve(vertex)?;
     let entries = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id)?;
@@ -3062,6 +3166,7 @@ fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Opti
 /// adjacencies the neighbor_id is `(to_sys, 0)` and any AdjSid
 /// sub-TLV under it qualifies. Index-encoded SIDs resolve against
 /// the originator's SRLB.
+#[allow(dead_code)]
 fn adj_sid_label_for_link(
     top: &IsisTop,
     level: Level,
@@ -3129,6 +3234,7 @@ fn adj_sid_label_for_link(
 /// — we refuse to install a partial stack since the resulting label
 /// path would diverge from the post-convergence path the algorithm
 /// computed.
+#[allow(dead_code)]
 fn repair_segments_to_mpls_labels(
     top: &IsisTop,
     level: Level,
@@ -3159,6 +3265,7 @@ fn repair_segments_to_mpls_labels(
 /// segments to MPLS labels and pair them with the local egress.
 /// Pure link protection: pass the edge-removed graph with `x = []`
 /// (no node exclusion).
+#[allow(dead_code)]
 fn resolve_repairs_mpls(
     top: &IsisTop,
     level: Level,
@@ -3173,8 +3280,10 @@ fn resolve_repairs_mpls(
         };
         let nbr_sys = *nbr_sys;
         // One modified graph per protected link, reused across
-        // every affected destination on this edge.
-        let modified = graph_minus_edge(graph, source, edge.nbr_vertex);
+        // every affected destination on this edge. Parallel-link
+        // selection is not yet wired through this pipeline; pass None
+        // to remove all parallels (conservative).
+        let modified = graph_minus_edge(graph, source, edge.nbr_vertex, None);
         for (dest, post_path) in &edge.repairs {
             let Some(path_vec) = post_path.paths.first() else {
                 continue;
@@ -3212,6 +3321,7 @@ fn resolve_repairs_mpls(
 /// produces a (protected nbr sys_id, dest vertex) -> RepairCandidate
 /// map; this step writes `SpfNexthop.backup` on every primary nhop
 /// whose key matches.
+#[allow(dead_code)]
 fn ti_lfa_compute_mpls(
     top: &mut IsisTop,
     level: Level,
@@ -3234,6 +3344,7 @@ fn ti_lfa_compute_mpls(
 /// nhop's `backup` field. The label stack — including the
 /// NodeSID(P) + AdjSid(P->Q) ... AdjSid(...) sequence produced by
 /// `make_repair_list` — was already assembled in resolve.
+#[allow(dead_code)]
 fn apply_repairs_mpls(
     routes: &mut PrefixMap<Ipv4Net, SpfRoute>,
     repairs: &BTreeMap<(IsisSysId, usize), RepairCandidate>,
@@ -3378,7 +3489,45 @@ fn ti_lfa_compute_srv6(
     }
 }
 
-// XXX
+fn tilfa_repair_path(
+    graph: &spf::Graph,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> BTreeMap<usize, Vec<spf::RepairPath>> {
+    let mut tilfa_result = BTreeMap::new();
+
+    for (d, path) in spf_result.iter() {
+        print!("{}: {:?}", d, path.paths);
+        // Source is skipped.
+        if *d == source {
+            println!(" => Source is skipped");
+            continue;
+        }
+        // ECMP is skipped.
+        if path.paths.len() > 1 {
+            println!(" => ECMP is skipped");
+            continue;
+        }
+
+        // X
+        let first = &path.paths[0];
+        if first.is_empty() {
+            continue;
+        }
+        let x = first[0];
+
+        let repair_paths = spf::tilfa(graph, source, *d, &[x]);
+        if let Some(repair) = repair_paths.first() {
+            println!(" => [{}] {:?}", repair.nhop, repair.segs);
+        } else {
+            println!(" => no repair path");
+        }
+        tilfa_result.insert(*d, repair_paths);
+    }
+    tilfa_result
+}
+
+//
 fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // Turn off SPF calculation timer.
     *top.spf_timer.get_mut(&level) = None;
@@ -3398,8 +3547,14 @@ fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // Full-path mode so the legacy v6 builder can apply RFC 1195
     // §5 strict NLPID gating across every transit node.
     let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
-    let mut rib = build_rib_from_spf(top, level, source, &spf_result);
-    ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
+
+    // TI-LFA repair path.
+    let tilfa_result = tilfa_repair_path(&graph, source, &spf_result);
+
+    // Build RIB.
+    let rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
+
+    // ti_lfa_compute_mpls(top, level, &graph, source, &spf_result, &mut rib);
 
     let mt2_enabled =
         top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
@@ -3825,7 +3980,7 @@ mod tests {
         // SPF (used by Q-space) sees the same modified topology as
         // forward SPF (used by P-space / PC-paths).
         let (graph, _) = build_link_protection_fixture();
-        let pruned = graph_minus_edge(&graph, 0, 1);
+        let pruned = graph_minus_edge(&graph, 0, 1, None);
         // Forward direction S->A removed (olinks on S, ilinks on A).
         assert!(!pruned[&0].olinks.iter().any(|l| l.to == 1));
         assert!(!pruned[&1].ilinks.iter().any(|l| l.from == 0));
@@ -3834,6 +3989,72 @@ mod tests {
         assert!(!pruned[&0].ilinks.iter().any(|l| l.from == 1));
         // Unrelated links intact.
         assert!(pruned[&0].olinks.iter().any(|l| l.to == 2));
+    }
+
+    /// When `failed_link_id` is `Some`, only the matching forward
+    /// parallel is removed; sibling parallels survive. Reverse
+    /// direction still removes all parallels (documented limitation).
+    #[test]
+    fn graph_minus_edge_precise_forward_keeps_sibling_parallels() {
+        let mut graph = spf::Graph::new();
+        graph.insert(0, spf::Vertex::new_node("S", 0));
+        graph.insert(1, spf::Vertex::new_node("A", 1));
+        // Two parallel S->A edges with distinct link_ids; one A->S
+        // reverse edge (came from A's LSP, link_id = 0).
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(spf::Link::with_id(0, 1, 5, 10));
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .olinks
+            .push(spf::Link::with_id(0, 1, 5, 11));
+        graph
+            .get_mut(&1)
+            .unwrap()
+            .ilinks
+            .push(spf::Link::with_id(0, 1, 5, 10));
+        graph
+            .get_mut(&1)
+            .unwrap()
+            .ilinks
+            .push(spf::Link::with_id(0, 1, 5, 11));
+        graph
+            .get_mut(&1)
+            .unwrap()
+            .olinks
+            .push(spf::Link::new(1, 0, 5));
+        graph
+            .get_mut(&0)
+            .unwrap()
+            .ilinks
+            .push(spf::Link::new(1, 0, 5));
+
+        let pruned = graph_minus_edge(&graph, 0, 1, Some(10));
+
+        // Forward: only link_id=10 removed; link_id=11 must survive.
+        let surviving_fwd: Vec<u32> = pruned[&0]
+            .olinks
+            .iter()
+            .filter(|l| l.to == 1)
+            .map(|l| l.link_id)
+            .collect();
+        assert_eq!(surviving_fwd, vec![11]);
+        let surviving_in: Vec<u32> = pruned[&1]
+            .ilinks
+            .iter()
+            .filter(|l| l.from == 0)
+            .map(|l| l.link_id)
+            .collect();
+        assert_eq!(surviving_in, vec![11]);
+
+        // Reverse direction is conservatively wiped regardless of
+        // link_id (we have no way to identify which of A's reverse
+        // parallels corresponds to the failed link).
+        assert!(!pruned[&1].olinks.iter().any(|l| l.to == 0));
+        assert!(!pruned[&0].ilinks.iter().any(|l| l.from == 1));
     }
 
     #[test]

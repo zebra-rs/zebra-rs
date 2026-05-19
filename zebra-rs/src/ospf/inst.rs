@@ -1357,6 +1357,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                             from: node_id,
                             to: to_id,
                             cost: link.tos_0_metric as u32,
+                            link_id: 0,
                         });
                     }
                     OspfLinkType::Transit => {
@@ -1370,6 +1371,7 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                                         from: node_id,
                                         to: to_id,
                                         cost: link.tos_0_metric as u32,
+                                        link_id: 0,
                                     });
                                 }
                             }
