@@ -59,6 +59,10 @@ impl Isis {
             "/router/isis/timers/lsp-refresh-interval",
             config_lsp_refresh_interval,
         );
+        self.callback_add(
+            "/router/isis/timers/min-lsp-arrival-time",
+            config_min_lsp_arrival_time,
+        );
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
         self.callback_add(
@@ -145,6 +149,7 @@ pub struct IsisConfig {
     pub is_type: Option<IsLevel>,
     pub refresh_time: Option<u16>,
     pub hold_time: Option<u16>,
+    pub min_lsp_arrival_time: Option<u32>,
     pub te_router_id: Option<Ipv4Addr>,
     pub rib_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
@@ -201,6 +206,9 @@ pub struct IsisConfig {
 impl IsisConfig {
     const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
     const DEFAULT_HOLD_TIME: u16 = 1200;
+    // RFC 4444 §3.1 storm-protection floor for accepting new LSP versions.
+    // 100 ms matches IOS-XR's default.
+    const DEFAULT_MIN_LSP_ARRIVAL_TIME_MS: u32 = 100;
 
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
@@ -226,6 +234,11 @@ impl IsisConfig {
 
     pub fn hold_time(&self) -> u16 {
         self.hold_time.unwrap_or(Self::DEFAULT_HOLD_TIME)
+    }
+
+    pub fn min_lsp_arrival_time(&self) -> u32 {
+        self.min_lsp_arrival_time
+            .unwrap_or(Self::DEFAULT_MIN_LSP_ARRIVAL_TIME_MS)
     }
 
     /// True when either SR dataplane is enabled. Used to gate emission
@@ -314,6 +327,17 @@ fn config_lsp_refresh_interval(isis: &mut Isis, mut args: Args, op: ConfigOp) ->
         isis.config.refresh_time = Some(refresh_time);
     } else {
         isis.config.refresh_time = None;
+    }
+    Some(())
+}
+
+fn config_min_lsp_arrival_time(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ms = args.u32()?;
+
+    if op == ConfigOp::Set {
+        isis.config.min_lsp_arrival_time = Some(ms);
+    } else {
+        isis.config.min_lsp_arrival_time = None;
     }
     Some(())
 }

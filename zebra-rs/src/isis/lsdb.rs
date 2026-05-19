@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Iter, Values};
+use std::time::{Duration, Instant};
 
 use isis_packet::*;
 
@@ -40,6 +41,10 @@ pub struct Lsa {
     pub refresh_timer: Option<Timer>,
     pub ifindex: u32,
     pub bytes: Vec<u8>,
+    // When this entry was inserted via the receive path. None for
+    // self-originated LSPs and as the pre-fill on fresh entries.
+    // Used by `insert_lsp` to enforce min-lsp-arrival-time.
+    pub last_received: Option<Instant>,
 }
 
 impl Lsa {
@@ -51,6 +56,7 @@ impl Lsa {
             refresh_timer: None,
             ifindex: 0,
             bytes: vec![],
+            last_received: None,
         }
     }
 }
@@ -317,17 +323,32 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
         return None;
     }
 
-    // Check sequence number.
-    if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id)
-        && lsp.seq_number <= lsa.lsp.seq_number
-    {
-        isis_database_trace!(
-            top.tracing,
-            Lsdb,
-            &level,
-            "Same or smaller seq_number, no need of updating LSDB"
-        );
-        return None;
+    // Sequence-number and min-lsp-arrival-time gating against the
+    // existing entry. RFC 4444 §3.1: storm-protect by ignoring new
+    // versions that arrive within the arrival window after the last
+    // accepted version of the same LSP.
+    if let Some(lsa) = top.lsdb.get(&level).get(&lsp.lsp_id) {
+        if lsp.seq_number <= lsa.lsp.seq_number {
+            isis_database_trace!(
+                top.tracing,
+                Lsdb,
+                &level,
+                "Same or smaller seq_number, no need of updating LSDB"
+            );
+            return None;
+        }
+        let window = Duration::from_millis(top.up_config.min_lsp_arrival_time() as u64);
+        if let Some(last) = lsa.last_received
+            && last.elapsed() < window
+        {
+            isis_database_trace!(
+                top.tracing,
+                Lsdb,
+                &level,
+                "Within min-lsp-arrival-time window, dropping"
+            );
+            return None;
+        }
     }
 
     if key.is_pseudo() {
@@ -342,6 +363,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     lsa.ifindex = top.ifindex;
     lsa.bytes = bytes;
     lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
+    lsa.last_received = Some(Instant::now());
 
     top.lsdb.get_mut(&level).map.insert(key, lsa)
 }
