@@ -75,6 +75,18 @@ impl Isis {
             "/router/isis/spf-interval/maximum-wait",
             config_spf_maximum_wait,
         );
+        self.callback_add(
+            "/router/isis/lsp-gen-interval/initial-wait",
+            config_lsp_gen_initial_wait,
+        );
+        self.callback_add(
+            "/router/isis/lsp-gen-interval/secondary-wait",
+            config_lsp_gen_secondary_wait,
+        );
+        self.callback_add(
+            "/router/isis/lsp-gen-interval/maximum-wait",
+            config_lsp_gen_maximum_wait,
+        );
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
         self.callback_add(
@@ -165,6 +177,9 @@ pub struct IsisConfig {
     pub spf_initial_wait: Option<u32>,
     pub spf_secondary_wait: Option<u32>,
     pub spf_maximum_wait: Option<u32>,
+    pub lsp_gen_initial_wait: Option<u32>,
+    pub lsp_gen_secondary_wait: Option<u32>,
+    pub lsp_gen_maximum_wait: Option<u32>,
     pub te_router_id: Option<Ipv4Addr>,
     pub rib_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
@@ -228,6 +243,12 @@ impl IsisConfig {
     const DEFAULT_SPF_INITIAL_WAIT_MS: u32 = 50;
     const DEFAULT_SPF_SECONDARY_WAIT_MS: u32 = 200;
     const DEFAULT_SPF_MAXIMUM_WAIT_MS: u32 = 5000;
+    // IOS-XR-style LSP-generation exponential-backoff defaults
+    // (milliseconds). IOS-XR's defaults are 50 ms / 5000 ms / 5000 ms —
+    // a long maximum keeps self-LSP origination spaced out under churn.
+    const DEFAULT_LSP_GEN_INITIAL_WAIT_MS: u32 = 50;
+    const DEFAULT_LSP_GEN_SECONDARY_WAIT_MS: u32 = 5000;
+    const DEFAULT_LSP_GEN_MAXIMUM_WAIT_MS: u32 = 5000;
 
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
@@ -273,6 +294,21 @@ impl IsisConfig {
     pub fn spf_maximum_wait(&self) -> u32 {
         self.spf_maximum_wait
             .unwrap_or(Self::DEFAULT_SPF_MAXIMUM_WAIT_MS)
+    }
+
+    pub fn lsp_gen_initial_wait(&self) -> u32 {
+        self.lsp_gen_initial_wait
+            .unwrap_or(Self::DEFAULT_LSP_GEN_INITIAL_WAIT_MS)
+    }
+
+    pub fn lsp_gen_secondary_wait(&self) -> u32 {
+        self.lsp_gen_secondary_wait
+            .unwrap_or(Self::DEFAULT_LSP_GEN_SECONDARY_WAIT_MS)
+    }
+
+    pub fn lsp_gen_maximum_wait(&self) -> u32 {
+        self.lsp_gen_maximum_wait
+            .unwrap_or(Self::DEFAULT_LSP_GEN_MAXIMUM_WAIT_MS)
     }
 
     /// True when either SR dataplane is enabled. Used to gate emission
@@ -391,6 +427,24 @@ fn config_spf_secondary_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> O
 fn config_spf_maximum_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ms = args.u32()?;
     isis.config.spf_maximum_wait = if op == ConfigOp::Set { Some(ms) } else { None };
+    Some(())
+}
+
+fn config_lsp_gen_initial_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ms = args.u32()?;
+    isis.config.lsp_gen_initial_wait = if op == ConfigOp::Set { Some(ms) } else { None };
+    Some(())
+}
+
+fn config_lsp_gen_secondary_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ms = args.u32()?;
+    isis.config.lsp_gen_secondary_wait = if op == ConfigOp::Set { Some(ms) } else { None };
+    Some(())
+}
+
+fn config_lsp_gen_maximum_wait(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ms = args.u32()?;
+    isis.config.lsp_gen_maximum_wait = if op == ConfigOp::Set { Some(ms) } else { None };
     Some(())
 }
 
