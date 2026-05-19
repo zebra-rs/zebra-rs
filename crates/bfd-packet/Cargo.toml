@@ -1,0 +1,17 @@
+[package]
+name = "bfd-packet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Parser and encoder for BFD (RFC 5880) control packets"
+
+[dependencies]
+bitfield-struct = "0.13"
+bytes = "1.9"
+
+[dev-dependencies]
+hex-literal = "1.0"
+
+[lints]
+workspace = true
