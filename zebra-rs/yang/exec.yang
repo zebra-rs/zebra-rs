@@ -341,6 +341,10 @@ module exec {
           type empty;
         }
       }
+      leaf ti-lfa {
+        ext:help "IS-IS TI-LFA per-destination repair paths (graph-level view)";
+        type empty;
+      }
       leaf topology {
         ext:help "IS-IS SPF tree (per-AFI today; per-MT once multi-topology lands)";
         type empty;
