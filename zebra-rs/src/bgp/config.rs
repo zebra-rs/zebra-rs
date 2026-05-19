@@ -335,6 +335,30 @@ fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
+/// `set router bgp neighbor X bfd enable true|false` — flips the
+/// BFD attachment for this neighbor. PR 5b stores the bit on
+/// `peer.config.bfd.enable`; the subscribe/unsubscribe call to BFD
+/// lands in PR 5c once `Bgp` carries a `bfd_client_tx` handle.
+fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let enable = args.boolean()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.bfd.enable = op.is_set() && enable;
+    Some(())
+}
+
+/// `set router bgp neighbor X bfd profile NAME` — selects the BFD
+/// profile applied when this neighbor's BFD session is created.
+/// Stored verbatim; resolution against `/bfd/profile/<name>` is
+/// the responsibility of the PR 5c subscribe path.
+fn config_peer_bfd_profile(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let name = args.string()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.bfd.profile = op.is_set().then_some(name);
+    Some(())
+}
+
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let key: AfiSafi = args.afi_safi()?;
@@ -986,6 +1010,12 @@ impl Bgp {
         // `/tcp-md5/password` path above; either CLI form is accepted,
         // both lower onto the same runtime state.
         self.callback_peer("/password", config_peer_tcp_md5_password);
+        // FRR-style per-neighbor BFD attachment from
+        // zebra-bgp-bfd.yang. PR 5b stores the leaves on
+        // `peer.config.bfd`; PR 5c wires the runtime subscribe /
+        // unsubscribe path to the BFD client API.
+        self.callback_peer("/bfd/enable", config_peer_bfd_enable);
+        self.callback_peer("/bfd/profile", config_peer_bfd_profile);
         self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);
         self.callback_peer(
             "/tcp-ao/include-tcp-options",

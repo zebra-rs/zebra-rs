@@ -48,6 +48,10 @@ module config {
     prefix zbp;
   }
 
+  import zebra-bgp-bfd {
+    prefix zbb;
+  }
+
   import zebra-bgp-soft-reconfiguration {
     prefix zbsr;
   }
