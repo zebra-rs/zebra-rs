@@ -803,6 +803,17 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             metric: link.config.metric(),
             subs: Vec::new(),
         };
+        // Per-link ASLA sub-TLV (RFC 9479) with the Extended Admin
+        // Group bitmap for flex-algo path computation. Only emitted
+        // when at least one affinity name resolves — receivers can
+        // intersect this bitmap with any FAD's
+        // include-any/include-all/exclude-any constraint sub-TLV to
+        // decide whether the link is in the algorithm's topology.
+        if let Some(asla) =
+            super::flex_algo::build_link_asla(&link.config.affinity, top.affinity_map)
+        {
+            is_reach.subs.push(neigh::IsisSubTlv::Asla(asla));
+        }
         // Neighbor
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
             for (_key, value) in nbr.addr4.iter() {
@@ -981,6 +992,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 metric,
                 subs: Vec::new(),
             };
+            // Per-link ASLA carries the same affinity bitmap on the
+            // MT IS-reach entry as on the legacy TLV 22 entry —
+            // affinities are MT-agnostic in the YANG model.
+            if let Some(asla) =
+                super::flex_algo::build_link_asla(&link.config.affinity, top.affinity_map)
+            {
+                entry.subs.push(neigh::IsisSubTlv::Asla(asla));
+            }
             for (_, nbr) in link.state.nbrs.get(&level).iter() {
                 if let Some((_, sid_addr)) = nbr.endx_sid {
                     if nbr.network_type.is_p2p() {
