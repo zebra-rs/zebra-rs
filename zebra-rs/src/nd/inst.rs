@@ -8,15 +8,18 @@
 //! [`crate::config::ConfigManager`] calls both at startup.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep_until;
 
+use crate::config::{ConfigChannel, ConfigRequest, path_from_command};
 use crate::context::Task;
 use crate::rib::api::{RibRx, RibRxChannel};
 
+use super::config::Callback;
 use super::engine::{NdEngine, NdEvent};
 use super::network::{read_packet, write_packet};
 use super::send::RaSendConfig;
@@ -39,6 +42,13 @@ pub struct Nd {
     client_rx: UnboundedReceiver<NdClientReq>,
     client_tx: UnboundedSender<NdClientReq>,
     rib_rx: UnboundedReceiver<RibRx>,
+    /// Config-manager subscription endpoints. The receive half drains
+    /// in the event loop and feeds [`Self::process_cm_msg`].
+    pub cm: ConfigChannel,
+    /// Callback table — path → handler — populated by
+    /// [`Self::callback_build`] (in `super::config`) and consumed by
+    /// [`Self::process_cm_msg`].
+    pub callbacks: HashMap<String, Callback>,
     // Hold the spawned read / write tasks so dropping `Nd` aborts them.
     _read_task: Task<()>,
     _write_task: Task<()>,
@@ -70,16 +80,30 @@ impl Nd {
             write_packet(write_socket, send_rx).await;
         });
 
-        Ok(Self {
+        let mut nd = Self {
             engine: NdEngine::new(),
             recv_rx,
             send_tx,
             client_rx,
             client_tx,
             rib_rx: rib_chan.rx,
+            cm: ConfigChannel::new(),
+            callbacks: HashMap::new(),
             _read_task: read_task,
             _write_task: write_task,
-        })
+        };
+        nd.callback_build();
+        Ok(nd)
+    }
+
+    /// Internal accessor for callbacks living in [`super::config`].
+    pub(super) fn engine(&self) -> &NdEngine {
+        &self.engine
+    }
+
+    /// Internal accessor for callbacks living in [`super::config`].
+    pub(super) fn engine_mut(&mut self) -> &mut NdEngine {
+        &mut self.engine
     }
 
     /// Clone of the client-request sender. Distribute to YANG callback
@@ -107,6 +131,9 @@ impl Nd {
                 Some(rmsg) = self.rib_rx.recv() => {
                     self.process_rib_msg(rmsg);
                 }
+                Some(cmsg) = self.cm.rx.recv() => {
+                    self.process_cm_msg(cmsg);
+                }
                 _ = sleep_until_opt(wakeup) => {
                     let now = Instant::now();
                     for frame in self.engine.tick(now) {
@@ -127,6 +154,13 @@ impl Nd {
         // link-local in a follow-up PR).
         if let RibRx::LinkAdd(link) = msg {
             self.engine.process_link_add(&link);
+        }
+    }
+
+    pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.callbacks.get(&path).copied() {
+            f(self, args, msg.op);
         }
     }
 

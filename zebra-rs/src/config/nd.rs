@@ -8,9 +8,10 @@ use super::ConfigManager;
 /// — called once from [`ConfigManager`] init regardless of whether
 /// any config has been loaded yet. Reason: ND is the receive substrate
 /// for IPv6 unnumbered BGP, and we want incoming Router Advertisements
-/// to be observable as soon as the daemon is up. Sending RAs still
-/// requires an explicit operator opt-in via YANG (the leaf wiring
-/// lands in a follow-up PR).
+/// to be observable as soon as the daemon is up. Sending RAs requires
+/// an explicit operator opt-in via the `send-advertisements` YANG
+/// leaf — the per-leaf callback is registered by `Nd::new` itself
+/// (see [`crate::nd::config`]).
 ///
 /// If `CAP_NET_RAW` is missing the raw ICMPv6 socket cannot be opened;
 /// we log a `warn!` and continue. The daemon stays functional, just
@@ -18,6 +19,7 @@ use super::ConfigManager;
 pub fn spawn_nd(config: &ConfigManager) {
     match inst::Nd::new(config.rib_tx.clone()) {
         Ok(nd) => {
+            config.subscribe("nd", nd.cm.tx.clone());
             let task = inst::serve(nd);
             config
                 .protocol_tasks
