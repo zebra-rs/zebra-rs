@@ -59,12 +59,6 @@ struct Arg {
 
     #[arg(
         long,
-        help = "Re-install configured addresses removed by the kernel (cool-down on burst); off by default"
-    )]
-    enable_addr_recovery: bool,
-
-    #[arg(
-        long,
         help = "Write PID to this file on startup; in --daemon mode replaces /var/run/zebra-rs.pid"
     )]
     pid_file: Option<String>,
@@ -163,7 +157,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     let log_config = logging_config(&arg.log_output, &arg.log_file, &arg.log_format);
     tracing_set(arg.daemon, Some(log_config));
 
-    let rib = Rib::new(arg.no_nhid, arg.enable_addr_recovery)?;
+    let rib = Rib::new(arg.no_nhid)?;
 
     let policy = Policy::new();
 
@@ -178,6 +172,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
         policy.tx.clone(),
         service_accounts.clone(),
     )?;
+
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());
     config.subscribe_show("rib", rib.show.tx.clone());

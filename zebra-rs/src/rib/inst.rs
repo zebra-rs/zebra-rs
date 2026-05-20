@@ -426,13 +426,6 @@ pub struct Rib {
     /// `crate::rib::route::RECOVERY_*` if an external actor keeps
     /// fighting us.
     pub addr_recovery: BTreeMap<(u32, IpNet), AddrRecoveryState>,
-
-    /// Master switch for the kernel-driven address recovery feature
-    /// (re-install configured addresses on RTM_DELADDR, plus the link_up
-    /// bulk recovery loop). Set via `--enable-addr-recovery`. Off by
-    /// default — when false, an external delete tears the address down
-    /// the same way it did before the feature existed.
-    pub addr_recovery_enabled: bool,
 }
 
 /// Name of the dummy interface that hosts End-style seg6local routes
@@ -442,7 +435,7 @@ pub const SR0_DUMMY_NAME: &str = "sr0";
 const DEFAULT_RIB_SYNC_INTERVAL_SEC: u64 = 1;
 
 impl Rib {
-    pub fn new(no_nhid: bool, addr_recovery_enabled: bool) -> anyhow::Result<Self> {
+    pub fn new(no_nhid: bool) -> anyhow::Result<Self> {
         let fib = FibChannel::new();
         let fib_handle = FibHandle::new(fib.tx.clone(), no_nhid)?;
         let (tx, rx) = mpsc::unbounded_channel();
@@ -500,7 +493,6 @@ impl Rib {
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
             addr_recovery: BTreeMap::new(),
-            addr_recovery_enabled,
         };
         rib.show_build();
         Ok(rib)
@@ -1561,15 +1553,14 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
-                // When the address-recovery feature is enabled and the
-                // deleted address is still in config, push it back to
-                // the kernel rather than tearing down state. Recovery
-                // may be suppressed (Step 7 hold-down) — in both cases
+                // If the deleted address is still in config, push it back
+                // to the kernel rather than tearing down state. Recovery
+                // may be suppressed (Step 7 hold-down); in either case
                 // skip the normal teardown so the connected route
-                // doesn't churn. The next NewAddr we receive (either
-                // from our own re-install, or from a future operator
-                // add) will run the sync chain.
-                if self.addr_recovery_enabled && self.addr_recover_if_configured(&addr).await {
+                // doesn't churn. The next NewAddr we receive (from our
+                // own re-install, or from a future operator add) runs
+                // the sync chain.
+                if self.addr_recover_if_configured(&addr).await {
                     return;
                 }
 
