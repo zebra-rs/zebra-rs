@@ -3,16 +3,19 @@ use crate::nd::socket::nd_socket;
 
 use super::ConfigManager;
 
-/// Spawn the ND instance at zebra-rs startup.
+/// Spawn the ND instance on first commit that mentions
+/// `ipv6 router-advertisements`.
 ///
-/// Unlike `spawn_ospf` / `spawn_bgp` / `spawn_bfd` this is unconditional
-/// — called once from [`ConfigManager`] init regardless of whether
-/// any config has been loaded yet. Reason: ND is the receive substrate
-/// for IPv6 unnumbered BGP, and we want incoming Router Advertisements
-/// to be observable as soon as the daemon is up. Sending RAs requires
-/// an explicit operator opt-in via the `send-advertisements` YANG
-/// leaf — the per-leaf callback is registered by `Nd::new` itself
-/// (see [`crate::nd::config`]).
+/// Mirrors `spawn_ospf` / `spawn_bgp` / `spawn_bfd`: the dispatch in
+/// [`crate::config::ConfigManager::commit_config`] gates the call so
+/// hosts that never configure RAs don't pay the cost of opening a
+/// raw ICMPv6 socket (and don't see a startup `warn!` if the kernel
+/// rejects one of the socket options or `CAP_NET_RAW` is missing).
+///
+/// BGP unnumbered also depends on ND — `spawn_bgp` captures
+/// `nd_client_tx` at spawn time. If `router bgp` is committed before
+/// any RA-touching line, BGP's handle stays `None`; that ordering
+/// caveat is identical to the BFD case noted in `spawn_bgp`.
 ///
 /// If `CAP_NET_RAW` is missing the raw ICMPv6 socket cannot be opened;
 /// we log a `warn!` and continue. The daemon stays functional, just
