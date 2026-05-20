@@ -515,6 +515,256 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+// ---- redistribute -----------------------------------------------------
+//
+// Per-AFI redistribution sources (zebra-bgp-redistribute.yang). Each
+// source is a presence container with modifier leaves; storage is a
+// BTreeMap<(AfiSafi, Source), BgpRedistribute> on the Bgp instance.
+// Storage-only today — the BGP RIB-source plumbing that consumes
+// these entries lands in a follow-up.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BgpRedistSource {
+    Connected,
+    Static,
+    Isis,
+    Ospf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BgpRedistIsisLevel {
+    L1,
+    L2,
+    L1InterArea,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BgpRedistOspfMatch {
+    Internal,
+    External1,
+    External2,
+    NssaExternal1,
+    NssaExternal2,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct BgpRedistribute {
+    pub policy: Option<String>,
+    pub metric: Option<u32>,
+    pub multipath: bool,
+    /// Populated only when source == Isis. Empty set means "no filter".
+    pub isis_levels: std::collections::BTreeSet<BgpRedistIsisLevel>,
+    /// Populated only when source == Ospf. Empty set means "no filter".
+    pub ospf_match: std::collections::BTreeSet<BgpRedistOspfMatch>,
+}
+
+/// Only AFs BGP actually originates from are valid redistribute
+/// targets. The YANG augment attaches the container to every
+/// afi-safi list entry, so we filter at the callback. Returns `None`
+/// for AFs we don't support — the callback in turn returns `None` and
+/// libyang surfaces it as a commit failure.
+fn redist_afi_valid(afi_safi: &bgp_packet::AfiSafi) -> bool {
+    use bgp_packet::{Afi, Safi};
+    matches!(
+        (afi_safi.afi, afi_safi.safi),
+        (Afi::Ip, Safi::Unicast) | (Afi::Ip6, Safi::Unicast)
+    )
+}
+
+fn bgp_redist_set_presence(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+    src: BgpRedistSource,
+) -> Option<()> {
+    let afi_safi: bgp_packet::AfiSafi = args.afi_safi()?;
+    if !redist_afi_valid(&afi_safi) {
+        return None;
+    }
+    if op.is_set() {
+        bgp.redistribute.entry((afi_safi, src)).or_default();
+    } else {
+        bgp.redistribute.remove(&(afi_safi, src));
+    }
+    Some(())
+}
+
+fn bgp_redist_with<F>(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+    src: BgpRedistSource,
+    f: F,
+) -> Option<()>
+where
+    F: FnOnce(&mut BgpRedistribute, &mut Args, ConfigOp) -> Option<()>,
+{
+    let afi_safi: bgp_packet::AfiSafi = args.afi_safi()?;
+    if !redist_afi_valid(&afi_safi) {
+        return None;
+    }
+    let entry = bgp.redistribute.entry((afi_safi, src)).or_default();
+    f(entry, &mut args, op)
+}
+
+fn bgp_set_policy(e: &mut BgpRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    e.policy = if op.is_set() { Some(a.string()?) } else { None };
+    Some(())
+}
+fn bgp_set_metric(e: &mut BgpRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    e.metric = if op.is_set() { Some(a.u32()?) } else { None };
+    Some(())
+}
+fn bgp_set_multipath(e: &mut BgpRedistribute, _a: &mut Args, op: ConfigOp) -> Option<()> {
+    e.multipath = op.is_set();
+    Some(())
+}
+fn bgp_set_isis_level(e: &mut BgpRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    let v = match a.string()?.as_str() {
+        "level-1" => BgpRedistIsisLevel::L1,
+        "level-2" => BgpRedistIsisLevel::L2,
+        "level-1-inter-area" => BgpRedistIsisLevel::L1InterArea,
+        _ => return None,
+    };
+    if op.is_set() {
+        e.isis_levels.insert(v);
+    } else {
+        e.isis_levels.remove(&v);
+    }
+    Some(())
+}
+fn bgp_set_ospf_match(e: &mut BgpRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    let v = match a.string()?.as_str() {
+        "internal" => BgpRedistOspfMatch::Internal,
+        "external-1" => BgpRedistOspfMatch::External1,
+        "external-2" => BgpRedistOspfMatch::External2,
+        "nssa-external-1" => BgpRedistOspfMatch::NssaExternal1,
+        "nssa-external-2" => BgpRedistOspfMatch::NssaExternal2,
+        _ => return None,
+    };
+    if op.is_set() {
+        e.ospf_match.insert(v);
+    } else {
+        e.ospf_match.remove(&v);
+    }
+    Some(())
+}
+
+// Per-source presence + modifier wrappers. Mirrors the IS-IS shape.
+pub(super) fn config_redistribute_connected(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    bgp_redist_set_presence(bgp, args, op, BgpRedistSource::Connected)
+}
+pub(super) fn config_redistribute_connected_policy(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Connected, bgp_set_policy)
+}
+pub(super) fn config_redistribute_connected_metric(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Connected, bgp_set_metric)
+}
+pub(super) fn config_redistribute_connected_multipath(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Connected, bgp_set_multipath)
+}
+
+pub(super) fn config_redistribute_static(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    bgp_redist_set_presence(bgp, args, op, BgpRedistSource::Static)
+}
+pub(super) fn config_redistribute_static_policy(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Static, bgp_set_policy)
+}
+pub(super) fn config_redistribute_static_metric(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Static, bgp_set_metric)
+}
+pub(super) fn config_redistribute_static_multipath(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Static, bgp_set_multipath)
+}
+
+pub(super) fn config_redistribute_isis(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    bgp_redist_set_presence(bgp, args, op, BgpRedistSource::Isis)
+}
+pub(super) fn config_redistribute_isis_policy(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_policy)
+}
+pub(super) fn config_redistribute_isis_metric(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_metric)
+}
+pub(super) fn config_redistribute_isis_multipath(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_multipath)
+}
+pub(super) fn config_redistribute_isis_level(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_isis_level)
+}
+
+pub(super) fn config_redistribute_ospf(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    bgp_redist_set_presence(bgp, args, op, BgpRedistSource::Ospf)
+}
+pub(super) fn config_redistribute_ospf_policy(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_policy)
+}
+pub(super) fn config_redistribute_ospf_metric(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_metric)
+}
+pub(super) fn config_redistribute_ospf_multipath(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_multipath)
+}
+pub(super) fn config_redistribute_ospf_match_type(
+    bgp: &mut Bgp,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_ospf_match)
+}
+
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
@@ -1143,6 +1393,83 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/advertise-all-vni",
             config_advertise_all_vni,
+        );
+
+        // Per-AFI redistribution (zebra-bgp-redistribute.yang).
+        // One presence-container callback per source plus one per
+        // modifier leaf, dispatched through `bgp_redist_set_presence`
+        // / `bgp_redist_with`. Storage-only today.
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/connected",
+            config_redistribute_connected,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/connected/policy",
+            config_redistribute_connected_policy,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/connected/metric",
+            config_redistribute_connected_metric,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/connected/multipath",
+            config_redistribute_connected_multipath,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/static",
+            config_redistribute_static,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/static/policy",
+            config_redistribute_static_policy,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/static/metric",
+            config_redistribute_static_metric,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/static/multipath",
+            config_redistribute_static_multipath,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/isis",
+            config_redistribute_isis,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/isis/policy",
+            config_redistribute_isis_policy,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/isis/metric",
+            config_redistribute_isis_metric,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/isis/multipath",
+            config_redistribute_isis_multipath,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/isis/level",
+            config_redistribute_isis_level,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/ospf",
+            config_redistribute_ospf,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/ospf/policy",
+            config_redistribute_ospf_policy,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/ospf/metric",
+            config_redistribute_ospf_metric,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/ospf/multipath",
+            config_redistribute_ospf_multipath,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/redistribute/ospf/match/type",
+            config_redistribute_ospf_match_type,
         );
 
         // Applying policy.

@@ -188,6 +188,19 @@ pub struct Bgp {
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
     // BgpAttr shared storage.
     pub attr_store: BgpAttrStore,
+
+    /// Per-AFI redistribution configuration. Populated by the
+    /// `/router/bgp/afi-safi/redistribute/<source>...` callbacks
+    /// (zebra-bgp-redistribute.yang); one entry per (AfiSafi, source)
+    /// pair, holding policy / metric / multipath plus per-source
+    /// extras (IS-IS level filter, OSPF match types).
+    ///
+    /// Storage-only today — the BGP RIB-source plumbing that reads
+    /// from this map lands in a follow-up.
+    pub redistribute: BTreeMap<
+        (bgp_packet::AfiSafi, super::config::BgpRedistSource),
+        super::config::BgpRedistribute,
+    >,
 }
 
 impl Bgp {
@@ -245,6 +258,7 @@ impl Bgp {
             bfd_event_tx,
             bfd_event_rx,
             attr_store: BgpAttrStore::new(),
+            redistribute: BTreeMap::new(),
         };
         bgp.callback_build();
         bgp.show_build();
