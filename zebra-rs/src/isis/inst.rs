@@ -104,6 +104,17 @@ pub struct Isis {
     /// `show isis flex-algo`) read from here instead of re-walking
     /// the LSDB. Cleared on peer purge.
     pub peer_fad: Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
+
+    /// Per-peer per-link affinity bitmaps. Outer key is peer sys-id;
+    /// inner key is the IS-reach neighbor identifier (a 7-byte tuple
+    /// of 6-byte sys-id and 1-byte circuit/pseudo id). Populated
+    /// from IsisSubAsla sub-TLVs on Ext IS-Reach (TLV 22) and MT
+    /// IS-Reach (TLV 222) entries whose SABM byte 0 has the
+    /// Flex-Algorithm X-bit set (RFC 9479 §4.2). Cleared on peer
+    /// purge.
+    pub peer_link_affinity: Levels<
+        BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
+    >,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
@@ -251,6 +262,14 @@ pub struct IsisTop<'a> {
     /// Router Capability TLVs.
     pub peer_fad:
         &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
+
+    /// Per-peer per-link affinity bitmaps (see
+    /// `Isis::peer_link_affinity`). Threaded through IsisTop so the
+    /// LSDB rebuild path can populate it from peer IS-reach ASLA
+    /// sub-TLVs.
+    pub peer_link_affinity: &'a mut Levels<
+        BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
+    >,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -353,6 +372,12 @@ impl Isis {
                 srv6_end_map: Levels::<BTreeMap<IsisSysId, Ipv6Addr>>::default(),
                 peer_fad: Levels::<
                     BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>,
+                >::default(),
+                peer_link_affinity: Levels::<
+                    BTreeMap<
+                        IsisSysId,
+                        BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>,
+                    >,
                 >::default(),
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
@@ -1104,6 +1129,7 @@ impl Isis {
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
+            peer_link_affinity: &mut self.peer_link_affinity,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
@@ -1150,6 +1176,7 @@ impl Isis {
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
+            peer_link_affinity: &mut self.peer_link_affinity,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
             rib_tx: &self.rib_tx,
