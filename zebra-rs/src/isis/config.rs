@@ -248,6 +248,19 @@ impl Isis {
         );
         self.callback_add("/router/isis/interface/metric", link::config_metric);
         self.callback_add("/router/isis/interface/srlg", link::config_srlg);
+        self.callback_add("/router/isis/interface/affinity", link::config_affinity);
+        self.callback_add(
+            "/router/isis/interface/ipv4/flex-algo-prefix-sid",
+            link::config_ipv4_flex_algo_prefix_sid,
+        );
+        self.callback_add(
+            "/router/isis/interface/ipv4/flex-algo-prefix-sid/index",
+            link::config_ipv4_flex_algo_prefix_sid_index,
+        );
+        self.callback_add(
+            "/router/isis/segment-routing/srv6/flex-algo-locator/locator",
+            config_sr_srv6_flex_algo_locator,
+        );
         self.callback_add(
             "/router/isis/interface/ipv6/enable",
             link::config_ipv6_enable,
@@ -255,6 +268,7 @@ impl Isis {
         self.callback_add("/router/isis/distribute/rib", config_distribute_rib);
 
         super::flex_algo::callback_register(self);
+        super::affinity_map::callback_register(self);
     }
 }
 
@@ -312,6 +326,14 @@ pub struct IsisConfig {
     /// /segment-routing/locator list. Same staging-friendly rationale
     /// as sr_mpls_block.
     pub sr_srv6_locator: Option<String>,
+
+    /// Per-Flex-Algorithm SRv6 locator bindings, from the YANG list at
+    /// /router/isis/segment-routing/srv6/flex-algo-locator[algo=N].
+    /// Each entry binds an algorithm (128..=255) to a /segment-routing/
+    /// locator name; the LSP-emit follow-up will originate a SRv6
+    /// Locator TLV 27 with Algorithm=N (RFC 9352 §7.1) for each entry.
+    /// Names, not leafrefs — staged the same way as `sr_srv6_locator`.
+    pub sr_srv6_flex_algo_locators: BTreeMap<u8, String>,
 
     /// Set when /router/isis/fast-reroute/ti-lfa is committed (the
     /// presence-marked YANG container). Will gate post-convergence
@@ -700,6 +722,28 @@ fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
         isis.config.sr_srv6_locator = None;
     }
     isis.reconcile_locator_watch();
+    Some(())
+}
+
+// `/router/isis/segment-routing/srv6/flex-algo-locator[algo=N]/locator`
+// — bind a /segment-routing/locator name to algorithm N for SRv6
+// origination. Storage-only here; the LSP emit follow-up will turn
+// each entry into an SRv6 Locator TLV 27 with Algorithm=N (RFC 9352
+// §7.1). The locator-watch reconciliation that fires for the algo-0
+// `sr_srv6_locator` is not invoked here — per-algo locators live in
+// the same /segment-routing/locator namespace and will be folded into
+// the watch set in the same PR that consumes the map.
+fn config_sr_srv6_flex_algo_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let algo = args.u8()?;
+    if !(128..=255).contains(&algo) {
+        return None;
+    }
+    if op.is_set() {
+        let name = args.string()?;
+        isis.config.sr_srv6_flex_algo_locators.insert(algo, name);
+    } else {
+        isis.config.sr_srv6_flex_algo_locators.remove(&algo);
+    }
     Some(())
 }
 

@@ -227,6 +227,26 @@ pub struct LinkConfig {
     /// because the order influences the byte layout of TLVs 138/139
     /// (RFC 5307 / RFC 6119) and so the LSP-content signature.
     pub srlg_groups: BTreeSet<String>,
+
+    /// Affinity (admin-group) names this link belongs to, from
+    /// /router/isis/interface/<name>/affinity. Each name references a
+    /// /router/isis/affinity-map/affinity entry; the bit positions are
+    /// resolved to a 256-bit Extended Admin Group bitmap (RFC 7308) at
+    /// LSP-build time, advertised inside the ASLA sub-TLV (RFC 9479)
+    /// whenever at least one flex-algo references the attribute.
+    /// `BTreeSet` for the same deterministic-iteration reason as
+    /// `srlg_groups`.
+    pub affinity: BTreeSet<String>,
+
+    /// Per-Flex-Algorithm Prefix-SID for this link's IPv4 address(es).
+    /// Populated from
+    /// /router/isis/interface/<name>/ipv4/flex-algo-prefix-sid[algo=N].
+    /// Each entry produces an additional Prefix-SID sub-TLV (RFC 8667)
+    /// on the link's IP-reach TLV with the Algorithm field set to the
+    /// map key (RFC 9350 §7), alongside the algo-0 SID in
+    /// `prefix_sid`. Storage-only — the LSP emitter consumes it once
+    /// per-algo origination lands.
+    pub ipv4_flex_algo_prefix_sids: BTreeMap<u8, SidLabelValue>,
 }
 
 /// IS-IS-side mirror of the YANG `bfd { enable, profile }` container.
@@ -835,6 +855,23 @@ pub fn config_srlg(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
     Some(())
 }
 
+// `/router/isis/interface/<ifname>/affinity` — one call per affinity
+// name in the leaf-list. Storage-only; the LSP emit follow-up will
+// resolve names against `Isis::affinity_map` to build the 256-bit
+// Extended Admin Group bitmap (RFC 7308) inside ASLA (RFC 9479).
+pub fn config_affinity(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let ifname = args.string()?;
+    let name = args.string()?;
+
+    let link = isis.links.get_mut_by_name(&ifname)?;
+    if op.is_set() {
+        link.config.affinity.insert(name);
+    } else {
+        link.config.affinity.remove(&name);
+    }
+    Some(())
+}
+
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ifname = args.string()?;
     let metric = args.u32()?;
@@ -891,6 +928,51 @@ pub fn config_ipv4_prefix_sid_index(isis: &mut Isis, mut args: Args, op: ConfigO
         link.config.prefix_sid = None;
     }
 
+    Some(())
+}
+
+// `/router/isis/interface/<ifname>/ipv4/flex-algo-prefix-sid[algo=N]`
+// list root. libyang fires Set on entry creation (no value yet) and
+// Delete when the entire algo entry is removed.
+pub fn config_ipv4_flex_algo_prefix_sid(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let ifname = args.string()?;
+    let algo = args.u8()?;
+    if !(128..=255).contains(&algo) {
+        return None;
+    }
+    let link = isis.links.get_mut_by_name(&ifname)?;
+    if !op.is_set() {
+        link.config.ipv4_flex_algo_prefix_sids.remove(&algo);
+    }
+    Some(())
+}
+
+// `.../flex-algo-prefix-sid[algo=N]/index` — per-algo index-form SID
+// for this link's IPv4 address(es), advertised as an additional
+// Prefix-SID sub-TLV with Algorithm=N (RFC 9350 §7).
+pub fn config_ipv4_flex_algo_prefix_sid_index(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let ifname = args.string()?;
+    let algo = args.u8()?;
+    if !(128..=255).contains(&algo) {
+        return None;
+    }
+    let index = args.u32()?;
+    let link = isis.links.get_mut_by_name(&ifname)?;
+    if op.is_set() {
+        link.config
+            .ipv4_flex_algo_prefix_sids
+            .insert(algo, SidLabelValue::Index(index));
+    } else {
+        link.config.ipv4_flex_algo_prefix_sids.remove(&algo);
+    }
     Some(())
 }
 
