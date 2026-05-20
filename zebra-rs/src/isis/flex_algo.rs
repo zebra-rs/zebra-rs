@@ -2,9 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
+use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
 use isis_packet::{
-    Algo, ExtAdminGroup, FadSubTlv, IsisSubFadExcludeAg, IsisSubFadExcludeSrlg, IsisSubFadFlags,
-    IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg, IsisSubFlexAlgoDef,
+    Algo, ExtAdminGroup, FadSubTlv, IsisSubAdminGrp, IsisSubAsla, IsisSubFadExcludeAg,
+    IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg,
+    IsisSubFlexAlgoDef,
 };
 
 use crate::config::{Args, ConfigOp};
@@ -116,6 +118,52 @@ impl FlexAlgoConfig {
             }
         }
     }
+}
+
+/// SABM byte (RFC 9479 §4.2) with the Flex-Algorithm (X-bit) set.
+/// Bit layout in the first SABM byte, MSB-first: R(7) S(6) F(5) X(4)
+/// reserved(3..0). Used as the Selective Application-specific
+/// Attribute Bitmap on a per-link ASLA sub-TLV so receivers know
+/// these link attributes apply to flex-algo path computation.
+const SABM_FLEX_ALGO: u8 = 0x10;
+
+/// Build the per-link Extended Admin Group bitmap from a set of
+/// affinity names by resolving each name to its bit position via the
+/// affinity-map and packing the bits into RFC 7308 32-bit words.
+/// Names with no matching `/router/isis/affinity-map/affinity` entry
+/// are silently dropped (best-effort emit, matches `build_fad_subs`).
+fn link_admin_group_words(affinity: &BTreeSet<String>, am: &AffinityMap) -> Vec<u32> {
+    let mut g = ExtAdminGroup::default();
+    for name in affinity {
+        if let Some(bit) = am.bit(name) {
+            g.set(bit);
+        }
+    }
+    g.words
+}
+
+/// Build a per-link ASLA sub-TLV (RFC 9479) carrying the link's
+/// affinity (Extended Admin Group, RFC 7308) for the Flex-Algorithm
+/// application. Returns `None` when no affinity bits resolved — a
+/// zero-byte AdminGrp inside an ASLA would be a meaningless wire
+/// artifact.
+///
+/// SABM is set to a single byte with only the X-bit (Flex-Algorithm,
+/// 0x10) — these link attributes apply to flex-algo SPF only. The
+/// L-flag stays cleared (modern non-legacy interpretation per
+/// RFC 9479 §4.2). UDABM is left empty: every receiver that
+/// understands ASLA understands Flex-Algorithm.
+pub fn build_link_asla(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<IsisSubAsla> {
+    let words = link_admin_group_words(affinity, am);
+    if words.is_empty() {
+        return None;
+    }
+    Some(IsisSubAsla {
+        l_flag: false,
+        sabm: vec![SABM_FLEX_ALGO],
+        udabm: Vec::new(),
+        subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp { groups: words })],
+    })
 }
 
 /// Algorithms this router advertises in the SR Algorithm sub-TLV
@@ -615,6 +663,82 @@ mod tests {
         .unwrap();
         fa.commit();
         assert!(!fa.config.contains_key(&128));
+    }
+
+    fn affinity_set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn build_link_asla_returns_none_for_empty_affinity() {
+        let am = AffinityMap::new();
+        assert!(build_link_asla(&BTreeSet::new(), &am).is_none());
+    }
+
+    #[test]
+    fn build_link_asla_returns_none_when_all_names_unresolved() {
+        let am = AffinityMap::new();
+        // `blue` is referenced but the affinity-map is empty.
+        assert!(build_link_asla(&affinity_set(&["blue"]), &am).is_none());
+    }
+
+    #[test]
+    fn build_link_asla_emits_sabm_flex_algo_and_admin_grp() {
+        let mut am = AffinityMap::new();
+        for (name, bit) in [("blue", "0"), ("low-lat", "4"), ("red", "31")] {
+            am.exec(
+                "/router/isis/affinity-map/affinity/bit-position".into(),
+                args(&[name, bit]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            am.commit();
+        }
+        let asla = build_link_asla(&affinity_set(&["blue", "low-lat", "red"]), &am)
+            .expect("ASLA expected");
+        // L-flag clear, SABM = [0x10] (X-bit only), UDABM empty.
+        assert!(!asla.l_flag);
+        assert_eq!(asla.sabm, vec![SABM_FLEX_ALGO]);
+        assert!(asla.udabm.is_empty());
+        // One nested sub-TLV: AdminGrp with bits 0, 4, 31 packed into
+        // the first 32-bit word.
+        assert_eq!(asla.subs.len(), 1);
+        match &asla.subs[0] {
+            NeighSubTlv::AdminGrp(ag) => {
+                assert_eq!(ag.groups.len(), 1);
+                let w = ag.groups[0];
+                assert!(w & (1 << 0) != 0, "bit 0 (blue) missing");
+                assert!(w & (1 << 4) != 0, "bit 4 (low-lat) missing");
+                assert!(w & (1 << 31) != 0, "bit 31 (red) missing");
+                // No unexpected bits.
+                let expected = (1u32 << 0) | (1u32 << 4) | (1u32 << 31);
+                assert_eq!(w, expected);
+            }
+            other => panic!("expected AdminGrp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_link_asla_grows_bitmap_to_multiple_words() {
+        let mut am = AffinityMap::new();
+        for (name, bit) in [("a", "0"), ("b", "32"), ("c", "200")] {
+            am.exec(
+                "/router/isis/affinity-map/affinity/bit-position".into(),
+                args(&[name, bit]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            am.commit();
+        }
+        let asla = build_link_asla(&affinity_set(&["a", "b", "c"]), &am).expect("ASLA");
+        match &asla.subs[0] {
+            NeighSubTlv::AdminGrp(ag) => {
+                // bit 200 lives in word 6 (200/32=6), so we need
+                // at least 7 words.
+                assert_eq!(ag.groups.len(), 7);
+            }
+            _ => panic!("expected AdminGrp"),
+        }
     }
 
     #[test]
