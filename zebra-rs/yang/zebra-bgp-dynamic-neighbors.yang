@@ -1,0 +1,121 @@
+module zebra-bgp-dynamic-neighbors {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-dynamic-neighbors";
+  prefix "zbdn";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "BGP dynamic neighbors — passive-only peers materialized on
+     inbound accept when their TCP source matches a configured
+     listen-range. Modelled on the IOS-XR `bgp listen range`
+     CLI; equivalent to FRR `bgp listen range PREFIX peer-group G`
+     where `peer-group G` maps onto our IOS-XR-style
+     `neighbor-group G`.
+
+     Resulting config shape:
+
+       router bgp {
+         neighbor-groups {
+           neighbor-group LEAF-CLIENTS {
+             remote-as 65000;
+           }
+         }
+         dynamic-neighbors {
+           listen-limit 256;
+           listen-range 10.1.0.0/24 {
+             neighbor-group LEAF-CLIENTS;
+           }
+         }
+       }
+
+     A TCP SYN whose source is in the configured prefix is accepted
+     (subject to `listen-limit`), its peer state is synthesized from
+     the referenced `neighbor-group`, and `PeerOrigin::Dynamic` is
+     stamped so the runtime can later distinguish it from
+     statically-configured peers. Active outbound opens against a
+     listen-range are refused — dynamic peers are passive-only.";
+
+  grouping bgp-dynamic-neighbors-extension {
+    description
+      "Container hung off `router bgp`.";
+    container dynamic-neighbors {
+      ext:help "BGP dynamic neighbors (listen-range)";
+      leaf listen-limit {
+        type uint32;
+        default 100;
+        description
+          "Maximum number of dynamic peers the local speaker is
+           willing to materialize. Once reached, additional inbound
+           SYNs are dropped at accept time. Setting to 0 effectively
+           disables the listen-range without removing the prefix
+           list.";
+      }
+      list listen-range {
+        key "prefix";
+        description
+          "Per-prefix authorization to accept dynamic peers. Multiple
+           ranges may overlap; longest-prefix-match wins.";
+        leaf prefix {
+          type inet:ip-prefix;
+          description
+            "TCP source prefix to match against. Both IPv4 and IPv6
+             prefixes are accepted; lookup is per-AF.";
+        }
+        leaf neighbor-group {
+          type string;
+          mandatory true;
+          description
+            "Name of the `neighbor-group` whose attributes the newly
+             materialized peer inherits. Held as a plain string (not
+             a leafref) so the listen-range can be staged before the
+             group definition lands — same convention as other
+             zebra-bgp-* augments.";
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the dynamic-neighbors container in the candidate-set
+       subtree.";
+    uses bgp-dynamic-neighbors-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp dynamic-neighbors …` is path-valid.";
+    uses bgp-dynamic-neighbors-extension;
+  }
+}
