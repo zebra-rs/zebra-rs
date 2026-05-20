@@ -28,6 +28,8 @@ pub enum CapabilityPacket {
     MultiProtocol(CapMultiProtocol),
     #[nom(Selector = "CapCode::RouteRefresh")]
     RouteRefresh(CapRefresh),
+    #[nom(Selector = "CapCode::ExtendedNextHop")]
+    ExtendedNextHop(CapExtendedNextHop),
     #[nom(Selector = "CapCode::ExtendedMessage")]
     ExtendedMessage(CapExtended),
     #[nom(Selector = "CapCode::GracefulRestart")]
@@ -71,6 +73,9 @@ impl CapabilityPacket {
                 m.emit(buf, false);
             }
             Self::RouteRefresh(m) => {
+                m.emit(buf, false);
+            }
+            Self::ExtendedNextHop(m) => {
                 m.emit(buf, false);
             }
             Self::ExtendedMessage(m) => {
@@ -121,6 +126,7 @@ impl fmt::Display for CapabilityPacket {
         match self {
             Self::MultiProtocol(v) => write!(f, "{}", v),
             Self::RouteRefresh(v) => write!(f, "{}", v),
+            Self::ExtendedNextHop(v) => write!(f, "{}", v),
             Self::ExtendedMessage(v) => write!(f, "{}", v),
             Self::GracefulRestart(v) => write!(f, "{}", v),
             Self::As4(v) => write!(f, "{}", v),
