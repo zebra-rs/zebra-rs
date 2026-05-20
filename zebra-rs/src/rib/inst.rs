@@ -317,6 +317,12 @@ pub struct Rib {
     pub fib: FibChannel,
     pub fib_handle: FibHandle,
     pub redists: HashMap<String, UnboundedSender<RibRx>>,
+    /// Per-proto redistribute subscription registry. Outer key is the
+    /// subscriber's protocol name (matches `redists`); inner map is
+    /// keyed by `(afi, rtype)` and holds the subtype filter set
+    /// (empty = wildcard). Updated by RedistAdd / RedistUpdate /
+    /// RedistDel; consulted by the steady-state delta hook (follow-up).
+    pub redist_filters: HashMap<String, super::redist::FilterMap>,
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
     pub vxlan: BTreeMap<String, Vxlan>,
@@ -438,6 +444,7 @@ impl Rib {
             fib,
             fib_handle,
             redists: HashMap::new(),
+            redist_filters: HashMap::new(),
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
             vxlan: BTreeMap::new(),
@@ -950,6 +957,7 @@ impl Rib {
         }
 
         self.redists.remove(&proto);
+        self.redist_filters.remove(&proto);
         self.sr_clients.remove(&proto);
         for watchers in self.block_watch.values_mut() {
             watchers.remove(&proto);
@@ -958,6 +966,176 @@ impl Rib {
             watchers.remove(&proto);
         }
         self.srlg_clients.remove(&proto);
+    }
+
+    // ---- redistribute subscription handlers ------------------------
+    //
+    // Step 2: registry + walk-and-replay. Steady-state delta hook
+    // (firing on FIB churn) lands in step 3; per-protocol senders /
+    // consumers land in step 4.
+
+    /// Self-route check + registry insert. Returns the Tx the walker
+    /// should push routes to, or `None` if the subscription is to be
+    /// silently dropped (self-loop, or subscriber never called
+    /// Subscribe so there's no Tx).
+    fn redist_register(
+        &mut self,
+        proto: &str,
+        afi: super::RedistAfi,
+        rtype: RibType,
+        subtypes: std::collections::BTreeSet<super::RibSubType>,
+    ) -> Option<UnboundedSender<RibRx>> {
+        // Self-route filter — unconditional. A subscriber whose proto
+        // maps to the rtype it's asking for would never receive
+        // anything; drop at registration so the registry stays clean.
+        if !super::redist::deliverable(proto, rtype) {
+            return None;
+        }
+        let tx = self.redists.get(proto)?.clone();
+        self.redist_filters
+            .entry(proto.to_string())
+            .or_default()
+            .insert((afi, rtype), subtypes);
+        Some(tx)
+    }
+
+    fn redist_add(
+        &mut self,
+        proto: String,
+        afi: super::RedistAfi,
+        rtype: RibType,
+        subtypes: std::collections::BTreeSet<super::RibSubType>,
+    ) {
+        let Some(tx) = self.redist_register(&proto, afi, rtype, subtypes.clone()) else {
+            return;
+        };
+        self.redist_walk(
+            &proto,
+            afi,
+            rtype,
+            &subtypes,
+            super::redist::WalkOp::Add,
+            &tx,
+        );
+    }
+
+    /// Replace the prior subtype set for `(proto, afi, rtype)` and
+    /// emit the appropriate Add/Del delta. Treats a missing prior row
+    /// as empty (so first-ever Update behaves like Add).
+    ///
+    /// Wildcard handling (`subtypes: {}` means "match every subtype"):
+    /// the symmetric-difference shortcut is only valid when both
+    /// sides are non-wildcard. When either side is wildcard, fall
+    /// back to a full `Del(prior) + Add(new)` sweep — slightly
+    /// heavier but the only correct option since "every subtype
+    /// except this list" isn't expressible as a finite set without
+    /// enumerating `RibSubType::Other(u8)`.
+    fn redist_update(
+        &mut self,
+        proto: String,
+        afi: super::RedistAfi,
+        rtype: RibType,
+        subtypes: std::collections::BTreeSet<super::RibSubType>,
+    ) {
+        if !super::redist::deliverable(&proto, rtype) {
+            return;
+        }
+        let Some(tx) = self.redists.get(&proto).cloned() else {
+            return;
+        };
+        let prior = self
+            .redist_filters
+            .get(&proto)
+            .and_then(|f| f.get(&(afi, rtype)))
+            .cloned()
+            .unwrap_or_default();
+        if prior == subtypes {
+            return; // no-op
+        }
+
+        if prior.is_empty() || subtypes.is_empty() {
+            // Wildcard on either side — fall back to full re-walk.
+            // Consumer briefly sees Del then Add for any routes
+            // shared by both filters; acceptable for redistribute
+            // (config-time, not data-plane).
+            self.redist_walk(&proto, afi, rtype, &prior, super::redist::WalkOp::Del, &tx);
+            self.redist_walk(
+                &proto,
+                afi,
+                rtype,
+                &subtypes,
+                super::redist::WalkOp::Add,
+                &tx,
+            );
+        } else {
+            // Both non-wildcard — symmetric difference is correct and
+            // avoids the brief Del→Add glitch on shared subtypes.
+            let removed: std::collections::BTreeSet<super::RibSubType> =
+                prior.difference(&subtypes).cloned().collect();
+            if !removed.is_empty() {
+                self.redist_walk(
+                    &proto,
+                    afi,
+                    rtype,
+                    &removed,
+                    super::redist::WalkOp::Del,
+                    &tx,
+                );
+            }
+            let added: std::collections::BTreeSet<super::RibSubType> =
+                subtypes.difference(&prior).cloned().collect();
+            if !added.is_empty() {
+                self.redist_walk(&proto, afi, rtype, &added, super::redist::WalkOp::Add, &tx);
+            }
+        }
+
+        self.redist_filters
+            .entry(proto)
+            .or_default()
+            .insert((afi, rtype), subtypes);
+    }
+
+    fn redist_del(&mut self, proto: String, afi: super::RedistAfi, rtype: RibType) {
+        let Some(tx) = self.redists.get(&proto).cloned() else {
+            // No Tx → nothing to withdraw. Still clear the filter row
+            // so memory doesn't leak across re-subscribes.
+            if let Some(f) = self.redist_filters.get_mut(&proto) {
+                f.remove(&(afi, rtype));
+            }
+            return;
+        };
+        // Withdraw using whatever filter we had registered.
+        let Some(filter) = self
+            .redist_filters
+            .get(&proto)
+            .and_then(|f| f.get(&(afi, rtype)))
+            .cloned()
+        else {
+            return;
+        };
+        self.redist_walk(&proto, afi, rtype, &filter, super::redist::WalkOp::Del, &tx);
+        if let Some(f) = self.redist_filters.get_mut(&proto) {
+            f.remove(&(afi, rtype));
+        }
+    }
+
+    fn redist_walk(
+        &self,
+        proto: &str,
+        afi: super::RedistAfi,
+        rtype: RibType,
+        subtypes: &std::collections::BTreeSet<super::RibSubType>,
+        op: super::redist::WalkOp,
+        tx: &UnboundedSender<RibRx>,
+    ) {
+        match afi {
+            super::RedistAfi::Ipv4 => {
+                super::redist::walk_v4(&self.table, proto, rtype, subtypes, op, tx);
+            }
+            super::RedistAfi::Ipv6 => {
+                super::redist::walk_v6(&self.table_v6, proto, rtype, subtypes, op, tx);
+            }
+        }
     }
 
     async fn process_msg(&mut self, msg: Message) {
@@ -1294,13 +1472,25 @@ impl Rib {
             } => {
                 self.mdb_del(vni, group, source, ifindex).await;
             }
-            // Redistribute subscription messages — types-only PR.
-            // The walk-and-replay + steady-state dispatch lands in a
-            // follow-up; drain silently for now so the dispatcher
-            // stays exhaustive.
-            Message::RedistAdd { .. }
-            | Message::RedistUpdate { .. }
-            | Message::RedistDel { .. } => {}
+            Message::RedistAdd {
+                proto,
+                afi,
+                rtype,
+                subtypes,
+            } => {
+                self.redist_add(proto, afi, rtype, subtypes);
+            }
+            Message::RedistUpdate {
+                proto,
+                afi,
+                rtype,
+                subtypes,
+            } => {
+                self.redist_update(proto, afi, rtype, subtypes);
+            }
+            Message::RedistDel { proto, afi, rtype } => {
+                self.redist_del(proto, afi, rtype);
+            }
         }
     }
 
