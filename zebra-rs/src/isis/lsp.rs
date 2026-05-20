@@ -639,9 +639,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 cap.subs.push(sr_cap.into());
             }
 
-            // Sub: SR Algorithms
+            // Sub: SR Algorithms — Algo::Spf plus every flex-algo
+            // we participate in (RFC 9350 §5.2 requires participants
+            // to advertise here, not just FAD originators).
             let algo = IsisSubSegmentRoutingAlgo {
-                algo: vec![Algo::Spf],
+                algo: super::flex_algo::sr_algorithms(top.flex_algo),
             };
             cap.subs.push(algo.into());
 
@@ -669,7 +671,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             // we still need to advertise the algorithm list once.
             if !top.config.sr_mpls_enabled {
                 let algo = IsisSubSegmentRoutingAlgo {
-                    algo: vec![Algo::Spf],
+                    algo: super::flex_algo::sr_algorithms(top.flex_algo),
                 };
                 cap.subs.push(algo.into());
             }
