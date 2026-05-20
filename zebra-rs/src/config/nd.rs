@@ -20,6 +20,10 @@ pub fn spawn_nd(config: &ConfigManager) {
     match inst::Nd::new(config.rib_tx.clone()) {
         Ok(nd) => {
             config.subscribe("nd", nd.cm.tx.clone());
+            // Publish the ND client-request channel so other protocol
+            // modules (BGP unnumbered) can attach a subscriber for
+            // `NeighborDiscovered` events at their own spawn time.
+            *config.nd_client_tx.borrow_mut() = Some(nd.client_tx());
             let task = inst::serve(nd);
             config
                 .protocol_tasks

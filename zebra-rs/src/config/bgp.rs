@@ -10,10 +10,12 @@ pub fn spawn_bgp(config: &ConfigManager) {
     // stays None and the BFD attach is a no-op — PR 5d adds a refresh
     // path for that ordering.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
+    let nd_client_tx = config.nd_client_tx.borrow().clone();
     let bgp = inst::Bgp::new(
         config.rib_tx.clone(),
         config.policy_tx.clone(),
         bfd_client_tx,
+        nd_client_tx,
     );
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe_show("bgp", bgp.show.tx.clone());

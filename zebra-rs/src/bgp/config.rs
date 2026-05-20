@@ -1513,6 +1513,19 @@ impl Bgp {
             "/router/bgp/dynamic-neighbors/listen-range/neighbor-group",
             super::dynamic_neighbors::config_listen_range_neighbor_group,
         );
+        // `set router bgp interface-neighbor <name> [...]`.
+        self.callback_add(
+            "/router/bgp/interface-neighbor",
+            super::interface_neighbor::config_interface_neighbor,
+        );
+        self.callback_add(
+            "/router/bgp/interface-neighbor/neighbor-group",
+            super::interface_neighbor::config_interface_neighbor_neighbor_group,
+        );
+        self.callback_add(
+            "/router/bgp/interface-neighbor/remote-as",
+            super::interface_neighbor::config_interface_neighbor_remote_as,
+        );
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/transport/local-address", config_transport_local_address);
@@ -1723,7 +1736,7 @@ mod bfd_wiring_tests {
         let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
         let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
-        let bgp = Bgp::new(rib_tx, policy_tx, Some(bfd_client_tx));
+        let bgp = Bgp::new(rib_tx, policy_tx, Some(bfd_client_tx), None);
         (bgp, bfd_client_rx)
     }
 
@@ -1781,7 +1794,7 @@ mod bfd_wiring_tests {
     async fn enable_without_bfd_handle_is_noop() {
         let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        let mut bgp = Bgp::new(rib_tx, policy_tx, None);
+        let mut bgp = Bgp::new(rib_tx, policy_tx, None, None);
         config_peer(&mut bgp, arg_words(&["10.0.0.4"]), ConfigOp::Set).unwrap();
         // No bfd handle to assert against; the call must not panic.
         config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.4", "true"]), ConfigOp::Set).unwrap();
