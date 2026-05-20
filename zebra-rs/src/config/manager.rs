@@ -91,11 +91,12 @@ pub struct ConfigManager {
     /// BFD attach logic.
     pub bfd_client_tx: RefCell<Option<UnboundedSender<crate::bfd::inst::ClientReq>>>,
     /// Sender side of the ND client-request channel. Populated by
-    /// [`super::nd::spawn_nd`] on the first `ipv6 router-advertisements`
-    /// config line (see `commit_config`); clones distributed to BGP
-    /// (via [`super::bgp::spawn_bgp`]) so the BGP unnumbered runtime
-    /// can submit `NdClientReq::SetNotifier` and observe
-    /// `NeighborDiscovered` events. `None` while ND has not been
+    /// [`super::nd::spawn_nd`] on either the first
+    /// `ipv6 router-advertisements` line or the first `router bgp`
+    /// line — whichever comes first in the commit. `spawn_bgp`
+    /// captures the handle by value, so the eager spawn-before-BGP
+    /// step in `commit_config` is what guarantees BGP unnumbered
+    /// always sees a live handle. `None` while ND has not been
     /// spawned, or while ND failed to start (missing `CAP_NET_RAW`,
     /// kernel rejecting a socket option, …); consumers silently skip
     /// in that case.
@@ -309,6 +310,15 @@ impl ConfigManager {
             }
             if !bgp && op == ConfigOp::Set && line.starts_with("router bgp") {
                 bgp = true;
+                // Spawn ND first if it hasn't started yet — `spawn_bgp`
+                // captures `nd_client_tx` by value, so BGP unnumbered
+                // gets no handle if ND lands afterwards. The reverse
+                // order (RA config before `router bgp`) already works
+                // via the per-line trigger below.
+                if !nd {
+                    nd = true;
+                    spawn_nd(self);
+                }
                 spawn_bgp(self);
             }
             if !bfd && op == ConfigOp::Set && line.starts_with("bfd") {
