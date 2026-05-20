@@ -1,0 +1,12 @@
+router:
+  bgp:
+    global:
+      as: 65002
+      identifier: 192.168.0.3
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      peer-as: 65002
