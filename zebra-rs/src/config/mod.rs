@@ -37,6 +37,7 @@ mod ip;
 mod isis;
 mod json;
 mod mac;
+mod nd;
 mod nsap;
 mod ospf;
 mod parse;

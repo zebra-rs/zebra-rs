@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::time::Instant;
 
+use crate::rib::link::Link;
+
 use super::send::{RaEvent, RaSendConfig, RaSender};
 use super::{NdRecv, NdSend};
 
@@ -35,6 +37,14 @@ pub enum NdEvent {
 pub struct NdEngine {
     senders: BTreeMap<u32, RaSender>,
     notifier: Option<tokio::sync::mpsc::UnboundedSender<NdEvent>>,
+    /// Mirror of the RIB's link table — ifindex → name. Populated by
+    /// [`Self::process_link_add`] on every `RibRx::LinkAdd`. Lets the
+    /// future YANG callback layer (the operator types
+    /// `interface eth0 ipv6 router-advertisements …`) resolve the
+    /// `if-name` leaf to an `ifindex` before submitting
+    /// [`super::inst::NdClientReq::EnableInterface`].
+    ifindex_by_name: BTreeMap<String, u32>,
+    name_by_ifindex: BTreeMap<u32, String>,
 }
 
 impl NdEngine {
@@ -42,7 +52,39 @@ impl NdEngine {
         Self {
             senders: BTreeMap::new(),
             notifier: None,
+            ifindex_by_name: BTreeMap::new(),
+            name_by_ifindex: BTreeMap::new(),
         }
+    }
+
+    /// Absorb a link-add notification from RIB. The RIB never emits
+    /// LinkDel — once a link is known it stays in our table even if
+    /// the kernel administratively removes the device. That matches
+    /// the OSPF / BFD pattern in this repo.
+    pub fn process_link_add(&mut self, link: &Link) {
+        // Insert preserves the most recently seen name; renaming a
+        // link via `ip link set X name Y` is rare but if it happens,
+        // we drop the old name entry to keep the reverse map
+        // consistent.
+        if let Some(old_name) = self.name_by_ifindex.insert(link.index, link.name.clone())
+            && old_name != link.name
+        {
+            self.ifindex_by_name.remove(&old_name);
+        }
+        self.ifindex_by_name.insert(link.name.clone(), link.index);
+    }
+
+    /// Look up the ifindex for a given link name. Returns `None` if
+    /// RIB hasn't notified us about this link yet (race between
+    /// config load and the kernel dump) — the callback layer should
+    /// retry on later events.
+    pub fn ifindex_of(&self, name: &str) -> Option<u32> {
+        self.ifindex_by_name.get(name).copied()
+    }
+
+    /// Reverse lookup, mostly for show / debug output.
+    pub fn ifname_of(&self, ifindex: u32) -> Option<&str> {
+        self.name_by_ifindex.get(&ifindex).map(String::as_str)
     }
 
     /// Attach a single downstream subscriber. Calling twice replaces
@@ -135,7 +177,9 @@ const ALL_NODES: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x1);
 mod tests {
     use super::*;
     use crate::nd::send::RaSendConfig;
+    use crate::rib::link::{Link, LinkType};
     use nd_packet::{RouterAdvert, RouterSolicit};
+    use netlink_packet_route::link::LinkFlags;
     use tokio::sync::mpsc;
 
     fn t0() -> Instant {
@@ -144,6 +188,24 @@ mod tests {
 
     fn ll(s: &str) -> Ipv6Addr {
         s.parse().unwrap()
+    }
+
+    fn link(name: &str, index: u32) -> Link {
+        Link {
+            index,
+            name: name.to_string(),
+            mtu: 1500,
+            metric: 1,
+            flags: LinkFlags::default(),
+            link_type: LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master: None,
+            vni: None,
+            vxlan_local: None,
+        }
     }
 
     #[test]
@@ -291,5 +353,24 @@ mod tests {
         let mut eng = NdEngine::new();
         eng.enable_interface(3, RaSendConfig::default(), start);
         assert!(eng.tick(start).is_empty());
+    }
+
+    #[test]
+    fn link_add_populates_both_lookup_directions() {
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7));
+        assert_eq!(eng.ifindex_of("eth0"), Some(7));
+        assert_eq!(eng.ifname_of(7), Some("eth0"));
+    }
+
+    #[test]
+    fn link_rename_drops_stale_name_entry() {
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7));
+        // Rename: same ifindex, new name.
+        eng.process_link_add(&link("swp1", 7));
+        assert_eq!(eng.ifindex_of("eth0"), None);
+        assert_eq!(eng.ifindex_of("swp1"), Some(7));
+        assert_eq!(eng.ifname_of(7), Some("swp1"));
     }
 }
