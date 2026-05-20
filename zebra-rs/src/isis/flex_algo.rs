@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use isis_packet::{
-    ExtAdminGroup, FadSubTlv, IsisSubFadExcludeAg, IsisSubFadExcludeSrlg, IsisSubFadFlags,
+    Algo, ExtAdminGroup, FadSubTlv, IsisSubFadExcludeAg, IsisSubFadExcludeSrlg, IsisSubFadFlags,
     IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg, IsisSubFlexAlgoDef,
 };
 
@@ -116,6 +116,25 @@ impl FlexAlgoConfig {
             }
         }
     }
+}
+
+/// Algorithms this router advertises in the SR Algorithm sub-TLV
+/// (RFC 8667 §3.2, sub-TLV 19). `Algo::Spf` (algo 0) is always
+/// present; every flex-algo entry in `fa.config` is added as
+/// `Algo::FlexAlgo(N)` in sorted order.
+///
+/// Required by RFC 9350 §5.2: a router that originates a FAD or
+/// participates in a flex-algo MUST list that algo here. The
+/// configuration model treats *any* entry in `flex_algo.config` as
+/// participation — `advertise_definition` controls FAD origination,
+/// not participation.
+pub fn sr_algorithms(fa: &FlexAlgoConfig) -> Vec<Algo> {
+    let mut algos = Vec::with_capacity(1 + fa.config.len());
+    algos.push(Algo::Spf);
+    for &n in fa.config.keys() {
+        algos.push(Algo::FlexAlgo(n));
+    }
+    algos
 }
 
 /// Build the FAD sub-TLVs (RFC 9350 §5.1) this router will originate
@@ -596,6 +615,32 @@ mod tests {
         .unwrap();
         fa.commit();
         assert!(!fa.config.contains_key(&128));
+    }
+
+    #[test]
+    fn sr_algorithms_lists_spf_plus_every_configured_algo() {
+        let mut fa = FlexAlgoConfig::new();
+        // No flex-algos yet — should yield exactly Algo::Spf.
+        assert_eq!(sr_algorithms(&fa), vec![Algo::Spf]);
+
+        // Add two flex-algos via any leaf write (priority is fine —
+        // participation is implied by the entry existing, not by
+        // advertise_definition).
+        for algo in ["129", "128"] {
+            fa.exec(
+                "/router/isis/flex-algo/priority".into(),
+                args(&[algo, "200"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            fa.commit();
+        }
+        // BTreeMap iterates sorted, so flex-algos appear in 128, 129
+        // order after Spf.
+        assert_eq!(
+            sr_algorithms(&fa),
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(129)]
+        );
     }
 
     #[test]
