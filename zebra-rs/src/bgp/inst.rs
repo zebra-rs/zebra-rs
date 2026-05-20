@@ -642,10 +642,19 @@ impl Bgp {
         match batch {
             crate::rib::RouteBatch::V4(entries) => {
                 for e in entries {
-                    self.redist_v4.insert((rtype, e.prefix), e);
+                    let prefix = e.prefix;
+                    let rib_metric = e.metric;
+                    self.redist_v4.insert((rtype, prefix), e);
+                    // Lower into Loc-RIB. Per-AFI override metric beats
+                    // the RIB cost; no override → use RIB cost as MED.
+                    let metric = self
+                        .redist_metric_v4_override(rtype, prefix)
+                        .unwrap_or(rib_metric);
+                    self.route_redist_inject(rtype, prefix, metric);
                 }
             }
             crate::rib::RouteBatch::V6(entries) => {
+                // v6 stays storage-only until LocalRib grows a v6 path.
                 for e in entries {
                     self.redist_v6.insert((rtype, e.prefix), e);
                 }
@@ -658,14 +667,43 @@ impl Bgp {
             crate::rib::RouteBatch::V4(entries) => {
                 for e in entries {
                     self.redist_v4.remove(&(rtype, e.prefix));
+                    self.route_redist_withdraw(rtype, e.prefix);
                 }
             }
             crate::rib::RouteBatch::V6(entries) => {
+                // v6 storage-only — see route_redist_add.
                 for e in entries {
                     self.redist_v6.remove(&(rtype, e.prefix));
                 }
             }
         }
+    }
+
+    /// Pull the `metric` static override from any `Bgp.redistribute`
+    /// row matching `(rtype, ipv4-unicast)`. Iterates because the map
+    /// is keyed by full `AfiSafi`, and we only care about the IPv4
+    /// unicast row here. `None` means "no override, use RIB cost".
+    fn redist_metric_v4_override(
+        &self,
+        rtype: crate::rib::RibType,
+        _prefix: ipnet::Ipv4Net,
+    ) -> Option<u32> {
+        use crate::bgp::config::BgpRedistSource;
+        use bgp_packet::{Afi, Safi};
+        let source = match rtype {
+            crate::rib::RibType::Connected => BgpRedistSource::Connected,
+            crate::rib::RibType::Static => BgpRedistSource::Static,
+            crate::rib::RibType::Isis => BgpRedistSource::Isis,
+            crate::rib::RibType::Ospf => BgpRedistSource::Ospf,
+            _ => return None,
+        };
+        let afi_safi = bgp_packet::AfiSafi {
+            afi: Afi::Ip,
+            safi: Safi::Unicast,
+        };
+        self.redistribute
+            .get(&(afi_safi, source))
+            .and_then(|c| c.metric)
     }
 
     pub async fn process_policy_msg(&mut self, msg: policy::PolicyRx) {
