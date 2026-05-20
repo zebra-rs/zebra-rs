@@ -39,7 +39,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y protobuf-compiler libnanomsg-dev bison xxd
+          sudo apt-get install -y protobuf-compiler libnanomsg-dev bison xxd libpam0g-dev
 
       - name: Install nfpm
         run: |
@@ -102,7 +102,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update -y
-          apt-get install -y protobuf-compiler libnanomsg-dev bison xxd
+          apt-get install -y protobuf-compiler libnanomsg-dev bison xxd libpam0g-dev
 
       - name: Install nfpm
         run: |
