@@ -45,7 +45,7 @@ pub enum LogFormatType {
     Elasticsearch,
 }
 
-pub fn logging_config_from_args(
+pub fn logging_config(
     log_output: &LogOutputType,
     log_file: &Option<String>,
     log_format: &LogFormatType,

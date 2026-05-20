@@ -1,24 +1,29 @@
-mod config;
-mod fmt;
-mod spf;
-mod version;
-use config::{Cli, ConfigManager};
+use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
-mod bgp;
-mod rib;
-use rib::{LogFormatType, LogOutputType, Rib, logging_config_from_args, tracing_set};
-mod policy;
-use policy::Policy;
-mod bfd;
-mod context;
-mod fib;
-mod isis;
-mod nd;
-mod ospf;
-mod srv6;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 use clap::Parser;
 use daemonize::Daemonize;
+
+mod bfd;
+mod bgp;
+mod config;
+mod context;
+use config::{Cli, ConfigManager};
+mod fib;
+mod fmt;
+mod isis;
+mod nd;
+mod policy;
+use policy::Policy;
+mod rib;
+use rib::{LogFormatType, LogOutputType, Rib, logging_config, tracing_set};
+mod ospf;
+mod spf;
+mod srv6;
+mod version;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -76,8 +81,6 @@ struct Arg {
 // 2. HomeDir ~/.zebra/yang
 // 3. System /etc/zebra-rs/yang
 
-use std::path::Path;
-
 fn yang_path(arg: &Arg) -> Option<String> {
     if !arg.yang_path.is_empty() {
         let path = Path::new(&arg.yang_path);
@@ -125,18 +128,15 @@ fn system_path(arg: &Arg) -> PathBuf {
     }
 }
 
-fn daemonize(pid_file: Option<&str>) -> anyhow::Result<()> {
-    let daemonize = Daemonize::new()
-        .pid_file(pid_file.unwrap_or("/var/run/zebra-rs.pid"))
-        .chown_pid_file(true) // is optional, see `Daemonize` documentation
-        .working_directory("/") // for default behaviour.
-        .umask(0o027) // Set umask, `0o027` by default.
-        .privileged_action(|| "Executed before drop privileges");
-
-    match daemonize.start() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("Failed to daemonize: {}", e)),
-    }
+fn daemonize() -> anyhow::Result<()> {
+    // Preserve the original cwd in the daemonized child so relative
+    // paths (e.g. `--yang-path ./yang`, relative `--pid-file`) still
+    // resolve the same way they would in foreground mode.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    Daemonize::new()
+        .working_directory(cwd)
+        .start()
+        .map_err(|e| anyhow::anyhow!("Failed to daemonize: {}", e))
 }
 
 fn write_pid_file(path: &str) -> anyhow::Result<()> {
@@ -144,46 +144,62 @@ fn write_pid_file(path: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to write PID to {}: {}", path, e))
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = run().await {
-        // Use anyhow's alternate-format Display to print the message
-        // and its cause chain without the (rarely actionable) stack
-        // backtrace that the default `Debug` representation includes.
-        eprintln!("zebra-rs: {e:#}");
-        std::process::exit(1);
-    }
-}
-
-async fn run() -> anyhow::Result<()> {
+fn main() {
     let arg = Arg::parse();
 
-    let yang_path = yang_path(&arg);
-    if yang_path.is_none() {
+    // Daemonize before building the tokio runtime.
+    if arg.daemon {
+        if let Err(e) = daemonize() {
+            eprintln!("zebra-rs: {e:#}");
+            std::process::exit(1);
+        }
+    }
+
+    if let Some(ref path) = arg.pid_file {
+        if let Err(e) = write_pid_file(path) {
+            eprintln!("zebra-rs: {e:#}");
+            std::process::exit(1);
+        }
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("zebra-rs: {e:#}");
+            std::process::exit(1);
+        });
+
+    rt.block_on(async {
+        if let Err(e) = run(arg).await {
+            eprintln!("zebra-rs: {e:#}");
+            std::process::exit(1);
+        }
+    });
+}
+
+async fn run(arg: Arg) -> anyhow::Result<()> {
+    let Some(yang_path) = yang_path(&arg) else {
         println!("Can't find YANG load path");
         std::process::exit(1);
-    }
-    let yang_path = yang_path.unwrap();
+    };
 
     // Setup tracing before any subsystem spin-up so warn/error events
     // emitted during construction (e.g. ND failing to open its raw
     // socket inside `ConfigManager::new`) are actually surfaced to the
     // operator instead of being swallowed by the default subscriber.
-    let log_config = logging_config_from_args(&arg.log_output, &arg.log_file, &arg.log_format);
+    let log_config = logging_config(&arg.log_output, &arg.log_file, &arg.log_format);
     tracing_set(arg.daemon, Some(log_config));
 
     let rib = Rib::new(arg.no_nhid, arg.enable_addr_recovery)?;
 
     let policy = Policy::new();
 
-    // Runtime-mutable YANG-defined service-accounts (D25). Shared
-    // between ConfigManager (writes on commit) and SessionTable (reads
-    // at session creation). Empty at startup; populated by the config
-    // file load that runs inside ConfigManager.
-    #[cfg(target_os = "linux")]
-    let yang_service_accounts: std::sync::Arc<
-        std::sync::RwLock<std::collections::HashSet<u32>>,
-    > = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+    // Runtime-mutable YANG-defined service-accounts. Shared between
+    // ConfigManager (writes on commit) and SessionTable (reads at session
+    // creation). Empty at startup; populated by the config file load that runs
+    // inside ConfigManager.
+    let service_accounts: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::new()));
 
     let config = ConfigManager::new(
         system_path(&arg),
@@ -191,34 +207,23 @@ async fn run() -> anyhow::Result<()> {
         rib.tx.clone(),
         rib.inbound_tx.clone(),
         policy.tx.clone(),
-        #[cfg(target_os = "linux")]
-        yang_service_accounts.clone(),
+        service_accounts.clone(),
     )?;
     config.subscribe("rib", rib.cm.tx.clone());
     config.subscribe("policy", policy.cm.tx.clone());
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
-    let cli = Cli::new(
-        config.tx.clone(),
-        #[cfg(target_os = "linux")]
-        yang_service_accounts,
-    );
+    let cli = Cli::new(config.tx.clone(), service_accounts);
 
     let vty_addr = config::VtyAddr::parse(&arg.vty_socket)?;
+
     config::serve(cli, vty_addr)?;
 
     policy::serve(policy);
 
     rib::serve(rib);
     // rib::nanomsg::serve();
-
-    // Daemonize if requested (after tracing setup)
-    if arg.daemon {
-        daemonize(arg.pid_file.as_deref())?;
-    } else if let Some(ref path) = arg.pid_file {
-        write_pid_file(path)?;
-    }
 
     tracing::info!("zebra-rs started");
 
