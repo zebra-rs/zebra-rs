@@ -321,6 +321,14 @@ pub struct Peer {
     /// `Dynamic { range_prefix }` for peers materialized on inbound
     /// accept by a configured listen-range.
     pub origin: PeerOrigin,
+    /// IPv6 scope identifier for the outbound connect, populated for
+    /// interface-keyed peers whose `address` is a link-local. The
+    /// kernel rejects a `connect(2)` to `fe80::/10` without a scope,
+    /// so this is the ifindex captured at materialization time
+    /// (see [`super::interface_neighbor::materialize_peer`]). `None`
+    /// for address-keyed peers — `connect(2)` treats the v4/v6 global
+    /// case fine without it.
+    pub scope_id: Option<u32>,
     pub router_id: Ipv4Addr,
     pub local_identifier: Option<Ipv4Addr>,
     pub remote_id: Ipv4Addr,
@@ -398,6 +406,7 @@ impl Peer {
             local_hostname,
             address,
             origin: PeerOrigin::Static,
+            scope_id: None,
             active: false,
             peer_type: PeerType::IBGP,
             state: State::Idle,
@@ -874,6 +883,7 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let address = peer.address;
+    let scope_id = peer.scope_id;
     let update_source = peer.config.transport.update_source;
     let md5_password = peer.config.transport.md5_password.clone();
     let ao_key = peer.config.transport.resolved_ao_key.clone();
@@ -881,7 +891,18 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
         let tx = tx.clone();
         let remote: SocketAddr = match address {
             IpAddr::V4(addr) => SocketAddr::new(IpAddr::V4(addr), BGP_PORT),
-            IpAddr::V6(addr) => SocketAddr::new(IpAddr::V6(addr), BGP_PORT),
+            // Pass `scope_id` through `SocketAddrV6` so a link-local
+            // target (fe80::/10) resolves to the right interface — the
+            // kernel `connect(2)` returns EINVAL otherwise. For global
+            // v6 addresses `scope_id = 0` is fine, which is what
+            // `unwrap_or(0)` produces when the peer wasn't materialized
+            // by interface-neighbor.
+            IpAddr::V6(addr) => SocketAddr::V6(std::net::SocketAddrV6::new(
+                addr,
+                BGP_PORT,
+                0,
+                scope_id.unwrap_or(0),
+            )),
         };
         let result = peer_connect(remote, update_source, md5_password.as_deref(), ao_key).await;
         match result {

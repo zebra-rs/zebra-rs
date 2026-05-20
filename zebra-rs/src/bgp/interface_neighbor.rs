@@ -92,10 +92,24 @@ pub fn materialize_peer(
         bgp.tx.clone(),
     );
     peer.origin = PeerOrigin::Interface { ifindex };
+    // Required for the kernel connect(2) to a fe80:: target —
+    // SocketAddrV6 without a scope_id returns EINVAL. The connect
+    // path in `peer_start_connection` reads this back out and
+    // builds the SocketAddrV6 accordingly.
+    peer.scope_id = Some(ifindex);
     bgp.peers.insert_with_key(PeerKey::Interface(ifindex), peer);
-    bgp.peers
-        .get_by_key(&PeerKey::Interface(ifindex))
-        .map(|p| p.ident)
+
+    // Kick the FSM. `peer.start()` arms the idle-hold timer which
+    // fires Event::Start → fsm_start → peer_start_connection. The
+    // timer captures `peer.ident`, so it must run AFTER insert (which
+    // assigns the real ident). The gate inside start() also requires
+    // `remote_as != 0`, so peers materialized from a `RemoteAsSpec::
+    // External` (which yields 0 as a placeholder until OPEN backfill)
+    // remain dormant — that case lands in a follow-up alongside the
+    // OPEN-side validation.
+    let peer = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))?;
+    peer.start();
+    Some(peer.ident)
 }
 
 /// `set router bgp interface-neighbor <name>` — list-key callback.
