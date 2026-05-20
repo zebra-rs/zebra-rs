@@ -18,6 +18,7 @@ use std::net::Ipv6Addr;
 use nd_packet::{RouterAdvert, RouterSolicit};
 
 pub mod network;
+pub mod send;
 pub mod socket;
 
 /// Inbound ND messages produced by [`network::read_packet`].
