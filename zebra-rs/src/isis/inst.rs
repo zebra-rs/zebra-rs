@@ -62,6 +62,11 @@ pub struct Isis {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub config: IsisConfig,
+    /// Flex-Algorithm (RFC 9350) configuration tree, keyed by the
+    /// numeric algorithm identifier (128..=255). Owns its own
+    /// pending-cache → commit pipeline mirroring the static-route
+    /// config builder in rib/static/config.rs.
+    pub flex_algo: super::flex_algo::FlexAlgoConfig,
     pub tracing: IsisTracing,
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
@@ -305,6 +310,7 @@ impl Isis {
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             config: IsisConfig::default(),
+            flex_algo: super::flex_algo::FlexAlgoConfig::new(),
             tracing: IsisTracing::default(),
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),

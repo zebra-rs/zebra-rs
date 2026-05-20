@@ -461,6 +461,149 @@ module config {
               // global locator is committed.
               type string;
             }
+            list flex-algo-locator {
+              // Per-Flex-Algorithm SRv6 locator binding. The named
+              // locator is advertised in SRv6 Locator TLV 27 with the
+              // Algorithm field set to `algo` (RFC 9352 §7.1). The
+              // base `locator` leaf above carries algorithm 0 (regular
+              // SPF); flex-algos (128..255) bind here. As with the
+              // base leaf, the locator name is a plain string so the
+              // IS-IS config can be staged before the matching
+              // /segment-routing/locator entry is committed.
+              key "algo";
+              leaf algo {
+                type uint8 { range "128..255"; }
+              }
+              leaf locator {
+                type string;
+              }
+            }
+          }
+        }
+
+        container affinity-map {
+          // Named affinity (admin-group) table local to this IS-IS
+          // instance. Each entry binds an operator-friendly name to a
+          // bit position in the 256-bit Extended Admin Group bitmap
+          // (RFC 7308). Per-link `affinity` leaf-lists and per-flex-
+          // algo include-any / include-all / exclude-any constraints
+          // reference these names. Held inside /router/isis to match
+          // IOS-XR's `router isis / affinity-map` placement; if/when
+          // OSPF flex-algo arrives the table can be promoted to a
+          // global sibling of /srlg.
+          list affinity {
+            key "name";
+            leaf name {
+              type string;
+            }
+            leaf bit-position {
+              type uint16 { range "0..255"; }
+              mandatory true;
+              description
+                "Bit index in the 256-bit Extended Admin Group
+                 (RFC 7308). The on-the-wire bitmap is the union of
+                 bit positions referenced by all `affinity` names
+                 attached to a given link, advertised inside the
+                 ASLA sub-TLV (RFC 9479) when at least one flex-algo
+                 references the attribute.";
+            }
+          }
+        }
+
+        list flex-algo {
+          // IS-IS Flexible Algorithm (RFC 9350) definition. Each list
+          // entry describes one algorithm this router participates in
+          // and is keyed by the on-the-wire numeric identifier
+          // (FRR / Cisco IOS-XR style: `flex-algo 128`). The same
+          // numeric value keys per-interface `flex-algo-prefix-sid`
+          // and SRv6 `flex-algo-locator` bindings — a single
+          // identifier ties FAD config, per-link SIDs and the value
+          // emitted in the FAD sub-TLV's Flex Algorithm field.
+          // `advertise-definition true` causes the router to
+          // originate the FAD sub-TLV inside Router Capability TLV
+          // 242; without it the router participates using a FAD
+          // learned from another node — at least one (preferably
+          // two) routers per area MUST advertise.
+          key "algo";
+          leaf algo {
+            type uint8 { range "128..255"; }
+            description
+              "Flex-Algorithm identifier (RFC 9350 §4). 0..127 are
+               reserved by IANA; 128..255 are user-defined.";
+          }
+
+          leaf advertise-definition {
+            type boolean;
+            default false;
+            description
+              "When true, originate the FAD sub-TLV for this
+               algorithm. If no router in the area advertises the
+               FAD, every participant fails to compute paths.";
+          }
+
+          leaf metric-type {
+            type enumeration {
+              enum igp;                   // FAD Metric-Type 0
+              enum min-unidir-link-delay; // FAD Metric-Type 1 (RFC 8570)
+              enum te-default;            // FAD Metric-Type 2 (RFC 5305)
+            }
+            default igp;
+          }
+
+          leaf priority {
+            // FAD Priority (RFC 9350 §5.1). Tie-breaker when more
+            // than one router originates a FAD for the same algo;
+            // higher priority wins.
+            type uint8;
+            default 128;
+          }
+
+          leaf prefix-metric {
+            // M-flag in the FAD Flags sub-TLV (RFC 9350 §6.4).
+            // When set, the computed path metric to a prefix
+            // includes the advertised prefix metric in addition
+            // to the path metric.
+            type boolean;
+            default false;
+          }
+
+          container dataplane {
+            // Per-algorithm dataplane participation. Explicit flags
+            // (FRR style) so the FAD sub-TLV bits, the SPF graph
+            // filter, and the SID-install path can all be driven
+            // from configuration rather than inferred from which
+            // SIDs happen to be present.
+            leaf sr-mpls { type boolean; default false; }
+            leaf srv6    { type boolean; default false; }
+            leaf ip      { type boolean; default false; }
+          }
+
+          container affinity {
+            // FAD Exclude / Include-Any / Include-All Affinity
+            // sub-TLVs (RFC 9350 §6.1). Each leaf-list value is a
+            // name from this instance's /affinity-map table.
+            leaf-list include-any { type string; }
+            leaf-list include-all { type string; }
+            leaf-list exclude-any { type string; }
+          }
+
+          leaf-list srlg-exclude {
+            // FAD Exclude SRLG sub-TLV (RFC 9350 §6.2). Each entry
+            // references a /srlg/group name; the per-link SRLG
+            // memberships configured under
+            // /router/isis/interface/srlg drive the actual link
+            // exclusion at SPF time.
+            type string;
+          }
+
+          container fast-reroute {
+            // Per-algo override of the instance-level
+            // /router/isis/fast-reroute/ti-lfa toggle. Empty
+            // container is a no-op; the child presence container
+            // turns the per-algo TI-LFA computation on.
+            container ti-lfa {
+              presence "Enable Topology-Independent LFA for this flex-algo";
+            }
           }
         }
 
@@ -728,6 +871,25 @@ module config {
                 type uint32;
               }
             }
+            list flex-algo-prefix-sid {
+              // Per-Flex-Algorithm Prefix-SID for the IPv4 address(es)
+              // of this interface. Advertised as additional Prefix-SID
+              // sub-TLVs (RFC 8667) with the Algorithm field set to
+              // `algo` (RFC 9350 §7), alongside the algo-0 SID in the
+              // `prefix-sid` container above. Typically attached to a
+              // loopback so the SID identifies this node in the
+              // flex-algo's topology.
+              key "algo";
+              leaf algo {
+                type uint8 { range "128..255"; }
+              }
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
+            }
           }
           container ipv6 {
             leaf enable {
@@ -774,6 +936,19 @@ module config {
                 "Name of a `/bfd/profile` entry whose parameters
                  apply to BFD sessions formed on this interface.";
             }
+          }
+
+          leaf-list affinity {
+            // Names of /router/isis/affinity-map entries this link
+            // belongs to. The union of their bit-positions forms the
+            // 256-bit Extended Admin Group bitmap (RFC 7308)
+            // advertised for this link inside the ASLA sub-TLV
+            // (RFC 9479) whenever at least one flex-algo references
+            // an attribute. Held as a plain string (not a leafref)
+            // so the per-interface config can be staged before the
+            // matching `affinity-map` entry is committed — matches
+            // the staging pattern of `srlg` directly below.
+            type string;
           }
 
           leaf-list srlg {

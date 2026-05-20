@@ -58,3 +58,5 @@ pub mod rib;
 pub mod srlg;
 
 pub mod throttle;
+
+pub mod flex_algo;

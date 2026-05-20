@@ -253,6 +253,8 @@ impl Isis {
             link::config_ipv6_enable,
         );
         self.callback_add("/router/isis/distribute/rib", config_distribute_rib);
+
+        super::flex_algo::callback_register(self);
     }
 }
 
