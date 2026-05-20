@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use super::{Link, MacAddr, Rib, link::LinkAddr};
+use super::{BulkPhase, Link, MacAddr, Rib, RibSubType, RibType, RouteBatch, link::LinkAddr};
 
 /// One bridge-FDB row, distilled from the larger `FibNeighbor` so
 /// subscribers don't need to drag the full address-family / state
@@ -74,6 +74,30 @@ pub enum RibRx {
         vni: u32,
     },
     EoR,
+
+    // ---- redistribute route push ---------------------------------
+    //
+    // Per-filter-row delivery of routes matched by a subscriber's
+    // `RedistAdd` / `RedistUpdate`. `rtype` and `subtype` echo the
+    // matched route so the consumer can re-key against its filter
+    // table without RIB carrying extra opaque ids. Self-route
+    // filtering is enforced by RIB before send — a subscriber whose
+    // proto maps to `rtype` will never see a RouteAdd of that rtype.
+    // Pure types in this PR — no sender wired yet.
+    #[allow(dead_code)]
+    RouteAdd {
+        rtype: RibType,
+        subtype: RibSubType,
+        routes: RouteBatch,
+        bulk: BulkPhase,
+    },
+    #[allow(dead_code)]
+    RouteDel {
+        rtype: RibType,
+        subtype: RibSubType,
+        routes: RouteBatch,
+        bulk: BulkPhase,
+    },
 }
 
 impl Rib {
