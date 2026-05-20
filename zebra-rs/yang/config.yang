@@ -117,6 +117,69 @@ module config {
        RFC 5668: 4-Octet AS Specific BGP Extended Community";
   }
 
+  grouping isis-redist-common {
+    description
+      "Common per-source knobs for IS-IS redistribution. Reused by
+       every `container redistribute/<source>` entry under
+       `router isis / afi-safi`.";
+    leaf policy {
+      // Name of a top-level `policy` (the /policy list). Held as a
+      // plain string (not a leafref) so the redistribute config can
+      // be staged before the policy is committed — same convention
+      // as `router isis / segment-routing / srv6 / locator`.
+      type string;
+    }
+    leaf metric {
+      type uint32 {
+        range "0..16777215";
+      }
+      description
+        "Static metric override for redistributed routes. When omitted,
+         the source RIB cost is used (subject to `metric-type` below).";
+    }
+    leaf level {
+      type enumeration {
+        enum level-1;
+        enum level-2;
+        enum level-1-2;
+      }
+      default "level-2";
+      description
+        "Target IS-IS level for the originated reachability TLV. Default
+         matches IOS-XR.";
+    }
+    leaf metric-type {
+      type enumeration {
+        enum internal;
+        enum external;
+        enum rib-metric-as-internal;
+        enum rib-metric-as-external;
+      }
+      default "internal";
+      description
+        "RFC 5305 I/E bit selection. `rib-metric-as-*` lifts the RIB
+         cost into the IS-IS metric instead of using a static value.";
+    }
+  }
+
+  grouping isis-redist-ospf-match {
+    description
+      "OSPF-source filter for `redistribute ospf`. IOS-XR allows only
+       one of {internal, external, nssa-external} per redistribute
+       entry — repeating the command overwrites rather than stacks.
+       Modeled as a leaf-list for shape simplicity; the IS-IS callback
+       enforces the single-value rule at commit time.";
+    container match {
+      leaf-list type {
+        type enumeration {
+          enum internal;
+          enum external;
+          enum nssa-external;
+        }
+      }
+    }
+  }
+
   grouping vrf-route-target-policy {
     description
       "Per-address-family RT import/export sets attached to a VRF.";
@@ -435,6 +498,30 @@ module config {
             key "prefix";
             leaf prefix {
               type inet:ip-prefix;
+            }
+          }
+          container redistribute {
+            presence "Enable route redistribution into IS-IS for this AFI";
+            description
+              "Per-source redistribution into the IS-IS RIB. Each
+               source is a presence container — there is no instance
+               keying (zebra-rs has a single instance per protocol).";
+            container connected {
+              presence "Redistribute connected routes";
+              uses isis-redist-common;
+            }
+            container static {
+              presence "Redistribute static routes";
+              uses isis-redist-common;
+            }
+            container bgp {
+              presence "Redistribute BGP routes";
+              uses isis-redist-common;
+            }
+            container ospf {
+              presence "Redistribute OSPF routes";
+              uses isis-redist-common;
+              uses isis-redist-ospf-match;
             }
           }
         }
