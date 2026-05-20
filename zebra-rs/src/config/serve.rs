@@ -8,9 +8,7 @@ use tonic::Response;
 use tonic::transport::Server;
 
 use crate::config::api::DeployRequest;
-#[cfg(target_os = "linux")]
 use crate::config::enable_rate::EnableRateLimiter;
-#[cfg(target_os = "linux")]
 use crate::config::session::{
     AuthzError, DEFAULT_GC_INTERVAL, DEFAULT_IDLE_TTL, ENABLE_HARD_CAP, ENABLE_IDLE_TTL,
     ProcfsReader, SessionContext, SessionError, SessionTable, run_gc, watch_bash_death,
@@ -29,12 +27,13 @@ use super::vty::{
     EnableReply, EnableRequest, ExecCode, ExecReply, ExecRequest, ExecType, LogoutReply,
     LogoutRequest, ShowReply, ShowRequest, YangMatch,
 };
+
+const VTY_TRACING: bool = false;
+
 #[derive(Debug)]
 struct ExecService {
     pub tx: mpsc::Sender<Message>,
-    #[cfg(target_os = "linux")]
     pub sessions: Arc<SessionTable>,
-    #[cfg(target_os = "linux")]
     pub enable_rate: Arc<EnableRateLimiter>,
 }
 
@@ -43,7 +42,6 @@ struct ExecService {
 ///
 /// Wraps [`SessionTable::require_admin`] with the tonic-side mapping so
 /// every gated handler does the same boilerplate.
-#[cfg(target_os = "linux")]
 fn enforce_admin<T>(
     sessions: &SessionTable,
     request: &tonic::Request<T>,
@@ -70,7 +68,6 @@ fn enforce_admin<T>(
 /// Format: comma-separated decimal uids, optional whitespace around each
 /// entry. Anything that doesn't parse as a `u32` is silently dropped so a
 /// typo in one entry doesn't take out the rest.
-#[cfg(target_os = "linux")]
 fn parse_service_accounts(raw: Option<&str>) -> std::collections::HashSet<u32> {
     let Some(raw) = raw else {
         return std::collections::HashSet::new();
@@ -84,7 +81,6 @@ fn parse_service_accounts(raw: Option<&str>) -> std::collections::HashSet<u32> {
 ///
 /// `ZEBRA_VTYPAM_BIN` env var wins for developer convenience; otherwise
 /// falls back to the distribution install path `/usr/sbin/vtypam` (D6/D15).
-#[cfg(target_os = "linux")]
 fn vtypam_path() -> std::path::PathBuf {
     std::env::var_os("ZEBRA_VTYPAM_BIN")
         .map(std::path::PathBuf::from)
@@ -94,7 +90,6 @@ fn vtypam_path() -> std::path::PathBuf {
 /// Spawn vtypam, feed it the password on stdin, and return its exit code.
 ///
 /// See `vtypam/src/main.rs` for the exit-code contract (0/1/2/3).
-#[cfg(target_os = "linux")]
 async fn spawn_vtypam(username: &str, password: &str) -> std::io::Result<i32> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
@@ -187,7 +182,6 @@ impl Exec for ExecService {
         //
         // The configure-mode lock is intentionally deferred (see D11);
         // multiple admins can still enter configure simultaneously.
-        #[cfg(target_os = "linux")]
         if request.get_ref().r#type == ExecType::Exec as i32 {
             let req = request.get_ref();
             let mode = req.mode.as_str();
@@ -231,29 +225,17 @@ impl Exec for ExecService {
 
     async fn logout(
         &self,
-        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] request: tonic::Request<
-            LogoutRequest,
-        >,
+        request: tonic::Request<LogoutRequest>,
     ) -> Result<Response<LogoutReply>, tonic::Status> {
-        #[cfg(target_os = "linux")]
         if let Some(ctx) = request.extensions().get::<SessionContext>() {
             let removed = self.sessions.remove(&ctx.key);
-            tracing::info!(uid = ctx.key.0, bash_pid = ctx.key.1, removed, "vty logout",);
+            if VTY_TRACING {
+                tracing::info!(uid = ctx.key.0, bash_pid = ctx.key.1, removed, "vty logout",);
+            }
         }
         Ok(Response::new(LogoutReply { ok: true }))
     }
 
-    #[cfg(not(target_os = "linux"))]
-    async fn enable(
-        &self,
-        _request: tonic::Request<EnableRequest>,
-    ) -> Result<Response<EnableReply>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "enable requires Linux PAM (vtypam helper)",
-        ))
-    }
-
-    #[cfg(target_os = "linux")]
     async fn enable(
         &self,
         request: tonic::Request<EnableRequest>,
@@ -269,7 +251,9 @@ impl Exec for ExecService {
         // Admin from session creation. Acknowledge the enable RPC without
         // spawning PAM so no password is prompted.
         if uid == 0 || self.sessions.is_service_account(uid) {
-            tracing::info!(uid, "enable noop (permanent admin)");
+            if VTY_TRACING {
+                tracing::info!(uid, "enable noop (permanent admin)");
+            }
             return Ok(Response::new(EnableReply {
                 ok: true,
                 message: String::new(),
@@ -322,7 +306,9 @@ impl Exec for ExecService {
                 if !promoted {
                     return Err(tonic::Status::unauthenticated("session vanished"));
                 }
-                tracing::info!(uid, auth_user = %target_user, "enable success");
+                if VTY_TRACING {
+                    tracing::info!(uid, auth_user = %target_user, "enable success");
+                }
                 Ok(Response::new(EnableReply {
                     ok: true,
                     message: String::new(),
@@ -352,19 +338,18 @@ impl Exec for ExecService {
 
     async fn disable(
         &self,
-        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] request: tonic::Request<
-            DisableRequest,
-        >,
+        request: tonic::Request<DisableRequest>,
     ) -> Result<Response<DisableReply>, tonic::Status> {
-        #[cfg(target_os = "linux")]
         if let Some(ctx) = request.extensions().get::<SessionContext>() {
             let cleared = self.sessions.disable(&ctx.key);
-            tracing::info!(
-                uid = ctx.key.0,
-                bash_pid = ctx.key.1,
-                cleared,
-                "vty disable",
-            );
+            if VTY_TRACING {
+                tracing::info!(
+                    uid = ctx.key.0,
+                    bash_pid = ctx.key.1,
+                    cleared,
+                    "vty disable",
+                );
+            }
         }
         Ok(Response::new(DisableReply { ok: true }))
     }
@@ -493,7 +478,6 @@ impl Show for ShowService {
 #[derive(Debug)]
 struct ClearService {
     pub tx: mpsc::Sender<Message>,
-    #[cfg(target_os = "linux")]
     pub sessions: Arc<SessionTable>,
 }
 
@@ -503,7 +487,6 @@ impl Clear for ClearService {
         &self,
         request: tonic::Request<ClearRequest>,
     ) -> std::result::Result<Response<ClearReply>, tonic::Status> {
-        #[cfg(target_os = "linux")]
         enforce_admin(&self.sessions, &request)?;
 
         let request = request.get_ref();
@@ -530,21 +513,17 @@ pub struct Cli {
     /// Runtime-mutable set of YANG-defined service-account uids. Shared
     /// with `ConfigManager`, which updates it on commit of
     /// `vty service-account uid N` changes (D25).
-    #[cfg(target_os = "linux")]
     pub yang_service_accounts: Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
 }
 
 impl Cli {
     pub fn new(
         config_tx: Sender<Message>,
-        #[cfg(target_os = "linux")] yang_service_accounts: Arc<
-            std::sync::RwLock<std::collections::HashSet<u32>>,
-        >,
+        yang_service_accounts: Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
     ) -> Self {
         Self {
             tx: config_tx,
             _show_clients: HashMap::new(),
-            #[cfg(target_os = "linux")]
             yang_service_accounts,
         }
     }
@@ -557,7 +536,6 @@ impl Cli {
 
 struct ApplyService {
     pub tx: mpsc::Sender<Message>,
-    #[cfg(target_os = "linux")]
     pub sessions: Arc<SessionTable>,
 }
 
@@ -567,7 +545,6 @@ impl Apply for ApplyService {
         &self,
         request: tonic::Request<tonic::Streaming<ApplyRequest>>,
     ) -> Result<tonic::Response<ApplyReply>, tonic::Status> {
-        #[cfg(target_os = "linux")]
         enforce_admin(&self.sessions, &request)?;
 
         let mut stream = request.into_inner();
@@ -611,7 +588,6 @@ impl Apply for ApplyService {
 #[derive(Debug, Clone)]
 pub enum VtyAddr {
     Tcp(SocketAddr),
-    #[cfg(target_os = "linux")]
     AbstractUds(String),
 }
 
@@ -624,19 +600,11 @@ impl VtyAddr {
             return Ok(Self::Tcp(addr));
         }
         if let Some(rest) = s.strip_prefix("unix:") {
-            #[cfg(target_os = "linux")]
-            {
-                let name = rest.trim_start_matches('@').to_string();
-                if name.is_empty() {
-                    anyhow::bail!("unix name must be non-empty");
-                }
-                return Ok(Self::AbstractUds(name));
+            let name = rest.trim_start_matches('@').to_string();
+            if name.is_empty() {
+                anyhow::bail!("unix name must be non-empty");
             }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = rest;
-                anyhow::bail!("unix sockets are only supported on Linux");
-            }
+            return Ok(Self::AbstractUds(name));
         }
         anyhow::bail!("--vty-socket must start with 'tcp:' or 'unix:'");
     }
@@ -657,12 +625,11 @@ impl VtyAddr {
 #[derive(Clone)]
 struct VtyPeerInterceptor {
     allow_uids: Option<Arc<HashSet<u32>>>,
-    #[cfg(target_os = "linux")]
     sessions: Arc<SessionTable>,
 }
 
 impl VtyPeerInterceptor {
-    fn from_env(#[cfg(target_os = "linux")] sessions: Arc<SessionTable>) -> Self {
+    fn from_env(sessions: Arc<SessionTable>) -> Self {
         let allow_uids = std::env::var("ZEBRA_VTY_ALLOW_UIDS").ok().and_then(|raw| {
             let set: HashSet<u32> = raw
                 .split(',')
@@ -676,18 +643,13 @@ impl VtyPeerInterceptor {
         });
         Self {
             allow_uids,
-            #[cfg(target_os = "linux")]
             sessions,
         }
     }
 }
 
 impl tonic::service::Interceptor for VtyPeerInterceptor {
-    fn call(
-        &mut self,
-        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))] mut req: tonic::Request<()>,
-    ) -> Result<tonic::Request<()>, tonic::Status> {
-        #[cfg(target_os = "linux")]
+    fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         if let Some(info) = req
             .extensions()
             .get::<tonic::transport::server::UdsConnectInfo>()
@@ -711,12 +673,20 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                         key: (skey_uid, bash_pid),
                     });
                     if is_new {
-                        tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc (new session)");
+                        if VTY_TRACING {
+                            tracing::info!(
+                                uid = skey_uid,
+                                gid,
+                                pid,
+                                bash_pid,
+                                "vty rpc (new session)"
+                            );
+                        }
                         let table = self.sessions.clone();
                         tokio::spawn(async move {
                             watch_bash_death(table, (skey_uid, bash_pid), bash_pid).await;
                         });
-                    } else {
+                    } else if VTY_TRACING {
                         tracing::info!(uid = skey_uid, gid, pid, bash_pid, "vty rpc");
                     }
                 }
@@ -751,11 +721,10 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
 }
 
 pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
     let sessions = {
         let env_accounts =
             parse_service_accounts(std::env::var("ZEBRA_VTY_SERVICE_ACCOUNTS").ok().as_deref());
-        if !env_accounts.is_empty() {
+        if !env_accounts.is_empty() && VTY_TRACING {
             tracing::info!(
                 uids = ?env_accounts,
                 "VTY service-account uids from env (permanent admin)",
@@ -763,37 +732,28 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         }
         SessionTable::with_service_accounts(env_accounts, cli.yang_service_accounts.clone())
     };
-    #[cfg(target_os = "linux")]
     let enable_rate = EnableRateLimiter::new();
 
     let exec_service = ExecService {
         tx: cli.tx.clone(),
-        #[cfg(target_os = "linux")]
         sessions: sessions.clone(),
-        #[cfg(target_os = "linux")]
         enable_rate: enable_rate.clone(),
     };
     let show_service = ShowService { tx: cli.tx.clone() };
     let apply_service = ApplyService {
         tx: cli.tx.clone(),
-        #[cfg(target_os = "linux")]
         sessions: sessions.clone(),
     };
     let clear_service = ClearService {
         tx: cli.tx.clone(),
-        #[cfg(target_os = "linux")]
         sessions: sessions.clone(),
     };
 
-    let interceptor = VtyPeerInterceptor::from_env(
-        #[cfg(target_os = "linux")]
-        sessions.clone(),
-    );
-    if let Some(set) = &interceptor.allow_uids {
+    let interceptor = VtyPeerInterceptor::from_env(sessions.clone());
+    if VTY_TRACING && let Some(set) = &interceptor.allow_uids {
         tracing::info!(uids = ?set, "VTY peer UID allow-list active (log-only)");
     }
 
-    #[cfg(target_os = "linux")]
     {
         let gc_table = sessions.clone();
         tokio::spawn(async move {
@@ -805,11 +765,13 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
             )
             .await
         });
-        tracing::info!(
-            interval_secs = DEFAULT_GC_INTERVAL.as_secs(),
-            idle_ttl_secs = DEFAULT_IDLE_TTL.as_secs(),
-            "VTY session GC sweep started",
-        );
+        if VTY_TRACING {
+            tracing::info!(
+                interval_secs = DEFAULT_GC_INTERVAL.as_secs(),
+                idle_ttl_secs = DEFAULT_IDLE_TTL.as_secs(),
+                "VTY session GC sweep started",
+            );
+        }
     }
 
     let builder = Server::builder()
@@ -829,20 +791,22 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
 
     match addr {
         VtyAddr::Tcp(addr) => {
-            tracing::info!("VTY gRPC listening on tcp://{addr}");
+            if VTY_TRACING {
+                tracing::info!("VTY gRPC listening on tcp://{addr}");
+            }
             tokio::spawn(async move { builder.serve(addr).await });
         }
-        #[cfg(target_os = "linux")]
         VtyAddr::AbstractUds(name) => {
             let incoming = bind_abstract_uds(&name)?;
-            tracing::info!("VTY gRPC listening on abstract UDS @{name}");
+            if VTY_TRACING {
+                tracing::info!("VTY gRPC listening on abstract UDS @{name}");
+            }
             tokio::spawn(async move { builder.serve_with_incoming(incoming).await });
         }
     }
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixListenerStream> {
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::SocketAddr as StdSockAddr;
@@ -857,10 +821,7 @@ fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixL
     let std_listener = StdUnixListener::bind_addr(&addr).map_err(|e| match e.kind() {
         std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
             "abstract VTY socket '@{name}' is already in use.\n\
-             Another zebra-rs daemon is likely running in this network namespace.\n\
-             Check with:    ss -xal | grep '@{name}'\n\
-             Then either stop the running daemon (e.g. 'systemctl stop zebra-rs')\n\
-             or start this one in a different netns ('ip netns exec ...').",
+             Another zebra-rs daemon is likely running in this network namespace.",
         ),
         std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
             "permission denied binding abstract VTY socket '@{name}'.\n\
@@ -878,7 +839,7 @@ fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixL
     Ok(UnixListenerStream::new(listener))
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::parse_service_accounts;
 
