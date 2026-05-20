@@ -165,6 +165,13 @@ async fn run() -> anyhow::Result<()> {
     }
     let yang_path = yang_path.unwrap();
 
+    // Setup tracing before any subsystem spin-up so warn/error events
+    // emitted during construction (e.g. ND failing to open its raw
+    // socket inside `ConfigManager::new`) are actually surfaced to the
+    // operator instead of being swallowed by the default subscriber.
+    let log_config = logging_config_from_args(&arg.log_output, &arg.log_file, &arg.log_format);
+    tracing_set(arg.daemon, Some(log_config));
+
     let rib = Rib::new(arg.no_nhid, arg.enable_addr_recovery)?;
 
     let policy = Policy::new();
@@ -205,10 +212,6 @@ async fn run() -> anyhow::Result<()> {
 
     rib::serve(rib);
     // rib::nanomsg::serve();
-
-    // Setup tracing based on CLI arguments
-    let log_config = logging_config_from_args(&arg.log_output, &arg.log_file, &arg.log_format);
-    tracing_set(arg.daemon, Some(log_config));
 
     // Daemonize if requested (after tracing setup)
     if arg.daemon {

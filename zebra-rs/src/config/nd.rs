@@ -1,4 +1,5 @@
 use crate::nd::inst;
+use crate::nd::socket::nd_socket;
 
 use super::ConfigManager;
 
@@ -16,23 +17,28 @@ use super::ConfigManager;
 /// If `CAP_NET_RAW` is missing the raw ICMPv6 socket cannot be opened;
 /// we log a `warn!` and continue. The daemon stays functional, just
 /// without ND.
+///
+/// The socket is opened *before* `subscribe_to_rib` so that a socket
+/// failure doesn't leave a dead `RibRx` receiver queued in RIB's
+/// inbox — RIB would panic on the link-dump send in that case.
 pub fn spawn_nd(config: &ConfigManager) {
-    let (_rib_client, rib_rx) = config.subscribe_to_rib("nd");
-    match inst::Nd::new(rib_rx) {
-        Ok(nd) => {
-            config.subscribe("nd", nd.cm.tx.clone());
-            // Publish the ND client-request channel so other protocol
-            // modules (BGP unnumbered) can attach a subscriber for
-            // `NeighborDiscovered` events at their own spawn time.
-            *config.nd_client_tx.borrow_mut() = Some(nd.client_tx());
-            let task = inst::serve(nd);
-            config
-                .protocol_tasks
-                .borrow_mut()
-                .insert("nd".to_string(), task);
-        }
+    let socket = match nd_socket() {
+        Ok(s) => s,
         Err(e) => {
             tracing::warn!("nd: not started ({e}); IPv6 RA send / receive disabled");
+            return;
         }
-    }
+    };
+    let (_rib_client, rib_rx) = config.subscribe_to_rib("nd");
+    let nd = inst::Nd::new(socket, rib_rx);
+    config.subscribe("nd", nd.cm.tx.clone());
+    // Publish the ND client-request channel so other protocol modules
+    // (BGP unnumbered) can attach a subscriber for `NeighborDiscovered`
+    // events at their own spawn time.
+    *config.nd_client_tx.borrow_mut() = Some(nd.client_tx());
+    let task = inst::serve(nd);
+    config
+        .protocol_tasks
+        .borrow_mut()
+        .insert("nd".to_string(), task);
 }

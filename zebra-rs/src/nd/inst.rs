@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use socket2::Socket;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep_until;
 
@@ -23,7 +25,6 @@ use super::config::Callback;
 use super::engine::{NdEngine, NdEvent};
 use super::network::{read_packet, write_packet};
 use super::send::RaSendConfig;
-use super::socket::{SocketError, nd_socket};
 use super::{NdRecv, NdSend};
 
 /// Control requests from external clients (the YANG callback layer
@@ -66,12 +67,20 @@ pub struct Nd {
 }
 
 impl Nd {
-    /// Build a new instance. Opens the raw socket, spawns the read /
-    /// write tasks, and subscribes to RIB so the engine learns about
-    /// links as the kernel exposes them. The event loop is *not*
-    /// spawned here — call [`serve`] for that.
-    pub fn new(rib_rx: UnboundedReceiver<RibRx>) -> Result<Self, SocketError> {
-        let socket = Arc::new(nd_socket()?);
+    /// Build a new instance from a pre-opened raw ICMPv6 socket.
+    ///
+    /// Spawns the read / write tasks and wires up the RIB
+    /// subscription channel so the engine learns about links as the
+    /// kernel exposes them. The event loop is *not* spawned here —
+    /// call [`serve`] for that.
+    ///
+    /// The socket is opened by the caller (see `super::socket::nd_socket`)
+    /// so that socket failures can be detected *before* registering a
+    /// `RibRx` subscriber — otherwise the caller would have to drop
+    /// `rib_rx` on the error path, leaving a dead receiver queued in
+    /// RIB's inbox and causing a panic when RIB tries to dump links.
+    pub fn new(socket: AsyncFd<Socket>, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+        let socket = Arc::new(socket);
         let (recv_tx, recv_rx) = mpsc::unbounded_channel();
         let (send_tx, send_rx) = mpsc::unbounded_channel();
         let (client_tx, client_rx) = mpsc::unbounded_channel();
@@ -98,7 +107,7 @@ impl Nd {
             _write_task: write_task,
         };
         nd.callback_build();
-        Ok(nd)
+        nd
     }
 
     /// Internal accessor for callbacks living in [`super::config`].

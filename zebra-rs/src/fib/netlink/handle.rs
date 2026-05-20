@@ -2434,51 +2434,46 @@ pub fn neighbor_from_msg(msg: NeighbourMessage) -> FibNeighbor {
 }
 
 fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
+    // Every arm forwards a parsed event to the RIB inbox. If RIB has
+    // already shut down (or panicked) the receiver is dropped and the
+    // send returns `SendError`; that is benign here — we don't want a
+    // closing channel to take down the netlink reader task with a
+    // secondary panic.
     if let NetlinkPayload::InnerMessage(msg) = msg.payload {
         match msg {
             RouteNetlinkMessage::NewLink(msg) => {
                 let link = link_from_msg(msg);
-                let msg = FibMessage::NewLink(link);
-                tx.send(msg).unwrap();
+                let _ = tx.send(FibMessage::NewLink(link));
             }
             RouteNetlinkMessage::DelLink(msg) => {
                 let link = link_from_msg(msg);
-                let msg = FibMessage::DelLink(link);
-                tx.send(msg).unwrap();
+                let _ = tx.send(FibMessage::DelLink(link));
             }
             RouteNetlinkMessage::NewAddress(msg) => {
                 let addr = addr_from_msg(msg);
-                let msg = FibMessage::NewAddr(addr);
-                tx.send(msg).unwrap();
+                let _ = tx.send(FibMessage::NewAddr(addr));
             }
             RouteNetlinkMessage::DelAddress(msg) => {
                 let addr = addr_from_msg(msg);
-                let msg = FibMessage::DelAddr(addr);
-                tx.send(msg).unwrap();
+                let _ = tx.send(FibMessage::DelAddr(addr));
             }
             RouteNetlinkMessage::NewRoute(msg) => {
-                let route = route_from_msg(msg);
-                if let Some(route) = route {
-                    let msg = FibMessage::NewRoute(route);
-                    tx.send(msg).unwrap();
+                if let Some(route) = route_from_msg(msg) {
+                    let _ = tx.send(FibMessage::NewRoute(route));
                 }
             }
             RouteNetlinkMessage::DelRoute(msg) => {
-                let route = route_from_msg(msg);
-                if let Some(route) = route {
-                    let msg = FibMessage::DelRoute(route);
-                    tx.send(msg).unwrap();
+                if let Some(route) = route_from_msg(msg) {
+                    let _ = tx.send(FibMessage::DelRoute(route));
                 }
             }
             RouteNetlinkMessage::NewNeighbour(msg) => {
                 let neighbor = neighbor_from_msg(msg);
-                let msg = FibMessage::NewNeighbor(neighbor);
-                tx.send(msg).unwrap();
+                let _ = tx.send(FibMessage::NewNeighbor(neighbor));
             }
             RouteNetlinkMessage::DelNeighbour(msg) => {
                 let neighbor = neighbor_from_msg(msg);
-                let msg = FibMessage::DelNeighbor(neighbor);
-                tx.send(msg).unwrap();
+                let _ = tx.send(FibMessage::DelNeighbor(neighbor));
             }
             // TODO: Phase 4B - Add MDB message handling when netlink-packet-route supports it
             // RouteNetlinkMessage::NewMdb(_) => {
