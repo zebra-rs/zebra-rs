@@ -13,6 +13,9 @@ pub use refresh::{CapEnhancedRefresh, CapRefresh, CapRefreshCisco};
 pub mod extend;
 pub use extend::CapExtended;
 
+pub mod extended_nexthop;
+pub use extended_nexthop::{CapExtendedNextHop, ExtendedNextHopValue};
+
 pub mod graceful;
 pub use graceful::{CapRestart, RestartValue};
 

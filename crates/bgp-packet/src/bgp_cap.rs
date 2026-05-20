@@ -5,8 +5,9 @@ use bytes::BytesMut;
 
 use crate::{
     AddPathValue, AfiSafi, CapAddPath, CapAs4, CapDynamic, CapEmit, CapEnhancedRefresh,
-    CapExtended, CapFqdn, CapLlgr, CapMultiProtocol, CapPathLimit, CapRefresh, CapRefreshCisco,
-    CapRestart, CapVersion, CapabilityPacket, LlgrValue, PathLimitValue, RestartValue,
+    CapExtended, CapExtendedNextHop, CapFqdn, CapLlgr, CapMultiProtocol, CapPathLimit, CapRefresh,
+    CapRefreshCisco, CapRestart, CapVersion, CapabilityPacket, LlgrValue, PathLimitValue,
+    RestartValue,
 };
 
 #[derive(Default, Debug, PartialEq, Clone)]
@@ -16,6 +17,7 @@ pub struct BgpCap {
     pub refresh_cisco: Option<CapRefreshCisco>,
     pub enhanced_refresh: Option<CapEnhancedRefresh>,
     pub extended: Option<CapExtended>,
+    pub extended_nexthop: Option<CapExtendedNextHop>,
     pub restart: BTreeMap<AfiSafi, RestartValue>,
     pub as4: Option<CapAs4>,
     pub dynamic: Option<CapDynamic>,
@@ -41,6 +43,9 @@ impl BgpCap {
             v.emit(buf, false);
         }
         if let Some(v) = &self.extended {
+            v.emit(buf, false);
+        }
+        if let Some(v) = &self.extended_nexthop {
             v.emit(buf, false);
         }
         if !self.restart.is_empty() {
@@ -102,6 +107,9 @@ impl BgpCap {
                     }
                     CapabilityPacket::ExtendedMessage(v) => {
                         bgp_cap.extended = Some(v);
+                    }
+                    CapabilityPacket::ExtendedNextHop(v) => {
+                        bgp_cap.extended_nexthop = Some(v);
                     }
                     CapabilityPacket::GracefulRestart(v) => {
                         for restart in v.values.into_iter() {
