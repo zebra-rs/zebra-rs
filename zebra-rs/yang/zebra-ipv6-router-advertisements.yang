@@ -1,0 +1,79 @@
+module zebra-ipv6-router-advertisements {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ipv6-router-advertisements";
+  prefix "zird";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Per-interface IPv6 Router Advertisement transmit knobs.
+
+     Receive is always on — the daemon's `nd` subsystem ingests RAs
+     unconditionally so the BGP unnumbered hand-off (a future PR)
+     can observe a peer's link-local as soon as it appears.
+
+     Send is opt-in. RFC 8349's RA model is more elaborate than what
+     this first cut needs; for now we expose only the explicit
+     `send-advertisements` switch, with all RFC 4861 §6.2.1 templates
+     (router lifetime, MinRtrAdvInterval, etc.) defaulted in the
+     runtime. Additional knobs can be added incrementally without
+     breaking on-disk config.";
+
+  grouping ipv6-router-advertisements-extension {
+    description
+      "Container hung off `interface/ipv6`.";
+    container router-advertisements {
+      ext:help "IPv6 Router Advertisement configuration";
+      leaf send-advertisements {
+        type boolean;
+        default false;
+        description
+          "If true, this interface emits unsolicited Router
+           Advertisements per RFC 4861 §6.2 and responds to Router
+           Solicitations within MAX_RA_DELAY_TIME (500 ms). Default
+           false — send is opt-in to avoid surprising operators of
+           routers that haven't explicitly asked for it.
+
+           Toggling this off removes the per-interface RA scheduler;
+           toggling back on re-runs the initial bring-up burst (3
+           unsolicited RAs within MAX_INITIAL_RTR_ADVERT_INTERVAL).";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:interface/config:ipv6" {
+    description
+      "Attach the router-advertisements container under
+       `interface/ipv6` in the candidate-set subtree.";
+    uses ipv6-router-advertisements-extension;
+  }
+
+  augment "/configure:delete/config:interface/config:ipv6" {
+    description
+      "Same attachment for the delete subtree so
+       `delete interface X ipv6 router-advertisements …` is
+       path-valid.";
+    uses ipv6-router-advertisements-extension;
+  }
+}

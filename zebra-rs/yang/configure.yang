@@ -34,6 +34,10 @@ module configure {
     prefix zbng;
   }
 
+  import zebra-ipv6-router-advertisements {
+    prefix zird;
+  }
+
   container set {
     ext:help "Set configuration";
     uses "config:config";
