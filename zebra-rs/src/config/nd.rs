@@ -3,19 +3,23 @@ use crate::nd::socket::nd_socket;
 
 use super::ConfigManager;
 
-/// Spawn the ND instance on first commit that mentions
-/// `ipv6 router-advertisements`.
+/// Spawn the ND instance. Triggered by [`commit_config`] in two
+/// places:
 ///
-/// Mirrors `spawn_ospf` / `spawn_bgp` / `spawn_bfd`: the dispatch in
-/// [`crate::config::ConfigManager::commit_config`] gates the call so
-/// hosts that never configure RAs don't pay the cost of opening a
-/// raw ICMPv6 socket (and don't see a startup `warn!` if the kernel
-/// rejects one of the socket options or `CAP_NET_RAW` is missing).
+///   * the first config line that contains
+///     `ipv6 router-advertisements`, or
+///   * the first `router bgp` line — eagerly, so BGP unnumbered's
+///     `spawn_bgp` (which captures `nd_client_tx` by value) gets a
+///     live handle regardless of whether the operator wrote the RA
+///     line first.
 ///
-/// BGP unnumbered also depends on ND — `spawn_bgp` captures
-/// `nd_client_tx` at spawn time. If `router bgp` is committed before
-/// any RA-touching line, BGP's handle stays `None`; that ordering
-/// caveat is identical to the BFD case noted in `spawn_bgp`.
+/// Mirrors `spawn_ospf` / `spawn_isis` / `spawn_bfd`: hosts that
+/// never configure either of those subtrees don't pay the cost of
+/// opening a raw ICMPv6 socket (and don't see a startup `warn!` if
+/// the kernel rejects one of the socket options or `CAP_NET_RAW` is
+/// missing).
+///
+/// [`commit_config`]: crate::config::ConfigManager::commit_config
 ///
 /// If `CAP_NET_RAW` is missing the raw ICMPv6 socket cannot be opened;
 /// we log a `warn!` and continue. The daemon stays functional, just
