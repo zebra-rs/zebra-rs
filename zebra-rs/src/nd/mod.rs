@@ -17,6 +17,8 @@ use std::net::Ipv6Addr;
 
 use nd_packet::{RouterAdvert, RouterSolicit};
 
+pub mod engine;
+pub mod inst;
 pub mod network;
 pub mod send;
 pub mod socket;
