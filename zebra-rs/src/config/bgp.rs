@@ -11,8 +11,11 @@ pub fn spawn_bgp(config: &ConfigManager) {
     // path for that ordering.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
     let nd_client_tx = config.nd_client_tx.borrow().clone();
+    let (rib_client, rib_rx) = config.subscribe_to_rib("bgp");
+    let ctx = crate::context::ProtoContext::default_table(rib_client);
     let bgp = inst::Bgp::new(
-        config.rib_tx.clone(),
+        ctx,
+        rib_rx,
         config.policy_tx.clone(),
         bfd_client_tx,
         nd_client_tx,

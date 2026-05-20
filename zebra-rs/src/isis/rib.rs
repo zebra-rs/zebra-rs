@@ -240,7 +240,7 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
     }
 }
 
-pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
+pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult) {
     // Delete.
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
@@ -249,7 +249,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     // Add (changed).
@@ -260,7 +260,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     // Add (new).
@@ -271,7 +271,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
 }
@@ -326,7 +326,7 @@ fn backup_to_nexthop_uni_v6(backup: &RepairPathSrv6, metric: u32) -> rib::Nextho
     nhop
 }
 
-pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6) {
+pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResultV6) {
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
             let rib = make_rib_entry_v6(route);
@@ -334,7 +334,7 @@ pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6)
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     for (prefix, _, route) in diff.different.iter() {
@@ -344,7 +344,7 @@ pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6)
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     for (prefix, route) in diff.only_next.iter() {
@@ -354,7 +354,7 @@ pub fn diff_apply_v6(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResultV6)
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
 }
@@ -396,7 +396,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     }
 }
 
-pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResult) {
+pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlmResult) {
     // Delete.
     for (label, ilm) in diff.only_curr.iter() {
         if !ilm.nhops.is_empty() {
@@ -405,7 +405,7 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
                 label: **label,
                 ilm: ilm_entry,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     // Add (changed).
@@ -416,7 +416,7 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
                 label: **label,
                 ilm: ilm_entry,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     // Add (new).
@@ -427,7 +427,7 @@ pub fn diff_ilm_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffIlmResul
                 label: **label,
                 ilm: ilm_entry,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
 }
@@ -903,21 +903,21 @@ fn apply_routing_updates(
     // Update MPLS ILM
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.ilm.get(&level).iter(), ilm.iter());
-        diff_ilm_apply(top.rib_tx.clone(), &diff);
+        diff_ilm_apply(top.rib_client, &diff);
     }
     *top.ilm.get_mut(&level) = ilm;
 
     // Update IPv4 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
-        diff_apply(top.rib_tx.clone(), &diff);
+        diff_apply(top.rib_client, &diff);
     }
     *top.rib.get_mut(&level) = rib;
 
     // Update IPv6 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
-        diff_apply_v6(top.rib_tx.clone(), &diff);
+        diff_apply_v6(top.rib_client, &diff);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
 }

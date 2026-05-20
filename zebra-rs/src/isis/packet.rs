@@ -253,7 +253,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         link.sr_locator,
         link.watched_locator,
         link.elib,
-        link.rib_tx,
+        link.rib_client,
     );
 
     // Start state transition.
@@ -421,7 +421,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             link.sr_locator,
             link.watched_locator,
             link.elib,
-            link.rib_tx,
+            link.rib_client,
         );
 
         // Start state transition.

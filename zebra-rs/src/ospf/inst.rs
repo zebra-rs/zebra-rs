@@ -22,8 +22,7 @@ use crate::rib::{self, Link, RibType};
 use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{Args, ConfigChannel, ConfigRequest, path_from_command},
-    context::{Context, Task},
-    rib::RibRxChannel,
+    context::Task,
 };
 
 use super::area::{OspfArea, OspfAreaMap};
@@ -49,7 +48,7 @@ pub struct Ospf {
     pub ptx: UnboundedSender<Message>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
-    pub rib_tx: UnboundedSender<rib::Message>,
+    pub ctx: crate::context::ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink>,
     pub areas: OspfAreaMap,
@@ -150,14 +149,8 @@ impl Ospf {
             .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
     }
 
-    pub fn new(_ctx: Context, rib_tx: UnboundedSender<crate::rib::Message>) -> Self {
-        let chan = RibRxChannel::new();
-        let msg = crate::rib::Message::Subscribe {
-            proto: "ospf".to_string(),
-            tx: chan.tx.clone(),
-        };
-        let _ = rib_tx.send(msg);
-        let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4().unwrap()).unwrap());
+    pub fn new(ctx: crate::context::ProtoContext, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+        let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, prx) = mpsc::unbounded_channel();
@@ -167,8 +160,8 @@ impl Ospf {
             ptx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
-            rib_rx: chan.rx,
-            rib_tx,
+            rib_rx,
+            ctx,
             links: BTreeMap::new(),
             areas: OspfAreaMap::new(),
             table: PrefixMap::new(),
@@ -1601,7 +1594,7 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
     rib
 }
 
-pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
+pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult) {
     // Delete.
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
@@ -1610,7 +1603,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     // Add (changed).
@@ -1621,7 +1614,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
     // Add (new).
@@ -1632,7 +1625,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
                 prefix: **prefix,
                 rib,
             };
-            rib_tx.send(msg).unwrap();
+            rib_client.send(msg).unwrap();
         }
     }
 }
@@ -1641,7 +1634,7 @@ pub fn diff_apply(rib_tx: UnboundedSender<rib::Message>, diff: &DiffResult) {
 fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     // Update RIB
     let diff = spf::table_diff(top.rib.iter(), rib.iter());
-    diff_apply(top.rib_tx.clone(), &diff);
+    diff_apply(&top.ctx.rib, &diff);
 
     top.rib = rib;
 }

@@ -6,7 +6,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{ConfigChannel, ConfigRequest, path_from_command};
-use crate::context::{Context, Task};
+use crate::context::{ProtoContext, Task};
 
 use super::config::{BfdConfig, Callback};
 use super::fsm::Event;
@@ -139,7 +139,7 @@ pub enum BfdEvent {
 
 impl Bfd {
     /// Production constructor — binds to `0.0.0.0:3784`.
-    pub fn new(ctx: Context) -> std::io::Result<Self> {
+    pub fn new(ctx: ProtoContext) -> std::io::Result<Self> {
         Self::new_with(
             ctx,
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, BFD_SINGLE_HOP_PORT),
@@ -151,8 +151,8 @@ impl Bfd {
     /// loopback ephemeral ports). Client event notifications go
     /// through the [`Self::client_req`] channel — see
     /// [`Self::client_req_tx`] for the standard distribution path.
-    pub fn new_with(_ctx: Context, bind: SocketAddrV4) -> std::io::Result<Self> {
-        let sock = bfd_socket_ipv4(bind)?;
+    pub fn new_with(ctx: ProtoContext, bind: SocketAddrV4) -> std::io::Result<Self> {
+        let sock = bfd_socket_ipv4(&ctx, bind)?;
         let local_addr = sock
             .local_addr()?
             .as_socket_ipv4()
@@ -459,7 +459,7 @@ mod tests {
 
     fn fresh_bfd() -> Bfd {
         Bfd::new_with(
-            Context::default(),
+            ProtoContext::default_table_no_rib(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
         )
         .expect("bind loopback")

@@ -1,11 +1,12 @@
 use super::api::{FdbEntry, RibRx};
+use super::client::{ClientRegistry, ProtoId, RibInbound};
 use super::entry::RibEntry;
 use super::link::{LinkConfig, link_config_exec};
 use super::{
     Block, BlockBuilder, BlockConfig, BridgeBuilder, BridgeConfig, DEFAULT_BLOCK_NAME, GroupTrait,
     Link, Locator, LocatorBuilder, LocatorConfig, MacAddr, MplsConfig, Nexthop, NexthopMap,
     NexthopUni, RibSrRx, RibType, Sid, SidBehavior, StaticConfig, V4, V6, Vrf, VrfBuilder,
-    VrfIdAllocator, Vxlan, VxlanBuilder, VxlanConfig,
+    VrfIdAllocator, VrfRibTables, Vxlan, VxlanBuilder, VxlanConfig,
 };
 
 use crate::config::{Args, path_from_command};
@@ -175,7 +176,16 @@ pub enum Message {
         tx: oneshot::Sender<()>,
     },
     Resolve,
+    /// Register a subscriber. Sent by
+    /// [`crate::config::ConfigManager::subscribe_to_rib`] right after
+    /// it has allocated a `ProtoId` and built the matching
+    /// [`crate::rib::client::RibClient`]. RIB inserts the row in
+    /// both the typed `client_registry` (keyed by `proto_id`) and
+    /// the legacy `redists` map (keyed by proto name), then drives
+    /// the link / addr / VXLAN / FDB / router-id initial-state
+    /// replay before terminating with `RibRx::EoR`.
     Subscribe {
+        proto_id: ProtoId,
         proto: String,
         tx: UnboundedSender<RibRx>,
     },
@@ -296,7 +306,27 @@ pub struct Rib {
     pub show_cb: HashMap<String, ShowCallback>,
     pub fib: FibChannel,
     pub fib_handle: FibHandle,
+    /// Legacy proto-name → `RibRx` sender map kept alongside
+    /// `client_registry` for as long as the outbound broadcast paths
+    /// (api_link_add, api_addr_add, …) iterate by name. Step 9
+    /// replaces those walks with `client_registry.iter()` and drops
+    /// this field.
     pub redists: HashMap<String, UnboundedSender<RibRx>>,
+    /// Typed subscriber registry. Populated by
+    /// `Rib::subscribe` (the `Message::Subscribe` handler) alongside
+    /// the legacy `redists` map; consulted by `proto_cleanup` and by
+    /// step 9's per-VRF dispatch.
+    pub client_registry: ClientRegistry,
+    /// Sender half of the `RibInbound` channel — cloned by
+    /// `ConfigManager` into every `RibClient` it hands out at
+    /// subscribe time.
+    pub inbound_tx: UnboundedSender<RibInbound>,
+    /// Receive half polled in `event_loop`. Each `RibInbound` is
+    /// unwrapped and forwarded to `process_msg` exactly like the
+    /// legacy `rx` channel. The `from: ProtoId` field is captured
+    /// for future use (step 9 routes per-VRF installs through it)
+    /// but is otherwise inert in step 1.
+    pub inbound_rx: UnboundedReceiver<RibInbound>,
     /// Per-proto redistribute subscription registry. Outer key is the
     /// subscriber's protocol name (matches `redists`); inner map is
     /// keyed by `(afi, rtype)` and holds the subtype filter set
@@ -311,6 +341,14 @@ pub struct Rib {
     /// creates the kernel `vrf` master, entry is recorded here).
     /// `Message::VrfDel` removes the entry and releases the id.
     pub vrfs: BTreeMap<String, Vrf>,
+    /// Per-VRF routing tables, keyed by the same `table_id` the
+    /// kernel uses. Each entry holds the IPv4 + IPv6 prefix tries
+    /// and the MPLS ILM map for that VRF. Created on `VrfAdd`
+    /// (empty), removed on `VrfDel`. Step 9's per-`ProtoId` inbound
+    /// dispatcher writes into these when a VRF-attached protocol
+    /// installs a route; nothing inserts into the inner maps in
+    /// step 7.
+    pub vrf_tables: BTreeMap<u32, VrfRibTables>,
     pub vrf_id_alloc: VrfIdAllocator,
     /// Operator intent for per-interface VRF binding, keyed by ifname.
     /// `Some(vrf)` = enslave; `None` = unbind. The handler retries this
@@ -408,6 +446,7 @@ impl Rib {
         let fib = FibChannel::new();
         let fib_handle = FibHandle::new(fib.tx.clone(), no_nhid)?;
         let (tx, rx) = mpsc::unbounded_channel();
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let mut rib = Rib {
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
@@ -415,11 +454,15 @@ impl Rib {
             fib,
             fib_handle,
             redists: HashMap::new(),
+            client_registry: ClientRegistry::new(),
+            inbound_tx,
+            inbound_rx,
             redist_filters: HashMap::new(),
             links: BTreeMap::new(),
             bridges: BTreeMap::new(),
             vxlan: BTreeMap::new(),
             vrfs: BTreeMap::new(),
+            vrf_tables: BTreeMap::new(),
             vrf_id_alloc: VrfIdAllocator::new(),
             pending_vrf_bind: BTreeMap::new(),
             table: PrefixMap::new(),
@@ -818,7 +861,14 @@ impl Rib {
         }
     }
 
-    pub fn subscribe(&mut self, tx: UnboundedSender<RibRx>, proto: String) {
+    /// Register a subscriber. `proto_id` is allocated by
+    /// [`crate::config::ConfigManager::subscribe_to_rib`] before this
+    /// runs; we record the row in both `client_registry` (keyed by
+    /// id — the canonical lookup for step 9's per-VRF dispatch) and
+    /// `redists` (keyed by name — still used by the outbound
+    /// broadcast paths and by `proto_cleanup`). The initial-state
+    /// dump and the trailing `EoR` are unchanged.
+    pub fn subscribe(&mut self, proto_id: ProtoId, tx: UnboundedSender<RibRx>, proto: String) {
         // Link dump.
         for (_, link) in self.links.iter() {
             let msg = RibRx::LinkAdd(link.clone());
@@ -861,6 +911,8 @@ impl Rib {
                 let _ = tx.send(RibRx::FdbAdd(entry));
             }
         }
+        self.client_registry
+            .register_with_id(proto_id, &proto, tx.clone());
         self.redists.insert(proto, tx.clone());
         if !self.router_id.is_unspecified() {
             let msg = RibRx::RouterIdUpdate(self.router_id);
@@ -910,6 +962,12 @@ impl Rib {
             }
         }
 
+        // Drop the typed registry row alongside the legacy redists
+        // entry. Once step 9 removes redists, this becomes the only
+        // teardown call here.
+        if let Some(proto_id) = self.client_registry.find_by_proto(&proto) {
+            self.client_registry.unregister(proto_id);
+        }
         self.redists.remove(&proto);
         self.redist_filters.remove(&proto);
         self.sr_clients.remove(&proto);
@@ -1173,6 +1231,13 @@ impl Rib {
                         ifindex,
                     },
                 );
+                // Park an empty per-VRF routing table set keyed by the
+                // same `table_id` the kernel uses. Step 9's per-
+                // `ProtoId` dispatcher will start writing routes here
+                // when a VRF-attached protocol installs. Until then
+                // the entry exists so the lookup is never a `None`
+                // surprise once the dispatcher lands.
+                self.vrf_tables.insert(table_id, VrfRibTables::new());
                 tracing::info!(
                     "vrf_add: {} table_id={} ifindex={}",
                     name,
@@ -1200,6 +1265,12 @@ impl Rib {
                     self.fib_handle.vrf_del(&name).await;
                     return;
                 };
+                // Drop the parked per-VRF routing tables alongside the
+                // kernel VRF master. Step 7 doesn't walk the tables for
+                // FIB withdrawal because no route ever lands in them —
+                // step 9's dispatcher will start populating these,
+                // and the matching withdraw walk lands then too.
+                self.vrf_tables.remove(&vrf.table_id);
                 self.fib_handle.vrf_del(&name).await;
                 self.vrf_id_alloc.release(vrf.table_id);
                 tracing::info!("vrf_del: {} (table_id={})", name, vrf.table_id);
@@ -1377,8 +1448,12 @@ impl Rib {
                 self.ipv4_route_resolve().await;
                 self.ipv6_route_resolve().await;
             }
-            Message::Subscribe { tx, proto } => {
-                self.subscribe(tx, proto);
+            Message::Subscribe {
+                proto_id,
+                tx,
+                proto,
+            } => {
+                self.subscribe(proto_id, tx, proto);
             }
             Message::ProtoCleanup { proto } => {
                 self.proto_cleanup(proto).await;
@@ -1649,6 +1724,18 @@ impl Rib {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg).await;
+                }
+                Some(env) = self.inbound_rx.recv() => {
+                    // Step 1: unwrap the envelope and forward to the
+                    // same `process_msg` the legacy `rx` channel
+                    // uses. `env.from` is the subscriber's ProtoId,
+                    // which step 9 will consult to decide which VRF
+                    // table the install lands in; for now it's
+                    // purely informational. Logging at trace level
+                    // makes it easy to confirm the wiring works
+                    // without spamming production logs.
+                    tracing::trace!(from = %env.from, "rib: inbound envelope");
+                    self.process_msg(env.msg).await;
                 }
                 Some(msg) = self.fib.rx.recv() => {
                     self.process_fib_msg(msg).await;

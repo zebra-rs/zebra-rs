@@ -8,15 +8,14 @@ use crate::bgp::{InOut, peer};
 use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
 };
-use crate::context::Task;
+use crate::context::{ProtoContext, Task};
 use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
-use crate::rib::api::{FdbEntry, RibRx, RibRxChannel};
-use crate::rib::{self, MacAddr};
-use socket2::{Domain, Protocol, Socket, Type};
+use crate::rib::MacAddr;
+use crate::rib::api::{FdbEntry, RibRx};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 
 /// Map a `/clear/bgp/<afi>/neighbor[/soft[/in|out]]` path (from
@@ -45,24 +44,6 @@ fn parse_clear_bgp_path(
         _ => return None,
     };
     Some((afi, safi, op))
-}
-
-/// Create an IPv6-only TCP listener to avoid conflicts with IPv4 binding
-fn create_ipv6_listener() -> Result<TcpListener, std::io::Error> {
-    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
-
-    // Set IPV6_V6ONLY to true to prevent binding to IPv4 as well
-    socket.set_only_v6(true)?;
-    socket.set_reuse_address(true)?;
-
-    let addr = "[::]:179".parse::<SocketAddr>().unwrap();
-    socket.bind(&addr.into())?;
-    socket.listen(128)?;
-
-    // Convert socket2::Socket to std::net::TcpListener, then to tokio::net::TcpListener
-    let std_listener: std::net::TcpListener = socket.into();
-    std_listener.set_nonblocking(true)?;
-    TcpListener::from_std(std_listener)
 }
 
 #[allow(dead_code)]
@@ -130,7 +111,13 @@ pub struct Bgp {
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
-    pub rib_tx: UnboundedSender<rib::Message>,
+    /// Spawn-time runtime context. Bundles the `RibClient` (sends
+    /// to RIB through `self.ctx.rib`) with the VRF identity the
+    /// socket factories on `ctx` consult — so BGP code calls
+    /// `self.ctx.tcp_listen(...)` / `self.ctx.tcp_socket_v*()`
+    /// without ever branching on whether it's the default routing
+    /// table or a future VRF instance.
+    pub ctx: ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub callbacks: HashMap<String, Callback>,
     pub pcallbacks: HashMap<String, PCallback>,
@@ -243,18 +230,12 @@ pub struct Bgp {
 
 impl Bgp {
     pub fn new(
-        rib_tx: UnboundedSender<rib::Message>,
+        ctx: ProtoContext,
+        rib_rx: UnboundedReceiver<RibRx>,
         policy_tx: UnboundedSender<policy::Message>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
         nd_client_tx: Option<UnboundedSender<crate::nd::inst::NdClientReq>>,
     ) -> Self {
-        let chan = RibRxChannel::new();
-        let msg = rib::Message::Subscribe {
-            proto: "bgp".into(),
-            tx: chan.tx.clone(),
-        };
-        let _ = rib_tx.send(msg);
-
         let policy_chan = PolicyRxChannel::new();
         let msg = policy::Message::Subscribe {
             proto: "bgp".into(),
@@ -286,8 +267,8 @@ impl Bgp {
             tx,
             rx,
             local_rib: LocalRib::default(),
-            rib_tx,
-            rib_rx: chan.rx,
+            ctx,
+            rib_rx,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -469,7 +450,7 @@ impl Bgp {
                     router_id: &self.router_id,
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,
-                    rib_tx: &self.rib_tx,
+                    rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,
                     update_groups: &mut self.update_groups,
                 };
@@ -594,7 +575,7 @@ impl Bgp {
         let mut ipv6_bound = false;
 
         // Check if we can bind to IPv4
-        match TcpListener::bind("0.0.0.0:179").await {
+        match self.ctx.tcp_listen("0.0.0.0:179".parse().unwrap()).await {
             Ok(listener) => {
                 ipv4_bound = true;
                 // println!("Successfully bound to IPv4 0.0.0.0:179");
@@ -629,7 +610,11 @@ impl Bgp {
         }
 
         // Check if we can bind to IPv6 with IPv6-only socket
-        match create_ipv6_listener() {
+        match self
+            .ctx
+            .tcp_listen_v6_only("[::]:179".parse().unwrap())
+            .await
+        {
             Ok(listener) => {
                 ipv6_bound = true;
                 // println!("Successfully bound to IPv6 [::]:179");

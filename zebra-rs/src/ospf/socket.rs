@@ -4,13 +4,17 @@ use std::os::raw::c_int;
 use std::str::FromStr;
 
 use socket2::InterfaceIndexOrAddress;
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, Socket};
 use tokio::io::unix::AsyncFd;
+
+use crate::context::ProtoContext;
 
 const OSPF_IP_PROTO: i32 = 89;
 
-pub fn ospf_socket_ipv4() -> Result<Socket, std::io::Error> {
-    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
+pub fn ospf_socket_ipv4(ctx: &ProtoContext) -> Result<Socket, std::io::Error> {
+    // Initial socket through the context so VRF binding (when
+    // step 8 lights up `SO_BINDTODEVICE`) applies automatically.
+    let socket = ctx.raw_socket(Domain::IPV4, Protocol::from(OSPF_IP_PROTO))?;
 
     socket.set_nonblocking(true)?;
     socket.set_reuse_address(true)?;

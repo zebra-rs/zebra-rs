@@ -182,6 +182,7 @@ async fn run() -> anyhow::Result<()> {
         system_path(&arg),
         yang_path,
         rib.tx.clone(),
+        rib.inbound_tx.clone(),
         policy.tx.clone(),
         #[cfg(target_os = "linux")]
         yang_service_accounts.clone(),

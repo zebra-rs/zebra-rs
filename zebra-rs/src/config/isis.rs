@@ -1,18 +1,19 @@
-use crate::context::Context;
+use crate::context::ProtoContext;
 use crate::isis::inst;
 use crate::rib;
 
 use super::ConfigManager;
 
 pub fn spawn_isis(config: &ConfigManager) {
-    let ctx = Context::default();
     // Capture BFD's client handle (if BFD is already spawned) so per-
     // interface `bfd { enable }` can later submit Subscribe /
     // Unsubscribe. If `bfd { ... }` is configured *after* IS-IS, the
     // handle stays None and the BFD attach is a no-op — late-binding
     // refresh is a follow-up.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
-    let isis = inst::Isis::new(ctx, config.rib_tx.clone(), bfd_client_tx);
+    let (rib_client, rib_rx) = config.subscribe_to_rib("isis");
+    let ctx = ProtoContext::default_table(rib_client);
+    let isis = inst::Isis::new(ctx, rib_rx, bfd_client_tx);
     config.subscribe("isis", isis.cm.tx.clone());
     config.subscribe_show("isis", isis.show.tx.clone());
     let task = inst::serve(isis);

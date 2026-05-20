@@ -317,11 +317,11 @@ mod tests {
 
     use super::*;
     use crate::bfd::inst::Bfd;
-    use crate::context::Context;
+    use crate::context::ProtoContext;
 
     fn fresh_bfd() -> Bfd {
         Bfd::new_with(
-            Context::default(),
+            ProtoContext::default_table_no_rib(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
         )
         .expect("bind loopback")

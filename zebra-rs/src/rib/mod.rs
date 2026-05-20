@@ -1,5 +1,14 @@
 pub mod api;
-pub use api::RibRxChannel;
+// `RibRxChannel` is no longer re-exported at the rib crate root —
+// every external caller now obtains the rx half via
+// `ConfigManager::subscribe_to_rib`. Test code that needs the raw
+// channel reaches it as `crate::rib::api::RibRxChannel`.
+
+pub mod client;
+// Re-exports intentionally omitted until step 2's callers land — a
+// binary crate with no external consumer of these names today would
+// just trigger `unused_imports`. Use `crate::rib::client::*` from
+// callsites for now.
 
 pub mod inst;
 pub use inst::{Message, Rib, serve};

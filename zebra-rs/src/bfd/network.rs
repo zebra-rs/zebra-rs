@@ -155,9 +155,11 @@ mod tests {
 
     use super::*;
     use crate::bfd::socket::bfd_socket_ipv4;
+    use crate::context::ProtoContext;
 
     fn loopback_recv_socket() -> (Arc<AsyncFd<Socket>>, u16) {
-        let sock = bfd_socket_ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let ctx = ProtoContext::default_table_no_rib();
+        let sock = bfd_socket_ipv4(&ctx, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = sock.local_addr().unwrap().as_socket_ipv4().unwrap().port();
         (Arc::new(AsyncFd::new(sock).unwrap()), port)
     }

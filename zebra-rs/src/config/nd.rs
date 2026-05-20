@@ -17,7 +17,8 @@ use super::ConfigManager;
 /// we log a `warn!` and continue. The daemon stays functional, just
 /// without ND.
 pub fn spawn_nd(config: &ConfigManager) {
-    match inst::Nd::new(config.rib_tx.clone()) {
+    let (_rib_client, rib_rx) = config.subscribe_to_rib("nd");
+    match inst::Nd::new(rib_rx) {
         Ok(nd) => {
             config.subscribe("nd", nd.cm.tx.clone());
             // Publish the ND client-request channel so other protocol

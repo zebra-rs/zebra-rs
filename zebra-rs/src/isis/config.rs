@@ -920,7 +920,7 @@ fn send_redist(isis: &Isis, afi: IsisRedistAfi, src: IsisRedistSource, first_tim
             subtypes: wire_subtypes(src, entry),
         },
     };
-    let _ = isis.rib_tx.send(msg);
+    let _ = isis.ctx.rib.send(msg);
 }
 
 fn redist_set_presence(

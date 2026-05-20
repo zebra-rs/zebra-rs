@@ -17,7 +17,7 @@ use tokio::time::sleep_until;
 
 use crate::config::{ConfigChannel, ConfigRequest, path_from_command};
 use crate::context::Task;
-use crate::rib::api::{RibRx, RibRxChannel};
+use crate::rib::api::RibRx;
 
 use super::config::Callback;
 use super::engine::{NdEngine, NdEvent};
@@ -70,17 +70,11 @@ impl Nd {
     /// write tasks, and subscribes to RIB so the engine learns about
     /// links as the kernel exposes them. The event loop is *not*
     /// spawned here — call [`serve`] for that.
-    pub fn new(rib_tx: UnboundedSender<crate::rib::Message>) -> Result<Self, SocketError> {
+    pub fn new(rib_rx: UnboundedReceiver<RibRx>) -> Result<Self, SocketError> {
         let socket = Arc::new(nd_socket()?);
         let (recv_tx, recv_rx) = mpsc::unbounded_channel();
         let (send_tx, send_rx) = mpsc::unbounded_channel();
         let (client_tx, client_rx) = mpsc::unbounded_channel();
-
-        let rib_chan = RibRxChannel::new();
-        let _ = rib_tx.send(crate::rib::Message::Subscribe {
-            proto: "nd".to_string(),
-            tx: rib_chan.tx.clone(),
-        });
 
         let read_socket = socket.clone();
         let read_task = Task::spawn(async move {
@@ -97,7 +91,7 @@ impl Nd {
             send_tx,
             client_rx,
             client_tx,
-            rib_rx: rib_chan.rx,
+            rib_rx,
             cm: ConfigChannel::new(),
             callbacks: HashMap::new(),
             _read_task: read_task,
