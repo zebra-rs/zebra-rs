@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use super::{BulkPhase, Link, MacAddr, Rib, RibSubType, RibType, RouteBatch, link::LinkAddr};
+use super::{BulkPhase, Link, MacAddr, Rib, RibType, RouteBatch, link::LinkAddr};
 
 /// One bridge-FDB row, distilled from the larger `FibNeighbor` so
 /// subscribers don't need to drag the full address-family / state
@@ -78,23 +78,22 @@ pub enum RibRx {
     // ---- redistribute route push ---------------------------------
     //
     // Per-filter-row delivery of routes matched by a subscriber's
-    // `RedistAdd` / `RedistUpdate`. `rtype` and `subtype` echo the
-    // matched route so the consumer can re-key against its filter
-    // table without RIB carrying extra opaque ids. Self-route
-    // filtering is enforced by RIB before send — a subscriber whose
-    // proto maps to `rtype` will never see a RouteAdd of that rtype.
-    // Pure types in this PR — no sender wired yet.
+    // `RedistAdd` / `RedistUpdate`. `rtype` is at the message level
+    // (every entry in a batch shares it by construction); `subtype`
+    // is per-entry inside `RouteEntryV4`/`V6` so a wildcard
+    // subscription replays in a single pass with one final EoR
+    // instead of N walks and N EoRs. Self-route filtering is
+    // enforced by RIB before send — a subscriber whose proto maps
+    // to `rtype` will never see a RouteAdd of that rtype.
     #[allow(dead_code)]
     RouteAdd {
         rtype: RibType,
-        subtype: RibSubType,
         routes: RouteBatch,
         bulk: BulkPhase,
     },
     #[allow(dead_code)]
     RouteDel {
         rtype: RibType,
-        subtype: RibSubType,
         routes: RouteBatch,
         bulk: BulkPhase,
     },

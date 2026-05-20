@@ -7,7 +7,7 @@ const RIB_ISIS: u8 = 5;
 const RIB_BGP: u8 = 6;
 const RIB_DHCP: u8 = 7;
 
-#[derive(Debug, PartialEq, Eq, Clone, Default, Copy, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Default, Copy, PartialOrd, Ord, serde::Serialize)]
 pub enum RibType {
     Kernel,
     Connected,
@@ -88,7 +88,7 @@ impl RibType {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord, serde::Serialize)]
 pub enum RibSubType {
     Default,
     OspfIa,
@@ -177,15 +177,20 @@ pub enum BulkPhase {
 
 /// Minimal route attributes delivered to a redistribute subscriber.
 /// Carries what policy almost always matches on (prefix, nexthop,
-/// metric, tag) plus the egress ifindex. Communities / originator-id
-/// etc. are BGP-only and intentionally omitted from this baseline —
-/// they'd grow `extra: Option<…>` later without changing the wire
-/// shape.
+/// metric, tag, subtype) plus the egress ifindex. Communities /
+/// originator-id etc. are BGP-only and intentionally omitted from
+/// this baseline — they'd grow `extra: Option<…>` later without
+/// changing the wire shape.
+///
+/// `subtype` is per-entry (not per-message) so a wildcard
+/// subscription replays in a single pass with one final EoR, instead
+/// of N walks and N EoRs (one per subtype).
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteEntryV4 {
     pub prefix: ipnet::Ipv4Net,
     pub nexthop: std::net::Ipv4Addr,
+    pub subtype: RibSubType,
     pub metric: u32,
     pub tag: u32,
     pub ifindex: u32,
@@ -196,6 +201,7 @@ pub struct RouteEntryV4 {
 pub struct RouteEntryV6 {
     pub prefix: ipnet::Ipv6Net,
     pub nexthop: std::net::Ipv6Addr,
+    pub subtype: RibSubType,
     pub metric: u32,
     pub tag: u32,
     pub ifindex: u32,
