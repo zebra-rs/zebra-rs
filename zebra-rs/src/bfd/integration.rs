@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::inst::{Bfd, BfdEvent, serve};
 use super::session::{SessionKey, SessionParams};
-use crate::context::Context;
+use crate::context::ProtoContext;
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
@@ -47,10 +47,16 @@ async fn two_instances_reach_up() {
     let (tx_a, mut rx_a) = mpsc::unbounded_channel();
     let (tx_b, mut rx_b) = mpsc::unbounded_channel();
 
-    let mut bfd_a =
-        Bfd::new_with(Context::default(), SocketAddrV4::new(LOOPBACK, 0)).expect("bind A");
-    let mut bfd_b =
-        Bfd::new_with(Context::default(), SocketAddrV4::new(LOOPBACK, 0)).expect("bind B");
+    let mut bfd_a = Bfd::new_with(
+        ProtoContext::default_table_no_rib(),
+        SocketAddrV4::new(LOOPBACK, 0),
+    )
+    .expect("bind A");
+    let mut bfd_b = Bfd::new_with(
+        ProtoContext::default_table_no_rib(),
+        SocketAddrV4::new(LOOPBACK, 0),
+    )
+    .expect("bind B");
 
     let port_a = bfd_a.local_addr.port();
     let port_b = bfd_b.local_addr.port();

@@ -68,6 +68,17 @@ pub struct ConfigManager {
     pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     pub rib_tx: UnboundedSender<crate::rib::Message>,
+    /// Inbound envelope channel toward RIB. Mints every `RibClient`
+    /// handed out by [`Self::subscribe_to_rib`]; all protocol-side
+    /// sends go through here once step 2's migration completes. The
+    /// legacy `rib_tx` survives in parallel for `Subscribe` /
+    /// `ProtoCleanup` and other registration-time messages that are
+    /// not attributable to a single subscriber.
+    pub rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
+    /// Monotonic allocator for `ProtoId`s handed out at
+    /// `subscribe_to_rib` time. `Cell` because allocation is sync
+    /// and ConfigManager is `!Send` (uses `RefCell` elsewhere).
+    pub next_proto_id: std::cell::Cell<u32>,
     pub policy_tx: UnboundedSender<crate::policy::Message>,
     /// Sender side of the BFD client-request channel. Populated by
     /// [`super::bfd::spawn_bfd`] when a `bfd { ... }` block first
@@ -99,6 +110,7 @@ impl ConfigManager {
         mut system_path: PathBuf,
         yang_path: String,
         rib_tx: UnboundedSender<crate::rib::Message>,
+        rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
         policy_tx: UnboundedSender<crate::policy::Message>,
         #[cfg(target_os = "linux")] yang_service_accounts: std::sync::Arc<
             std::sync::RwLock<std::collections::HashSet<u32>>,
@@ -121,6 +133,8 @@ impl ConfigManager {
             cm_clients: RefCell::new(HashMap::new()),
             show_clients: RefCell::new(HashMap::new()),
             rib_tx,
+            rib_inbound_tx,
+            next_proto_id: std::cell::Cell::new(0),
             policy_tx,
             bfd_client_tx: RefCell::new(None),
             nd_client_tx: RefCell::new(None),
@@ -138,6 +152,39 @@ impl ConfigManager {
         spawn_nd(&cm);
 
         Ok(cm)
+    }
+
+    /// Allocate a `ProtoId`, build a `RibClient` bound to it, and
+    /// register the matching `RibRx` sender with RIB via the legacy
+    /// `Message::Subscribe` (still the only path that knows how to
+    /// replay the link / addr / VXLAN / FDB dump and emit `EoR`).
+    /// Returns the bound client plus the receiver half the caller
+    /// polls for notifications.
+    ///
+    /// In step 2 the returned `ProtoId` exists only in the client —
+    /// RIB doesn't yet consult it for dispatch. Step 9 wires it
+    /// through to the per-VRF table lookup; this allocator stays
+    /// the canonical mint point for ids regardless of that.
+    pub fn subscribe_to_rib(
+        &self,
+        proto: &str,
+    ) -> (
+        crate::rib::client::RibClient,
+        tokio::sync::mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
+    ) {
+        let id_raw = self.next_proto_id.get();
+        self.next_proto_id.set(id_raw + 1);
+        let proto_id = crate::rib::client::ProtoId::from_raw(id_raw);
+
+        let chan = crate::rib::api::RibRxChannel::new();
+        let _ = self.rib_tx.send(crate::rib::Message::Subscribe {
+            proto_id,
+            proto: proto.to_string(),
+            tx: chan.tx.clone(),
+        });
+
+        let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);
+        (client, chan.rx)
     }
 
     fn init(&mut self) -> anyhow::Result<()> {

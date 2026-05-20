@@ -2,7 +2,9 @@ use std::net::SocketAddrV4;
 use std::os::fd::AsRawFd;
 use std::os::raw::c_int;
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Socket};
+
+use crate::context::ProtoContext;
 
 /// IANA-assigned UDP port for BFD single-hop control packets (RFC 5881 §4).
 pub const BFD_SINGLE_HOP_PORT: u16 = 3784;
@@ -17,10 +19,13 @@ pub const BFD_SINGLE_HOP_PORT: u16 = 3784;
 ///   * report the destination address and ingress ifindex via
 ///     `IP_PKTINFO` so multi-address hosts can demultiplex sessions.
 ///
-/// `bind` controls the local socket address. Production callers pass
-/// `(0.0.0.0, BFD_SINGLE_HOP_PORT)`; tests can pass an ephemeral port.
-pub fn bfd_socket_ipv4(bind: SocketAddrV4) -> std::io::Result<Socket> {
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+/// The initial socket comes from the `ProtoContext` factory — that's
+/// where `SO_BINDTODEVICE` lands once step 8 wires the VRF-aware
+/// branch in `maybe_bind_device`. `bind` controls the local socket
+/// address. Production callers pass `(0.0.0.0, BFD_SINGLE_HOP_PORT)`;
+/// tests can pass an ephemeral port.
+pub fn bfd_socket_ipv4(ctx: &ProtoContext, bind: SocketAddrV4) -> std::io::Result<Socket> {
+    let socket = ctx.udp_socket_unbound(Domain::IPV4)?;
 
     socket.set_nonblocking(true)?;
     socket.set_reuse_address(true)?;

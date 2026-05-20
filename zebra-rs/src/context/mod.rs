@@ -1,5 +1,5 @@
-pub mod inst;
-pub use inst::Context;
+pub mod proto;
+pub use proto::ProtoContext;
 
 pub mod task;
 pub use task::*;

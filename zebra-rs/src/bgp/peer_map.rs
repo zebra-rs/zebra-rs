@@ -147,7 +147,16 @@ mod tests {
 
     fn make_peer(addr: IpAddr) -> Peer {
         let (tx, _rx) = mpsc::channel(1);
-        Peer::new(0, 65000, Ipv4Addr::new(1, 1, 1, 1), 0, addr, None, tx)
+        // PeerMap tests don't exercise socket creation, so a parked
+        // ProtoContext over a leaked inbound channel is enough.
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(inbound_rx));
+        let rib = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        let ctx = crate::context::ProtoContext::default_table(rib);
+        Peer::new(0, 65000, Ipv4Addr::new(1, 1, 1, 1), 0, addr, None, tx, ctx)
     }
 
     #[test]

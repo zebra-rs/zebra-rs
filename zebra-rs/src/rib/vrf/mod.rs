@@ -6,4 +6,4 @@ mod inst;
 pub use alloc::VrfIdAllocator;
 pub use builder::VrfBuilder;
 pub use config::VrfConfig;
-pub use inst::Vrf;
+pub use inst::{Vrf, VrfRibTables};

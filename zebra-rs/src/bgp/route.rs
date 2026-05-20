@@ -1894,7 +1894,7 @@ fn route_evpn_export_selected(
                 }
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
                     let msg = rib::Message::MacDel { vni, mac: mac_addr };
-                    let _ = bgp.rib_tx.send(msg);
+                    let _ = bgp.rib_client.send(msg);
                 } else {
                     eprintln!(
                         "[ERROR] EVPN Type 2 withdraw: removed path has no Route Target. \
@@ -1911,7 +1911,7 @@ fn route_evpn_export_selected(
                         source: None,
                         ifindex: 0,
                     };
-                    let _ = bgp.rib_tx.send(msg);
+                    let _ = bgp.rib_client.send(msg);
                 } else {
                     eprintln!(
                         "[ERROR] EVPN Type 3 withdraw: removed path has no Route Target. \
@@ -1949,7 +1949,7 @@ fn route_evpn_export_selected(
                     seq: extract_mac_mobility_seq(&best.attr),
                     esi: best.esi, // Phase 4D: Extracted from EVPN route
                 };
-                let _ = bgp.rib_tx.send(msg);
+                let _ = bgp.rib_client.send(msg);
             } else {
                 eprintln!(
                     "[ERROR] EVPN Type 2 route missing Route Target (RFC 8365). \
@@ -1971,7 +1971,7 @@ fn route_evpn_export_selected(
                     ifindex: 0,
                     seq: extract_mac_mobility_seq(&best.attr),
                 };
-                let _ = bgp.rib_tx.send(msg);
+                let _ = bgp.rib_client.send(msg);
             } else {
                 eprintln!(
                     "[ERROR] EVPN Type 3 route missing Route Target (RFC 8365). \
@@ -3440,7 +3440,7 @@ impl Bgp {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
         };
@@ -3466,7 +3466,7 @@ impl Bgp {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
         };
@@ -3544,7 +3544,7 @@ impl Bgp {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
         };
@@ -3570,7 +3570,7 @@ impl Bgp {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
         };
@@ -3697,7 +3697,7 @@ impl Bgp {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
         };
@@ -3815,7 +3815,7 @@ impl Bgp {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
         };

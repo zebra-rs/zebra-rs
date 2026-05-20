@@ -1,5 +1,5 @@
 use crate::bfd::inst;
-use crate::context::Context;
+use crate::context::ProtoContext;
 use crate::rib;
 
 use super::ConfigManager;
@@ -10,7 +10,11 @@ use super::ConfigManager;
 /// channel so committed `/bfd/*` leaves reach the callback
 /// dispatcher.
 pub fn spawn_bfd(config: &ConfigManager) {
-    match inst::Bfd::new(Context::default()) {
+    // BFD doesn't subscribe to RIB today — the `default_table_no_rib`
+    // constructor builds a parked `RibClient` so the ctx still has
+    // a `rib` field for uniformity with the other protocols.
+    let _ = config; // borrow ConfigManager only when needed.
+    match inst::Bfd::new(ProtoContext::default_table_no_rib()) {
         Ok(bfd) => {
             config.subscribe("bfd", bfd.cm.tx.clone());
             // Publish the inbound client-request handle on the

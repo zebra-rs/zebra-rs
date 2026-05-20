@@ -7,8 +7,8 @@ use std::time::Instant;
 use bytes::BytesMut;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
@@ -26,7 +26,6 @@ use crate::bgp::{AdjRib, In, Out};
 use crate::bgp::{stale_route_withdraw, timer};
 use crate::config::Args;
 use crate::context::task::*;
-use crate::rib;
 
 use super::cap::{CapAfiMap, cap_addpath_recv, cap_register_send};
 use super::inst::Message;
@@ -339,6 +338,14 @@ pub struct Peer {
     /// and refreshed by the global hostname callback so that re-opened
     /// sessions advertise the latest value.
     pub local_hostname: Option<String>,
+    /// Per-protocol runtime context cloned from the owning `Bgp`.
+    /// Carries the VRF identity the active-connect path uses to
+    /// build TCP sockets through `ctx.tcp_socket_v4` / `v6` —
+    /// SO_BINDTODEVICE happens inside the context, never at the
+    /// peer call site. `RibClient` is reachable via `ctx.rib` if
+    /// any per-peer code ever needs to send to RIB directly (none
+    /// do today).
+    pub ctx: crate::context::ProtoContext,
     pub active: bool,
     pub peer_type: PeerType,
     pub state: State,
@@ -397,6 +404,7 @@ impl Peer {
         address: IpAddr,
         local_hostname: Option<String>,
         tx: mpsc::Sender<Message>,
+        ctx: crate::context::ProtoContext,
     ) -> Self {
         let mut peer = Self {
             ident,
@@ -405,6 +413,7 @@ impl Peer {
             remote_as,
             local_hostname,
             address,
+            ctx,
             origin: PeerOrigin::Static,
             scope_id: None,
             active: false,
@@ -512,7 +521,7 @@ pub struct BgpTop<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut LocalRib,
     pub tx: &'a mpsc::Sender<Message>,
-    pub rib_tx: &'a UnboundedSender<rib::Message>,
+    pub rib_client: &'a crate::rib::client::RibClient,
     pub attr_store: &'a mut BgpAttrStore,
     pub update_groups: &'a mut super::update_group::UpdateGroupMap,
 }
@@ -887,6 +896,7 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let update_source = peer.config.transport.update_source;
     let md5_password = peer.config.transport.md5_password.clone();
     let ao_key = peer.config.transport.resolved_ao_key.clone();
+    let ctx = peer.ctx.clone();
     Task::spawn(async move {
         let tx = tx.clone();
         let remote: SocketAddr = match address {
@@ -904,7 +914,8 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
                 scope_id.unwrap_or(0),
             )),
         };
-        let result = peer_connect(remote, update_source, md5_password.as_deref(), ao_key).await;
+        let result =
+            peer_connect(&ctx, remote, update_source, md5_password.as_deref(), ao_key).await;
         match result {
             Ok(stream) => {
                 let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
@@ -917,6 +928,7 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
 }
 
 async fn peer_connect(
+    ctx: &crate::context::ProtoContext,
     remote: SocketAddr,
     update_source: Option<IpAddr>,
     md5_password: Option<&str>,
@@ -933,9 +945,9 @@ async fn peer_connect(
     }
 
     let socket = if remote.is_ipv4() {
-        TcpSocket::new_v4()?
+        ctx.tcp_socket_v4()?
     } else {
-        TcpSocket::new_v6()?
+        ctx.tcp_socket_v6()?
     };
 
     // Install TCP MD5 / TCP-AO key BEFORE connect() so the outgoing
@@ -1188,6 +1200,7 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
         peer_addr,
         bgp.hostname(),
         bgp.tx.clone(),
+        bgp.ctx.clone(),
     );
     peer.origin = super::peer_key::PeerOrigin::Dynamic { range_prefix };
     // Dynamic peers are passive-only — they never initiate a connect.
@@ -1230,7 +1243,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
             tx: &bgp.tx,
-            rib_tx: &bgp.rib_tx,
+            rib_client: &bgp.ctx.rib,
             attr_store: &mut bgp.attr_store,
             update_groups: &mut bgp.update_groups,
         };
@@ -1258,7 +1271,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         router_id: &bgp.router_id,
         local_rib: &mut bgp.local_rib,
         tx: &bgp.tx,
-        rib_tx: &bgp.rib_tx,
+        rib_client: &bgp.ctx.rib,
         attr_store: &mut bgp.attr_store,
         update_groups: &mut bgp.update_groups,
     };

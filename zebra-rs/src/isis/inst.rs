@@ -22,8 +22,7 @@ use crate::rib::{self, MacAddr};
 use crate::spf;
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
-    context::Context,
-    rib::RibRxChannel,
+    context::ProtoContext,
 };
 
 use super::config::{IsisConfig, MtId};
@@ -56,7 +55,7 @@ pub struct Isis {
     pub rx: UnboundedReceiver<Message>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
-    pub rib_tx: UnboundedSender<rib::Message>,
+    pub ctx: ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: IsisLinks,
     pub show: ShowChannel,
@@ -287,7 +286,7 @@ pub struct IsisTop<'a> {
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
-    pub rib_tx: &'a UnboundedSender<rib::Message>,
+    pub rib_client: &'a crate::rib::client::RibClient,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub spf_throttle: &'a mut Levels<Throttle>,
@@ -339,22 +338,17 @@ pub struct IsisTop<'a> {
 
 impl Isis {
     pub fn new(
-        _ctx: Context,
-        rib_tx: UnboundedSender<rib::Message>,
+        ctx: ProtoContext,
+        rib_rx: UnboundedReceiver<RibRx>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
     ) -> Self {
-        let chan = RibRxChannel::new();
-        let msg = rib::Message::Subscribe {
-            proto: "isis".into(),
-            tx: chan.tx.clone(),
-        };
-        let _ = rib_tx.send(msg);
-
         // SR config subscription channel. One-time registration with the
         // RIB; subsequent SrBlockWatch / SrLocatorWatch messages drive
-        // which named entries we receive updates for.
+        // which named entries we receive updates for. Goes through the
+        // typed handle just like every other protocol-to-RIB send post-
+        // step-2.
         let (sr_tx, sr_rx) = mpsc::unbounded_channel::<RibSrRx>();
-        let _ = rib_tx.send(rib::Message::SrSubscribe {
+        let _ = ctx.rib.send(rib::Message::SrSubscribe {
             proto: "isis".into(),
             tx: sr_tx,
         });
@@ -367,8 +361,8 @@ impl Isis {
                 rx,
                 cm: ConfigChannel::new(),
                 callbacks: HashMap::new(),
-                rib_rx: chan.rx,
-                rib_tx,
+                rib_rx,
+                ctx,
                 links: IsisLinks::default(),
                 show: ShowChannel::new(),
                 show_cb: HashMap::new(),
@@ -1151,7 +1145,7 @@ impl Isis {
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             hostname: &mut self.hostname,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
@@ -1198,7 +1192,7 @@ impl Isis {
             peer_algo_sid: &mut self.peer_algo_sid,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
-            rib_tx: &self.rib_tx,
+            rib_client: &self.ctx.rib,
             sr_locator: &self.sr_locator,
             watched_locator: &self.watched_locator,
             elib: &mut self.elib,
@@ -1224,14 +1218,14 @@ impl Isis {
             return;
         }
         if let Some(prev) = self.watched_block.take() {
-            let _ = self.rib_tx.send(rib::Message::SrBlockUnwatch {
+            let _ = self.ctx.rib.send(rib::Message::SrBlockUnwatch {
                 proto: "isis".into(),
                 name: prev,
             });
             self.sr_block = None;
         }
         if let Some(next) = desired {
-            let _ = self.rib_tx.send(rib::Message::SrBlockWatch {
+            let _ = self.ctx.rib.send(rib::Message::SrBlockWatch {
                 proto: "isis".into(),
                 name: next.clone(),
             });
@@ -1246,7 +1240,7 @@ impl Isis {
             return;
         }
         if let Some(prev) = self.watched_locator.take() {
-            let _ = self.rib_tx.send(rib::Message::SrLocatorUnwatch {
+            let _ = self.ctx.rib.send(rib::Message::SrLocatorUnwatch {
                 proto: "isis".into(),
                 name: prev,
             });
@@ -1258,7 +1252,7 @@ impl Isis {
             self.clear_all_endx_sids();
         }
         if let Some(next) = desired {
-            let _ = self.rib_tx.send(rib::Message::SrLocatorWatch {
+            let _ = self.ctx.rib.send(rib::Message::SrLocatorWatch {
                 proto: "isis".into(),
                 name: next.clone(),
             });
@@ -1275,7 +1269,7 @@ impl Isis {
         for link in self.links.values_mut() {
             for level in [Level::L1, Level::L2] {
                 for nbr in link.state.nbrs.get_mut(&level).values_mut() {
-                    nbr.release_endx_sid(&mut self.elib, &self.rib_tx);
+                    nbr.release_endx_sid(&mut self.elib, &self.ctx.rib);
                 }
             }
         }
@@ -1299,7 +1293,7 @@ impl Isis {
         // truly nothing changed is one channel round-trip; the cost of
         // skipping a real change is FIB drift.
         if let Some(prev) = self.sr_end_sid.take() {
-            let _ = self.rib_tx.send(rib::Message::SidDel { addr: prev });
+            let _ = self.ctx.rib.send(rib::Message::SidDel { addr: prev });
         }
         if let Some(locator) = self.sr_locator.as_ref()
             && let Some(addr) = locator.node_sid_addr()
@@ -1323,7 +1317,7 @@ impl Isis {
                 nh6: None,
                 structure,
             };
-            let _ = self.rib_tx.send(rib::Message::SidAdd { sid });
+            let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
             self.sr_end_sid = Some(addr);
         }
     }
@@ -1490,7 +1484,7 @@ mod bfd_wiring_tests {
     use super::*;
     use crate::bfd::inst::ClientReq;
     use crate::bfd::session::SessionKey;
-    use crate::context::Context;
+    use crate::context::ProtoContext;
 
     fn loopback_key() -> SessionKey {
         SessionKey {
@@ -1501,10 +1495,26 @@ mod bfd_wiring_tests {
         }
     }
 
+    /// Build a parked `ProtoContext` plus its `rib_rx` half for
+    /// tests. Mirrors `bgp::config::tests::test_ctx`.
+    fn test_ctx() -> (
+        ProtoContext,
+        mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
+    ) {
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        Box::leak(Box::new(inbound_rx));
+        (ProtoContext::default_table(client), rib_rx)
+    }
+
     fn fresh_isis_with_bfd() -> (Isis, mpsc::UnboundedReceiver<ClientReq>) {
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel::<crate::rib::Message>();
+        let (ctx, rib_rx) = test_ctx();
         let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
-        let isis = Isis::new(Context::default(), rib_tx, Some(bfd_client_tx));
+        let isis = Isis::new(ctx, rib_rx, Some(bfd_client_tx));
         (isis, bfd_client_rx)
     }
 
@@ -1547,8 +1557,8 @@ mod bfd_wiring_tests {
     /// both handlers must no-op cleanly without panicking.
     #[tokio::test]
     async fn no_bfd_handle_is_noop() {
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel::<crate::rib::Message>();
-        let isis = Isis::new(Context::default(), rib_tx, None);
+        let (ctx, rib_rx) = test_ctx();
+        let isis = Isis::new(ctx, rib_rx, None);
         let key = loopback_key();
         isis.process_bfd_subscribe(key);
         isis.process_bfd_unsubscribe(key);

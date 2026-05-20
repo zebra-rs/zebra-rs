@@ -90,6 +90,7 @@ pub fn materialize_peer(
         link_local.into(),
         bgp.hostname(),
         bgp.tx.clone(),
+        bgp.ctx.clone(),
     );
     peer.origin = PeerOrigin::Interface { ifindex };
     // Required for the kernel connect(2) to a fe80:: target —

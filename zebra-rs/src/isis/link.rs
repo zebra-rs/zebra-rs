@@ -159,7 +159,7 @@ pub struct LinkTop<'a> {
     /// through so packet handlers can carve a function from the ELIB
     /// pool the moment they learn about a new neighbor, without round-
     /// tripping back through the IS-IS instance.
-    pub rib_tx: &'a tokio::sync::mpsc::UnboundedSender<crate::rib::Message>,
+    pub rib_client: &'a crate::rib::client::RibClient,
     pub sr_locator: &'a Option<crate::rib::Locator>,
     pub watched_locator: &'a Option<String>,
     pub elib: &'a mut crate::isis::srv6::ElibPool,
@@ -616,7 +616,7 @@ impl Isis {
                             }
                         }
                     }
-                    nbr.release_endx_sid(&mut self.elib, &self.rib_tx);
+                    nbr.release_endx_sid(&mut self.elib, &self.ctx.rib);
                 }
                 // Drop the entry. The hold-timer JoinHandle goes
                 // with it; tokio cancels the underlying task on

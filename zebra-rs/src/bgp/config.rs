@@ -62,6 +62,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             addr,
             bgp.hostname(),
             bgp.tx.clone(),
+            bgp.ctx.clone(),
         );
         bgp.peers.insert(addr, peer);
     } else {
@@ -80,7 +81,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             router_id: &bgp.router_id,
             local_rib: &mut bgp.local_rib,
             tx: &bgp.tx,
-            rib_tx: &bgp.rib_tx,
+            rib_client: &bgp.ctx.rib,
             attr_store: &mut bgp.attr_store,
             update_groups: &mut bgp.update_groups,
         };
@@ -679,7 +680,7 @@ fn send_redist(bgp: &Bgp, afi_safi: &bgp_packet::AfiSafi, src: BgpRedistSource, 
             subtypes: wire_subtypes(src, entry),
         },
     };
-    let _ = bgp.rib_tx.send(msg);
+    let _ = bgp.ctx.rib.send(msg);
 }
 
 fn bgp_redist_set_presence(
@@ -1729,14 +1730,37 @@ mod bfd_wiring_tests {
         )
     }
 
+    /// Build a parked `ProtoContext` plus its `rib_rx` half for
+    /// tests. The inbound channel and the rx half are dropped after
+    /// the test completes; nothing here asserts what BGP would have
+    /// sent to RIB.
+    fn test_ctx() -> (
+        crate::context::ProtoContext,
+        mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
+    ) {
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        // Leak the inbound rx so it isn't dropped — sends through the
+        // client otherwise return SendError and trip BGP's unwraps.
+        // Tests don't observe messages on it, but the channel must
+        // stay open for the duration of the test.
+        Box::leak(Box::new(_inbound_rx));
+        let ctx = crate::context::ProtoContext::default_table(client);
+        (ctx, rib_rx)
+    }
+
     /// Construct a Bgp with mock channels and an optional BFD
     /// client_tx. Returned alongside the BFD ClientReq receiver so
     /// the caller can assert what was sent.
     fn fresh_bgp_with_bfd() -> (Bgp, mpsc::UnboundedReceiver<ClientReq>) {
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (ctx, rib_rx) = test_ctx();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
         let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
-        let bgp = Bgp::new(rib_tx, policy_tx, Some(bfd_client_tx), None);
+        let bgp = Bgp::new(ctx, rib_rx, policy_tx, Some(bfd_client_tx), None);
         (bgp, bfd_client_rx)
     }
 
@@ -1792,9 +1816,9 @@ mod bfd_wiring_tests {
     /// ClientReq goes out.
     #[tokio::test]
     async fn enable_without_bfd_handle_is_noop() {
-        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (ctx, rib_rx) = test_ctx();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        let mut bgp = Bgp::new(rib_tx, policy_tx, None, None);
+        let mut bgp = Bgp::new(ctx, rib_rx, policy_tx, None, None);
         config_peer(&mut bgp, arg_words(&["10.0.0.4"]), ConfigOp::Set).unwrap();
         // No bfd handle to assert against; the call must not panic.
         config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.4", "true"]), ConfigOp::Set).unwrap();

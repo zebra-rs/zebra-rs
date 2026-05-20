@@ -107,7 +107,7 @@ impl Neighbor {
         sr_locator: &Option<Locator>,
         watched_locator: &Option<String>,
         elib: &mut ElibPool,
-        rib_tx: &UnboundedSender<rib::Message>,
+        rib_client: &crate::rib::client::RibClient,
     ) {
         if self.endx_sid.is_some() {
             return;
@@ -152,7 +152,7 @@ impl Neighbor {
             nh6,
             structure,
         };
-        let _ = rib_tx.send(rib::Message::SidAdd { sid });
+        let _ = rib_client.send(rib::Message::SidAdd { sid });
         self.endx_sid = Some((function, addr));
     }
 
@@ -162,11 +162,11 @@ impl Neighbor {
     pub fn release_endx_sid(
         &mut self,
         elib: &mut ElibPool,
-        rib_tx: &UnboundedSender<rib::Message>,
+        rib_client: &crate::rib::client::RibClient,
     ) {
         if let Some((function, addr)) = self.endx_sid.take() {
             elib.release(function);
-            let _ = rib_tx.send(rib::Message::SidDel { addr });
+            let _ = rib_client.send(rib::Message::SidDel { addr });
         }
     }
 }
