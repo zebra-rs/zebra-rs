@@ -28,7 +28,7 @@ use super::vty::{
     LogoutRequest, ShowReply, ShowRequest, YangMatch,
 };
 
-const VTY_TRACING: bool = false;
+pub(super) const VTY_TRACING: bool = false;
 
 #[derive(Debug)]
 struct ExecService {
