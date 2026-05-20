@@ -195,12 +195,23 @@ pub struct Bgp {
     /// pair, holding policy / metric / multipath plus per-source
     /// extras (IS-IS level filter, OSPF match types).
     ///
-    /// Storage-only today — the BGP RIB-source plumbing that reads
-    /// from this map lands in a follow-up.
+    /// Each commit converts these into wire-level RedistAdd /
+    /// RedistUpdate / RedistDel messages bound for RIB; the per-AFI
+    /// snapshots below catch the route deliveries that come back.
     pub redistribute: BTreeMap<
         (bgp_packet::AfiSafi, super::config::BgpRedistSource),
         super::config::BgpRedistribute,
     >,
+
+    /// Redistribute snapshot — routes the RIB delivered via
+    /// `RouteAdd`/`RouteDel` for our `RedistAdd` subscriptions.
+    /// Keyed by `(RibType, prefix)` so different source protocols
+    /// advertising the same prefix stay distinct (each row carries
+    /// its own policy / metric / multipath override at Loc-RIB
+    /// injection time). Consumed by the BGP origination path in a
+    /// follow-up (step 5b).
+    pub redist_v4: BTreeMap<(crate::rib::RibType, ipnet::Ipv4Net), crate::rib::RouteEntryV4>,
+    pub redist_v6: BTreeMap<(crate::rib::RibType, ipnet::Ipv6Net), crate::rib::RouteEntryV6>,
 }
 
 impl Bgp {
@@ -259,6 +270,8 @@ impl Bgp {
             bfd_event_rx,
             attr_store: BgpAttrStore::new(),
             redistribute: BTreeMap::new(),
+            redist_v4: BTreeMap::new(),
+            redist_v6: BTreeMap::new(),
         };
         bgp.callback_build();
         bgp.show_build();
@@ -608,8 +621,49 @@ impl Bgp {
                     self.evpn_withdraw_imet(vni, vtep_local);
                 }
             }
+            // Redistribute deliveries from RIB — initial walk
+            // (chunks ending in `bulk: Eor`) plus steady-state deltas
+            // (single-entry `bulk: More`). Stored in `redist_v{4,6}`
+            // keyed by `(rtype, prefix)`; consumed at Loc-RIB
+            // injection time in a follow-up.
+            RibRx::RouteAdd { rtype, routes, .. } => {
+                self.route_redist_add(rtype, routes);
+            }
+            RibRx::RouteDel { rtype, routes, .. } => {
+                self.route_redist_del(rtype, routes);
+            }
             _ => {
                 //
+            }
+        }
+    }
+
+    fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        match batch {
+            crate::rib::RouteBatch::V4(entries) => {
+                for e in entries {
+                    self.redist_v4.insert((rtype, e.prefix), e);
+                }
+            }
+            crate::rib::RouteBatch::V6(entries) => {
+                for e in entries {
+                    self.redist_v6.insert((rtype, e.prefix), e);
+                }
+            }
+        }
+    }
+
+    fn route_redist_del(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        match batch {
+            crate::rib::RouteBatch::V4(entries) => {
+                for e in entries {
+                    self.redist_v4.remove(&(rtype, e.prefix));
+                }
+            }
+            crate::rib::RouteBatch::V6(entries) => {
+                for e in entries {
+                    self.redist_v6.remove(&(rtype, e.prefix));
+                }
             }
         }
     }

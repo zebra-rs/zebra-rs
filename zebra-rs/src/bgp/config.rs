@@ -571,6 +571,117 @@ fn redist_afi_valid(afi_safi: &bgp_packet::AfiSafi) -> bool {
     )
 }
 
+/// Map the BGP-side `AfiSafi` (afi+safi) to the wire-side `RedistAfi`
+/// (afi only — SAFI is irrelevant to RIB's per-AFI table choice).
+fn wire_afi(afi_safi: &bgp_packet::AfiSafi) -> crate::rib::RedistAfi {
+    use bgp_packet::Afi;
+    match afi_safi.afi {
+        Afi::Ip => crate::rib::RedistAfi::Ipv4,
+        Afi::Ip6 => crate::rib::RedistAfi::Ipv6,
+        // redist_afi_valid filters everything else above, so we never
+        // reach this in practice. Default keeps the fn total.
+        _ => crate::rib::RedistAfi::Ipv4,
+    }
+}
+
+fn wire_rtype(src: BgpRedistSource) -> crate::rib::RibType {
+    match src {
+        BgpRedistSource::Connected => crate::rib::RibType::Connected,
+        BgpRedistSource::Static => crate::rib::RibType::Static,
+        BgpRedistSource::Isis => crate::rib::RibType::Isis,
+        BgpRedistSource::Ospf => crate::rib::RibType::Ospf,
+    }
+}
+
+/// Translate the BGP-side subtype filters (IS-IS levels, OSPF match
+/// types) into the RIB-side `RibSubType` set. Non-(IS-IS|OSPF)
+/// sources have no subtype dimension so always wildcard.
+///
+/// Caveat for `BgpRedistIsisLevel::L1InterArea`: our `RibSubType`
+/// currently models L1 as a single bucket (`IsisLevel1` +
+/// `IsisIntraArea`), so the explicit "L1 inter-area" distinction
+/// from IOS-XR maps to the same set as plain `L1`. Refining the
+/// `RibSubType` enum to separate L1 intra vs L1 inter-area is a
+/// follow-up; for now `level 1` and `level 1-inter-area` yield
+/// identical filter sets.
+fn wire_subtypes(
+    src: BgpRedistSource,
+    entry: &BgpRedistribute,
+) -> std::collections::BTreeSet<crate::rib::RibSubType> {
+    use crate::rib::RibSubType;
+    let mut out = std::collections::BTreeSet::new();
+    match src {
+        BgpRedistSource::Isis => {
+            if entry.isis_levels.is_empty() {
+                return out; // wildcard
+            }
+            for lvl in &entry.isis_levels {
+                match lvl {
+                    BgpRedistIsisLevel::L1 | BgpRedistIsisLevel::L1InterArea => {
+                        out.insert(RibSubType::IsisLevel1);
+                        out.insert(RibSubType::IsisIntraArea);
+                    }
+                    BgpRedistIsisLevel::L2 => {
+                        out.insert(RibSubType::IsisLevel2);
+                    }
+                }
+            }
+        }
+        BgpRedistSource::Ospf => {
+            if entry.ospf_match.is_empty() {
+                return out; // wildcard
+            }
+            for m in &entry.ospf_match {
+                match m {
+                    BgpRedistOspfMatch::Internal => {
+                        out.insert(RibSubType::Default);
+                        out.insert(RibSubType::OspfIa);
+                    }
+                    BgpRedistOspfMatch::External1 => {
+                        out.insert(RibSubType::OspfExternal1);
+                    }
+                    BgpRedistOspfMatch::External2 => {
+                        out.insert(RibSubType::OspfExternal2);
+                    }
+                    BgpRedistOspfMatch::NssaExternal1 => {
+                        out.insert(RibSubType::OspfNssa1);
+                    }
+                    BgpRedistOspfMatch::NssaExternal2 => {
+                        out.insert(RibSubType::OspfNssa2);
+                    }
+                }
+            }
+        }
+        // Connected / Static have no subtype dimension → always wildcard.
+        _ => {}
+    }
+    out
+}
+
+/// Send the RIB the appropriate Redist message for the current state
+/// of `(afi_safi, src)`. Mirrors the IS-IS helper of the same name.
+fn send_redist(bgp: &Bgp, afi_safi: &bgp_packet::AfiSafi, src: BgpRedistSource, first_time: bool) {
+    let afi = wire_afi(afi_safi);
+    let rtype = wire_rtype(src);
+    let proto = "bgp".to_string();
+    let msg = match bgp.redistribute.get(&(*afi_safi, src)) {
+        None => crate::rib::Message::RedistDel { proto, afi, rtype },
+        Some(entry) if first_time => crate::rib::Message::RedistAdd {
+            proto,
+            afi,
+            rtype,
+            subtypes: wire_subtypes(src, entry),
+        },
+        Some(entry) => crate::rib::Message::RedistUpdate {
+            proto,
+            afi,
+            rtype,
+            subtypes: wire_subtypes(src, entry),
+        },
+    };
+    let _ = bgp.rib_tx.send(msg);
+}
+
 fn bgp_redist_set_presence(
     bgp: &mut Bgp,
     mut args: Args,
@@ -581,19 +692,27 @@ fn bgp_redist_set_presence(
     if !redist_afi_valid(&afi_safi) {
         return None;
     }
+    let first_time = !bgp.redistribute.contains_key(&(afi_safi, src));
     if op.is_set() {
         bgp.redistribute.entry((afi_safi, src)).or_default();
     } else {
         bgp.redistribute.remove(&(afi_safi, src));
     }
+    send_redist(bgp, &afi_safi, src, first_time && op.is_set());
     Some(())
 }
 
+/// `subtype_relevant = true` means the mutation may have changed the
+/// wire-level subtype set (only the `isis level` and `ospf match`
+/// callbacks today), triggering a RedistUpdate to RIB. Other modifier
+/// leaves (policy, metric, multipath) are consumer-side overrides
+/// and don't need to flip the RIB filter.
 fn bgp_redist_with<F>(
     bgp: &mut Bgp,
     mut args: Args,
     op: ConfigOp,
     src: BgpRedistSource,
+    subtype_relevant: bool,
     f: F,
 ) -> Option<()>
 where
@@ -604,7 +723,11 @@ where
         return None;
     }
     let entry = bgp.redistribute.entry((afi_safi, src)).or_default();
-    f(entry, &mut args, op)
+    f(entry, &mut args, op)?;
+    if subtype_relevant {
+        send_redist(bgp, &afi_safi, src, /* first_time = */ false);
+    }
+    Some(())
 }
 
 fn bgp_set_policy(e: &mut BgpRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
@@ -659,21 +782,42 @@ pub(super) fn config_redistribute_connected_policy(
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Connected, bgp_set_policy)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Connected,
+        false,
+        bgp_set_policy,
+    )
 }
 pub(super) fn config_redistribute_connected_metric(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Connected, bgp_set_metric)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Connected,
+        false,
+        bgp_set_metric,
+    )
 }
 pub(super) fn config_redistribute_connected_multipath(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Connected, bgp_set_multipath)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Connected,
+        false,
+        bgp_set_multipath,
+    )
 }
 
 pub(super) fn config_redistribute_static(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
@@ -684,21 +828,42 @@ pub(super) fn config_redistribute_static_policy(
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Static, bgp_set_policy)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Static,
+        false,
+        bgp_set_policy,
+    )
 }
 pub(super) fn config_redistribute_static_metric(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Static, bgp_set_metric)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Static,
+        false,
+        bgp_set_metric,
+    )
 }
 pub(super) fn config_redistribute_static_multipath(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Static, bgp_set_multipath)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Static,
+        false,
+        bgp_set_multipath,
+    )
 }
 
 pub(super) fn config_redistribute_isis(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
@@ -709,28 +874,45 @@ pub(super) fn config_redistribute_isis_policy(
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_policy)
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, false, bgp_set_policy)
 }
 pub(super) fn config_redistribute_isis_metric(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_metric)
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, false, bgp_set_metric)
 }
 pub(super) fn config_redistribute_isis_multipath(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_multipath)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Isis,
+        false,
+        bgp_set_multipath,
+    )
 }
+// `level <N>` flips the wire-level subtype set (BGP-from-IS-IS level
+// filter); pass `subtype_relevant: true` so the callback emits a
+// `RedistUpdate` to RIB.
 pub(super) fn config_redistribute_isis_level(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Isis, bgp_set_isis_level)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Isis,
+        true,
+        bgp_set_isis_level,
+    )
 }
 
 pub(super) fn config_redistribute_ospf(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
@@ -741,28 +923,44 @@ pub(super) fn config_redistribute_ospf_policy(
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_policy)
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, false, bgp_set_policy)
 }
 pub(super) fn config_redistribute_ospf_metric(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_metric)
+    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, false, bgp_set_metric)
 }
 pub(super) fn config_redistribute_ospf_multipath(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_multipath)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Ospf,
+        false,
+        bgp_set_multipath,
+    )
 }
+// `match { type … }` flips the wire-level subtype set; set
+// `subtype_relevant: true` so the callback emits a `RedistUpdate`.
 pub(super) fn config_redistribute_ospf_match_type(
     bgp: &mut Bgp,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    bgp_redist_with(bgp, args, op, BgpRedistSource::Ospf, bgp_set_ospf_match)
+    bgp_redist_with(
+        bgp,
+        args,
+        op,
+        BgpRedistSource::Ospf,
+        true,
+        bgp_set_ospf_match,
+    )
 }
 
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
