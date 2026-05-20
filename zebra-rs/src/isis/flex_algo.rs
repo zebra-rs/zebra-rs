@@ -87,11 +87,7 @@ impl FlexAlgoConfig {
         const CONFIG_ERR: &str = "missing flex-algo config handler";
         const ALGO_ERR: &str = "missing flex-algo algorithm arg";
 
-        let func = self
-            .builder
-            .map
-            .get(&(path, op))
-            .context(CONFIG_ERR)?;
+        let func = self.builder.map.get(&(path, op)).context(CONFIG_ERR)?;
         let algo = args.u8().context(ALGO_ERR)?;
         if !(128..=255).contains(&algo) {
             bail!("flex-algo identifier must be 128..=255 (got {algo})");
@@ -368,31 +364,55 @@ macro_rules! flex_algo_cb {
 }
 
 flex_algo_cb!(cb_entry, "/router/isis/flex-algo");
-flex_algo_cb!(cb_advertise_definition, "/router/isis/flex-algo/advertise-definition");
+flex_algo_cb!(
+    cb_advertise_definition,
+    "/router/isis/flex-algo/advertise-definition"
+);
 flex_algo_cb!(cb_metric_type, "/router/isis/flex-algo/metric-type");
 flex_algo_cb!(cb_priority, "/router/isis/flex-algo/priority");
 flex_algo_cb!(cb_prefix_metric, "/router/isis/flex-algo/prefix-metric");
 flex_algo_cb!(cb_dp_sr_mpls, "/router/isis/flex-algo/dataplane/sr-mpls");
 flex_algo_cb!(cb_dp_srv6, "/router/isis/flex-algo/dataplane/srv6");
 flex_algo_cb!(cb_dp_ip, "/router/isis/flex-algo/dataplane/ip");
-flex_algo_cb!(cb_affinity_include_any, "/router/isis/flex-algo/affinity/include-any");
-flex_algo_cb!(cb_affinity_include_all, "/router/isis/flex-algo/affinity/include-all");
-flex_algo_cb!(cb_affinity_exclude_any, "/router/isis/flex-algo/affinity/exclude-any");
+flex_algo_cb!(
+    cb_affinity_include_any,
+    "/router/isis/flex-algo/affinity/include-any"
+);
+flex_algo_cb!(
+    cb_affinity_include_all,
+    "/router/isis/flex-algo/affinity/include-all"
+);
+flex_algo_cb!(
+    cb_affinity_exclude_any,
+    "/router/isis/flex-algo/affinity/exclude-any"
+);
 flex_algo_cb!(cb_srlg_exclude, "/router/isis/flex-algo/srlg-exclude");
 flex_algo_cb!(cb_ti_lfa, "/router/isis/flex-algo/fast-reroute/ti-lfa");
 
 pub fn callback_register(isis: &mut Isis) {
     isis.callback_add("/router/isis/flex-algo", cb_entry);
-    isis.callback_add("/router/isis/flex-algo/advertise-definition", cb_advertise_definition);
+    isis.callback_add(
+        "/router/isis/flex-algo/advertise-definition",
+        cb_advertise_definition,
+    );
     isis.callback_add("/router/isis/flex-algo/metric-type", cb_metric_type);
     isis.callback_add("/router/isis/flex-algo/priority", cb_priority);
     isis.callback_add("/router/isis/flex-algo/prefix-metric", cb_prefix_metric);
     isis.callback_add("/router/isis/flex-algo/dataplane/sr-mpls", cb_dp_sr_mpls);
     isis.callback_add("/router/isis/flex-algo/dataplane/srv6", cb_dp_srv6);
     isis.callback_add("/router/isis/flex-algo/dataplane/ip", cb_dp_ip);
-    isis.callback_add("/router/isis/flex-algo/affinity/include-any", cb_affinity_include_any);
-    isis.callback_add("/router/isis/flex-algo/affinity/include-all", cb_affinity_include_all);
-    isis.callback_add("/router/isis/flex-algo/affinity/exclude-any", cb_affinity_exclude_any);
+    isis.callback_add(
+        "/router/isis/flex-algo/affinity/include-any",
+        cb_affinity_include_any,
+    );
+    isis.callback_add(
+        "/router/isis/flex-algo/affinity/include-all",
+        cb_affinity_include_all,
+    );
+    isis.callback_add(
+        "/router/isis/flex-algo/affinity/exclude-any",
+        cb_affinity_exclude_any,
+    );
     isis.callback_add("/router/isis/flex-algo/srlg-exclude", cb_srlg_exclude);
     isis.callback_add("/router/isis/flex-algo/fast-reroute/ti-lfa", cb_ti_lfa);
 }
