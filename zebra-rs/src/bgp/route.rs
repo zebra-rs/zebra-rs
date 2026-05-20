@@ -2079,6 +2079,9 @@ pub fn route_evpn_update(
     // construction (we just inserted the path).
     let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
     route_evpn_export_selected(&rd, &prefix, &selected, None, bgp);
+    if !selected.is_empty() {
+        route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
+    }
 }
 
 /// Withdraw one EVPN route advertised in an MP_UNREACH_NLRI from Adj-RIB-In
