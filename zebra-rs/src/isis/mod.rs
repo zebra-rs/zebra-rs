@@ -56,3 +56,5 @@ pub mod graph;
 pub mod rib;
 
 pub mod throttle;
+
+pub mod flex_algo;
