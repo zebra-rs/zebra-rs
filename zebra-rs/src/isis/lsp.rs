@@ -1054,9 +1054,19 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     } else {
                         None
                     };
+                    // Per-algo Prefix-SID sub-TLVs (RFC 8667 §2.1 +
+                    // RFC 9350 §7). One additional Prefix-SID per
+                    // configured algo with Algorithm=N, attached to
+                    // the same IP-reach entry as the algo-0 SID so a
+                    // receiver can resolve any of {0, N1, N2, ...}
+                    // for this prefix from a single TLV.
+                    let per_algo_sids = super::flex_algo::build_per_algo_prefix_sids(
+                        &link.config.ipv4_flex_algo_prefix_sids,
+                    );
+                    let has_subs = sub_tlv.is_some() || !per_algo_sids.is_empty();
                     let flags = Ipv4ControlInfo::new()
                         .with_prefixlen(prefix.prefix_len() as usize)
-                        .with_sub_tlv(sub_tlv.is_some())
+                        .with_sub_tlv(has_subs)
                         .with_distribution(false);
                     let mut entry = IsisTlvExtIpReachEntry {
                         metric: 10,
@@ -1066,6 +1076,9 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     };
                     if let Some(sub_tlv) = sub_tlv {
                         entry.subs.push(sub_tlv);
+                    }
+                    for sid in per_algo_sids {
+                        entry.subs.push(prefix::IsisSubTlv::PrefixSid(sid));
                     }
                     ext_ip_reach.entries.push(entry);
                 }
