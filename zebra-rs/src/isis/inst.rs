@@ -96,6 +96,14 @@ pub struct Isis {
     /// (parallel to label_map for SR-MPLS). Used by TI-LFA Step 4d to
     /// assemble the SRH segment list for a 1-segment repair.
     pub srv6_end_map: Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
+
+    /// Per-peer Flex-Algorithm Definition store. Outer key is peer
+    /// sys-id; inner key is the algo identifier (128..=255). Populated
+    /// from peer LSP fragment 0 Router Capability TLV by
+    /// `lsdb::rebuild_sys_state`. Consumers (future SPF gating,
+    /// `show isis flex-algo`) read from here instead of re-walking
+    /// the LSDB. Cleared on peer purge.
+    pub peer_fad: Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
@@ -238,6 +246,11 @@ pub struct IsisTop<'a> {
     pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub srv6_end_map: &'a mut Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
+    /// Per-peer FAD store (see `Isis::peer_fad`). Threaded through
+    /// IsisTop so the LSDB rebuild path can populate it from peer
+    /// Router Capability TLVs.
+    pub peer_fad:
+        &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -315,65 +328,69 @@ impl Isis {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
-        let mut isis = Self {
-            tx,
-            rx,
-            cm: ConfigChannel::new(),
-            callbacks: HashMap::new(),
-            rib_rx: chan.rx,
-            rib_tx,
-            links: IsisLinks::default(),
-            show: ShowChannel::new(),
-            show_cb: HashMap::new(),
-            config: IsisConfig::default(),
-            flex_algo: super::flex_algo::FlexAlgoConfig::new(),
-            affinity_map: super::affinity_map::AffinityMap::new(),
-            tracing: IsisTracing::default(),
-            lsdb: Levels::<Lsdb>::default(),
-            lsp_map: Levels::<LspMap>::default(),
-            reach_map: Levels::<Afis<ReachMap>>::default(),
-            reach_map_v6: Levels::<ReachMapV6>::default(),
-            mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
-            mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),
-            label_map: Levels::<IsisLabelMap>::default(),
-            srv6_end_map: Levels::<BTreeMap<IsisSysId, Ipv6Addr>>::default(),
-            rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
-            rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
-            ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
-            hostname: Levels::<Hostname>::default(),
-            spf_timer: Levels::<Option<Timer>>::default(),
-            spf_throttle: Levels::<Throttle>::default(),
-            lsp_gen_timer: Levels::<Option<Timer>>::default(),
-            lsp_gen_throttle: Levels::<Throttle>::default(),
-            lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
-            // Adjacency-SID label pool is owned by the SR-MPLS feature.
-            // Stays None until `segment-routing mpls` is configured —
-            // otherwise we'd allocate labels for every hello and emit
-            // LanAdjSid sub-TLVs that turn into MPLS ILM installs the
-            // kernel rejects (EOPNOTSUPP) on hosts without an MPLS path.
-            local_pool: None,
-            graph: Levels::<Option<spf::Graph>>::default(),
-            spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
-            tilfa_result: Levels::<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>::default(),
-            mt2_graph: Levels::<Option<spf::Graph>>::default(),
-            mt2_spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
-            sr_rx,
-            watched_block: None,
-            watched_locator: None,
-            sr_block: None,
-            sr_locator: None,
-            sr_end_sid: None,
-            elib: super::srv6::ElibPool::new(),
-            lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
-            lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
-            redist_v4: BTreeMap::new(),
-            redist_v6: BTreeMap::new(),
-            srlg_config: SrlgGroupBuilder::new(),
-            srlg_groups: BTreeMap::new(),
-            bfd_client_tx,
-            bfd_event_tx,
-            bfd_event_rx,
-        };
+        let mut isis =
+            Self {
+                tx,
+                rx,
+                cm: ConfigChannel::new(),
+                callbacks: HashMap::new(),
+                rib_rx: chan.rx,
+                rib_tx,
+                links: IsisLinks::default(),
+                show: ShowChannel::new(),
+                show_cb: HashMap::new(),
+                config: IsisConfig::default(),
+                flex_algo: super::flex_algo::FlexAlgoConfig::new(),
+                affinity_map: super::affinity_map::AffinityMap::new(),
+                tracing: IsisTracing::default(),
+                lsdb: Levels::<Lsdb>::default(),
+                lsp_map: Levels::<LspMap>::default(),
+                reach_map: Levels::<Afis<ReachMap>>::default(),
+                reach_map_v6: Levels::<ReachMapV6>::default(),
+                mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
+                mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),
+                label_map: Levels::<IsisLabelMap>::default(),
+                srv6_end_map: Levels::<BTreeMap<IsisSysId, Ipv6Addr>>::default(),
+                peer_fad: Levels::<
+                    BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>,
+                >::default(),
+                rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
+                rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
+                ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
+                hostname: Levels::<Hostname>::default(),
+                spf_timer: Levels::<Option<Timer>>::default(),
+                spf_throttle: Levels::<Throttle>::default(),
+                lsp_gen_timer: Levels::<Option<Timer>>::default(),
+                lsp_gen_throttle: Levels::<Throttle>::default(),
+                lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
+                // Adjacency-SID label pool is owned by the SR-MPLS feature.
+                // Stays None until `segment-routing mpls` is configured —
+                // otherwise we'd allocate labels for every hello and emit
+                // LanAdjSid sub-TLVs that turn into MPLS ILM installs the
+                // kernel rejects (EOPNOTSUPP) on hosts without an MPLS path.
+                local_pool: None,
+                graph: Levels::<Option<spf::Graph>>::default(),
+                spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
+                tilfa_result: Levels::<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>::default(),
+                mt2_graph: Levels::<Option<spf::Graph>>::default(),
+                mt2_spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
+                sr_rx,
+                watched_block: None,
+                watched_locator: None,
+                sr_block: None,
+                sr_locator: None,
+                sr_end_sid: None,
+                elib: super::srv6::ElibPool::new(),
+                lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
+                lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
+                redist_v4: BTreeMap::new(),
+                redist_v6: BTreeMap::new(),
+                srlg_config: SrlgGroupBuilder::new(),
+                srlg_groups: BTreeMap::new(),
+                bfd_client_tx,
+                bfd_event_tx,
+                bfd_event_rx,
+            };
         isis.callback_build();
         isis.show_build();
         isis
@@ -1086,6 +1103,7 @@ impl Isis {
             mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
+            peer_fad: &mut self.peer_fad,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
@@ -1131,6 +1149,7 @@ impl Isis {
             mt_membership: &mut self.mt_membership,
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
+            peer_fad: &mut self.peer_fad,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
             rib_tx: &self.rib_tx,
