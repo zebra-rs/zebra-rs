@@ -105,31 +105,25 @@ pub struct ConfigManager {
     /// Runtime-mutable YANG-defined service-accounts (D25). Updated by
     /// `commit_config` when `vty service-account uid N` changes; read by
     /// `SessionTable::is_service_account` at session creation.
-    #[cfg(target_os = "linux")]
     pub yang_service_accounts: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
 }
 
 impl ConfigManager {
     pub fn new(
-        mut system_path: PathBuf,
         yang_path: String,
         rib_tx: UnboundedSender<crate::rib::Message>,
         rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
         policy_tx: UnboundedSender<crate::policy::Message>,
-        #[cfg(target_os = "linux")] yang_service_accounts: std::sync::Arc<
-            std::sync::RwLock<std::collections::HashSet<u32>>,
-        >,
+        yang_service_accounts: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<u32>>>,
     ) -> anyhow::Result<Self> {
-        system_path.pop();
-        system_path.push("zebra.conf");
-        let mut new_system_path = PathBuf::from(yang_path.clone());
-        new_system_path.pop();
-        new_system_path.push("zebra-rs.conf");
+        let mut config_path = PathBuf::from(yang_path.clone());
+        config_path.pop();
+        config_path.push("zebra-rs.conf");
 
         let (tx, rx) = mpsc::channel(255);
         let mut cm = Self {
             yang_path,
-            config_path: new_system_path,
+            config_path,
             modes: HashMap::new(),
             store: ConfigStore::new(),
             tx,
@@ -143,7 +137,6 @@ impl ConfigManager {
             bfd_client_tx: RefCell::new(None),
             nd_client_tx: RefCell::new(None),
             protocol_tasks: RefCell::new(HashMap::new()),
-            #[cfg(target_os = "linux")]
             yang_service_accounts,
         };
         cm.init()?;
@@ -371,7 +364,6 @@ impl ConfigManager {
             }
             // Handle vty service-account changes (D25). Inline because
             // it mutates daemon-internal state shared with serve.rs.
-            #[cfg(target_os = "linux")]
             if line.starts_with("vty service-account") {
                 self.handle_vty_service_account(&op, &line);
             }
@@ -707,7 +699,6 @@ impl ConfigManager {
     /// - `vty service-account uid 999` (key-explicit)
     /// - `vty service-account 999 description "foo"` (with leaves;
     ///   the uid is still extracted)
-    #[cfg(target_os = "linux")]
     fn handle_vty_service_account(&self, op: &ConfigOp, line: &str) {
         let Some(uid) = parse_service_account_uid(line) else {
             return;
@@ -830,7 +821,6 @@ pub enum ConfigFormat {
 /// (`vty service-account 999 description "foo"`). Returns `Some(uid)`
 /// for any of these; `None` if the line isn't a vty-service-account
 /// statement or the uid isn't numeric.
-#[cfg(target_os = "linux")]
 fn parse_service_account_uid(line: &str) -> Option<u32> {
     let mut parts = line.split_whitespace();
     if parts.next()? != "vty" {

@@ -77,10 +77,11 @@ struct Arg {
     vty_socket: String,
 }
 
-// 1. Option Yang path
-// 2. HomeDir ~/.zebra/yang
-// 3. System /etc/zebra-rs/yang
-
+// YANG schema directory search order:
+//   1. `--yang-path` argument, if the path exists
+//   2. `~/.zebra-rs/yang`, if it exists
+//   3. `/etc/zebra-rs/yang`, if it exists
+// Returns `None` if none resolve, which causes startup to abort.
 fn yang_path(arg: &Arg) -> Option<String> {
     if !arg.yang_path.is_empty() {
         let path = Path::new(&arg.yang_path);
@@ -103,35 +104,10 @@ fn yang_path(arg: &Arg) -> Option<String> {
     }
 }
 
-fn system_path(arg: &Arg) -> PathBuf {
-    if !arg.yang_path.is_empty() {
-        PathBuf::from(&arg.yang_path)
-    } else {
-        let mut home = dirs::home_dir().unwrap();
-        home.push(".zebra-rs");
-        home.push("yang");
-        if home.is_dir() {
-            home
-        } else {
-            let mut path = PathBuf::new();
-            path.push("etc");
-            path.push("zebra-rs");
-            home.push("yang");
-            if path.is_dir() {
-                path
-            } else {
-                let mut cwd = std::env::current_dir().unwrap();
-                cwd.push("yang");
-                cwd
-            }
-        }
-    }
-}
-
 fn daemonize() -> anyhow::Result<()> {
-    // Preserve the original cwd in the daemonized child so relative
-    // paths (e.g. `--yang-path ./yang`, relative `--pid-file`) still
-    // resolve the same way they would in foreground mode.
+    // Preserve the original cwd in the daemonized child so relative paths for
+    // --yang-path or --pid-file still resolve the same way they would in
+    // foreground mode.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     Daemonize::new()
         .working_directory(cwd)
@@ -184,10 +160,6 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
         std::process::exit(1);
     };
 
-    // Setup tracing before any subsystem spin-up so warn/error events
-    // emitted during construction (e.g. ND failing to open its raw
-    // socket inside `ConfigManager::new`) are actually surfaced to the
-    // operator instead of being swallowed by the default subscriber.
     let log_config = logging_config(&arg.log_output, &arg.log_file, &arg.log_format);
     tracing_set(arg.daemon, Some(log_config));
 
@@ -196,13 +168,10 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     let policy = Policy::new();
 
     // Runtime-mutable YANG-defined service-accounts. Shared between
-    // ConfigManager (writes on commit) and SessionTable (reads at session
-    // creation). Empty at startup; populated by the config file load that runs
-    // inside ConfigManager.
+    // ConfigManager and SessionTable.
     let service_accounts: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::new()));
 
     let config = ConfigManager::new(
-        system_path(&arg),
         yang_path,
         rib.tx.clone(),
         rib.inbound_tx.clone(),
